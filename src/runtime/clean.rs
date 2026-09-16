@@ -289,7 +289,7 @@ fn classify_capacity_claims(
     let backed = shards
         .iter()
         .flat_map(|shard| &shard.resources)
-        .map(|entry| entry.resource.terminal_id.as_str().clone())
+        .map(|entry| entry.resource.terminal_id.as_str())
         .collect::<BTreeSet<_>>();
     // Without a readable registry nothing is provably retired, so every owner is
     // treated as still listed and no claim becomes a candidate.
@@ -297,7 +297,7 @@ fn classify_capacity_claims(
         document
             .generations
             .iter()
-            .map(|entry| entry.generation.as_str().clone())
+            .map(|entry| entry.generation.as_str())
             .collect::<BTreeSet<_>>()
     });
     allocator
@@ -305,11 +305,11 @@ fn classify_capacity_claims(
         .iter()
         .filter(|claim| claim.state != ClaimState::Released)
         .map(|claim| {
-            let owner = claim.owner.as_str().clone();
+            let owner = claim.owner.as_str();
             ObservedCapacityClaim {
                 backed: backed.contains(claim.resource.terminal_id.as_str().as_str()),
                 owner_registered: listed.as_ref().is_none_or(|listed| listed.contains(&owner)),
-                resource_id: claim.resource.terminal_id.as_str().clone(),
+                resource_id: claim.resource.terminal_id.as_str(),
                 pool: claim.kind.pool().to_owned(),
                 owner,
             }

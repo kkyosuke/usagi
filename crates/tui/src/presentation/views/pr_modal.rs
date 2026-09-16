@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(modal.selected(), 0);
         assert_eq!(modal.selected_pr().map(PrEntry::number), Some(812));
         // derive された Clone / Debug も触れる。
-        assert!(format!("{:?}", modal.clone()).contains("812"));
+        assert!(format!("{modal:?}").contains("812"));
     }
 
     #[test]

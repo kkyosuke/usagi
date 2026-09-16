@@ -772,7 +772,6 @@ impl AgentRuntime {
 
     /// Hydrates the owner bound to the daemon-wide retention authority, so
     /// Agent runtimes and generic terminals share one aggregate budget (#526).
-    #[allow(clippy::too_many_arguments)]
     pub fn hydrate_with_retention(
         generation: DaemonGeneration,
         registry: AdapterRegistry,
@@ -1961,8 +1960,7 @@ impl AgentRuntime {
             .map_err(map_runtime_error)?
             .operation
             .operation_id
-            .as_str()
-            .clone();
+            .as_str();
         let record = self
             .operations
             .get_mut(&operation)

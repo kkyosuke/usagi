@@ -225,6 +225,7 @@ CI で full test / coverage gate が必須となる条件は次のとおり（�
   - `#[coverage(off)]` はその item だけに適用され、内部の closure など別 item には継承されない。除外した合成関数は closure-free に保つか、入れ子の item をテスト可能な関数へ分離し、意図しない未計測 item を作らない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
   - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は日付なしの `nightly` なので、pin した toolchain が使う component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` の `components` が正本である。
+- **`#[allow(clippy::…)]` には理由コメントを必ず添える**（属性の直前の行、または同じ行）。pedantic を黙らせるためだけの allow は、後から「まだ要るのか」を判断できなくなる。理由は lint 名の言い換えではなく、その item がその形である理由を書く。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
 
 ## `coverage(off)` 例外

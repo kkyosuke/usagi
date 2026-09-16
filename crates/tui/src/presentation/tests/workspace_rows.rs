@@ -614,7 +614,7 @@ fn production_input_order_reserves_drawer_picker_before_root_agent_pty() {
         runtime.state().director_new(),
         DirectorNew::Choosing(DefaultModel::Claude)
     ));
-    assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
+    assert_eq!(runtime.focused_terminal(), Some(root_agent));
 
     assert_eq!(
         route_workspace_input_before_reducer(

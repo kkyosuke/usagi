@@ -473,7 +473,7 @@ mod tests {
         assert_eq!(modal.selected(), 0);
         assert_eq!(modal.matches().len(), 8);
         // derive された Clone / Debug / Eq も触れる。
-        assert!(format!("{:?}", modal.clone()).contains("OverviewModal"));
+        assert!(format!("{modal:?}").contains("OverviewModal"));
         assert_eq!(modal.clone(), modal);
         let mut other = modal.clone();
         other.insert_char('x');

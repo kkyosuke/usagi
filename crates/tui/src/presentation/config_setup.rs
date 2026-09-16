@@ -38,7 +38,6 @@ pub(super) fn save_config_source_responsive(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn step_setup_commands_editor(
     config: &mut Config,
     key: Key,

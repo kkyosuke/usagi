@@ -818,8 +818,9 @@ fn completion_is_reconciled_once_and_restart_does_not_duplicate_the_parent_wake(
     assert_eq!(waker.wakes.len(), 1);
 }
 
-#[test]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
+#[test]
 fn control_surface_is_idempotent_owned_and_durable() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = SupervisorRuntime::new(temp.path());

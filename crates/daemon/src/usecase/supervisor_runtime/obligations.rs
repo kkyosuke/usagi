@@ -882,10 +882,7 @@ impl SupervisorRuntime {
             }
         }
         obligations.sort_by_key(|(workspace, provenance)| {
-            (
-                workspace.to_string(),
-                provenance.worker_agent_id.as_str().clone(),
-            )
+            (workspace.to_string(), provenance.worker_agent_id.as_str())
         });
         obligations.dedup();
         Ok(obligations)

@@ -631,7 +631,7 @@ pub fn run(
     err: &mut dyn Write,
 ) -> io::Result<RunOutcome> {
     let command = Cli::command().version(version.to_owned());
-    let matches = match command.clone().try_get_matches_from(args) {
+    let matches = match command.try_get_matches_from(args) {
         Ok(matches) => matches,
         Err(e) => {
             // clap の --help / --version は stdout、使い方エラーは stderr に出す慣習に従う。

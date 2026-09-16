@@ -554,7 +554,7 @@ impl AgentRuntime {
             .upsert_agent_by_runtime_model(
                 intent.workspace,
                 intent.session,
-                profile_id.clone(),
+                profile_id,
                 ModelSelector::new("default").expect("literal model selector is canonical"),
             )
             .map_err(map_dispatch_storage_error)?;

@@ -144,7 +144,7 @@ impl FrameMaterialKey {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 pub(super) fn home_frame_material(
     height: usize,
     width: usize,
@@ -185,7 +185,7 @@ pub(super) fn home_frame_material(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 pub(super) fn home_frame_material_shared(
     height: usize,
     width: usize,
@@ -367,7 +367,7 @@ pub(super) fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> 
     frame
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 pub(super) fn render_controller_frame(
     height: usize,
     width: usize,
@@ -395,10 +395,11 @@ pub(super) fn render_controller_frame(
     ))
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
 /// Apply actions already routed by [`DaemonBackend`] to the stateful terminal
 /// host. This layer owns no Effect matching and therefore cannot diverge from
 /// the backend's route matrix.
-#[allow(clippy::too_many_lines)]
 pub(super) fn drain_controller_host_actions(
     actions: &Receiver<ControllerHostAction>,
     ui: &mut WorkspaceIoRuntime,
@@ -644,12 +645,15 @@ pub(super) fn drain_controller_host_actions(
     }
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 /// Controller-driven real-terminal frame loop (`drain → poll → render → input →
 /// dispatch`). Home row state, live-pane availability, and the Home frame come
 /// from [`WorkspaceRuntime`]/`render_home`; [`WorkspaceIoRuntime`] holds only
 /// daemon transport coordination (session workers, pane launches, terminal
 /// streams, metrics) and owns no route or selection state.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=screen_graph_production_port_harness
 pub(super) fn drive_workspace_controller(
     term: &mut dyn Terminal,
@@ -734,7 +738,7 @@ pub(super) fn drive_workspace_controller(
     // one-shot worker without ever holding the render thread.
     let (branch_catalog_sender, branch_catalog_receiver) = mpsc::channel();
     let branch_catalog_root = root_cwd.clone();
-    let branch_catalog_default = default_branch.clone();
+    let branch_catalog_default = default_branch;
     let branch_catalogs = session_catalogs.branch_worker();
     let _ = std::thread::Builder::new()
         .name("tui-branch-catalog".to_owned())
@@ -2070,6 +2074,10 @@ impl EntryFrameMaterial {
     }
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 /// [`run_screen_graph_with_backend`] that opens with `notice` already on the
 /// Welcome screen.
 ///
@@ -2083,7 +2091,6 @@ impl EntryFrameMaterial {
 /// # Errors
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn run_screen_graph_with_backend_and_notice(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,

@@ -762,7 +762,7 @@ fn a_lease_taken_before_a_barrier_is_what_the_barrier_waits_on() {
     gate.close(LeaseClass::ActiveControl);
     let entered = Arc::new(AtomicBool::new(false));
     let waiter = {
-        let gate = gate.clone();
+        let gate = gate;
         let entered = Arc::clone(&entered);
         std::thread::spawn(move || {
             gate.await_drain(LeaseClass::ActiveControl).unwrap();

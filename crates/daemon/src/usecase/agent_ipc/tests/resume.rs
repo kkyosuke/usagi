@@ -341,7 +341,7 @@ fn readiness_preparation_covers_replay_conflict_and_safe_refusals() {
             .unwrap()
             .is_none()
     );
-    let mut conflicting = stale_target.clone();
+    let mut conflicting = stale_target;
     conflicting.source = AgentResumeSourceId::new();
     assert_eq!(
         runtime
@@ -769,7 +769,7 @@ fn codex_without_structured_identity_fails_closed_for_resume() {
                 session: Some(session),
                 profile: Some(AgentProfileId::new("codex").unwrap()),
             },
-            &FakeScope(Ok(resolved.clone())),
+            &FakeScope(Ok(resolved)),
         )
         .unwrap();
     runtime.exit(&first.terminal, 0).unwrap();

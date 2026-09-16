@@ -53,6 +53,7 @@ pub(super) fn session_organization(
     (parent_name, lineage.len(), path)
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn dispatch_session_action(
@@ -971,10 +972,7 @@ fn delegate_brief(
     {
         sessions.retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
     }
-    let selected = DispatchAgentIntent::New {
-        runtime: runtime.clone(),
-        model: model.clone(),
-    };
+    let selected = DispatchAgentIntent::New { runtime, model };
     let reserved_worker = if supervision_at_preflight.is_some() {
         let planned = agent
             .lock()

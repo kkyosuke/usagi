@@ -537,7 +537,7 @@ mod metrics_schema_tests {
             serde_json::from_value::<DaemonMetrics>(encoded).unwrap(),
             reported
         );
-        let mut unknown = reported.clone();
+        let mut unknown = reported;
         unknown.agent_concurrency = None;
         assert!(
             serde_json::to_value(&unknown)
@@ -1255,7 +1255,7 @@ mod tests {
         draining.generation_role = GenerationRole::Draining;
         let mut missing_capability = hello.clone();
         missing_capability.capabilities.clear();
-        let mut wrong_record = hello.clone();
+        let mut wrong_record = hello;
         wrong_record.daemon_process = Some(DaemonRecord::identified(record.pid, "replacement"));
         for invalid in [wrong_generation, draining, missing_capability, wrong_record] {
             let error = verify_owner_binding(&invalid, &exact).unwrap_err();
@@ -1656,7 +1656,7 @@ mod tests {
         write_json_frame(&mut input, &event, 1_048_576).unwrap();
         let unrelated = Envelope {
             protocol,
-            daemon_generation: generation.clone(),
+            daemon_generation: generation,
             kind: EnvelopeKind::Response {
                 request_id: crate::infrastructure::ipc::RequestId("other".into()),
                 outcome: ResponseOutcome::Ok,
@@ -2148,7 +2148,6 @@ mod deadline_and_retry_tests {
         ClientError::Unavailable("stalled".into())
     }
 
-    #[allow(clippy::type_complexity)]
     fn policy_client(
         policy: ClientPolicy,
         connect_outcomes: Vec<Result<(), ClientError>>,
@@ -2164,7 +2163,6 @@ mod deadline_and_retry_tests {
         let connect_deque = Rc::new(RefCell::new(VecDeque::from(connect_outcomes)));
         let make = {
             let counters = counters.clone();
-            let outcomes = outcomes.clone();
             move || FakeClientSession {
                 counters: counters.clone(),
                 outcomes: outcomes.clone(),
@@ -2378,8 +2376,9 @@ mod deadline_and_retry_tests {
 
     // ---- Eligibility classification table ---------------------------------
 
-    #[test]
+    // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     #[allow(clippy::too_many_lines)]
+    #[test]
     fn retry_eligibility_follows_the_request_class_table() {
         use RetryEligibility::{DurableOperation, NoCrossConnectionEvidence, ReadOnly};
         let session_payload = || serde_json::json!({});
@@ -2731,7 +2730,7 @@ mod deadline_and_retry_tests {
         let clock = FakeMonotonicClock::default();
         let result = connect_deadline(
             clock.clone(),
-            ScriptedConn::new(clock.clone(), vec![]).advancing(0, 5_000),
+            ScriptedConn::new(clock, vec![]).advancing(0, 5_000),
             2_000,
         );
         assert!(matches!(result, Err(ClientError::Unavailable(_))));
@@ -2742,7 +2741,7 @@ mod deadline_and_retry_tests {
         let clock = FakeMonotonicClock::default();
         let mut client = connect_deadline(
             clock.clone(),
-            ScriptedConn::new(clock.clone(), server_hello_frame()).advancing(0, 5_000),
+            ScriptedConn::new(clock, server_hello_frame()).advancing(0, 5_000),
             2_000,
         )
         .unwrap();
@@ -2760,7 +2759,7 @@ mod deadline_and_retry_tests {
         let result = IpcClient::connect(
             DeadlineStream::new(
                 clock.clone(),
-                ScriptedConn::new(clock.clone(), vec![])
+                ScriptedConn::new(clock, vec![])
                     .advancing(0, 5_000)
                     .stalling_writes(),
                 2_000,
@@ -2781,7 +2780,7 @@ mod deadline_and_retry_tests {
         readable.extend_from_slice(&[0x00, 0x00]); // 2 of 4 length-prefix bytes, then nothing
         let mut client = connect_deadline(
             clock.clone(),
-            ScriptedConn::new(clock.clone(), readable).advancing(0, 5_000),
+            ScriptedConn::new(clock, readable).advancing(0, 5_000),
             2_000,
         )
         .unwrap();
@@ -2821,12 +2820,8 @@ mod deadline_and_retry_tests {
         let clock = FakeMonotonicClock::default();
         let mut readable = server_hello_frame();
         readable.extend(response_frame("1", ResponseOutcome::Ok));
-        let mut client = connect_deadline(
-            clock.clone(),
-            ScriptedConn::new(clock.clone(), readable),
-            10_000,
-        )
-        .unwrap();
+        let mut client =
+            connect_deadline(clock.clone(), ScriptedConn::new(clock, readable), 10_000).unwrap();
         // Exercise the DaemonSession adapter (rearm + exchange) directly.
         DaemonSession::rearm(&mut client, 10_000);
         let reply = DaemonSession::exchange(
@@ -3114,7 +3109,7 @@ mod deadline_and_retry_tests {
             },
         };
         let anonymous = TerminalLaunchIntent {
-            request: request.clone(),
+            request,
             geometry: TerminalGeometry { cols: 80, rows: 24 },
             launch_operation: None,
         };
@@ -3162,7 +3157,7 @@ mod deadline_and_retry_tests {
             profile: None,
         };
         let key = agent_launch_semantic_key(&intent);
-        assert_eq!(key, agent_launch_semantic_key(&intent.clone()));
+        assert_eq!(key, agent_launch_semantic_key(&intent));
         assert!(key.contains(&workspace.as_str()));
         assert!(key.contains(&session.as_str()));
         assert!(key.ends_with("<default>"));
@@ -3184,7 +3179,7 @@ mod deadline_and_retry_tests {
             },
             AgentLaunchIntent {
                 profile: Some(AgentProfileId::new("codex").unwrap()),
-                ..intent.clone()
+                ..intent
             },
         ] {
             assert_ne!(key, agent_launch_semantic_key(&other), "{other:?}");
@@ -3215,7 +3210,7 @@ mod deadline_and_retry_tests {
             },
             AgentGoalIntent {
                 profile: Some(AgentProfileId::new("codex").unwrap()),
-                ..intent.clone()
+                ..intent
             },
         ] {
             assert_ne!(key, agent_goal_semantic_key(&other));
@@ -3242,7 +3237,7 @@ mod deadline_and_retry_tests {
         };
         let key = agent_resume_semantic_key(&target);
         assert!(key.starts_with("resume:"));
-        assert_eq!(key, agent_resume_semantic_key(&target.clone()));
+        assert_eq!(key, agent_resume_semantic_key(&target));
         assert_ne!(
             key,
             agent_launch_semantic_key(&AgentLaunchIntent {
@@ -3262,7 +3257,7 @@ mod deadline_and_retry_tests {
             },
             AgentResumeTarget {
                 session_id: None,
-                ..target.clone()
+                ..target
             },
         ] {
             assert_ne!(key, agent_resume_semantic_key(&other), "{other:?}");

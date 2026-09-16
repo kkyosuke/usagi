@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 pub use crate::domain::pr_inventory::PrState;
 use crate::domain::pr_inventory::{PrChecksState, PrRefreshState, PrReviewDecision};
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // 同じ trait の他の実装と署名を揃える。
 /// `true` when a boolean is its `false` default, so an unpinned PR omits the
 /// `pinned` key from persisted files.
-#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -142,9 +142,9 @@ impl PrLink {
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)] // 同じ trait の他の実装と署名を揃える。
 /// Whether the canonical state is its default `open` value. This compatibility
 /// entity keeps omitting that value from legacy session records.
-#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_open(state: &PrState) -> bool {
     matches!(state, PrState::Open)
 }

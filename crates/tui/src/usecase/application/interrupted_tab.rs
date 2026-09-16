@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(partial.tabs[0].continuation, second.continuation);
         assert_eq!(partial.tabs[1].continuation, first.continuation);
         assert_eq!(partial, {
-            let mut reversed = inventory.clone();
+            let mut reversed = inventory;
             reversed.runtimes.reverse();
             project(
                 &reversed,
@@ -734,7 +734,7 @@ mod tests {
             workspace,
             vec![
                 lineage.runtime(AgentRuntimeInventoryState::Interrupted),
-                replacement.clone(),
+                replacement,
             ],
             vec![lineage.available()],
         );

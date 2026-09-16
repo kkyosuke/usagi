@@ -317,7 +317,7 @@ fn provenance_and_pending_authority_validation_is_fail_closed() {
     let mut stale = run.clone();
     stale.tasks.get_mut(&root_id).unwrap().generation = 2;
     assert!(validate_provenance_chain(&stale, &root_id, &root_provenance).is_err());
-    let mut rooted_parent = root_provenance.clone();
+    let mut rooted_parent = root_provenance;
     rooted_parent.parent_dispatch_run = Some(OperationId::new());
     assert!(
         validate_provenance_chain(&run, &root_id, &rooted_parent)
@@ -374,7 +374,7 @@ fn provenance_and_pending_authority_validation_is_fail_closed() {
     let mut cyclic = run.clone();
     let cyclic_task = cyclic.tasks.get_mut(&child_id).unwrap();
     cyclic_task.parent_task_id = Some(child_id.clone());
-    let mut cyclic_provenance = child_provenance.clone();
+    let mut cyclic_provenance = child_provenance;
     cyclic_provenance.parent_task_id = Some(child_id.clone());
     cyclic_provenance.parent_dispatch_run = Some(child_operation);
     cyclic
@@ -738,7 +738,7 @@ fn pending_operation_validation_joins_live_agent_identity_and_semantics() {
         assert!(result.is_err());
     }
 
-    let mut closed = dispatch.clone();
+    let mut closed = dispatch;
     closed.status = RunStatus::Completed;
     closed.ended_at = Some(now());
     scheduler.dispatch.upsert_run(closed).unwrap();
@@ -1810,7 +1810,7 @@ fn session_delegation_replays_only_the_exact_reserved_agent_and_semantics() {
             DispatchRun {
                 run_id: child_operation,
                 agent_id: admitted.agent_id,
-                prompt: reserved.prompt.clone(),
+                prompt: reserved.prompt,
                 started_at: now(),
                 ended_at: None,
                 status: RunStatus::Running,

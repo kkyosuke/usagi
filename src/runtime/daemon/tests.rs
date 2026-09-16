@@ -389,7 +389,7 @@ fn promotion_admission_matching_rejects_each_collision_fence() {
         &worker,
         semantic.into(),
     );
-    let shared = empty_supervisor_agent(dispatch.clone());
+    let shared = empty_supervisor_agent(dispatch);
     let runtime = shared.owner.lock().unwrap();
 
     assert!(
@@ -1000,7 +1000,7 @@ fn supervisor_promotion_outcomes_bind_or_close_every_reservation_kind() {
         worker_session_id: child_worker.session_id,
         worker_runtime_id: None,
         worker_agent_id: Some(planned_child.agent_id),
-        worker_profile_id: Some(planned_child.runtime.clone()),
+        worker_profile_id: Some(planned_child.runtime),
         worker_semantic_digest: Some(child_digest),
     };
     assert!(
@@ -2030,9 +2030,7 @@ fn fresh_ipc_ready<'a>(data_dir: &'a Path, _info: &'a AppInfo) -> IpcReady<'a> {
 
 fn ipc_generation() -> usagi_core::infrastructure::ipc::DaemonGeneration {
     usagi_core::infrastructure::ipc::DaemonGeneration(
-        usagi_core::domain::id::DaemonGeneration::new()
-            .as_str()
-            .clone(),
+        usagi_core::domain::id::DaemonGeneration::new().as_str(),
     )
 }
 
@@ -2381,9 +2379,7 @@ fn lifecycle_private_files_override_a_restrictive_umask() {
     let listener = SecureUnixListener::bind(
         &data,
         usagi_core::infrastructure::ipc::DaemonGeneration(
-            usagi_core::domain::id::DaemonGeneration::new()
-                .as_str()
-                .clone(),
+            usagi_core::domain::id::DaemonGeneration::new().as_str(),
         ),
     )
     .unwrap();
@@ -2939,7 +2935,7 @@ fn a_bound_client_adopts_the_repository_it_is_running_inside() {
             pid: std::process::id(),
         },
         SystemTenantOpener {
-            data_home: data.clone(),
+            data_home: data,
             generation: usagi_core::domain::id::DaemonGeneration::new(),
         },
         DEFAULT_TENANT_LIMIT,
@@ -3104,7 +3100,7 @@ fn a_closed_workspace_still_counts_as_owning_its_sessions() {
             pid: std::process::id(),
         },
         SystemTenantOpener {
-            data_home: data.clone(),
+            data_home: data,
             generation,
         },
         DEFAULT_TENANT_LIMIT,
@@ -3320,7 +3316,7 @@ fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
             pid: std::process::id(),
         },
         SystemTenantOpener {
-            data_home: data.clone(),
+            data_home: data,
             generation,
         },
         DEFAULT_TENANT_LIMIT,
@@ -3329,7 +3325,7 @@ fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
     let workspaces: Workspaces = tenants.clone();
     let resolver = TenantWorkspaces {
         tenants: Arc::clone(&tenants),
-        daemon_dir: daemon_dir.clone(),
+        daemon_dir,
         initial: first_root.clone(),
     };
     let wire = |root: &Path| paths::wire_workspace_root(root);
@@ -3400,7 +3396,7 @@ fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
     // The connection binds the workspace its handshake settled on.
     for (declared, expected) in [
         (None, first_root.clone()),
-        (Some(ClientWorkspace::Unbound), first_root.clone()),
+        (Some(ClientWorkspace::Unbound), first_root),
         (Some(selected.clone()), second_root.clone()),
         (
             Some(ClientWorkspace::Bound {
@@ -4141,7 +4137,7 @@ fn a_generation_process_is_only_verified_by_its_exact_recorded_identity() {
 
     let reused = ProcessIdentity {
         start_identity: "another-incarnation".to_owned(),
-        ..live.clone()
+        ..live
     };
     assert_eq!(
         observe_generation_process(&reused),
@@ -4150,7 +4146,7 @@ fn a_generation_process_is_only_verified_by_its_exact_recorded_identity() {
 
     let legacy = ProcessIdentity {
         start_identity: String::new(),
-        ..live.clone()
+        ..live
     };
     assert_eq!(
         observe_generation_process(&legacy),
@@ -4376,7 +4372,7 @@ fn the_declared_workspace_prefers_the_opened_one_then_the_injected_root() {
     let canonical_root =
         paths::wire_workspace_root(paths::canonical_workspace_root(&workspace).unwrap());
     let canonical = ClientWorkspace::Bound {
-        root: canonical_root.clone(),
+        root: canonical_root,
     };
 
     // A daemon-provisioned child declares the trusted root the daemon
@@ -4669,7 +4665,7 @@ fn client_bootstrap_recovers_a_socket_first_partial_retire_with_a_reused_live_pi
     );
     assert!(!socket.exists());
     assert!(current.exists());
-    assert_eq!(store.load().unwrap(), Some(record.clone()));
+    assert_eq!(store.load().unwrap(), Some(record));
     std::fs::remove_file(alias).unwrap();
     assert_eq!(
         usagi_daemon::infrastructure::unix_transport::connect_current(data)
@@ -5174,7 +5170,7 @@ fn production_stop_reclaims_a_reused_pid_in_socket_first_order_without_signallin
         "the socket step failed, so nothing committed"
     );
     assert!(current.exists(), "the locator commits after the socket");
-    assert_eq!(store.load().unwrap(), Some(record.clone()));
+    assert_eq!(store.load().unwrap(), Some(record));
     assert!(
         occupant.try_wait().unwrap().is_none(),
         "a failed reclaim must not signal the process holding the reused pid"
@@ -8086,8 +8082,7 @@ fn start_broker(idle: BrokerIdlePolicy) -> BrokerFixture {
     let data = data_parent.path().join("data");
     let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
     let address = bootstrap_broker_address(&data, &workspace, &exe);
-    let (server_data, server_workspace, server_exe) =
-        (data.clone(), workspace.clone(), exe.clone());
+    let (server_data, server_workspace, server_exe) = (data, workspace, exe);
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let result = serve_bootstrap_broker(&server_data, &server_workspace, &server_exe, idle);
@@ -9106,7 +9101,7 @@ fn full_pty_observation_queue_backpressures_without_reordering() {
     sender
         .send(PtyObservation::Output(terminal.clone(), vec![1]))
         .unwrap();
-    let blocked_sender = sender.clone();
+    let blocked_sender = sender;
     let blocked_metrics = Arc::clone(&metrics);
     let blocked_terminal = terminal.clone();
     let producer = std::thread::spawn(move || {
@@ -10816,7 +10811,7 @@ fn a_record_that_leaves_the_owners_truth_is_fenced_and_still_counted() {
     let generation = DaemonGeneration::new();
     let mut store = ShardedTerminalStore::new(sharded_state(dir.path(), generation));
     let truth = terminal_truth(generation);
-    store.save(truth.clone()).unwrap();
+    store.save(truth).unwrap();
 
     // A reserved record still owns a PTY reservation a cold transition would
     // destroy, so the lifecycle census counts it.
@@ -10946,7 +10941,7 @@ fn fence_client_hello(capabilities: Vec<String>) -> usagi_core::infrastructure::
         ClientHello, ProtocolRange, TERMINAL_CHECKPOINT_REVISION, TERMINAL_WIRE_GENERATION,
     };
     ClientHello {
-        client_id: usagi_core::infrastructure::ipc::ClientId(ClientId::new().as_str().clone()),
+        client_id: usagi_core::infrastructure::ipc::ClientId(ClientId::new().as_str()),
         connection_nonce: "fence".to_owned(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {
@@ -10983,7 +10978,7 @@ fn serve_through_fence(
     let generation = ipc_generation();
     let protocol = usagi_daemon::presentation::ipc::server_protocol(
         generation.clone(),
-        generation.0.clone(),
+        generation.0,
         current_build(),
         DaemonRecord::new(std::process::id()),
         String::new(),
@@ -11098,7 +11093,7 @@ fn serve_supervisor_request(
             protocol: negotiated.protocol,
             daemon_generation: negotiated.daemon_generation,
             kind: EnvelopeKind::Request {
-                request_id: WireRequestId(RequestId::new().as_str().clone()),
+                request_id: WireRequestId(RequestId::new().as_str()),
                 timeout_ms: None,
                 body,
             },

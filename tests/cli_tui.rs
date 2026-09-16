@@ -1979,9 +1979,7 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     let second_fence = hold_workspace_fence(
         &usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap(),
     );
-    let initial_connection = connect(ClientWorkspace::Bound {
-        root: initial_root.clone(),
-    });
+    let initial_connection = connect(ClientWorkspace::Bound { root: initial_root });
     if let Err(error) = initial_connection {
         panic!("{error}");
     }

@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(state.focus_cursor(), 0);
         assert_eq!(state.notice(), None);
         // derive された Clone / Debug も計測対象なので触れる。
-        assert!(format!("{:?}", state.clone()).contains("New"));
+        assert!(format!("{state:?}").contains("New"));
     }
 
     #[test]
