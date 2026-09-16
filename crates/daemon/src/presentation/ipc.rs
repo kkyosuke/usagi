@@ -499,7 +499,7 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
                         // Store the lease outside the match arm before dispatch so
                         // response observation and writing remain inside its lifetime.
                         request_lease = lease;
-                        if let Ok(usagi_core::infrastructure::client::DaemonRequest::Terminal {
+                        if let Ok(usagi_core::infrastructure::ipc::DaemonRequest::Terminal {
                             action,
                             payload,
                         }) = serde_json::from_value(body.clone())
@@ -602,7 +602,7 @@ fn dispatch_terminal_request(
     terminal: &mut dyn TerminalOwner,
     context: TerminalRequestContext,
     canonical_client: bool,
-    action: usagi_core::infrastructure::client::TerminalAction,
+    action: usagi_core::infrastructure::ipc::TerminalAction,
     payload: serde_json::Value,
     revision: u16,
 ) -> Result<serde_json::Value, ProtocolError> {
@@ -622,10 +622,10 @@ fn dispatch_terminal_request(
 }
 
 fn decode_terminal_request(
-    action: usagi_core::infrastructure::client::TerminalAction,
+    action: usagi_core::infrastructure::ipc::TerminalAction,
     payload: serde_json::Value,
-) -> Result<usagi_core::infrastructure::client::TerminalRequest, ProtocolError> {
-    use usagi_core::infrastructure::client::{TerminalAction, TerminalRequest};
+) -> Result<usagi_core::infrastructure::ipc::TerminalRequest, ProtocolError> {
+    use usagi_core::infrastructure::ipc::{TerminalAction, TerminalRequest};
 
     let request = serde_json::from_value(payload).map_err(|_| {
         ProtocolError::new(
@@ -834,7 +834,7 @@ mod tests {
         fn handle(
             &mut self,
             context: TerminalRequestContext,
-            _: usagi_core::infrastructure::client::TerminalRequest,
+            _: usagi_core::infrastructure::ipc::TerminalRequest,
         ) -> Result<TerminalResponse, ProtocolError> {
             self.requests += 1;
             self.clients.push(context.client);
@@ -955,7 +955,7 @@ mod tests {
             terminal_launch::TerminalLaunchScope,
         };
         let payload = serde_json::to_value(
-            usagi_core::infrastructure::client::TerminalRequest::Inventory {
+            usagi_core::infrastructure::ipc::TerminalRequest::Inventory {
                 scope: TerminalLaunchScope {
                     workspace_id: WorkspaceId::new(),
                     session_id: None,
@@ -974,8 +974,8 @@ mod tests {
                 request_id: usagi_core::infrastructure::ipc::RequestId(request_id),
                 timeout_ms: None,
                 body: serde_json::to_value(
-                    usagi_core::infrastructure::client::DaemonRequest::Terminal {
-                        action: usagi_core::infrastructure::client::TerminalAction::Inventory,
+                    usagi_core::infrastructure::ipc::DaemonRequest::Terminal {
+                        action: usagi_core::infrastructure::ipc::TerminalAction::Inventory,
                         payload,
                     },
                 )
@@ -1843,7 +1843,7 @@ mod tests {
             id::{WorkspaceId, WorktreeId},
             terminal_launch::TerminalLaunchScope,
         };
-        use usagi_core::infrastructure::client::{DaemonRequest, TerminalAction, TerminalRequest};
+        use usagi_core::infrastructure::ipc::{DaemonRequest, TerminalAction, TerminalRequest};
 
         let request = |action, payload| Envelope {
             protocol: ProtocolVersion {

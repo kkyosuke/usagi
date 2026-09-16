@@ -5,7 +5,7 @@
 //! worktree — and because the table itself has a line budget the rest of the
 //! daemon has to fit inside (`tests/architecture.rs`).
 
-use usagi_core::infrastructure::client::SessionAction;
+use usagi_core::infrastructure::ipc::SessionAction;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::usecase::note;
 use usagi_daemon::usecase::session_runtime::SessionRuntimeError;

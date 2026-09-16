@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use usagi_core::domain::supervisor::{
     MAX_SUPERVISOR_KEY_BYTES, MAX_SUPERVISOR_REASON_BYTES, MAX_SUPERVISOR_TEXT_BYTES,
 };
-use usagi_core::infrastructure::client::SupervisorToolAction;
+use usagi_core::infrastructure::ipc::SupervisorToolAction;
 
 #[must_use]
 pub fn tools() -> Vec<ToolDescriptor> {

@@ -116,7 +116,7 @@ use crate::usecase::application::daemon_health::DaemonHealthTracker;
 use tempfile::tempdir;
 use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 use usagi_core::domain::workspace_state::WorkspaceState;
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 
 /// The unobserved default: diagnostic health draws no indicator, so a frame
 /// test keeps asserting the healthy Home frame. The judgement itself is
