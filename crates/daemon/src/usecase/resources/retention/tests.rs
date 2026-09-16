@@ -2,9 +2,11 @@
 
 use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 
+use usagi_core::domain::clock::LogicalClock;
+
 use super::{
-    GcPhase, GcPlan, GcReport, LogicalClock, RetentionLimits, admission_guard, apply_phase,
-    collect_garbage, plan_gc, serialized_bytes,
+    GcPhase, GcPlan, GcReport, RetentionLimits, admission_guard, apply_phase, collect_garbage,
+    plan_gc, serialized_bytes,
 };
 use crate::usecase::resources::allocator::{
     AllocatorDocument, ClaimState, ExpiryClass, LaunchFailure, OperationOutcome, ResourceAllocator,
