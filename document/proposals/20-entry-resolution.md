@@ -1,116 +1,145 @@
-# 20. 起動時 workspace 解決と entry 面の回収
+# 20. Welcome の主語を入れ替えて Open / New / Recent を回収する
 
-> [設計提案一覧](README.md) ｜ 関連する現在仕様: [3. TUI](../03-tui.md#画面と入力) / [1. プロジェクト概要](../01-overview.md#cli) ｜ 関連提案: [17-multi-workspace-daemon.md](17-multi-workspace-daemon.md)
+> [設計提案一覧](README.md) ｜ 関連する現在仕様: [3. TUI](../03-tui.md#画面と入力) / [1. プロジェクト概要](../01-overview.md#cli) ｜ 関連提案: [15-session-garden.md](15-session-garden.md) / [17-multi-workspace-daemon.md](17-multi-workspace-daemon.md)
 
-> **Status:** 提案中（未実装）。本書は Welcome の Open / New / Recent を Home の既存面と起動時解決へ畳み込む target design である。
+> **Status:** 提案中（未実装）。本書は Welcome を**残したまま**、使われていない Open / New / Recent を Welcome 自身の中へ畳み込む target design である。
 > 現在のビルドの挙動は [3. TUI](../03-tui.md) と [11. キーバインド](../11-keybindings.md) を正本とする。
 >
 > **Baseline:** 原版 commit `573dc395df99270f53baaca1bcc4b8d5861b0823`（2026-09-15）。現在仕様は上記の TUI とキーバインドを参照する。
 
-## 目的
+## 目的と制約
 
-Welcome の Open / New / Recent が日常的に使われていない。この 3 つを「削る / 残す」の二択で扱わず、
-**それぞれが答えている問いを、より早い場所へ移して回収する**ための設計判断を残す。
+Welcome の Open / New / Recent が日常的に使われていない。一方で **Welcome 画面そのものは残す**。
+したがって解は「画面を削る」ではなく、**Welcome の主語を入れ替えて 3 項目をその中へ回収する**ことになる。
 
-回収先は次の 2 つで、どちらも既に存在する。
-
-- **起動時の解決**: 「どの workspace か」は cwd と直近の利用履歴でほぼ決まっており、起動のたびに人へ問い直す必要がない。
-- **Home の workspace deck**: `+ Open` overlay と project tab は、Welcome の Open / New（Existing）と同じ操作を
-  作業中の文脈のまま提供する（[project tab と workspace deck](../03-tui.md#project-tab-と-workspace-deck)）。
+| 制約 | 内容 |
+|---|---|
+| Welcome を残す | `usagi`（引数なし）の入口、`Ctrl-Q` → `w` の戻り先、マスコットと splash の顔を保つ |
+| entry 面は daemon 非依存 | 最初の 1 フレームは registry と Recent だけで描き、daemon の起動・接続を待たない |
+| SSoT を割らない | `+ Open` overlay、Session Garden、Home の投影を Welcome 側へ複製しない。使うなら同じ投影を読む |
 
 ## 問題の構造
 
-Welcome が使われない理由は「画面の出来」ではなく、**位置**と**重複**である。
+Welcome が使われない理由は「画面の出来」ではなく、**主語**と**重複**である。
 
-1. **問いのタイミングが早すぎる**。`usagi` は引数なしで必ず Welcome を出す（[process argv contract](../02-architecture.md#process-argv-contract)）。
-   しかし起動時点の答えは、ほとんどの場合 cwd の repository か、前回と同じ deck である。既に決まっている問いに
-   毎回 1 画面と数打鍵を払っている。
-2. **Home に同じ操作がある**。workspace を開いたあとは deck から離れずに追加・切り替え・登録ができるため、
-   Welcome へ戻る動機が無い。
-3. **CLI に近道がある**。`usagi open [path]` は登録と Home 起動を 1 コマンドで行い、Welcome を通らない。
+現在の Welcome の主語は「何をしますか？」で、答えとして Open / New / Config / Quit の 4 択と Recent カード 3 枚を出す。
+しかし利用者が起動時に本当に持っている問いは「**前回の続きはどうなっている？**」であり、Welcome はそれに答えていない。
+そのうえ 4 択のうち 3 つは Home 側に等価物がある。
 
-### 重複マトリクス
-
-| Welcome の項目 | Home の等価物 | CLI の等価物 | Welcome 固有か |
+| Welcome の項目 | Home の等価物 | CLI の等価物 | 判定 |
 |---|---|---|---|
-| Open（登録済み一覧・filter・Unite 選択） | `+ Open` overlay（filter・`Space` 複数選択・`Ctrl-X` close） | — | 重複 |
-| Recent（カード 3 枚） | project tab deck（開いている deck そのもの） | `usagi open` | 重複（起動直後だけ意味を持つ） |
+| Open（登録済み一覧・filter・Unite 選択） | `+ Open` overlay（filter・`Space` 複数選択） | — | 重複 |
+| Recent（カード 3 枚） | project tab deck そのもの | `usagi open` | 起動直後だけ意味を持つ |
 | New / Existing（既存ディレクトリ登録） | `+ Open` overlay の Directory 入力 | `usagi open <path>` | 重複 |
-| New / Clone（git clone して登録） | なし | なし | **固有** |
+| New / Clone（git clone して登録） | なし | なし | **Welcome 固有** |
 | Config | Overview の `config`（overlay modal） | `usagi config` | 重複 |
 | Quit | `Ctrl-Q` の exit prompt | — | 重複 |
 
-**Welcome 固有の機能は Clone だけである**。したがって「Welcome を作り込む」方向に投資しても、
-重複が解消しない限り使われ方は変わらない。
+**Welcome 固有の機能は Clone だけである**。Welcome を残すと決めた以上、重複の解消先は Home 側ではなく
+**Welcome 側の情報設計**になる。つまり 4 択メニューという形をやめ、3 項目を格の違う 3 か所へ置き直す。
 
 ## 設計判断
 
-1. **起動時に workspace を解決し、解けたら Welcome を出さない**。Recent は「画面」ではなく「起動の既定値」として回収する。
-2. **Open / New を `+ Open` overlay へ一本化する**。overlay に Clone モードを足し、Welcome 固有の機能を残さない。
-3. **Welcome は Picker へ縮退させ、消さない**。解決不能時と workspace 離脱時の戻り先という 2 つの役割は残るため、
-   2 カラムのメニュー＋カードをやめ、Home の overlay と同じ 1 リストにする。
+主語を「何をしますか？」から「**どこへ戻るか・今どうなっているか**」へ入れ替え、3 項目を次の格へ移す。
 
-### 起動時の解決順序
+| 項目 | 回収先 | 格 |
+|---|---|---|
+| Open | **画面本体のリストへ昇格**。Welcome が登録済み workspace の一覧そのものになる | 主 |
+| Recent | **並び順と `Continue` 行へ溶かす**。カード 3 枚という別表現をやめる | 既定値 |
+| New | **footer の 1 キーへ降格**（`n`）。Clone / Existing の画面は現状のまま残す | 従 |
+| Config | **footer の 1 キーへ降格**（`c`） | 従 |
+
+### 1. `Continue` 行を既定選択にする
+
+最上段に `Continue` 行を置き、**起動直後のカーソルをそこに合わせる**。Enter 1 打で前回の続きに戻る。
+
+`Continue` が指す対象の決め方（registry と Recent だけで決まり、daemon に問い合わせない）:
 
 ```text
-usagi（引数なし）
+Welcome を開く
    |
-   +-- cwd が登録済み workspace の内側 ------> その workspace の Home
-   |
-   +-- 直近の Recent が解決できる ----------> その単体 / Unite deck の Home
-   |        （Recent は Unite も保持するため前回の deck 構成をそのまま復元する）
-   |
-   +-- 登録が 0 件 ------------------------> New（初回導線。ここだけ New が主役になる）
-   |
-   `-- 解決先を開けない（daemon 拒否 / 消失）--> Picker ＋ notice（無言で別 workspace へ落ちない）
+   +-- cwd が登録済み workspace の内側 ------> その workspace
+   +-- 直近の Recent（Unite ならその deck 構成ごと）-> その deck
+   `-- 登録が 0 件 --------------------------> Continue 行を出さず New を既定選択にする
 ```
 
-- 解決は registry と Recent だけを読み、daemon には問い合わせない（entry 面が daemon 非依存である原則を保つ）。
-- cwd 判定は登録済み path の祖先一致で行い、**未登録ディレクトリを暗黙に登録しない**。暗黙登録は `usagi open` の
-  明示的な操作に留める。
-- 解決結果は `usagi open <path>` と同じ snapshot / composition 経路へ入れる。新しい Home 起動経路は作らない。
-- **明示的に Picker を開く入口を 1 つ残す**。現在 Welcome の互換 alias である `usagi hop` をこの用途へ再定義し、
-  「今日はどの workspace か選びたい」を 1 コマンドで表す。
+**起動時に自動で workspace を開く経路は作らない**。Welcome は必ず表示し、決定は Enter という利用者の 1 操作に残す。
+これで「毎回同じ問いに答える」コストは 1 打鍵まで下がり、画面は残る。ゼロ打鍵で入りたい場合の入口は
+既存の `usagi open [path]` が既に担っている。
 
-### 画面の before / after
+### 2. Open を画面本体へ昇格し、メニュー列を廃止する
 
-| 面 | 現在 | 提案後 |
+左のメニュー列（Open / New / Config / Quit の 4 行）と右の Recent カード列という 2 カラムをやめ、
+**filter 1 行＋ workspace リスト 1 本**にする。リストは最近順、続けて名前順。
+`views/open.rs` の Filter・`Tab` の Single / Unite 切り替え・`Space` の複数選択は、画面を移さず Welcome 上でそのまま使う。
+Open は独立した画面としては無くなるが、機能は 1 つも落ちない。
+
+```text
+              (mascot)
+               USAGI
+
+   ▸ Continue   usagi + AccelHack          3 sessions · 1 needs attention
+   ─────────────────────────────────────────────────────────────────────
+     usagi        ~/git/…/usagi             2 sessions · 1 needs attention
+     AccelHack    ~/git/…/AccelHack         1 session
+     dotfiles     ~/git/…/dotfiles          —
+   ─────────────────────────────────────────────────────────────────────
+   /: filter   Tab: unite   n: new   c: config   q: quit   Ctrl-?: help
+```
+
+### 3. 空いた面積へ daemon-optional な status を置く
+
+メニュー列と カードを畳んで空いた右側に、workspace ごとの **session 数と `N needs attention`** を出す。
+これが「Welcome を毎回見る価値」に相当し、Open / New / Recent が占めていた面積の回収先になる。
+
+制約を守るための規則:
+
+| 規則 | 内容 |
+|---|---|
+| 最初のフレーム | registry と Recent だけで描く。status 列は空（`—`）で出し、後から埋める |
+| 読み方 | Garden の inactive project 観測と同じ `AgentWorkspaceObservation` を使う。workspace ごとに daemon が自分の record を filter して答えるため、その workspace の tenant へ接続し直さない |
+| いつ読むか | Welcome が前面にある間だけ。1 round ずつ直列で、成功後 1 秒・空振り後 5 秒。1 round の上限 16 件 |
+| daemon が居ないとき | 何も表示せず、エラーも出さず、**daemon を起動しない**。status は「あれば出る」付加情報に留める |
+| 数え方 | attention 件数の定義は [Garden Action Center](../03-tui.md#garden-action-center) を正本として共有し、Welcome 側で数え直さない |
+
+## キー操作の before / after
+
+| キー | 現在 | 提案後 |
 |---|---|---|
-| `usagi` | Welcome（メニュー＋Recent カード） | 解決した workspace の Home。解決不能時だけ Picker |
-| `usagi hop` | Welcome（非表示 alias） | Picker（公開コマンド） |
-| Welcome の Open | 専用画面 | 廃止。`+ Open` overlay と Picker が担う |
-| Welcome の New | 専用画面（Clone / Existing） | 初回導線と `+ Open` overlay の Clone モードへ分解 |
-| Welcome の Recent | カード 3 枚 | 起動時解決の第 2 候補。Picker では最近順の並び順として残る |
-| `Ctrl-Q` → `w` | Welcome へ戻る | Picker へ戻る（[workspace の離脱と終了](../03-tui.md#workspace-の離脱と終了)の意味は変えない） |
-
-Picker は filter 1 行＋ 1 リスト（最近順 → 名前順）で、footer は `n: new  c: config  q: quit` に縮める。
-マスコットと splash は起動の顔として Picker と Home 起動の両方で保つ。
+| `↑` / `↓`、`j` / `k` | メニュー 4 項目の移動 | workspace リストの移動（`Continue` を含む） |
+| `Enter` | 選択したメニュー項目 | 選択した workspace / `Continue` を開く |
+| `1`…`3` | Recent カード | 廃止（リストの並び順へ溶ける） |
+| `o` | Open 画面へ | 廃止（画面が本体になる） |
+| `e` | New 画面へ | `n`（footer 表記と一致させる） |
+| `c` / `q` | Config / Quit | 変更なし |
+| `/` | なし | filter へフォーカス |
+| `Tab` / `Space` | なし（Open 画面の機能） | Single / Unite 切り替えと複数選択 |
 
 ## 段階
 
-各段階は単独で出荷でき、前段が無くても後段の価値を壊さない。
-
 | 段階 | 内容 | 主な変更点 | 効果 |
 |---|---|---|---|
-| 1 | 起動時解決 | 合成ルートの entry 決定（`src/runtime/tui.rs`）と `EntryScreen` 選択、`usagi hop` の再定義 | 日常の起動から Welcome が消える。Recent / Open / New に触れない |
-| 2 | Clone の移設 | `+ Open` overlay に Clone モード、New の Clone 経路を overlay の backend port へ寄せる | Welcome 固有機能が無くなる |
-| 3 | Welcome → Picker | `views/welcome.rs` の 2 カラム描画を 1 リスト化、`views/open.rs` と統合、Home の `w` 戻り先を差し替え | 画面が 3 つ（Welcome / Open / New）から 2 つ（Picker / New）へ減る |
+| 1 | `Continue` 行と既定選択 | `views/welcome.rs` の選択初期値と 1 行追加、cwd 判定 | 起動が Enter 1 打になる。Recent カードはまだ残せる |
+| 2 | 1 リスト化 | `views/welcome.rs` と `views/open.rs` の統合、メニュー列と Recent カードの廃止、footer 整理 | Open / Recent の重複が消え、画面が 1 つ減る |
+| 3 | status 列 | 観測 lane の Welcome 版（bounded round・daemon 非依存の縮退） | Welcome に毎回見る理由ができる |
 
-段階 1 だけでも「使われない画面を毎回見る」問題は解消する。段階 2 / 3 は重複そのものの除去であり、
-実装より先に段階 1 の実使用で「Picker をどれだけ開くか」を観測してから着手してよい。
+段階 1 は描画とカーソル初期値だけで完結し、backend を増やさない。段階 2 までで「使われない 3 項目」は無くなる。
+段階 3 は daemon 依存を**任意の付加情報**として足すため、失敗しても Welcome は今と同じ情報量で成立する。
 
 ## 却下した代替案
 
 | 案 | 却下理由 |
 |---|---|
-| Welcome を即削除し、解決できない場合は空の Home を出す | 0 件 deck の Home は active tab を持てず、`+ Open` overlay だけが載った特殊な Home を新設することになる。画面は減らず、状態が増える |
-| Welcome に横断情報（全 workspace の session / Garden）を足して価値を上げる | 起動のたびに「どの workspace か」を問う構造は変わらない。横断表示は既に全幅 Session Garden が deck 上で担っており、entry 面へ複製すると SSoT が割れる |
-| 起動挙動を Global 設定にする | 既定の解決順序が正しければ設定は不要で、entry の分岐と設定 surface を同時に増やす。明示操作は `usagi hop` と `usagi open <path>` の 2 つで足りる |
-| cwd が未登録なら暗黙に登録して開く | 任意のディレクトリで `usagi` を打つだけで registry が汚れる。登録は `usagi open` の明示操作に留める |
+| 起動時に workspace を解決して Welcome を出さない | Welcome を残すという決定に反する。決定は Enter 1 打へ縮めるに留める |
+| Welcome を消して Home の空 deck へ統合 | 同上。加えて 0 件 deck の Home は active tab を持てず、特殊な Home を新設することになる |
+| Clone を `+ Open` overlay へ移し、New も畳む | Clone は Welcome 固有で重複していない。重複していない機能を移しても総量は減らず、overlay のモードだけが増える |
+| Welcome 上に Garden を別実装で描く | 同じ投影の二重実装になり SSoT が割れる。Welcome では 1 行の status に留め、庭は Garden の 1 か所に保つ |
+| 起動挙動（自動で開く / Welcome を出す）を Global 設定にする | 既定が Enter 1 打なら設定する動機が無く、entry の分岐と設定 surface だけが増える |
+| cwd が未登録なら暗黙に登録して `Continue` に出す | 任意のディレクトリで `usagi` を打つだけで registry が汚れる。登録は `usagi open` の明示操作に留める |
 
 ## 未決事項
 
-- Picker と `+ Open` overlay を同じ view 実装で共有するか、描画だけ揃えて別実装のままにするか。
-- 段階 1 で解決した workspace が **Unite deck** の場合、Recent の Unite entry をそのまま復元するか、
-  active tab だけを開いて残りを遅延で開くか（起動時間とのトレードオフ）。
-- 初回導線（登録 0 件）を New 全画面のままにするか、Picker の空状態に Clone / Existing の 2 行を出すだけにするか。
+- `Continue` が Unite deck を指すときの表記（`usagi + AccelHack` のような連結か、保存済み deck 名を持たせるか）。
+- 段階 3 の status を Welcome だけでなく `+ Open` overlay の候補行にも出すか（同じ projection を共有できる）。
+- Welcome が idle になったとき Garden を開くか。Home と同じ idle 契約を entry 面へ広げると
+  「entry は daemon 非依存」の原則と衝突するため、開くとしても daemon が既に居る場合に限る。
