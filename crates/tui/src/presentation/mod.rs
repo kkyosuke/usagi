@@ -29,12 +29,13 @@ pub mod workspace_deck;
 mod workspace_io;
 pub mod workspace_runtime;
 use frame_loop::drive_workspace_controller;
+pub use frame_loop::render_home_snapshot;
+pub(crate) use frame_loop::run_screen_graph_with_backend_and_notice;
 #[cfg(test)]
 use frame_loop::{
     drain_controller_host_actions, home_frame_material, render_controller_frame,
     render_home_material,
 };
-pub use frame_loop::{render_home_snapshot, run_screen_graph_with_backend_and_notice};
 
 use workspace_io::WorkspaceIoRuntime;
 
@@ -55,20 +56,22 @@ use terminal_io::{
 
 use flow_steps::{
     WelcomeStep, new_project_notice, save_config_responsive, step_config, step_new, step_open,
-    step_welcome, step_workspace_config, unavailable_completion,
+    step_welcome, step_workspace_config,
 };
 #[cfg(test)]
-use flow_steps::{save_environment_responsive, unavailable_environment_error, welcome_action};
+use flow_steps::{
+    save_environment_responsive, unavailable_completion, unavailable_environment_error,
+    welcome_action,
+};
 
 use session_commands::{
-    SessionCommandCompletion, UnavailableSessionCommandPortFactory, begin_session_command,
-    drain_session_completions, drain_session_refresh, project_controller_sessions,
-    session_name_for, sync_runtime_sessions,
+    SessionCommandCompletion, begin_session_command, drain_session_completions,
+    drain_session_refresh, project_controller_sessions, session_name_for, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{
-    UnavailableSessionCommandPort, apply_session_projection, emit_session_command_result,
-    safe_session_error,
+    UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, apply_session_projection,
+    emit_session_command_result, safe_session_error,
 };
 
 use restore::{
@@ -91,21 +94,23 @@ use director::{
     director_organization, select_director_agent, select_director_selection, select_director_tab,
 };
 
-use work_run::{
-    UnavailableWorkRunPort, WorkRunControlInput, WorkRunLaneCompletion,
-    handle_work_run_control_input_with_ui, spawn_work_run_control_job,
-    spawn_work_run_observation_job, work_run_control_projection,
-};
 #[cfg(test)]
 use work_run::{
-    handle_work_run_control_input, handle_work_run_list_input, validate_work_run_snapshot,
+    UnavailableWorkRunPort, handle_work_run_control_input, handle_work_run_list_input,
+    validate_work_run_snapshot,
+};
+use work_run::{
+    WorkRunControlInput, WorkRunLaneCompletion, handle_work_run_control_input_with_ui,
+    spawn_work_run_control_job, spawn_work_run_observation_job, work_run_control_projection,
 };
 
 #[cfg(test)]
 use garden::GardenProjectVisit;
+#[cfg(test)]
+use garden::UnavailableGardenInventoryPort;
 use garden::{
-    GardenInputRoute, GardenObservationCompletion, UnavailableGardenInventoryPort,
-    garden_shell_owned_wake, route_garden_input, spawn_garden_observation_job, visit_garden_agent,
+    GardenInputRoute, GardenObservationCompletion, garden_shell_owned_wake, route_garden_input,
+    spawn_garden_observation_job, visit_garden_agent,
 };
 
 pub use banner::{BannerScreenRunner, write_banner};
@@ -128,16 +133,19 @@ use usagi_core::domain::agent::{
     AgentWorkspaceObservation, ProviderResumeProjection,
 };
 use usagi_core::domain::id::{
-    AgentContinuationRef, AgentRuntimeId, OperationId, RequestId, SessionId, TerminalRef,
-    UserDecisionId, WorkspaceId,
+    AgentContinuationRef, AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId,
 };
+#[cfg(test)]
+use usagi_core::domain::id::{RequestId, UserDecisionId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
 use usagi_core::domain::settings::{IconMode, WorkMode};
 use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunId};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
+#[cfg(test)]
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
+#[cfg(test)]
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::vt_screen::RetainedRowMotion;
 
@@ -167,32 +175,47 @@ use crate::presentation::workspace_deck::{
 use crate::presentation::workspace_runtime::{
     InterruptedRemovalConfirmation, PaneRestoreTarget, WorkspaceRuntime,
 };
+#[cfg(test)]
+use crate::usecase::application::agent_tab_intent::AgentTabIntentPortCommit;
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabIntentPort,
-    AgentTabIntentPortCommit, AgentTabProjection,
+    AgentTabProjection,
 };
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState,
-    DirectorConsoleParent, DirectorNew, DirectorRoute, Effect, EnvironmentEntry, ExitChoice,
-    Feedback, GardenClick, HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken,
-    PreviewFileFilter, Route, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection,
-    Target, WorkspaceDrawerFocus,
+    DirectorConsoleParent, DirectorNew, DirectorRoute, Effect, ExitChoice, Feedback, GardenClick,
+    HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken, Route,
+    SessionRoleProjection, Target, WorkspaceDrawerFocus,
+};
+#[cfg(test)]
+use crate::usecase::application::controller::{
+    EnvironmentEntry, PreviewFileFilter, SessionBranchCatalog, SessionRoleCatalog,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
+#[cfg(test)]
+use crate::usecase::application::daemon_backend::DecisionPort as BackendDecisionPort;
+#[cfg(test)]
+use crate::usecase::application::daemon_backend::OverlayPort as BackendOverlayPort;
+#[cfg(test)]
+use crate::usecase::application::daemon_backend::TargetStorePort as BackendTargetStorePort;
+#[cfg(test)]
+use crate::usecase::application::daemon_backend::WorkspaceCommandPort as BackendWorkspaceCommandPort;
 use crate::usecase::application::daemon_backend::{
-    Completions, DaemonBackend, DecisionPort as BackendDecisionPort, Flow as BackendFlow,
-    OverlayPort as BackendOverlayPort, TargetStorePort as BackendTargetStorePort,
-    WorkspaceCommandPort as BackendWorkspaceCommandPort,
+    Completions, DaemonBackend, Flow as BackendFlow,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
+#[cfg(test)]
+use crate::usecase::application::metrics::MetricsPortFactory;
 use crate::usecase::application::metrics::{
-    GitDiff, MetricsBackend, MetricsPort, MetricsPortFactory, MetricsProjection,
+    GitDiff, MetricsBackend, MetricsPort, MetricsProjection,
 };
 use crate::usecase::application::observation_lane::ObservationLane;
 use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
-use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
+use crate::usecase::application::pr::BrowserOpener;
+#[cfg(test)]
+use crate::usecase::application::pr::PrSnapshotPort;
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
@@ -214,15 +237,27 @@ use usagi_core::usecase::settings::SettingsPort;
 
 #[cfg(test)]
 use crate::usecase::application::WorkspaceCreateCompletion;
+#[cfg(test)]
+use crate::usecase::application::agent_runtime_ports::AgentCommandPortFactory;
+#[cfg(test)]
+use crate::usecase::application::agent_runtime_ports::SerializedPaneLaunchPort;
 use crate::usecase::application::agent_runtime_ports::{
-    AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission, ExactAgentResume,
-    PaneLaunchCommandPort, SerializedPaneLaunchPort, TerminalCommandPort,
+    AgentCommandPort, AgentPaneAdmission, ExactAgentResume, PaneLaunchCommandPort,
+    TerminalCommandPort,
 };
+#[cfg(test)]
+use crate::usecase::application::runtime_ports::DecisionCommandPort;
+#[cfg(test)]
+use crate::usecase::application::runtime_ports::DesktopNotificationPort;
+#[cfg(test)]
+use crate::usecase::application::runtime_ports::EnvironmentStorePort;
+#[cfg(test)]
+use crate::usecase::application::runtime_ports::SessionBranchCatalogPort;
+#[cfg(test)]
+use crate::usecase::application::runtime_ports::SessionCommandPortFactory;
 use crate::usecase::application::runtime_ports::{
-    DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    GardenInventoryPort, RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort,
-    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionRefreshPort,
-    SessionWorktreeScanPort,
+    ExternalTerminalPort, GardenInventoryPort, RestoreConnectionPort, SessionCatalogPort,
+    SessionCommandPort, SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
 };
 use crate::usecase::application::{
     WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
@@ -401,7 +436,9 @@ fn route_workspace_input_before_reducer(
     }
 }
 
+#[cfg(test)]
 struct NoMetrics;
+#[cfg(test)]
 impl MetricsPort for NoMetrics {}
 
 /// Complete production port set for one opened workspace.
@@ -446,24 +483,30 @@ pub struct ControllerBackendComposition {
     pub session_worktrees: Box<dyn SessionWorktreeScanPort>,
 }
 
+#[cfg(test)]
 struct UnavailableRestoreConnectionPort;
 
+#[cfg(test)]
 impl RestoreConnectionPort for UnavailableRestoreConnectionPort {
     fn take_reconnected_epoch(&mut self) -> Option<u64> {
         None
     }
 }
 
+#[cfg(test)]
 struct UnavailableSessionCatalogPort;
 
+#[cfg(test)]
 struct UnavailableSessionBranchCatalogPort;
 
+#[cfg(test)]
 impl SessionBranchCatalogPort for UnavailableSessionBranchCatalogPort {
     fn branches(&self, _: &Path, _: Option<&str>) -> SessionBranchCatalog {
         SessionBranchCatalog::default()
     }
 }
 
+#[cfg(test)]
 impl SessionCatalogPort for UnavailableSessionCatalogPort {
     fn roles(&self, _: &Path) -> SessionRoleCatalog {
         SessionRoleCatalog::default()
@@ -493,8 +536,10 @@ pub trait ControllerBackendFactory {
     ) -> ControllerBackendComposition;
 }
 
+#[cfg(test)]
 struct UnavailableBackendPort;
 
+#[cfg(test)]
 impl BackendTargetStorePort for UnavailableBackendPort {
     fn load_notes(&mut self, _: Target, completions: Completions) {
         unavailable_completion(&completions, "notes are unavailable");
@@ -520,6 +565,7 @@ impl BackendTargetStorePort for UnavailableBackendPort {
     }
 }
 
+#[cfg(test)]
 impl BackendWorkspaceCommandPort for UnavailableBackendPort {
     fn execute(
         &mut self,
@@ -531,6 +577,7 @@ impl BackendWorkspaceCommandPort for UnavailableBackendPort {
     }
 }
 
+#[cfg(test)]
 impl BackendDecisionPort for UnavailableBackendPort {
     fn refresh(&mut self, _: WorkspaceId, completions: Completions) {
         unavailable_completion(&completions, "user decisions are unavailable");
@@ -546,6 +593,7 @@ impl BackendDecisionPort for UnavailableBackendPort {
     }
 }
 
+#[cfg(test)]
 impl BackendOverlayPort for UnavailableBackendPort {
     fn load_pull_requests(&mut self, _: Target, completions: Completions) {
         unavailable_completion(&completions, "Pull Request data is unavailable");
@@ -711,6 +759,7 @@ enum WorkspaceStep {
 }
 
 impl WorkspaceStep {
+    #[cfg(test)]
     /// workspace ループの停止理由を TUI 全体の終了理由へ投影する。workspace を
     /// 直接開いた入口（`usagi open <path>`）は Welcome を持たないため、合成ルートが
     /// [`Exit::Welcome`] を受けて screen graph へ入り直す。
@@ -754,12 +803,14 @@ impl Default for WorkspaceEntryPolicy {
     }
 }
 
+#[cfg(test)]
 /// 既定では Agent launch を接続しない port。
 ///
 /// daemon-backed Agent factory を注入しない screen-graph 経路（`run_with_settings`）で
 /// controller ループを駆動するためのフォールバック。launch はインラインの失敗になり、
 /// ローカルでプロセスを起動しない。
 struct UnavailableAgentCommandPort;
+#[cfg(test)]
 impl AgentCommandPort for UnavailableAgentCommandPort {
     fn launch(
         &mut self,
@@ -772,8 +823,10 @@ impl AgentCommandPort for UnavailableAgentCommandPort {
     }
 }
 
+#[cfg(test)]
 struct UnavailableAgentTabIntentPort;
 
+#[cfg(test)]
 impl AgentTabIntentPort for UnavailableAgentTabIntentPort {
     fn load(&mut self, workspace: WorkspaceId) -> Result<AgentTabIntent, AgentTabIntentError> {
         Ok(AgentTabIntent::empty(workspace))
@@ -860,18 +913,22 @@ impl PrSnapshotPort for UnavailablePrSnapshotPort {
     }
 }
 
+#[cfg(test)]
 /// Browser-open fallback for entry points that do not inject a platform opener.
 struct UnavailableBrowserOpener;
+#[cfg(test)]
 impl BrowserOpener for UnavailableBrowserOpener {
     fn open(&mut self, _url: &str) -> Result<(), String> {
         Err("Browser opening is unavailable on this platform.".to_owned())
     }
 }
 
+#[cfg(test)]
 /// The lane an embedder that injects no daemon-backed worker gets: it observes
 /// nothing, so Home keeps the snapshot it opened with.
 struct UnavailableSessionRefreshPort;
 
+#[cfg(test)]
 impl SessionRefreshPort for UnavailableSessionRefreshPort {
     fn wake(&mut self) {}
 
@@ -1301,8 +1358,10 @@ impl SessionWorktreeScanPort for FsSessionWorktreeScanPort {
     }
 }
 
+#[cfg(test)]
 struct UnavailableSessionWorktreeScanPort;
 
+#[cfg(test)]
 impl SessionWorktreeScanPort for UnavailableSessionWorktreeScanPort {
     fn scan(&mut self, _: &Path) -> Vec<String> {
         Vec::new()
@@ -2400,13 +2459,14 @@ const FRAME_EVENT_BUDGET: usize = 128;
 /// a filesystem poller.
 const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+#[cfg(test)]
 /// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
 ///
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive loop.
 #[allow(clippy::too_many_arguments)]
-pub fn run_workspace_controller_with_backend(
+pub(crate) fn run_workspace_controller_with_backend(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
@@ -2427,13 +2487,14 @@ pub fn run_workspace_controller_with_backend(
     .map(WorkspaceStep::exit)
 }
 
+#[cfg(test)]
 /// Run a direct workspace entry with settings already resolved for that
 /// workspace identity.
 ///
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive loop.
-pub fn run_workspace_controller_with_backend_and_settings(
+pub(crate) fn run_workspace_controller_with_backend_and_settings(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
@@ -2461,13 +2522,14 @@ pub fn run_workspace_controller_with_backend_and_settings(
     .map(WorkspaceStep::exit)
 }
 
+#[cfg(test)]
 /// Run a direct workspace entry with a writable settings port for Overview's
 /// workspace-local `config` command.
 ///
 /// # Errors
 ///
 /// Returns workspace binding or terminal IO failures.
-pub fn run_workspace_controller_with_backend_and_config(
+pub(crate) fn run_workspace_controller_with_backend_and_config(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     backend_factory: &mut dyn ControllerBackendFactory,
@@ -2501,35 +2563,7 @@ pub fn run_workspace_controller_with_backend_and_config(
     .map(WorkspaceStep::exit)
 }
 
-/// Run a direct workspace entry inside the same process-level deck used by the
-/// Welcome/Open graph, so `Ctrl-O +` is available immediately.
-///
-/// # Errors
-///
-/// Returns workspace preparation, settings, persistence, or terminal IO
-/// failures.
-#[allow(clippy::too_many_arguments)]
-pub fn run_workspace_deck_with_backend_and_config(
-    term: &mut dyn Terminal,
-    snapshot: WorkspaceSnapshot,
-    registry: &[Workspace],
-    loader: &mut dyn WorkspaceLoader,
-    backend_factory: &mut dyn ControllerBackendFactory,
-    settings: &mut dyn SettingsPort,
-    available_models: AvailableAgentModels,
-) -> io::Result<Exit> {
-    enter_workspace(
-        term,
-        snapshot,
-        registry,
-        loader,
-        settings,
-        backend_factory,
-        available_models,
-    )
-    .map(|exit| exit.unwrap_or(Exit::Welcome))
-}
-
+#[cfg(test)]
 struct FixedBackendFactory {
     sessions: Option<Box<dyn SessionCommandPort>>,
     agent: Option<Box<dyn AgentCommandPort>>,
@@ -2548,6 +2582,7 @@ struct FixedBackendFactory {
     session_worktrees: Option<Box<dyn SessionWorktreeScanPort>>,
 }
 
+#[cfg(test)]
 impl ControllerBackendFactory for FixedBackendFactory {
     fn create(
         &mut self,
@@ -2606,6 +2641,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
     }
 }
 
+#[cfg(test)]
 /// Compatibility entry for embedders that still supply individual host ports.
 /// Production uses [`run_workspace_controller_with_backend`].
 ///
@@ -2617,7 +2653,7 @@ impl ControllerBackendFactory for FixedBackendFactory {
 ///
 /// Returns terminal IO failures from the interactive workspace loop.
 #[allow(clippy::too_many_arguments)]
-pub fn run_workspace_controller(
+pub(crate) fn run_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
@@ -2663,6 +2699,7 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
     }
 }
 
+#[cfg(test)]
 /// `start` で選んだ画面を起点にした対話 runtime。
 ///
 /// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
@@ -2676,7 +2713,7 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
 ///
 /// workspace の読み込み、端末への描画、キー読み取りのいずれかに失敗した場合、そのエラーを返す。
 #[allow(clippy::too_many_arguments)] // screen data と注入 port（loader / settings / session port factory）を合成側から受ける入口。
-pub fn run_with_settings(
+pub(crate) fn run_with_settings(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
     recent: Vec<Recent>,
@@ -2701,13 +2738,14 @@ pub fn run_with_settings(
     )
 }
 
+#[cfg(test)]
 /// Run the screen graph with daemon Agent and metrics port factories.
 ///
 /// # Errors
 ///
 /// Returns workspace loading or terminal IO failures from the screen graph.
 #[allow(clippy::too_many_arguments)]
-pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+pub(crate) fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
     recent: Vec<Recent>,
@@ -2873,12 +2911,14 @@ fn prepare_workspace_deck(
     Ok((snapshots, primary, deck))
 }
 
+#[cfg(test)]
 struct CompatibilityBackendFactory<'a, 'b, 'c> {
     sessions: &'a mut dyn SessionCommandPortFactory,
     agents: Option<&'b mut dyn AgentCommandPortFactory>,
     metrics: Option<&'c mut dyn MetricsPortFactory>,
 }
 
+#[cfg(test)]
 impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
     fn create(
         &mut self,
@@ -2936,6 +2976,7 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
 // The screen graph is an IO composition boundary.  Its choices are covered by
 // the injected loader/port tests; LLVM coverage excludes only this terminal
 // loop, consistently with the existing `run_with_settings` entry point.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_with_settings_inner(
     term: &mut dyn Terminal,
@@ -3021,6 +3062,167 @@ fn render_missing_workspace_prompt(
     modal::render_confirmation_over(height, width, base, prompt.confirmation, view)
 }
 
+/// Everything the screen graph needs to run, gathered in one value.
+///
+/// The entry point used to grow a new `run_*_and_<dependency>` function every
+/// time the graph learned about another port, until nine of them named the same
+/// loop. Collecting the dependencies here keeps one public entry point, and
+/// makes adding a dependency a field rather than a new function.
+pub struct ScreenGraphRun<'a> {
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &'a mut dyn WorkspaceLoader,
+    settings: &'a mut dyn SettingsPort,
+    backend_factory: &'a mut dyn ControllerBackendFactory,
+    available_models: AvailableAgentModels,
+    notice: Option<String>,
+}
+
+impl<'a> ScreenGraphRun<'a> {
+    /// The dependencies every screen graph run needs. Optional ones are added
+    /// with the `with_*` methods.
+    pub fn new(
+        workspaces: Vec<Workspace>,
+        recent: Vec<Recent>,
+        now: DateTime<Utc>,
+        start: Start,
+        loader: &'a mut dyn WorkspaceLoader,
+        settings: &'a mut dyn SettingsPort,
+        backend_factory: &'a mut dyn ControllerBackendFactory,
+    ) -> Self {
+        Self {
+            workspaces,
+            recent,
+            now,
+            start,
+            loader,
+            settings,
+            backend_factory,
+            available_models: AvailableAgentModels::default(),
+            notice: None,
+        }
+    }
+
+    /// The models the Config screen may offer.
+    #[must_use]
+    pub fn with_available_models(mut self, available_models: AvailableAgentModels) -> Self {
+        self.available_models = available_models;
+        self
+    }
+
+    /// The message the first frame explains itself with.
+    ///
+    /// This is what makes an entry that could not open its workspace land
+    /// *inside* the TUI rather than back at the shell: the composition root
+    /// turns the failure into the same notice the Recent list would have shown,
+    /// and the switcher comes up with it.
+    #[must_use]
+    pub fn with_notice(mut self, notice: Option<String>) -> Self {
+        self.notice = notice;
+        self
+    }
+}
+
+/// Production screen graph entry. Every Welcome/Open/Recent/New path creates its
+/// workspace runtime through the same backend factory as direct launch.
+///
+/// # Errors
+///
+/// Returns workspace loading, settings, or terminal IO failures.
+pub fn run_screen_graph(term: &mut dyn Terminal, run: ScreenGraphRun<'_>) -> io::Result<Exit> {
+    let ScreenGraphRun {
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+        notice,
+    } = run;
+    run_screen_graph_with_backend_and_notice(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+        notice,
+    )
+}
+
+/// Everything a direct workspace entry needs, gathered in one value.
+pub struct WorkspaceDeckRun<'a> {
+    snapshot: WorkspaceSnapshot,
+    registry: &'a [Workspace],
+    loader: &'a mut dyn WorkspaceLoader,
+    backend_factory: &'a mut dyn ControllerBackendFactory,
+    settings: &'a mut dyn SettingsPort,
+    available_models: AvailableAgentModels,
+}
+
+impl<'a> WorkspaceDeckRun<'a> {
+    /// The dependencies every direct workspace entry needs.
+    pub fn new(
+        snapshot: WorkspaceSnapshot,
+        registry: &'a [Workspace],
+        loader: &'a mut dyn WorkspaceLoader,
+        backend_factory: &'a mut dyn ControllerBackendFactory,
+        settings: &'a mut dyn SettingsPort,
+    ) -> Self {
+        Self {
+            snapshot,
+            registry,
+            loader,
+            backend_factory,
+            settings,
+            available_models: AvailableAgentModels::default(),
+        }
+    }
+
+    /// The models the in-workspace Config screen may offer.
+    #[must_use]
+    pub fn with_available_models(mut self, available_models: AvailableAgentModels) -> Self {
+        self.available_models = available_models;
+        self
+    }
+}
+
+/// Run a direct workspace entry inside the same process-level deck used by the
+/// Welcome/Open graph, so `Ctrl-O +` is available immediately.
+///
+/// # Errors
+///
+/// Returns workspace preparation, settings, persistence, or terminal IO
+/// failures.
+pub fn run_workspace_deck(term: &mut dyn Terminal, run: WorkspaceDeckRun<'_>) -> io::Result<Exit> {
+    let WorkspaceDeckRun {
+        snapshot,
+        registry,
+        loader,
+        backend_factory,
+        settings,
+        available_models,
+    } = run;
+    enter_workspace(
+        term,
+        snapshot,
+        registry,
+        loader,
+        settings,
+        backend_factory,
+        available_models,
+    )
+    .map(|exit| exit.unwrap_or(Exit::Welcome))
+}
+
+#[cfg(test)]
 /// Production screen graph entry. Every Welcome/Open/Recent/New path creates
 /// its workspace runtime through the same backend factory as direct launch.
 ///
@@ -3028,7 +3230,7 @@ fn render_missing_workspace_prompt(
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
 #[allow(clippy::too_many_arguments)]
-pub fn run_screen_graph_with_backend(
+pub(crate) fn run_screen_graph_with_backend(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
     recent: Vec<Recent>,
@@ -3053,13 +3255,14 @@ pub fn run_screen_graph_with_backend(
     )
 }
 
+#[cfg(test)]
 /// Run the screen graph with transient default settings. Embedders that own a
 /// settings backend should call [`run_with_settings`] and inject its port.
 ///
 /// # Errors
 ///
 /// Returns terminal or workspace loading errors from the screen graph.
-pub fn run(
+pub(crate) fn run(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
     recent: Vec<Recent>,
@@ -3081,8 +3284,10 @@ pub fn run(
     )
 }
 
+#[cfg(test)]
 struct DefaultSettingsPort;
 
+#[cfg(test)]
 impl SettingsPort for DefaultSettingsPort {
     fn read(
         &mut self,

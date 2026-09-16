@@ -202,8 +202,10 @@ pub(super) fn work_run_control_projection(control: &WorkRunControl) -> WorkRunCo
     }
 }
 
+#[cfg(test)]
 pub(super) struct UnavailableWorkRunPort;
 
+#[cfg(test)]
 impl WorkRunPort for UnavailableWorkRunPort {
     fn snapshot(
         &mut self,
