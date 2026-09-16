@@ -21,6 +21,7 @@ use tempfile::TempDir;
 use usagi_core::domain::agent::{
     AgentProfileId, DurableLaunchSnapshot, LaunchMode, LaunchPlan, LaunchRequest, LaunchScope,
 };
+use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::id::{AgentRuntimeId, AgentRuntimeRef};
 use usagi_core::domain::id::{
     CompletionFence, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
@@ -39,7 +40,6 @@ use usagi_daemon::usecase::resources::durable::{
     IdentityAuthority, MIGRATION_SCHEMA, ShardedAgentStore, ShardedRuntimeState,
     ShardedTerminalStore, UnprovenChildren, census, shipping_retention_limits,
 };
-use usagi_daemon::usecase::resources::retention::LogicalClock;
 use usagi_daemon::usecase::runtime::{
     DurableOperationOutcome, DurableRuntimeRecord, RuntimeStoreSnapshot,
 };

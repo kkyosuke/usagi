@@ -15,6 +15,7 @@ use crate::domain::agent::{
     AgentIntegrationRevision, AgentProfileId, AgentResumeTarget, CallerRef, ModelSelector,
     ProviderSessionId,
 };
+use crate::domain::clock::MonotonicClock;
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::domain::id::{AgentId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::pr_inventory::{PrEntry, PrInventory};
@@ -1633,14 +1634,6 @@ impl TerminalLaneBudget {
             TerminalAction::Launch => Self::LAUNCH_MS,
         }
     }
-}
-
-/// A monotonic millisecond time source. Only differences between observations
-/// are meaningful; the origin is arbitrary and never a wall clock. It is
-/// injected so the deadline state machine is deterministic under a controllable
-/// fake and never resets an attempt budget from unrelated progress.
-pub trait MonotonicClock {
-    fn now_ms(&self) -> u64;
 }
 
 /// A byte-stream connection whose blocking reads and writes accept a per-call

@@ -17,7 +17,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::daemon_backend::{
     AgentPort as BackendAgentPort, Completions, CreateSessionRequest, LaunchAgentRequest,
     OpenTerminalRequest, RemoveSessionRequest, ReopenAgentRequest, ResumeAgentRequest,
-    SessionCommandPort as BackendSessionCommandPort, SleepSessionRequest,
+    SessionLifecyclePort as BackendSessionLifecyclePort, SleepSessionRequest,
 };
 
 /// Actions whose stateful host remains in the terminal loop while
@@ -49,7 +49,7 @@ impl ControllerHost {
     }
 }
 
-impl BackendSessionCommandPort for ControllerHost {
+impl BackendSessionLifecyclePort for ControllerHost {
     fn create(&mut self, request: CreateSessionRequest, completions: Completions) {
         if let Err(mpsc::SendError(ControllerHostAction::Create(request, completions))) = self
             .0

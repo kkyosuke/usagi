@@ -142,7 +142,7 @@ pub struct OpenTerminalRequest {
 /// [`Completions`]: a create as [`AppEvent::OperationResult`], a refresh/remove
 /// as [`super::controller::BackendEvent::Sessions`].  The reducer stays the
 /// authority on how a completion updates the sidebar and pending band.
-pub trait SessionCommandPort {
+pub trait SessionLifecyclePort {
     /// Create a session and report the completion for its token.
     fn create(&mut self, request: CreateSessionRequest, completions: Completions);
     /// Request a fresh session snapshot for the workspace.
@@ -405,7 +405,7 @@ pub enum Flow {
 /// [`drain_events`]: Self::drain_events
 pub struct DaemonBackend {
     workflow: Option<Box<dyn super::workflow::WorkflowPort>>,
-    sessions: Box<dyn SessionCommandPort>,
+    sessions: Box<dyn SessionLifecyclePort>,
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
     workspace_commands: Box<dyn WorkspaceCommandPort>,
@@ -420,7 +420,7 @@ impl DaemonBackend {
     /// Bundle the daemon ports behind one effect executor.
     #[must_use]
     pub fn new(
-        sessions: Box<dyn SessionCommandPort>,
+        sessions: Box<dyn SessionLifecyclePort>,
         agent: Box<dyn AgentPort>,
         store: Box<dyn TargetStorePort>,
         workspace_commands: Box<dyn WorkspaceCommandPort>,
@@ -757,7 +757,7 @@ mod tests {
         slept: Vec<SleepSessionRequest>,
     }
 
-    impl SessionCommandPort for FakeSessions {
+    impl SessionLifecyclePort for FakeSessions {
         fn create(&mut self, request: CreateSessionRequest, completions: Completions) {
             let token = request.token;
             self.created.push(request);
@@ -789,7 +789,7 @@ mod tests {
 
     struct DefaultSleepSessions;
 
-    impl SessionCommandPort for DefaultSleepSessions {
+    impl SessionLifecyclePort for DefaultSleepSessions {
         fn create(&mut self, _: CreateSessionRequest, _: Completions) {}
         fn refresh(&mut self, _: WorkspaceId, _: Completions) {}
         fn remove(&mut self, _: RemoveSessionRequest, _: Completions) {}
@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn default_session_sleep_is_an_explicit_no_op() {
         let (completions, receiver) = Completions::channel();
-        SessionCommandPort::sleep(
+        SessionLifecyclePort::sleep(
             &mut DefaultSleepSessions,
             SleepSessionRequest {
                 workspace: WorkspaceId::new(),

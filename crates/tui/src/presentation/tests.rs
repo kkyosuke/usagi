@@ -6860,7 +6860,7 @@ fn enqueue_session_request(
     workspace: WorkspaceId,
     session: SessionId,
 ) -> Receiver<AppEvent> {
-    use crate::usecase::application::daemon_backend::SessionCommandPort as _;
+    use crate::usecase::application::daemon_backend::SessionLifecyclePort as _;
 
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
@@ -7093,7 +7093,7 @@ fn session_worker_panic_completes_and_returns_the_port() {
 
 #[test]
 fn closed_session_host_channel_completes_each_effect_once() {
-    use crate::usecase::application::daemon_backend::SessionCommandPort as _;
+    use crate::usecase::application::daemon_backend::SessionLifecyclePort as _;
 
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
