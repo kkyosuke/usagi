@@ -1,13 +1,13 @@
 ---
 number: 763
 title: refactor(core): IPC protocol 語彙を infrastructure::client から protocol module へ分離する
-status: done
+status: todo
 priority: medium
 labels: [v2, refactor, core, ipc]
 dependson: []
 related: [757]
 created_at: 2026-09-16T00:00:00+00:00
-updated_at: 2026-09-16T14:46:23.173375+00:00
+updated_at: 2026-09-16T00:00:00+00:00
 ---
 
 ## 問題
