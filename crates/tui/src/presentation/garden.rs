@@ -190,8 +190,10 @@ pub(super) fn garden_shell_owned_wake(key: &Key) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(super) struct UnavailableGardenInventoryPort;
 
+#[cfg(test)]
 impl GardenInventoryPort for UnavailableGardenInventoryPort {
     fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
         Err("Agent inventory is unavailable".to_owned())

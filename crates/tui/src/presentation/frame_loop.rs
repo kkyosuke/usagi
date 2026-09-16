@@ -2084,7 +2084,7 @@ impl EntryFrameMaterial {
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub fn run_screen_graph_with_backend_and_notice(
+pub(crate) fn run_screen_graph_with_backend_and_notice(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
     recent: Vec<Recent>,

@@ -40,11 +40,11 @@ use super::{
     run_with_settings, run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
     run_workspace_config, run_workspace_controller, run_workspace_controller_with_backend,
     run_workspace_controller_with_backend_and_config,
-    run_workspace_controller_with_backend_and_settings, run_workspace_deck_with_backend_and_config,
-    run_workspace_loading, safe_session_error, save_config_responsive,
-    save_config_source_responsive, save_environment_responsive, save_setup_commands_responsive,
-    select_right_pane_tab, select_root_terminal_tab, sidebar_pointer_event, step_config, step_new,
-    step_open, step_workspace_config, terminal_geometry, visit_garden_agent, welcome_action,
+    run_workspace_controller_with_backend_and_settings, run_workspace_deck, run_workspace_loading,
+    safe_session_error, save_config_responsive, save_config_source_responsive,
+    save_environment_responsive, save_setup_commands_responsive, select_right_pane_tab,
+    select_root_terminal_tab, sidebar_pointer_event, step_config, step_new, step_open,
+    step_workspace_config, terminal_geometry, visit_garden_agent, welcome_action,
     workspace_drawer_header_key, workspace_has_unsaved_surface, workspace_loading_visible,
     write_banner,
 };
@@ -6408,14 +6408,16 @@ fn direct_deck_entry_uses_the_shared_workspace_composition() {
     };
 
     assert_eq!(
-        run_workspace_deck_with_backend_and_config(
+        run_workspace_deck(
             &mut term,
-            snapshot,
-            &registry,
-            &mut loader,
-            &mut factory,
-            &mut settings,
-            AvailableAgentModels::all(),
+            super::WorkspaceDeckRun::new(
+                snapshot,
+                &registry,
+                &mut loader,
+                &mut factory,
+                &mut settings,
+            )
+            .with_available_models(AvailableAgentModels::all()),
         )
         .unwrap(),
         Exit::Quit
