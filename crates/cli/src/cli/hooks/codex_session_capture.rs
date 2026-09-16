@@ -10,7 +10,7 @@ use std::io::{self, Read, Write};
 use serde::Deserialize;
 use usagi_core::{
     domain::agent::ProviderSessionId,
-    infrastructure::client::{DaemonRequest, McpCallerContext},
+    infrastructure::ipc::{DaemonRequest, McpCallerContext},
 };
 
 use crate::cli::{Run, RunOutcome};

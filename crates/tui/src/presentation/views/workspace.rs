@@ -29,7 +29,7 @@ use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
-use usagi_core::infrastructure::client::{AgentConcurrency, DaemonMetrics};
+use usagi_core::infrastructure::ipc::{AgentConcurrency, DaemonMetrics};
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
@@ -6761,7 +6761,7 @@ mod tests {
         // Daemon metrics feed the sidecar beside the rabbit without adding rows, so
         // the reservation the hit-test assumes stays constant — including the
         // second row the Agent concurrency projection occupies.
-        let metrics = usagi_core::infrastructure::client::DaemonMetrics {
+        let metrics = usagi_core::infrastructure::ipc::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
@@ -7197,7 +7197,7 @@ mod tests {
 
     #[test]
     fn home_metrics_sidecar_renders_the_daemon_metrics_row() {
-        let metrics = usagi_core::infrastructure::client::DaemonMetrics {
+        let metrics = usagi_core::infrastructure::ipc::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
@@ -7289,7 +7289,7 @@ mod tests {
     /// inventing a count.
     #[test]
     fn home_sidecar_degrades_when_the_daemon_omits_agent_concurrency() {
-        let mut metrics = usagi_core::infrastructure::client::DaemonMetrics {
+        let mut metrics = usagi_core::infrastructure::ipc::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
@@ -7306,7 +7306,7 @@ mod tests {
             failed_background_workers: 0,
         };
         let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let render = |metrics: &usagi_core::infrastructure::client::DaemonMetrics| {
+        let render = |metrics: &usagi_core::infrastructure::ipc::DaemonMetrics| {
             render_home(
                 30,
                 100,
@@ -7397,8 +7397,8 @@ mod tests {
         u64::try_from(clock.timestamp_millis()).expect("test clock is after the epoch")
     }
 
-    fn health_metrics(sampled_at_ms: u64) -> usagi_core::infrastructure::client::DaemonMetrics {
-        usagi_core::infrastructure::client::DaemonMetrics {
+    fn health_metrics(sampled_at_ms: u64) -> usagi_core::infrastructure::ipc::DaemonMetrics {
+        usagi_core::infrastructure::ipc::DaemonMetrics {
             schema_version: 3,
             sampled_at_ms,
             cpu_percent_hundredths: 120,

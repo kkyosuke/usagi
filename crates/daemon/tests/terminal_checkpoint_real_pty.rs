@@ -44,7 +44,7 @@ use usagi_core::domain::terminal_launch::{
     DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchRequest,
     TerminalLaunchScope, TerminalLaunchValidationError, TerminalProfileId,
 };
-use usagi_core::infrastructure::client::{
+use usagi_core::infrastructure::ipc::{
     AgentLaunchIntent, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, write_json_frame};

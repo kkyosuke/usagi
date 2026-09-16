@@ -92,10 +92,9 @@ use usagi_core::infrastructure::bounded_process::{
     ChildObservation, ChildPolicy, observe, observe_with_environment,
 };
 use usagi_core::infrastructure::client::{
-    ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
-    DeadlineStream, IpcClient, PolicyClient, TerminalLaneBudget,
+    ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient, PolicyClient,
+    TerminalLaneBudget,
 };
-use usagi_core::infrastructure::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe,
     ProcessIdentitySource, RecordFile, ShutdownSignal, Sleeper, Terminator, WorkspaceFence,
@@ -108,6 +107,8 @@ use usagi_core::infrastructure::ipc::{
     EnvelopeKind, ErrorCode, OperationId, ResponseOutcome, build_artifact_decision,
     build_rollover_trigger,
 };
+use usagi_core::infrastructure::ipc::{ClientError, DaemonRestartAgents};
+use usagi_core::infrastructure::ipc::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::{DispatchStore, INBOX_PAGE_MAX, InboxCursor};
@@ -1466,7 +1467,7 @@ impl AgentTerminalActor for SharedAgent {
     fn handle(
         &mut self,
         context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
-        request: usagi_core::infrastructure::client::TerminalRequest,
+        request: usagi_core::infrastructure::ipc::TerminalRequest,
     ) -> TerminalOutcome {
         match self.runtime.lock() {
             Ok(mut agent) => AgentTerminalActor::handle(&mut *agent, context, request),
@@ -2237,7 +2238,7 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
     fn handle(
         &mut self,
         context: usagi_daemon::usecase::terminal_owner::TerminalRequestContext,
-        request: usagi_core::infrastructure::client::TerminalRequest,
+        request: usagi_core::infrastructure::ipc::TerminalRequest,
     ) -> Result<
         usagi_daemon::usecase::terminal_owner::TerminalResponse,
         usagi_core::infrastructure::ipc::ProtocolError,
@@ -8712,8 +8713,8 @@ impl IpcRolloverRequester<'_> {
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let body = match reply {
-            usagi_core::infrastructure::client::DaemonReply::Ok(body)
-            | usagi_core::infrastructure::client::DaemonReply::Accepted { body, .. } => body,
+            usagi_core::infrastructure::ipc::DaemonReply::Ok(body)
+            | usagi_core::infrastructure::ipc::DaemonReply::Accepted { body, .. } => body,
         };
         serde_json::from_value(body)
             .map(Some)
@@ -8841,7 +8842,7 @@ impl IpcRolloverRequester<'_> {
     /// exposes `generation_rolled_over` to the command immediately following a
     /// successful restart.
     fn successor_is_serving(&self, standby: &DaemonRecord, operation: &OperationId) -> bool {
-        use usagi_core::infrastructure::client::{DaemonReply, TenantAction};
+        use usagi_core::infrastructure::ipc::{DaemonReply, TenantAction};
 
         let Some(generation) = read_registry_document(self.data_dir)
             .ok()
@@ -8969,7 +8970,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
         if !committed
             && result
                 .as_ref()
-                .is_err_and(usagi_core::infrastructure::client::ClientError::is_transport_failure)
+                .is_err_and(usagi_core::infrastructure::ipc::ClientError::is_transport_failure)
         {
             // A transport failure cannot distinguish a request that never
             // arrived from a reply lost while W2 was becoming observable.
@@ -9515,7 +9516,7 @@ fn run_inner(
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         client
             .request(DaemonRequest::Tenant {
-                action: usagi_core::infrastructure::client::TenantAction::Retire,
+                action: usagi_core::infrastructure::ipc::TenantAction::Retire,
                 root: Some(root.clone()),
                 force,
             })
@@ -9691,7 +9692,7 @@ fn run_inner(
 /// deliberately leaves the presentation layer's existing status text intact.
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-08-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 fn append_live_tenant_inventory(out: &mut dyn Write) {
-    use usagi_core::infrastructure::client::{DaemonReply, TenantAction, TenantInventory};
+    use usagi_core::infrastructure::ipc::{DaemonReply, TenantAction, TenantInventory};
 
     let Ok(mut client) = existing_policy_client(ClientPolicy::cli(), ClientWorkspace::Unbound)
     else {
@@ -10579,16 +10580,14 @@ pub(crate) fn sync_after_update(
     if published_build != expected_build {
         let workspace = owner
             .request(DaemonRequest::Session {
-                action: usagi_core::infrastructure::client::SessionAction::List,
+                action: usagi_core::infrastructure::ipc::SessionAction::List,
                 operation_id: usagi_core::domain::id::OperationId::new().to_string(),
                 payload: serde_json::json!({}),
             })
             .and_then(|reply| {
                 let body = match reply {
-                    usagi_core::infrastructure::client::DaemonReply::Ok(body)
-                    | usagi_core::infrastructure::client::DaemonReply::Accepted { body, .. } => {
-                        body
-                    }
+                    usagi_core::infrastructure::ipc::DaemonReply::Ok(body)
+                    | usagi_core::infrastructure::ipc::DaemonReply::Accepted { body, .. } => body,
                 };
                 serde_json::from_value::<WorkspaceId>(body["workspace_id"].clone()).map_err(|_| {
                     ClientError::Unavailable(
@@ -10607,10 +10606,8 @@ pub(crate) fn sync_after_update(
             })
             .and_then(|reply| {
                 let body = match reply {
-                    usagi_core::infrastructure::client::DaemonReply::Ok(body)
-                    | usagi_core::infrastructure::client::DaemonReply::Accepted { body, .. } => {
-                        body
-                    }
+                    usagi_core::infrastructure::ipc::DaemonReply::Ok(body)
+                    | usagi_core::infrastructure::ipc::DaemonReply::Accepted { body, .. } => body,
                 };
                 serde_json::from_value::<usagi_core::domain::agent::AgentIntegrationDiagnosis>(body)
                     .map_err(|_| {
@@ -10651,7 +10648,7 @@ pub(crate) fn sync_after_update(
         )));
     }
     if let Err(error) = current.request(DaemonRequest::Tenant {
-        action: usagi_core::infrastructure::client::TenantAction::Inventory,
+        action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
         root: None,
         force: false,
     }) {
@@ -11331,7 +11328,7 @@ mod tests {
         },
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
-    use usagi_core::infrastructure::client::{
+    use usagi_core::infrastructure::ipc::{
         TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
     };
     use usagi_daemon::presentation::ipc::encode_terminal_response;
@@ -12292,7 +12289,7 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        let child_semantic = usagi_core::infrastructure::client::agent_dispatch_semantic_key(
+        let child_semantic = usagi_core::infrastructure::ipc::agent_dispatch_semantic_key(
             "child-session",
             planned_child.agent_id,
             &reserved_child.prompt,
@@ -14455,7 +14452,7 @@ mod tests {
             let mut runtime = tenant.runtime().lock().unwrap();
             let created = runtime
                 .handle(
-                    usagi_core::infrastructure::client::SessionAction::Create,
+                    usagi_core::infrastructure::ipc::SessionAction::Create,
                     &usagi_core::domain::id::OperationId::new().to_string(),
                     &serde_json::json!({"name": "kept"}),
                 )
@@ -17559,7 +17556,7 @@ mod tests {
 
     #[test]
     fn a_panicked_background_worker_reports_danger_and_requests_shutdown() {
-        use usagi_core::infrastructure::client::MetricsAction;
+        use usagi_core::infrastructure::ipc::MetricsAction;
         use usagi_tui::usecase::application::daemon_health::{
             DaemonHealth, DaemonHealthTracker, HealthReason,
         };
@@ -17848,9 +17845,9 @@ mod tests {
         sampler: &SharedProcessResourceSampler,
         pipeline: &TerminalPipelineMetrics,
         observer: &mut Option<MetricsObserver>,
-        action: usagi_core::infrastructure::client::MetricsAction,
-    ) -> usagi_core::infrastructure::client::DaemonMetrics {
-        use usagi_core::infrastructure::client::DaemonRequest;
+        action: usagi_core::infrastructure::ipc::MetricsAction,
+    ) -> usagi_core::infrastructure::ipc::DaemonMetrics {
+        use usagi_core::infrastructure::ipc::DaemonRequest;
         use usagi_core::infrastructure::ipc::{EnvelopeKind, ResponseOutcome};
 
         let response = dispatch_metrics(
@@ -17871,7 +17868,7 @@ mod tests {
 
     #[test]
     fn production_snapshot_polling_does_not_drop_but_a_slow_observer_does() {
-        use usagi_core::infrastructure::client::MetricsAction;
+        use usagi_core::infrastructure::ipc::MetricsAction;
 
         let broker = Arc::new(Mutex::new(MetricsBroker::default()));
         let sampler = Arc::new(Mutex::new(ProcessResourceSampler { previous: None }));
@@ -17942,7 +17939,7 @@ mod tests {
     /// lock: a display-only tick may never wait behind a launch (#644).
     #[test]
     fn production_metrics_report_agent_concurrency_without_taking_the_agent_lock() {
-        use usagi_core::infrastructure::client::{AgentConcurrency, MetricsAction};
+        use usagi_core::infrastructure::ipc::{AgentConcurrency, MetricsAction};
 
         let gauge = AgentConcurrencyGauge::default();
         let broker = Arc::new(Mutex::new(MetricsBroker::with_agent_concurrency(
@@ -18026,7 +18023,7 @@ mod tests {
 
     #[test]
     fn failed_create_and_remove_replay_as_error_envelopes_without_success_hooks() {
-        use usagi_core::infrastructure::client::SessionAction;
+        use usagi_core::infrastructure::ipc::SessionAction;
         use usagi_core::infrastructure::ipc::{EnvelopeKind, ErrorCode, ResponseOutcome};
 
         for action in [SessionAction::Create, SessionAction::Remove] {
@@ -18063,7 +18060,7 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
         inventory.entries.get_mut(&identity).unwrap().head_oid = Some(head.clone());
         let snapshot =
-            usagi_core::infrastructure::client::PrSnapshot::from((session, inventory.clone()));
+            usagi_core::infrastructure::ipc::PrSnapshot::from((session, inventory.clone()));
         assert_eq!(
             exact_merged_pr_head(Some(snapshot), Some(head.clone())),
             Some(head.clone())
@@ -18072,7 +18069,7 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Open;
         assert_eq!(
             exact_merged_pr_head(
-                Some(usagi_core::infrastructure::client::PrSnapshot::from((
+                Some(usagi_core::infrastructure::ipc::PrSnapshot::from((
                     session,
                     inventory.clone()
                 ))),
@@ -18083,7 +18080,7 @@ mod tests {
         inventory.entries.get_mut(&identity).unwrap().state = PrState::Merged;
         assert_eq!(
             exact_merged_pr_head(
-                Some(usagi_core::infrastructure::client::PrSnapshot::from((
+                Some(usagi_core::infrastructure::ipc::PrSnapshot::from((
                     session, inventory
                 ))),
                 Some("b".repeat(40))
@@ -18092,7 +18089,7 @@ mod tests {
         );
         assert_eq!(
             exact_merged_pr_head(
-                Some(usagi_core::infrastructure::client::PrSnapshot::from((
+                Some(usagi_core::infrastructure::ipc::PrSnapshot::from((
                     session,
                     PrInventory::default()
                 ))),
@@ -21647,7 +21644,7 @@ instructions = "{instructions}"
         let run = usagi_core::domain::id::OperationId::new().to_string();
         let envelope_for = |reconcile: DelegationReconcile, code: ErrorCode| {
             session_response_envelope(
-                usagi_core::infrastructure::client::SessionAction::DelegateBrief,
+                usagi_core::infrastructure::ipc::SessionAction::DelegateBrief,
                 Err(SessionRuntimeError::Delegation(DelegationFailure {
                     code,
                     message: "dispatch runtime executable is unavailable".into(),
@@ -23146,7 +23143,7 @@ instructions = "{instructions}"
             use usagi_core::domain::agent::{CallerRef, ModelSelector, ProviderKind};
             use usagi_core::domain::agent_message::{MessageKind, ReviewTarget, SendMessage};
             use usagi_core::domain::id::OperationId;
-            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            use usagi_core::infrastructure::ipc::{DispatchAgentIntent, DispatchIntent};
             let fixture = Fixture::new();
             let operation = OperationId::new();
             let run = fixture
@@ -23282,7 +23279,7 @@ instructions = "{instructions}"
             };
             use usagi_core::domain::id::OperationId;
             use usagi_core::domain::workflow::Phase;
-            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            use usagi_core::infrastructure::ipc::{DispatchAgentIntent, DispatchIntent};
             let fixture = Fixture::new();
             let operation = OperationId::new();
             let run = fixture
@@ -23381,7 +23378,7 @@ instructions = "{instructions}"
                 .unwrap()
                 .launch(
                     &unrelated_operation.to_string(),
-                    &usagi_core::infrastructure::client::AgentLaunchIntent {
+                    &usagi_core::infrastructure::ipc::AgentLaunchIntent {
                         workspace: fixture.workspace,
                         session: Some(fixture.session),
                         profile: Some(AgentProfileId::new("claude").unwrap()),
@@ -23468,7 +23465,7 @@ instructions = "{instructions}"
             use usagi_core::domain::agent::{CallerRef, ModelSelector};
             use usagi_core::domain::agent_message::{MessageKind, ReviewTarget, SendMessage};
             use usagi_core::domain::id::OperationId;
-            use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+            use usagi_core::infrastructure::ipc::{DispatchAgentIntent, DispatchIntent};
             let fixture = Fixture::new();
             let operation = OperationId::new();
             let run = fixture
@@ -24127,7 +24124,7 @@ instructions = "{instructions}"
                 .unwrap()
                 .launch(
                     &usagi_core::domain::id::OperationId::new().to_string(),
-                    &usagi_core::infrastructure::client::AgentLaunchIntent {
+                    &usagi_core::infrastructure::ipc::AgentLaunchIntent {
                         workspace: fixture.workspace,
                         session: Some(fixture.session),
                         profile: Some(AgentProfileId::new("claude").unwrap()),
@@ -24421,7 +24418,7 @@ instructions = "{instructions}"
                 );
             }
             let sibling_operation = usagi_core::domain::id::OperationId::new().to_string();
-            let sibling_intent = usagi_core::infrastructure::client::AgentLaunchIntent {
+            let sibling_intent = usagi_core::infrastructure::ipc::AgentLaunchIntent {
                 workspace: fixture.workspace,
                 session: Some(fixture.session),
                 profile: Some(AgentProfileId::new("codex").unwrap()),
@@ -24594,7 +24591,7 @@ instructions = "{instructions}"
         use chrono::Utc;
         use usagi_core::domain::id::OperationId;
         use usagi_core::domain::supervisor::{SupervisorRunDeletion, SupervisorWorkspaceCommand};
-        use usagi_core::infrastructure::client::DaemonRequest;
+        use usagi_core::infrastructure::ipc::DaemonRequest;
         use usagi_core::infrastructure::ipc::{EnvelopeKind, ResponseOutcome};
         use usagi_daemon::usecase::session_runtime::SessionRuntime;
 
@@ -24709,8 +24706,8 @@ instructions = "{instructions}"
         }
     }
 
-    fn goal_intent(workspace: WorkspaceId) -> usagi_core::infrastructure::client::AgentGoalIntent {
-        usagi_core::infrastructure::client::AgentGoalIntent {
+    fn goal_intent(workspace: WorkspaceId) -> usagi_core::infrastructure::ipc::AgentGoalIntent {
+        usagi_core::infrastructure::ipc::AgentGoalIntent {
             workspace,
             profile: None,
             goal: "prepare the requested change for review".into(),
@@ -24849,7 +24846,7 @@ instructions = "{instructions}"
     #[test]
     fn goal_supervisor_promotion_maps_a_poisoned_owner_to_unavailable() {
         use usagi_core::domain::id::AgentId;
-        use usagi_core::infrastructure::client::{AgentGoalIntent, agent_goal_semantic_key};
+        use usagi_core::infrastructure::ipc::{AgentGoalIntent, agent_goal_semantic_key};
         use usagi_core::infrastructure::store::dispatch::DispatchStore;
 
         let temporary = tempfile::tempdir().unwrap();

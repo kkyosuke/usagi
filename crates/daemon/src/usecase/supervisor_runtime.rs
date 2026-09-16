@@ -830,7 +830,7 @@ fn delegated_worker_semantic_digest(
         return None;
     };
     Some(usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::infrastructure::client::agent_dispatch_semantic_key(
+        &usagi_core::infrastructure::ipc::agent_dispatch_semantic_key(
             session_name,
             worker_agent_id,
             prompt,
@@ -9063,7 +9063,7 @@ mod tests {
                 },
                 AgentAdmissionReservation {
                     operation_id: child_operation,
-                    semantic_key: usagi_core::infrastructure::client::agent_dispatch_semantic_key(
+                    semantic_key: usagi_core::infrastructure::ipc::agent_dispatch_semantic_key(
                         "worker",
                         peer.agent_id,
                         &reserved.prompt,
@@ -9301,7 +9301,7 @@ mod tests {
         let mut admitted = planned.clone();
         admitted.status = AgentStatus::Running;
         admitted.current_run = Some(child_operation);
-        let semantic_key = usagi_core::infrastructure::client::agent_dispatch_semantic_key(
+        let semantic_key = usagi_core::infrastructure::ipc::agent_dispatch_semantic_key(
             "worker",
             admitted.agent_id,
             &reserved.prompt,

@@ -19,7 +19,7 @@ use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 
 /// Daemon capacity refusal and the action-oriented copy shown in Closeup.
 /// The daemon owns the resource fact; the TUI owns the recovery vocabulary.
