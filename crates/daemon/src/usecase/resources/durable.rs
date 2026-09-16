@@ -57,9 +57,9 @@ use crate::usecase::resources::allocator::{
 use crate::usecase::resources::drain::ActiveConsumer;
 use crate::usecase::resources::identity::{ChildIdentity, ChildObservation};
 use crate::usecase::resources::migration::{LegacyRuntimeRecord, UnknownRecord, adopt_legacy};
-use crate::usecase::resources::retention::{
-    GcReport, LogicalClock, RetentionLimits, collect_garbage,
-};
+use usagi_core::domain::clock::LogicalClock;
+
+use crate::usecase::resources::retention::{GcReport, RetentionLimits, collect_garbage};
 use crate::usecase::resources::shard::{
     CollectionBlocker, OwnerShard, ShardDocument, ShardResource, collectable, retired_collectable,
 };

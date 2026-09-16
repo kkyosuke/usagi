@@ -21,7 +21,9 @@ use crate::usecase::resources::identity::{
     ChildIdentity, ChildObservation, ChildProcessProbe, IDENTITY_SOURCE_OS,
 };
 use crate::usecase::resources::launch::{LaunchIntent, ResourceSpawner, SpawnRefusal};
-use crate::usecase::resources::retention::{LogicalClock, RetentionLimits};
+use usagi_core::domain::clock::LogicalClock;
+
+use crate::usecase::resources::retention::RetentionLimits;
 use crate::usecase::resources::shard::OwnerShard;
 
 /// The bytes of one durable document, shared by every store bound to it.

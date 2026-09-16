@@ -1,13 +1,13 @@
 ---
 number: 765
 title: refactor(core,daemon,tui): 5 種の時刻 port を統一し、同名 port trait の衝突を解消する
-status: todo
+status: done
 priority: low
 labels: [v2, refactor, core, daemon, tui]
 dependson: []
 related: [762]
 created_at: 2026-09-16T00:00:00+00:00
-updated_at: 2026-09-16T00:00:00+00:00
+updated_at: 2026-09-16T14:15:03.289094+00:00
 ---
 
 ## 問題

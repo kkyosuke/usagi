@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod agent_message;
+pub mod clock;
 pub mod daemon;
 pub mod frontmatter;
 pub mod id;

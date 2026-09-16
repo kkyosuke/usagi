@@ -6,6 +6,7 @@ use std::{
 };
 use usagi_core::{
     domain::{
+        clock::MonotonicClock,
         id::{SessionId, TerminalId},
         pr_inventory::{
             CANDIDATE_PREFIX_MAX, PrChecksState, PrIdentity, PrInventory, PrRefreshMetadata,
@@ -57,13 +58,6 @@ pub trait GhProcessPort {
         argv: &[String],
         timeout_ms: u64,
     ) -> Result<String, Self::Error>;
-}
-
-/// Monotonic clock used by the refresh scheduler. Production binds this to
-/// process uptime; tests can advance it without sleeping.
-pub trait RefreshClock {
-    /// Returns monotonic milliseconds since this daemon worker started.
-    fn now_ms(&self) -> u64;
 }
 
 /// Safe, parsed result of `gh pr view`'s allowlisted presentation fields.
@@ -263,7 +257,7 @@ pub struct RefreshWorker<R, C> {
     freshness_ms: u64,
 }
 
-impl<R: GhProcessPort, C: RefreshClock> RefreshWorker<R, C> {
+impl<R: GhProcessPort, C: MonotonicClock> RefreshWorker<R, C> {
     #[must_use]
     pub fn new(runner: R, clock: C, cap: usize, freshness_ms: u64) -> Self {
         Self {
@@ -1129,7 +1123,7 @@ mod tests {
             self.0.set(now_ms);
         }
     }
-    impl RefreshClock for FakeClock {
+    impl MonotonicClock for FakeClock {
         fn now_ms(&self) -> u64 {
             self.0.get()
         }

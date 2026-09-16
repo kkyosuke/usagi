@@ -80,6 +80,8 @@ use usagi_core::domain::agent::{
     AgentIntegrationRevision, AgentProfileId, DaemonRestartAgent, DaemonRestartAgentPlan,
     DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
 };
+use usagi_core::domain::clock::LogicalClock;
+use usagi_core::domain::clock::MonotonicClock;
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{
     AgentRuntimeRef, ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
@@ -91,7 +93,7 @@ use usagi_core::infrastructure::bounded_process::{
 };
 use usagi_core::infrastructure::client::{
     ClientError, ClientPolicy, DaemonClient, DaemonRestartAgents, DeadlineConnection,
-    DeadlineStream, IpcClient, MonotonicClock, PolicyClient, TerminalLaneBudget,
+    DeadlineStream, IpcClient, PolicyClient, TerminalLaneBudget,
 };
 use usagi_core::infrastructure::client::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
 use usagi_core::infrastructure::daemon::{
@@ -175,9 +177,7 @@ use usagi_daemon::usecase::metrics::{
     AgentConcurrencyGauge, MetricsBroker, MetricsObserver, MetricsSample,
 };
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
-use usagi_daemon::usecase::pr_inventory::{
-    GhProcessPort, OutputPrProjector, RefreshClock, RefreshWorker,
-};
+use usagi_daemon::usecase::pr_inventory::{GhProcessPort, OutputPrProjector, RefreshWorker};
 use usagi_daemon::usecase::pr_projection::{
     PrProjection, PrProjectionQueue, pr_projection_counters,
 };
@@ -192,7 +192,6 @@ use usagi_daemon::usecase::resources::durable::{
 };
 use usagi_daemon::usecase::resources::fence::FencedPrInventory;
 use usagi_daemon::usecase::resources::identity::{ChildIdentity, ChildProcessProbe, record_child};
-use usagi_daemon::usecase::resources::retention::LogicalClock;
 use usagi_daemon::usecase::rollover_trigger;
 #[cfg(test)]
 use usagi_daemon::usecase::runtime::RuntimeStoreSnapshot;
@@ -2139,17 +2138,6 @@ const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
 /// slowly: often enough that a finished review reaches the human in seconds,
 /// rarely enough that an idle run costs one journal read per sweep.
 const WORKFLOW_LANE_TICK: Duration = Duration::from_secs(10);
-struct ProductionRefreshClock {
-    started: Instant,
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pr_snapshot_events_cover_success_scoped_and_lane_errors
-impl RefreshClock for ProductionRefreshClock {
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-}
-
 #[derive(Clone, Copy)]
 struct GhProcess;
 
@@ -3036,9 +3024,7 @@ fn start_pr_refresh_worker(
         Some(daemon_dir),
         shutdown,
         GhProcess,
-        ProductionRefreshClock {
-            started: Instant::now(),
-        },
+        SystemClock::new(),
         PR_REFRESH_TICK,
     )
 }
@@ -3092,7 +3078,7 @@ fn spawn_pr_refresh_worker<R, C>(
 ) -> std::io::Result<std::thread::JoinHandle<()>>
 where
     R: GhProcessPort + Clone + Send + 'static,
-    C: RefreshClock + Send + 'static,
+    C: MonotonicClock + Send + 'static,
 {
     std::thread::Builder::new()
         .name("usagi-pr-refresh".to_string())
@@ -16686,7 +16672,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         shutdown_after: Option<(usize, Arc<ShutdownRequest>)>,
     }
-    impl RefreshClock for FixedRefreshClock {
+    impl MonotonicClock for FixedRefreshClock {
         fn now_ms(&self) -> u64 {
             let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
             if let Some((after, shutdown)) = &self.shutdown_after

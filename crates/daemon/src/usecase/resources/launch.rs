@@ -38,7 +38,9 @@ use crate::usecase::resources::allocator::{
 use crate::usecase::resources::identity::{
     ChildIdentity, ChildObservation, ChildProcessProbe, observe_child,
 };
-use crate::usecase::resources::retention::{LogicalClock, RetentionLimits, admission_guard};
+use usagi_core::domain::clock::LogicalClock;
+
+use crate::usecase::resources::retention::{RetentionLimits, admission_guard};
 use crate::usecase::resources::shard::{OwnerShard, ResourceState, ShardDocument};
 use crate::usecase::resources::{ResourceError, ResourceFailure};
 
