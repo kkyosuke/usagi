@@ -252,6 +252,63 @@ fn layer_violations(root: &Path, forbidden: &[&str]) -> BTreeMap<PathBuf, BTreeS
         .collect()
 }
 
+/// The TUI's own infrastructure layer translates daemon replies and live input
+/// into TUI vocabulary. It must stay free of real IO: terminal backends, PTYs,
+/// subprocesses, threads and the filesystem belong to the composition root, which
+/// injects what this layer needs. Keeping the layer pure is what lets it be unit
+/// tested from payloads alone instead of behind another `#[coverage(off)]`.
+#[test]
+fn tui_infrastructure_translates_without_owning_real_io() {
+    let root = workspace_root().join("crates/tui/src/infrastructure");
+    let mut sources = Vec::new();
+    rust_sources(&root, &mut sources);
+    assert!(
+        !sources.is_empty(),
+        "the TUI infrastructure layer must hold its adapters"
+    );
+    let forbidden_crates = [
+        "crossterm",
+        "portable_pty",
+        "libc",
+        "signal_hook",
+        "fs2",
+        "dirs",
+    ];
+    let violations = sources
+        .into_iter()
+        .filter_map(|path| {
+            let source = fs::read_to_string(&path).expect("TUI infrastructure source is readable");
+            let syntax: File = syn::parse_file(&source).expect("TUI infrastructure source parses");
+            let forbidden = ["fs", "process", "thread"]
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let mut visitor = DependencyVisitor {
+                forbidden: &forbidden,
+                required_root: Some("std"),
+                violations: BTreeSet::new(),
+            };
+            visitor.visit_file(&syntax);
+            let mut found = visitor.violations;
+            for name in forbidden_crates {
+                let forbidden = [name].into_iter().collect::<BTreeSet<_>>();
+                let mut visitor = DependencyVisitor {
+                    forbidden: &forbidden,
+                    required_root: None,
+                    violations: BTreeSet::new(),
+                };
+                visitor.visit_file(&syntax);
+                found.extend(visitor.violations);
+            }
+            (!found.is_empty()).then_some((path, found))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert!(
+        violations.is_empty(),
+        "TUI infrastructure must take real IO from the composition root:\n{violations:#?}"
+    );
+}
+
 #[test]
 fn tui_views_are_pure_projections_without_filesystem_or_process_io() {
     let root = workspace_root().join("crates/tui/src/presentation/views");
