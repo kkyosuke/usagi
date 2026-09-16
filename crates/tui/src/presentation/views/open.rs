@@ -30,6 +30,12 @@ const FOOTER: &str =
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
 const NAME_WIDTH: usize = 42;
+/// 一覧ブロックの見出し（`Workspaces`・モード行・空行・Filter 行・空行）が占める行数。
+const LIST_HEADER_LINES: usize = 5;
+/// 一覧の下に置く「空行＋選択中の絶対パス」が占める行数。
+const SELECTED_PATH_LINES: usize = 2;
+/// 1 件の workspace が占める行数（名前行＋状態行）。
+const ROWS_PER_WORKSPACE: usize = 2;
 
 /// Open 画面の状態。登録済み workspace の一覧と選択位置を持つ。端末 IO は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,8 +409,48 @@ fn filter_line(open: &Open) -> String {
     format!("{} {value}", accent.paint("Filter:"))
 }
 
+/// 一覧に収める件数と、その先頭位置（`(start, capacity)`）を `budget` 行から決める。
+///
+/// 端末に収まらない行は [`crate::presentation::frame::Frame::from_lines`] が黙って捨てるので、
+/// **溢れる件数は「表示されない」ではなく「scroll して届く」**ようにする。選択が下端に来るよう
+/// 窓を動かすだけの純粋な計算で、view は scroll 位置を状態に持たない。溢れているときは、
+/// 残り件数を伝える 1 行分を予算から差し引く。
+fn viewport(total: usize, selected: usize, budget: usize) -> (usize, usize) {
+    let rows = budget.saturating_sub(LIST_HEADER_LINES + SELECTED_PATH_LINES);
+    let without_indicator = rows / ROWS_PER_WORKSPACE;
+    if total <= without_indicator {
+        return (0, total);
+    }
+    let capacity = (rows.saturating_sub(1) / ROWS_PER_WORKSPACE).max(1);
+    let start = selected
+        .saturating_sub(capacity - 1)
+        .min(total.saturating_sub(capacity));
+    (start, capacity)
+}
+
+/// 窓の外にある件数を伝える行。上下どちらにも隠れていなければ行を足さない。
+fn overflow_line(hidden_above: usize, hidden_below: usize) -> Option<String> {
+    if hidden_above == 0 && hidden_below == 0 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if hidden_above > 0 {
+        parts.push(format!("↑ {hidden_above} more"));
+    }
+    if hidden_below > 0 {
+        parts.push(format!("↓ {hidden_below} more"));
+    }
+    parts.push("type to filter".to_owned());
+    Some(
+        Style::new()
+            .dim()
+            .paint(&format!("    {}", parts.join("  ·  "))),
+    )
+}
+
 /// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
-fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
+/// `budget` はボディに使える行数で、溢れる workspace は [`viewport`] が scroll させる。
+fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> Vec<String> {
     let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
     let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
 
@@ -435,7 +481,9 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         ));
         return lines;
     }
-    for (i, overview) in open.filtered().into_iter().enumerate() {
+    let filtered = open.filtered();
+    let (start, capacity) = viewport(filtered.len(), open.selected_index(), budget);
+    for (i, overview) in filtered.iter().enumerate().skip(start).take(capacity) {
         let marker = if open.is_unite() && open.unite_paths.contains(&overview.workspace.path) {
             Role::Success.style().bold().paint("✓ ")
         } else {
@@ -446,6 +494,9 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
             workspace_name_row(&overview.workspace, i == open.selected_index())
         )));
         lines.push(indent(&workspace_stats_row(overview, now)));
+    }
+    if let Some(overflow) = overflow_line(start, filtered.len() - (start + capacity)) {
+        lines.push(indent(&overflow));
     }
 
     // 一覧の下に選択中 workspace の絶対パスを添える（どこを開くのか一目でわかるように）。
@@ -481,8 +532,11 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
-        let mut body = body_lines(width, open, now);
-        body.extend(notice_lines(width, open.notice()));
+        let notice = notice_lines(width, open.notice());
+        // 通知はボディの一部なので、一覧に残る行数から先に差し引く。
+        let budget = mascot_screen::body_budget(raw_height, raw_width).saturating_sub(notice.len());
+        let mut body = body_lines(width, open, now, budget);
+        body.extend(notice);
         body
     })
 }
@@ -490,7 +544,7 @@ pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Ut
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{Open, render};
+    use super::{Open, overflow_line, render, viewport};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
     use std::path::Path;
@@ -799,6 +853,82 @@ mod tests {
         assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
         assert!(joined.contains("Workspaces"));
         assert!(!joined.contains("A–Z"));
+    }
+
+    #[test]
+    fn a_list_taller_than_the_terminal_scrolls_instead_of_dropping_rows() {
+        // 端末に収まらない行は Frame が黙って捨てるので、溢れた分は窓を動かして届かせる。
+        let open = Open::with_overviews(
+            (0..12)
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0, 0))
+                .collect(),
+        );
+        let frame = render(24, 80, &open, now());
+        assert_eq!(frame.len(), 24);
+        let joined = frame
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 先頭（選択行）は出て、窓の外は残り件数として数えられる。
+        assert!(joined.contains("ws00"));
+        assert!(!joined.contains("ws11"));
+        let overflow = frame
+            .iter()
+            .map(|l| strip(l))
+            .find(|line| line.contains("more"))
+            .expect("溢れた件数の行が出る");
+        assert_eq!(overflow.trim(), "↓ 8 more  ·  type to filter");
+        // フッタは最下行に残る（溢れで押し出されない）。
+        assert!(strip(frame.last().unwrap()).contains("Esc back"));
+    }
+
+    #[test]
+    fn scrolling_past_the_window_keeps_the_selected_row_visible() {
+        let mut open = Open::with_overviews(
+            (0..12)
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0, 0))
+                .collect(),
+        );
+        for _ in 0..11 {
+            open.select_next();
+        }
+        let frame = render(24, 80, &open, now());
+        let joined = frame
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("ws11"));
+        assert!(!joined.contains("ws00"));
+        let overflow = frame
+            .iter()
+            .map(|l| strip(l))
+            .find(|line| line.contains("more"))
+            .expect("溢れた件数の行が出る");
+        assert_eq!(overflow.trim(), "↑ 8 more  ·  type to filter");
+    }
+
+    #[test]
+    fn viewport_shows_everything_that_fits_and_windows_what_does_not() {
+        // 収まるときは窓を作らない。
+        assert_eq!(viewport(4, 0, 17), (0, 4));
+        // 収まらないときは残り件数行の 1 行を予算から引く。
+        assert_eq!(viewport(12, 0, 17), (0, 4));
+        // 選択が窓の下端に来るまで先頭は動かない。
+        assert_eq!(viewport(12, 3, 17), (0, 4));
+        assert_eq!(viewport(12, 4, 17), (1, 4));
+        // 先頭は末尾より先へは進まない。
+        assert_eq!(viewport(12, 11, 17), (8, 4));
+        // 予算が尽きても 1 件は必ず出す。
+        assert_eq!(viewport(12, 0, 0), (0, 1));
+    }
+
+    #[test]
+    fn overflow_line_appears_only_while_rows_are_hidden() {
+        assert!(overflow_line(0, 0).is_none());
+        assert!(overflow_line(0, 1).is_some());
+        assert!(overflow_line(1, 0).is_some());
     }
 
     #[test]
