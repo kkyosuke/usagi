@@ -210,7 +210,7 @@ fn every_reference_addressed_request_routes_to_its_owner_generation() {
             expected_revision: 3,
         },
         TerminalRequest::Dismiss {
-            terminal: target.clone(),
+            terminal: target,
             expected_revision: 3,
         },
     ];
@@ -395,7 +395,7 @@ fn merged_inventory_is_deduplicated_deterministic_and_generation_fenced() {
         .iter()
         .map(|entry| entry.terminal.clone())
         .collect();
-    let mut expected = vec![mine.clone(), theirs.clone()];
+    let mut expected = vec![mine, theirs];
     expected.sort();
     assert_eq!(refs, expected);
     assert_eq!(merged.answered().len(), 2);

@@ -1114,6 +1114,7 @@ pub enum WorkspaceDrawerFocus {
 // These bools are independent runtime flags (live-pane availability, forced
 // action modal, Ctrl-C grace, quit-confirmation focus), not a combinable state
 // machine, so a single enum would not model them.
+// いずれも独立した設定で、enum にまとめると組み合わせが表現できなくなる。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {

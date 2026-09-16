@@ -111,7 +111,10 @@ pub(super) fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefus
 // independently resolved startup fact (endpoint, generation, data directory, fenced
 // workspace, build, owner record, custody probe, shutdown); bundling them would only
 // hide the composition wiring.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=agent_ipc_e2e
 pub(super) fn spawn_ipc_server(
     listener: SecureUnixListener,

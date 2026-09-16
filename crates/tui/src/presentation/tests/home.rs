@@ -499,7 +499,7 @@ fn launch_admission_is_bounded_and_refuses_beyond_the_queue_with_one_busy_comple
         crate::presentation::PaneLaunch::ResumeExact {
             operation: OperationId::new(),
             continuation: history.continuation,
-            target: history.target.clone().unwrap(),
+            target: history.target.unwrap(),
         },
     ];
     let refused = refused_kinds
@@ -1063,7 +1063,7 @@ fn a_background_tab_is_watched_by_scope_inventory_and_never_attached_or_resumed(
     );
     assert_eq!(
         recorded.polls,
-        vec![foreground.clone()],
+        vec![foreground],
         "only the foreground selection is resumed"
     );
     assert_eq!(
@@ -1083,7 +1083,7 @@ fn a_background_exit_observed_by_scope_inventory_closes_that_tab_only() {
             exited: Arc::clone(&exited),
         }));
     // The bounded inventory lane observed the background shell exiting.
-    exited.lock().unwrap().push(background.clone());
+    exited.lock().unwrap().push(background);
 
     close_exited_panes(&mut ui, &mut runtime);
 
@@ -1495,7 +1495,7 @@ fn stale_agent_admission_cannot_show_or_focus_a_lineage_closed_by_another_tui() 
             outcome: crate::presentation::PaneLaunchOutcome::Agent {
                 operation,
                 result: Ok(AgentPaneAdmission {
-                    terminal: replacement.clone(),
+                    terminal: replacement,
                     continuation: Some(continuation),
                     supervisor_run_id: None,
                 }),
@@ -1575,7 +1575,7 @@ fn persistence_failures_block_agent_reorder_and_selection_but_not_generic_tabs()
                     kind: PaneKind::Agent,
                 },
                 LivePane {
-                    terminal: second_terminal.clone(),
+                    terminal: second_terminal,
                     kind: PaneKind::Agent,
                 },
             ],
@@ -1672,7 +1672,7 @@ fn persistence_failures_block_agent_reorder_and_selection_but_not_generic_tabs()
                     kind: PaneKind::Terminal,
                 },
                 LivePane {
-                    terminal: generic_second.clone(),
+                    terminal: generic_second,
                     kind: PaneKind::Terminal,
                 },
             ],
@@ -2455,10 +2455,10 @@ fn public_value_derives_are_exercised() {
     assert_eq!(snapshot.clone(), snapshot);
     assert!(format!("{snapshot:?}").contains("derive"));
     let quit = Exit::Quit;
-    assert_eq!(quit.clone(), Exit::Quit);
+    assert_eq!(quit, Exit::Quit);
     assert!(format!("{quit:?}").contains("Quit"));
     let welcome = Exit::Welcome;
-    assert_eq!(welcome.clone(), Exit::Welcome);
+    assert_eq!(welcome, Exit::Welcome);
     assert_ne!(welcome, quit);
     assert!(format!("{welcome:?}").contains("Welcome"));
 }
@@ -2692,7 +2692,7 @@ fn a_refused_or_failed_resume_keeps_the_history_tab_with_safe_feedback() {
     let (mut ui, mut runtime) = closeup_with_history(
         workspace,
         session,
-        vec![history.clone()],
+        vec![history],
         launch_port(Box::new(ScriptedExactResumePort {
             answers: vec![
                 Err("provider resume failed; refresh Agent inventory".to_owned()),
@@ -2948,7 +2948,7 @@ fn an_accepted_resume_whose_display_intent_cannot_be_saved_surfaces_a_typed_noti
             Box::new(UnavailableAgentCommandPort),
         )
         .with_pane_launch_port(launch_port(Box::new(ScriptedExactResumePort {
-            answers: vec![Ok(answer.clone())],
+            answers: vec![Ok(answer)],
             requests: Arc::new(Mutex::new(Vec::new())),
         })))
         .with_agent_tab_intent(

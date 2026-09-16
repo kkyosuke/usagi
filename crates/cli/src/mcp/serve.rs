@@ -1921,10 +1921,7 @@ mod tests {
                 "agent_resume_inventory",
                 serde_json::json!({"workspace_id": workspace}),
             ),
-            (
-                "session_resume",
-                serde_json::json!({"target": target.clone()}),
-            ),
+            ("session_resume", serde_json::json!({"target": target})),
         ] {
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#

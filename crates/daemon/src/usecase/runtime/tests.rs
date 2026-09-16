@@ -663,7 +663,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     assert_eq!(
         hydrated_records(RuntimeStoreSnapshot {
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
-            records: vec![lineage_source.clone(), duplicate_source],
+            records: vec![lineage_source, duplicate_source],
             generation: GenerationSnapshot::default(),
         })
         .unwrap_err(),
@@ -1155,9 +1155,7 @@ fn interrupting_agents_marks_a_process_that_cannot_be_reaped_for_reconcile() {
 
     assert_eq!(
         coordinator.interrupt_agents(
-            &[runtime.agent_runtime_id.as_str().clone()]
-                .into_iter()
-                .collect(),
+            &[runtime.agent_runtime_id.as_str()].into_iter().collect(),
             &mut store,
             &mut spawner,
         ),
@@ -1757,7 +1755,7 @@ fn runtime_failures_remain_typed_and_fail_closed() {
             &mut c,
             &initial_request,
             runtime.clone(),
-            fence.clone(),
+            fence,
             &mut spawner,
             &mut store
         ),
@@ -1906,7 +1904,7 @@ fn spawn_and_persistence_uncertainty_are_retained_for_reconcile() {
         launch(
             &mut c,
             &persisted_request,
-            runtime.clone(),
+            runtime,
             fence,
             &mut spawner,
             &mut store
@@ -2120,7 +2118,7 @@ fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
     assert_eq!(
         coordinator.launch(
             &first_request,
-            runtime.clone(),
+            runtime,
             valid_fence,
             Geometry { cols: 80, rows: 24 },
             &mut RejectingResolver,
@@ -2408,7 +2406,7 @@ fn a_live_connection_sweep_releases_every_stale_agent_final() {
 #[test]
 fn a_restart_reimports_exited_agent_finals_into_the_budget() {
     let (retention, _clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
-    let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention.clone());
+    let mut coordinator = RuntimeCoordinator::with_retention(8, 64, 1, retention);
     let mut store = Store::default();
     let runtime = run_agent(&mut coordinator, &mut store, b"gone");
     let snapshot = coordinator.snapshot();

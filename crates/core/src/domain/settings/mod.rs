@@ -561,7 +561,7 @@ impl DefaultModel {
 /// is the one place that decides it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 // Closed provider availability flags remain a small Copy value with stable Debug output.
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools)] // いずれも独立した設定で、enum にまとめると組み合わせが表現できなくなる。
 pub struct AvailableModels {
     claude: bool,
     agy: bool,

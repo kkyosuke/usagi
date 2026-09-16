@@ -1153,7 +1153,6 @@ fn config_help_context(config: &Config) -> KeyHelpContext {
 /// consumes: raw PTY passthrough, pointer input, and keys with no Home management
 /// meaning.
 #[must_use]
-#[allow(clippy::needless_pass_by_value)]
 pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
     let app_key = match key {
         Key::Management { action, .. } => return Some(AppEvent::Key(action)),
@@ -2465,7 +2464,6 @@ const REGISTRY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive loop.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_workspace_controller_with_backend(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2641,6 +2639,8 @@ impl ControllerBackendFactory for FixedBackendFactory {
     }
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 /// Compatibility entry for embedders that still supply individual host ports.
 /// Production uses [`run_workspace_controller_with_backend`].
@@ -2652,7 +2652,6 @@ impl ControllerBackendFactory for FixedBackendFactory {
 /// # Errors
 ///
 /// Returns terminal IO failures from the interactive workspace loop.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2738,13 +2737,14 @@ pub(crate) fn run_with_settings(
     )
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 /// Run the screen graph with daemon Agent and metrics port factories.
 ///
 /// # Errors
 ///
 /// Returns workspace loading or terminal IO failures from the screen graph.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -2773,10 +2773,11 @@ pub(crate) fn run_with_settings_and_agent_and_metrics_port_factory_and_model_ava
     )
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 /// Open one workspace snapshot through the controller runtime, supplying
 /// fallback ports for the screen-graph entry points that do not inject a daemon
 /// Agent / metrics factory (`run_with_settings`).
-#[allow(clippy::too_many_arguments)]
 fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2841,10 +2842,11 @@ fn enter_workspace(
     )
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 /// Run the process-level deck while keeping exactly one workspace composition
 /// resident. A prepared activation returns from the old frame first, so all of
 /// its ports are dropped before the next factory call.
-#[allow(clippy::too_many_arguments)]
 fn enter_workspace_deck(
     term: &mut dyn Terminal,
     mut snapshot: WorkspaceSnapshot,
@@ -2976,8 +2978,9 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
 // The screen graph is an IO composition boundary.  Its choices are covered by
 // the injected loader/port tests; LLVM coverage excludes only this terminal
 // loop, consistently with the existing `run_with_settings` entry point.
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_with_settings_inner(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -3222,6 +3225,8 @@ pub fn run_workspace_deck(term: &mut dyn Terminal, run: WorkspaceDeckRun<'_>) ->
     .map(|exit| exit.unwrap_or(Exit::Welcome))
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 /// Production screen graph entry. Every Welcome/Open/Recent/New path creates
 /// its workspace runtime through the same backend factory as direct launch.
@@ -3229,7 +3234,6 @@ pub fn run_workspace_deck(term: &mut dyn Terminal, run: WorkspaceDeckRun<'_>) ->
 /// # Errors
 ///
 /// Returns workspace loading, settings, or terminal IO failures.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_screen_graph_with_backend(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,

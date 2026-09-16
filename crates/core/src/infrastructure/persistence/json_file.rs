@@ -797,7 +797,7 @@ mod tests {
         write_atomic(dir.path(), &path, &value).unwrap();
 
         let read_back: Option<Vec<String>> = read(&path).unwrap();
-        assert_eq!(read_back, Some(value.clone()));
+        assert_eq!(read_back, Some(value));
         // Pretty JSON plus a trailing newline reaches disk after the fsync.
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.ends_with('\n'));

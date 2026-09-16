@@ -82,13 +82,9 @@ fn production_client_requirements_are_contextual_and_served_by_production_daemon
         (
             true,
             &bound,
-            [base.clone(), vec![owner.clone(), fence.clone()]].concat(),
+            [base.clone(), vec![owner, fence.clone()]].concat(),
         ),
-        (
-            false,
-            &selected,
-            [base.clone(), vec![fence.clone()]].concat(),
-        ),
+        (false, &selected, [base, vec![fence]].concat()),
     ];
     let active = server_advertised_capabilities(GenerationRole::Active);
     for (expects_owner, workspace, expected) in cases {

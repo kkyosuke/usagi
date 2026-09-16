@@ -1827,7 +1827,7 @@ mod tests {
                 selected: Some(run_id),
                 ..WorkRunControlProjection::default()
             },
-            ..base.clone()
+            ..base
         };
         let deletion_text = render(&deletion);
         assert!(deletion_text.contains("Delete this finished Work Run from history?"));

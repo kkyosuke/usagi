@@ -181,6 +181,7 @@ pub fn terminal_point_at_for(
     )
 }
 
+// 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn terminal_point_at_for_mode(

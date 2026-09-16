@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(welcome.items().len(), 4);
         assert!(welcome.recent().is_empty());
         // derive された Clone / Debug も計測対象なのでここで触れる。
-        assert!(format!("{:?}", welcome.clone()).contains("Welcome"));
+        assert!(format!("{welcome:?}").contains("Welcome"));
     }
 
     #[test]

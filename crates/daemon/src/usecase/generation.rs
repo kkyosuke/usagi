@@ -783,7 +783,7 @@ mod tests {
         let pane = terminal(owner);
         let session = pane.session_id.unwrap();
         let worktree = pane.worktree_id;
-        registry.reserve_terminal(pane.clone()).unwrap();
+        registry.reserve_terminal(pane).unwrap();
         registry.crash_generation(owner, &mut |_| ProcessObservation::Gone);
         assert_eq!(
             registry.snapshot().terminals[0].state,
@@ -890,7 +890,7 @@ mod tests {
         lost_without_process.terminals[0].process = None;
         lost_without_process.terminals[0].state = TerminalState::Lost;
         assert!(GenerationCoordinator::restore(lost_without_process, 2).is_ok());
-        let mut duplicate_terminal = snapshot.clone();
+        let mut duplicate_terminal = snapshot;
         duplicate_terminal
             .terminals
             .push(duplicate_terminal.terminals[0].clone());

@@ -349,7 +349,7 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
         );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
-    for terminal in [first.clone(), second.clone()] {
+    for terminal in [first, second.clone()] {
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, PaneKind::Agent);
         let _ = runtime.complete_pane(target, operation, terminal);
@@ -1084,7 +1084,7 @@ fn an_exited_terminal_auto_closes_its_pane_and_detaches_through_the_runtime() {
         session,
         terminal.clone(),
         Box::new(ScriptedAgentPort {
-            terminal: terminal.clone(),
+            terminal,
             subscription: 5,
             replay: b"live!".to_vec(),
             poll_error: Some(TerminalError::Exited),
@@ -2423,7 +2423,7 @@ fn closing_an_unobserved_live_agent_survives_inventory_replay_and_reconnect() {
                     kind: PaneKind::Agent,
                 },
                 LivePane {
-                    terminal: surviving_terminal.clone(),
+                    terminal: surviving_terminal,
                     kind: PaneKind::Agent,
                 },
             ],
@@ -2886,7 +2886,7 @@ fn scrolling_a_live_terminal_offsets_its_projected_viewport() {
         session,
         terminal.clone(),
         Box::new(ScriptedAgentPort {
-            terminal: terminal.clone(),
+            terminal,
             subscription: 3,
             replay,
             poll_error: None,
@@ -3132,7 +3132,7 @@ fn one_explicit_resume_sends_one_request_and_turns_only_that_tab_live() {
     let (mut ui, mut runtime) = closeup_with_history(
         workspace,
         session,
-        vec![resumed.clone(), untouched.clone()],
+        vec![resumed.clone(), untouched],
         launch_port(Box::new(ScriptedExactResumePort {
             answers: vec![Ok(answer.clone())],
             requests: Arc::clone(&requests),
@@ -3185,7 +3185,7 @@ fn the_resume_chord_drives_the_selected_history_tab_through_the_live_surface() {
     let (mut ui, mut runtime) = closeup_with_history(
         workspace,
         session,
-        vec![history.clone()],
+        vec![history],
         launch_port(Box::new(ScriptedExactResumePort {
             answers: vec![Ok(answer.clone())],
             requests: Arc::clone(&requests),

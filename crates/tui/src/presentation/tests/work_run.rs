@@ -153,7 +153,7 @@ fn work_run_lane_rejects_unbounded_or_private_snapshots() {
         crate::presentation::validate_work_run_snapshot(
             usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
                 workspace_id: workspace,
-                runs: vec![run.clone()],
+                runs: vec![run],
             },
             workspace,
         )
@@ -192,7 +192,7 @@ fn work_run_lane_rejects_mismatched_or_private_control_results() {
         workspace,
         request,
         crate::presentation::WorkRunControlResult::Updated(Box::new(
-            with_private_work_run_provenance(run.clone()),
+            with_private_work_run_provenance(run),
         )),
     );
     assert_eq!(

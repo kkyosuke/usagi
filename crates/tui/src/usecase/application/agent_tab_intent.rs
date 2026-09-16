@@ -782,6 +782,8 @@ impl From<AgentTabIntentMutationError> for AgentTabIntentError {
     }
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
+#[allow(clippy::too_many_lines)]
 /// Reconcile one mutation against the latest durable value under a caller-held
 /// store lock.
 ///
@@ -795,7 +797,6 @@ impl From<AgentTabIntentMutationError> for AgentTabIntentError {
 /// is ahead of durable state or the resulting state fails validation. Revision
 /// exhaustion is reported as [`AgentTabIntentMutationError::Unavailable`] because the
 /// accepted causal write cannot be published.
-#[allow(clippy::too_many_lines)]
 pub fn reconcile_agent_tab_intent_mutation(
     mut current: AgentTabIntent,
     expected_workspace: WorkspaceId,
@@ -1076,9 +1077,9 @@ mod tests {
             resumable: Vec::new(),
         };
         let terminals = vec![
-            live_entry(discovered_terminal.clone()),
+            live_entry(discovered_terminal),
             live_entry(first_terminal.clone()),
-            live_entry(second_terminal.clone()),
+            live_entry(second_terminal),
             live_entry(first_terminal),
         ];
         let projection = intent.reconcile(&terminals, &inventory, &BTreeSet::from([session]));

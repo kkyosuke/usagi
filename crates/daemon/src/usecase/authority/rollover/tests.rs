@@ -680,7 +680,6 @@ fn the_handoff_waits_for_an_effect_that_is_already_running() {
 
     let handoff = {
         let world = Arc::clone(&world);
-        let op = op.clone();
         std::thread::spawn(move || {
             let outcome = execute_rollover(
                 &world.store,

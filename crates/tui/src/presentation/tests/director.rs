@@ -468,7 +468,7 @@ fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
             }],
             selected: Some(live.clone()),
             selected_interrupted: None,
-            interrupted: vec![interrupted.clone()],
+            interrupted: vec![interrupted],
         }],
     ));
 
@@ -564,7 +564,7 @@ fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
         &mut runtime,
         &mut pending_targets,
     ));
-    assert_eq!(runtime.focused_terminal(), Some(live.clone()));
+    assert_eq!(runtime.focused_terminal(), Some(live));
     assert!(crate::presentation::select_director_tab(
         &Key::Live(LiveTerminalAction::NextTab),
         &mut ui,
@@ -1023,7 +1023,7 @@ fn director_selection_rejects_placeholders_and_surfaces_intent_failure() {
         }),
     );
     assert!(!crate::presentation::select_director_selection(
-        TabSelection::Live(terminal.clone()),
+        TabSelection::Live(terminal),
         &mut ui,
         &mut runtime,
     ));
@@ -1349,7 +1349,7 @@ fn clicking_the_exposed_shell_focuses_it_and_keeps_copy_available_under_director
         None
     );
     for (terminal, kind) in [
-        (agent.clone(), PaneKind::Agent),
+        (agent, PaneKind::Agent),
         (shell.clone(), PaneKind::Terminal),
     ] {
         let operation = OperationId::new();

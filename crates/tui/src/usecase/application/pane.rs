@@ -1765,7 +1765,7 @@ mod tests {
             assert!(matches!(retained.selected(), PaneSelection::Tab(_)));
         }
 
-        let mut empty = PaneState::new(PaneSelection::Tab(TabSelection::Live(first.clone())));
+        let mut empty = PaneState::new(PaneSelection::Tab(TabSelection::Live(first)));
         let _ = reduce(
             &mut empty,
             PaneEvent::RestoreBatch {
@@ -2037,7 +2037,7 @@ mod tests {
                 &mut registry,
                 PaneRegistryEvent::Pane {
                     target: session_a,
-                    event: PaneEvent::Exited(terminal_a.clone()),
+                    event: PaneEvent::Exited(terminal_a),
                 },
             )
             .is_empty()
@@ -2407,7 +2407,7 @@ mod tests {
         let _ = reduce(
             &mut state,
             PaneEvent::RestoreInterrupted {
-                tabs: vec![kept.clone(), dropped.clone()],
+                tabs: vec![kept.clone(), dropped],
             },
         );
         let operation = OperationId::new();
@@ -2471,7 +2471,7 @@ mod tests {
         );
         assert_eq!(
             state.selected(),
-            &PaneSelection::Tab(TabSelection::Live(live.clone()))
+            &PaneSelection::Tab(TabSelection::Live(live))
         );
 
         // Without any other tab the selection returns to the lineage's own scope.

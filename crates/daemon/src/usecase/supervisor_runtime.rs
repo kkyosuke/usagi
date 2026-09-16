@@ -1110,7 +1110,6 @@ impl SupervisorRuntime {
     /// # Errors
     /// Returns an error for conflicting idempotency, invalid DAGs, or durable IO failure.
     ///
-    #[allow(clippy::too_many_lines)]
     pub fn start(
         &self,
         caller: &str,
@@ -1136,6 +1135,8 @@ impl SupervisorRuntime {
         })
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Starts a run owned by one daemon-admitted workspace. This is the
     /// production entry point; the unscoped wrapper remains for legacy callers
     /// and deterministic domain fixtures.
@@ -1144,7 +1145,6 @@ impl SupervisorRuntime {
     ///
     /// Returns an error when admission input is invalid or the durable run
     /// cannot be initialized.
-    #[allow(clippy::too_many_arguments)]
     pub fn start_for_workspace(
         &self,
         caller: &str,
@@ -1171,6 +1171,8 @@ impl SupervisorRuntime {
         })
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Reserves a generic Supervisor root together with the authenticated
     /// dispatch which must own it. Persisting this join before aggregate
     /// creation makes a crash between start and provenance binding recoverable
@@ -1179,7 +1181,6 @@ impl SupervisorRuntime {
     /// # Errors
     /// Returns an error when the caller dispatch, Agent, runtime scope, or
     /// durable start reservation conflicts.
-    #[allow(clippy::too_many_arguments)]
     pub fn start_for_workspace_caller_dispatch(
         &self,
         caller: &str,
@@ -1243,6 +1244,8 @@ impl SupervisorRuntime {
         })
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Starts a Goal run and binds its root task to an already admitted
     /// workspace-root Agent dispatch. Production reserves before spawn and
     /// calls [`Self::bind_reserved_workspace_root_dispatch`] afterwards; this
@@ -1256,7 +1259,6 @@ impl SupervisorRuntime {
     /// Returns an error when the worker is not rooted in the requested
     /// workspace, the dispatch identity is absent, or durable state cannot be
     /// initialized and bound consistently.
-    #[allow(clippy::too_many_arguments)]
     pub fn start_for_workspace_root_dispatch(
         &self,
         caller: &str,
@@ -1595,7 +1597,7 @@ impl SupervisorRuntime {
         self.bind_reserved_delegated_dispatch(child_operation_id, worker, now)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     fn start_scoped(&self, request: SupervisorStartRequest<'_>) -> Result<SupervisorRunQuery> {
         let SupervisorStartRequest {
             caller,

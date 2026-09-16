@@ -1640,8 +1640,8 @@ mod tests {
         assert_eq!(
             c.launch(
                 &request,
-                terminal.clone(),
-                fence.clone(),
+                terminal,
+                fence,
                 Geometry { cols: 80, rows: 24 },
                 &mut Resolver,
                 &mut Store::default(),
@@ -1733,8 +1733,8 @@ mod tests {
         assert_eq!(
             coordinator.launch(
                 &request,
-                terminal.clone(),
-                fence.clone(),
+                terminal,
+                fence,
                 Geometry { cols: 80, rows: 24 },
                 &mut RejectingResolver,
                 &mut Store::default(),
@@ -1828,7 +1828,7 @@ mod tests {
         assert_eq!(
             coordinator.launch(
                 &request,
-                terminal.clone(),
+                terminal,
                 fence,
                 Geometry { cols: 80, rows: 24 },
                 &mut Resolver,
@@ -1923,7 +1923,7 @@ mod tests {
         let spawns = std::cell::Cell::new(0);
         let rejected = coordinator.launch(
             &request,
-            terminal.clone(),
+            terminal,
             fence,
             Geometry { cols: 80, rows: 24 },
             &mut Resolver,
@@ -2125,8 +2125,7 @@ mod tests {
     #[test]
     fn a_restart_reimports_exited_records_so_the_budget_survives_it() {
         let (retention, clock) = crate::usecase::terminal_retention_ipc::tests::manual_retention();
-        let mut coordinator =
-            GenericTerminalCoordinator::with_retention(4, 64, 1, retention.clone());
+        let mut coordinator = GenericTerminalCoordinator::with_retention(4, 64, 1, retention);
         let mut store = Store::default();
         let terminal = run_terminal(&mut coordinator, &mut store, b"gone");
         let snapshot = coordinator.snapshot();

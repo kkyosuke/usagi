@@ -117,7 +117,7 @@ fn end_to_end_launch_output_attach_input_detach_reattach_and_exit() {
     assert_eq!(admission.operation_id, operation);
     assert_eq!(admission.revision, 1);
     assert_eq!(admission.terminal.session_id, launch_intent.session);
-    let terminal = admission.terminal.clone();
+    let terminal = admission.terminal;
 
     // Daemon-owned PTY output is journaled before it is replayable.
     runtime.output(&terminal, b"ready\n".to_vec()).unwrap();
@@ -402,7 +402,7 @@ fn shared_owner_routes_agent_terminals_to_agent_and_others_to_generic() {
     let admission = agent
         .launch(&operation, &launch_intent, &FakeScope(Ok(scope())))
         .unwrap();
-    let terminal = admission.terminal.clone();
+    let terminal = admission.terminal;
     agent.output(&terminal, b"hi\n".to_vec()).unwrap();
 
     let mut owner = SharedTerminalOwner::new(agent, FakeGeneric::default());
@@ -486,7 +486,7 @@ fn shared_owner_inventory_merges_agent_and_generic_and_rejects_invalid_scope() {
     let admission = agent
         .launch(&operation, &intent(None), &FakeScope(Ok(scope())))
         .unwrap();
-    let agent_terminal = admission.terminal.clone();
+    let agent_terminal = admission.terminal;
     // Query with the launched Agent's exact scope so it is in scope.
     let inventory_scope = TerminalLaunchScope {
         workspace_id: agent_terminal.workspace_id,
@@ -569,7 +569,7 @@ fn shared_owner_completed_inventory_merges_and_stamps_visibility() {
     let admission = agent
         .launch(&operation, &intent(None), &FakeScope(Ok(scope())))
         .unwrap();
-    let agent_terminal = admission.terminal.clone();
+    let agent_terminal = admission.terminal;
     // Exit the Agent so it becomes an exited tombstone, not a live runtime.
     agent.exit(&agent_terminal, 0).unwrap();
     let query_scope = TerminalLaunchScope {

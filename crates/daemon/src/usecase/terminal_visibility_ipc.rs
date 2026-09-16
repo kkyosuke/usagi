@@ -118,7 +118,7 @@ mod tests {
         let visibility = SharedTerminalVisibility::new();
         let t = terminal();
         let _ = visibility.observe(&t, 0);
-        let mut entries = vec![entry(t.clone()), entry(terminal())];
+        let mut entries = vec![entry(t), entry(terminal())];
         visibility.stamp(&mut entries);
         assert_eq!(
             entries[0].visibility.state,

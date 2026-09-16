@@ -1240,6 +1240,7 @@ impl IdempotencyJournal {
 pub fn write_frame(writer: &mut dyn Write, payload: &[u8]) -> io::Result<()> {
     write_frame_with_limit(writer, payload, DEFAULT_MAX_FRAME_BYTES)
 }
+#[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
 pub fn write_frame_with_limit(
     writer: &mut dyn Write,
     payload: &[u8],
@@ -1251,7 +1252,6 @@ pub fn write_frame_with_limit(
             "IPC frame length is outside negotiated bounds",
         ));
     }
-    #[allow(clippy::cast_possible_truncation)]
     let length = payload.len() as u32; // checked against u32::MAX above
     writer.write_all(&length.to_be_bytes())?;
     writer.write_all(payload)

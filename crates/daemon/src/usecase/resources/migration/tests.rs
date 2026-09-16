@@ -97,7 +97,7 @@ fn foreign_and_duplicated_records_are_left_out_of_the_shard_entirely() {
         ..record(owner, true)
     };
 
-    let report = adopt_legacy(owner, &[foreign.clone(), mine.clone(), duplicate]);
+    let report = adopt_legacy(owner, &[foreign.clone(), mine, duplicate]);
     assert_eq!(report.shard.resources.len(), 1);
     assert_eq!(report.adopted(), 1);
     assert_eq!(

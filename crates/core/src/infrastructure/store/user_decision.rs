@@ -912,7 +912,7 @@ mod tests {
         let mut freeform = decision.clone();
         freeform.allow_freeform = true;
         variants.push(freeform);
-        let mut expiry = decision.clone();
+        let mut expiry = decision;
         expiry.expires_at = Some(Utc::now());
         variants.push(expiry);
         for changed in variants {
@@ -1101,7 +1101,7 @@ mod tests {
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
 
-        let mut second = decision.clone();
+        let mut second = decision;
         second.decision_id = UserDecisionId::new();
         second.idempotency_key = None;
         assert_eq!(

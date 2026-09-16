@@ -105,7 +105,7 @@ mod action_io {
         write_client_error, write_daemon_outcome,
     };
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     pub(super) fn execute_action(
         action: Action,
         outcome: RunOutcome,
@@ -1024,7 +1024,7 @@ mod tests {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             validate_launcher_policy_inputs(&LauncherPolicyInputs {
-                protected_root: Some(protected.clone()),
+                protected_root: Some(protected),
                 backend: Some(parent_alias.join("executable")),
                 ..LauncherPolicyInputs::default()
             }),

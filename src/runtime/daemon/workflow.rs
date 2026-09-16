@@ -1232,7 +1232,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let mut stale = revising.clone();
+        let mut stale = revising;
         stale.id = OperationId::new();
         publish_verification(&store, workspace, session, &stale, Ok(PR_URL.to_owned())).unwrap();
         stale = run.clone();

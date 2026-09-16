@@ -20,7 +20,7 @@ fn clicking_a_usagi_opens_that_agents_tab() {
     };
     let second = TerminalRef {
         terminal_id: TerminalId::new(),
-        ..first.clone()
+        ..first
     };
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let (interaction, revision) = runtime.restore_fence();
@@ -65,7 +65,7 @@ fn clicking_a_usagi_opens_that_agents_tab() {
     };
     let _ = runtime.apply_event(AppEvent::GardenClick(plot_click));
     visit_garden_agent(&mut ui, &mut runtime, plot_click);
-    assert_eq!(runtime.focused_terminal(), Some(first.clone()));
+    assert_eq!(runtime.focused_terminal(), Some(first));
 
     // うさぎの click は、その runtime を持つ tab を選ぶ。
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));

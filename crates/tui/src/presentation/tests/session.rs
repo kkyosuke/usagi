@@ -1317,7 +1317,7 @@ fn open_workspace_pulls_the_session_command_port_from_the_factory() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let created = Arc::new(Mutex::new(0usize));
     let mut factory = SnapshotSessionPortFactory {
-        calls: calls.clone(),
+        calls,
         created: created.clone(),
     };
     let keys = [Key::Char('o'), Key::Enter, Key::CtrlQ, Key::Char('y')];
@@ -1350,7 +1350,7 @@ fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let created = Arc::new(Mutex::new(0usize));
     let mut factory = SnapshotSessionPortFactory {
-        calls: calls.clone(),
+        calls,
         created: created.clone(),
     };
     let keys = [Key::Char('1'), Key::CtrlQ, Key::Char('y')];

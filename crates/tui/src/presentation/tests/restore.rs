@@ -1235,8 +1235,9 @@ fn cross_tui_stale_observe_omits_old_ref_then_fresh_observation_restores_replace
     assert_eq!(mutations.lock().unwrap().len(), 2);
 }
 
-#[test]
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
+#[test]
 fn successful_restore_retains_port_and_reconnect_reobserves_exactly_once() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
@@ -1307,7 +1308,7 @@ fn successful_restore_retains_port_and_reconnect_reobserves_exactly_once() {
         crate::presentation::RestoreJobOutcome::Applied
     ));
     assert_eq!(mutations.lock().unwrap().len(), 1);
-    assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
+    assert_eq!(runtime.focused_terminal(), Some(terminal));
     let focus_before = runtime.focused_terminal();
     for tick in 1..=1_000 {
         assert!(!retry.begin_if_due(std::time::Duration::from_millis(tick)));

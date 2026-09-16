@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(first.to_string(), "endpoint cleanup failed");
         assert!(cleanup.saw_expected.get());
         assert!(!cleanup.cleared.get());
-        assert_eq!(store.load().unwrap(), Some(record.clone()));
+        assert_eq!(store.load().unwrap(), Some(record));
 
         assert_eq!(
             stop_with_cleanup(

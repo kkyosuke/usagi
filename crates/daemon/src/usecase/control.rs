@@ -1,7 +1,5 @@
 //! Typed, pure session/control state transitions owned by the daemon.
 
-#![allow(clippy::missing_errors_doc)]
-
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, WorkspaceId};
 
@@ -83,6 +81,7 @@ pub struct Prompt {
     pub attempts: u8,
 }
 
+#[allow(clippy::missing_errors_doc)] // エラーは呼び手が分岐しない不透明な失敗で、内訳を約束しない。
 /// Apply a phase report only for the exact capability and a newer source sequence.
 pub fn report_phase(
     runtime: &mut RuntimeSnapshot,
@@ -101,6 +100,7 @@ pub fn report_phase(
     runtime.phase_revision += 1;
     Ok(true)
 }
+#[allow(clippy::missing_errors_doc)] // エラーは呼び手が分岐しない不透明な失敗で、内訳を約束しない。
 /// Resolve an omitted prompt target only where one eligible agent pane exists.
 pub fn resolve_target(
     session: &SessionSnapshot,
@@ -121,6 +121,7 @@ pub fn resolve_target(
         None => Err(ControlError::AmbiguousTarget),
     }
 }
+#[allow(clippy::missing_errors_doc)] // エラーは呼び手が分岐しない不透明な失敗で、内訳を約束しない。
 /// Advance the durable input transaction. ACK loss is intentionally ambiguous.
 pub fn advance_prompt(prompt: &mut Prompt, next: PromptState) -> Result<(), ControlError> {
     if prompt.state == PromptState::InputAcknowledged && next == PromptState::RetryWait {
@@ -142,6 +143,7 @@ pub fn advance_prompt(prompt: &mut Prompt, next: PromptState) -> Result<(), Cont
     }
     Err(ControlError::InvalidTransition)
 }
+#[allow(clippy::missing_errors_doc)] // エラーは呼び手が分岐しない不透明な失敗で、内訳を約束しない。
 /// Begin removal by fencing all ordinary prompt/spawn delivery.
 pub fn begin_remove(
     session: &mut SessionSnapshot,
@@ -160,7 +162,6 @@ pub fn begin_remove(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::many_single_char_names)]
     use super::*;
     fn session() -> SessionSnapshot {
         SessionSnapshot {

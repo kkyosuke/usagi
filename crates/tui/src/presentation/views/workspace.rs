@@ -4314,13 +4314,13 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
-                    runtime: waiting.clone(),
+                    runtime: waiting,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
-                    runtime: live.clone(),
+                    runtime: live,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
                     resumed_from: None,
@@ -4445,8 +4445,8 @@ mod tests {
         let interrupted = runtime_ref(workspace, session);
         let ended = runtime_ref(workspace, session);
         for (runtime, phase) in [
-            (interrupted.clone(), AgentPhase::Interrupted),
-            (ended.clone(), AgentPhase::Ended),
+            (interrupted, AgentPhase::Interrupted),
+            (ended, AgentPhase::Ended),
         ] {
             let _ = update(
                 &mut state,
@@ -4616,7 +4616,7 @@ mod tests {
         let with_metrics = home_left_pane(
             30,
             LEFT_WIDTH,
-            &home.clone().with_metrics(Some(daemon_metrics())),
+            &home.with_metrics(Some(daemon_metrics())),
             now(),
         );
         let state_row = with_metrics
@@ -5871,7 +5871,7 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
-                    runtime: closed.clone(),
+                    runtime: closed,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Exited,
                     resumed_from: None,
@@ -6085,11 +6085,8 @@ mod tests {
 
         // Garden が frame でない場合は `None` を返し、呼び出し側は通常の Home の
         // hit test を続ける（overlay が閉じている場合と、庭が収まらない端末）。
-        let plain = HomeProjection::from_state(
-            &AppState::home(workspace, ids.clone()),
-            "atlas",
-            &projected,
-        );
+        let plain =
+            HomeProjection::from_state(&AppState::home(workspace, ids), "atlas", &projected);
         assert_eq!(garden_click_at(24, 100, &plain, now(), 10, 10), None);
         assert_eq!(garden_click_at(12, 100, &home, now(), 10, 10), None);
     }
@@ -7378,7 +7375,7 @@ mod tests {
         let baseline = render_home(30, 100, &home);
 
         // Attaching an absent observation is a no-op on the rendered frame.
-        let with_none = home.clone().with_metrics(None);
+        let with_none = home.with_metrics(None);
         assert_eq!(render_home(30, 100, &with_none), baseline);
         assert!(
             !baseline.iter().any(|line| line.contains(CPU_ICON)),
@@ -8850,7 +8847,6 @@ mod tests {
         let detail = HomeProjection::from_state(&state, "repo", &sessions)
             .with_pane(&pane)
             .pane_detail
-            .clone()
             .unwrap();
         assert_eq!(detail, unresumable.safe_detail());
 
@@ -8869,7 +8865,6 @@ mod tests {
         let detail = HomeProjection::from_state(&state, "repo", &sessions)
             .with_pane(&pane)
             .pane_detail
-            .clone()
             .unwrap();
         assert!(detail.contains("resuming"), "{detail}");
     }

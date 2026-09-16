@@ -428,7 +428,7 @@ fn newly_detected_pr_auto_opens_without_reopening_or_stealing_focus() {
     // Closing acknowledges the discovery. A title/state refresh and a
     // duplicate cannot reopen it because neither introduces a new URL.
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-    let mut enriched = first.clone();
+    let mut enriched = first;
     enriched.title = Some("ready for review".into());
     let _ = update(
         &mut state,
@@ -635,7 +635,7 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
     assert!(state.pr_overlay().unwrap().prs().is_empty());
-    let mut refreshed_merged = newly_detected.clone();
+    let mut refreshed_merged = newly_detected;
     refreshed_merged.state = PrState::Merged;
     let _ = update(
         &mut state,
