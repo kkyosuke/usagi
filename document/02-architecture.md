@@ -57,7 +57,14 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   ├── main.rs           # 面の選択だけを担う合成ルート
 │   ├── runtime/          # 実 IO adapter（各面のライブラリ port を接続）
 │   │   ├── cli.rs        # CLI outcome、実 git、TUI / daemon への bridge
-│   │   ├── daemon.rs     # Unix socket・signal・process・daemon record / lock
+│   │   ├── daemon.rs     # daemon 面の composition root（責務別の子モジュールを束ねる）
+│   │   ├── daemon/ipc_accept.rs # Unix socket の accept ループと handshake・response 書き出し
+│   │   ├── daemon/standby.rs    # standby generation の IPC・custody・昇格
+│   │   ├── daemon/workers.rs    # 背景 worker 群と shutdown、orphan / retention の回収
+│   │   ├── daemon/agent.rs      # Agent runtime の open / restart 復旧・tenant inventory
+│   │   ├── daemon/pty.rs        # PTY の確保と所有、terminal runtime の composition
+│   │   ├── daemon/instance_lock.rs # single-instance lock と workspace fence、custody 監視
+│   │   ├── daemon/broker.rs     # bootstrap broker の起動・endpoint 公開・idle 監視
 │   │   ├── daemon/dispatch.rs # admitted request と daemon owner / store の composition adapter
 │   │   ├── daemon/agent_provisioning.rs # provider argv・sandbox・role・MCP 注入の合成
 │   │   └── tui.rs        # crossterm terminal と workspace filesystem adapter

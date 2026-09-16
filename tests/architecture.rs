@@ -730,6 +730,44 @@ fn clipboard_platform_variants_are_compiled_only_for_their_targets_or_tests() {
     );
 }
 
+/// The daemon composition root grew to twenty-five thousand lines because every
+/// new concern was appended to one file. Each concern now owns a module, and
+/// this guard keeps them there: it fails if a representative symbol reappears in
+/// the composition module, or if the module itself grows back past the size the
+/// split brought it to.
+#[test]
+fn daemon_composition_root_keeps_its_concerns_in_their_modules() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition root is readable");
+    for (module, marker) in [
+        ("agent.rs", "fn open_agent_runtime"),
+        ("broker.rs", "fn spawn_bootstrap_broker"),
+        ("instance_lock.rs", "fn open_private_lock"),
+        ("ipc_accept.rs", "fn start_ipc_accept_loop"),
+        ("pty.rs", "fn new_terminal_runtime"),
+        ("standby.rs", "fn promote_standby_generation"),
+        ("workers.rs", "fn spawn_critical_worker"),
+    ] {
+        let source = fs::read_to_string(root.join("src/runtime/daemon").join(module))
+            .unwrap_or_else(|error| panic!("{module} is readable: {error}"));
+        assert!(source.contains(marker), "{module} must hold {marker}");
+        assert!(
+            !composition.contains(marker),
+            "{marker} belongs in daemon/{module}, not the composition module"
+        );
+    }
+    assert!(
+        composition.contains("mod tests;") && !composition.contains("mod tests {"),
+        "the composition module keeps its tests in a sibling file"
+    );
+    assert!(
+        composition.lines().count() <= 4_500,
+        "the daemon composition module must stay split: {} lines",
+        composition.lines().count()
+    );
+}
+
 #[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
@@ -737,10 +775,15 @@ fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_modul
         .expect("daemon composition source is readable");
     let tenant = fs::read_to_string(root.join("src/runtime/daemon/tenant_control.rs"))
         .expect("tenant control source is readable");
+    // The accept loop now lives in its own module; it is the caller that must
+    // route tenant requests through the tenant module rather than inline them.
+    let accept = fs::read_to_string(root.join("src/runtime/daemon/ipc_accept.rs"))
+        .expect("daemon accept loop source is readable");
 
     assert!(composition.contains("mod tenant_control;"));
-    assert!(composition.contains("tenant_control::dispatch("));
+    assert!(accept.contains("tenant_control::dispatch("));
     assert!(!composition.contains("fn dispatch_tenant("));
+    assert!(!accept.contains("fn dispatch_tenant("));
     for source in [&composition, &tenant] {
         assert!(
             !source
