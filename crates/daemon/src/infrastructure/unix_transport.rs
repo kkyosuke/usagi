@@ -1701,8 +1701,11 @@ fn socket_stat_at(directory: &fs::File, name: &str) -> io::Result<Option<libc::s
     }
 }
 
-// libc's mode_t width differs between supported Unix targets.
-#[allow(clippy::cast_lossless)] // 値域は呼び出し前に押さえてあり、明示変換のほうが意図が読める。
+// libc's mode_t width differs between supported Unix targets: the same `as u32`
+// is a widening conversion on one and a no-op on another, so exactly one of these
+// two lints fires per target. Both are allowed so the source reads the same
+// everywhere and CI does not depend on which host ran clippy.
+#[allow(clippy::cast_lossless, clippy::unnecessary_cast)]
 fn verify_owned_socket_stat(
     metadata: &libc::stat,
     expected: Option<SocketIdentity>,
