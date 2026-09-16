@@ -6,13 +6,15 @@ use crate::presentation::views::config;
 #[cfg(test)]
 use crate::usecase::application::controller::{SafeError, SafeMessage};
 
+#[cfg(test)]
+use super::{AppEvent, BackendEvent, Completions, Notice};
 use super::{
-    AppEvent, AppKey, BackendEvent, Completions, Config, ConfigStep, Field, Key, MenuAction, New,
-    NewStep, Notice, Open, OpenStep, SettingsPort, Terminal, Welcome, WorkspaceConfigStep,
-    play_config_save_wave, run_workspace_loading, run_workspace_loading_with,
-    step_setup_commands_editor,
+    AppKey, Config, ConfigStep, Field, Key, MenuAction, New, NewStep, Open, OpenStep, SettingsPort,
+    Terminal, Welcome, WorkspaceConfigStep, play_config_save_wave, run_workspace_loading,
+    run_workspace_loading_with, step_setup_commands_editor,
 };
 
+#[cfg(test)]
 pub(super) fn unavailable_completion(completions: &Completions, message: &str) {
     completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
         message,

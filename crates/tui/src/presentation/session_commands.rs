@@ -2,16 +2,22 @@
 
 #[cfg(test)]
 use super::SESSION_PROJECTION_BUILDS;
+#[cfg(test)]
+use super::SessionCommandPort;
+#[cfg(test)]
+use super::SessionCommandPortFactory;
 use super::{
     AppEvent, AppState, BTreeMap, BackendEvent, Completions, FRAME_EVENT_BUDGET, Notice,
     OperationResult, ProjectedSession, ProviderResumeProjection, SessionBackendCompletion,
-    SessionCommand, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionId,
-    SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort, SessionRoleProjection,
-    WorkspaceIoRuntime, WorkspaceRuntime, runtime_identities_are_valid,
+    SessionCommand, SessionCommandResult, SessionId, SessionLifecycle, SessionLifecycleProjection,
+    SessionRefreshPort, SessionRoleProjection, WorkspaceIoRuntime, WorkspaceRuntime,
+    runtime_identities_are_valid,
 };
 
+#[cfg(test)]
 pub(super) struct UnavailableSessionCommandPort;
 
+#[cfg(test)]
 impl SessionCommandPort for UnavailableSessionCommandPort {
     fn execute(
         &self,
@@ -23,11 +29,13 @@ impl SessionCommandPort for UnavailableSessionCommandPort {
     }
 }
 
+#[cfg(test)]
 /// 既定では session command を接続しない factory。
 ///
 /// daemon-backed port を注入しない embedder / テスト経路で使う。
 pub(super) struct UnavailableSessionCommandPortFactory;
 
+#[cfg(test)]
 impl SessionCommandPortFactory for UnavailableSessionCommandPortFactory {
     fn create(&mut self) -> Box<dyn SessionCommandPort> {
         Box::new(UnavailableSessionCommandPort)

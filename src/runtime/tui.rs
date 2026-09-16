@@ -4213,17 +4213,19 @@ fn launch_screen_graph(
             // The graph resolves "leave this workspace" into its own Welcome
             // screen, so it only returns when the process is ending. The
             // splash therefore plays once per launch, not once per Welcome.
-            presentation::run_screen_graph_with_backend_and_notice(
+            presentation::run_screen_graph(
                 terminal,
-                workspaces,
-                recent,
-                now,
-                start,
-                &mut loader,
-                &mut settings,
-                &mut backend_factory,
-                available_models,
-                notice,
+                presentation::ScreenGraphRun::new(
+                    workspaces,
+                    recent,
+                    now,
+                    start,
+                    &mut loader,
+                    &mut settings,
+                    &mut backend_factory,
+                )
+                .with_available_models(available_models)
+                .with_notice(notice),
             )
         })?;
     } else {
@@ -4399,17 +4401,19 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     if error.kind() == std::io::ErrorKind::Interrupted {
                         let (workspaces, recent) =
                             load_screen_graph_data(&loader.storage, Start::Welcome)?;
-                        return presentation::run_screen_graph_with_backend_and_notice(
+                        return presentation::run_screen_graph(
                             terminal,
-                            workspaces,
-                            recent,
-                            Utc::now(),
-                            Start::Welcome,
-                            &mut loader,
-                            &mut settings,
-                            &mut backend_factory,
-                            available_models,
-                            Some("Workspace opening was cancelled.".to_owned()),
+                            presentation::ScreenGraphRun::new(
+                                workspaces,
+                                recent,
+                                Utc::now(),
+                                Start::Welcome,
+                                &mut loader,
+                                &mut settings,
+                                &mut backend_factory,
+                            )
+                            .with_available_models(available_models)
+                            .with_notice(Some("Workspace opening was cancelled.".to_owned())),
                         );
                     }
                     let Some(notice) = application::open_failure_notice(&error) else {
@@ -4417,17 +4421,19 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     };
                     let (workspaces, recent) =
                         load_screen_graph_data(&loader.storage, Start::Welcome)?;
-                    return presentation::run_screen_graph_with_backend_and_notice(
+                    return presentation::run_screen_graph(
                         terminal,
-                        workspaces,
-                        recent,
-                        Utc::now(),
-                        Start::Welcome,
-                        &mut loader,
-                        &mut settings,
-                        &mut backend_factory,
-                        available_models,
-                        Some(notice),
+                        presentation::ScreenGraphRun::new(
+                            workspaces,
+                            recent,
+                            Utc::now(),
+                            Start::Welcome,
+                            &mut loader,
+                            &mut settings,
+                            &mut backend_factory,
+                        )
+                        .with_available_models(available_models)
+                        .with_notice(Some(notice)),
                     );
                 }
             };
@@ -4440,14 +4446,16 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             // The workspace's ports are already dropped by the time the
             // controller returns, so the switcher starts with no connection
             // to the workspace that was left.
-            match presentation::run_workspace_deck_with_backend_and_config(
+            match presentation::run_workspace_deck(
                 terminal,
-                snapshot,
-                &registry,
-                &mut loader,
-                &mut backend_factory,
-                &mut settings,
-                available_models,
+                presentation::WorkspaceDeckRun::new(
+                    snapshot,
+                    &registry,
+                    &mut loader,
+                    &mut backend_factory,
+                    &mut settings,
+                )
+                .with_available_models(available_models),
             )? {
                 Exit::Quit => Ok(Exit::Quit),
                 Exit::Welcome => {
@@ -4455,16 +4463,18 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     // just left is the most recent one and belongs at the top.
                     let (workspaces, recent) =
                         load_screen_graph_data(&loader.storage, Start::Welcome)?;
-                    presentation::run_screen_graph_with_backend(
+                    presentation::run_screen_graph(
                         terminal,
-                        workspaces,
-                        recent,
-                        Utc::now(),
-                        Start::Welcome,
-                        &mut loader,
-                        &mut settings,
-                        &mut backend_factory,
-                        available_models,
+                        presentation::ScreenGraphRun::new(
+                            workspaces,
+                            recent,
+                            Utc::now(),
+                            Start::Welcome,
+                            &mut loader,
+                            &mut settings,
+                            &mut backend_factory,
+                        )
+                        .with_available_models(available_models),
                     )
                 }
             }
