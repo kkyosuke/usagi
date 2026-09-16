@@ -1,5 +1,5 @@
 ---
-number: 757
+number: 767
 title: fix(tui): Open 画面に登録済み workspace が全件出ないのを直す
 status: done
 priority: high
