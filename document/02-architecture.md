@@ -92,6 +92,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   └── tui/              # usagi-tui: TUI 面
 │       └── src/
 │           ├── lib.rs
+│           ├── infrastructure/  # daemon reply / live 入力を TUI 語彙へ翻訳する純粋 adapter（実 IO は合成ルートが注入）
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
 │           │   │   ├── controller/    # Entry / New / Home の純粋 reducer（bounded context と tests を分離）
@@ -649,6 +650,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | `Workspace` / `Settings` / `Issue` などのエンティティ、および画面が並べて見せる読み取り値（`WorkspaceOverview` = workspace＋各カウント、`UniteOverview` = 合併した workspace 群の合計、welcome 画面の recent 一覧が持つ `Recent` = そのどちらか） | `crates/core/src/domain/` |
 | agent の static profile、product-neutral capability、immutable launch request / plan / durable snapshot、injected MCP wiring が公開する tool 系統、system prompt 本文 | `crates/core/src/domain/agent/`。CLI 文法・shell rendering・PTY・secret・provisioning は置かない |
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
+| daemon reply の decode・operation の correlate・live 入力の `Key` 分類 | `crates/tui/src/infrastructure/`。payload と入力だけを見る純関数で、接続・lane・thread・端末 backend の所有は合成ルート（`src/runtime/tui.rs`）に残る。`tests/architecture.rs` の `tui_infrastructure_translates_without_owning_real_io` が実 IO の混入を禁じる |
 | 注入する時計の語彙（monotonic ミリ秒 / wall clock / 論理カウンタ） | `crates/core/src/domain/clock.rs` の `MonotonicClock` / `WallClock` / `LogicalClock`。同じ意味の時計を層ごとに別 trait で宣言せず、実装（`Instant` 由来の process uptime、`Utc::now`、粗いカウンタ）は infrastructure と合成ルートが束ねる。待機は時計ではないため `infrastructure::daemon` の `Sleeper` が持つ |
 | workspace の登録・touch・recent overview 構築、セッション作成・設定解決など両面が使うロジック | `crates/core/src/usecase/` |
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
