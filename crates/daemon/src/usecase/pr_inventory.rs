@@ -1117,13 +1117,13 @@ mod tests {
         assert_eq!(store.values.borrow()[&session].entries.len(), 1);
     }
     #[derive(Clone, Default)]
-    struct FakeClock(Rc<Cell<u64>>);
-    impl FakeClock {
+    struct FakeRefreshClock(Rc<Cell<u64>>);
+    impl FakeRefreshClock {
         fn set(&self, now_ms: u64) {
             self.0.set(now_ms);
         }
     }
-    impl MonotonicClock for FakeClock {
+    impl MonotonicClock for FakeRefreshClock {
         fn now_ms(&self) -> u64 {
             self.0.get()
         }
@@ -1132,11 +1132,11 @@ mod tests {
     type ProcessCall = (String, Vec<String>, u64);
 
     #[derive(Clone, Default)]
-    struct FakeRunner {
+    struct FakeGhRunner {
         calls: Rc<RefCell<Vec<ProcessCall>>>,
         results: Rc<RefCell<VecDeque<Result<String, ()>>>>,
     }
-    impl GhProcessPort for FakeRunner {
+    impl GhProcessPort for FakeGhRunner {
         type Error = ();
         fn run(&mut self, program: &str, argv: &[String], timeout_ms: u64) -> Result<String, ()> {
             self.calls
@@ -1173,12 +1173,12 @@ mod tests {
     #[test]
     fn concurrent_refresh_contains_a_panicking_provider_worker() {
         let id = canonicalize("https://github.com/o/r/pull/17").unwrap();
-        let worker = RefreshWorker::new(PanickingRunner, FakeClock::default(), 1, 10);
+        let worker = RefreshWorker::new(PanickingRunner, FakeRefreshClock::default(), 1, 10);
         let results = worker.fetch_many(vec![id.clone()]);
         assert_eq!(results, vec![(id, RefreshResult::Failed)]);
 
         let id = canonicalize("https://github.com/o/r/pull/18").unwrap();
-        let worker = RefreshWorker::new(SuccessfulRunner, FakeClock::default(), 1, 10);
+        let worker = RefreshWorker::new(SuccessfulRunner, FakeRefreshClock::default(), 1, 10);
         let results = worker.fetch_many(vec![id.clone()]);
         assert!(matches!(
             results.as_slice(),
@@ -1209,12 +1209,12 @@ mod tests {
         let second = SessionId::new();
         discover(&mut projector, first, id.as_url());
         discover(&mut projector, second, id.as_url());
-        let runner = FakeRunner::default();
+        let runner = FakeGhRunner::default();
         runner.results.borrow_mut().push_back(Ok(format!(
             r#"{{"title":"Done","state":"MERGED","headRefOid":"{HEAD_OID}"}}"#
         )));
         let calls = Rc::clone(&runner.calls);
-        let mut worker = RefreshWorker::new(runner, FakeClock::default(), 2, 60_000);
+        let mut worker = RefreshWorker::new(runner, FakeRefreshClock::default(), 2, 60_000);
         worker.rebuild(&mut projector).unwrap();
         let due = worker.claim_due(&mut projector).unwrap();
         assert_eq!(due, vec![id.clone()]);
@@ -1399,14 +1399,14 @@ mod tests {
             .unwrap();
         let mut projector = OutputPrProjector::new(Store::default());
         discover(&mut projector, session, id.as_url());
-        let runner = FakeRunner::default();
+        let runner = FakeGhRunner::default();
         runner.results.borrow_mut().extend([
             Err(()),
             Ok(format!(
                 r#"{{"title":"fresh","state":"OPEN","headRefOid":"{HEAD_OID}"}}"#
             )),
         ]);
-        let clock = FakeClock::default();
+        let clock = FakeRefreshClock::default();
         let mut worker = RefreshWorker::new(runner, clock.clone(), 1, 10_000);
         worker.rebuild(&mut projector).unwrap();
         let due = worker.claim_due(&mut projector).unwrap();
@@ -1451,8 +1451,8 @@ mod tests {
         let id = canonicalize("https://github.com/o/r/pull/15").unwrap();
         let mut projector = OutputPrProjector::new(Store::default());
         discover(&mut projector, session, id.as_url());
-        let clock = FakeClock::default();
-        let mut worker = RefreshWorker::new(FakeRunner::default(), clock.clone(), 1, 10_000);
+        let clock = FakeRefreshClock::default();
+        let mut worker = RefreshWorker::new(FakeGhRunner::default(), clock.clone(), 1, 10_000);
         worker.rebuild(&mut projector).unwrap();
         assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id.clone()]);
         assert!(
@@ -1488,9 +1488,9 @@ mod tests {
                 &format!("https://github.com/o/r/pull/{number}"),
             );
         }
-        let clock = FakeClock::default();
+        let clock = FakeRefreshClock::default();
         clock.set(50_000);
-        let mut first = RefreshWorker::new(FakeRunner::default(), clock.clone(), 2, 60_000);
+        let mut first = RefreshWorker::new(FakeGhRunner::default(), clock.clone(), 2, 60_000);
         first.rebuild(&mut projector).unwrap();
         let selected = first.claim_due(&mut projector).unwrap();
         assert_eq!(selected.len(), 2);
@@ -1498,7 +1498,7 @@ mod tests {
         assert_eq!(selected[1].as_url(), "https://github.com/o/r/pull/2");
         assert!(first.claim_due(&mut projector).unwrap().len() <= 1);
 
-        let mut restarted = RefreshWorker::new(FakeRunner::default(), clock, 2, 60_000);
+        let mut restarted = RefreshWorker::new(FakeGhRunner::default(), clock, 2, 60_000);
         restarted.rebuild(&mut projector).unwrap();
         assert_eq!(restarted.claim_due(&mut projector).unwrap(), selected);
     }
@@ -1510,11 +1510,11 @@ mod tests {
             .unwrap();
         let mut projector = OutputPrProjector::new(Store::default());
         discover(&mut projector, session, id.as_url());
-        let runner = FakeRunner::default();
+        let runner = FakeGhRunner::default();
         runner.results.borrow_mut().push_back(Ok(format!(
             r#"{{"title":"remote","state":"OPEN","headRefOid":"{HEAD_OID}"}}"#
         )));
-        let clock = FakeClock::default();
+        let clock = FakeRefreshClock::default();
         let mut worker = RefreshWorker::new(runner, clock.clone(), 1, 10_000);
         worker.rebuild(&mut projector).unwrap();
         let due = worker.claim_due(&mut projector).unwrap();
@@ -1543,7 +1543,8 @@ mod tests {
         };
 
         let mut projector = failing_projector();
-        let mut worker = RefreshWorker::new(FakeRunner::default(), FakeClock::default(), 1, 10);
+        let mut worker =
+            RefreshWorker::new(FakeGhRunner::default(), FakeRefreshClock::default(), 1, 10);
         assert!(worker.rebuild(&mut projector).is_err());
         let mut projector = failing_projector();
         assert!(worker.claim_due(&mut projector).is_err());

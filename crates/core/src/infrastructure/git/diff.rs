@@ -118,7 +118,7 @@ pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffSta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::testkit::{FakeGitRunner, fail, ok};
     use anyhow::anyhow;
     use std::cell::Cell;
 
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn prefers_remote_base_and_counts_commits_and_lines() {
-        let git = FakeGit::new(vec![
+        let git = FakeGitRunner::new(vec![
             ok("topic\n"),
             ok("origin/main\n"),
             ok("3\t2\n"),
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_main_and_hides_unavailable_or_base_states() {
-        let local = FakeGit::new(vec![ok("topic\n"), fail("no origin"), ok("0 1"), ok("")]);
+        let local = FakeGitRunner::new(vec![ok("topic\n"), fail("no origin"), ok("0 1"), ok("")]);
         assert_eq!(
             diff_status(&local, Path::new("/repo"))
                 .unwrap()
@@ -195,9 +195,9 @@ mod tests {
                 .base,
             "main"
         );
-        let base = FakeGit::new(vec![ok("main\n"), fail("no origin")]);
+        let base = FakeGitRunner::new(vec![ok("main\n"), fail("no origin")]);
         assert_eq!(diff_status(&base, Path::new("/repo")).unwrap(), None);
-        let detached = FakeGit::new(vec![ok("HEAD\n")]);
+        let detached = FakeGitRunner::new(vec![ok("HEAD\n")]);
         assert_eq!(diff_status(&detached, Path::new("/repo")).unwrap(), None);
     }
 
@@ -209,17 +209,18 @@ mod tests {
         assert!(diff_status(&BrokenAfter::new(2), repo).is_err());
         assert!(diff_status(&BrokenAfter::new(3), repo).is_err());
 
-        let branch_failure = FakeGit::new(vec![fail("not a repository")]);
+        let branch_failure = FakeGitRunner::new(vec![fail("not a repository")]);
         assert_eq!(diff_status(&branch_failure, repo).unwrap(), None);
-        let remote_without_name = FakeGit::new(vec![ok("topic"), ok("")]);
+        let remote_without_name = FakeGitRunner::new(vec![ok("topic"), ok("")]);
         assert_eq!(diff_status(&remote_without_name, repo).unwrap(), None);
-        let count_failure = FakeGit::new(vec![ok("topic"), ok("origin/main"), fail("bad range")]);
+        let count_failure =
+            FakeGitRunner::new(vec![ok("topic"), ok("origin/main"), fail("bad range")]);
         assert_eq!(diff_status(&count_failure, repo).unwrap(), None);
-        let missing_behind = FakeGit::new(vec![ok("topic"), ok("origin/main"), ok("x 1")]);
+        let missing_behind = FakeGitRunner::new(vec![ok("topic"), ok("origin/main"), ok("x 1")]);
         assert_eq!(diff_status(&missing_behind, repo).unwrap(), None);
-        let missing_ahead = FakeGit::new(vec![ok("topic"), ok("origin/main"), ok("1")]);
+        let missing_ahead = FakeGitRunner::new(vec![ok("topic"), ok("origin/main"), ok("1")]);
         assert_eq!(diff_status(&missing_ahead, repo).unwrap(), None);
-        let stat_failure = FakeGit::new(vec![
+        let stat_failure = FakeGitRunner::new(vec![
             ok("topic"),
             ok("origin/main"),
             ok("1 2"),

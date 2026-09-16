@@ -998,9 +998,9 @@ not a process line
     }
 
     #[derive(Clone)]
-    struct FakeGit(GitOutput);
+    struct FakeCleanGit(GitOutput);
 
-    impl GitRunner for FakeGit {
+    impl GitRunner for FakeCleanGit {
         fn run(&self, _repo: &Path, _args: &[&str]) -> anyhow::Result<GitOutput> {
             Ok(self.0.clone())
         }
@@ -1197,11 +1197,11 @@ not a process line
             stderr: String::new(),
         };
         for branch in [Some("usagi/x"), None] {
-            ensure_managed_worktree(&FakeGit(output(branch)), Path::new("/repo"), path, "x")
+            ensure_managed_worktree(&FakeCleanGit(output(branch)), Path::new("/repo"), path, "x")
                 .unwrap();
         }
         let error = ensure_managed_worktree(
-            &FakeGit(output(Some("feature/reused"))),
+            &FakeCleanGit(output(Some("feature/reused"))),
             Path::new("/repo"),
             path,
             "x",
@@ -1209,7 +1209,7 @@ not a process line
         .unwrap_err();
         assert!(error.to_string().contains("identity changed"));
         ensure_managed_worktree(
-            &FakeGit(GitOutput {
+            &FakeCleanGit(GitOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1221,7 +1221,7 @@ not a process line
         .unwrap();
         assert!(
             ensure_managed_worktree(
-                &FakeGit(GitOutput {
+                &FakeCleanGit(GitOutput {
                     success: false,
                     stdout: String::new(),
                     stderr: "broken".into(),

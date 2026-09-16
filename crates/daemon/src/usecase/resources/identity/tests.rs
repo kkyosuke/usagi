@@ -7,7 +7,7 @@ use super::{
     observe_child, record_child,
 };
 use crate::usecase::resources::ResourceError;
-use crate::usecase::resources::fixture::{FakeProbe, ProbeAnswer, verified};
+use crate::usecase::resources::fixture::{FakeChildProbe, ProbeAnswer, verified};
 
 /// A platform that answers the start token but not the process group. Each shape
 /// is a separate type so the observation rules stay readable at the call site.
@@ -43,7 +43,7 @@ impl ChildProcessProbe for GroupDenied {
 
 #[test]
 fn a_recorded_identity_is_the_platforms_answer_for_that_exact_pid() {
-    let probe = FakeProbe::new().with(
+    let probe = FakeChildProbe::new().with(
         7,
         ProbeAnswer::Alive {
             start: "os:991".to_owned(),
@@ -64,7 +64,7 @@ fn a_recorded_identity_is_the_platforms_answer_for_that_exact_pid() {
 
 #[test]
 fn an_unobservable_platform_never_produces_an_identity() {
-    let gone = FakeProbe::new().with(1, ProbeAnswer::Gone);
+    let gone = FakeChildProbe::new().with(1, ProbeAnswer::Gone);
     assert_eq!(record_child(&gone, 1), Err(IdentityRefusal::Gone));
     assert_eq!(record_child(&gone, 404), Err(IdentityRefusal::Gone));
     assert_eq!(
@@ -73,10 +73,10 @@ fn an_unobservable_platform_never_produces_an_identity() {
         "a gone process answers neither question"
     );
 
-    let denied = FakeProbe::new().with(2, ProbeAnswer::Denied);
+    let denied = FakeChildProbe::new().with(2, ProbeAnswer::Denied);
     assert_eq!(record_child(&denied, 2), Err(IdentityRefusal::Unobservable));
 
-    let malformed = FakeProbe::new().with(3, ProbeAnswer::Malformed);
+    let malformed = FakeChildProbe::new().with(3, ProbeAnswer::Malformed);
     assert_eq!(
         record_child(&malformed, 3),
         Err(IdentityRefusal::Malformed),
@@ -97,7 +97,7 @@ fn a_fixed_token_is_recorded_as_unverifiable_and_can_never_be_authority() {
         legacy.to_process_identity().unwrap_err(),
         ResourceError::IdentityUnverifiable
     );
-    let probe = FakeProbe::new().with(
+    let probe = FakeChildProbe::new().with(
         11,
         ProbeAnswer::Alive {
             start: "start".to_owned(),
@@ -111,7 +111,7 @@ fn a_fixed_token_is_recorded_as_unverifiable_and_can_never_be_authority() {
     );
     assert!(!ChildIdentity::unverifiable(11, String::new()).is_verifiable());
 
-    let gone = FakeProbe::new().with(11, ProbeAnswer::Gone);
+    let gone = FakeChildProbe::new().with(11, ProbeAnswer::Gone);
     assert_eq!(
         observe_child(&gone, &legacy),
         ChildObservation::Gone,
@@ -122,7 +122,7 @@ fn a_fixed_token_is_recorded_as_unverifiable_and_can_never_be_authority() {
 #[test]
 fn observation_separates_exact_gone_reuse_and_unknown() {
     let recorded = verified(21, "os:555");
-    let mut probe = FakeProbe::new().with(
+    let mut probe = FakeChildProbe::new().with(
         21,
         ProbeAnswer::Alive {
             start: "os:555".to_owned(),
@@ -158,7 +158,7 @@ fn observation_separates_exact_gone_reuse_and_unknown() {
 #[test]
 fn a_matching_token_with_a_different_process_group_is_not_an_exact_match() {
     let recorded = verified(31, "os:31");
-    let mismatched = FakeProbe::new().with(
+    let mismatched = FakeChildProbe::new().with(
         31,
         ProbeAnswer::Alive {
             start: "os:31".to_owned(),

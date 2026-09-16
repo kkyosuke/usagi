@@ -211,8 +211,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    struct FakeLocator(&'static [&'static str]);
-    impl ExecutableLocator for FakeLocator {
+    struct FakeRuntimeModelLocator(&'static [&'static str]);
+    impl ExecutableLocator for FakeRuntimeModelLocator {
         fn is_available(&self, executable: &str) -> bool {
             self.0.contains(&executable)
         }
@@ -235,7 +235,8 @@ mod tests {
             (&["claude", "codex"][..], vec!["claude", "codex"]),
         ] {
             let schema =
-                RuntimeModelSnapshot::capture(&config, &FakeLocator(available)).agent_schema();
+                RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(available))
+                    .agent_schema();
             let actual: Vec<_> = schema["oneOf"]
                 .as_array()
                 .unwrap()
@@ -255,8 +256,8 @@ mod tests {
         )]);
         // Fugu is served through the Claude CLI, so that executable is what
         // makes this runtime available.
-        let schema =
-            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["claude"])).agent_schema();
+        let schema = RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&["claude"]))
+            .agent_schema();
         assert_eq!(
             schema["oneOf"][1]["properties"]["runtime"]["const"],
             "sakana-ai"
@@ -266,7 +267,7 @@ mod tests {
             json!(["fugu-model"])
         );
         assert_eq!(
-            RuntimeModelSnapshot::capture(&config, &FakeLocator(&["sakana-ai"]))
+            RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&["sakana-ai"]))
                 .agent_schema()["oneOf"]
                 .as_array()
                 .unwrap()
@@ -294,7 +295,7 @@ mod tests {
         .unwrap();
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::read(workspace.path()),
-            &FakeLocator(&["claude", "codex"]),
+            &FakeRuntimeModelLocator(&["claude", "codex"]),
         );
         let branches = snapshot.agent_schema()["oneOf"].as_array().unwrap().clone();
         assert_eq!(branches.len(), 2);
@@ -325,15 +326,18 @@ mod tests {
         )
         .unwrap();
         let original_config = WorkspaceAgentConfig::read(workspace.path());
-        let original = RuntimeModelSnapshot::capture(&original_config, &FakeLocator(&["claude"]));
+        let original =
+            RuntimeModelSnapshot::capture(&original_config, &FakeRuntimeModelLocator(&["claude"]));
         std::fs::write(
             workspace.path().join(".usagi/config.toml"),
             "[agents.codex]\nmodels = [\"gpt-5\"]\n",
         )
         .unwrap();
         let regenerated_config = WorkspaceAgentConfig::read(workspace.path());
-        let regenerated =
-            RuntimeModelSnapshot::capture(&regenerated_config, &FakeLocator(&["codex"]));
+        let regenerated = RuntimeModelSnapshot::capture(
+            &regenerated_config,
+            &FakeRuntimeModelLocator(&["codex"]),
+        );
         assert_eq!(
             original.agent_schema()["oneOf"].as_array().unwrap().len(),
             2
@@ -359,7 +363,7 @@ mod tests {
     fn parser_rejects_invalid_and_mixed_agent_selectors() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeRuntimeModelLocator(&["claude"]),
         );
         assert!(
             snapshot
@@ -385,7 +389,7 @@ mod tests {
     fn the_delegation_selector_publishes_and_accepts_only_new_agents() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeRuntimeModelLocator(&["claude"]),
         );
 
         let branches = snapshot.new_agent_schema()["oneOf"]
@@ -438,7 +442,7 @@ mod tests {
     fn legacy_alias_normalizes_and_rejects_migration_mixes() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeRuntimeModelLocator(&["claude"]),
         );
         let mut accepted = json!({"agent_cli":"claude", "model":"sonnet"});
         snapshot.normalize_legacy_agent(&mut accepted).unwrap();

@@ -503,9 +503,9 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeBackend(VecDeque<&'static str>);
+    struct FakeEventBackend(VecDeque<&'static str>);
 
-    impl BackendReceiver for FakeBackend {
+    impl BackendReceiver for FakeEventBackend {
         type Event = &'static str;
 
         fn try_recv(&mut self) -> Option<Self::Event> {
@@ -654,7 +654,7 @@ mod tests {
             Event::Resize(80, 24),
             Event::Paste("paste".into()),
         ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(
             pump.next(T0).unwrap(),
@@ -699,7 +699,7 @@ mod tests {
                     KeyModifiers::CONTROL,
                 )),
             ]);
-            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0)
+            let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0)
                 .with_legacy_unix_control_aliases(true);
             let mut classifier = LiveInputClassifier::default();
             let RuntimeEvent::Input(leader) = pump.next(T0).unwrap() else {
@@ -761,7 +761,7 @@ mod tests {
             wheel(MouseEventKind::Moved, 9, 8),
             wheel(MouseEventKind::Down(MouseButton::Left), 9, 8),
         ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
         assert_eq!(
             pump.next(T0).unwrap(),
             RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
@@ -813,7 +813,7 @@ mod tests {
             wheel(MouseEventKind::ScrollUp, 6, 9),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(
             pump.next(T0).unwrap(),
@@ -835,7 +835,12 @@ mod tests {
             .map(|_| wheel(MouseEventKind::ScrollDown, 1, 2))
             .collect::<Vec<_>>();
         events.push(wheel(MouseEventKind::ScrollUp, 3, 4));
-        let mut pump = EventPump::new(FakeSource::with(events), FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(
+            FakeSource::with(events),
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
 
         assert_eq!(
             pump.next(T0).unwrap(),
@@ -869,7 +874,7 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         ))]);
-        let backend = FakeBackend(VecDeque::from(["snapshot"]));
+        let backend = FakeEventBackend(VecDeque::from(["snapshot"]));
         let mut pump = EventPump::new(source, backend, TICK, T0);
 
         assert!(matches!(pump.next(T0).unwrap(), RuntimeEvent::Input(_)));
@@ -879,7 +884,7 @@ mod tests {
 
     #[test]
     fn waits_only_until_the_next_tick_when_no_source_is_ready() {
-        let mut pump = EventPump::new(FakeSource::default(), FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(FakeSource::default(), FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
         assert_eq!(pump.source.timeouts, vec![Duration::ZERO, TICK]);
@@ -888,12 +893,16 @@ mod tests {
     #[test]
     fn source_poll_and_read_errors_are_projected_from_each_pump_phase() {
         for source in [ErrorSource::ImmediatePoll, ErrorSource::Read] {
-            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+            let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
             assert!(pump.next(T0).is_err());
         }
 
-        let mut delayed =
-            EventPump::new(ErrorSource::DelayedPoll, FakeBackend::default(), TICK, T0);
+        let mut delayed = EventPump::new(
+            ErrorSource::DelayedPoll,
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
         assert!(delayed.next(T0).is_err());
     }
 
@@ -935,7 +944,7 @@ mod tests {
     #[test]
     fn ignores_non_input_events_received_while_waiting_for_a_tick() {
         let source = DelayedSource(Some(Event::FocusLost));
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
 
@@ -943,7 +952,7 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         ))));
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
         assert!(matches!(pump.next(T0).unwrap(), RuntimeEvent::Input(_)));
     }
 
