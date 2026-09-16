@@ -1,7 +1,7 @@
 ---
 number: 767
 title: 削除した interrupted を Garden とサイドバーの一覧・件数から除外する
-status: todo
+status: done
 priority: medium
 labels: [bug, tui]
 dependson: []
@@ -12,14 +12,15 @@ updated_at: 2026-09-17T00:00:00+09:00
 
 ## 問題
 
-interrupted タブを削除しても Garden の右側一覧に履歴が残る。左サイドバーも同じ runtime 集合を
-使っており、削除状態を反映していない。実環境の保存データは未確認だが、コード上で表示経路の不整合を確認した。
+interrupted タブを削除しても Garden の右側一覧に履歴が残る。実環境の保存データは未確認だが、
+コード上で表示経路の不整合を確認した。
 
 ## 原因
 
 - `dismiss_interrupted_history` は表示 intent に `DismissInterrupted` を保存してタブを除去する。
 - interrupted タブの投影は dismissed な continuation を除外する。
-- workspace の表示投影は runtime phase 一覧から session ごとの Agent 群を作り、Garden とサイドバーへ渡すが、削除 intent を参照しない。
+- active project は pane membership による除外を実装済み。ただし inventory 再取得中の `None` 経路では古い runtime phase 一覧が残り、Garden と左サイドバーに削除済み interrupted が再表示され得る。
+- inactive project を描く Garden の観測経路は daemon inventory を直接集計し、保存済み削除 intent を参照していない。
 
 ## 対応方針
 

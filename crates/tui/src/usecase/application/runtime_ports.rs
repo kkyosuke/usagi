@@ -62,7 +62,10 @@ pub trait DesktopNotificationPort {
 
 /// Read-only daemon lane used to observe other projects in the Garden.
 pub trait GardenInventoryPort: Send {
-    /// Returns the safe Agent observation for `workspace`.
+    /// Returns the safe Agent observation for `workspace`, with interrupted
+    /// history filtered through the saved display intent and tab projection.
+    /// Refresh that intent on every observation so another TUI's dismissal or
+    /// explicit reopen also updates an inactive project's Garden.
     ///
     /// # Errors
     ///

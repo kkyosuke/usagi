@@ -128,6 +128,37 @@ pub struct InterruptedProjection {
     pub tabs: Vec<InterruptedTab>,
 }
 
+/// Apply the tab visibility rules to an inactive project's Garden inventory.
+/// This changes only the display copy; daemon history and live runtimes remain
+/// intact. Without a resident pane registry, the same pure tab projection owns
+/// dismissal, live-lineage suppression, and interrupted-lineage deduplication.
+pub fn retain_visible_interrupted(
+    inventory: &mut AgentInventory,
+    dismissed: &BTreeSet<AgentContinuationRef>,
+) {
+    let allowed = inventory
+        .runtimes
+        .iter()
+        .filter_map(|item| item.runtime.session_id)
+        .collect();
+    let visible = project(
+        inventory,
+        inventory.workspace_id,
+        &allowed,
+        &[],
+        dismissed,
+        &BTreeSet::new(),
+    )
+    .tabs
+    .into_iter()
+    .map(|tab| (tab.continuation, tab.last_terminal))
+    .collect::<BTreeMap<_, _>>();
+    inventory.runtimes.retain(|item| {
+        item.state != AgentRuntimeInventoryState::Interrupted
+            || visible.get(&item.continuation) == Some(&item.runtime.terminal)
+    });
+}
+
 /// Projects `inventory` into the interrupted tabs one TUI displays.
 ///
 /// * `workspace` fences the observation: an inventory for another workspace
@@ -583,6 +614,77 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
         )
+    }
+
+    #[test]
+    fn garden_history_visibility_tracks_dismissal_and_reopen_without_hiding_live_agents() {
+        let workspace = WorkspaceId::new();
+        let scope = Scope::session(workspace);
+        let closed = Lineage::new(&scope, ProviderKind::Codex);
+        let other = Lineage::new(&Scope::session(workspace), ProviderKind::Claude);
+        let live = Lineage::new(&scope, ProviderKind::Codex);
+        let source = inventory(
+            workspace,
+            vec![
+                closed.runtime(AgentRuntimeInventoryState::Interrupted),
+                other.runtime(AgentRuntimeInventoryState::Interrupted),
+                live.runtime(AgentRuntimeInventoryState::Live),
+            ],
+            vec![closed.available(), other.available()],
+        );
+        let mut displayed = source.clone();
+        retain_visible_interrupted(
+            &mut displayed,
+            &BTreeSet::from([closed.continuation, live.continuation]),
+        );
+        assert_eq!(displayed.runtimes, source.runtimes[1..]);
+        assert_eq!(displayed.resumable, source.resumable);
+
+        // A new observation (including after reconnect or workspace switch)
+        // reads the same dismissal, rather than reviving the daemon history.
+        let mut refreshed = source.clone();
+        retain_visible_interrupted(&mut refreshed, &BTreeSet::from([closed.continuation]));
+        assert_eq!(refreshed, displayed);
+        let mut reopened = source.clone();
+        retain_visible_interrupted(&mut reopened, &BTreeSet::new());
+        assert_eq!(reopened, source);
+
+        let mut last = inventory(
+            workspace,
+            vec![closed.runtime(AgentRuntimeInventoryState::Interrupted)],
+            vec![],
+        );
+        retain_visible_interrupted(&mut last, &BTreeSet::from([closed.continuation]));
+        assert!(last.runtimes.is_empty());
+    }
+
+    #[test]
+    fn garden_history_uses_the_same_lineage_membership_as_tabs() {
+        let workspace = WorkspaceId::new();
+        let scope = Scope::session(workspace);
+        let history = Lineage::new(&scope, ProviderKind::Codex);
+        let mut duplicate = history.runtime(AgentRuntimeInventoryState::Interrupted);
+        duplicate.runtime.agent_runtime_id = AgentRuntimeId::new();
+        duplicate.runtime.terminal.terminal_id = TerminalId::new();
+        let mut source = inventory(
+            workspace,
+            vec![
+                history.runtime(AgentRuntimeInventoryState::Interrupted),
+                duplicate,
+            ],
+            vec![history.available()],
+        );
+        retain_visible_interrupted(&mut source, &BTreeSet::new());
+        assert_eq!(
+            source.runtimes,
+            vec![history.runtime(AgentRuntimeInventoryState::Interrupted)]
+        );
+        let mut live = history.runtime(AgentRuntimeInventoryState::Live);
+        live.runtime.agent_runtime_id = AgentRuntimeId::new();
+        live.runtime.terminal.terminal_id = TerminalId::new();
+        source.runtimes.push(live.clone());
+        retain_visible_interrupted(&mut source, &BTreeSet::new());
+        assert_eq!(source.runtimes, vec![live]);
     }
 
     #[test]
