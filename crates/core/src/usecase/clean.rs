@@ -328,7 +328,7 @@ fn managed_worktree_name<'a>(
 mod tests {
     use super::*;
     use crate::infrastructure::git::observe_repository;
-    use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::testkit::{FakeGitRunner, fail, ok};
     use crate::infrastructure::git::{GitOutput, GitRunner};
     use std::cell::Cell;
 
@@ -375,7 +375,7 @@ mod tests {
                          \nworktree /elsewhere\nHEAD other\nbranch refs/heads/usagi/elsewhere\n\
                          \nworktree /repo/.usagi/sessions/clean\nHEAD clean\nbranch refs/heads/usagi/clean\n\
                          \nworktree /repo/.usagi/sessions/detached\nHEAD detached\ndetached\n";
-        let git = FakeGit::new(vec![
+        let git = FakeGitRunner::new(vec![
             ok("true\n"),
             ok(worktrees),
             ok(""),
@@ -433,16 +433,16 @@ mod tests {
 
     #[test]
     fn repository_observation_fails_closed_when_git_evidence_is_missing() {
-        let outside = FakeGit::new(vec![fail("not a repository")]);
+        let outside = FakeGitRunner::new(vec![fail("not a repository")]);
         assert_eq!(
             observe_repository(&outside, Path::new("/repo")).unwrap(),
             None
         );
 
-        let worktrees_unavailable = FakeGit::new(vec![ok("true"), fail("broken worktrees")]);
+        let worktrees_unavailable = FakeGitRunner::new(vec![ok("true"), fail("broken worktrees")]);
         assert!(observe_repository(&worktrees_unavailable, Path::new("/repo")).is_err());
 
-        let branches_unavailable = FakeGit::new(vec![
+        let branches_unavailable = FakeGitRunner::new(vec![
             ok("true"),
             ok("worktree /repo\nHEAD root\nbranch refs/heads/main\n"),
             fail("broken refs"),

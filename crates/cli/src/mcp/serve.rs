@@ -994,8 +994,8 @@ mod tests {
         }
     }
 
-    struct FakeLocator(&'static [&'static str]);
-    impl ExecutableLocator for FakeLocator {
+    struct FakeServeLocator(&'static [&'static str]);
+    impl ExecutableLocator for FakeServeLocator {
         fn is_available(&self, executable: &str) -> bool {
             self.0.contains(&executable)
         }
@@ -1138,7 +1138,7 @@ mod tests {
             session_worktree.path().to_path_buf(),
             Some(workspace.path().to_path_buf()),
         );
-        let snapshot = runtime_model_snapshot(&workspace_root, &FakeLocator(&["codex"]));
+        let snapshot = runtime_model_snapshot(&workspace_root, &FakeServeLocator(&["codex"]));
         let schema = snapshot.agent_schema();
         let branches = schema["oneOf"].as_array().unwrap();
 
@@ -1266,7 +1266,7 @@ mod tests {
     #[test]
     fn delegation_is_hidden_when_no_new_worker_selector_is_executable() {
         let snapshot =
-            RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::empty(), &FakeLocator(&[]));
+            RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::empty(), &FakeServeLocator(&[]));
         let listed = tools_list_result(&snapshot, McpToolFamilies::all());
         assert!(
             listed["tools"]
@@ -1981,7 +1981,7 @@ mod tests {
             // at least one available runtime.
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
+                &FakeServeLocator(&["claude"]),
             );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
@@ -2010,7 +2010,7 @@ mod tests {
     fn delegate_brief_requires_one_validated_agent_selector() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         for arguments in [
             r#"{"brief":"triage"}"#,
@@ -2134,7 +2134,7 @@ mod tests {
         ] {
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
+                &FakeServeLocator(&["claude"]),
             );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
@@ -2182,7 +2182,7 @@ mod tests {
         ] {
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
+                &FakeServeLocator(&["claude"]),
             );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
@@ -2223,7 +2223,7 @@ mod tests {
     fn dispatch_schema_and_parser_use_the_captured_snapshot() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::empty(),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         // An empty config never publishes a runtime even when its executable exists.
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
@@ -2251,7 +2251,7 @@ mod tests {
 
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         let input = initialized_input(
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"session\":{\"name\":\"a\"},\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"},\"prompt\":\"p\"}}}\n",
@@ -2335,7 +2335,7 @@ mod tests {
     fn tools_list_publishes_an_existing_agent_branch_only_where_it_can_be_honoured() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         let mut out = Vec::new();
@@ -2386,7 +2386,7 @@ mod tests {
                 "sakana-ai",
                 vec!["fugu-model".into()],
             )]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         let mut out = Vec::new();

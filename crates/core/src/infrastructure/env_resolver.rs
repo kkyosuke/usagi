@@ -462,11 +462,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct FakeResolver {
+    struct FakeSecretResolver {
         reads: Mutex<Vec<String>>,
     }
 
-    impl SecretResolver for FakeResolver {
+    impl SecretResolver for FakeSecretResolver {
         fn read(&self, reference: &str) -> Result<String, String> {
             self.reads.lock().unwrap().push(reference.to_owned());
             if reference.contains("Locked") {
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn bounded_parallel_resolution_keeps_literals_success_failures_and_order() {
-        let reader = FakeResolver {
+        let reader = FakeSecretResolver {
             reads: Mutex::new(Vec::new()),
         };
         let resolved = resolve_parallel(
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn an_over_limit_request_has_zero_resolver_effects() {
-        let reader = FakeResolver {
+        let reader = FakeSecretResolver {
             reads: Mutex::new(Vec::new()),
         };
         let oversized = (0..=crate::domain::settings::MAX_SECRET_REFERENCES)
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn literal_only_bindings_do_not_start_secret_workers() {
-        let reader = FakeResolver {
+        let reader = FakeSecretResolver {
             reads: Mutex::new(Vec::new()),
         };
         assert_eq!(
@@ -695,12 +695,12 @@ mod tests {
         }
     }
 
-    struct FakeRunner {
+    struct FakeSecretRunner {
         child: Mutex<Option<FakeChild>>,
         spawn_error: Option<String>,
     }
 
-    impl ChildRunner for FakeRunner {
+    impl ChildRunner for FakeSecretRunner {
         fn spawn(&self, _reference: &str) -> Result<Box<dyn OwnedChild>, String> {
             if let Some(error) = &self.spawn_error {
                 return Err(error.clone());
@@ -755,10 +755,12 @@ mod tests {
         }
     }
 
-    fn fake_runner(exit_after_terminate: bool) -> (FakeRunner, Arc<Mutex<Vec<&'static str>>>) {
+    fn fake_runner(
+        exit_after_terminate: bool,
+    ) -> (FakeSecretRunner, Arc<Mutex<Vec<&'static str>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         (
-            FakeRunner {
+            FakeSecretRunner {
                 child: Mutex::new(Some(FakeChild {
                     events: Arc::clone(&events),
                     ready: false,
@@ -815,7 +817,7 @@ mod tests {
     #[test]
     fn successful_child_is_reaped_and_its_readers_are_joined() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let runner = FakeRunner {
+        let runner = FakeSecretRunner {
             child: Mutex::new(Some(FakeChild {
                 events: Arc::clone(&events),
                 ready: true,
@@ -880,7 +882,7 @@ mod tests {
                 true,
             ),
         ] {
-            let runner = FakeRunner {
+            let runner = FakeSecretRunner {
                 child: Mutex::new(Some(FakeChild {
                     events: Arc::new(Mutex::new(Vec::new())),
                     ready: true,
@@ -1106,7 +1108,7 @@ mod tests {
     #[test]
     fn observation_errors_still_escalate_reap_and_join() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let runner = FakeRunner {
+        let runner = FakeSecretRunner {
             child: Mutex::new(Some(FakeChild {
                 events: Arc::clone(&events),
                 ready: false,
@@ -1157,7 +1159,7 @@ mod tests {
             (Vec::new(), "no stderr"),
             (b"vault is locked\n".to_vec(), "vault is locked"),
         ] {
-            let runner = FakeRunner {
+            let runner = FakeSecretRunner {
                 child: Mutex::new(Some(FakeChild {
                     events: Arc::new(Mutex::new(Vec::new())),
                     ready: true,
@@ -1195,7 +1197,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_has_no_child_cleanup_effect() {
-        let runner = FakeRunner {
+        let runner = FakeSecretRunner {
             child: Mutex::new(None),
             spawn_error: Some("failed to start secret resolver".to_owned()),
         };

@@ -8,8 +8,8 @@ use tempfile::TempDir;
 use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
 use usagi_core::infrastructure::git::GitOutput;
 
-struct FakeGit(bool);
-impl FakeGit {
+struct FakeSessionGit(bool);
+impl FakeSessionGit {
     fn ok() -> Self {
         Self(true)
     }
@@ -344,7 +344,7 @@ fn specialized_worktree_fakes_keep_their_noop_contracts_explicit() {
     );
     assert!(setup.is_linked_worktree(session_root));
     setup
-        .remove_session_tree(&FakeGit::ok(), session_root, false)
+        .remove_session_tree(&FakeSessionGit::ok(), session_root, false)
         .unwrap();
 }
 
@@ -414,7 +414,7 @@ impl GitRunner for WorkspaceExistsGit {
         })
     }
 }
-impl GitRunner for FakeGit {
+impl GitRunner for FakeSessionGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
@@ -538,7 +538,7 @@ impl TeardownEffect for FailingTeardown {
     }
 }
 
-fn runtime(git: FakeGit) -> (TempDir, SessionRuntime) {
+fn runtime(git: FakeSessionGit) -> (TempDir, SessionRuntime) {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir(tmp.path().join(".git")).unwrap();
     let runtime = SessionRuntime::open(
@@ -575,7 +575,7 @@ fn confined_teardown() -> PendingTeardown {
 #[test]
 fn a_branch_preserving_teardown_skips_git_branch_deletion() {
     assert_eq!(
-        delete_teardown_branch(&FakeGit::ok(), &confined_teardown()),
+        delete_teardown_branch(&FakeSessionGit::ok(), &confined_teardown()),
         Ok(())
     );
 }
@@ -606,11 +606,11 @@ fn a_stored_conventional_branch_is_deleted_only_once() {
 
 #[test]
 fn an_exact_merged_pr_head_force_deletes_only_that_squash_merged_branch() {
-    struct RecordingGit {
+    struct HeadRecordingGit {
         head: String,
         calls: Arc<Mutex<Vec<Vec<String>>>>,
     }
-    impl GitRunner for RecordingGit {
+    impl GitRunner for HeadRecordingGit {
         fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
             self.calls
                 .lock()
@@ -634,7 +634,7 @@ fn an_exact_merged_pr_head_force_deletes_only_that_squash_merged_branch() {
         teardown.delete_branch = true;
         teardown.merged_head_oid = Some("a".repeat(40));
         delete_teardown_branch(
-            &RecordingGit {
+            &HeadRecordingGit {
                 head,
                 calls: Arc::clone(&calls),
             },
@@ -657,11 +657,11 @@ fn an_exact_merged_pr_head_force_deletes_only_that_squash_merged_branch() {
 
 #[test]
 fn merged_pr_head_is_durable_across_teardown_worker_handoff() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -683,7 +683,7 @@ fn merged_pr_head_is_durable_across_teardown_worker_handoff() {
         tmp.path().to_path_buf(),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -701,11 +701,11 @@ fn merged_pr_head_is_durable_across_teardown_worker_handoff() {
 
 #[test]
 fn removal_identity_treats_a_missing_branch_as_absent_and_rejects_unknown_names() {
-    let (_tmp, rt) = runtime(FakeGit::fail());
+    let (_tmp, rt) = runtime(FakeSessionGit::fail());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -727,7 +727,7 @@ fn session_runtime_fake_git_contract() {
         tmp.path().join("repository"),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::fail(),
+        FakeSessionGit::fail(),
         FakeSessionWorktreeIo {
             occupied: false,
             build_calls: Arc::clone(&calls),
@@ -757,7 +757,7 @@ fn session_runtime_fake_fs_contract() {
         tmp.path().join("repository"),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         FakeSessionWorktreeIo {
             occupied: true,
             build_calls: Arc::clone(&calls),
@@ -860,7 +860,7 @@ fn startup_adopts_a_clean_merged_orphan_and_safe_remove_deletes_actual_branch() 
 
 #[test]
 fn a_manually_removed_orphan_is_safe_to_forget() {
-    let (_tmp, runtime) = runtime(FakeGit::ok());
+    let (_tmp, runtime) = runtime(FakeSessionGit::ok());
 
     let diagnosis = runtime.inspect_orphan("gone");
 
@@ -991,7 +991,7 @@ fn explicit_orphan_purge_removes_unregistered_files_and_unmerged_work() {
 
 #[test]
 fn explicit_orphan_purge_rejects_a_registered_session() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -1014,7 +1014,7 @@ fn explicit_orphan_purge_rejects_a_registered_session() {
 
 #[test]
 fn create_lists_overview_and_removes_a_durable_session() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     // An empty workspace has nothing only its owner can finish, so it may be
     // given back; a session mid-teardown is exactly such work.
     assert!(!runtime.has_unfinished_work().unwrap());
@@ -1039,7 +1039,7 @@ fn create_lists_overview_and_removes_a_durable_session() {
 
 #[test]
 fn creates_a_single_character_session_name() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
 
     let created = runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"a"}))
@@ -1097,7 +1097,7 @@ fn session_base_ref_accepts_only_fully_qualified_branch_refs() {
 }
 #[test]
 fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
-    let (_tmp, mut runtime) = runtime(FakeGit::fail());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::fail());
     assert_eq!(
         runtime
             .handle(SessionAction::Create, "bad", &json!({"name":"one"}))
@@ -1264,7 +1264,7 @@ fn reports_a_reusable_session_name_when_its_workspace_already_exists() {
 
 #[test]
 fn lists_a_failed_session_but_refuses_to_resolve_it_then_removes_it_to_free_the_name() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -1453,7 +1453,7 @@ fn remove_forwards_force_to_the_worktree_removal() {
 
 #[test]
 fn remove_rejects_a_non_boolean_force_flag() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -1472,7 +1472,7 @@ fn remove_rejects_a_non_boolean_force_flag() {
 
 #[test]
 fn existing_session_create_is_idempotent_for_the_same_legacy_role() {
-    let (tmp, mut runtime) = runtime(FakeGit::ok());
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -1508,7 +1508,7 @@ instructions = "code"
 
 #[test]
 fn existing_session_create_never_reparents_the_session() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let original_parent = SessionId::new();
     let different_parent = SessionId::new();
     let created = runtime
@@ -1540,7 +1540,7 @@ fn existing_session_create_never_reparents_the_session() {
 
 #[test]
 fn authenticated_creator_exclusively_owns_the_session_name_and_identity() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let parent = SessionId::new();
     let creator = AgentId::new();
     let caller = CallerRef {
@@ -1632,8 +1632,8 @@ fn authenticated_creator_exclusively_owns_the_session_name_and_identity() {
 
 #[test]
 fn creator_metadata_is_validated_and_failed_records_are_removal_only() {
-    let (_failed_tmp, mut failed_runtime) = runtime(FakeGit::fail());
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_failed_tmp, mut failed_runtime) = runtime(FakeSessionGit::fail());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let parent = SessionId::new();
     let creator = AgentId::new();
     let caller = CallerRef {
@@ -1713,7 +1713,7 @@ fn creator_metadata_is_validated_and_failed_records_are_removal_only() {
 
 #[test]
 fn creator_metadata_and_base_ref_validation_fail_before_effect() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let parent = SessionId::new();
     let creator = AgentId::new();
     for payload in [
@@ -1742,7 +1742,7 @@ fn creator_metadata_and_base_ref_validation_fail_before_effect() {
 
 #[test]
 fn creator_authorization_reports_unreadable_state() {
-    let (tmp, runtime) = runtime(FakeGit::ok());
+    let (tmp, runtime) = runtime(FakeSessionGit::ok());
     let caller = CallerRef {
         session_id: Some(SessionId::new()),
         agent_id: AgentId::new(),
@@ -1769,7 +1769,7 @@ fn creator_authorization_reports_unreadable_state() {
 
 #[test]
 fn catalog_default_assignment_is_stable_and_conflicting_role_is_rejected() {
-    let (tmp, mut runtime) = runtime(FakeGit::ok());
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     std::fs::write(
         tmp.path().join(".usagi/roles.toml"),
         r#"version = 1
@@ -1875,7 +1875,7 @@ fn malformed_catalog_fails_create_before_git_effect() {
         tmp.path().to_path_buf(),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         FakeSessionWorktreeIo {
             occupied: false,
             build_calls: Arc::clone(&calls),
@@ -1911,7 +1911,7 @@ instructions = "direct"
 
 #[test]
 fn effective_role_catalog_rejects_a_malformed_catalog() {
-    let (tmp, runtime) = runtime(FakeGit::ok());
+    let (tmp, runtime) = runtime(FakeSessionGit::ok());
     std::fs::write(tmp.path().join(".usagi/roles.toml"), "version = 99\n").unwrap();
 
     assert!(matches!(
@@ -1938,7 +1938,7 @@ fn worktree_failure_detail_is_single_line_bounded_and_nonempty() {
 }
 #[test]
 fn operation_id_is_idempotent_only_for_the_same_semantic_request() {
-    let (_tmp, mut runtime) = runtime(FakeGit::ok());
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let operation = operation();
     runtime
         .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
@@ -2165,7 +2165,7 @@ fn failed_remove_replays_the_same_failure_without_repeating_the_effect() {
 
 #[test]
 fn resolver_requires_complete_available_scope_and_restart_reconciles_interrupted_work() {
-    let (tmp, mut runtime) = runtime(FakeGit::ok());
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let created = runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -2208,7 +2208,7 @@ fn resolver_requires_complete_available_scope_and_restart_reconciles_interrupted
         tmp.path().to_path_buf(),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2253,7 +2253,7 @@ fn resolver_requires_complete_available_scope_and_restart_reconciles_interrupted
 
 #[test]
 fn open_repairs_a_legacy_failed_session_and_replays_failure() {
-    let (tmp, mut runtime) = runtime(FakeGit::ok());
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let operation = operation();
     runtime
         .handle(SessionAction::Create, &operation, &json!({"name":"legacy"}))
@@ -2277,7 +2277,7 @@ fn open_repairs_a_legacy_failed_session_and_replays_failure() {
         tmp.path().to_path_buf(),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2309,7 +2309,7 @@ fn restart_from_another_directory_uses_the_shared_session_state_and_root() {
         original_root.clone(),
         &state_dir,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2322,7 +2322,7 @@ fn restart_from_another_directory_uses_the_shared_session_state_and_root() {
         another_directory,
         &state_dir,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2360,7 +2360,7 @@ fn first_shared_start_migrates_legacy_repository_session_state() {
         repository.clone(),
         &state_dir,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2455,7 +2455,7 @@ fn opening_a_repository_migrates_v1_usagi_ignore_rules() {
         tmp.path().to_path_buf(),
         &tmp.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2489,7 +2489,7 @@ fn bound_workspace_root_predicts_the_root_open_binds() {
         first.clone(),
         &state_dir,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2507,7 +2507,7 @@ fn bound_workspace_root_predicts_the_root_open_binds() {
         second,
         &state_dir,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -2528,7 +2528,7 @@ fn bound_workspace_root_reports_unreadable_state() {
 
 #[test]
 fn session_id_reports_unreadable_state() {
-    let (tmp, mut runtime) = runtime(FakeGit::ok());
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name": "one"}))
         .unwrap();
@@ -2545,7 +2545,7 @@ fn session_id_reports_unreadable_state() {
 
 #[test]
 fn pending_teardowns_skip_incomplete_delete_records() {
-    let (_tmp, runtime) = runtime(FakeGit::ok());
+    let (_tmp, runtime) = runtime(FakeSessionGit::ok());
     let mut missing_plan =
         ManagedSession::new_creating("missing-plan".into(), OperationId::new(), Utc::now());
     missing_plan.lifecycle = SessionLifecycle::Deleting;
@@ -2628,7 +2628,7 @@ fn poison_lock(runtime: &Arc<Mutex<SessionRuntime>>) {
 
 #[test]
 fn perform_create_releases_the_session_lock_while_building_the_worktree() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let git = LockProbeGit {
@@ -2661,7 +2661,7 @@ fn configured_setup_commands_run_in_order_without_holding_the_session_lock() {
             repository.clone(),
             &temporary.path().join("daemon"),
             DaemonGeneration::new(),
-            FakeGit::ok(),
+            FakeSessionGit::ok(),
             SetupSessionWorktreeIo {
                 calls: Arc::clone(&calls),
                 fail_on: None,
@@ -2675,7 +2675,7 @@ fn configured_setup_commands_run_in_order_without_holding_the_session_lock() {
 
     let reply = perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"configured"}),
     )
@@ -2708,7 +2708,7 @@ fn create_and_setup_completion_refresh_the_fence_after_unrelated_mutations() {
         repository,
         &temporary.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
@@ -2770,7 +2770,7 @@ fn create_and_setup_completion_rejects_a_different_workspace_identity() {
         repository,
         &temporary.path().join("daemon"),
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
@@ -2840,7 +2840,7 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
             repository,
             &temporary.path().join("daemon"),
             DaemonGeneration::new(),
-            FakeGit::ok(),
+            FakeSessionGit::ok(),
             SetupSessionWorktreeIo {
                 calls: Arc::clone(&calls),
                 fail_on: Some("fail".into()),
@@ -2854,7 +2854,7 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
 
     let error = perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation,
         &json!({"name":"failed-setup"}),
     )
@@ -2893,7 +2893,7 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
     assert!(matches!(
         perform_create(
             &runtime,
-            &FakeGit::ok(),
+            &FakeSessionGit::ok(),
             &operation,
             &json!({"name":"failed-setup"}),
         ),
@@ -2917,7 +2917,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
         repository.clone(),
         &daemon,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
@@ -2946,7 +2946,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
         repository,
         &daemon,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
@@ -2969,7 +2969,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
 /// a recovery candidate — with or without a role (#611).
 #[test]
 fn only_delegated_creates_are_reported_for_recovery() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     std::fs::write(
         tmp.path().join(".usagi/roles.toml"),
         r#"version = 1
@@ -2982,10 +2982,10 @@ instructions = "code"
     .unwrap();
     let runtime = Arc::new(Mutex::new(rt));
     let delegate = |operation: &str, payload| {
-        perform_delegated_create(&runtime, &FakeGit::ok(), operation, &payload).unwrap();
+        perform_delegated_create(&runtime, &FakeSessionGit::ok(), operation, &payload).unwrap();
     };
     let create = |payload| {
-        perform_create(&runtime, &FakeGit::ok(), &operation(), &payload).unwrap();
+        perform_create(&runtime, &FakeSessionGit::ok(), &operation(), &payload).unwrap();
     };
 
     let delegated = operation();
@@ -3028,7 +3028,7 @@ instructions = "code"
 /// of a journal entry as "nothing dispatched" and roll it back (#611).
 #[test]
 fn a_session_without_an_owning_operation_is_not_a_delegation_candidate() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let mut state = rt.state().unwrap();
     let revision = state.state_revision;
     state.state_revision += 1;
@@ -3049,11 +3049,11 @@ fn a_session_without_an_owning_operation_is_not_a_delegation_candidate() {
 /// name can be delegated again (#611).
 #[test]
 fn compensating_a_delegated_create_undoes_the_branch_and_frees_the_name() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_delegated_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"triage"}),
     )
@@ -3097,7 +3097,7 @@ fn compensating_a_delegated_create_undoes_the_branch_and_frees_the_name() {
     // user: the stale delegated journal entry must not make it a candidate.
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"triage"}),
     )
@@ -3108,11 +3108,11 @@ fn compensating_a_delegated_create_undoes_the_branch_and_frees_the_name() {
 /// Removing an available session safely deletes a fully merged branch.
 #[test]
 fn removing_an_available_session_safely_deletes_its_branch() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3166,11 +3166,11 @@ fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
         }
     }
 
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3252,11 +3252,11 @@ fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
 
 #[test]
 fn forced_branch_delete_requires_worktree_force() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3279,11 +3279,11 @@ fn forced_branch_delete_requires_worktree_force() {
 
 #[test]
 fn removing_a_failed_session_deletes_its_branch() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3362,11 +3362,11 @@ fn a_failed_branch_deletion_fails_the_compensating_teardown() {
 
 #[test]
 fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_worker() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3430,11 +3430,11 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
 
 #[test]
 fn a_second_remove_of_a_deleting_session_returns_the_operation_already_in_flight() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3469,14 +3469,14 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
                 tmp.path().to_path_buf(),
                 &state_dir,
                 DaemonGeneration::new(),
-                FakeGit::ok(),
+                FakeSessionGit::ok(),
                 SystemSessionWorktreeIo,
             )
             .unwrap(),
         ));
         perform_create(
             &runtime,
-            &FakeGit::ok(),
+            &FakeSessionGit::ok(),
             &operation(),
             &json!({"name":"one"}),
         )
@@ -3515,7 +3515,7 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
                 tmp.path().to_path_buf(),
                 &state_dir,
                 DaemonGeneration::new(),
-                FakeGit::ok(),
+                FakeSessionGit::ok(),
                 SystemSessionWorktreeIo,
             )
             .unwrap(),
@@ -3585,11 +3585,11 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
 
 #[test]
 fn legacy_remove_keys_replay_only_while_the_delete_plan_proves_the_intent() {
-    let (tmp, rt) = runtime(FakeGit::ok());
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3630,7 +3630,7 @@ fn legacy_remove_keys_replay_only_while_the_delete_plan_proves_the_intent() {
             tmp.path().to_path_buf(),
             &state_dir,
             DaemonGeneration::new(),
-            FakeGit::ok(),
+            FakeSessionGit::ok(),
             SystemSessionWorktreeIo,
         )
         .unwrap(),
@@ -3639,7 +3639,7 @@ fn legacy_remove_keys_replay_only_while_the_delete_plan_proves_the_intent() {
 
     drain_pending_teardowns(
         &SharedSessionTeardown::new(Arc::clone(&restarted)),
-        &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
+        &WorktreeTeardown::new(FakeSessionGit::ok(), SystemSessionWorktreeIo),
         &|| false,
     );
     // Success retires the session and its plan. The legacy key can no longer
@@ -3659,11 +3659,11 @@ fn legacy_remove_keys_replay_only_while_the_delete_plan_proves_the_intent() {
 
 #[test]
 fn compensating_and_requested_removes_are_distinct_durable_intents() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_delegated_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"triage"}),
     )
@@ -3698,11 +3698,11 @@ fn compensating_and_requested_removes_are_distinct_durable_intents() {
 
 #[test]
 fn legacy_compensation_replay_requires_a_matching_session_and_forced_branch_delete_flags() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_delegated_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"triage"}),
     )
@@ -3787,11 +3787,11 @@ fn legacy_compensation_replay_requires_a_matching_session_and_forced_branch_dele
 
 #[test]
 fn a_teardown_failure_records_the_reason_on_a_failed_row_and_frees_the_name_after_removal() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -3827,13 +3827,13 @@ fn a_teardown_failure_records_the_reason_on_a_failed_row_and_frees_the_name_afte
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
     drain_pending_teardowns(
         &SharedSessionTeardown::new(Arc::clone(&runtime)),
-        &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
+        &WorktreeTeardown::new(FakeSessionGit::ok(), SystemSessionWorktreeIo),
         &|| false,
     );
     assert!(
         perform_create(
             &runtime,
-            &FakeGit::ok(),
+            &FakeSessionGit::ok(),
             &operation(),
             &json!({"name":"one"})
         )
@@ -3852,12 +3852,18 @@ fn an_interrupted_teardown_is_resumed_after_restart_instead_of_failing() {
             tmp.path().to_path_buf(),
             &state_dir,
             DaemonGeneration::new(),
-            FakeGit::ok(),
+            FakeSessionGit::ok(),
             SystemSessionWorktreeIo,
         )
         .unwrap(),
     ));
-    perform_create(&first, &FakeGit::ok(), &operation(), &json!({"name":"one"})).unwrap();
+    perform_create(
+        &first,
+        &FakeSessionGit::ok(),
+        &operation(),
+        &json!({"name":"one"}),
+    )
+    .unwrap();
     std::fs::create_dir_all(&session_root).unwrap();
     std::fs::write(session_root.join("file"), "work").unwrap();
     let signal = TeardownSignal::new();
@@ -3871,7 +3877,7 @@ fn an_interrupted_teardown_is_resumed_after_restart_instead_of_failing() {
             tmp.path().to_path_buf(),
             &state_dir,
             DaemonGeneration::new(),
-            FakeGit::ok(),
+            FakeSessionGit::ok(),
             SystemSessionWorktreeIo,
         )
         .unwrap(),
@@ -3887,7 +3893,7 @@ fn an_interrupted_teardown_is_resumed_after_restart_instead_of_failing() {
     // generation journaled.
     drain_pending_teardowns(
         &SharedSessionTeardown::new(Arc::clone(&restarted)),
-        &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
+        &WorktreeTeardown::new(FakeSessionGit::ok(), SystemSessionWorktreeIo),
         &|| false,
     );
     assert!(!session_root.exists());
@@ -3914,7 +3920,7 @@ fn restart_rejects_persisted_path_names_without_touching_a_sentinel() {
             tmp.path().to_path_buf(),
             &state_dir,
             DaemonGeneration::new(),
-            FakeGit::ok(),
+            FakeSessionGit::ok(),
             FakeSessionWorktreeIo {
                 occupied: false,
                 build_calls: Arc::new(AtomicUsize::new(0)),
@@ -4105,21 +4111,21 @@ fn teardown_confinement_preserves_absent_target_idempotency() {
     assert!(!io_contract.is_linked_worktree(Path::new("/unused")));
     io_contract
         .build_session_tree(
-            &FakeGit::ok(),
+            &FakeSessionGit::ok(),
             Path::new("/source"),
             Path::new("/destination"),
             "branch",
             None,
         )
         .unwrap();
-    WorktreeTeardown::new(FakeGit::ok(), io_contract)
+    WorktreeTeardown::new(FakeSessionGit::ok(), io_contract)
         .tear_down(&confined_teardown())
         .unwrap();
     assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
 
     let mut occupied = ConfinementIo::new(Arc::clone(&remove_calls));
     occupied.occupied = true;
-    WorktreeTeardown::new(FakeGit::ok(), occupied)
+    WorktreeTeardown::new(FakeSessionGit::ok(), occupied)
         .tear_down(&confined_teardown())
         .unwrap();
     assert_eq!(remove_calls.load(Ordering::SeqCst), 2);
@@ -4127,11 +4133,11 @@ fn teardown_confinement_preserves_absent_target_idempotency() {
 
 #[test]
 fn finalizing_a_teardown_twice_reports_durable_truth_without_a_stale_write() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     perform_create(
         &runtime,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -4159,11 +4165,11 @@ fn finalizing_a_teardown_twice_reports_durable_truth_without_a_stale_write() {
 
 #[test]
 fn the_shared_teardown_journal_reports_an_unavailable_session_owner() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let shared = Arc::new(Mutex::new(rt));
     perform_create(
         &shared,
-        &FakeGit::ok(),
+        &FakeSessionGit::ok(),
         &operation(),
         &json!({"name":"one"}),
     )
@@ -4186,13 +4192,23 @@ fn the_shared_teardown_journal_reports_an_unavailable_session_owner() {
 
 #[test]
 fn perform_create_and_remove_replay_a_completed_operation_under_the_lock() {
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
     let create_op = operation();
-    let created =
-        perform_create(&runtime, &FakeGit::ok(), &create_op, &json!({"name":"one"})).unwrap();
-    let replayed_create =
-        perform_create(&runtime, &FakeGit::ok(), &create_op, &json!({"name":"one"})).unwrap();
+    let created = perform_create(
+        &runtime,
+        &FakeSessionGit::ok(),
+        &create_op,
+        &json!({"name":"one"}),
+    )
+    .unwrap();
+    let replayed_create = perform_create(
+        &runtime,
+        &FakeSessionGit::ok(),
+        &create_op,
+        &json!({"name":"one"}),
+    )
+    .unwrap();
     assert_eq!(created.body, replayed_create.body);
 
     let signal = TeardownSignal::new();
@@ -4200,7 +4216,7 @@ fn perform_create_and_remove_replay_a_completed_operation_under_the_lock() {
     perform_remove(&runtime, &signal, &remove_op, &json!({"name":"one"})).unwrap();
     drain_pending_teardowns(
         &SharedSessionTeardown::new(Arc::clone(&runtime)),
-        &WorktreeTeardown::new(FakeGit::ok(), SystemSessionWorktreeIo),
+        &WorktreeTeardown::new(FakeSessionGit::ok(), SystemSessionWorktreeIo),
         &|| false,
     );
     let replayed_remove =
@@ -4211,13 +4227,13 @@ fn perform_create_and_remove_replay_a_completed_operation_under_the_lock() {
 #[test]
 fn perform_create_maps_a_poisoned_session_lock_to_storage() {
     // Poisoned before begin: the first re-lock fails.
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let shared = Arc::new(Mutex::new(rt));
     poison_lock(&shared);
     assert!(matches!(
         perform_create(
             &shared,
-            &FakeGit::ok(),
+            &FakeSessionGit::ok(),
             &operation(),
             &json!({"name":"one"})
         ),
@@ -4225,7 +4241,7 @@ fn perform_create_maps_a_poisoned_session_lock_to_storage() {
     ));
 
     // Poisoned mid-build: begin succeeds, the finish re-lock fails.
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let shared = Arc::new(Mutex::new(rt));
     let git = PoisoningGit {
         runtime: Arc::downgrade(&shared),
@@ -4240,7 +4256,7 @@ fn perform_create_maps_a_poisoned_session_lock_to_storage() {
 fn perform_remove_maps_a_poisoned_session_lock_to_storage() {
     // The admission is the only lock this path takes, so a poisoned session
     // lock is the one way it fails without reaching the reducer.
-    let (_tmp, rt) = runtime(FakeGit::ok());
+    let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let shared = Arc::new(Mutex::new(rt));
     poison_lock(&shared);
 
@@ -4266,7 +4282,7 @@ fn production_logic_coverage_contract() {
     assert!(!failing_io.is_repo_root(path));
     assert!(!failing_io.is_linked_worktree(path));
     failing_io
-        .build_session_tree(&FakeGit::ok(), path, path, "branch", None)
+        .build_session_tree(&FakeSessionGit::ok(), path, path, "branch", None)
         .unwrap();
     let fake_io = FakeSessionWorktreeIo {
         occupied: false,
@@ -4275,7 +4291,7 @@ fn production_logic_coverage_contract() {
     assert_eq!(fake_io.canonical_path(path), Some(path.into()));
     assert!(fake_io.is_linked_worktree(path));
     fake_io
-        .remove_session_tree(&FakeGit::ok(), path, false)
+        .remove_session_tree(&FakeSessionGit::ok(), path, false)
         .unwrap();
     PoisoningGit {
         runtime: std::sync::Weak::new(),
@@ -4350,7 +4366,7 @@ fn production_logic_coverage_contract() {
     );
     assert_eq!(session_name(&json!({"label": "alias"})), Ok("alias".into()));
     assert_eq!(
-        WorktreeTeardown::new(FakeGit::ok(), FailingSessionWorktreeIo).tear_down(
+        WorktreeTeardown::new(FakeSessionGit::ok(), FailingSessionWorktreeIo).tear_down(
             &PendingTeardown {
                 session_id: SessionId::new(),
                 operation_id: OperationId::new(),
@@ -4369,7 +4385,7 @@ fn production_logic_coverage_contract() {
         Err("injected remove failure".into())
     );
 
-    let (tmp, mut runtime) = runtime(FakeGit::ok());
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let state = runtime.state().unwrap();
     // A daemon holding several workspaces routes by this identity, so it is
     // readable without resolving a scope first.
@@ -4640,7 +4656,7 @@ fn unowned_reconcile_is_a_noop() {
         repository.clone(),
         &state_dir,
         DaemonGeneration::new(),
-        FakeGit::ok(),
+        FakeSessionGit::ok(),
         SystemSessionWorktreeIo,
     )
     .unwrap();
@@ -4657,7 +4673,7 @@ fn unowned_reconcile_is_a_noop() {
 
 #[test]
 fn shared_teardown_reports_storage_failure() {
-    let (tmp, runtime) = runtime(FakeGit::ok());
+    let (tmp, runtime) = runtime(FakeSessionGit::ok());
     let shared = Arc::new(Mutex::new(runtime));
     std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
     let pending = PendingTeardown {

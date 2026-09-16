@@ -145,14 +145,14 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, VecDeque};
 
-    struct FakePort {
+    struct FakeDoctorPort {
         tools: BTreeMap<String, Result<String, String>>,
         settings: VecDeque<Result<String, String>>,
         daemon: VecDeque<Result<String, String>>,
         calls: Vec<String>,
     }
 
-    impl DoctorPort for FakePort {
+    impl DoctorPort for FakeDoctorPort {
         fn tool_version(&mut self, executable: &str) -> Result<String, String> {
             self.calls.push(executable.to_owned());
             self.tools.remove(executable).unwrap()
@@ -176,8 +176,8 @@ mod tests {
         agy: Result<&str, &str>,
         settings: Result<&str, &str>,
         daemon: Result<&str, &str>,
-    ) -> FakePort {
-        FakePort {
+    ) -> FakeDoctorPort {
+        FakeDoctorPort {
             tools: [
                 (
                     "git".to_owned(),
