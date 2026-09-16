@@ -1530,7 +1530,7 @@ impl PrSnapshotPort for UnavailablePrSnapshotPort {
     fn snapshot(
         &mut self,
         _session: SessionId,
-    ) -> Result<usagi_core::infrastructure::client::PrSnapshot, String> {
+    ) -> Result<usagi_core::infrastructure::ipc::PrSnapshot, String> {
         Err("Pull Request data is unavailable.".to_owned())
     }
 }
@@ -5893,7 +5893,7 @@ fn home_frame_material(
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
     sessions: &[ProjectedSession],
-    metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
+    metrics: Option<usagi_core::infrastructure::ipc::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,
@@ -5934,7 +5934,7 @@ fn home_frame_material_shared(
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
     sessions: Arc<[ProjectedSession]>,
-    metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
+    metrics: Option<usagi_core::infrastructure::ipc::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
     managed_terminal_view: Option<Arc<TerminalViewProjection>>,
@@ -6117,7 +6117,7 @@ fn render_controller_frame(
     runtime: &WorkspaceRuntime,
     workspace_name: &str,
     sessions: &[ProjectedSession],
-    metrics: Option<usagi_core::infrastructure::client::DaemonMetrics>,
+    metrics: Option<usagi_core::infrastructure::ipc::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: &BTreeMap<SessionId, GitDiff>,
     terminal_view: Option<TerminalViewProjection>,

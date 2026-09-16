@@ -20,10 +20,10 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal,
     OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
 };
-use usagi_core::infrastructure::client::SessionAction;
 use usagi_core::infrastructure::git::{GitRunner, delete_branch};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::ipc::SessionAction;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_dir};
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;

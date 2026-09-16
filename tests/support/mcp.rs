@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::{agent::AgentProfileId, settings::Settings};
-use usagi_core::infrastructure::client::{
-    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
-    SessionAction,
-};
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient, IpcClient};
 use usagi_core::infrastructure::ipc::ClientWorkspace;
+use usagi_core::infrastructure::ipc::{
+    AgentLaunchIntent, DaemonReply, DaemonRequest, SessionAction,
+};
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 

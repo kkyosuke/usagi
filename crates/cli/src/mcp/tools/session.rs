@@ -6,7 +6,7 @@
 use crate::mcp::tool::{Tool, ToolDescriptor};
 use std::sync::OnceLock;
 use usagi_core::domain::user_decision::UserDecisionPolicy;
-use usagi_core::infrastructure::client::{DispatchToolAction, SessionAction};
+use usagi_core::infrastructure::ipc::{DispatchToolAction, SessionAction};
 
 /// session 系 tool の一覧（オーケストレーションの delegate_* を含む）。
 #[must_use]

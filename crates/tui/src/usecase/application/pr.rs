@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use usagi_core::domain::id::SessionId;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState, canonicalize};
-use usagi_core::infrastructure::client::PrSnapshot;
+use usagi_core::infrastructure::ipc::PrSnapshot;
 
 /// Reads the daemon-owned, revisioned PR snapshot. Events are hints only:
 /// callers always refresh through this port before changing their projection.

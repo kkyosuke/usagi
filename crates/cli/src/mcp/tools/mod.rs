@@ -19,7 +19,7 @@ use std::fmt;
 
 use super::tool::{CallerPolicy, ToolDescriptor, ToolRoute, validate_schema_definition};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-use usagi_core::infrastructure::client::SessionAction;
+use usagi_core::infrastructure::ipc::SessionAction;
 
 /// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal / supervisor を連結）。
 ///
@@ -144,7 +144,7 @@ mod tests {
     use crate::mcp::tool::{CallerPolicy, StoreRoot, Tool, ToolDescriptor, ToolError, ToolRoute};
     use std::path::Path;
     use usagi_core::domain::user_decision::UserDecisionPolicy;
-    use usagi_core::infrastructure::client::{
+    use usagi_core::infrastructure::ipc::{
         DispatchToolAction, SessionAction, SupervisorToolAction,
     };
 

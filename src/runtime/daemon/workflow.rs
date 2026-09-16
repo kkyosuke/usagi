@@ -10,7 +10,7 @@ use super::{
 };
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::workflow::{Delivery, WorkflowCommand, WorkflowRun};
-use usagi_core::infrastructure::client::AgentLaunchIntent;
+use usagi_core::infrastructure::ipc::AgentLaunchIntent;
 use usagi_core::infrastructure::ipc::{
     Envelope, ErrorCode, ProtocolError, RequestId, ResponseOutcome, RetryMode, ServerHello,
 };

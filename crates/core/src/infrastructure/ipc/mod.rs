@@ -6,6 +6,14 @@
 
 #![allow(clippy::missing_errors_doc)] // All public codec errors are transport/protocol errors documented above.
 
+pub mod request;
+
+// The request / reply vocabulary is part of this protocol contract; it lives in
+// its own file so that protocol changes and transport changes do not share a
+// review, and is re-exported here so callers keep one import path for the
+// protocol.
+pub use request::*;
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::Path;

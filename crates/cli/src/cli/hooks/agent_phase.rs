@@ -18,7 +18,7 @@ use serde::Deserialize;
 use usagi_core::domain::{
     agent::ProviderSessionId, session_lifecycle::AgentPhase as ReportedPhase,
 };
-use usagi_core::infrastructure::client::{DaemonRequest, McpCallerContext};
+use usagi_core::infrastructure::ipc::{DaemonRequest, McpCallerContext};
 
 use crate::cli::{Run, RunOutcome};
 
