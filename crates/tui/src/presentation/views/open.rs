@@ -539,15 +539,15 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
+        let available = mascot_screen::body_budget(raw_height, raw_width);
         let notice = notice_lines(width, open.notice());
         // 通知はボディの一部なので、一覧に残る行数から先に差し引く。
-        let budget = mascot_screen::body_budget(raw_height, raw_width).saturating_sub(notice.len());
-        let mut body = body_lines(width, open, now, budget);
-        // [`viewport`] は選択行を出すために予算を 1 件分だけ超えることがある（端末が極端に低い
-        // とき）。フッタを画面外へ押し出さないよう、ここで予算に収める。落ちるのは末尾の
-        // 選択中パス行で、一覧そのものではない。
-        body.truncate(budget);
+        let mut body = body_lines(width, open, now, available.saturating_sub(notice.len()));
         body.extend(notice);
+        // ボディが予算を超えうる経路が 2 つある。[`viewport`] は選択行を出すために 1 件分だけ
+        // 超えることがあり、通知は（daemon の error 文字列をそのまま載せるため）長さに上限が
+        // ない。フッタを画面外へ押し出さないよう、**組み上げた最後に**予算へ収める。
+        body.truncate(available);
         body
     })
 }
@@ -918,6 +918,26 @@ mod tests {
                     .join("\n");
                 assert!(joined.contains("ws0"), "height {height}");
             }
+        }
+    }
+
+    #[test]
+    fn a_notice_longer_than_the_body_budget_still_keeps_the_footer() {
+        // 通知は daemon の error 文字列をそのまま載せるので長さに上限が無い。予算を食い潰しても
+        // フッタは最下行に残る。
+        let mut open = Open::with_overviews(
+            (0..3)
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0, 0))
+                .collect(),
+        );
+        open.set_notice(Some("daemon refused the workspace ".repeat(40)));
+        for height in 12..=30 {
+            let frame = render(height, 80, &open, now());
+            assert_eq!(frame.len(), height, "height {height}");
+            assert!(
+                strip(frame.last().unwrap()).contains("Esc back"),
+                "height {height}"
+            );
         }
     }
 
