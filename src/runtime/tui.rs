@@ -39,12 +39,14 @@ use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy,
 use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient, TerminalLaneBudget};
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{clone as git_clone, diff_status};
+use usagi_core::infrastructure::ipc::TerminalInputReplayMode;
+#[cfg(test)]
+use usagi_core::infrastructure::ipc::TerminalSnapshotMode;
 use usagi_core::infrastructure::ipc::{
     AgentGoalIntent, AgentLaunchIntent, ClientError, DaemonMetrics, DaemonReply, DaemonRequest,
     MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction, TerminalAction,
     TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
-use usagi_core::infrastructure::ipc::{TerminalInputReplayMode, TerminalSnapshotMode};
 use usagi_core::infrastructure::role_catalog::{
     CatalogLayer, read_layer_source, write_layer_source,
 };
@@ -56,9 +58,18 @@ use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::note::Target as StoreTarget;
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
-use usagi_core::usecase::vt_screen::ScreenCheckpoint;
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::session_worktree::SystemGit;
+use usagi_tui::infrastructure::daemon_reply::{
+    PrObservations, agent_goal_request, agent_inventory_request, agent_launch_request,
+    correlate_agent_goal, correlate_agent_launch, daemon_error_reason, decode_attach_screen,
+    decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_input_ack_value,
+    decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
+    decode_work_run_snapshot_reply, exact_agent_resume_request, map_terminal_error,
+    owner_of_terminal_request, pr_snapshot_events, remove_session_payload, reply_geometry,
+    terminal_inventory_matches_scope, validate_unique_session_ids, work_run_control_client_error,
+};
+use usagi_tui::infrastructure::live_input::classify_terminal_input;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
@@ -74,9 +85,9 @@ use usagi_tui::usecase::application::agent_tab_intent::{
     AgentTabIntentPortCommit,
 };
 use usagi_tui::usecase::application::controller::{
-    AppEvent, AppKey, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice,
-    PendingToken, PreviewFileFilter, RoleEditorScope, SafeError, SafeMessage, SessionBranchCatalog,
-    SessionRoleCatalog, SessionRoleProjection, Target, classify_management_input,
+    AppEvent, BackendEvent, DaemonAction, EnvironmentEntry, NewRequest, Notice, PendingToken,
+    PreviewFileFilter, RoleEditorScope, SafeError, SafeMessage, SessionBranchCatalog,
+    SessionRoleCatalog, SessionRoleProjection, Target,
 };
 use usagi_tui::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DaemonControlPort as BackendDaemonControlPort,
@@ -95,8 +106,8 @@ use usagi_tui::usecase::application::session_catalog::{
     project_branch_catalog, project_branch_default, project_session_role_catalog,
 };
 use usagi_tui::usecase::application::terminal_session::{
-    TerminalAttach, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-    TerminalInputResolution, TerminalSubscription,
+    TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
+    TerminalSubscription,
 };
 use usagi_tui::usecase::application::work_run_control::WorkRunPort;
 use usagi_tui::usecase::application::work_run_control::{
@@ -109,10 +120,7 @@ use usagi_tui::usecase::application::{
 use usagi_tui::usecase::doctor::{self, DoctorPort};
 use usagi_tui::usecase::overview;
 use usagi_tui::usecase::overview::SessionCommand;
-use usagi_tui::usecase::terminal_input::{
-    GlobalControlChord, KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput,
-    Modifiers, RuntimeEvent,
-};
+use usagi_tui::usecase::terminal_input::{LiveInputClassifier, RuntimeEvent};
 
 use crate::runtime::agent_tab_intent::FileAgentTabIntentStore;
 use crate::runtime::clipboard::PlatformClipboard;
@@ -125,23 +133,20 @@ use crate::runtime::refresh_pump::{RefreshCadence, RefreshPump};
 use crate::runtime::terminal_pump::TerminalPollPump;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
+#[cfg(test)]
+use usagi_tui::infrastructure::daemon_reply::{
+    AGENT_LAUNCH_UNCORRELATED, MAX_CACHED_INPUT_ACK_DEPTH, decode_agent_admission,
+};
+#[cfg(test)]
+use usagi_tui::infrastructure::live_input::{passthrough_key, terminal_copy_key};
+#[cfg(test)]
+use usagi_tui::usecase::application::controller::AppKey;
+#[cfg(test)]
+use usagi_tui::usecase::application::terminal_session::TerminalAttachScreen;
+
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
 #[derive(Default)]
 struct DaemonSessionCommandPort;
-
-fn remove_session_payload(
-    name: &str,
-    force: bool,
-    force_delete_branch: bool,
-    purge_orphan: bool,
-) -> serde_json::Value {
-    serde_json::json!({
-        "name": name,
-        "force": force,
-        "force_delete_branch": force_delete_branch,
-        "purge_orphan": purge_orphan,
-    })
-}
 
 /// Production bridge for the controller's durable user-decision effects.
 /// The daemon remains the authority; this adapter only converts its safe
@@ -652,48 +657,6 @@ impl BackendDecisionPort for ProductionDecisionPort {
     }
 }
 
-type PrSnapshotResult = Result<PrSnapshot, String>;
-type PrObservations = Vec<(SessionId, PrSnapshotResult)>;
-
-fn pr_snapshot_events(
-    result: Result<PrObservations, String>,
-    sessions: &[SessionId],
-) -> Vec<AppEvent> {
-    result
-        .unwrap_or_else(|error| {
-            sessions
-                .iter()
-                .map(|session| (*session, Err(error.clone())))
-                .collect()
-        })
-        .into_iter()
-        .map(|(session, snapshot)| {
-            let target = Target::Session(session);
-            let snapshot = snapshot.and_then(|snapshot| {
-                if snapshot.session_id == session {
-                    Ok(snapshot)
-                } else {
-                    Err("invalid PR snapshot identity".to_owned())
-                }
-            });
-            AppEvent::Backend(match snapshot {
-                Ok(snapshot) => BackendEvent::PullRequestsLoaded {
-                    target,
-                    revision: snapshot.revision,
-                    prs: snapshot.entries,
-                },
-                Err(_) => BackendEvent::PullRequestsError {
-                    target,
-                    error: SafeError {
-                        message: SafeMessage::new("Pull Requests are unavailable."),
-                        error_id: "pr-load".to_owned(),
-                    },
-                },
-            })
-        })
-        .collect()
-}
-
 struct ProductionOverlayPort {
     root: PathBuf,
     sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
@@ -1184,9 +1147,6 @@ fn reduced_motion_from_environment(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
 
-type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
-type OverlaySessions = Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>;
-
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
 fn project_backend_sessions(
     snapshot: &WorkspaceSnapshot,
@@ -1203,6 +1163,9 @@ fn project_backend_sessions(
     }
     (names, overlays)
 }
+
+type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
+type OverlaySessions = Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>;
 
 impl ControllerBackendFactory for ProductionBackendFactory {
     fn garden_reduced_motion(&self) -> bool {
@@ -2066,170 +2029,6 @@ impl Drop for DaemonAgentCommandPort {
     }
 }
 
-/// The generation a terminal request must be delivered to.
-///
-/// The destination is read from the typed payload rather than from the action it
-/// is sent under, because the `TerminalRef` is what names the daemon that holds
-/// the PTY. A request that carries no such reference has no single owner —
-/// control work belongs to the active generation and a scope query belongs to
-/// all of them — so it is refused here instead of being sent to whichever lane
-/// happened to be open.
-fn owner_of_terminal_request(
-    request: &TerminalRequest,
-) -> Result<usagi_core::domain::id::DaemonGeneration, TerminalError> {
-    use usagi_core::infrastructure::owner_routing::{RouteTarget, route_terminal_request};
-
-    match route_terminal_request(request) {
-        RouteTarget::Owner(generation) => Ok(generation),
-        RouteTarget::ActiveControl | RouteTarget::EveryGeneration => Err(TerminalError::Stale),
-    }
-}
-
-/// Maps a typed client failure onto the safe terminal feedback the UI renders.
-/// No mapping authorizes a local PTY fallback.
-fn map_terminal_error(error: &usagi_core::infrastructure::ipc::ClientError) -> TerminalError {
-    use usagi_core::infrastructure::ipc::ErrorCode;
-    match error.code() {
-        ErrorCode::ResyncRequired => TerminalError::ResyncRequired,
-        ErrorCode::StaleTarget => TerminalError::Stale,
-        ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
-        ErrorCode::IdempotencyExpired | ErrorCode::SequenceGap => TerminalError::OrderingMismatch,
-        _ => TerminalError::Unavailable,
-    }
-}
-
-/// The geometry a terminal snapshot reply reports, when it carries a complete
-/// one.
-///
-/// The daemon answers a resize with the snapshot of the terminal as it now
-/// stands, which is the authoritative viewport for every window sharing it. A
-/// partial or out-of-range pair is treated as absent so the caller keeps what it
-/// asked for rather than decoding at an invented size.
-fn reply_geometry(body: &serde_json::Value) -> Option<Geometry> {
-    let geometry = &body["geometry"];
-    Some(Geometry {
-        cols: u16::try_from(geometry["cols"].as_u64()?).ok()?,
-        rows: u16::try_from(geometry["rows"].as_u64()?).ok()?,
-    })
-}
-
-const MAX_CACHED_INPUT_ACK_DEPTH: usize = 16;
-
-/// Decodes the terminal owner's sequence-consuming input acknowledgement.
-///
-/// The wire enum is deliberately validated here instead of being collapsed to
-/// a body-less success. Unknown variants, malformed partial-write counts and
-/// pathological cached nesting all have an unknown effect and therefore fail
-/// closed without authorizing a retry.
-fn decode_terminal_input_ack(
-    body: &serde_json::Value,
-    input_len: usize,
-) -> Result<TerminalInputOutcome, TerminalError> {
-    let object = body
-        .as_object()
-        .filter(|object| object.len() == 1)
-        .ok_or(TerminalError::InputEffectUnknown)?;
-    let ack = object.get("ack").ok_or(TerminalError::InputEffectUnknown)?;
-    decode_terminal_input_ack_value(ack, input_len, 0)
-}
-
-fn decode_terminal_input_ack_value(
-    ack: &serde_json::Value,
-    input_len: usize,
-    cached_depth: usize,
-) -> Result<TerminalInputOutcome, TerminalError> {
-    match ack.as_str() {
-        Some("Written") => return Ok(TerminalInputOutcome::Written),
-        Some("Failed") => return Ok(TerminalInputOutcome::Failed),
-        Some(_) => return Err(TerminalError::InputEffectUnknown),
-        None => {}
-    }
-
-    let variant = ack
-        .as_object()
-        .filter(|object| object.len() == 1)
-        .ok_or(TerminalError::InputEffectUnknown)?;
-    if let Some(ambiguous) = variant.get("Ambiguous") {
-        let fields = ambiguous
-            .as_object()
-            .filter(|object| object.len() == 1)
-            .ok_or(TerminalError::InputEffectUnknown)?;
-        let applied_prefix = fields
-            .get("applied_prefix")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|prefix| usize::try_from(prefix).ok())
-            .filter(|prefix| *prefix > 0 && *prefix <= input_len)
-            .ok_or(TerminalError::InputEffectUnknown)?;
-        return Ok(TerminalInputOutcome::Ambiguous { applied_prefix });
-    }
-    if let Some(cached) = variant.get("Cached") {
-        if cached_depth >= MAX_CACHED_INPUT_ACK_DEPTH {
-            return Err(TerminalError::InputEffectUnknown);
-        }
-        return decode_terminal_input_ack_value(cached, input_len, cached_depth + 1);
-    }
-    Err(TerminalError::InputEffectUnknown)
-}
-
-fn decode_terminal_inventory(
-    body: &serde_json::Value,
-) -> Result<Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry>, TerminalError> {
-    body.get("terminals")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(TerminalError::Unavailable)?
-        .iter()
-        .map(|item| serde_json::from_value(item.clone()).map_err(|_| TerminalError::Unavailable))
-        .collect()
-}
-
-/// Decode the screen an attach / resync snapshot carries, according to the
-/// contract the connection negotiated.
-///
-/// On the checkpoint path the frame must satisfy `base_offset == output_offset`
-/// (a checkpoint is complete at `output_offset`, so it has no tail) and carry a
-/// checkpoint this build accepts; anything else is refused rather than displayed.
-/// On the legacy path the retained `replay` tail is **not read at all**: a tail
-/// cut mid UTF-8 / CSI / OSC must never reach a parser, so the client fails
-/// closed to a history-less view and renders only output after `output_offset`.
-fn decode_attach_screen(
-    mode: TerminalSnapshotMode,
-    snapshot: &serde_json::Value,
-    base_offset: u64,
-    output_offset: u64,
-) -> Result<TerminalAttachScreen, TerminalError> {
-    match mode {
-        TerminalSnapshotMode::Checkpoint => {
-            if base_offset != output_offset {
-                return Err(TerminalError::Unavailable);
-            }
-            // The frame is already bounded by the negotiated IPC frame limit;
-            // the checkpoint's own bounds are enforced when it is restored.
-            let checkpoint: ScreenCheckpoint = serde_json::from_value(snapshot["screen"].clone())
-                .map_err(|_| TerminalError::Unavailable)?;
-            Ok(TerminalAttachScreen::Checkpoint(Box::new(checkpoint)))
-        }
-        TerminalSnapshotMode::LegacyFailClosed => Ok(TerminalAttachScreen::HistoryUnavailable),
-    }
-}
-
-fn terminal_inventory_matches_scope(
-    entries: &[usagi_core::domain::terminal_launch::TerminalInventoryEntry],
-    scope: &TerminalLaunchScope,
-) -> bool {
-    entries.iter().all(|entry| {
-        entry.terminal.workspace_id == scope.workspace_id
-            && entry.terminal.session_id == scope.session_id
-            && entry.terminal.worktree_id == scope.worktree_id
-    })
-}
-
-fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
-    DaemonRequest::AgentInventory {
-        workspace,
-        caller_context: None,
-    }
-}
-
 /// Read one workspace's safe Agent inventory over a per-request daemon client.
 ///
 /// The workspace is the request's own argument rather than the connection's
@@ -2336,245 +2135,6 @@ impl WorkRunPort for DaemonWorkRunPort {
                 .map_err(work_run_control_client_error)?,
         )
     }
-}
-
-fn decode_work_run_snapshot_reply(
-    reply: DaemonReply,
-) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
-    match reply {
-        DaemonReply::Ok(body) => serde_json::from_value(body)
-            .map_err(|_| "daemon returned invalid Work Run progress".to_owned()),
-        DaemonReply::Accepted { .. } => Err("Work Run progress is unavailable".to_owned()),
-    }
-}
-
-fn decode_work_run_control_reply(
-    reply: DaemonReply,
-) -> Result<WorkRunControlResult, WorkRunControlError> {
-    match reply {
-        DaemonReply::Ok(body) => {
-            if body.get("state").is_some() {
-                serde_json::from_value(body)
-                    .map(|run| WorkRunControlResult::Updated(Box::new(run)))
-                    .map_err(|_| {
-                        WorkRunControlError::Unconfirmed(
-                            "daemon returned an invalid Work Run result".to_owned(),
-                        )
-                    })
-            } else {
-                serde_json::from_value(body)
-                    .map(WorkRunControlResult::Deleted)
-                    .map_err(|_| {
-                        WorkRunControlError::Unconfirmed(
-                            "daemon returned an invalid Work Run deletion".to_owned(),
-                        )
-                    })
-            }
-        }
-        // A durable Accepted acknowledgement proves admission, not the final
-        // aggregate. Treating its optional body as final could make the UI
-        // forget the only operation identity safe to replay after ambiguity.
-        DaemonReply::Accepted { .. } => Err(WorkRunControlError::Unconfirmed(
-            WORK_RUN_ACTION_UNCONFIRMED.to_owned(),
-        )),
-    }
-}
-
-fn work_run_control_client_error(error: ClientError) -> WorkRunControlError {
-    match error {
-        ClientError::Protocol(protocol)
-            if protocol.side_effect == usagi_core::infrastructure::ipc::SideEffect::None =>
-        {
-            WorkRunControlError::Rejected(protocol.message)
-        }
-        _ => WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned()),
-    }
-}
-
-fn exact_agent_resume_request(
-    operation_id: usagi_core::domain::id::OperationId,
-    target: usagi_core::domain::agent::AgentResumeTarget,
-) -> DaemonRequest {
-    DaemonRequest::ResumeAgent {
-        operation_id: operation_id.to_string(),
-        target,
-        caller_context: None,
-    }
-}
-
-/// Decode one exact-target resume answer, keeping the daemon's own lineage and
-/// source-to-replacement relation. Nothing is inferred here: a body without a
-/// decodable relation yields `None` and the TUI refuses the replacement (#510).
-fn decode_exact_agent_resume(body: &serde_json::Value) -> Result<ExactAgentResume, String> {
-    let terminal = body
-        .get("terminal")
-        .cloned()
-        .ok_or_else(|| "provider resume returned no terminal".to_owned())
-        .and_then(|terminal| {
-            serde_json::from_value(terminal)
-                .map_err(|_| "provider resume returned an invalid terminal".to_owned())
-        })?;
-    let continuation = body
-        .get("continuation")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
-    let relation = body
-        .get("resume_relation")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
-    Ok(ExactAgentResume {
-        terminal,
-        continuation,
-        relation,
-    })
-}
-
-fn decode_agent_admission(
-    body: &serde_json::Value,
-    operation: &str,
-) -> Result<AgentPaneAdmission, String> {
-    let terminal = body
-        .get("terminal")
-        .cloned()
-        .ok_or_else(|| format!("{operation} returned no terminal"))
-        .and_then(|terminal| {
-            serde_json::from_value(terminal)
-                .map_err(|_| format!("{operation} returned an invalid terminal"))
-        })?;
-    let continuation = body
-        .get("continuation")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| format!("{operation} returned an invalid continuation"))?;
-    let supervisor_run_id = body
-        .get("supervisor_run_id")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| format!("{operation} returned an invalid Work Run identity"))?;
-    Ok(AgentPaneAdmission {
-        terminal,
-        continuation,
-        supervisor_run_id,
-    })
-}
-
-/// The one safe message every failed Agent launch correlation reports. It says
-/// nothing about which check failed, so a mismatched identity, a foreign digest,
-/// and an unfenced terminal all read the same on screen.
-const AGENT_LAUNCH_UNCORRELATED: &str = "agent launch could not be correlated safely";
-
-/// Build the request for one pane's Agent launch. The pending pane's own
-/// operation is the wire identity; the adapter never mints another (#522).
-fn agent_launch_request(
-    operation: usagi_core::domain::id::OperationId,
-    intent: AgentLaunchIntent,
-) -> DaemonRequest {
-    DaemonRequest::Agent {
-        operation_id: operation.to_string(),
-        intent,
-    }
-}
-
-fn agent_goal_request(
-    operation: usagi_core::domain::id::OperationId,
-    intent: AgentGoalIntent,
-) -> DaemonRequest {
-    DaemonRequest::AgentGoal {
-        operation_id: operation.to_string(),
-        intent,
-    }
-}
-
-/// Correlate one Agent launch reply back to the pending operation that issued it.
-///
-/// The reply is usable only when *every* fence agrees with the request: the
-/// admission or final states the same `operation_id`, the digest of the intent it
-/// was admitted for matches the one computed here, `completed` matches the reply
-/// class (an `Accepted` is running, an `Ok` is the durable final — direct or
-/// replayed after a reconnect), the terminal is fenced to the requested scope, and
-/// an ordinary launch carries no resume relation. Anything else — a missing or
-/// foreign identity, another intent's digest, a `completed: false` offered as a
-/// final, a terminal from another scope — is a correlation failure that leaves the
-/// pending pane to fail safely instead of promoting a side effect that may belong
-/// to another operation (#522).
-fn correlate_agent_launch(
-    reply: DaemonReply,
-    operation: usagi_core::domain::id::OperationId,
-    intent: &AgentLaunchIntent,
-) -> Result<AgentPaneAdmission, String> {
-    let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::infrastructure::ipc::agent_launch_semantic_key(intent),
-    );
-    correlate_agent_response(
-        reply,
-        operation,
-        &expected_digest,
-        intent.workspace,
-        intent.session,
-    )
-}
-
-fn correlate_agent_goal(
-    reply: DaemonReply,
-    operation: usagi_core::domain::id::OperationId,
-    intent: &AgentGoalIntent,
-) -> Result<AgentPaneAdmission, String> {
-    let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::infrastructure::ipc::agent_goal_semantic_key(intent),
-    );
-    correlate_agent_response(reply, operation, &expected_digest, intent.workspace, None)
-}
-
-fn correlate_agent_response(
-    reply: DaemonReply,
-    operation: usagi_core::domain::id::OperationId,
-    expected_digest: &str,
-    workspace: WorkspaceId,
-    session: Option<SessionId>,
-) -> Result<AgentPaneAdmission, String> {
-    let expected = operation.to_string();
-    let (body, final_reply) = match reply {
-        // `Accepted` proves admission of this operation twice over: the envelope
-        // identity the transport matched, and the body identity checked below.
-        DaemonReply::Accepted {
-            operation_id, body, ..
-        } if operation_id == expected => (body, false),
-        DaemonReply::Accepted { .. } => return Err(AGENT_LAUNCH_UNCORRELATED.to_owned()),
-        // `ResponseOutcome::Ok` carries no envelope operation identity, so a final
-        // is correlatable only through its body.
-        DaemonReply::Ok(body) => (body, true),
-    };
-    if body.get("operation_id").and_then(serde_json::Value::as_str) != Some(expected.as_str()) {
-        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
-    }
-    if body
-        .get("semantic_digest")
-        .and_then(serde_json::Value::as_str)
-        != Some(expected_digest)
-    {
-        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
-    }
-    if body.get("completed").and_then(serde_json::Value::as_bool) != Some(final_reply) {
-        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
-    }
-    // A relation means the daemon answered a resume replacement, not this launch.
-    if body
-        .get("resume_relation")
-        .is_some_and(|relation| !relation.is_null())
-    {
-        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
-    }
-    let admission = decode_agent_admission(&body, "agent launch")?;
-    if admission.terminal.workspace_id != workspace || admission.terminal.session_id != session {
-        return Err(AGENT_LAUNCH_UNCORRELATED.to_owned());
-    }
-    Ok(admission)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
@@ -3155,51 +2715,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     }
 }
 
-/// Cadence of Home's durable-decision lane. A pending decision blocks an agent,
-/// so this is the most responsive of the three; the bound is what matters, not
-/// the exact value.
-fn decision_cadence() -> RefreshCadence {
-    RefreshCadence::new(
-        Duration::from_millis(500),
-        Duration::from_millis(500),
-        Duration::from_millis(8_000),
-    )
-}
-
-/// Cadence of Home's session-inventory lane. It only has to notice lifecycle
-/// changes another client made (an MCP server creating a session); anything the
-/// user does here is adopted from the command's own result or an explicit wake,
-/// so a one-second worst case for a foreign change is the accepted visible cost
-/// of coalescing (#551).
-fn session_cadence() -> RefreshCadence {
-    RefreshCadence::new(
-        Duration::from_millis(1_000),
-        Duration::from_millis(1_000),
-        Duration::from_millis(8_000),
-    )
-}
-
-/// Cadence of the daemon-authoritative PR projection. The daemon owns remote
-/// refresh/backoff; this lane only notices its cheap local revisioned snapshot.
-fn pr_cadence() -> RefreshCadence {
-    RefreshCadence::new(
-        Duration::from_millis(1_000),
-        Duration::from_millis(1_000),
-        Duration::from_millis(8_000),
-    )
-}
-
-/// Cadence of the mascot's metrics lane. It matches the one-second throttle the
-/// inline port already applied, so the sampling rate is unchanged and only the
-/// thread it runs on differs.
-fn metrics_cadence() -> RefreshCadence {
-    RefreshCadence::new(
-        Duration::from_millis(1_000),
-        Duration::from_millis(1_000),
-        Duration::from_millis(8_000),
-    )
-}
-
 /// How many times a lane that is allowed to cold-start may pay for one, per
 /// workspace launch. Cold-start runs a lifecycle subprocess and can sleep out a
 /// two-second readiness wait, so an observation lane retrying it every cadence
@@ -3363,6 +2878,50 @@ fn spawn_pr_pump(sessions: Arc<Mutex<Vec<SessionId>>>) -> RefreshPump<PrObservat
             })
             .collect())
     })
+}
+/// Cadence of Home's durable-decision lane. A pending decision blocks an agent,
+/// so this is the most responsive of the three; the bound is what matters, not
+/// the exact value.
+fn decision_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(500),
+        Duration::from_millis(500),
+        Duration::from_millis(8_000),
+    )
+}
+
+/// Cadence of Home's session-inventory lane. It only has to notice lifecycle
+/// changes another client made (an MCP server creating a session); anything the
+/// user does here is adopted from the command's own result or an explicit wake,
+/// so a one-second worst case for a foreign change is the accepted visible cost
+/// of coalescing (#551).
+fn session_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(1_000),
+        Duration::from_millis(1_000),
+        Duration::from_millis(8_000),
+    )
+}
+
+/// Cadence of the daemon-authoritative PR projection. The daemon owns remote
+/// refresh/backoff; this lane only notices its cheap local revisioned snapshot.
+fn pr_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(1_000),
+        Duration::from_millis(1_000),
+        Duration::from_millis(8_000),
+    )
+}
+
+/// Cadence of the mascot's metrics lane. It matches the one-second throttle the
+/// inline port already applied, so the sampling rate is unchanged and only the
+/// thread it runs on differs.
+fn metrics_cadence() -> RefreshCadence {
+    RefreshCadence::new(
+        Duration::from_millis(1_000),
+        Duration::from_millis(1_000),
+        Duration::from_millis(8_000),
+    )
 }
 
 /// Spawns the mascot's resident metrics lane. Display-only, so it never
@@ -3543,41 +3102,6 @@ fn fetch_terminal_output(
     }
 }
 
-/// Decode a terminal `Resume` reply into the output chunks a session applies.
-///
-/// The daemon reports the hosting process's exit in the same reply
-/// (`"exited": true`) for both generic terminals and Agent runtimes. Once no
-/// further output remains to apply, that exit is surfaced as
-/// [`TerminalError::Exited`] so the per-frame poll — not only an incidental
-/// resync — transitions the [`usagi_tui`] terminal session to exited and the
-/// Closeup pane tab is dropped. A reply that still carries fresh output yields
-/// the chunks first; the next poll (which returns no new output) then reports
-/// the exit, preserving the final output before the tab disappears.
-fn decode_terminal_poll(body: &serde_json::Value) -> Result<Vec<TerminalChunk>, TerminalError> {
-    let outputs = body["output"].as_array().cloned().unwrap_or_default();
-    let mut chunks = Vec::with_capacity(outputs.len());
-    for output in outputs {
-        let start_offset = output["start_offset"]
-            .as_u64()
-            .ok_or(TerminalError::Unavailable)?;
-        let end_offset = output["end_offset"]
-            .as_u64()
-            .ok_or(TerminalError::Unavailable)?;
-        let data = serde_json::from_value(output["data"].clone()).unwrap_or_default();
-        chunks.push(TerminalChunk {
-            start_offset,
-            end_offset,
-            data,
-        });
-    }
-    // `exited` is absent while running (and on daemons that omit it), so only an
-    // explicit `true` — after the final output is drained — ends the session.
-    if chunks.is_empty() && body["exited"].as_bool() == Some(true) {
-        return Err(TerminalError::Exited);
-    }
-    Ok(chunks)
-}
-
 struct LifecycleSnapshot {
     workspace_id: WorkspaceId,
     root_worktree_id: usagi_core::domain::id::WorktreeId,
@@ -3585,16 +3109,6 @@ struct LifecycleSnapshot {
     sessions: Vec<ManagedSession>,
     agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
-}
-
-fn validate_unique_session_ids(sessions: &[ManagedSession]) -> Result<(), String> {
-    let ids = sessions
-        .iter()
-        .map(|session| session.session_id)
-        .collect::<Vec<_>>();
-    usagi_tui::usecase::application::runtime_identities_are_valid(sessions.len(), &ids)
-        .then_some(())
-        .ok_or_else(|| "daemon session snapshot has duplicate session IDs".to_owned())
 }
 
 impl LifecycleSnapshot {
@@ -3848,33 +3362,6 @@ fn created_session_hook(
     }
 }
 
-fn session_snapshot_result(
-    message: impl Into<String>,
-    snapshot: &LifecycleSnapshot,
-    workspace: &Workspace,
-) -> Result<SessionCommandResult, String> {
-    // Align the identities with the listed rows (`project` lists the same set),
-    // so a `Failed` row joins its stable ID and can be removed. Terminal/Agent
-    // scopes still filter to `Available` at their own call sites.
-    let session_ids = snapshot
-        .listed_sessions()
-        .map(|session| session.session_id)
-        .collect();
-    let legacy = match load_workspace_state(&workspace.path) {
-        Ok(state) => state,
-        Err(error) => return Err(error.to_string()),
-    };
-    Ok(SessionCommandResult {
-        message: message.into(),
-        sessions: Some(snapshot.project(workspace, &legacy.sessions)),
-        session_ids: Some(session_ids),
-        agent_resumes: Some(snapshot.agent_resumes.clone()),
-        session_lifecycles: Some(snapshot.session_lifecycles()),
-        session_roles: Some(snapshot.session_roles.clone()),
-        revision: Some(snapshot.revision),
-    })
-}
-
 /// Why a lifecycle snapshot could not be read.
 ///
 /// Every surface but one shows a single line ([`LifecycleRequestError::reason`]).
@@ -3975,27 +3462,6 @@ fn workspace_open_error(error: LifecycleRequestError, opened: &Path) -> std::io:
         return std::io::Error::new(std::io::ErrorKind::NotConnected, error.reason());
     }
     io_error(error.reason())
-}
-
-/// Render only the user-actionable daemon reason in the TUI.  Error codes and
-/// transport variant labels remain useful to diagnostics but add no context to
-/// an interactive failure notice.
-fn daemon_error_reason(error: ClientError) -> String {
-    match error {
-        ClientError::Protocol(error) => error.message,
-        ClientError::Unavailable(message) | ClientError::Lifecycle(message) => message,
-        ClientError::RolloverRequired(trigger) => format!(
-            "daemon build rollover is required (operation {}); the current daemon remains running",
-            trigger.operation_id.0
-        ),
-        ClientError::BuildIdentityUnavailable => {
-            "exact daemon build identity is unavailable; the current daemon remains running"
-                .to_owned()
-        }
-        ClientError::BootstrapContended => {
-            "another usagi process is establishing the daemon connection; retrying".to_owned()
-        }
-    }
 }
 
 fn tui_error_entry(action: &str, reason: &str) -> String {
@@ -4241,174 +3707,6 @@ impl Terminal for CrosstermTerminal {
     }
 }
 
-/// Apply the process-wide input ordering policy before projecting terminal input
-/// into the management [`Key`] vocabulary. `LiveInputClassifier` is the sole
-/// owner of leader precedence for every workspace surface; this adapter only
-/// translates its resolved output.
-fn classify_terminal_input(
-    classifier: &mut LiveInputClassifier,
-    now: Duration,
-    input: &LiveInput,
-) -> Option<Key> {
-    match classifier.classify(now, input.clone()) {
-        LiveInputOutput::Action(action) => Some(Key::Live(action)),
-        LiveInputOutput::GlobalControl(control) => Some(match control {
-            GlobalControlChord::CtrlC => terminal_copy_key(input).unwrap_or(Key::Quit),
-            GlobalControlChord::CtrlQ => Key::CtrlQ,
-            GlobalControlChord::CtrlD => Key::CtrlD,
-            GlobalControlChord::CtrlX => Key::CtrlX,
-            GlobalControlChord::Help => Key::Help,
-        }),
-        LiveInputOutput::Swallowed => None,
-        LiveInputOutput::Passthrough(bytes) => match input {
-            LiveInput::Pointer(pointer) => Some(Key::Pointer(*pointer)),
-            LiveInput::Mouse { column, row } => Some(Key::Click {
-                column: *column,
-                row: *row,
-            }),
-            _ => terminal_copy_key(input).or_else(|| Some(passthrough_key(input, bytes))),
-        },
-    }
-}
-
-/// Maps each supported platform's terminal copy chord to a selection-aware
-/// request. Windows retains Ctrl-C as a PTY SIGINT when there is no selection.
-fn terminal_copy_key(input: &LiveInput) -> Option<Key> {
-    let LiveInput::Key(key) = input else {
-        return None;
-    };
-    let only = |control, shift, super_| {
-        key.modifiers.control == control
-            && key.modifiers.shift == shift
-            && key.modifiers.super_ == super_
-            && !key.modifiers.alt
-            && !key.modifiers.hyper
-            && !key.modifiers.meta
-    };
-    // `adapt_key` canonicalizes a shifted ASCII letter to uppercase. Linux's
-    // native copy chord includes Shift, while terminals that already resolve
-    // the character can still supply lowercase. Keep the character spelling
-    // protocol-independent without relaxing the platform modifier contract.
-    let copy_character = matches!(key.code, KeyCode::Char('c' | 'C'));
-    #[cfg(target_os = "macos")]
-    let matches_copy = copy_character && only(false, false, true);
-    #[cfg(target_os = "windows")]
-    let matches_copy = copy_character && only(true, false, false);
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let matches_copy = copy_character && only(true, true, false);
-
-    #[cfg(target_os = "windows")]
-    let fallback = vec![3];
-    #[cfg(not(target_os = "windows"))]
-    let fallback = Vec::new();
-
-    matches_copy.then_some(Key::TerminalCopy { fallback })
-}
-
-/// Map a non-prefix terminal input to the management `Key` vocabulary. The
-/// process-wide classifier has already reserved the `Ctrl-O` prefix, so this
-/// preserves the prior mapping for every other key and text/paste payload.
-#[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_input_classifier_contract
-fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
-    let key = match input {
-        LiveInput::Key(key) => key,
-        // Some terminal decoders preserve Return as its original byte instead
-        // of emitting a semantic key event. Management modals must accept both
-        // forms, otherwise Closeup actions appear to ignore Enter.
-        LiveInput::Raw(bytes) if bytes.as_slice() == b"\r" || bytes.as_slice() == b"\n" => {
-            return Key::Enter;
-        }
-        LiveInput::Text(text) if text == "\r" || text == "\n" => {
-            return Key::Enter;
-        }
-        // A bracketed paste is delivered as one block. Carry the text so the
-        // focused live pane wraps it in bracketed-paste markers before it reaches
-        // the PTY (agents insert it instead of submitting each embedded newline)
-        // and a management text input inserts it verbatim.
-        LiveInput::Paste(_) => {
-            return Key::Paste(String::from_utf8_lossy(&bytes).into_owned());
-        }
-        LiveInput::Raw(_) | LiveInput::Text(_) => {
-            return Key::Passthrough(bytes);
-        }
-        LiveInput::Mouse { .. }
-        | LiveInput::WheelUp { .. }
-        | LiveInput::WheelDown { .. }
-        | LiveInput::Pointer(_) => return Key::Other,
-    };
-    // Some terminal backends report an auto-repeat as the first observable
-    // key event.  Treat it like a press so management controls (notably
-    // Closeup's Enter action) are never dropped; only releases are inert.
-    if matches!(key.kind, KeyEventKind::Release) {
-        return Key::Other;
-    }
-    // Ctrl-A / Ctrl-E become semantic caret keys. A focused text field reads
-    // them as emacs line-start / line-end; the reducer's navigation branch maps
-    // `LineStart` back to the reserved `+ new session` action (IME-safe),
-    // and `key_to_terminal_bytes` still forwards U+0001 / U+0005 to a focused
-    // shell. `Home` / `End` carry the same split without the control modifier.
-    if (key.modifiers.control && key.code == KeyCode::Char('a'))
-        || key.code == KeyCode::Char('\u{1}')
-    {
-        return Key::LineStart;
-    }
-    if (key.modifiers.control && key.code == KeyCode::Char('e'))
-        || key.code == KeyCode::Char('\u{5}')
-    {
-        return Key::LineEnd;
-    }
-    // Shift+motion extends a selection in the focused input; a live shell still
-    // receives movement via `key_to_terminal_bytes`. Handle these before the
-    // generic modified-chord passthrough below swallows the Shift.
-    match key.code {
-        KeyCode::Left if key.modifiers.shift => return Key::SelectLeft,
-        KeyCode::Right if key.modifiers.shift => return Key::SelectRight,
-        KeyCode::Home if key.modifiers.shift => return Key::SelectHome,
-        KeyCode::End if key.modifiers.shift => return Key::SelectEnd,
-        _ => {}
-    }
-    // The live classifier has already encoded the original terminal input.
-    // Keep modified chords opaque so this management-key adapter cannot drop
-    // their Ctrl/Alt bytes before Closeup forwards them to the focused pane.
-    // Crossterm reports Shift even though `Char` already carries the resulting
-    // uppercase (or shifted-symbol) Unicode scalar.  It is text input, not an
-    // opaque terminal chord, so pass it to management forms normally.
-    let shift_only = key.modifiers.shift
-        && !key.modifiers.control
-        && !key.modifiers.alt
-        && !key.modifiers.super_
-        && !key.modifiers.hyper
-        && !key.modifiers.meta;
-    if key.modifiers != Modifiers::default()
-        && !(shift_only && matches!(key.code, KeyCode::Char(_)))
-    {
-        if let Some(action @ AppKey::SaveRoles) = classify_management_input(input.clone()) {
-            return Key::Management {
-                action,
-                passthrough: bytes,
-            };
-        }
-        return Key::Passthrough(bytes);
-    }
-    match key.code {
-        KeyCode::Up => Key::Up,
-        KeyCode::Down => Key::Down,
-        KeyCode::PageUp => Key::PageUp,
-        KeyCode::PageDown => Key::PageDown,
-        KeyCode::Left => Key::Left,
-        KeyCode::Right => Key::Right,
-        KeyCode::Home => Key::Home,
-        KeyCode::End => Key::End,
-        KeyCode::Delete => Key::Delete,
-        KeyCode::Enter => Key::Enter,
-        KeyCode::Tab => Key::Tab,
-        KeyCode::Backspace => Key::Backspace,
-        KeyCode::Escape => Key::Escape,
-        KeyCode::Char(ch) => Key::Char(ch),
-        _ => Key::Other,
-    }
-}
-
 fn io_error(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(error.to_string())
 }
@@ -4456,6 +3754,33 @@ fn probe_path(path: &Path) -> workspace_usecase::WorkspaceProbe {
         Ok(_) => workspace_usecase::WorkspaceProbe::NonDirectory,
         Err(_) => workspace_usecase::WorkspaceProbe::Missing,
     }
+}
+
+fn session_snapshot_result(
+    message: impl Into<String>,
+    snapshot: &LifecycleSnapshot,
+    workspace: &Workspace,
+) -> Result<SessionCommandResult, String> {
+    // Align the identities with the listed rows (`project` lists the same set),
+    // so a `Failed` row joins its stable ID and can be removed. Terminal/Agent
+    // scopes still filter to `Available` at their own call sites.
+    let session_ids = snapshot
+        .listed_sessions()
+        .map(|session| session.session_id)
+        .collect();
+    let legacy = match load_workspace_state(&workspace.path) {
+        Ok(state) => state,
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(SessionCommandResult {
+        message: message.into(),
+        sessions: Some(snapshot.project(workspace, &legacy.sessions)),
+        session_ids: Some(session_ids),
+        agent_resumes: Some(snapshot.agent_resumes.clone()),
+        session_lifecycles: Some(snapshot.session_lifecycles()),
+        session_roles: Some(snapshot.session_roles.clone()),
+        revision: Some(snapshot.revision),
+    })
 }
 
 fn load_workspace_state(

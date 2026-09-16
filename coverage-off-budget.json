@@ -24,6 +24,7 @@
     "crates/daemon/src/infrastructure/unix_transport.rs": 36,
     "crates/daemon/src/usecase/resources/mod.rs": 4,
     "crates/daemon/src/usecase/stop.rs": 1,
+    "crates/tui/src/infrastructure/live_input.rs": 1,
     "crates/tui/src/presentation/frame.rs": 1,
     "crates/tui/src/presentation/live_terminal.rs": 1,
     "crates/tui/src/presentation/mod.rs": 2,
@@ -66,7 +67,7 @@
     "src/runtime/platform_child_reaper.rs": 3,
     "src/runtime/systemd.rs": 1,
     "src/runtime/terminal_pump.rs": 1,
-    "src/runtime/tui.rs": 65,
+    "src/runtime/tui.rs": 64,
     "src/runtime/tui/workflow.rs": 3,
     "src/tui_input.rs": 4
   }
