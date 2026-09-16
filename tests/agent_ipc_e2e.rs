@@ -28,12 +28,12 @@ use usagi_core::domain::supervisor::{
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::client::{
-    AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply,
-    DaemonRequest, IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
-    TerminalLaunchIntent, TerminalRequest,
-};
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient, IpcClient};
 use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::ipc::{
+    AgentGoalIntent, AgentLaunchIntent, ClientError, DaemonReply, DaemonRequest, McpCallerContext,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+};
 use usagi_core::infrastructure::owner_routing::GenerationDirectory;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::generation_registry::{
@@ -146,6 +146,30 @@ fn write_restartable_codex(bin: &Path, count: &Path) {
     let path = bin.join("codex");
     fs::write(&path, script).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Antigravity fixture which loads the daemon-private workspace plugin, runs
+/// its structured starting hook, and records exact argv for cold-restart resume.
+fn write_restartable_agy(bin: &Path, count: &Path, argv: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = models ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nplugin_workspace=\nconversation_id=\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --add-dir ]; then plugin_workspace=\"$argument\"; fi\n  if [ \"$previous\" = --conversation ]; then conversation_id=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$plugin_workspace\" ] || exit 10\nplugin=\"$plugin_workspace/.agents/plugins/usagi-runtime\"\n[ -f \"$plugin/plugin.json\" ] || exit 11\n[ -f \"$plugin/mcp_config.json\" ] || exit 12\n[ -f \"$plugin/hooks.json\" ] || exit 13\ngrep -q '\"PreInvocation\"' \"$plugin/hooks.json\" || exit 14\nresuming=true\nif [ -z \"$conversation_id\" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi\nresponse=$(printf '%s' '{{\"conversationId\":\"'\"$conversation_id\"'\",\"workspacePaths\":[\"/fixture\"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15\n[ \"$response\" = '{{}}' ] || exit 16\nprintf '%s\\0' \"$@\" > \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'agy-ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        argv.display(),
+        count.display(),
+    );
+    let path = bin.join("agy");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn nul_arguments(path: &Path) -> Vec<String> {
+    fs::read(path)
+        .unwrap()
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
+        .collect()
 }
 
 /// Restartable provider whose successor readiness can be held until the test
@@ -275,6 +299,13 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> 
     spawn_daemon(repo, home, path, shell)
 }
 
+fn start_daemon_with_sandbox_home(repo: &Path, home: &Path, path: &Path) -> Daemon {
+    let data_dir = channel_data_dir(home);
+    fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
+    fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    spawn_daemon_command(repo, home, path, None, None, Some(home))
+}
+
 fn start_daemon_with_source_identity(
     repo: &Path,
     home: &Path,
@@ -285,13 +316,13 @@ fn start_daemon_with_source_identity(
     let data_dir = channel_data_dir(home);
     fs::create_dir(&data_dir).expect("daemon data directory exists before serve");
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity))
+    spawn_daemon_command(repo, home, path, Some(shell), Some(source_identity), None)
 }
 
 /// Start a daemon against an existing home, as a cold restart does. The data
 /// directory is already published, so it is not re-created here.
 fn spawn_daemon(repo: &Path, home: &Path, path: &Path, shell: Option<&Path>) -> Daemon {
-    spawn_daemon_command(repo, home, path, shell, None)
+    spawn_daemon_command(repo, home, path, shell, None, None)
 }
 
 fn spawn_daemon_command(
@@ -300,6 +331,7 @@ fn spawn_daemon_command(
     path: &Path,
     shell: Option<&Path>,
     source_identity: Option<&str>,
+    sandbox_home: Option<&Path>,
 ) -> Daemon {
     let fixture_path = format!("{}:/usr/bin:/bin", path.display());
     let mut command = usagi_command(
@@ -317,6 +349,9 @@ fn spawn_daemon_command(
             usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
             "1",
         );
+    if let Some(sandbox_home) = sandbox_home {
+        command.env("HOME", sandbox_home);
+    }
     if let Some(shell) = shell {
         command.env("SHELL", shell);
     }
@@ -625,7 +660,7 @@ fn launch_intent(
 /// another intent cannot be correlated to it (#522).
 fn expected_digest(intent: &AgentLaunchIntent) -> String {
     usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::infrastructure::client::agent_launch_semantic_key(intent),
+        &usagi_core::infrastructure::ipc::agent_launch_semantic_key(intent),
     )
 }
 
@@ -878,6 +913,43 @@ fn wait_for_resume_completion(
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A fixture Claude CLI.
+///
+/// `auth status` answers the way the real one does for this profile: a token in
+/// the environment is what "logged in" means, so the probe is only satisfied
+/// when usagi injected the configured key. A launch records the environment it
+/// received, then behaves like the Codex fixture: one line of output, one line
+/// echoed back.
+fn write_claude_cli(bin: &Path, count: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let record = bin.parent().unwrap().join("launch-environment");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then\n  [ -n \"${{ANTHROPIC_AUTH_TOKEN:-}}\" ] || exit 1\n  printf 'logged in\\n'\n  exit 0\nfi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nenv | grep -E '^(ANTHROPIC_|CLAUDE_)' > '{record}'\nprintf '%s\\n' spawn >> '{count}'\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        record = record.display(),
+        count = count.display(),
+    );
+    let path = bin.join("claude");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Write the machine-level bindings a gateway provider's credential comes from.
+fn write_global_env(home: &Path, bindings: &[(&str, &str)]) {
+    let settings = serde_json::json!({
+        "env": bindings
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), serde_json::json!(value)))
+            .collect::<serde_json::Map<_, _>>(),
+    });
+    let data_dir = channel_data_dir(home);
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(
+        data_dir.join("settings.json"),
+        serde_json::to_string(&settings).unwrap(),
+    )
+    .unwrap();
 }
 
 fn safe_readiness_error(error: ClientError) {
@@ -1165,7 +1237,7 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
     assert_eq!(
         body["semantic_digest"],
         usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::infrastructure::client::agent_goal_semantic_key(&intent)
+            &usagi_core::infrastructure::ipc::agent_goal_semantic_key(&intent)
         )
     );
     let terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
@@ -1384,32 +1456,36 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
     );
 }
 
-/// #609 product E2E: the `sakana-ai` profile launches the Codex-compatible
-/// `codex-fugu`, so its admission has to follow *that* executable's status
-/// probe.
+/// Product E2E: the `sakana-ai` profile is the Claude CLI made into Fugu by its
+/// environment, so its admission has to follow *that* CLI under *that*
+/// environment.
 ///
-/// The root used to accept only `codex` / `claude` as readiness products, which
-/// made an installed and authenticated `codex-fugu` permanently unavailable —
-/// the profile the picker offers could never be launched. This drives the
-/// shipping binary over the real socket for all three states: not installed and
-/// installed-but-unauthenticated must refuse safely without spawning a PTY, and
-/// an authenticated fixture must reach a live conversation.
+/// Two things can only be observed end to end. A readiness probe run without the
+/// provider's environment answers for the user's own Anthropic login, which
+/// admits a launch that has no Sakana key and refuses one that does. And a
+/// launch that loses the gateway variables still starts Claude — against
+/// Anthropic, silently, while the picker says `sakana.ai`. This drives the
+/// shipping binary over the real socket for both: not installed and installed
+/// without a configured key must refuse safely without spawning a PTY, and a
+/// configured launch must reach a live conversation whose child received the
+/// endpoint, the isolated config directory, and the key.
 #[test]
-fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
+fn root_ipc_sakana_ai_admission_and_launch_carry_the_fugu_environment() {
     let _serial = serial();
-    for ready_status in [None, Some(1)] {
+    // Not installed, and installed-but-unconfigured, are both refused before any
+    // PTY exists.
+    for installed in [false, true] {
         let repo = fixture_repo();
         let home = short_dir("usagi-");
         let bin = home.path().join("bin");
         let count = home.path().join("spawn-count");
         fs::create_dir(&bin).unwrap();
-        // Codex stays installed and authenticated throughout, so a refusal can
-        // only come from `codex-fugu`'s own probe rather than a shared one.
-        write_codex(&bin, &count, 0);
-        if let Some(status) = ready_status {
-            write_codex_cli(&bin, "codex-fugu", &count, status);
+        if installed {
+            // The CLI is present and usable; only the Sakana key is missing, so
+            // no settings file configures one.
+            write_claude_cli(&bin, &count);
         }
-        let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+        let _daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
         let mut client = client(&channel_data_dir(home.path()));
         let (workspace, session, _) = available_scope(&mut client);
         let operation = OperationId::new().to_string();
@@ -1426,8 +1502,12 @@ fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     let count = home.path().join("spawn-count");
-    write_codex_cli(&bin, "codex-fugu", &count, 0);
-    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    fs::create_dir(&bin).unwrap();
+    write_claude_cli(&bin, &count);
+    let _daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
+    // The credential is machine-level, so it is read from the data directory the
+    // daemon just published rather than from any workspace.
+    write_global_env(home.path(), &[("SAKANA_API_KEY", "fish-fixture-key")]);
     let mut client = client(&channel_data_dir(home.path()));
     let (workspace, session, _) = available_scope(&mut client);
 
@@ -1472,7 +1552,28 @@ fn root_ipc_sakana_ai_admission_follows_the_codex_fugu_status_probe() {
     assert_eq!(
         fs::read_to_string(&count).unwrap().lines().count(),
         1,
-        "the authenticated fixture spawns exactly one `codex-fugu` child"
+        "the configured fixture spawns exactly one Claude child"
+    );
+
+    // What the launched child actually received. Without these the same binary
+    // would have talked to Anthropic with the user's own account and written the
+    // Claude profile's home.
+    let launched = fs::read_to_string(home.path().join("launch-environment")).unwrap();
+    for expected in [
+        "ANTHROPIC_BASE_URL=https://api.sakana.ai",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL=fugu-max[1m]",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL=fugu[1m]",
+        "CLAUDE_CODE_SUBAGENT_MODEL=fugu[1m]",
+        "ANTHROPIC_AUTH_TOKEN=fish-fixture-key",
+    ] {
+        assert!(launched.contains(expected), "{expected} in {launched}");
+    }
+    // The daemon resolves `$HOME` canonically, which on macOS means the
+    // `/private` side of the firmlink.
+    let config_directory = home.path().canonicalize().unwrap().join(".claude-sakana");
+    assert!(
+        launched.contains(&format!("CLAUDE_CONFIG_DIR={}", config_directory.display())),
+        "the Fugu profile keeps its own Claude config directory: {launched}"
     );
 }
 
@@ -1492,6 +1593,7 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
     let forged = client
         .request(DaemonRequest::AgentPhaseReport {
             phase: AgentPhase::Waiting,
+            native_session_id: None,
             caller_context: Some(McpCallerContext {
                 credential: "forged-credential".into(),
             }),
@@ -1506,6 +1608,7 @@ fn root_ipc_agent_phase_report_without_a_live_credential_fails_closed() {
     let empty = client
         .request(DaemonRequest::AgentPhaseReport {
             phase: AgentPhase::Ready,
+            native_session_id: None,
             caller_context: Some(McpCallerContext {
                 credential: String::new(),
             }),
@@ -1559,7 +1662,7 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     let stale = launch(
         TerminalLaunchScope {
             worktree_id: WorktreeId::new(),
-            ..scope.clone()
+            ..scope
         },
         "login-shell",
     )
@@ -1799,6 +1902,132 @@ fn wait_for_spawns(count: &Path, expected: usize) {
     }
 }
 
+fn assert_private_agy_plugin(
+    arguments: &[String],
+    data_dir: &Path,
+    repo: &Path,
+    home: &Path,
+) -> PathBuf {
+    let add_dir = arguments
+        .iter()
+        .position(|argument| argument == "--add-dir")
+        .and_then(|position| arguments.get(position + 1))
+        .map(PathBuf::from)
+        .expect("managed AGY launch carries its private plugin workspace");
+    assert!(
+        add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
+        "managed plugin workspace {} escaped daemon data {}",
+        add_dir.display(),
+        data_dir.display()
+    );
+    let plugin = add_dir.join(".agents/plugins/usagi-runtime");
+    for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+        assert!(plugin.join(document).is_file());
+    }
+    assert!(!repo.join(".agents/plugins/usagi-runtime").exists());
+    assert!(!home.join(".gemini/config").exists());
+    add_dir
+}
+
+fn assert_agy_conversation_state(state: &Path) {
+    assert!(state.join("conversations").is_dir());
+    for database in [
+        "conversation_summaries.db",
+        "conversation_summaries.db-shm",
+        "conversation_summaries.db-wal",
+    ] {
+        assert!(state.join(database).is_file());
+    }
+    assert_eq!(
+        fs::read_to_string(state.join("settings.json")).unwrap(),
+        "{\"existing\":true}\n"
+    );
+    assert!(!state.join("plugins").exists());
+    assert!(!state.join("import_manifest.json").exists());
+}
+
+/// Shipping composition E2E for the AGY-specific chain: private workspace
+/// plugin discovery, structured hook capture, cold interruption, and exact
+/// provider-native resume without a replacement prompt.
+#[test]
+fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    fs::create_dir(repo.path().join(".usagi")).unwrap();
+    fs::write(
+        repo.path().join(".usagi/config.toml"),
+        "[agents.agy]\nmodels = [\"fixture-agy\"]\n",
+    )
+    .unwrap();
+    git(repo.path(), &["add", ".usagi/config.toml"]);
+    git(repo.path(), &["commit", "-qm", "fixture agy config"]);
+
+    let home = short_dir("usagi-agy-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("agy-spawn-count");
+    let argv = home.path().join("agy-argv");
+    write_restartable_agy(&bin, &count, &argv);
+    let state = home.path().join(".gemini/antigravity-cli");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("settings.json"), "{\"existing\":true}\n").unwrap();
+    let daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
+    let data_dir = channel_data_dir(home.path());
+    let mut first = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut first);
+    let (_, terminal) = launch(&mut first, workspace, session, Some("agy"));
+    wait_for_terminal_text(&mut first, &terminal, "agy-ready");
+    wait_for_spawns(&count, 1);
+
+    let initial = nul_arguments(&argv);
+    let add_dir = assert_private_agy_plugin(&initial, &data_dir, repo.path(), home.path());
+    assert_agy_conversation_state(&state);
+    drop(first);
+    drop(daemon);
+    let _restarted = spawn_daemon_command(
+        repo.path(),
+        home.path(),
+        &bin,
+        None,
+        None,
+        Some(home.path()),
+    );
+    let mut second = client(&data_dir);
+    let (_, replacement, target) = resume(&mut second, workspace, session);
+    assert_eq!(
+        target.adapter_revision,
+        usagi_daemon::usecase::agy::PROFILE_REVISION
+    );
+    assert!(
+        !serde_json::to_string(&target)
+            .unwrap()
+            .contains("fixture-agy-conversation")
+    );
+    wait_for_spawns(&count, 2);
+    wait_for_terminal_text(&mut second, &replacement, "agy-ready");
+
+    let resumed = nul_arguments(&argv);
+    assert_eq!(
+        resumed
+            .iter()
+            .filter(|argument| argument.as_str() == "fixture-agy-conversation")
+            .count(),
+        1
+    );
+    assert!(
+        resumed
+            .windows(2)
+            .any(|arguments| { arguments == ["--conversation", "fixture-agy-conversation"] })
+    );
+    assert!(resumed.windows(2).any(|arguments| {
+        arguments[0] == "--add-dir" && arguments[1] == add_dir.to_string_lossy()
+    }));
+    assert!(
+        resumed
+            .iter()
+            .all(|argument| !matches!(argument.as_str(), "--prompt-interactive" | "--print"))
+    );
+}
+
 /// #510 product E2E: after a cold restart every interrupted conversation becomes
 /// its own tab, and only an explicit per-tab resume starts a provider.
 ///
@@ -1978,7 +2207,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     let replayed = client
         .request(DaemonRequest::ResumeAgent {
             operation_id: command.operation.to_string(),
-            target: command.target.clone(),
+            target: command.target,
             caller_context: None,
         })
         .expect("a replayed exact resume is idempotent");
@@ -2153,7 +2382,7 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
     .expect("restart returns with a successor that completes the first handshake");
     successor
         .request(DaemonRequest::Tenant {
-            action: usagi_core::infrastructure::client::TenantAction::Inventory,
+            action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
             root: None,
             force: false,
         })
@@ -2248,7 +2477,7 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Launch,
             payload: serde_json::to_value(TerminalRequest::Launch {
-                intent: successor_intent.clone(),
+                intent: successor_intent,
             })
             .unwrap(),
         })

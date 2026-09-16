@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use usagi_core::infrastructure::client::{
+use usagi_core::infrastructure::ipc::{
     DaemonRequest, TenantAction, TenantInventory, TenantSummary,
 };
 use usagi_core::infrastructure::ipc::{Envelope, ErrorCode, ProtocolError, ResponseOutcome};

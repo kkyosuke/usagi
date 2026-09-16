@@ -21,7 +21,9 @@ use crate::usecase::resources::identity::{
     ChildIdentity, ChildObservation, ChildProcessProbe, IDENTITY_SOURCE_OS,
 };
 use crate::usecase::resources::launch::{LaunchIntent, ResourceSpawner, SpawnRefusal};
-use crate::usecase::resources::retention::{LogicalClock, RetentionLimits};
+use usagi_core::domain::clock::LogicalClock;
+
+use crate::usecase::resources::retention::RetentionLimits;
 use crate::usecase::resources::shard::OwnerShard;
 
 /// The bytes of one durable document, shared by every store bound to it.
@@ -239,11 +241,11 @@ pub enum ProbeAnswer {
 
 /// A [`ChildProcessProbe`] over a table of answers.
 #[derive(Debug, Default)]
-pub struct FakeProbe {
+pub struct FakeChildProbe {
     answers: BTreeMap<u32, ProbeAnswer>,
 }
 
-impl FakeProbe {
+impl FakeChildProbe {
     /// A probe that knows about nothing.
     pub fn new() -> Self {
         Self::default()
@@ -261,7 +263,7 @@ impl FakeProbe {
     }
 }
 
-impl ChildProcessProbe for FakeProbe {
+impl ChildProcessProbe for FakeChildProbe {
     fn start_identity(&self, pid: u32) -> io::Result<String> {
         match self.answers.get(&pid) {
             Some(ProbeAnswer::Alive { start, .. }) => Ok(start.clone()),
@@ -284,9 +286,9 @@ impl ChildProcessProbe for FakeProbe {
 
 /// A deterministic logical clock.
 #[derive(Debug, Default)]
-pub struct FakeClock(Cell<u64>);
+pub struct FakeLogicalClock(Cell<u64>);
 
-impl FakeClock {
+impl FakeLogicalClock {
     /// A clock reading `now`.
     pub fn at(now: u64) -> Self {
         Self(Cell::new(now))
@@ -298,7 +300,7 @@ impl FakeClock {
     }
 }
 
-impl LogicalClock for FakeClock {
+impl LogicalClock for FakeLogicalClock {
     fn now(&self) -> u64 {
         self.0.get()
     }
@@ -318,19 +320,19 @@ pub enum SpawnPlan {
 /// A [`ResourceSpawner`] that counts every spawn, so "spawned at most once" is
 /// checkable rather than assumed.
 #[derive(Debug)]
-pub struct FakeSpawner {
+pub struct FakeResourceSpawner {
     plan: SpawnPlan,
     pub spawns: usize,
 }
 
-impl FakeSpawner {
+impl FakeResourceSpawner {
     /// A spawner following `plan`.
     pub fn new(plan: SpawnPlan) -> Self {
         Self { plan, spawns: 0 }
     }
 }
 
-impl ResourceSpawner for FakeSpawner {
+impl ResourceSpawner for FakeResourceSpawner {
     fn spawn(&mut self, _resource: &TerminalRef) -> Result<ChildIdentity, SpawnRefusal> {
         self.spawns += 1;
         match &self.plan {
@@ -357,8 +359,8 @@ pub fn verified(pid: u32, start: &str) -> ChildIdentity {
 }
 
 /// A probe that agrees with [`verified`] for `pid`.
-pub fn probe_for(pid: u32, start: &str) -> FakeProbe {
-    FakeProbe::new().with(
+pub fn probe_for(pid: u32, start: &str) -> FakeChildProbe {
+    FakeChildProbe::new().with(
         pid,
         ProbeAnswer::Alive {
             start: start.to_owned(),

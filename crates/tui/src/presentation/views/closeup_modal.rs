@@ -730,7 +730,7 @@ mod tests {
             all.insert_char(character);
         }
         let mut seen = Vec::new();
-        for _ in 0..5 {
+        for _ in 0..6 {
             all.complete_selected();
             seen.push(all.submission());
         }
@@ -742,6 +742,7 @@ mod tests {
                 "agent claude",
                 "agent codex",
                 "agent sakana.ai",
+                "agent agy",
             ]
         );
         // Wrapping returns to the first candidate.
@@ -834,12 +835,13 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 5);
+        assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
+        assert!(joined(&modal).contains("workflow"));
         assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
-        assert!(format!("{:?}", modal.clone()).contains("tui"));
+        assert!(format!("{modal:?}").contains("tui"));
         let action = modal.actions()[0];
         assert_eq!(action, action);
         assert!(format!("{action:?}").contains("agent"));
@@ -848,9 +850,9 @@ mod tests {
     #[test]
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
-        modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 4);
-        assert_eq!(modal.selected_action().name, "terminal");
+        modal.select_prev(); // wrap to last (workflow)
+        assert_eq!(modal.selected(), 5);
+        assert_eq!(modal.selected_action().name, "workflow");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();

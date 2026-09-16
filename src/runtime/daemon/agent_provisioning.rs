@@ -1,10 +1,10 @@
 //! Product-specific Agent launch provisioning for the daemon composition.
 //!
-//! This module owns Codex/Claude argv, sandbox, environment, role, and MCP
+//! This module owns Antigravity/Codex/Claude argv, sandbox, environment, role, and MCP
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
-use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory};
+use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory, validate_owned_path};
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
     ClaudeProvisioner, CodexProvision, CodexProvisionFailure, CodexProvisioner, DefaultModel,
@@ -14,6 +14,16 @@ use super::{
     claude_product_mcp_arguments, claude_sandbox, codex_product_mcp_arguments,
     launch_system_prompt, paths, scoped_settings_json, user_env,
 };
+
+mod agy;
+mod gateway;
+pub(super) use agy::RootAgyProvisioner;
+#[cfg(test)]
+pub(super) use agy::{
+    agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
+    materialize_agy_plugin,
+};
+pub(in crate::runtime) use gateway::provider_gateway_environment;
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -97,11 +107,8 @@ pub(super) fn effective_role_instruction(
 pub(super) fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
     // Repair only stale directory modes before the Agent owner mutex exists.
     // Codex performs the lock-aware deletion itself after startup.
-    for program in [
-        DefaultModel::OpenAi.command(),
-        DefaultModel::SakanaAi.command(),
-    ] {
-        if let Ok(roots) = root_agent_writable_roots(sandbox_home, program) {
+    for agent in [DefaultModel::OpenAi] {
+        if let Ok(roots) = root_agent_writable_roots(sandbox_home, agent) {
             for root in roots {
                 if let Err(error) = repair_codex_arg0_permissions(&root) {
                     ErrorLog::record(&format!(
@@ -131,9 +138,9 @@ pub(super) struct RootCodexProvisioner {
     pub(super) workspaces: Workspaces,
     pub(super) mcp_command: PathBuf,
     pub(super) data_home: paths::DataHome,
-    /// The executable this profile launches: `codex`, or `codex-fugu` for the
-    /// Codex-compatible `sakana-ai` profile.
-    pub(super) program: &'static str,
+    /// The provider this profile launches. Codex is the only one left on this
+    /// grammar: `sakana-ai` now serves Fugu through the Claude CLI.
+    pub(super) agent: DefaultModel,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the MCP wiring.
     pub(super) environment: Option<Arc<SharedUserEnvironment>>,
@@ -188,19 +195,19 @@ impl CodexProvisioner for RootCodexProvisioner {
         } else {
             None
         };
-        let sandbox_roots = codex_writable_roots(
+        let sandbox_roots = agent_writable_roots(
             mode,
             &working_directory,
             session_git.as_ref(),
             self.sandbox_home.as_deref(),
-            self.program,
+            self.agent,
             &self.data_home,
             context.scope.workspace_id,
         )
         .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
-            program: self.program,
+            agent: self.agent,
             workspace_root: &workspace_root,
             launch_roots: &sandbox_roots,
             tmpdir: self.sandbox_tmpdir.as_deref(),
@@ -208,6 +215,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             cache_dir: self.sandbox_cache_dir.as_deref(),
             backend: self.sandbox_backend.as_deref(),
             passthrough: self.sandbox_passthrough,
+            read_only_roots: &[],
         })
         .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         let protected_root = workspace_root
@@ -216,6 +224,7 @@ impl CodexProvisioner for RootCodexProvisioner {
         let launcher = claude_sandbox_launcher(
             &self.mcp_command,
             mode,
+            self.agent,
             &protected_root,
             &SandboxLauncherPaths {
                 backend: self.sandbox_backend.as_deref(),
@@ -224,6 +233,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 cache_dir: self.sandbox_cache_dir.as_deref(),
             },
             &sandbox_roots,
+            &[],
         )
         .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         spawn.set_sandbox_launcher(launcher);
@@ -245,17 +255,17 @@ impl CodexProvisioner for RootCodexProvisioner {
     }
 }
 
-pub(super) fn codex_writable_roots(
+pub(super) fn agent_writable_roots(
     mode: SandboxMode,
     working_directory: &Path,
     session_git: Option<&SessionGitPolicy>,
     sandbox_home: Option<&Path>,
-    program: &str,
+    agent: DefaultModel,
     data_home: &paths::DataHome,
     workspace: WorkspaceId,
 ) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
     let mut roots = if mode == SandboxMode::Root {
-        root_agent_writable_roots(sandbox_home, program)?
+        root_agent_writable_roots(sandbox_home, agent)?
     } else {
         let mut roots = claude_writable_roots(mode, working_directory);
         roots.extend(
@@ -271,38 +281,37 @@ pub(super) fn codex_writable_roots(
     Ok(roots)
 }
 
-/// The Claude provisioner's product program: what the readiness probe proves,
-/// what the launcher execs, and whose `$HOME` state root the sandbox grants.
-/// The Codex provisioner carries the same value per profile (`RootCodexProvisioner::program`).
-pub(super) const CLAUDE_PROGRAM: &str = "claude";
-
 /// Ensure the launched agent's private state directory exists before a root
 /// sandbox starts. Linux `--bind-try` cannot make a missing bind source writable,
 /// so the daemon creates and validates the provider-specific directory first.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_scope_grants_only_the_state_directory_of_the_agent_it_launches
 pub(super) fn root_agent_writable_roots(
     home: Option<&Path>,
-    program: &str,
+    agent: DefaultModel,
 ) -> Result<Vec<PathBuf>, ClaudeSandboxPolicyError> {
-    let (Some(home), Some(state_directory)) =
-        (home, claude_sandbox::agent_state_directory(program))
-    else {
+    let Some(home) = home else {
         return Ok(Vec::new());
     };
+    let state_directory = agent.state_directory();
     validate_owned_directory(home)?;
-    let state = home.join(state_directory);
-    let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+    let mut state = home.to_path_buf();
+    // Some providers intentionally expose a nested state subtree. Validate
+    // every ancestor before descending so a symlink cannot redirect creation.
+    for segment in state_directory.split('/') {
+        state.push(segment);
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match builder.create(&state) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
+        }
+        validate_owned_directory(&state)?;
     }
-    match builder.create(&state) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(ClaudeSandboxPolicyError::InvalidWritableRoot),
-    }
-    validate_owned_directory(&state)?;
     state
         .canonicalize()
         .map(|state| vec![state])
@@ -412,6 +421,10 @@ pub(super) struct RootClaudeProvisioner {
     pub(super) workspaces: Workspaces,
     pub(super) mcp_command: PathBuf,
     pub(super) data_home: paths::DataHome,
+    /// この provisioner が起動する provider。`claude` executable は Claude と
+    /// `sakana-ai`（Sakana の Anthropic 互換 endpoint 上の Fugu）が共有するため、
+    /// state grant と gateway environment はこの値から決まる。
+    pub(super) agent: DefaultModel,
     /// daemon bootstrap の trusted environment から一度だけ確定した backend。
     pub(super) sandbox_backend: Option<PathBuf>,
     /// daemon bootstrap の trusted environment から一度だけ確定した policy paths。
@@ -446,14 +459,14 @@ impl RootClaudeProvisioner {
 }
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl ClaudeProvisioner for RootClaudeProvisioner {
+    #[allow(clippy::too_many_lines)] // One path keeps Claude's sandbox, hooks, prompt, and spawn arguments visibly atomic.
     fn provision(
         &mut self,
         context: &ProvisionContext,
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
         let (working_directory, workspace_root) = working_directories(&self.workspaces, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
-        // Claude は必ず OS sandbox の中で起動する（多層防御の hard boundary）。論理境界の
-        // `guard-workspace` も両 scope に配線し、root は tool と OS の両方で fail-closed にする。
+        // Claude は OS sandbox と `guard-workspace` の両方で fail-closed 起動する。
         let mode = sandbox_mode(context);
         let session_git = if mode == SandboxMode::Session {
             session_git_policy(&workspace_root, &working_directory)
@@ -475,7 +488,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
-            program: CLAUDE_PROGRAM,
+            agent: self.agent,
             workspace_root: &workspace_root,
             launch_roots: &launch_roots,
             tmpdir: paths.tmpdir,
@@ -483,6 +496,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             cache_dir: paths.cache_dir,
             backend: paths.backend,
             passthrough: self.sandbox_passthrough,
+            read_only_roots: &[],
         })
         .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
         let sandbox_roots = launch_roots
@@ -496,9 +510,11 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         let sandbox_launcher = claude_sandbox_launcher(
             &self.mcp_command,
             mode,
+            self.agent,
             &protected_root,
             &paths,
             &sandbox_roots,
+            &[],
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let role =
@@ -527,14 +543,14 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| ClaudeProvisionFailure::MaterializationFailed)?;
-        let mut spawn = SpawnProvision::new(
-            launch_environment(
-                &user,
-                mcp_environment(context, &self.data_home, &workspace_root)
-                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
-            ),
-            arguments,
+        let gateway = provider_gateway_environment(self.agent, self.sandbox_home.as_deref(), &user)
+            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
+        let mut environment = launch_environment(&user, gateway.clone());
+        environment.extend(
+            mcp_environment(context, &self.data_home, &workspace_root)
+                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
         );
+        let mut spawn = SpawnProvision::new(environment, arguments);
         spawn.set_sandbox_launcher(sandbox_launcher);
         if mode == SandboxMode::Root {
             insert_root_git_environment(&mut spawn);
@@ -546,9 +562,11 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
                 "1".to_owned(),
             );
         }
+        let mut environment_allowlist = launch_allowlist(context, &user);
+        environment_allowlist.extend(gateway.into_iter().map(|(name, _)| name));
         Ok(ClaudeProvision {
             working_directory,
-            environment_allowlist: launch_allowlist(context, &user),
+            environment_allowlist,
             spawn,
         })
     }
@@ -728,7 +746,7 @@ pub(super) fn insert_root_git_environment(spawn: &mut SpawnProvision) {
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical
 pub(super) fn validate_root_git_common_dir_policy(
     workspace_root: &Path,
-    program: &str,
+    agent: DefaultModel,
     tmpdir: Option<&Path>,
     home: Option<&Path>,
     cache_dir: Option<&Path>,
@@ -737,9 +755,9 @@ pub(super) fn validate_root_git_common_dir_policy(
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
-        writable
-            .extend(claude_sandbox::agent_state_directory(program).map(|state| home.join(state)));
-        if claude_sandbox::agent_config_prefix(program)
+        writable.push(home.join(agent.state_directory()));
+        if agent
+            .global_config_prefix()
             .is_some_and(|prefix| lexical_prefix_overlaps_path(&home.join(prefix), &common))
         {
             return Err(());
@@ -808,10 +826,10 @@ impl From<InvalidOwnedDirectory> for ClaudeSandboxPolicyError {
 /// daemon が確定した、1 回の launch 分の sandbox policy 入力。
 pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) mode: SandboxMode,
-    /// sandbox の中で exec する agent CLI（`claude` / `codex` / `codex-fugu`）。root mode で
-    /// launcher が足す `$HOME` 配下の state root（`~/.claude` / `~/.codex` / …）を決めるため、
-    /// daemon 側の検証もこの program に追従する。
-    pub(super) program: &'a str,
+    /// 起動する provider。root mode で launcher が足す `$HOME` 配下の state root
+    /// （`~/.claude` / `~/.codex` / `~/.claude-sakana` / …）はこれで決まる。`claude` を
+    /// 2 provider が共有するため、program だけでは検証対象が一意に決まらない。
+    pub(super) agent: DefaultModel,
     pub(super) workspace_root: &'a Path,
     pub(super) launch_roots: &'a [PathBuf],
     pub(super) tmpdir: Option<&'a Path>,
@@ -821,17 +839,20 @@ pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) cache_dir: Option<&'a Path>,
     pub(super) backend: Option<&'a Path>,
     pub(super) passthrough: bool,
+    /// writable provider state の内側を再び read-only にする、実在・検証済み file / directory。
+    pub(super) read_only_roots: &'a [PathBuf],
 }
 
 /// launcher へ host path を渡す前に通す policy gate。writable root 集合・`$HOME` 配下の
 /// state root・（root mode では）Git common dir を、保護対象 workspace と突き合わせる。
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
+#[allow(clippy::too_many_lines)] // One gate keeps every host path validation and overlap rule atomic.
 pub(super) fn validate_claude_sandbox_policy(
     policy: &SandboxPolicyInputs<'_>,
 ) -> Result<(), ClaudeSandboxPolicyError> {
     let SandboxPolicyInputs {
         mode,
-        program,
+        agent,
         workspace_root,
         launch_roots,
         tmpdir,
@@ -839,6 +860,7 @@ pub(super) fn validate_claude_sandbox_policy(
         cache_dir,
         backend,
         passthrough,
+        read_only_roots,
     } = *policy;
     if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return Err(ClaudeSandboxPolicyError::MissingBackend);
@@ -849,7 +871,7 @@ pub(super) fn validate_claude_sandbox_policy(
     let backend = backend.ok_or(ClaudeSandboxPolicyError::MissingBackend)?;
     validate_sandbox_backend(backend)?;
     if mode == SandboxMode::Root {
-        validate_root_git_common_dir_policy(workspace_root, program, tmpdir, home, cache_dir)
+        validate_root_git_common_dir_policy(workspace_root, agent, tmpdir, home, cache_dir)
             // Git common dir が writable 領域に入っていれば、read-only な checkout でも
             // refs / index の権威は書けてしまう。保護対象が writable の中にある同じ誤りである。
             .map_err(|()| ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)?;
@@ -879,8 +901,14 @@ pub(super) fn validate_claude_sandbox_policy(
         validate_owned_directory(home)?;
         // State is a path subtree, whereas the global config is a lexical file
         // family (`~/.claude.json*`). Keep those overlap rules distinct.
-        if let Some(state) = claude_sandbox::agent_state_directory(program) {
-            let granted = home.join(state);
+        //
+        // Both are resolved from the **provider**, exactly as the launcher
+        // resolves the grant it will hand out. Reading them off `program` would
+        // judge `sakana-ai` against Claude's `~/.claude` while the launcher
+        // grants `~/.claude-sakana`, so a workspace inside the directory that is
+        // actually made writable would pass this gate.
+        {
+            let granted = home.join(agent.state_directory());
             let granted = granted.canonicalize().unwrap_or(granted);
             if protected_workspace.starts_with(&granted)
                 || (mode == SandboxMode::Root && granted.starts_with(&protected_workspace))
@@ -888,7 +916,7 @@ pub(super) fn validate_claude_sandbox_policy(
                 return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
             }
         }
-        if claude_sandbox::agent_config_prefix(program).is_some_and(|prefix| {
+        if agent.global_config_prefix().is_some_and(|prefix| {
             let granted = home.join(prefix);
             let protected_in_family = lexical_prefix_overlaps_path(&granted, &protected_workspace);
             protected_in_family
@@ -911,18 +939,72 @@ pub(super) fn validate_claude_sandbox_policy(
         }
     }
     for root in roots {
-        validate_owned_directory(&root)?;
+        validate_owned_path(&root, true)?;
         let canonical = root
             .canonicalize()
             .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+        if canonical != root {
+            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+        }
         if protected_workspace.starts_with(&canonical)
             || (mode == SandboxMode::Root && canonical.starts_with(&protected_workspace))
         {
             return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
         }
     }
+    for root in read_only_roots {
+        validate_owned_path(root, true)?;
+        if root
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .is_none_or(|canonical| canonical != root)
+        {
+            return Err(ClaudeSandboxPolicyError::InvalidWritableRoot);
+        }
+    }
     Ok(())
 }
+
+/// Materialization target が launcher の完全な write surface と重ならないことを確認する。
+/// target 自体はまだ存在しなくてよく、呼び出し側はこの gate の後にだけ作成する。
+pub(super) fn validate_isolated_sandbox_root(
+    policy: &SandboxPolicyInputs<'_>,
+    target: &Path,
+) -> Result<(), ClaudeSandboxPolicyError> {
+    if target.starts_with(policy.workspace_root) || policy.workspace_root.starts_with(target) {
+        return Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor);
+    }
+    let request = claude_sandbox::SandboxRequest {
+        platform: HOST_SANDBOX_PLATFORM,
+        mode: policy.mode,
+        protected_root: Some(policy.workspace_root.to_path_buf()),
+        backend: None,
+        launch_roots: policy.launch_roots.to_vec(),
+        read_only_roots: policy.read_only_roots.to_vec(),
+        tmpdir: policy.tmpdir.map(Path::to_path_buf),
+        home: policy.home.map(Path::to_path_buf),
+        linux_home_entries: None,
+        cache_dir: policy.cache_dir.map(Path::to_path_buf),
+        passthrough: false,
+        agent: Some(policy.agent),
+        // The provider decides the grant; the program it execs follows from it,
+        // so the two cannot be given different answers here.
+        command: vec![policy.agent.command().to_owned()],
+    };
+    if claude_sandbox::writable_surface_overlaps(&request, target) {
+        Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+const HOST_SANDBOX_PLATFORM: claude_sandbox::Platform = claude_sandbox::Platform::MacOs;
+#[cfg(target_os = "linux")]
+const HOST_SANDBOX_PLATFORM: claude_sandbox::Platform = claude_sandbox::Platform::Linux;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const HOST_SANDBOX_PLATFORM: claude_sandbox::Platform = claude_sandbox::Platform::Unsupported;
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_cold_starts_through_the_out_of_sandbox_broker
 pub(super) fn validate_sandbox_backend(path: &Path) -> Result<(), ClaudeSandboxPolicyError> {
@@ -1004,21 +1086,28 @@ pub(super) struct SandboxLauncherPaths<'a> {
     pub(super) cache_dir: Option<&'a Path>,
 }
 
-/// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… --`, the ephemeral
+/// `usagi claude-sandbox --mode <mode> [--writable-root <path>]… [--read-only-root <path>]… --`,
+/// the ephemeral
 /// instruction that makes the spawned child the launcher instead of the bare
 /// product.  Host paths stay out of the durable launch snapshot.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 pub(super) fn claude_sandbox_launcher(
     usagi: &Path,
     mode: SandboxMode,
+    agent: DefaultModel,
     protected_root: &Path,
     paths: &SandboxLauncherPaths<'_>,
     writable_roots: &[PathBuf],
+    read_only_roots: &[PathBuf],
 ) -> Result<SandboxLauncher, ()> {
     let mut prefix = vec![
         "claude-sandbox".to_owned(),
         "--mode".to_owned(),
         mode.as_str().to_owned(),
+        // Which `$HOME` state the launcher grants cannot be read off the argv:
+        // Claude and `sakana-ai` exec the same program. The provider says it.
+        "--agent".to_owned(),
+        agent.profile_id().to_owned(),
         "--protected-root".to_owned(),
         protected_root.to_str().ok_or(())?.to_owned(),
     ];
@@ -1035,6 +1124,10 @@ pub(super) fn claude_sandbox_launcher(
     }
     for root in writable_roots {
         prefix.push("--writable-root".to_owned());
+        prefix.push(root.to_str().ok_or(())?.to_owned());
+    }
+    for root in read_only_roots {
+        prefix.push("--read-only-root".to_owned());
         prefix.push(root.to_str().ok_or(())?.to_owned());
     }
     prefix.push("--".to_owned());
@@ -1180,8 +1273,6 @@ pub(super) fn mcp_environment(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 pub(super) fn codex_integration_arguments(command: &Path) -> Result<Vec<String>, ()> {
     let command = command.to_str().ok_or(())?;
-    let capture_command = format!("{} codex-session-capture", shell_quote(command));
-    let capture_command = serde_json::to_string(&capture_command).map_err(|_| ())?;
     let mut arguments = codex_product_mcp_arguments(command);
     arguments.extend(["-c".into(), r"features.hooks = true".into()]);
     for (event, phase) in AGENT_PHASE_HOOK_EVENTS {
@@ -1194,17 +1285,12 @@ pub(super) fn codex_integration_arguments(command: &Path) -> Result<Vec<String>,
         let phase_command = format!("{} agent-phase {}", shell_quote(command), phase.as_token());
         let phase_command = serde_json::to_string(&phase_command).map_err(|_| ())?;
         let timeout = if event == "SessionEnd" { 3 } else { 10 };
-        let groups = if event == "SessionStart" {
-            // Only a new conversation may establish provider resume identity;
-            // phase reporting also applies to resume/clear/compact starts.
-            format!(
-                r#"[{{ matcher = "^startup$", hooks = [{{ type = "command", command = {capture_command}, timeout = 10 }}] }}, {{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
-            )
-        } else {
-            format!(
-                r#"[{{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
-            )
-        };
+        // `agent-phase ready` consumes the same SessionStart payload and sends
+        // both its current session ID and phase in one private request. This
+        // keeps startup, resume, clear, and compact transitions ordered.
+        let groups = format!(
+            r#"[{{ hooks = [{{ type = "command", command = {phase_command}, timeout = {timeout} }}] }}]"#
+        );
         arguments.extend(["-c".into(), format!("hooks.{event} = {groups}")]);
     }
     Ok(arguments)

@@ -14,13 +14,12 @@
 //! shell.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 
 /// Daemon capacity refusal and the action-oriented copy shown in Closeup.
 /// The daemon owns the resource fact; the TUI owns the recovery vocabulary.
@@ -136,6 +135,22 @@ pub struct WorkspaceRuntime {
 }
 
 impl WorkspaceRuntime {
+    /// Agent inventory owns live membership, not a user's native Workflow focus.
+    pub(super) fn preserve_workflow_selection(&self, targets: &mut [PaneRestoreTarget]) {
+        for target in targets {
+            if self.panes().pane(target.target).is_some_and(|pane| {
+                pane.tabs().iter().any(|tab| {
+                    matches!(tab, PaneTab::Ready(ready)
+                        if ready.kind == PaneKind::Workflow
+                            && pane.selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
+                })
+            }) {
+                target.selected = None;
+                target.selected_interrupted = None;
+            }
+        }
+    }
+
     /// Start a Home runtime for `workspace` with the daemon-authoritative
     /// `sessions`. The first managed session is active when present; an empty
     /// snapshot has no active pane target and never falls back to workspace root.
@@ -551,6 +566,18 @@ impl WorkspaceRuntime {
     /// calling this.
     #[must_use]
     pub fn handle_key(&mut self, key: Key) -> Vec<Effect> {
+        if let Some(session) = self.selected_workflow_session() {
+            use crate::usecase::application::workflow::WorkflowEdit;
+            let edit = match &key {
+                Key::LineStart | Key::Home | Key::Char('\u{1}') => Some(WorkflowEdit::Start),
+                Key::LineEnd | Key::End => Some(WorkflowEdit::End),
+                Key::Delete => Some(WorkflowEdit::Delete),
+                _ => None,
+            };
+            if let Some(edit) = edit {
+                return self.apply_event(AppEvent::WorkflowEdit { session, edit });
+            }
+        }
         // The Overview / Closeup overlays own keyboard input while open: their
         // persisted modal edits its own caret and selection, and the sidebar
         // reducer never sees the key. This is the symmetry the other overlays
@@ -842,6 +869,31 @@ impl WorkspaceRuntime {
     /// live-pane flag in sync with the resulting controller state.
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
+        let event = match event {
+            AppEvent::Key(key)
+                if matches!(
+                    key,
+                    AppKey::Char(_)
+                        | AppKey::Paste(_)
+                        | AppKey::Enter
+                        | AppKey::Backspace
+                        | AppKey::Left
+                        | AppKey::Right
+                        | AppKey::Up
+                        | AppKey::Down
+                        | AppKey::Tab
+                        | AppKey::PageUp
+                        | AppKey::PageDown
+                        | AppKey::SaveRoles
+                ) =>
+            {
+                match self.selected_workflow_session() {
+                    Some(session) => AppEvent::WorkflowInput { session, key },
+                    _ => AppEvent::Key(key),
+                }
+            }
+            event => event,
+        };
         let previous_drawer_focus = self.state.workspace_drawer_focus();
         let advances_material = match &event {
             AppEvent::Tick => false,
@@ -857,6 +909,15 @@ impl WorkspaceRuntime {
             self.material_revision = self.material_revision.saturating_add(1);
         }
         let mut effects = update(&mut self.state, event);
+        // The Workflow tab is shell-local: it owns no daemon operation, so no
+        // port answers `OpenWorkflow` and no completion comes back to promote
+        // it. The registry therefore takes that intent here, where the reducer
+        // produced it; the effect executor accepts the same effect as a no-op.
+        for effect in &effects {
+            if matches!(effect, Effect::OpenWorkflow { .. }) {
+                self.on_effect(effect);
+            }
+        }
         self.remember_root_surface_selection(previous_drawer_focus);
         self.follow_active_target();
         // A restored root terminal already names the exact tab the user last
@@ -879,6 +940,22 @@ impl WorkspaceRuntime {
         }
         self.sync_overlay_modals();
         effects
+    }
+
+    fn selected_workflow_session(&self) -> Option<SessionId> {
+        if self.state.overlay().is_some()
+            || self.state.workspace_drawer_focus().is_some()
+            || self.state.route() != Route::Home(HomeMode::Closeup)
+        {
+            return None;
+        }
+        let Some(Target::Session(session)) = self.panes.active() else {
+            return None;
+        };
+        self.panes.active_pane().tabs().iter().any(|tab| {
+            matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow
+                && self.panes.active_pane().selected() == &PaneSelection::Tab(TabSelection::Ready(ready.operation)))
+        }).then_some(session)
     }
 
     fn remember_root_surface_selection(&mut self, previous: Option<WorkspaceDrawerFocus>) {
@@ -1162,7 +1239,8 @@ impl WorkspaceRuntime {
         operation: OperationId,
         kind: PaneKind,
     ) -> Vec<PaneRegistryEffect> {
-        if matches!(target, Target::Root(_)) && kind == PaneKind::Diff {
+        if matches!(target, Target::Root(_)) && matches!(kind, PaneKind::Diff | PaneKind::Workflow)
+        {
             return Vec::new();
         }
         let effects = reduce_registry(
@@ -1897,9 +1975,53 @@ impl WorkspaceRuntime {
     /// cycles the active tab; `OpenTerminal`/`LaunchAgent` record a pending
     /// placeholder keyed by the effect's operation, so the daemon completion the
     /// shell later routes to [`WorkspaceRuntime::complete_pane`] promotes the
-    /// matching tab. Effects with no pane surface are ignored here.
+    /// matching tab. `OpenWorkflow` has no daemon IO to execute, so
+    /// [`Self::apply_event`] mirrors it itself as soon as the reducer produces
+    /// it. Effects with no pane surface are ignored here.
     pub fn on_effect(&mut self, effect: &Effect) {
         match effect {
+            Effect::OpenWorkflow { session } => {
+                if !self.state.sessions().contains(session)
+                    || self
+                        .state
+                        .session_lifecycles()
+                        .get(session)
+                        .is_some_and(|state| !state.capabilities().can_use)
+                {
+                    return;
+                }
+                let target = Target::Session(*session);
+                let existing = self.panes.pane(target).and_then(|pane| {
+                    pane.tabs().iter().find_map(|tab| match tab {
+                        PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow => {
+                            Some(ready.operation)
+                        }
+                        _ => None,
+                    })
+                });
+                let operation = existing.unwrap_or_else(OperationId::new);
+                if existing.is_none() {
+                    let _ = self.request_pane(target, operation, PaneKind::Workflow);
+                    let _ = reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane {
+                            target,
+                            event: PaneEvent::Resolved { operation },
+                        },
+                    );
+                    self.pane_focus_at_request.remove(&operation);
+                }
+                let _ = reduce_registry(
+                    &mut self.panes,
+                    PaneRegistryEvent::Pane {
+                        target,
+                        event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(
+                            operation,
+                        ))),
+                    },
+                );
+                self.sync_live_pane();
+            }
             Effect::SelectTab { direction } => {
                 let _ = self.select_tab(*direction);
             }
@@ -2053,39 +2175,37 @@ impl WorkspaceRuntime {
         }
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Build the Home frame from the controller state, pane strip, and the
     /// per-frame projection material the shell polls (metrics, git diffs, live
     /// terminal viewport). This is the only render path for the controller
     /// runtime.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         height: usize,
         width: usize,
         workspace_name: &str,
-        root_cwd: impl Into<PathBuf>,
         sessions: &[ProjectedSession],
         metrics: Option<DaemonMetrics>,
         git_diffs: &BTreeMap<SessionId, GitDiff>,
         terminal_view: Option<TerminalViewProjection>,
     ) -> Vec<String> {
-        let root_cwd = root_cwd.into();
         let root_terminal_projection = self.root_terminal_projection(terminal_view.as_ref());
         let home_terminal_view = if self.state.root_terminal_drawer_open() {
             None
         } else {
             terminal_view
         };
-        let projection =
-            HomeProjection::from_state(&self.state, workspace_name, &root_cwd, sessions)
-                .with_pane(self.preview_pane())
-                .with_metrics(metrics)
-                .with_git_diffs(git_diffs)
-                .with_terminal_view(home_terminal_view)
-                .with_director_drawer(self.director_projection.clone())
-                .with_root_terminal_drawer(root_terminal_projection)
-                .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
+        let projection = HomeProjection::from_state(&self.state, workspace_name, sessions)
+            .with_pane(self.preview_pane())
+            .with_metrics(metrics)
+            .with_git_diffs(git_diffs)
+            .with_terminal_view(home_terminal_view)
+            .with_director_drawer(self.director_projection.clone())
+            .with_root_terminal_drawer(root_terminal_projection)
+            .with_overlay_modals(self.overview_modal.clone(), self.closeup_modal.clone());
         render_home(height, width, &projection)
     }
 
@@ -2268,6 +2388,118 @@ mod tests {
         for character in text.chars() {
             let _ = runtime.handle_key(Key::Char(character));
         }
+    }
+
+    #[test]
+    fn workflow_command_opens_one_nonterminal_tab_and_keeps_its_draft() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let _ = runtime.handle_key(Key::Up);
+        let _ = runtime.handle_key(Key::Down);
+        type_str(&mut runtime, "workflow");
+        let effects = runtime.handle_key(Key::Enter);
+        assert!(
+            matches!(effects.as_slice(), [Effect::OpenWorkflow { session: opened }, Effect::Workflow(_)] if *opened == session)
+        );
+        // The tab is open from the key alone: nothing in the shell replays the
+        // effect, so a registry that waited for the executor would stay empty.
+        assert!(runtime.focused_terminal().is_none());
+        assert!(
+            matches!(runtime.panes.active_pane().tabs(), [PaneTab::Ready(ready)] if ready.kind == PaneKind::Workflow)
+        );
+        assert_eq!(runtime.selected_workflow_session(), Some(session));
+        type_str(&mut runtime, "Check login");
+        let _ = runtime.handle_key(Key::Enter);
+        type_str(&mut runtime, "and errors");
+        assert_eq!(
+            runtime
+                .state()
+                .workflow_panel(session)
+                .unwrap()
+                .draft
+                .value(),
+            "Check login\nand errors"
+        );
+        runtime.on_effect(&Effect::OpenWorkflow { session });
+        assert_eq!(runtime.panes.active_pane().tabs().len(), 1);
+        assert_eq!(
+            runtime
+                .state()
+                .workflow_panel(session)
+                .unwrap()
+                .draft
+                .value(),
+            "Check login\nand errors"
+        );
+        let _ = runtime.handle_key(Key::Home);
+        let _ = runtime.handle_key(Key::Delete);
+        let _ = runtime.handle_key(Key::End);
+        type_str(&mut runtime, "!");
+        assert_eq!(
+            runtime
+                .state()
+                .workflow_panel(session)
+                .unwrap()
+                .draft
+                .value(),
+            "heck login\nand errors!"
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO));
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Switch));
+    }
+
+    #[test]
+    fn workflow_can_open_beside_an_agent_and_has_no_root_input_owner() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        let _ = runtime.request_pane(
+            Target::Session(session),
+            OperationId::new(),
+            PaneKind::Agent,
+        );
+        runtime.on_effect(&Effect::OpenWorkflow { session });
+        assert_eq!(runtime.panes.active_pane().tabs().len(), 2);
+        assert_eq!(runtime.selected_workflow_session(), Some(session));
+        runtime.panes = PaneRegistry::new(Target::Root(workspace));
+        assert_eq!(runtime.selected_workflow_session(), None);
+    }
+
+    #[test]
+    fn workflow_tab_rejects_stale_and_unavailable_session_targets() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+        runtime.on_effect(&Effect::OpenWorkflow {
+            session: SessionId::new(),
+        });
+        assert!(runtime.panes.active_pane().tabs().is_empty());
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+            BTreeMap::from([(
+                session,
+                usagi_core::domain::session_lifecycle::SessionLifecycleProjection {
+                    lifecycle: SessionLifecycle::Failed,
+                    failure_stage: None,
+                    failure_summary: None,
+                },
+            )]),
+        )));
+        runtime.on_effect(&Effect::OpenWorkflow { session });
+        assert!(
+            runtime
+                .panes
+                .pane(Target::Session(session))
+                .unwrap()
+                .tabs()
+                .is_empty()
+        );
+        let _ = runtime.request_pane(
+            Target::Root(workspace),
+            OperationId::new(),
+            PaneKind::Workflow,
+        );
+        assert!(runtime.panes.pane(Target::Root(workspace)).is_none());
     }
 
     #[test]
@@ -2511,9 +2743,9 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
 
-        // `terminal` is the last action; Up wraps to it.
+        // Select by name so adding a later command cannot change this target.
         let mut runtime = closeup_on(workspace, session);
-        let _ = runtime.handle_key(Key::Up);
+        type_str(&mut runtime, "terminal");
         let effects = runtime.handle_key(Key::Enter);
         assert!(
             effects
@@ -2717,16 +2949,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
         type_str(&mut runtime, "session");
-        let frame = runtime.render(
-            24,
-            80,
-            "atlas",
-            "/work/root",
-            &[],
-            None,
-            &BTreeMap::new(),
-            None,
-        );
+        let frame = runtime.render(24, 80, "atlas", &[], None, &BTreeMap::new(), None);
         assert!(frame.join("\n").contains("Overview"));
     }
 
@@ -2833,7 +3056,7 @@ mod tests {
         // controller が phase を観測した runtime は inventory 無しでも引ける。
         let second_runtime = AgentRuntimeRef {
             agent_runtime_id: AgentRuntimeId::new(),
-            terminal: second.clone(),
+            terminal: second,
             session_id: Some(session),
         };
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
@@ -3222,7 +3445,7 @@ mod tests {
         let second_op = OperationId::new();
         let second = terminal_ref(workspace, session);
         let _ = runtime.request_pane(target, second_op, PaneKind::Agent);
-        let _ = runtime.complete_pane(target, second_op, second.clone());
+        let _ = runtime.complete_pane(target, second_op, second);
 
         assert_eq!(
             runtime.tab_selection_at(0),
@@ -3313,7 +3536,7 @@ mod tests {
         let discovered = terminal_ref(workspace, session);
         let mut runtime = closeup_on(workspace, session);
         let (dispatched_interaction, dispatched_revision) = runtime.restore_fence();
-        for terminal in [first.clone(), second.clone()] {
+        for terminal in [first.clone(), second] {
             let operation = OperationId::new();
             let _ = runtime.request_pane(target, operation, PaneKind::Agent);
             let _ = runtime.complete_pane(target, operation, terminal);
@@ -3665,7 +3888,7 @@ mod tests {
         };
         let root_generic = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
@@ -3753,11 +3976,11 @@ mod tests {
         };
         let root_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let first_root_agent = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
@@ -3846,11 +4069,11 @@ mod tests {
         };
         let first_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let second_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let fence = runtime.restore_fence();
@@ -3945,7 +4168,6 @@ mod tests {
             24,
             100,
             "demo",
-            ".",
             &[],
             None,
             &BTreeMap::new(),
@@ -3983,7 +4205,7 @@ mod tests {
         };
         let second = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..first.clone()
+            ..first
         };
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let fence = runtime.restore_fence();
@@ -4049,11 +4271,11 @@ mod tests {
         };
         let first_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let second_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::<SessionId>::new());
         let fence = runtime.restore_fence();
@@ -4117,7 +4339,6 @@ mod tests {
             20,
             80,
             "workspace",
-            "/workspace",
             &[],
             None,
             &BTreeMap::new(),
@@ -4287,7 +4508,6 @@ mod tests {
             24,
             200,
             "workspace",
-            "/workspace",
             &[],
             None,
             &BTreeMap::new(),
@@ -4316,7 +4536,7 @@ mod tests {
             managed_operation,
             PaneKind::Terminal,
         );
-        let _ = runtime.complete_pane(Target::Session(session), managed_operation, managed.clone());
+        let _ = runtime.complete_pane(Target::Session(session), managed_operation, managed);
         let managed_before = runtime
             .panes()
             .pane(Target::Session(session))
@@ -4572,7 +4792,6 @@ mod tests {
             20,
             80,
             "atlas",
-            "/work/root",
             std::slice::from_ref(&projected),
             None,
             &BTreeMap::new(),
@@ -4735,7 +4954,7 @@ mod tests {
     /// Render one Home frame through the runtime and flatten it to plain text.
     fn joined_frame(runtime: &WorkspaceRuntime) -> String {
         runtime
-            .render(24, 100, "work", "/work", &[], None, &BTreeMap::new(), None)
+            .render(24, 100, "work", &[], None, &BTreeMap::new(), None)
             .iter()
             .map(|line| strip(line))
             .collect::<Vec<_>>()
@@ -5176,7 +5395,7 @@ mod tests {
         with_history(
             &mut runtime,
             Target::Session(session),
-            vec![resumed.clone(), other.clone()],
+            vec![resumed.clone(), other],
         );
 
         let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
@@ -5226,7 +5445,7 @@ mod tests {
         with_history(
             &mut runtime,
             Target::Session(session),
-            vec![unresumable.clone(), resumable.clone()],
+            vec![unresumable, resumable.clone()],
         );
         assert_eq!(
             runtime.resume_selected_tab(OperationId::new()),

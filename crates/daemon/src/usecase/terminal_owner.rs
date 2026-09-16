@@ -11,8 +11,7 @@ use usagi_core::{
         terminal_launch::{TerminalInventoryEntry, TerminalLaunchScope},
         terminal_visibility::{CompletedTerminalEntry, TerminalVisibility},
     },
-    infrastructure::client::TerminalRequest,
-    infrastructure::ipc::ProtocolError,
+    infrastructure::ipc::{ProtocolError, TerminalRequest},
 };
 
 use super::terminal::{Attached, InputAck, Output, Snapshot};
@@ -117,7 +116,7 @@ pub(crate) trait JsonTerminalOwner {
         connection: ConnectionId,
         client: ClientId,
         request_id: RequestId,
-        action: usagi_core::infrastructure::client::TerminalAction,
+        action: usagi_core::infrastructure::ipc::TerminalAction,
         payload: serde_json::Value,
         wire: super::terminal::SnapshotWire,
     ) -> Result<serde_json::Value, ProtocolError>;
@@ -134,11 +133,11 @@ impl<T: TerminalOwner> JsonTerminalOwner for T {
         connection: ConnectionId,
         client: ClientId,
         request_id: RequestId,
-        action: usagi_core::infrastructure::client::TerminalAction,
+        action: usagi_core::infrastructure::ipc::TerminalAction,
         payload: serde_json::Value,
         wire: super::terminal::SnapshotWire,
     ) -> Result<serde_json::Value, ProtocolError> {
-        use usagi_core::infrastructure::client::{TerminalAction, TerminalRequest};
+        use usagi_core::infrastructure::ipc::{TerminalAction, TerminalRequest};
         let request: TerminalRequest = serde_json::from_value(payload).map_err(|_| {
             ProtocolError::new(
                 usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,

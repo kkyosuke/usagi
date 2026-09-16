@@ -74,6 +74,11 @@ struct ToolSpec {
     required: bool,
 }
 
+/// Doctor reports the **CLIs** a machine has, not the providers usagi can
+/// select. `sakana.ai` deliberately has no row: it is the Claude CLI pointed at
+/// another endpoint, so a second row would probe the same executable and report
+/// the same version twice — and an absent Sakana key would still read as a
+/// healthy "Sakana AI CLI".
 const TOOLS: [ToolSpec; 4] = [
     ToolSpec {
         name: "Git",
@@ -91,8 +96,8 @@ const TOOLS: [ToolSpec; 4] = [
         required: false,
     },
     ToolSpec {
-        name: "Sakana AI CLI",
-        executable: DefaultModel::SakanaAi.command(),
+        name: "Antigravity CLI",
+        executable: DefaultModel::Agy.command(),
         required: false,
     },
 ];
@@ -140,14 +145,14 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, VecDeque};
 
-    struct FakePort {
+    struct FakeDoctorPort {
         tools: BTreeMap<String, Result<String, String>>,
         settings: VecDeque<Result<String, String>>,
         daemon: VecDeque<Result<String, String>>,
         calls: Vec<String>,
     }
 
-    impl DoctorPort for FakePort {
+    impl DoctorPort for FakeDoctorPort {
         fn tool_version(&mut self, executable: &str) -> Result<String, String> {
             self.calls.push(executable.to_owned());
             self.tools.remove(executable).unwrap()
@@ -168,11 +173,11 @@ mod tests {
         git: Result<&str, &str>,
         claude: Result<&str, &str>,
         openai: Result<&str, &str>,
-        sakana_ai: Result<&str, &str>,
+        agy: Result<&str, &str>,
         settings: Result<&str, &str>,
         daemon: Result<&str, &str>,
-    ) -> FakePort {
-        FakePort {
+    ) -> FakeDoctorPort {
+        FakeDoctorPort {
             tools: [
                 (
                     "git".to_owned(),
@@ -187,8 +192,8 @@ mod tests {
                     openai.map(str::to_owned).map_err(str::to_owned),
                 ),
                 (
-                    "codex-fugu".to_owned(),
-                    sakana_ai.map(str::to_owned).map_err(str::to_owned),
+                    "agy".to_owned(),
+                    agy.map(str::to_owned).map_err(str::to_owned),
                 ),
             ]
             .into_iter()
@@ -205,16 +210,18 @@ mod tests {
             Ok("git version 2.50"),
             Ok("claude 2.0"),
             Ok("codex-cli 1.0"),
-            Ok("codex-fugu 1.0"),
+            Ok("agy 1.2.0"),
             Ok("settings.json is readable"),
             Ok("daemon is reachable"),
         );
         let report = diagnose(&mut port);
 
         assert!(report.is_healthy());
+        // One row per CLI. `sakana.ai` is the Claude CLI with another endpoint,
+        // so probing `claude` twice would only report the same version twice.
         assert_eq!(
             port.calls,
-            ["git", "claude", "codex", "codex-fugu", "settings", "daemon"]
+            ["git", "claude", "codex", "agy", "settings", "daemon"]
         );
         assert_eq!(report.checks.len(), 6);
         assert!(

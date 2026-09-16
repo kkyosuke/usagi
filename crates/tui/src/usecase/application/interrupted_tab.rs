@@ -91,6 +91,7 @@ pub const fn provider_label(provider: Option<ProviderKind>) -> &'static str {
     match provider {
         Some(ProviderKind::Claude) => "Claude",
         Some(ProviderKind::Codex) => "Codex",
+        Some(ProviderKind::Agy) => "Antigravity",
         None => "Agent",
     }
 }
@@ -701,7 +702,7 @@ mod tests {
         assert_eq!(partial.tabs[0].continuation, second.continuation);
         assert_eq!(partial.tabs[1].continuation, first.continuation);
         assert_eq!(partial, {
-            let mut reversed = inventory.clone();
+            let mut reversed = inventory;
             reversed.runtimes.reverse();
             project(
                 &reversed,
@@ -733,7 +734,7 @@ mod tests {
             workspace,
             vec![
                 lineage.runtime(AgentRuntimeInventoryState::Interrupted),
-                replacement.clone(),
+                replacement,
             ],
             vec![lineage.available()],
         );
@@ -1165,6 +1166,7 @@ mod tests {
         );
         assert_eq!(provider_label(Some(ProviderKind::Claude)), "Claude");
         assert_eq!(provider_label(Some(ProviderKind::Codex)), "Codex");
+        assert_eq!(provider_label(Some(ProviderKind::Agy)), "Antigravity");
         assert_eq!(provider_label(None), "Agent");
 
         let workspace = WorkspaceId::new();

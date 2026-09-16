@@ -939,7 +939,7 @@ mod tests {
         fs::write(&declared, issue(8, "Declared").to_markdown()).unwrap();
         let dirty = store.dir().join(".derived-dirty");
         fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
-        let mut expected = vec![canonical_a.clone(), canonical_b.clone(), declared.clone()];
+        let mut expected = vec![canonical_a, canonical_b, declared];
         expected.sort();
         let source_before: Vec<_> = expected
             .iter()

@@ -21,6 +21,7 @@ pub enum Context {
     TeamPicker,
     EnvironmentEditor,
     WorkspaceEnvironmentEditor,
+    SessionSetupEditor,
     MissingWorkspace,
     Switch,
     Closeup,
@@ -69,6 +70,7 @@ impl Context {
             Self::Config => "Config",
             Self::TeamPicker => "Team picker",
             Self::EnvironmentEditor | Self::WorkspaceEnvironmentEditor => "Environment editor",
+            Self::SessionSetupEditor => "Session setup editor",
             Self::MissingWorkspace => "Missing workspace",
             Self::Switch => "Workspace switch",
             Self::Closeup => "Closeup",
@@ -173,6 +175,13 @@ impl Context {
                 ("Ctrl-S", "save"),
                 ("Esc", "cancel"),
             ],
+            Self::SessionSetupEditor => &[
+                ("type / paste", "edit commands"),
+                ("arrows / Home / End", "move caret"),
+                ("Enter", "newline / save"),
+                ("Tab", "textarea / Save"),
+                ("Esc", "cancel"),
+            ],
             Self::Switch => &[
                 ("↑ / ↓", "select session"),
                 ("← / →", "previous / next project"),
@@ -182,7 +191,7 @@ impl Context {
                 ("Ctrl-A / Home", "new session"),
                 (":", "Overview commands"),
                 ("?", "keyboard shortcuts"),
-                ("Ctrl-X", "remove session / purge orphan"),
+                ("Ctrl-X", "force remove session"),
                 ("Ctrl-Q", "leave / quit prompt"),
             ],
             Self::Closeup => &[
@@ -538,6 +547,7 @@ mod tests {
             Context::TeamPicker,
             Context::EnvironmentEditor,
             Context::WorkspaceEnvironmentEditor,
+            Context::SessionSetupEditor,
             Context::MissingWorkspace,
             Context::Switch,
             Context::Closeup,
@@ -595,7 +605,7 @@ mod tests {
         assert!(rendered.contains("Ctrl-X"));
         assert!(rendered.contains("dismiss selected"));
         assert!(rendered.contains("Ctrl-? / Ctrl-/ or Esc"));
-        assert!(!rendered.contains("safe-remove session"));
+        assert!(!rendered.contains("force remove session"));
     }
 
     #[test]

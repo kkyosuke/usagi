@@ -157,7 +157,7 @@ where
                 event,
                 self.legacy_unix_control_aliases,
             ) {
-                return self.coalesce_wheel(event);
+                return self.coalesce_pointer(event);
             }
         }
         if let Some(event) = self.backend.try_recv() {
@@ -175,7 +175,7 @@ where
                     event,
                     self.legacy_unix_control_aliases,
                 ) {
-                    return self.coalesce_wheel(event);
+                    return self.coalesce_pointer(event);
                 }
                 continue;
             }
@@ -195,21 +195,26 @@ where
         poll_source(&mut self.source, timeout)
     }
 
-    /// Fold only an immediately-ready, same-direction wheel burst. The first
+    /// Fold an immediately-ready wheel burst or passive motion to its latest cell. The first
     /// different event is retained verbatim for the next call, preserving input
     /// order across keys, resize, pointer phases, and direction changes.
-    fn coalesce_wheel(
+    fn coalesce_pointer(
         &mut self,
         mut event: RuntimeEvent<R::Event>,
     ) -> io::Result<RuntimeEvent<R::Event>> {
-        let direction = match &event {
-            RuntimeEvent::Input(LiveInput::WheelUp { .. }) => Some(true),
-            RuntimeEvent::Input(LiveInput::WheelDown { .. }) => Some(false),
-            _ => None,
-        };
-        let Some(direction) = direction else {
+        if !matches!(
+            event,
+            RuntimeEvent::Input(
+                LiveInput::WheelUp { .. }
+                    | LiveInput::WheelDown { .. }
+                    | LiveInput::Pointer(PointerEvent {
+                        kind: PointerKind::Move,
+                        ..
+                    })
+            )
+        ) {
             return Ok(event);
-        };
+        }
 
         for _ in 1..WHEEL_COALESCE_LIMIT {
             let Some(raw) = self.poll_terminal(Duration::ZERO)? else {
@@ -223,22 +228,25 @@ where
             };
             match (&mut event, next) {
                 (
-                    RuntimeEvent::Input(LiveInput::WheelUp {
-                        column,
-                        row,
-                        notches,
-                    }),
-                    RuntimeEvent::Input(LiveInput::WheelUp {
-                        column: next_column,
-                        row: next_row,
-                        notches: next_notches,
-                    }),
-                ) if direction => {
-                    *column = next_column;
-                    *row = next_row;
-                    *notches = notches.saturating_add(next_notches);
+                    RuntimeEvent::Input(LiveInput::Pointer(pointer)),
+                    RuntimeEvent::Input(LiveInput::Pointer(next)),
+                ) if pointer.kind == PointerKind::Move && next.kind == PointerKind::Move => {
+                    *pointer = next;
                 }
+
                 (
+                    RuntimeEvent::Input(LiveInput::WheelUp {
+                        column,
+                        row,
+                        notches,
+                    }),
+                    RuntimeEvent::Input(LiveInput::WheelUp {
+                        column: next_column,
+                        row: next_row,
+                        notches: next_notches,
+                    }),
+                )
+                | (
                     RuntimeEvent::Input(LiveInput::WheelDown {
                         column,
                         row,
@@ -249,7 +257,7 @@ where
                         row: next_row,
                         notches: next_notches,
                     }),
-                ) if !direction => {
+                ) => {
                     *column = next_column;
                     *row = next_row;
                     *notches = notches.saturating_add(next_notches);
@@ -299,6 +307,11 @@ fn adapt_event_with_legacy_unix_control_aliases<B>(
         Event::Paste(text) => Some(RuntimeEvent::Input(LiveInput::Paste(text.into_bytes()))),
         Event::Resize(width, height) => Some(RuntimeEvent::Resize { width, height }),
         Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::Moved => Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Move,
+                column: mouse.column,
+                row: mouse.row,
+            }))),
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                 Some(RuntimeEvent::Input(LiveInput::Mouse {
                     column: mouse.column,
@@ -490,9 +503,9 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeBackend(VecDeque<&'static str>);
+    struct FakeEventBackend(VecDeque<&'static str>);
 
-    impl BackendReceiver for FakeBackend {
+    impl BackendReceiver for FakeEventBackend {
         type Event = &'static str;
 
         fn try_recv(&mut self) -> Option<Self::Event> {
@@ -641,7 +654,7 @@ mod tests {
             Event::Resize(80, 24),
             Event::Paste("paste".into()),
         ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(
             pump.next(T0).unwrap(),
@@ -686,7 +699,7 @@ mod tests {
                     KeyModifiers::CONTROL,
                 )),
             ]);
-            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0)
+            let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0)
                 .with_legacy_unix_control_aliases(true);
             let mut classifier = LiveInputClassifier::default();
             let RuntimeEvent::Input(leader) = pump.next(T0).unwrap() else {
@@ -742,6 +755,54 @@ mod tests {
     }
 
     #[test]
+    fn garden_hover_bursts_keep_the_latest_cell_before_the_next_click() {
+        let source = FakeSource::with([
+            wheel(MouseEventKind::Moved, 2, 3),
+            wheel(MouseEventKind::Moved, 9, 8),
+            wheel(MouseEventKind::Down(MouseButton::Left), 9, 8),
+        ]);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Move,
+                column: 9,
+                row: 8,
+            }))
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Mouse { column: 9, row: 8 })
+        );
+    }
+
+    #[test]
+    fn production_pointer_pump_preserves_hover_then_click() {
+        let mut pump = EventPump::new(
+            CrosstermSource::scripted([
+                wheel(MouseEventKind::Moved, 2, 3),
+                wheel(MouseEventKind::Moved, 9, 8),
+                wheel(MouseEventKind::Down(MouseButton::Left), 9, 8),
+            ]),
+            NoBackend::<()>::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Move,
+                column: 9,
+                row: 8,
+            }))
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::Mouse { column: 9, row: 8 })
+        );
+    }
+
+    #[test]
     fn same_direction_wheel_burst_is_coalesced_before_the_next_frame() {
         let source = FakeSource::with([
             wheel(MouseEventKind::ScrollUp, 4, 7),
@@ -752,7 +813,7 @@ mod tests {
             wheel(MouseEventKind::ScrollUp, 6, 9),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         ]);
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(
             pump.next(T0).unwrap(),
@@ -774,7 +835,12 @@ mod tests {
             .map(|_| wheel(MouseEventKind::ScrollDown, 1, 2))
             .collect::<Vec<_>>();
         events.push(wheel(MouseEventKind::ScrollUp, 3, 4));
-        let mut pump = EventPump::new(FakeSource::with(events), FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(
+            FakeSource::with(events),
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
 
         assert_eq!(
             pump.next(T0).unwrap(),
@@ -808,7 +874,7 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         ))]);
-        let backend = FakeBackend(VecDeque::from(["snapshot"]));
+        let backend = FakeEventBackend(VecDeque::from(["snapshot"]));
         let mut pump = EventPump::new(source, backend, TICK, T0);
 
         assert!(matches!(pump.next(T0).unwrap(), RuntimeEvent::Input(_)));
@@ -818,7 +884,7 @@ mod tests {
 
     #[test]
     fn waits_only_until_the_next_tick_when_no_source_is_ready() {
-        let mut pump = EventPump::new(FakeSource::default(), FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(FakeSource::default(), FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
         assert_eq!(pump.source.timeouts, vec![Duration::ZERO, TICK]);
@@ -827,12 +893,16 @@ mod tests {
     #[test]
     fn source_poll_and_read_errors_are_projected_from_each_pump_phase() {
         for source in [ErrorSource::ImmediatePoll, ErrorSource::Read] {
-            let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+            let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
             assert!(pump.next(T0).is_err());
         }
 
-        let mut delayed =
-            EventPump::new(ErrorSource::DelayedPoll, FakeBackend::default(), TICK, T0);
+        let mut delayed = EventPump::new(
+            ErrorSource::DelayedPoll,
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
         assert!(delayed.next(T0).is_err());
     }
 
@@ -874,7 +944,7 @@ mod tests {
     #[test]
     fn ignores_non_input_events_received_while_waiting_for_a_tick() {
         let source = DelayedSource(Some(Event::FocusLost));
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
 
         assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
 
@@ -882,7 +952,7 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         ))));
-        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+        let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
         assert!(matches!(pump.next(T0).unwrap(), RuntimeEvent::Input(_)));
     }
 

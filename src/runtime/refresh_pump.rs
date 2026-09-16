@@ -794,9 +794,16 @@ mod tests {
 
         pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while pump.take().is_none() {
+        // Hold the result outside the loop so both the body and the back edge
+        // run exactly once on a host fast enough to have the fetch ready
+        // already. `while take().is_none()` would skip the body, and
+        // `loop { .. if .. break }` would skip the edge that continues the
+        // wait; either shape leaves a line uncovered depending on host speed.
+        let mut fetched = None;
+        while fetched.is_none() {
             assert!(Instant::now() < deadline, "activation produced no fetch");
             std::thread::sleep(Duration::from_millis(5));
+            fetched = pump.take();
         }
         assert_eq!(pump.metrics().fetches, 1);
     }

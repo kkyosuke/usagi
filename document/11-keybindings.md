@@ -27,9 +27,9 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 | workspace 共通操作 | `Ctrl-O` を leader とする 2 打鍵へ集約し、2 打目は 1 action だけを持つ |
 | session / project 移動 | `Ctrl+Option+↑/↓` は前 / 次の session、`Ctrl+Option+←/→` は前 / 次の project とし、Closeup の live terminal より先に解決する |
 | tab | `[` / `]` は前 / 次の選択、`{` / `}` は前 / 次への並べ替えとする |
-| 対象の除去 | `Ctrl-X` は選択中の対象を安全に remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
+| 対象の除去 | `Ctrl-X` は選択中の対象を remove / detach / dismiss する。plain `x` / `X` に副作用を割り当てない |
 | tab の終了 | `Ctrl-O x` は現在の pane tab を閉じる。`x` の「現在対象を閉じる」という意味を維持し、session remove とは入力 scope を分ける |
-| 強制削除 | 通常 session は確認 modal または command の明示的な `--force` を使う。daemon が診断した integrity orphan に限り、選択中の exact row で `Ctrl-X` を押すと `--force --purge-orphan` 相当を実行する |
+| 強制削除 | Switch の `Ctrl-X` は選択中 session を `--force` で削除し、未コミット worktree と未マージ branch を破棄する。daemon が診断した integrity orphan では同じ `Ctrl-X` が `--force --purge-orphan` 相当になる |
 | modal 内操作 | `Enter` は決定、`Esc` は取消、矢印は選択、`Tab` は focus / mode 移動として再利用する |
 | 文字入力 | plain letter は入力欄と live terminal へ渡す。workspace 共通操作に plain letter を使わない |
 
@@ -141,6 +141,11 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | Environment editor | 矢印、`Home` / `End` | caret移動 |
 | Environment editor | 文字 / paste / `Backspace` / `Delete` | source編集 |
 | Environment editor | `Esc` | cancel |
+| Session setup editor | `Enter` | textareaでは改行、Saveでは保存 |
+| Session setup editor | `Tab` | textarea / Save移動 |
+| Session setup editor | 矢印、`Home` / `End` | caret移動 |
+| Session setup editor | 文字 / paste / `Backspace` / `Delete` | 1行1commandのsource編集 |
+| Session setup editor | `Esc` | cancel |
 | Roles editor | `Tab` | global / workspace scope |
 | Roles editor | `Ctrl-S` | 保存 |
 | Roles editor | `↑` / `↓`、`PgUp` / `PgDn` | 行 / page移動 |
@@ -160,7 +165,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Switch | `Ctrl-A` / `Home` | new session form |
 | Switch | `:` | Overview palette |
 | Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
-| Switch | `Ctrl-X` | 選択sessionのsafe remove。選択中の `failed/integrity` orphan sessionだけは明示破棄 |
+| Switch | `Ctrl-X` | 選択sessionのforce remove（未コミットworktreeと未マージbranchを破棄）。選択中の `failed/integrity` orphan sessionはpurgeも付ける |
 | Switch | `Ctrl-Q` | workspace離脱／TUI終了確認 |
 | Switch | `Ctrl-C` | no-op |
 | management surface | `Ctrl-D` | no-op。EOTはlive terminalだけに送る |
@@ -245,6 +250,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Root Shell | `Ctrl-O z` / `Ctrl-O x` | 高さ切替 / terminal終了 |
 | Root Shell | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
 | Garden | `↑` / `↓`、`Page Up` / `Page Down` | 右の session 一覧をスクロール（幅 99 桁以上） |
+| Garden | マウス移動 | うさぎに重ねると右一覧の対応行を強調する。画面は閉じない |
 | Garden | その他のキー / paste | wakeして閉じる |
 
 前面に入力modal / drawerがないworkspaceの `?`、live paneの `Ctrl-O ?`、全画面の `Ctrl-?` / `Ctrl-/` は
@@ -275,7 +281,7 @@ leader待機中でない入力は、terminalが選択を保持している場合
 | `Ctrl-C` | AgentではSIGINT。generic shellではinterrupt後にretained scrollbackをclear |
 | `Ctrl-D` | EOT |
 | `Ctrl-Q` | byte `0x11` |
-| `Ctrl-X` | live terminalではbyte `0x18`。Switchでは通常はsafe remove、選択中のintegrity orphanだけはpurge |
+| `Ctrl-X` | live terminalではbyte `0x18`。Switchでは通常はforce remove、選択中のintegrity orphanはpurgeも付ける |
 | generic shellの`Ctrl-L` | retained scrollbackと選択をclearし、同じbyteをPTYへ送る |
 | macOS `Command-C` | terminal選択をcopy |
 | Linux `Ctrl-Shift-C` | terminal選択をcopy |
@@ -283,4 +289,4 @@ leader待機中でない入力は、terminalが選択を保持している場合
 | `Esc`、文字、Enter、Tab、Backspace、矢印 | PTYへ送る |
 
 TUI は semantic な `Ctrl-X` と raw `0x18` を同じ入力として扱い、Switch では選択中の exact lifecycle を見て
-safe remove または integrity orphan purge を決める。
+force remove に purge を付けるかどうかを決める。

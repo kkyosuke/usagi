@@ -289,7 +289,7 @@ fn classify_capacity_claims(
     let backed = shards
         .iter()
         .flat_map(|shard| &shard.resources)
-        .map(|entry| entry.resource.terminal_id.as_str().clone())
+        .map(|entry| entry.resource.terminal_id.as_str())
         .collect::<BTreeSet<_>>();
     // Without a readable registry nothing is provably retired, so every owner is
     // treated as still listed and no claim becomes a candidate.
@@ -297,7 +297,7 @@ fn classify_capacity_claims(
         document
             .generations
             .iter()
-            .map(|entry| entry.generation.as_str().clone())
+            .map(|entry| entry.generation.as_str())
             .collect::<BTreeSet<_>>()
     });
     allocator
@@ -305,11 +305,11 @@ fn classify_capacity_claims(
         .iter()
         .filter(|claim| claim.state != ClaimState::Released)
         .map(|claim| {
-            let owner = claim.owner.as_str().clone();
+            let owner = claim.owner.as_str();
             ObservedCapacityClaim {
                 backed: backed.contains(claim.resource.terminal_id.as_str().as_str()),
                 owner_registered: listed.as_ref().is_none_or(|listed| listed.contains(&owner)),
-                resource_id: claim.resource.terminal_id.as_str().clone(),
+                resource_id: claim.resource.terminal_id.as_str(),
                 pool: claim.kind.pool().to_owned(),
                 owner,
             }
@@ -998,9 +998,9 @@ not a process line
     }
 
     #[derive(Clone)]
-    struct FakeGit(GitOutput);
+    struct FakeCleanGit(GitOutput);
 
-    impl GitRunner for FakeGit {
+    impl GitRunner for FakeCleanGit {
         fn run(&self, _repo: &Path, _args: &[&str]) -> anyhow::Result<GitOutput> {
             Ok(self.0.clone())
         }
@@ -1197,11 +1197,11 @@ not a process line
             stderr: String::new(),
         };
         for branch in [Some("usagi/x"), None] {
-            ensure_managed_worktree(&FakeGit(output(branch)), Path::new("/repo"), path, "x")
+            ensure_managed_worktree(&FakeCleanGit(output(branch)), Path::new("/repo"), path, "x")
                 .unwrap();
         }
         let error = ensure_managed_worktree(
-            &FakeGit(output(Some("feature/reused"))),
+            &FakeCleanGit(output(Some("feature/reused"))),
             Path::new("/repo"),
             path,
             "x",
@@ -1209,7 +1209,7 @@ not a process line
         .unwrap_err();
         assert!(error.to_string().contains("identity changed"));
         ensure_managed_worktree(
-            &FakeGit(GitOutput {
+            &FakeCleanGit(GitOutput {
                 success: true,
                 stdout: String::new(),
                 stderr: String::new(),
@@ -1221,7 +1221,7 @@ not a process line
         .unwrap();
         assert!(
             ensure_managed_worktree(
-                &FakeGit(GitOutput {
+                &FakeCleanGit(GitOutput {
                     success: false,
                     stdout: String::new(),
                     stderr: "broken".into(),

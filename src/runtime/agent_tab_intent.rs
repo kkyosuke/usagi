@@ -9,7 +9,8 @@ use fs2::FileExt;
 use usagi_core::domain::id::WorkspaceId;
 use usagi_tui::usecase::application::agent_tab_intent::{
     AGENT_TAB_INTENT_SCHEMA, AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation,
-    AgentTabIntentPort, AgentTabIntentPortCommit,
+    AgentTabIntentMutationError, AgentTabIntentPort, AgentTabIntentPortCommit,
+    reconcile_agent_tab_intent_mutation,
 };
 
 static TEMPORARY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -178,7 +179,6 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
             })
     }
 
-    #[allow(clippy::too_many_lines)] // Keep the CAS decision and atomic publish in one lock scope.
     fn mutate(
         &mut self,
         workspace: WorkspaceId,
@@ -186,7 +186,7 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
         mutation: AgentTabIntentMutation,
     ) -> Result<AgentTabIntentPortCommit, AgentTabIntentError> {
         self.with_lock(workspace, |path| {
-            let mut current = match Self::read_unlocked(path, workspace)? {
+            let current = match Self::read_unlocked(path, workspace)? {
                 AgentTabIntentLoad::Loaded(intent) => intent,
                 AgentTabIntentLoad::Missing | AgentTabIntentLoad::Corrupt => {
                     AgentTabIntent::empty(workspace)
@@ -198,172 +198,26 @@ impl AgentTabIntentPort for FileAgentTabIntentStore {
                     ));
                 }
             };
-            let cas_conflict = current.revision != expected_revision;
-            if expected_revision > current.revision {
-                return Err(io::Error::new(
+            let revision = current.revision;
+            let commit = reconcile_agent_tab_intent_mutation(
+                current,
+                workspace,
+                expected_revision,
+                mutation,
+            )
+            .map_err(|error| match error {
+                AgentTabIntentMutationError::Unavailable => {
+                    io::Error::other("Agent tab intent revision exhausted")
+                }
+                AgentTabIntentMutationError::InvalidMutation => io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Agent tab intent revision is ahead of durable state",
-                ));
+                    "invalid Agent tab intent mutation",
+                ),
+            })?;
+            if commit.intent.revision != revision {
+                Self::write_unlocked(path, &commit.intent)?;
             }
-            let before = current.clone();
-            // An accepted close is a causal write even when this key is
-            // already dismissed. Otherwise a Reopen that loaded the current
-            // revision before this close could clear the newer user intent.
-            // Unknown/authoritatively removed keys remain inert.
-            let force_close_fence = match &mutation {
-                AgentTabIntentMutation::Dismiss { continuation }
-                | AgentTabIntentMutation::DismissInterrupted { continuation, .. } => {
-                    current.targets.iter().any(|target| {
-                        target
-                            .tabs
-                            .iter()
-                            .any(|slot| slot.continuation == *continuation)
-                    })
-                }
-                // A repeated close of the same exact terminal is causal for the
-                // same reason: it must fence a Reopen that read this revision.
-                AgentTabIntentMutation::DismissTerminal { terminal }
-                | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
-                    current.dismisses_terminal(terminal)
-                }
-                _ => false,
-            };
-            let mut mutation_applied = true;
-            let projection = if cas_conflict {
-                match mutation {
-                    AgentTabIntentMutation::Observe {
-                        terminals,
-                        agents,
-                        allowed_sessions,
-                    } => {
-                        // Observe is not a stable-key delta. Return only a
-                        // latest-ref-exact projection, leave bytes untouched,
-                        // and make the controller redispatch under a fresh CAS
-                        // fence before it changes runtime state.
-                        mutation_applied = false;
-                        Some(current.projected_exact(&terminals, &agents, &allowed_sessions))
-                    }
-                    AgentTabIntentMutation::Reopen { continuation } => {
-                        // Reopen is anti-monotonic with Dismiss. If this stale
-                        // writer still sees the key closed, it cannot distinguish
-                        // the dismissal it read from a newer concurrent close;
-                        // preserve the latest close and ask the user to retry.
-                        mutation_applied = !current.dismissed.contains(&continuation);
-                        None
-                    }
-                    AgentTabIntentMutation::Upsert {
-                        session_id,
-                        continuation,
-                        terminal,
-                        select,
-                    } => {
-                        // A continuation/selection is a same-key register, not
-                        // a commutative delta. A stale admission may only be
-                        // acknowledged when the latest state already contains
-                        // the exact requested value. Otherwise a fresh daemon
-                        // observation must decide whether O or R is current.
-                        let existing = current.targets.iter().find_map(|target| {
-                            target
-                                .tabs
-                                .iter()
-                                .find(|slot| slot.continuation == continuation)
-                                .map(|slot| (target, slot))
-                        });
-                        let already_applied = existing.is_some_and(|(target, slot)| {
-                            target.session_id == session_id
-                                && slot.terminal.fences(&terminal)
-                                && (!select || target.selected == Some(continuation))
-                                && !current.dismissed.contains(&continuation)
-                        });
-                        mutation_applied = already_applied;
-                        None
-                    }
-                    AgentTabIntentMutation::Select {
-                        session_id,
-                        continuation,
-                    } => {
-                        mutation_applied = current.targets.iter().any(|target| {
-                            target.session_id == session_id && target.selected == continuation
-                        });
-                        None
-                    }
-                    AgentTabIntentMutation::Reorder {
-                        session_id,
-                        continuations,
-                    } => {
-                        mutation_applied = current
-                            .targets
-                            .iter()
-                            .find(|target| target.session_id == session_id)
-                            .is_some_and(|target| {
-                                target
-                                    .tabs
-                                    .iter()
-                                    .map(|slot| slot.continuation)
-                                    .eq(continuations)
-                            });
-                        None
-                    }
-                    AgentTabIntentMutation::Dismiss { continuation } => {
-                        current.apply(AgentTabIntentMutation::Dismiss { continuation })
-                    }
-                    AgentTabIntentMutation::DismissInterrupted {
-                        session_id,
-                        continuation,
-                        terminal,
-                    } => current.apply(AgentTabIntentMutation::DismissInterrupted {
-                        session_id,
-                        continuation,
-                        terminal,
-                    }),
-                    // A deferred close carries the exact terminal the user saw,
-                    // so it merges monotonically for the same reason. Only the
-                    // stale successor preview is dropped.
-                    AgentTabIntentMutation::DismissTerminal { terminal }
-                    | AgentTabIntentMutation::DismissTerminalAndSelect { terminal, .. } => {
-                        current.apply(AgentTabIntentMutation::DismissTerminal { terminal })
-                    }
-                }
-            } else {
-                match mutation {
-                    AgentTabIntentMutation::Upsert {
-                        session_id,
-                        continuation,
-                        terminal,
-                        select: _,
-                    } if current.dismissed.contains(&continuation) => {
-                        // Upsert refreshes identity, but only Reopen is allowed
-                        // to make an explicitly closed lineage visible again.
-                        mutation_applied = false;
-                        current.apply(AgentTabIntentMutation::Upsert {
-                            session_id,
-                            continuation,
-                            terminal,
-                            select: false,
-                        })
-                    }
-                    mutation => current.apply(mutation),
-                }
-            };
-            if current != before || force_close_fence {
-                current.revision = current
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::other("Agent tab intent revision exhausted"))?;
-                current.validate(workspace).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid Agent tab intent mutation",
-                    )
-                })?;
-                Self::write_unlocked(path, &current)?;
-            }
-            Ok(AgentTabIntentPortCommit {
-                intent: current,
-                projection,
-                mutation_applied,
-                cas_conflict,
-            })
+            Ok(commit)
         })
         .map_err(|error| match error.kind() {
             io::ErrorKind::Unsupported => AgentTabIntentError::ReadOnlySchema,

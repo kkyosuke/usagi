@@ -26,7 +26,7 @@
 //! 時計は sample 自身の `sampled_at_ms` だけを使う。実時計を読むのは
 //! [`DaemonHealthTracker::evaluate`] の引数だけで、この module は IO を持たない。
 
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 
 /// 最新 sample がこれ以上古ければ「観測が停滞している」と扱う。
 ///
@@ -319,7 +319,7 @@ mod tests {
         DaemonHealth, DaemonHealthTracker, HOLD_MS, HealthLevel, HealthReason, STALLED_MS,
         UNRESPONSIVE_MS,
     };
-    use usagi_core::infrastructure::client::DaemonMetrics;
+    use usagi_core::infrastructure::ipc::DaemonMetrics;
 
     const MIB: u64 = 1024 * 1024;
 

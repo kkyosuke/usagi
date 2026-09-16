@@ -7,7 +7,7 @@ use serde_json::json;
 use super::*;
 use crate::domain::id::{SessionId, TerminalId, WorkspaceId, WorktreeId};
 use crate::domain::terminal_launch::TerminalKind;
-use crate::infrastructure::client::{SessionAction, TerminalGeometry};
+use crate::infrastructure::ipc::{SessionAction, TerminalGeometry};
 
 // ------------------------------------------------------------------ fixtures
 
@@ -154,7 +154,7 @@ fn control_operations_route_to_the_active_generation() {
     );
 
     let launch = terminal_request(&TerminalRequest::Launch {
-        intent: crate::infrastructure::client::TerminalLaunchIntent {
+        intent: crate::infrastructure::ipc::TerminalLaunchIntent {
             request: crate::domain::terminal_launch::TerminalLaunchRequest {
                 scope: scope(),
                 profile_id: crate::domain::terminal_launch::TerminalProfileId::new("shell")
@@ -210,7 +210,7 @@ fn every_reference_addressed_request_routes_to_its_owner_generation() {
             expected_revision: 3,
         },
         TerminalRequest::Dismiss {
-            terminal: target.clone(),
+            terminal: target,
             expected_revision: 3,
         },
     ];
@@ -395,7 +395,7 @@ fn merged_inventory_is_deduplicated_deterministic_and_generation_fenced() {
         .iter()
         .map(|entry| entry.terminal.clone())
         .collect();
-    let mut expected = vec![mine.clone(), theirs.clone()];
+    let mut expected = vec![mine, theirs];
     expected.sort();
     assert_eq!(refs, expected);
     assert_eq!(merged.answered().len(), 2);
@@ -484,7 +484,7 @@ fn presence_collects_a_tab_only_on_an_authoritative_answer_or_a_verified_retirem
 /// reused, or dropped — never about the traffic over it — so this reuses the
 /// router's own fake rather than introducing a second one.
 fn connected(endpoint: &TrustedEndpoint) -> Box<dyn DaemonSession> {
-    Box::new(FakeSession {
+    Box::new(FakeRoutedSession {
         generation: endpoint.generation,
         recorder: Rc::new(RefCell::new(Recorder::default())),
         replies: Rc::new(RefCell::new(BTreeMap::new())),
@@ -610,13 +610,13 @@ type Shared = Rc<RefCell<Recorder>>;
 type Scripted = Rc<RefCell<BTreeMap<DaemonGeneration, Vec<Result<DaemonReply, ClientError>>>>>;
 
 /// A session bound to one generation, scripted per generation.
-struct FakeSession {
+struct FakeRoutedSession {
     generation: DaemonGeneration,
     recorder: Shared,
     replies: Scripted,
 }
 
-impl DaemonSession for FakeSession {
+impl DaemonSession for FakeRoutedSession {
     fn exchange(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         self.recorder
             .borrow_mut()
@@ -651,7 +651,7 @@ impl GenerationTransport for FakeTransport {
             .borrow_mut()
             .connects
             .push(endpoint.generation);
-        Ok(Box::new(FakeSession {
+        Ok(Box::new(FakeRoutedSession {
             generation: endpoint.generation,
             recorder: Rc::clone(&self.recorder),
             replies: Rc::clone(&self.replies),

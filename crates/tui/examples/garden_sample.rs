@@ -5,6 +5,10 @@ use usagi_tui::presentation::widgets::garden::{GardenAgent, GardenSession};
 
 fn main() {
     let sessions = sample_sessions();
+    if std::env::args().any(|arg| arg == "--animation") {
+        animation_scene(&sessions);
+        return;
+    }
     sidebar_scene(&sessions);
     scene("120x24 · restored meadow", 24, 120, &sessions, 1, false);
     scene("120x24 · reduced motion", 24, 120, &sessions, 1, true);
@@ -81,7 +85,7 @@ fn main() {
     );
 }
 
-fn sidebar_scene(sessions: &[GardenSession]) {
+fn reference_sessions(sessions: &[GardenSession]) -> Vec<GardenSession> {
     let mut reference = sessions[..3].to_vec();
     for session in &mut reference {
         session.sidebar.project = Some((
@@ -114,6 +118,11 @@ fn sidebar_scene(sessions: &[GardenSession]) {
     for session in &mut reference {
         session.label = session.sidebar.name.clone();
     }
+    reference
+}
+
+fn sidebar_scene(sessions: &[GardenSession]) {
+    let reference = reference_sessions(sessions);
     scene_in_scope(
         "160x32 · project/session sidebar",
         32,
@@ -122,6 +131,34 @@ fn sidebar_scene(sessions: &[GardenSession]) {
         &reference,
         (1, true),
     );
+}
+
+/// A deterministic sequence of real renderer frames for PR recordings.
+/// The pointer follows one rabbit for the first half, then leaves the meadow.
+fn animation_scene(sessions: &[GardenSession]) {
+    let mut sessions = reference_sessions(sessions);
+    for tick in 0..64 {
+        sessions[2].pr_merged = (16..40).contains(&tick);
+        let mut options = ViewOptions {
+            tick,
+            ..Default::default()
+        };
+        let normal = render(32, 160, "2 open projects", &sessions, options).unwrap();
+        if tick < 32 {
+            let rabbit = normal
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.agent == Some(sessions[0].agents[0].runtime_id))
+                .unwrap();
+            options.pointer = Some((
+                u16::try_from(rabbit.column).unwrap(),
+                u16::try_from(rabbit.row).unwrap(),
+            ));
+        }
+        let frame = render(32, 160, "2 open projects", &sessions, options).unwrap();
+        println!("--- frame {tick} ---");
+        println!("{}", frame.rows.join("\n"));
+    }
 }
 
 fn sample_sessions() -> [GardenSession; 6] {
@@ -205,6 +242,7 @@ fn scene_in_scope(
             tick,
             reduced_motion,
             scroll: 0,
+            pointer: None,
         },
     )
     .expect("the sample uses Garden-compatible terminal sizes");

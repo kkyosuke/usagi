@@ -45,8 +45,11 @@ pub struct PendingTeardown {
     /// in the linked worktree; ordinary sessions leave this unset and derive
     /// `usagi/<name>`.
     pub branch_name: Option<String>,
-    /// Whether branch deletion may discard unmerged commits. This is reserved
-    /// for daemon-owned compensation; requested deletion remains safe.
+    /// Whether branch deletion may discard unmerged commits. A requested
+    /// removal only sets this when the client paired it with worktree `force`
+    /// (the TUI's `Ctrl-X`, `close -f`, the Overview `--force` removals, and
+    /// the failed-delete confirmation); daemon-owned compensation always sets
+    /// it.
     pub force_delete_branch: bool,
     /// Exact merged PR head used to recognize a squash merge without weakening
     /// protection for commits added after that PR.

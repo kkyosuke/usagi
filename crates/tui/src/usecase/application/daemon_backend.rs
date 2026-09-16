@@ -142,7 +142,7 @@ pub struct OpenTerminalRequest {
 /// [`Completions`]: a create as [`AppEvent::OperationResult`], a refresh/remove
 /// as [`super::controller::BackendEvent::Sessions`].  The reducer stays the
 /// authority on how a completion updates the sidebar and pending band.
-pub trait SessionCommandPort {
+pub trait SessionLifecyclePort {
     /// Create a session and report the completion for its token.
     fn create(&mut self, request: CreateSessionRequest, completions: Completions);
     /// Request a fresh session snapshot for the workspace.
@@ -404,7 +404,8 @@ pub enum Flow {
 ///
 /// [`drain_events`]: Self::drain_events
 pub struct DaemonBackend {
-    sessions: Box<dyn SessionCommandPort>,
+    workflow: Option<Box<dyn super::workflow::WorkflowPort>>,
+    sessions: Box<dyn SessionLifecyclePort>,
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
     workspace_commands: Box<dyn WorkspaceCommandPort>,
@@ -419,13 +420,14 @@ impl DaemonBackend {
     /// Bundle the daemon ports behind one effect executor.
     #[must_use]
     pub fn new(
-        sessions: Box<dyn SessionCommandPort>,
+        sessions: Box<dyn SessionLifecyclePort>,
         agent: Box<dyn AgentPort>,
         store: Box<dyn TargetStorePort>,
         workspace_commands: Box<dyn WorkspaceCommandPort>,
     ) -> Self {
         let (completions_tx, completions_rx) = mpsc::channel();
         Self {
+            workflow: None,
             sessions,
             agent,
             store,
@@ -459,6 +461,12 @@ impl DaemonBackend {
         self
     }
 
+    #[must_use]
+    pub fn with_workflow(mut self, port: Box<dyn super::workflow::WorkflowPort>) -> Self {
+        self.workflow = Some(port);
+        self
+    }
+
     /// Run one reducer-issued effect against its owning port.
     ///
     /// Returns [`Flow::Exit`] for [`Effect::Detach`] and [`Flow::Leave`] for
@@ -470,6 +478,26 @@ impl DaemonBackend {
     #[allow(clippy::too_many_lines)] // This exhaustive adapter keeps every controller effect visibly mapped to exactly one port.
     pub fn dispatch(&mut self, effect: Effect) -> Flow {
         match effect {
+            Effect::Workflow(job) => {
+                let completions = self.completions();
+                if let Some(port) = self.workflow.as_mut() {
+                    port.dispatch(job, completions);
+                } else {
+                    completions.emit(AppEvent::Backend(
+                        super::controller::BackendEvent::Workflow {
+                            job,
+                            result: Err(super::workflow::WorkflowError {
+                                message: "Workflow backend is unavailable".into(),
+                                unconfirmed: false,
+                            }),
+                        },
+                    ));
+                }
+            }
+            // The Workflow tab is shell-local and owns no daemon operation, so
+            // this executor has nothing to run: the pane registry takes the
+            // intent when the reducer produces it (`WorkspaceRuntime`).
+            Effect::OpenWorkflow { .. } => {}
             Effect::CreateSession {
                 workspace,
                 token,
@@ -667,6 +695,56 @@ impl DaemonBackend {
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
+
+    #[test]
+    fn workflow_backend_routes_snapshots_and_explicit_unavailability() {
+        use crate::usecase::application::workflow::{WorkflowJob, WorkflowPort};
+        struct FakeWorkflow;
+        impl WorkflowPort for FakeWorkflow {
+            fn dispatch(&mut self, job: WorkflowJob, completions: Completions) {
+                let snapshot = usagi_core::domain::workflow::WorkflowSnapshot {
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    session: job.session,
+                    run: None,
+                    pending_start: None,
+                    finished: Vec::new(),
+                };
+                completions.emit(AppEvent::Backend(
+                    super::super::controller::BackendEvent::Workflow {
+                        job,
+                        result: Ok(Box::new(snapshot)),
+                    },
+                ));
+            }
+        }
+        let mut backend = backend();
+        let job = WorkflowJob {
+            workspace: WorkspaceId::new(),
+            session: SessionId::new(),
+            control: None,
+        };
+        assert_eq!(
+            backend.dispatch(Effect::OpenWorkflow {
+                session: job.session
+            }),
+            Flow::Continue
+        );
+        backend.dispatch(Effect::Workflow(job.clone()));
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(
+                super::super::controller::BackendEvent::Workflow { result: Err(_), .. }
+            )]
+        ));
+        let mut backend = backend.with_workflow(Box::new(FakeWorkflow));
+        backend.dispatch(Effect::Workflow(job));
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(
+                super::super::controller::BackendEvent::Workflow { result: Ok(_), .. }
+            )]
+        ));
+    }
     use crate::usecase::application::controller::{
         BackendEvent, Notice, OperationResult, SafeError, SafeMessage,
     };
@@ -679,7 +757,7 @@ mod tests {
         slept: Vec<SleepSessionRequest>,
     }
 
-    impl SessionCommandPort for FakeSessions {
+    impl SessionLifecyclePort for FakeSessions {
         fn create(&mut self, request: CreateSessionRequest, completions: Completions) {
             let token = request.token;
             self.created.push(request);
@@ -711,7 +789,7 @@ mod tests {
 
     struct DefaultSleepSessions;
 
-    impl SessionCommandPort for DefaultSleepSessions {
+    impl SessionLifecyclePort for DefaultSleepSessions {
         fn create(&mut self, _: CreateSessionRequest, _: Completions) {}
         fn refresh(&mut self, _: WorkspaceId, _: Completions) {}
         fn remove(&mut self, _: RemoveSessionRequest, _: Completions) {}
@@ -720,7 +798,7 @@ mod tests {
     #[test]
     fn default_session_sleep_is_an_explicit_no_op() {
         let (completions, receiver) = Completions::channel();
-        SessionCommandPort::sleep(
+        SessionLifecyclePort::sleep(
             &mut DefaultSleepSessions,
             SleepSessionRequest {
                 workspace: WorkspaceId::new(),

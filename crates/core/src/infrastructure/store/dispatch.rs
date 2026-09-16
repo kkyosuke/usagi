@@ -26,6 +26,9 @@ use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 use crate::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
+mod messages;
+pub mod workflows;
+
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
 const INBOX_DIR: &str = "inbox";
@@ -1487,7 +1490,6 @@ impl DispatchStore {
     /// # Errors
     ///
     /// Returns an error when the inbox cannot be locked, read, or written.
-    #[allow(clippy::too_many_lines)]
     pub fn append_inbox(&self, caller: &CallerRef, mut message: InboxMessage) -> Result<()> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let path = self.inbox_path(caller);
@@ -1852,7 +1854,6 @@ impl DispatchStore {
         self.rebuild_inbox_index(caller)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn rebuild_inbox_index(&self, caller: &CallerRef) -> Result<InboxIndex> {
         let path = self.inbox_path(caller);
         let file = match fs::File::open(&path) {
@@ -2192,7 +2193,7 @@ mod tests {
                 workspace,
                 Some(session),
                 AgentProfileId::new("claude").unwrap(),
-                first.model.clone(),
+                first.model,
             )
             .unwrap();
         assert_ne!(created.agent_id, agent_id);
@@ -2207,7 +2208,7 @@ mod tests {
         store.upsert_run(run.clone()).unwrap();
         let replaced_run = DispatchRun {
             prompt: "updated work".into(),
-            ..run.clone()
+            ..run
         };
         assert_eq!(
             store.upsert_run(replaced_run.clone()).unwrap(),
@@ -3698,7 +3699,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn inbox_journal_and_derived_index_corruption_fail_closed() {
         use std::os::unix::fs::symlink;
 
@@ -4077,7 +4077,7 @@ mod tests {
                 },
                 DispatchBinding {
                     run_id: reserved,
-                    caller: caller.clone(),
+                    caller,
                     worker,
                 },
                 AgentAdmissionReservation {

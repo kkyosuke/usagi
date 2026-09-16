@@ -123,7 +123,7 @@ fn terminal_fence_rejects_every_stale_scope_dimension() {
         },
         TerminalRef {
             worktree_id: WorktreeId::new(),
-            ..current.clone()
+            ..current
         },
     ];
     assert!(current.fences(&current));
@@ -203,7 +203,7 @@ fn completion_fence_rejects_every_late_worker_mismatch() {
         },
         CompletionFence {
             expected_revision: 5,
-            ..current.clone()
+            ..current
         },
     ];
     assert!(current.fences(&current));

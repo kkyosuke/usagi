@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-use usagi_core::infrastructure::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, McpCallerContext,
-    SessionAction,
+use usagi_core::infrastructure::client::DaemonClient;
+use usagi_core::infrastructure::ipc::{
+    ClientError, DaemonReply, DaemonRequest, DispatchToolAction, McpCallerContext, SessionAction,
 };
 use usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -788,7 +788,9 @@ fn execute_tool(
 /// schema keeps the composite operation from ever starting.
 fn agent_selector_schema(snapshot: &RuntimeModelSnapshot, route: ToolRoute) -> Option<Value> {
     match route {
-        ToolRoute::Dispatch(DispatchToolAction::Dispatch) => Some(snapshot.agent_schema()),
+        ToolRoute::Dispatch(DispatchToolAction::Dispatch | DispatchToolAction::AgentHandoff) => {
+            Some(snapshot.agent_schema())
+        }
         ToolRoute::Session(SessionAction::DelegateBrief) => Some(snapshot.new_agent_schema()),
         _ => None,
     }
@@ -965,9 +967,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-    use usagi_core::infrastructure::client::{
-        ClientError, DaemonClient, DaemonReply, DaemonRequest,
-    };
+    use usagi_core::infrastructure::client::DaemonClient;
+    use usagi_core::infrastructure::ipc::{ClientError, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
         reply: Result<DaemonReply, ClientError>,
@@ -993,8 +994,8 @@ mod tests {
         }
     }
 
-    struct FakeLocator(&'static [&'static str]);
-    impl ExecutableLocator for FakeLocator {
+    struct FakeServeLocator(&'static [&'static str]);
+    impl ExecutableLocator for FakeServeLocator {
         fn is_available(&self, executable: &str) -> bool {
             self.0.contains(&executable)
         }
@@ -1137,7 +1138,7 @@ mod tests {
             session_worktree.path().to_path_buf(),
             Some(workspace.path().to_path_buf()),
         );
-        let snapshot = runtime_model_snapshot(&workspace_root, &FakeLocator(&["codex"]));
+        let snapshot = runtime_model_snapshot(&workspace_root, &FakeServeLocator(&["codex"]));
         let schema = snapshot.agent_schema();
         let branches = schema["oneOf"].as_array().unwrap();
 
@@ -1206,7 +1207,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 59);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1252,7 +1253,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 39);
+        assert_eq!(names.len(), 48);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -1265,7 +1266,7 @@ mod tests {
     #[test]
     fn delegation_is_hidden_when_no_new_worker_selector_is_executable() {
         let snapshot =
-            RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::empty(), &FakeLocator(&[]));
+            RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::empty(), &FakeServeLocator(&[]));
         let listed = tools_list_result(&snapshot, McpToolFamilies::all());
         assert!(
             listed["tools"]
@@ -1920,10 +1921,7 @@ mod tests {
                 "agent_resume_inventory",
                 serde_json::json!({"workspace_id": workspace}),
             ),
-            (
-                "session_resume",
-                serde_json::json!({"target": target.clone()}),
-            ),
+            ("session_resume", serde_json::json!({"target": target})),
         ] {
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
@@ -1971,13 +1969,16 @@ mod tests {
             "session_decision_log",
             "session_delegate_issue",
             "session_delegate_brief",
+            "workflow_start",
+            "workflow_status",
+            "workflow_instruct",
         ] {
             // `session_delegate_brief` advertises only runtime/model selectors,
             // so its arguments are satisfiable only against a snapshot that has
             // at least one available runtime.
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
+                &FakeServeLocator(&["claude"]),
             );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
@@ -2006,7 +2007,7 @@ mod tests {
     fn delegate_brief_requires_one_validated_agent_selector() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         for arguments in [
             r#"{"brief":"triage"}"#,
@@ -2040,76 +2041,97 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table exercises every authenticated dispatch route.
     fn dispatch_tools_use_the_injected_daemon_client() {
         for (name, action) in [
             (
+                "agent_handoff",
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentHandoff,
+            ),
+            (
+                "agent_peers",
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentPeers,
+            ),
+            (
+                "agent_message",
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentMessage,
+            ),
+            (
+                "agent_messages",
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentMessages,
+            ),
+            (
+                "agent_message_ack",
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentMessageAck,
+            ),
+            (
                 "session_dispatch",
-                usagi_core::infrastructure::client::DispatchToolAction::Dispatch,
+                usagi_core::infrastructure::ipc::DispatchToolAction::Dispatch,
             ),
             (
                 "session_get",
-                usagi_core::infrastructure::client::DispatchToolAction::SessionGet,
+                usagi_core::infrastructure::ipc::DispatchToolAction::SessionGet,
             ),
             (
                 "agent_list",
-                usagi_core::infrastructure::client::DispatchToolAction::AgentList,
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentList,
             ),
             (
                 "agent_get",
-                usagi_core::infrastructure::client::DispatchToolAction::AgentGet,
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentGet,
             ),
             (
                 "terminal_list",
-                usagi_core::infrastructure::client::DispatchToolAction::TerminalList,
+                usagi_core::infrastructure::ipc::DispatchToolAction::TerminalList,
             ),
             (
                 "terminal_read",
-                usagi_core::infrastructure::client::DispatchToolAction::TerminalRead,
+                usagi_core::infrastructure::ipc::DispatchToolAction::TerminalRead,
             ),
             (
                 "agent_complete",
-                usagi_core::infrastructure::client::DispatchToolAction::AgentComplete,
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentComplete,
             ),
             (
                 "agent_fail",
-                usagi_core::infrastructure::client::DispatchToolAction::AgentFail,
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentFail,
             ),
             (
                 "agent_inbox",
-                usagi_core::infrastructure::client::DispatchToolAction::AgentInbox,
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentInbox,
             ),
             (
                 "agent_inbox_ack",
-                usagi_core::infrastructure::client::DispatchToolAction::AgentInboxAck,
+                usagi_core::infrastructure::ipc::DispatchToolAction::AgentInboxAck,
             ),
             (
                 "user_decision_request",
-                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionRequest,
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionRequest,
             ),
             (
                 "user_decision_get",
-                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionGet,
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionGet,
             ),
             (
                 "user_decision_list",
-                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionList,
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionList,
             ),
             (
                 "user_decision_resolve",
-                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionResolve,
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionResolve,
             ),
             (
                 "user_decision_cancel",
-                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionCancel,
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionCancel,
             ),
             (
                 "user_decision_expire",
-                usagi_core::infrastructure::client::DispatchToolAction::UserDecisionExpire,
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionExpire,
             ),
         ] {
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
+                &FakeServeLocator(&["claude"]),
             );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
@@ -2157,7 +2179,7 @@ mod tests {
         ] {
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-                &FakeLocator(&["claude"]),
+                &FakeServeLocator(&["claude"]),
             );
             let arguments = valid_arguments(name, &snapshot);
             let request = format!(
@@ -2198,7 +2220,7 @@ mod tests {
     fn dispatch_schema_and_parser_use_the_captured_snapshot() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::empty(),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         // An empty config never publishes a runtime even when its executable exists.
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
@@ -2226,7 +2248,7 @@ mod tests {
 
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         let input = initialized_input(
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"session\":{\"name\":\"a\"},\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"},\"prompt\":\"p\"}}}\n",
@@ -2310,7 +2332,7 @@ mod tests {
     fn tools_list_publishes_an_existing_agent_branch_only_where_it_can_be_honoured() {
         let snapshot = RuntimeModelSnapshot::capture(
             &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
-            &FakeLocator(&["claude"]),
+            &FakeServeLocator(&["claude"]),
         );
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         let mut out = Vec::new();
@@ -2347,7 +2369,7 @@ mod tests {
         assert!(
             agent_selector_schema(
                 &snapshot,
-                ToolRoute::Session(usagi_core::infrastructure::client::SessionAction::Create),
+                ToolRoute::Session(usagi_core::infrastructure::ipc::SessionAction::Create),
             )
             .is_none(),
             "only the dispatching tools carry an agent selector"
@@ -2361,7 +2383,7 @@ mod tests {
                 "sakana-ai",
                 vec!["fugu-model".into()],
             )]),
-            &FakeLocator(&["codex-fugu"]),
+            &FakeServeLocator(&["claude"]),
         );
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         let mut out = Vec::new();
@@ -2387,7 +2409,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             create["inputSchema"]["properties"]["runtime"]["enum"],
-            serde_json::json!(["claude", "codex", "sakana-ai"])
+            serde_json::json!(["claude", "codex", "sakana-ai", "agy"])
         );
     }
 
