@@ -710,9 +710,9 @@ fn the_handoff_waits_for_an_effect_that_is_already_running() {
     assert_eq!(world.document().document().current, Some(world.next));
 }
 
-struct FakeConnection(std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>);
+struct FakeRolloverConnection(std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>);
 
-impl ConnectionShutdown for FakeConnection {
+impl ConnectionShutdown for FakeRolloverConnection {
     fn shutdown(&self) -> io::Result<()> {
         drop(self.0.lock().unwrap().take());
         Ok(())
@@ -744,7 +744,7 @@ fn collection_joins_every_client_worker_before_recording_retirement() {
         })
     };
     workers.register(
-        Box::new(FakeConnection(std::sync::Mutex::new(Some(sender)))),
+        Box::new(FakeRolloverConnection(std::sync::Mutex::new(Some(sender)))),
         handle,
     );
 

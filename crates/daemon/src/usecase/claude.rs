@@ -312,9 +312,9 @@ mod tests {
         id::{SessionId, WorkspaceId, WorktreeId},
     };
 
-    struct FakeProvisioner(Option<Result<ClaudeProvision, ClaudeProvisionFailure>>);
+    struct FakeClaudeProvisioner(Option<Result<ClaudeProvision, ClaudeProvisionFailure>>);
 
-    impl ClaudeProvisioner for FakeProvisioner {
+    impl ClaudeProvisioner for FakeClaudeProvisioner {
         fn provision(
             &mut self,
             _: &ProvisionContext,
@@ -342,8 +342,8 @@ mod tests {
 
     #[test]
     fn the_fugu_profile_is_a_separate_identity_over_the_same_claude_grammar() {
-        let sakana = ClaudeAdapter::sakana(FakeProvisioner(None));
-        let claude = ClaudeAdapter::new(FakeProvisioner(None));
+        let sakana = ClaudeAdapter::sakana(FakeClaudeProvisioner(None));
+        let claude = ClaudeAdapter::new(FakeClaudeProvisioner(None));
         assert_eq!(sakana.profile().id.as_str(), "sakana-ai");
         assert_eq!(sakana.profile().display_name, "sakana.ai");
         // Same grammar, same capabilities: only the environment a provisioner
@@ -370,7 +370,7 @@ mod tests {
 
         // A launch for the other profile is refused rather than answered with
         // the wrong identity.
-        let mut sakana = ClaudeAdapter::sakana(FakeProvisioner(Some(Ok(provision()))));
+        let mut sakana = ClaudeAdapter::sakana(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             sakana.resolve(&request()),
             Err(AdapterError::Validation(LaunchValidationError::UnknownProfile {
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn renders_claude_plan_and_keeps_private_provision_outside_snapshot() {
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let resolved = adapter.resolve(&request()).unwrap();
         assert_eq!(resolved.snapshot.plan.program, "claude");
         assert_eq!(
@@ -441,7 +441,7 @@ mod tests {
         ] {
             let mut request = request();
             request.initial_prompt = Some(prompt.to_owned());
-            let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+            let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
             let resolved = adapter.resolve(&request).unwrap();
 
             assert_eq!(
@@ -464,7 +464,7 @@ mod tests {
                 .collect()
         }
 
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let headless = adapter.resolve(&request()).unwrap();
         assert_eq!(
             effective_argv(&headless),
@@ -483,7 +483,7 @@ mod tests {
 
         let mut interactive_request = request();
         interactive_request.mode = LaunchMode::Interactive;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let interactive = adapter.resolve(&interactive_request).unwrap();
         assert!(interactive.provider_resume.is_none());
         assert_eq!(
@@ -512,7 +512,7 @@ mod tests {
             last_known_status: ProviderResumeStatus::Interrupted,
             last_known_phase: Some(ProviderResumePhase::Interrupted),
         });
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let resumed = adapter.resolve(&resume_request).unwrap();
         assert_eq!(
             effective_argv(&resumed),
@@ -533,7 +533,7 @@ mod tests {
         let mut no_prompt = request();
         no_prompt.mode = LaunchMode::Interactive;
         no_prompt.initial_prompt = None;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let no_prompt = adapter.resolve(&no_prompt).unwrap();
         assert_eq!(no_prompt.snapshot.plan.argv, ["--model", "sonnet"]);
     }
@@ -543,7 +543,7 @@ mod tests {
         let mut initial = request();
         initial.mode = LaunchMode::Interactive;
         initial.initial_prompt = None;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let resolved = adapter.resolve(&initial).unwrap();
         assert!(resolved.provider_resume.is_none());
         assert_eq!(
@@ -561,7 +561,7 @@ mod tests {
     fn rejects_missing_headless_prompt_and_provision_failures() {
         let mut missing = request();
         missing.initial_prompt = None;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Err(
             ClaudeProvisionFailure::ExecutableUnavailable,
         ))));
         assert!(matches!(
@@ -572,14 +572,14 @@ mod tests {
             adapter.resolve(&request()),
             Err(AdapterError::ExecutableUnavailable)
         ));
-        let mut failed = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+        let mut failed = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Err(
             ClaudeProvisionFailure::MaterializationFailed,
         ))));
         assert!(matches!(
             failed.resolve(&request()),
             Err(AdapterError::ProvisionFailed)
         ));
-        let mut invalid_policy = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+        let mut invalid_policy = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Err(
             ClaudeProvisionFailure::InvalidSandboxPolicy,
         ))));
         assert!(matches!(
@@ -589,7 +589,7 @@ mod tests {
 
         let mut headless_resume = request();
         headless_resume.resume = true;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             adapter.resolve(&headless_resume),
             Err(AdapterError::Validation(
@@ -604,7 +604,7 @@ mod tests {
         resume.mode = LaunchMode::Interactive;
         resume.initial_prompt = None;
         resume.resume = true;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             adapter.resolve(&resume),
             Err(AdapterError::Validation(
@@ -622,7 +622,7 @@ mod tests {
             last_known_status: ProviderResumeStatus::Exited,
             last_known_phase: None,
         });
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             adapter.resolve(&resume),
             Err(AdapterError::Validation(
@@ -721,7 +721,8 @@ mod tests {
 
     #[test]
     fn exposes_its_profile_and_validates_its_own_durable_snapshot() {
-        let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 5);
+        let mut adapter =
+            ClaudeAdapter::with_revision(FakeClaudeProvisioner(Some(Ok(provision()))), 5);
         assert_eq!(
             adapter.profile().id.as_str(),
             DefaultModel::Claude.profile_id()

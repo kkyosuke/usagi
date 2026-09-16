@@ -2104,13 +2104,13 @@ mod deadline_and_retry_tests {
     // ---- Fake clock -------------------------------------------------------
 
     #[derive(Clone, Default)]
-    struct FakeClock(Rc<Cell<u64>>);
-    impl MonotonicClock for FakeClock {
+    struct FakeMonotonicClock(Rc<Cell<u64>>);
+    impl MonotonicClock for FakeMonotonicClock {
         fn now_ms(&self) -> u64 {
             self.0.get()
         }
     }
-    impl FakeClock {
+    impl FakeMonotonicClock {
         fn advance(&self, ms: u64) {
             self.0.set(self.0.get() + ms);
         }
@@ -2125,11 +2125,11 @@ mod deadline_and_retry_tests {
         rearms: Rc<Cell<usize>>,
     }
 
-    struct FakeSession {
+    struct FakeClientSession {
         counters: Counters,
         outcomes: Rc<RefCell<VecDeque<Result<DaemonReply, ClientError>>>>,
     }
-    impl DaemonSession for FakeSession {
+    impl DaemonSession for FakeClientSession {
         fn exchange(&mut self, _request: DaemonRequest) -> Result<DaemonReply, ClientError> {
             self.counters
                 .exchanges
@@ -2156,16 +2156,16 @@ mod deadline_and_retry_tests {
         with_initial_session: bool,
         counters: &Counters,
     ) -> PolicyClient<
-        FakeClock,
-        impl FnMut(FakeClock, u64) -> Result<FakeSession, ClientError>,
-        FakeSession,
+        FakeMonotonicClock,
+        impl FnMut(FakeMonotonicClock, u64) -> Result<FakeClientSession, ClientError>,
+        FakeClientSession,
     > {
         let outcomes = Rc::new(RefCell::new(VecDeque::from(exchange_outcomes)));
         let connect_deque = Rc::new(RefCell::new(VecDeque::from(connect_outcomes)));
         let make = {
             let counters = counters.clone();
             let outcomes = outcomes.clone();
-            move || FakeSession {
+            move || FakeClientSession {
                 counters: counters.clone(),
                 outcomes: outcomes.clone(),
             }
@@ -2173,7 +2173,9 @@ mod deadline_and_retry_tests {
         let initial = with_initial_session.then(&make);
         let connect = {
             let counters = counters.clone();
-            move |_clock: FakeClock, _budget: u64| -> Result<FakeSession, ClientError> {
+            move |_clock: FakeMonotonicClock,
+                  _budget: u64|
+                  -> Result<FakeClientSession, ClientError> {
                 counters.connects.set(counters.connects.get() + 1);
                 connect_deque
                     .borrow_mut()
@@ -2182,7 +2184,7 @@ mod deadline_and_retry_tests {
                     .map(|()| make())
             }
         };
-        PolicyClient::new(FakeClock::default(), policy, connect, initial)
+        PolicyClient::new(FakeMonotonicClock::default(), policy, connect, initial)
     }
 
     #[test]
@@ -2593,7 +2595,7 @@ mod deadline_and_retry_tests {
     /// once exhausted, stalls. Every read advances the fake clock so partial
     /// progress and event floods shrink the shared attempt budget.
     struct ScriptedConn {
-        clock: FakeClock,
+        clock: FakeMonotonicClock,
         readable: Cursor<Vec<u8>>,
         written: Vec<u8>,
         advance_per_read: u64,
@@ -2601,7 +2603,7 @@ mod deadline_and_retry_tests {
         stall_writes: bool,
     }
     impl ScriptedConn {
-        fn new(clock: FakeClock, readable: Vec<u8>) -> Self {
+        fn new(clock: FakeMonotonicClock, readable: Vec<u8>) -> Self {
             Self {
                 clock,
                 readable: Cursor::new(readable),
@@ -2710,10 +2712,10 @@ mod deadline_and_retry_tests {
         bytes
     }
     fn connect_deadline(
-        clock: FakeClock,
+        clock: FakeMonotonicClock,
         conn: ScriptedConn,
         budget_ms: u64,
-    ) -> Result<IpcClient<DeadlineStream<FakeClock, ScriptedConn>>, ClientError> {
+    ) -> Result<IpcClient<DeadlineStream<FakeMonotonicClock, ScriptedConn>>, ClientError> {
         IpcClient::connect(
             DeadlineStream::new(clock, conn, budget_ms),
             "c".into(),
@@ -2726,7 +2728,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn a_hello_stall_returns_a_bounded_unavailable() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let result = connect_deadline(
             clock.clone(),
             ScriptedConn::new(clock.clone(), vec![]).advancing(0, 5_000),
@@ -2737,7 +2739,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn no_response_after_handshake_times_out() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let mut client = connect_deadline(
             clock.clone(),
             ScriptedConn::new(clock.clone(), server_hello_frame()).advancing(0, 5_000),
@@ -2754,7 +2756,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn a_write_stall_before_hello_returns_unavailable() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let result = IpcClient::connect(
             DeadlineStream::new(
                 clock.clone(),
@@ -2774,7 +2776,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn a_partial_response_header_then_stall_times_out() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let mut readable = server_hello_frame();
         readable.extend_from_slice(&[0x00, 0x00]); // 2 of 4 length-prefix bytes, then nothing
         let mut client = connect_deadline(
@@ -2793,7 +2795,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn a_wrong_request_event_flood_cannot_extend_the_deadline() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let mut readable = server_hello_frame();
         for _ in 0..50 {
             readable.extend(response_frame("other", ResponseOutcome::Ok));
@@ -2816,7 +2818,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn a_successful_exchange_runs_over_the_deadline_stream() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let mut readable = server_hello_frame();
         readable.extend(response_frame("1", ResponseOutcome::Ok));
         let mut client = connect_deadline(
@@ -2839,7 +2841,7 @@ mod deadline_and_retry_tests {
 
     #[test]
     fn deadline_stream_rearm_and_accessors_track_the_budget() {
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let mut stream = DeadlineStream::new(
             clock.clone(),
             ScriptedConn::new(clock.clone(), vec![1, 2, 3, 4]),
@@ -2905,7 +2907,7 @@ mod deadline_and_retry_tests {
 
         // The construction arm succeeds, so the deadline it installed still bounds
         // this attempt and the refused re-arm must not discard the peer's answer.
-        let clock = FakeClock::default();
+        let clock = FakeMonotonicClock::default();
         let mut stream = DeadlineStream::new(
             clock.clone(),
             ClosesAfterAnswering {
@@ -2932,7 +2934,7 @@ mod deadline_and_retry_tests {
         // A transport that could never be armed has no deadline in effect, so the
         // failure propagates instead of leaving an unbounded read.
         let mut never = DeadlineStream::new(
-            FakeClock::default(),
+            FakeMonotonicClock::default(),
             ClosesAfterAnswering {
                 readable: Cursor::new(b"refused".to_vec()),
                 arms: 0,

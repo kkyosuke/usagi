@@ -484,7 +484,7 @@ fn presence_collects_a_tab_only_on_an_authoritative_answer_or_a_verified_retirem
 /// reused, or dropped — never about the traffic over it — so this reuses the
 /// router's own fake rather than introducing a second one.
 fn connected(endpoint: &TrustedEndpoint) -> Box<dyn DaemonSession> {
-    Box::new(FakeSession {
+    Box::new(FakeRoutedSession {
         generation: endpoint.generation,
         recorder: Rc::new(RefCell::new(Recorder::default())),
         replies: Rc::new(RefCell::new(BTreeMap::new())),
@@ -610,13 +610,13 @@ type Shared = Rc<RefCell<Recorder>>;
 type Scripted = Rc<RefCell<BTreeMap<DaemonGeneration, Vec<Result<DaemonReply, ClientError>>>>>;
 
 /// A session bound to one generation, scripted per generation.
-struct FakeSession {
+struct FakeRoutedSession {
     generation: DaemonGeneration,
     recorder: Shared,
     replies: Scripted,
 }
 
-impl DaemonSession for FakeSession {
+impl DaemonSession for FakeRoutedSession {
     fn exchange(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         self.recorder
             .borrow_mut()
@@ -651,7 +651,7 @@ impl GenerationTransport for FakeTransport {
             .borrow_mut()
             .connects
             .push(endpoint.generation);
-        Ok(Box::new(FakeSession {
+        Ok(Box::new(FakeRoutedSession {
             generation: endpoint.generation,
             recorder: Rc::clone(&self.recorder),
             replies: Rc::clone(&self.replies),

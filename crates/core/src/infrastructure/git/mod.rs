@@ -59,12 +59,12 @@ pub(crate) mod testkit {
 
     /// A fake runner that pops one queued response per call and records each
     /// invocation's arguments.
-    pub struct FakeGit {
+    pub struct FakeGitRunner {
         responses: RefCell<Vec<GitOutput>>,
         pub calls: RefCell<Vec<Vec<String>>>,
     }
 
-    impl FakeGit {
+    impl FakeGitRunner {
         /// A fake that will return `responses` in order, one per `run` call.
         pub fn new(responses: Vec<GitOutput>) -> Self {
             Self {
@@ -74,7 +74,7 @@ pub(crate) mod testkit {
         }
     }
 
-    impl GitRunner for FakeGit {
+    impl GitRunner for FakeGitRunner {
         fn run(&self, _repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
             self.calls
                 .borrow_mut()

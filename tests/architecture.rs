@@ -580,8 +580,21 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         .expect("TUI banner presentation is readable");
     let startup = fs::read_to_string(root.join("crates/tui/src/presentation/startup.rs"))
         .expect("TUI startup presentation is readable");
-    let tests = fs::read_to_string(root.join("crates/tui/src/presentation/tests.rs"))
-        .expect("TUI presentation tests are readable");
+    // The presentation tests are split per bounded context; every file keeps the
+    // module-level coverage exclusion so test fixtures never enter the gate.
+    let mut test_sources = Vec::new();
+    rust_sources(
+        &root.join("crates/tui/src/presentation/tests"),
+        &mut test_sources,
+    );
+    assert!(
+        !test_sources.is_empty(),
+        "the presentation tests must live in their own module"
+    );
+    let tests = test_sources
+        .iter()
+        .map(|path| fs::read_to_string(path).expect("TUI presentation tests are readable"))
+        .collect::<Vec<_>>();
     let observation =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/observation_lane.rs"))
             .expect("TUI observation policy is readable");
@@ -629,7 +642,13 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
     assert!(!composition.contains("pub struct StartupSplash"));
     assert!(banner.contains("pub struct BannerScreenRunner"));
     assert!(startup.contains("pub struct StartupSplash"));
-    assert!(tests.contains("#![coverage(off)]"));
+    for (path, source) in test_sources.iter().zip(&tests) {
+        assert!(
+            source.contains("#![coverage(off)]"),
+            "{} must keep the module-level coverage exclusion",
+            path.display()
+        );
+    }
     assert!(observation.contains("struct ObservationLane"));
     assert!(!composition.contains("struct GardenObservation {"));
     assert!(!composition.contains("struct WorkRunObservation {"));
@@ -650,9 +669,15 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
             .expect("TUI entry controller is readable");
     let new = fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/new.rs"))
         .expect("TUI new-workspace controller is readable");
-    let tests =
-        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/tests.rs"))
-            .expect("TUI controller tests are readable");
+    let mut controller_test_sources = Vec::new();
+    rust_sources(
+        &root.join("crates/tui/src/usecase/application/controller/tests"),
+        &mut controller_test_sources,
+    );
+    assert!(
+        !controller_test_sources.is_empty(),
+        "the controller tests must live in their own module"
+    );
     let pull_requests = fs::read_to_string(
         root.join("crates/tui/src/usecase/application/controller/pull_requests.rs"),
     )
@@ -675,7 +700,14 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
     assert!(pull_requests.contains("pub struct PrOverlay"));
     assert!(entry.contains("pub fn update_entry("));
     assert!(new.contains("pub fn update_new("));
-    assert!(tests.contains("#![coverage(off)]"));
+    for path in &controller_test_sources {
+        let source = fs::read_to_string(path).expect("TUI controller tests are readable");
+        assert!(
+            source.contains("#![coverage(off)]"),
+            "{} must keep the module-level coverage exclusion",
+            path.display()
+        );
+    }
     assert!(
         controller.lines().count() <= 6_500,
         "TUI Home controller grew beyond its reviewable boundary"

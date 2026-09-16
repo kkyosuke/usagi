@@ -44,12 +44,12 @@ pub fn clone(
 #[cfg(test)]
 mod tests {
     use super::clone;
-    use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::testkit::{FakeGitRunner, fail, ok};
     use std::path::PathBuf;
 
     #[test]
     fn clone_passes_repository_and_directory_and_returns_the_destination() {
-        let git = FakeGit::new(vec![ok("")]);
+        let git = FakeGitRunner::new(vec![ok("")]);
         let destination = clone(
             &git,
             &PathBuf::from("/projects"),
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn clone_forwards_the_requested_branch() {
-        let git = FakeGit::new(vec![ok("")]);
+        let git = FakeGitRunner::new(vec![ok("")]);
         clone(
             &git,
             &PathBuf::from("/projects"),
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn clone_reports_gits_stderr_on_failure() {
-        let git = FakeGit::new(vec![fail("fatal: repository not found")]);
+        let git = FakeGitRunner::new(vec![fail("fatal: repository not found")]);
         let error = clone(
             &git,
             &PathBuf::from("/projects"),
