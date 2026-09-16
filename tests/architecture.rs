@@ -525,12 +525,14 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
             .intersection(&application_ports)
             .collect::<Vec<_>>()
     );
+    let coordinator = fs::read_to_string(root.join("crates/tui/src/presentation/workspace_io.rs"))
+        .expect("TUI transport coordinator is readable");
     assert!(
-        source.contains("struct WorkspaceIoRuntime"),
+        coordinator.contains("struct WorkspaceIoRuntime"),
         "the presentation loop must name its transport-only coordinator explicitly"
     );
     assert!(
-        !source.contains("WorkspaceUi"),
+        !source.contains("WorkspaceUi") && !coordinator.contains("WorkspaceUi"),
         "the retired dual-state WorkspaceUi name must not return"
     );
 }
@@ -538,8 +540,15 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
 #[test]
 fn tui_presentation_discovers_session_catalogs_through_an_application_port() {
     let root = workspace_root();
-    let presentation = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
-        .expect("TUI presentation source is readable");
+    // The frame loop and its bounded contexts now live in sibling modules, so the
+    // contract is checked across the whole presentation layer rather than one file.
+    let mut sources = Vec::new();
+    rust_sources(&root.join("crates/tui/src/presentation"), &mut sources);
+    let presentation = sources
+        .iter()
+        .filter(|path| !path.ends_with("tests.rs"))
+        .map(|path| fs::read_to_string(path).expect("TUI presentation source is readable"))
+        .collect::<String>();
     let ports =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/runtime_ports.rs"))
             .expect("TUI runtime ports are readable");
@@ -577,8 +586,43 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         fs::read_to_string(root.join("crates/tui/src/usecase/application/observation_lane.rs"))
             .expect("TUI observation policy is readable");
 
-    for module in ["mod banner;", "mod startup;", "mod tests;"] {
+    for module in [
+        "mod banner;",
+        "mod startup;",
+        "mod tests;",
+        "mod director;",
+        "mod flow_steps;",
+        "mod frame_loop;",
+        "mod garden;",
+        "mod restore;",
+        "mod session_commands;",
+        "mod terminal_io;",
+        "mod work_run;",
+        "mod workspace_io;",
+    ] {
         assert!(composition.contains(module));
+    }
+    // Each bounded context keeps its own module. Moving one back into the
+    // composition module is what let it grow to ten thousand lines before, so
+    // the split is fixed here rather than left to review.
+    for (module, marker) in [
+        ("director.rs", "fn director_drawer_projection"),
+        ("flow_steps.rs", "fn step_welcome"),
+        ("frame_loop.rs", "fn drive_workspace_controller"),
+        ("garden.rs", "fn route_garden_input"),
+        ("restore.rs", "fn spawn_restore_job"),
+        ("session_commands.rs", "fn begin_session_command"),
+        ("terminal_io.rs", "fn forward_live_terminal_input"),
+        ("work_run.rs", "fn handle_work_run_list_input"),
+        ("workspace_io.rs", "struct WorkspaceIoRuntime"),
+    ] {
+        let source = fs::read_to_string(root.join("crates/tui/src/presentation").join(module))
+            .unwrap_or_else(|error| panic!("{module} is readable: {error}"));
+        assert!(source.contains(marker), "{module} must hold {marker}");
+        assert!(
+            !composition.contains(marker),
+            "{marker} belongs in {module}, not the composition module"
+        );
     }
     assert!(!composition.contains("mod tests {"));
     assert!(!composition.contains("pub struct BannerScreenRunner"));

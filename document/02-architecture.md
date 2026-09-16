@@ -93,6 +93,16 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │       └── src/
 │           ├── lib.rs
 │           ├── infrastructure/  # daemon reply / live 入力を TUI 語彙へ翻訳する純粋 adapter（実 IO は合成ルートが注入）
+│           ├── presentation/    # 画面描画とフレームループ（bounded context ごとに module を分ける）
+│           │   ├── frame_loop.rs        # 実端末の Home frame loop と screen graph の起動
+│           │   ├── workspace_io.rs      # frame loop が使う daemon transport の調整役
+│           │   ├── terminal_io.rs       # pane / terminal の起動・入力転送・選択・投影
+│           │   ├── flow_steps.rs        # Welcome / New / Open / Config の起動フロー
+│           │   ├── session_commands.rs  # Overview の session コマンド発行と完了反映
+│           │   ├── restore.rs           # pane / terminal の復元 job と対象選定
+│           │   ├── director.rs          # Director drawer / tab の選択と projection
+│           │   ├── work_run.rs          # Work run pane の入力と observation / control job
+│           │   └── garden.rs            # Garden の入力 routing と observation job
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
 │           │   │   ├── controller/    # Entry / New / Home の純粋 reducer（bounded context と tests を分離）
