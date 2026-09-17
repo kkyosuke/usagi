@@ -667,3 +667,80 @@ fn workflow_uses_saved_agents_without_overwriting_edits_and_submits_exact_choice
         matches!(&job.control, Some((_, WorkflowCommand::Start { goal, agents })) if goal == "Task" && *agents == chosen)
     );
 }
+
+#[test]
+fn history_scrolling_is_bounded_and_returns_to_the_latest_in_one_operation() {
+    use crate::usecase::application::workflow::{WorkflowEdit, WorkflowJob, fixture_run};
+    use usagi_core::domain::workflow::{WorkflowHistoryEntry, WorkflowSnapshot};
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = submit_closeup_workflow(&mut state, session, "");
+
+    let mut run = fixture_run(session);
+    let entry = |index: usize| WorkflowHistoryEntry {
+        id: usagi_core::domain::id::OperationId::new(),
+        actor: "claude".into(),
+        body: format!("entry {index}"),
+    };
+    run.history.extend((0..12).map(entry));
+    let land = |state: &mut AppState, run: &usagi_core::domain::workflow::WorkflowRun| {
+        let _ = update(
+            state,
+            AppEvent::Backend(BackendEvent::Workflow {
+                job: WorkflowJob {
+                    workspace,
+                    session,
+                    control: None,
+                },
+                result: Ok(Box::new(WorkflowSnapshot {
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    session,
+                    run: Some(run.clone()),
+                    pending_start: None,
+                    finished: Vec::new(),
+                })),
+            }),
+        );
+    };
+    land(&mut state, &run);
+
+    // Paging back past the oldest row used to leave the viewport empty.
+    for _ in 0..20 {
+        let _ = update(
+            &mut state,
+            AppEvent::WorkflowInput {
+                session,
+                key: AppKey::PageUp,
+            },
+        );
+    }
+    let offset = state.workflow_panel(session).unwrap().history_offset;
+    assert_eq!(offset, 11);
+
+    // Rows arriving under a scrolled-back reader hold their place.
+    run.history.extend((12..15).map(entry));
+    land(&mut state, &run);
+    assert_eq!(
+        state.workflow_panel(session).unwrap().history_offset,
+        offset + 3
+    );
+
+    // One operation follows the latest again, and it works while the start form
+    // owns the caret too: reading history is not editing the draft.
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::HistoryLatest,
+        },
+    );
+    assert_eq!(state.workflow_panel(session).unwrap().history_offset, 0);
+
+    // Following the latest, arriving rows are what the reader wants to see.
+    run.history.extend((15..17).map(entry));
+    land(&mut state, &run);
+    assert_eq!(state.workflow_panel(session).unwrap().history_offset, 0);
+}

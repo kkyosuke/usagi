@@ -93,9 +93,13 @@ fn composer(panel: &WorkflowPanel, width: usize) -> Vec<String> {
             .style()
             .paint("Ctrl+S: retry previous request (same operation ID)")
     } else if panel.run.is_some() {
-        muted().paint("Enter: newline | Tab: recipient | Ctrl+S: submit")
+        muted().paint(
+            "Enter: newline | Tab: recipient | Ctrl+S: submit | PgUp/PgDn+Shift+End: history",
+        )
     } else {
-        muted().paint("Tab: goal/agents | Left/Right: choose | Ctrl+S: start")
+        muted().paint(
+            "Tab: goal/agents | Left/Right: choose | Ctrl+S: start | PgUp/PgDn+Shift+End: history",
+        )
     });
     composer
 }
@@ -849,6 +853,44 @@ mod tests {
                 "height {height} keeps the waiting reason"
             );
         }
+    }
+
+    #[test]
+    fn the_scroll_bound_counts_the_rows_that_are_actually_drawn() {
+        use usagi_core::domain::id::{OperationId, SessionId};
+        use usagi_core::domain::workflow::{
+            FinishedRun, Instruction, Outcome, Phase, Recipient, WorkflowHistoryEntry,
+        };
+        let mut run = crate::usecase::application::workflow::fixture_run(SessionId::new());
+        for index in 0..4 {
+            run.history.push(WorkflowHistoryEntry {
+                id: OperationId::new(),
+                actor: "claude".into(),
+                body: format!("step {index}"),
+            });
+            run.instructions.push(Instruction {
+                id: OperationId::new(),
+                requested_recipient: Recipient::Automatic,
+                recipient: run.implementer,
+                body: format!("instruction {index}"),
+                delivery: Delivery::Queued,
+            });
+        }
+        let panel = WorkflowPanel {
+            run: Some(run),
+            finished: vec![FinishedRun {
+                id: OperationId::new(),
+                outcome: Outcome::Stopped,
+                goal: "Earlier attempt".into(),
+                phase: Phase::Revising,
+                issue: None,
+                pr_url: None,
+            }],
+            ..WorkflowPanel::default()
+        };
+        // `WorkflowPanel::history_rows` bounds the scroll; if it drifts from the
+        // rows this view draws, the bound stops matching the window it bounds.
+        assert_eq!(history(&panel).len(), panel.history_rows());
     }
 
     #[test]
