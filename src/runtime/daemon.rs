@@ -211,7 +211,9 @@ use usagi_daemon::infrastructure::generation_registry::{
     CurrentLocatorFile, GenerationRegistryFile, read_registry_document,
 };
 use usagi_daemon::infrastructure::pty::PtyTerminal;
-use usagi_daemon::infrastructure::resource_store::{AllocatorFile, ShardArchiveFiles};
+use usagi_daemon::infrastructure::resource_store::{
+    AllocatorFile, ShardArchiveFiles, read_allocator_document, read_shard_documents,
+};
 use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::infrastructure::unix_transport::{
     EndpointCleanup, EndpointLocator, SecureUnixListener, connect_generation, ensure_private_dir,
@@ -271,7 +273,7 @@ use usagi_daemon::usecase::pr_projection::{
 };
 use usagi_daemon::usecase::replacement::{
     LiveResources, ResourceCensus, RetainedGenerationControl, RolloverRequester, SeamlessRefusal,
-    TransitionMode, manual_operation_id, seamless_refusal,
+    TransitionMode, draining_collection, manual_operation_id, seamless_refusal,
 };
 use usagi_daemon::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator};
 use usagi_daemon::usecase::resources::durable::{

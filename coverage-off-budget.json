@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 550,
+  "total": 552,
   "owners": {
     "core": 10,
-    "daemon": 372,
+    "daemon": 374,
     "root-cli": 40,
     "tui": 128
   },
@@ -19,7 +19,7 @@
     "crates/daemon/src/infrastructure/generation_registry.rs": 7,
     "crates/daemon/src/infrastructure/os_user.rs": 1,
     "crates/daemon/src/infrastructure/pty.rs": 3,
-    "crates/daemon/src/infrastructure/resource_store.rs": 12,
+    "crates/daemon/src/infrastructure/resource_store.rs": 14,
     "crates/daemon/src/infrastructure/session_worktree.rs": 11,
     "crates/daemon/src/infrastructure/unix_transport.rs": 36,
     "crates/daemon/src/usecase/resources/mod.rs": 4,

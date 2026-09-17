@@ -3,20 +3,27 @@ use std::io;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
-use usagi_core::domain::id::DaemonGeneration;
+use usagi_core::domain::id::{
+    DaemonGeneration, OperationId as DomainOperationId, SessionId, TerminalId, TerminalRef,
+    WorkspaceId, WorktreeId,
+};
 use usagi_core::infrastructure::daemon::DaemonRecordStore;
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_identity};
 
 use super::{
-    LiveResources, ReplacementPlan, ResourceCensus, RetainedGenerationControl, RolloverRequester,
-    SeamlessRefusal, StopPlan, TransitionMode, manual_operation_id, plan_replacement, plan_stop,
-    replace_daemon, seamless_refusal, stop_daemon,
+    DrainingCollection, LiveResources, ReplacementPlan, ResourceCensus, RetainedGenerationControl,
+    RolloverRequester, SeamlessRefusal, StopPlan, TransitionMode, draining_collection,
+    manual_operation_id, plan_replacement, plan_stop, replace_daemon, seamless_refusal,
+    stop_daemon,
 };
 use crate::test_support::{
     FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
 };
 use crate::usecase::authority::registry::{GenerationEntry, RegistryDocument};
 use crate::usecase::generation::{GenerationRole, ProcessIdentity};
+use crate::usecase::resources::CasDocument as _;
+use crate::usecase::resources::allocator::{AllocatorDocument, ResourceKind};
+use crate::usecase::resources::shard::{CollectionBlocker, ShardDocument};
 
 fn info() -> AppInfo {
     AppInfo {
@@ -248,7 +255,7 @@ fn only_states_that_still_hold_a_pty_master_are_counted_as_live() {
 #[test]
 fn an_absent_registry_has_no_successor_to_hand_authority_to() {
     assert_eq!(
-        seamless_refusal(None, false, 2),
+        seamless_refusal(None, false, 2, None),
         Some(SeamlessRefusal::NoGenerationRegistry)
     );
 }
@@ -263,7 +270,7 @@ fn a_foreign_registry_schema_is_refused_before_it_is_interpreted() {
         ..RegistryDocument::default()
     };
     assert_eq!(
-        seamless_refusal(Some(&foreign), true, 2),
+        seamless_refusal(Some(&foreign), true, 2, None),
         Some(SeamlessRefusal::RegistrySchemaUnsupported)
     );
 }
@@ -274,14 +281,14 @@ fn a_live_active_and_one_free_generation_slot_enable_rollover() {
     let current = active.generation;
     let mut ready = document(vec![active]);
     ready.current = Some(current);
-    assert_eq!(seamless_refusal(Some(&ready), true, 2), None);
+    assert_eq!(seamless_refusal(Some(&ready), true, 2, None), None);
     assert_eq!(
-        seamless_refusal(Some(&ready), false, 2),
+        seamless_refusal(Some(&ready), false, 2, None),
         Some(SeamlessRefusal::NoLiveRegisteredActive)
     );
     ready.generations.push(entry(GenerationRole::Standby, true));
     assert_eq!(
-        seamless_refusal(Some(&ready), true, 2),
+        seamless_refusal(Some(&ready), true, 2, None),
         Some(SeamlessRefusal::GenerationLimit)
     );
 
@@ -289,10 +296,160 @@ fn a_live_active_and_one_free_generation_slot_enable_rollover() {
     let current = active.generation;
     let mut waiting = document(vec![entry(GenerationRole::Draining, true), active]);
     waiting.current = Some(current);
+    // The observed wait is carried through verbatim, and an unobservable one
+    // leaves the refusal without a cause rather than inventing one.
+    let observed = DrainingCollection {
+        blocker: Some(CollectionBlocker::LiveResource),
+        live: LiveResources {
+            agents: 0,
+            terminals: 2,
+        },
+    };
     assert_eq!(
-        seamless_refusal(Some(&waiting), true, 2),
-        Some(SeamlessRefusal::DrainingCollectionPending)
+        seamless_refusal(Some(&waiting), true, 2, Some(observed)),
+        Some(SeamlessRefusal::DrainingCollectionPending(Some(observed)))
     );
+    assert_eq!(
+        seamless_refusal(Some(&waiting), true, 2, None),
+        Some(SeamlessRefusal::DrainingCollectionPending(None))
+    );
+    // A wait is only reported by the refusal that is about it.
+    assert_eq!(
+        seamless_refusal(Some(&ready), true, 2, Some(observed)),
+        Some(SeamlessRefusal::GenerationLimit)
+    );
+}
+
+/// A shard for `owner` holding `terminals` live generic terminals.
+fn shard_with_live_terminals(owner: DaemonGeneration, terminals: usize) -> ShardDocument {
+    let mut document = ShardDocument::empty(owner);
+    for index in 0..terminals {
+        let resource = TerminalRef {
+            daemon_generation: owner,
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        document
+            .reserve(
+                &DomainOperationId::new(),
+                &format!("digest-{index}"),
+                ResourceKind::Terminal,
+                &resource,
+            )
+            .unwrap();
+    }
+    document
+}
+
+#[test]
+fn the_draining_wait_is_read_from_the_predecessor_own_state() {
+    let draining = entry(GenerationRole::Draining, true);
+    let owner = draining.generation;
+    let active = entry(GenerationRole::Active, true);
+    let registry = document(vec![draining, active]);
+    let allocator = AllocatorDocument::default();
+
+    // The condition an operator can clear themselves is named together with
+    // what there is to close.
+    assert_eq!(
+        draining_collection(
+            &registry,
+            &[shard_with_live_terminals(owner, 2)],
+            Some(&allocator)
+        ),
+        Some(DrainingCollection {
+            blocker: Some(CollectionBlocker::LiveResource),
+            live: LiveResources {
+                agents: 0,
+                terminals: 2,
+            },
+        })
+    );
+
+    // A predecessor that has cleared every condition is a different answer from
+    // one that could not be observed at all.
+    assert_eq!(
+        draining_collection(&registry, &[ShardDocument::empty(owner)], Some(&allocator)),
+        Some(DrainingCollection {
+            blocker: None,
+            live: LiveResources::default(),
+        })
+    );
+    assert_eq!(draining_collection(&registry, &[], Some(&allocator)), None);
+
+    // Another generation's shard is not this generation's wait, and neither is a
+    // shard whose own invariants do not hold.
+    let foreign = shard_with_live_terminals(DaemonGeneration::new(), 1);
+    assert_eq!(
+        draining_collection(&registry, &[foreign], Some(&allocator)),
+        None
+    );
+    let mut broken = shard_with_live_terminals(owner, 1);
+    broken.schema = "usagi-shard-v99".to_owned();
+    assert!(broken.validate().is_err());
+    assert_eq!(
+        draining_collection(&registry, &[broken], Some(&allocator)),
+        None
+    );
+
+    // Capacity claims are the last condition checked, so a lost allocator would
+    // read a real claim as "nothing is blocking". Without it, no cause at all.
+    assert_eq!(
+        draining_collection(&registry, &[shard_with_live_terminals(owner, 2)], None),
+        None
+    );
+
+    // The active generation is still issuing claims, so a condition observed on
+    // it says nothing about the wait and is not reported as it.
+    let active_only = entry(GenerationRole::Active, true);
+    let active_owner = active_only.generation;
+    assert_eq!(
+        draining_collection(
+            &document(vec![active_only]),
+            &[shard_with_live_terminals(active_owner, 1)],
+            Some(&allocator)
+        ),
+        None
+    );
+}
+
+#[test]
+fn the_draining_wait_names_the_condition_that_still_holds() {
+    let live = LiveResources {
+        agents: 1,
+        terminals: 2,
+    };
+    for (blocker, expected) in [
+        (
+            Some(CollectionBlocker::LiveResource),
+            "it still serves 1 Agent runtime(s) and 2 generic terminal(s)",
+        ),
+        (
+            Some(CollectionBlocker::InFlightCommand),
+            "a terminal command it accepted has not completed",
+        ),
+        (
+            Some(CollectionBlocker::UnackedOutbox),
+            "its exit events have not been applied yet",
+        ),
+        (
+            Some(CollectionBlocker::CapacityClaim),
+            "it still holds capacity claims",
+        ),
+        (None, "its collection pass has not run yet"),
+    ] {
+        let waiting = DrainingCollection { blocker, live };
+        assert_eq!(waiting.to_string(), expected);
+        // The refusal that is about this wait repeats it verbatim.
+        assert!(
+            SeamlessRefusal::DrainingCollectionPending(Some(waiting))
+                .to_string()
+                .ends_with(expected),
+            "{blocker:?} is not carried into the refusal"
+        );
+    }
 }
 
 #[test]
@@ -316,7 +473,7 @@ fn every_refusal_names_the_prerequisite_it_is_missing() {
         ),
         (SeamlessRefusal::GenerationLimit, "generation limit"),
         (
-            SeamlessRefusal::DrainingCollectionPending,
+            SeamlessRefusal::DrainingCollectionPending(None),
             "draining generation is still awaiting collection",
         ),
     ] {
@@ -519,7 +676,7 @@ fn a_forced_restart_shuts_down_the_live_draining_generation_before_replacement()
             &NoopReady,
             &FixedCensus::of(1, 0),
             &generations,
-            Some(&SeamlessRefusal::DrainingCollectionPending),
+            Some(&SeamlessRefusal::DrainingCollectionPending(None)),
             &NeverRollover,
             TransitionMode::Cold,
             None,
@@ -549,7 +706,7 @@ fn a_failed_generation_shutdown_preserves_the_record_and_never_launches() {
         &NoopReady,
         &FixedCensus::of(0, 0),
         &FailingGenerationShutdown,
-        Some(&SeamlessRefusal::DrainingCollectionPending),
+        Some(&SeamlessRefusal::DrainingCollectionPending(None)),
         &NeverRollover,
         TransitionMode::Cold,
         None,
