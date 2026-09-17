@@ -110,7 +110,7 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | Welcome | `o` / `e` / `c` / `q` | Open / New / Config / Quit |
 | Welcome | `1` … `3` | Recent cardを開く |
 | Welcome | `Esc` / `Ctrl-C` / `Ctrl-Q` | Quit |
-| Open | `↑` / `↓` | workspace選択 |
+| Open | `↑` / `↓` | workspace選択（端末に収まらない分は窓がscrollし、残り件数を一覧下に出す） |
 | Open | 文字 / paste / `Backspace` / `Delete` | filter編集 |
 | Open | `Tab` | Single / Unite |
 | Open | `Space` | Unite対象をmark |

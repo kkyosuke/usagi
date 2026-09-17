@@ -30,6 +30,12 @@ const FOOTER: &str =
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
 const NAME_WIDTH: usize = 42;
+/// 一覧ブロックの見出し（`Workspaces`・モード行・空行・Filter 行・空行）が占める行数。
+const LIST_HEADER_LINES: usize = 5;
+/// 一覧の下に置く「空行＋選択中の絶対パス」が占める行数。
+const SELECTED_PATH_LINES: usize = 2;
+/// 1 件の workspace が占める行数（名前行＋状態行）。
+const ROWS_PER_WORKSPACE: usize = 2;
 
 /// Open 画面の状態。登録済み workspace の一覧と選択位置を持つ。端末 IO は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +53,9 @@ pub struct Open {
 
 impl Open {
     /// workspace 一覧から、session などの集計値なしのメニューを組む。
+    ///
+    /// 本番の合成は集計済み overview を持つ [`Open::with_overviews`] を通るので、この入口は
+    /// 集計値に関心が無いテストと、生の registry 値しか持たない呼び出し側のための便宜である。
     #[must_use]
     pub fn new(workspaces: Vec<Workspace>) -> Self {
         Self::with_overviews(
@@ -403,8 +412,48 @@ fn filter_line(open: &Open) -> String {
     format!("{} {value}", accent.paint("Filter:"))
 }
 
+/// 一覧に収める件数と、その先頭位置（`(start, capacity)`）を `budget` 行から決める。
+///
+/// 端末に収まらない行は [`crate::presentation::frame::Frame::from_lines`] が黙って捨てるので、
+/// **溢れる件数は「表示されない」ではなく「scroll して届く」**ようにする。選択が下端に来るよう
+/// 窓を動かすだけの純粋な計算で、view は scroll 位置を状態に持たない。
+///
+/// 溢れているときは、隠れている側を伝える行（[`overflow_line`]）の分だけ予算を先に差し引く。
+/// 窓が一覧の端に接していれば隠れるのは片側だけなので 1 行、両端から離れていれば 2 行を引く。
+/// どちら側が隠れるかは窓の位置が決まって初めてわかるので、1 行で組んでから両側が隠れていた
+/// ときだけ 2 行で組み直す。
+fn viewport(total: usize, selected: usize, budget: usize) -> (usize, usize) {
+    let rows = budget.saturating_sub(LIST_HEADER_LINES + SELECTED_PATH_LINES);
+    if total * ROWS_PER_WORKSPACE <= rows {
+        return (0, total);
+    }
+    let window = |reserved: usize| {
+        // 予算が尽きても選択行だけは必ず出す（行が 1 本も無い一覧を見せない）。
+        let capacity = (rows.saturating_sub(reserved) / ROWS_PER_WORKSPACE).max(1);
+        let start = selected
+            .saturating_sub(capacity - 1)
+            .min(total.saturating_sub(capacity));
+        (start, capacity)
+    };
+    let (start, capacity) = window(1);
+    if start > 0 && start + capacity < total {
+        return window(2);
+    }
+    (start, capacity)
+}
+
+/// 窓の外にある件数を、隠れている側（`arrow`）に添えて伝える行。隠れていなければ行を足さない。
+fn overflow_line(arrow: &str, hidden: usize) -> Option<String> {
+    (hidden > 0).then(|| {
+        Style::new()
+            .dim()
+            .paint(&format!("    {arrow} {hidden} more"))
+    })
+}
+
 /// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
-fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
+/// `budget` はボディに使える行数で、溢れる workspace は [`viewport`] が scroll させる。
+fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> Vec<String> {
     let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
     let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
 
@@ -435,7 +484,13 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         ));
         return lines;
     }
-    for (i, overview) in open.filtered().into_iter().enumerate() {
+    let filtered = open.filtered();
+    let (start, capacity) = viewport(filtered.len(), open.selected_index(), budget);
+    // 隠れている件数は隠れている側に置く（窓の上に残る件数を一覧の下で伝えない）。
+    if let Some(above) = overflow_line("↑", start) {
+        lines.push(indent(&above));
+    }
+    for (i, overview) in filtered.iter().enumerate().skip(start).take(capacity) {
         let marker = if open.is_unite() && open.unite_paths.contains(&overview.workspace.path) {
             Role::Success.style().bold().paint("✓ ")
         } else {
@@ -446,6 +501,9 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
             workspace_name_row(&overview.workspace, i == open.selected_index())
         )));
         lines.push(indent(&workspace_stats_row(overview, now)));
+    }
+    if let Some(below) = overflow_line("↓", filtered.len() - (start + capacity)) {
+        lines.push(indent(&below));
     }
 
     // 一覧の下に選択中 workspace の絶対パスを添える（どこを開くのか一目でわかるように）。
@@ -481,8 +539,15 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
-        let mut body = body_lines(width, open, now);
-        body.extend(notice_lines(width, open.notice()));
+        let available = mascot_screen::body_budget(raw_height, raw_width);
+        let notice = notice_lines(width, open.notice());
+        // 通知はボディの一部なので、一覧に残る行数から先に差し引く。
+        let mut body = body_lines(width, open, now, available.saturating_sub(notice.len()));
+        body.extend(notice);
+        // ボディが予算を超えうる経路が 2 つある。[`viewport`] は選択行を出すために 1 件分だけ
+        // 超えることがあり、通知は（daemon の error 文字列をそのまま載せるため）長さに上限が
+        // ない。フッタを画面外へ押し出さないよう、**組み上げた最後に**予算へ収める。
+        body.truncate(available);
         body
     })
 }
@@ -490,7 +555,7 @@ pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Ut
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{Open, render};
+    use super::{Open, overflow_line, render, viewport};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
     use std::path::Path;
@@ -799,6 +864,133 @@ mod tests {
         assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
         assert!(joined.contains("Workspaces"));
         assert!(!joined.contains("A–Z"));
+    }
+
+    #[test]
+    fn a_list_taller_than_the_terminal_scrolls_instead_of_dropping_rows() {
+        // 端末に収まらない行は Frame が黙って捨てるので、溢れた分は窓を動かして届かせる。
+        let open = Open::with_overviews(
+            (0..12)
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0, 0))
+                .collect(),
+        );
+        let frame = render(24, 80, &open, now());
+        assert_eq!(frame.len(), 24);
+        let joined = frame
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // 先頭（選択行）は出て、窓の外は残り件数として数えられる。
+        assert!(joined.contains("ws00"));
+        assert!(!joined.contains("ws11"));
+        let overflow = frame
+            .iter()
+            .map(|l| strip(l))
+            .find(|line| line.contains("more"))
+            .expect("溢れた件数の行が出る");
+        assert_eq!(overflow.trim(), "↓ 8 more");
+        // フッタは最下行に残る（溢れで押し出されない）。
+        assert!(strip(frame.last().unwrap()).contains("Esc back"));
+    }
+
+    #[test]
+    fn a_terminal_too_low_for_the_window_still_keeps_the_footer() {
+        // 選択行を出すために予算を超えても、フッタを押し出さない（末尾のパス行が落ちる）。
+        for height in 12..=20 {
+            let open = Open::with_overviews(
+                (0..3)
+                    .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0, 0))
+                    .collect(),
+            );
+            let frame = render(height, 80, &open, now());
+            assert_eq!(frame.len(), height, "height {height}");
+            assert!(
+                strip(frame.last().unwrap()).contains("Esc back"),
+                "height {height}"
+            );
+            // 見出しと 1 件分が入る高さなら、選択行はまだ画面に出る。
+            if height >= 14 {
+                let joined = frame
+                    .iter()
+                    .map(|l| strip(l))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(joined.contains("ws0"), "height {height}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_notice_longer_than_the_body_budget_still_keeps_the_footer() {
+        // 通知は daemon の error 文字列をそのまま載せるので長さに上限が無い。予算を食い潰しても
+        // フッタは最下行に残る。
+        let mut open = Open::with_overviews(
+            (0..3)
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0, 0))
+                .collect(),
+        );
+        open.set_notice(Some("daemon refused the workspace ".repeat(40)));
+        for height in 12..=30 {
+            let frame = render(height, 80, &open, now());
+            assert_eq!(frame.len(), height, "height {height}");
+            assert!(
+                strip(frame.last().unwrap()).contains("Esc back"),
+                "height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrolling_past_the_window_keeps_the_selected_row_visible() {
+        let mut open = Open::with_overviews(
+            (0..12)
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0, 0))
+                .collect(),
+        );
+        for _ in 0..11 {
+            open.select_next();
+        }
+        let frame = render(24, 80, &open, now());
+        let joined = frame
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("ws11"));
+        assert!(!joined.contains("ws00"));
+        let overflow = frame
+            .iter()
+            .map(|l| strip(l))
+            .find(|line| line.contains("more"))
+            .expect("溢れた件数の行が出る");
+        assert_eq!(overflow.trim(), "↑ 8 more");
+    }
+
+    #[test]
+    fn viewport_shows_everything_that_fits_and_windows_what_does_not() {
+        // 収まるときは窓を作らない。
+        assert_eq!(viewport(4, 0, 17), (0, 4));
+        // 収まらないときは残り件数行の 1 行を予算から引く。
+        assert_eq!(viewport(12, 0, 17), (0, 4));
+        // 選択が窓の下端に来るまで先頭は動かない。
+        assert_eq!(viewport(12, 3, 17), (0, 4));
+        assert_eq!(viewport(12, 4, 17), (1, 4));
+        // 先頭は末尾より先へは進まない。
+        assert_eq!(viewport(12, 11, 17), (8, 4));
+        // 予算が尽きても 1 件は必ず出す。
+        assert_eq!(viewport(12, 0, 0), (0, 1));
+        // 上下どちらも隠れる窓は、件数行 2 本分を予算から引き直す（rows = 11 → capacity 5 → 4）。
+        assert_eq!(viewport(12, 6, 18), (3, 4));
+    }
+
+    #[test]
+    fn overflow_line_appears_only_while_rows_are_hidden() {
+        assert!(overflow_line("↑", 0).is_none());
+        assert_eq!(
+            overflow_line("↓", 3).map(|line| strip(&line)),
+            Some("    ↓ 3 more".to_owned())
+        );
     }
 
     #[test]

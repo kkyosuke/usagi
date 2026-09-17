@@ -44,6 +44,19 @@ fn header_top_padding(height: usize, content_lines: usize) -> usize {
     (height / 5).min(height.saturating_sub(content_lines + 1))
 }
 
+/// ボディに使える行数。`render` が必ず置くヘッダ（マスコット＋空行＋タイトル）・その下の
+/// 余白 1 行・最下行のフッタを端末高さから引いた値である。
+///
+/// ボディが高い画面では [`header_top_padding`] が 0 に詰まるので、この値がそのままボディの
+/// 上限になる。**行数が端末に収まらないボディは `Frame::from_lines` が末尾を黙って捨てる**ので、
+/// 一覧を出す view はこの予算で表示件数を決め、溢れる分を scroll させる。
+#[must_use]
+pub fn body_budget(raw_height: usize, raw_width: usize) -> usize {
+    let (height, _) = widgets::normalize_size(raw_height, raw_width);
+    // マスコット行＋空行＋タイトル＋ヘッダとボディの間の空行＋フッタ。
+    height.saturating_sub(icon::height() + 4)
+}
+
 /// マスコット＋タイトルを頂く全画面フレームを組む。
 ///
 /// ヘッダ（マスコット＋タイトル）を [`header_top_padding`] で**ボディの高さに依存しない**位置へ
@@ -85,7 +98,7 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_line, render};
+    use super::{body_budget, centered_line, render};
     use crate::presentation::theme::Role;
     use crate::presentation::widgets::display_width;
 
@@ -138,6 +151,22 @@ mod tests {
         let top = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top > 0);
         assert!(!frame[top].is_empty());
+    }
+
+    #[test]
+    fn body_budget_is_what_render_leaves_for_the_body() {
+        // ヘッダ（3 行＋空行＋タイトル）＋間の空行＋フッタを引いた残り。
+        assert_eq!(body_budget(40, 80), 40 - 7);
+        // サイズ 0 は render と同じ 80×24 にフォールバックする。
+        assert_eq!(body_budget(0, 0), 24 - 7);
+        // ボディが予算ちょうどなら、フレームは端末高さに収まる。
+        let budget = body_budget(20, 80);
+        let frame = render(20, 80, "T", "f", |_w| {
+            (0..budget).map(|i| i.to_string()).collect()
+        });
+        assert_eq!(frame.len(), 20);
+        assert!(strip(frame.last().unwrap()).contains('f'));
+        assert!(frame.iter().any(|l| strip(l) == (budget - 1).to_string()));
     }
 
     #[test]
