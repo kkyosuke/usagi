@@ -169,7 +169,7 @@ fn document(entries: Vec<GenerationEntry>) -> RegistryDocument {
 }
 
 #[test]
-fn live_resources_sum_both_kinds_and_render_them() {
+fn live_resources_sum_both_kinds_and_name_only_the_ones_that_are_live() {
     let live = LiveResources {
         agents: 2,
         terminals: 3,
@@ -177,10 +177,29 @@ fn live_resources_sum_both_kinds_and_render_them() {
     assert_eq!(live.total(), 5);
     assert!(!live.is_empty());
     assert!(LiveResources::default().is_empty());
+    // A refusal is read to decide what to go and close, so a kind that was
+    // never live is left out instead of being reported as a zero.
     assert_eq!(
         live.to_string(),
         "2 Agent runtime(s) and 3 generic terminal(s)"
     );
+    assert_eq!(
+        LiveResources {
+            agents: 0,
+            terminals: 3,
+        }
+        .to_string(),
+        "3 generic terminal(s)"
+    );
+    assert_eq!(
+        LiveResources {
+            agents: 2,
+            terminals: 0,
+        }
+        .to_string(),
+        "2 Agent runtime(s)"
+    );
+    assert_eq!(LiveResources::default().to_string(), "no live runtime");
 }
 
 #[test]
@@ -599,6 +618,9 @@ fn stopping_a_busy_daemon_is_refused_with_nothing_signalled() {
     assert!(error.to_string().contains("--force"));
     // A stop has no seamless alternative, so it never claims one was missing.
     assert!(!error.to_string().contains("registry"));
+    // It also has no successor to resume the Agents on, so it must not send the
+    // operator to a flag that only a replacement could honour.
+    assert!(!error.to_string().contains("--restart-agents"));
     assert!(terminator.terminated().is_empty());
     assert_eq!(store.load().unwrap(), Some(existing));
 }
@@ -791,6 +813,50 @@ fn replacing_a_busy_daemon_is_refused_and_names_the_missing_prerequisite() {
     assert!(error.to_string().contains("3 generic terminal(s)"));
     assert!(error.to_string().contains("no generation registry exists"));
     // Effect zero: the old daemon is untouched and no successor was launched.
+    assert!(terminator.terminated().is_empty());
+    assert_eq!(launcher.launches(), 0);
+    assert_eq!(store.load().unwrap(), Some(running));
+}
+
+#[test]
+fn a_replacement_blocked_by_a_missing_prerequisite_offers_only_what_clears_it() {
+    let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+    let running = DaemonRecord::new(1111);
+    store.save(&running).unwrap();
+    let terminator = RecordingTerminator::default();
+    let launcher = TestLauncher::registering(&store, 5555);
+
+    let error = replace_daemon(
+        &store,
+        &FixedProbe(true),
+        &terminator,
+        &launcher,
+        &NoopSleeper,
+        &NoopReady,
+        &FixedCensus::of(2, 1),
+        &NoGenerations,
+        Some(&SeamlessRefusal::NoLiveRegisteredActive),
+        &NeverRollover,
+        TransitionMode::Planned,
+        None,
+        &info(),
+    )
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert!(message.contains("2 Agent runtime(s) and 1 generic terminal(s)"));
+    assert!(message.contains("Close them"), "{message}");
+    assert!(message.contains("--force"), "{message}");
+    // This refusal is reached only when a seamless prerequisite is missing, and
+    // `--restart-agents` is planned the same way — so naming it here would send
+    // the operator round a loop. The refusal that can be cleared that way is
+    // `mcp_authority_retained`, which names it instead.
+    assert!(
+        !message.contains("--restart-agents"),
+        "the refusal offers a flag that would meet the same refusal: {message}"
+    );
+    // Effect zero: naming a remedy does not take one.
     assert!(terminator.terminated().is_empty());
     assert_eq!(launcher.launches(), 0);
     assert_eq!(store.load().unwrap(), Some(running));

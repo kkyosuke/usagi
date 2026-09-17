@@ -2774,6 +2774,15 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         String::from_utf8_lossy(&refused.stdout),
         String::from_utf8_lossy(&refused.stderr)
     );
+    // The refusal protected these conversations, and `--restart-agents` is the
+    // route that clears exactly this refusal, so the shipping message names it
+    // rather than only the destructive one.
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--restart-agents"),
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
     assert_eq!(daemon_pid(&data_dir), old_pid);
     assert_eq!(read_locator(&data_dir.join("daemon")).unwrap(), old_locator);
     assert!(alive(old_pid));

@@ -79,12 +79,21 @@ impl LiveResources {
 }
 
 impl fmt::Display for LiveResources {
+    /// Name only the kinds that are actually live.
+    ///
+    /// A refusal is read to decide what to go and close, and "0 Agent
+    /// runtime(s) and 3 generic terminal(s)" makes the reader rule out a kind
+    /// that was never there. Both counts appear only when both are non-zero.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} Agent runtime(s) and {} generic terminal(s)",
-            self.agents, self.terminals
-        )
+        match (self.agents, self.terminals) {
+            (0, 0) => f.write_str("no live runtime"),
+            (0, terminals) => write!(f, "{terminals} generic terminal(s)"),
+            (agents, 0) => write!(f, "{agents} Agent runtime(s)"),
+            (agents, terminals) => write!(
+                f,
+                "{agents} Agent runtime(s) and {terminals} generic terminal(s)"
+            ),
+        }
     }
 }
 
@@ -333,6 +342,12 @@ pub fn manual_operation_id(build: &BuildIdentity, channel: &str) -> Option<Opera
 }
 
 /// Refuse a transition that would destroy live runtime.
+///
+/// This refusal is reached only when a seamless prerequisite is missing
+/// ([`plan_replacement`]), and `--restart-agents` is planned the same way — so
+/// it would meet the same refusal. Naming it here would send the operator round
+/// a loop; the refusal that *can* be cleared that way names it instead
+/// ([`crate::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained`]).
 fn refuse_live(action: &str, live: LiveResources, why: Option<&SeamlessRefusal>) -> io::Error {
     let reason = why.map_or_else(String::new, |refusal| format!("; {refusal}"));
     io::Error::new(

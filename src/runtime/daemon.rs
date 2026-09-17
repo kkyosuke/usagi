@@ -243,7 +243,7 @@ use usagi_daemon::usecase::authority::registry::{
     DEFAULT_GENERATION_LIMIT, GenerationRegistry, RegistryDocument,
 };
 use usagi_daemon::usecase::authority::rollover::{CurrentLocator, recover as recover_rollover};
-use usagi_daemon::usecase::authority::routing::RoutingLedger;
+use usagi_daemon::usecase::authority::routing::{RESTART_AGENTS_REMEDY, RoutingLedger};
 use usagi_daemon::usecase::authority::standby::{
     ActiveOwner, StandbyCustody, StandbyProbe, admissible_active, evaluate_custody, prepare_standby,
 };
@@ -3661,7 +3661,7 @@ pub(crate) fn sync_after_update(
             Some(0) => {}
             Some(credentials) => {
                 return Ok(Err(ClientError::Lifecycle(format!(
-                    "daemon synchronization deferred: {credentials} daemon-provisioned MCP caller credential(s) remain; use 'usagi daemon restart --restart-agents' when they can be restarted"
+                    "daemon synchronization deferred: {credentials} daemon-provisioned MCP caller credential(s) remain; {RESTART_AGENTS_REMEDY}"
                 ))));
             }
             None => {

@@ -635,8 +635,22 @@ generation なので、seamless の successor 候補にはならない。
 | 1 以上 | `stop --force` | cold transition |
 
 拒否は typed であり、何を守ったか（Agent runtime 数と generic terminal 数）と、
-seamless に保てなかった理由を示す。`daemon stop` は rollover とは別契約であり、渡す先の successor が
+seamless に保てなかった理由を示す。**守った数は live な種類だけを挙げ**、live でない種類を 0 として並べない。
+`daemon stop` は rollover とは別契約であり、渡す先の successor が
 そもそも存在しないため seamless refusal を報告しない。live runtime を明示的に手放したかどうかだけを問う。
+
+拒否はさらに **次にできることを名指す**。ただし提示するのは、その拒否を実際に解く経路だけである。
+
+| 拒否 | 提示する経路 |
+|---|---|
+| live runtime を守った seamless refusal（上表） | close するか、`--force` の cold transition |
+| `mcp_authority_retained`（[rollover の routing 前提条件](#rollover-の-routing-前提条件)） | `daemon restart --restart-agents`。同じ provider conversation を resume する |
+| `mcp_authority_retained` で、その rollover が既に `--restart-agents` を要求済み | 提示しない。credential が残った事実だけを述べる |
+
+seamless refusal の側が `--restart-agents` を提示しないのは、**その flag も同じ seamless 前提を必要とする**ためである。
+前提が欠けている状態で案内すると、利用者は同じ拒否へ戻るだけになる。逆に `mcp_authority_retained` は
+`--restart-agents` が credential を 0 にして解ける拒否なので、そこでは名指す。守った会話を破棄する `--force` だけを
+提示して唯一の破壊的な経路へ送ることも、解けない flag を案内して空振りさせることも避ける。
 
 live Agent の拒否だけは、live runtime を手放さずに進む道が `--force` の他にもう 1 本ある。**`--restart-agents`
 は Agent の PTY を維持する経路ではなく、provider conversation を維持したまま Agent process を作り直す経路**で
