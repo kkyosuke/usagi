@@ -1004,7 +1004,12 @@ worker が daemon port を所有している間に届いた 2 件目は backend 
 pending overlay は残らず、実行順序・queue cancel policy は発生しない。worker panic は安全な失敗 completion に変換して
 admission を回復し、遅延・順序外の worker completion は command 世代で fence して現在の pending 表示を上書きしない。
 workspace を離れた場合は実行中の daemon operation 自体を取り消さず、worker は completion 経路を 1 回完了して終了する。
-閉じた workspace の receiver はその completion を破棄し、次に開く workspace は factory から fresh port を取得する。
+completion の受け取り口は 1 つの workspace composition ではなく project deck が持つため、project を切り替えても completion は失われない。
+離れている間に create が完了した場合は、その安全な outcome を当該 workspace へ持ち越し、同じ workspace を再び開いた最初のフレームで提示する。
+成功なら作成された session を名指す notice を出し、row が無通知で現れることはない。失敗なら上記の作成失敗 dialog を開く（前面に別の
+overlay があれば従来どおり notice へ退避する）。pending row を残さない remove / sleep の completion は従来どおり破棄する。
+再び開いた composition はその workspace がまだ実行中の command をそのまま引き継ぐため、遅れて届いた completion が stale として捨てられることもない。
+次に開く workspace は factory から fresh port を取得する。
 
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 

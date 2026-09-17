@@ -2006,7 +2006,7 @@ fn controller_host_executor_routes_busy_launch_terminal_and_tab_actions() {
     for completion in completed {
         ui.session_completion_sender.send(completion).unwrap();
     }
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     let events = backend.drain_events();
     // Create is admitted and reports its token; Remove is refused as busy
     // and notices. `RefreshSessions` no longer competes for that single
@@ -2057,7 +2057,7 @@ fn controller_host_executor_routes_busy_launch_terminal_and_tab_actions() {
         &mut pending,
     );
     std::thread::sleep(std::time::Duration::from_millis(10));
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     backend.dispatch(Effect::SleepSession { workspace, session });
     drain_host_actions(
         &actions,
@@ -2067,7 +2067,7 @@ fn controller_host_executor_routes_busy_launch_terminal_and_tab_actions() {
         &mut pending,
     );
     std::thread::sleep(std::time::Duration::from_millis(10));
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     backend.dispatch(Effect::RemoveSession {
         workspace,
         session,
@@ -2083,7 +2083,7 @@ fn controller_host_executor_routes_busy_launch_terminal_and_tab_actions() {
         &mut pending,
     );
     std::thread::sleep(std::time::Duration::from_millis(10));
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     backend.dispatch(Effect::SleepSession {
         workspace,
         session: SessionId::new(),
@@ -6666,7 +6666,7 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
     let (backend_completions, backend_receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
     let result = Err("daemon refused the session".to_owned());
-    let completion = super::SessionBackendCompletion::Create {
+    let completion = super::session_lane::SessionBackendCompletion::Create {
         token,
         before: Vec::new(),
         completions: backend_completions,
@@ -6674,7 +6674,7 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
     super::emit_session_command_result(&result, &completion);
     ui.active_session_command = Some(1);
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result,
@@ -6682,7 +6682,7 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
         })
         .unwrap();
 
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     assert!(matches!(
         backend_receiver.recv().unwrap(),
         AppEvent::OperationResult(result)
@@ -6714,24 +6714,24 @@ fn a_create_that_lands_after_its_project_left_is_carried_to_the_next_composition
     // A torn-down composition leaves no admitted command behind.
     ui.active_session_command = None;
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: workspace_path.clone(),
             command_id,
             result: Err("daemon refused the session\ninternal detail".to_owned()),
-            completion: super::SessionBackendCompletion::Create {
+            completion: super::session_lane::SessionBackendCompletion::Create {
                 token: PendingToken::from_raw(7),
                 before: Vec::new(),
                 completions,
             },
         })
         .unwrap();
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
 
     // The admission is released and only the safe first line is carried.
     assert!(command_lane.in_flight(&workspace_path).is_none());
     assert_eq!(
         command_lane.take_carried(&workspace_path),
-        Some(super::CarriedCreate {
+        Some(super::session_lane::CarriedCreate {
             name: "atlas".to_owned(),
             error: Some("daemon refused the session".to_owned()),
         })
@@ -6756,7 +6756,12 @@ fn a_reopened_project_adopts_its_in_flight_command_and_its_carried_outcome() {
     let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
 
     // Nothing parked: a fresh composition adopts nothing and reports nothing.
-    super::adopt_session_command_lane(&mut command_lane, &workspace_path, &mut ui, &mut runtime);
+    super::session_lane::adopt_session_command_lane(
+        &mut command_lane,
+        &workspace_path,
+        &mut ui,
+        &mut runtime,
+    );
     assert_eq!(ui.active_session_command, None);
     assert_eq!(runtime.state().overlay(), None);
 
@@ -6765,13 +6770,18 @@ fn a_reopened_project_adopts_its_in_flight_command_and_its_carried_outcome() {
         .expect("an idle workspace admits its first command");
     command_lane.carry(
         &workspace_path,
-        super::CarriedCreate {
+        super::session_lane::CarriedCreate {
             name: "atlas".to_owned(),
             error: Some("worktree path already exists".to_owned()),
         },
     );
 
-    super::adopt_session_command_lane(&mut command_lane, &workspace_path, &mut ui, &mut runtime);
+    super::session_lane::adopt_session_command_lane(
+        &mut command_lane,
+        &workspace_path,
+        &mut ui,
+        &mut runtime,
+    );
     assert_eq!(ui.active_session_command, Some(command_id));
     assert_eq!(
         runtime.state().overlay(),
@@ -6799,18 +6809,18 @@ fn a_remove_that_lands_after_its_project_left_is_dropped() {
 
     ui.active_session_command = None;
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: workspace_path.clone(),
             command_id,
             result: Err("daemon refused the removal".to_owned()),
-            completion: super::SessionBackendCompletion::Remove {
+            completion: super::session_lane::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
                 before: Vec::new(),
                 completions,
             },
         })
         .unwrap();
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
 
     assert!(command_lane.in_flight(&workspace_path).is_none());
     assert!(command_lane.take_carried(&workspace_path).is_none());
@@ -6848,21 +6858,21 @@ fn session_commands_reject_the_second_request_as_busy() {
     let (second_completions, _) =
         crate::usecase::application::daemon_backend::Completions::channel();
 
-    assert!(super::begin_session_command(
+    assert!(super::session_lane::begin_session_command(
         &mut ui,
         &mut command_lane,
         SessionCommand::List,
-        super::SessionBackendCompletion::Remove {
+        super::session_lane::SessionBackendCompletion::Remove {
             session: SessionId::new(),
             before: Vec::new(),
             completions: first_completions,
         },
     ));
-    assert!(!super::begin_session_command(
+    assert!(!super::session_lane::begin_session_command(
         &mut ui,
         &mut command_lane,
         SessionCommand::List,
-        super::SessionBackendCompletion::Remove {
+        super::session_lane::SessionBackendCompletion::Remove {
             session: SessionId::new(),
             before: Vec::new(),
             completions: second_completions,
@@ -6888,7 +6898,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
 
     ui.active_session_command = Some(2);
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 2,
             result: Ok(SessionCommandResult {
@@ -6900,18 +6910,18 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_roles: None,
                 revision: Some(2),
             }),
-            completion: super::SessionBackendCompletion::Remove {
+            completion: super::session_lane::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
                 before: vec![original],
                 completions: newer_completions,
             },
         })
         .unwrap();
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
 
     ui.active_session_command = Some(1);
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result: Ok(SessionCommandResult {
@@ -6923,7 +6933,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_roles: None,
                 revision: Some(1),
             }),
-            completion: super::SessionBackendCompletion::Remove {
+            completion: super::session_lane::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
                 before: vec![newer],
                 completions: older_completions,
@@ -6931,7 +6941,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
         })
         .unwrap();
 
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     assert_eq!(ui.workspace.session_ids(), &[newer]);
     assert_eq!(ui.workspace.sessions()[0].name, "newer");
 }
@@ -6961,7 +6971,7 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
         session_roles: None,
         revision: None,
     });
-    let completion = super::SessionBackendCompletion::Create {
+    let completion = super::session_lane::SessionBackendCompletion::Create {
         token,
         before: vec![existing],
         completions,
@@ -6970,14 +6980,14 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
     ui.active_session_command = Some(1);
 
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result,
             completion,
         })
         .unwrap();
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
 
     assert!(matches!(
         receiver.recv().unwrap(),
@@ -6991,7 +7001,7 @@ fn session_snapshot_completion_preserves_fallback_and_reports_failure_once() {
     let existing = SessionId::new();
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
-    let completion = super::SessionBackendCompletion::Remove {
+    let completion = super::session_lane::SessionBackendCompletion::Remove {
         session: SessionId::new(),
         before: vec![existing],
         completions,
@@ -7008,7 +7018,7 @@ fn session_snapshot_completion_preserves_fallback_and_reports_failure_once() {
 
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
-    let completion = super::SessionBackendCompletion::Remove {
+    let completion = super::session_lane::SessionBackendCompletion::Remove {
         session: SessionId::new(),
         before: vec![existing],
         completions,
@@ -7022,7 +7032,7 @@ fn session_snapshot_completion_preserves_fallback_and_reports_failure_once() {
 
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
-    let completion = super::SessionBackendCompletion::Sleep {
+    let completion = super::session_lane::SessionBackendCompletion::Sleep {
         before: vec![existing],
         completions,
     };
@@ -7034,7 +7044,7 @@ fn session_snapshot_completion_preserves_fallback_and_reports_failure_once() {
 
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
-    let completion = super::SessionBackendCompletion::Sleep {
+    let completion = super::session_lane::SessionBackendCompletion::Sleep {
         before: vec![existing],
         completions,
     };
@@ -7385,11 +7395,11 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
     let (completions, _) = crate::usecase::application::daemon_backend::Completions::channel();
 
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result: result.clone(),
-            completion: super::SessionBackendCompletion::Remove {
+            completion: super::session_lane::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
                 before: Vec::new(),
                 completions,
@@ -7401,11 +7411,11 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
 
     let (completions, _) = crate::usecase::application::daemon_backend::Completions::channel();
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 2,
             result,
-            completion: super::SessionBackendCompletion::Remove {
+            completion: super::session_lane::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
                 before: Vec::new(),
                 completions,
@@ -7505,7 +7515,7 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         session_roles: None,
         revision: None,
     });
-    let completion = super::SessionBackendCompletion::Remove {
+    let completion = super::session_lane::SessionBackendCompletion::Remove {
         session: SessionId::new(),
         before: vec![session],
         completions,
@@ -7513,14 +7523,14 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
     super::emit_session_command_result(&result, &completion);
     ui.active_session_command = Some(1);
     ui.session_completion_sender
-        .send(super::SessionCommandCompletion {
+        .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result,
             completion,
         })
         .unwrap();
-    super::drain_session_completions(&mut ui, &mut command_lane);
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
     let _ = runtime.apply_event(receiver.recv().unwrap());
     assert_eq!(runtime.state().sessions(), &[session]);
     let _ = runtime.apply_event(sidebar_pointer_event(
