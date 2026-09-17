@@ -22,8 +22,9 @@ pub mod workspace_deck;
 pub mod workspace_runtime;
 
 use session_lane::{
-    SessionBackendCompletion, SessionCommandCompletion, SessionCommandLane,
-    adopt_session_command_lane, begin_session_command, drain_session_completions,
+    ActiveSessionCommand, SessionBackendCompletion, SessionCommandCompletion, SessionCommandLane,
+    adopt_session_command_lane, begin_session_command, deliver_carried_create,
+    drain_session_completions,
 };
 
 pub use banner::{BannerScreenRunner, write_banner};
@@ -1593,10 +1594,10 @@ struct WorkspaceIoRuntime {
     /// Sink the lane hands to every session-command worker. It outlives this
     /// composition, so a completion is never dropped by a project switch (#768).
     session_completion_sender: Sender<SessionCommandCompletion>,
-    /// Lane identity of the command this composition owns. Re-adopted on entry
-    /// from [`SessionCommandLane`], so a command started before a project
-    /// switch is still this workspace's command when it is composed again.
-    active_session_command: Option<u64>,
+    /// The session command this composition owns. Re-adopted on entry from
+    /// [`SessionCommandLane`], so a command started before a project switch is
+    /// still this workspace's command when it is composed again.
+    active_session_command: Option<ActiveSessionCommand>,
     /// Session displayed as a removal skeleton until its daemon command returns.
     removing_session: Option<SessionId>,
     /// An in-flight create's controller token and the name drawn in its sidebar
@@ -7388,7 +7389,7 @@ fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
-    adopt_session_command_lane(lane, &root_cwd, &mut ui, &mut runtime);
+    adopt_session_command_lane(lane, &root_cwd, &mut ui);
     restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
@@ -7568,6 +7569,7 @@ fn drive_workspace_controller(
             restore_retry.request_changed_observation(restore_clock.elapsed());
         }
         drain_session_completions(&mut ui, lane);
+        deliver_carried_create(lane, &root_cwd, &mut runtime);
         drain_session_refresh(
             &mut ui,
             session_refresh.as_mut(),

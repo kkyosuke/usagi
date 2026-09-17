@@ -1009,7 +1009,9 @@ completion の受け取り口は 1 つの workspace composition ではなく pro
 成功なら作成された session を名指す notice を出し、row が無通知で現れることはない。失敗なら上記の作成失敗 dialog を開く（前面に別の
 overlay があれば従来どおり notice へ退避する）。pending row を残さない remove / sleep の completion は従来どおり破棄する。
 再び開いた composition はその workspace がまだ実行中の command をそのまま引き継ぐため、遅れて届いた completion が stale として捨てられることもない。
-次に開く workspace は factory から fresh port を取得する。
+引き継いだ create がまだ実行中なら**作成中 skeleton を同じ名前で描き直す**ので、戻った直後の sidebar に作成中である手掛かりが残る。
+引き継いだ create の完了は、開始した composition の reducer sink がすでに閉じているため、skeleton を消すと同時に上記の持ち越し経路で
+提示する。したがって skeleton が黙って消えることはない。次に開く workspace は factory から fresh port を取得する。
 
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 

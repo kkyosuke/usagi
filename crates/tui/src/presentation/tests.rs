@@ -6672,7 +6672,10 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
         completions: backend_completions,
     };
     super::emit_session_command_result(&result, &completion);
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
@@ -6740,9 +6743,63 @@ fn a_create_that_lands_after_its_project_left_is_carried_to_the_next_composition
 }
 
 #[test]
-fn a_reopened_project_adopts_its_in_flight_command_and_its_carried_outcome() {
+fn a_reopened_project_adopts_its_in_flight_command_and_redraws_its_skeleton() {
     // Coming back to a project must not fence out the command it still has in
-    // flight, and an outcome parked while it was away has to be reported (#768).
+    // flight, and the create the user started has to look like it is still
+    // running instead of leaving the sidebar with no sign of it (#768).
+    let snapshot = snapshot("demo");
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+
+    // Nothing in flight: a fresh composition adopts nothing.
+    super::session_lane::adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
+    assert_eq!(ui.active_session_command, None);
+    assert!(ui.creating_session.is_none());
+
+    let command_id = command_lane
+        .admit(&workspace_path, Some("atlas".to_owned()))
+        .expect("an idle workspace admits its first command");
+    super::session_lane::adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
+    assert_eq!(
+        ui.active_session_command.map(|command| command.id),
+        Some(command_id)
+    );
+    assert!(
+        ui.active_session_command
+            .is_some_and(|command| command.inherited)
+    );
+    assert_eq!(
+        ui.creating_session
+            .as_ref()
+            .map(|create| create.name.as_str()),
+        Some("atlas")
+    );
+
+    // A remove leaves no skeleton behind, only the admission.
+    let removing = std::path::PathBuf::from("/tmp/other");
+    let removing_id = command_lane
+        .admit(&removing, None)
+        .expect("a second workspace admits its own command");
+    super::session_lane::adopt_session_command_lane(&command_lane, &removing, &mut ui);
+    assert_eq!(
+        ui.active_session_command.map(|command| command.id),
+        Some(removing_id)
+    );
+    assert!(ui.creating_session.is_none());
+}
+
+#[test]
+fn an_inherited_create_reports_its_outcome_instead_of_clearing_the_skeleton_in_silence() {
+    // The skeleton was redrawn from the lane, so this composition owns it — but
+    // the reducer sink that would have reported the outcome died with the
+    // composition that started the create. Clearing the skeleton without a word
+    // is exactly the silence #768 is about.
     let snapshot = snapshot("demo");
     let workspace_id = snapshot.workspace_id;
     let view = WorkspaceView::with_runtime_ids(
@@ -6754,40 +6811,84 @@ fn a_reopened_project_adopts_its_in_flight_command_and_its_carried_outcome() {
     let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let workspace_path = ui.workspace.record().path.clone();
     let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
-
-    // Nothing parked: a fresh composition adopts nothing and reports nothing.
-    super::session_lane::adopt_session_command_lane(
-        &mut command_lane,
-        &workspace_path,
-        &mut ui,
-        &mut runtime,
-    );
-    assert_eq!(ui.active_session_command, None);
-    assert_eq!(runtime.state().overlay(), None);
-
     let command_id = command_lane
         .admit(&workspace_path, Some("atlas".to_owned()))
         .expect("an idle workspace admits its first command");
-    command_lane.carry(
-        &workspace_path,
-        super::session_lane::CarriedCreate {
-            name: "atlas".to_owned(),
-            error: Some("worktree path already exists".to_owned()),
-        },
-    );
+    super::session_lane::adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
 
-    super::session_lane::adopt_session_command_lane(
-        &mut command_lane,
-        &workspace_path,
-        &mut ui,
-        &mut runtime,
-    );
-    assert_eq!(ui.active_session_command, Some(command_id));
+    let (completions, _receiver) =
+        crate::usecase::application::daemon_backend::Completions::channel();
+    ui.session_completion_sender
+        .send(super::session_lane::SessionCommandCompletion {
+            workspace: workspace_path.clone(),
+            command_id,
+            result: Err("worktree path already exists".to_owned()),
+            completion: super::session_lane::SessionBackendCompletion::Create {
+                token: PendingToken::from_raw(11),
+                before: Vec::new(),
+                completions,
+            },
+        })
+        .unwrap();
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
+
+    // The skeleton clears here, and the outcome is handed to the next frame.
+    assert!(ui.creating_session.is_none());
+    assert!(ui.active_session_command.is_none());
+    super::session_lane::deliver_carried_create(&mut command_lane, &workspace_path, &mut runtime);
     assert_eq!(
         runtime.state().overlay(),
         Some(crate::usecase::application::controller::Overlay::CreateSessionError)
     );
-    // The outcome is delivered exactly once.
+    assert_eq!(
+        runtime
+            .state()
+            .create_session_error()
+            .map(|notice| notice.message.as_str()),
+        Some("worktree path already exists")
+    );
+    // Delivered exactly once.
+    super::session_lane::deliver_carried_create(&mut command_lane, &workspace_path, &mut runtime);
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
+#[test]
+fn a_create_this_composition_started_reports_through_its_own_sink_only() {
+    // The composition that started the create still owns a live reducer sink,
+    // so nothing is carried and the outcome is not reported twice.
+    let snapshot = snapshot("demo");
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let command_id = command_lane
+        .admit(&workspace_path, Some("atlas".to_owned()))
+        .expect("an idle workspace admits its first command");
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: command_id,
+        inherited: false,
+    });
+
+    let (completions, _receiver) =
+        crate::usecase::application::daemon_backend::Completions::channel();
+    ui.session_completion_sender
+        .send(super::session_lane::SessionCommandCompletion {
+            workspace: workspace_path.clone(),
+            command_id,
+            result: Err("worktree path already exists".to_owned()),
+            completion: super::session_lane::SessionBackendCompletion::Create {
+                token: PendingToken::from_raw(12),
+                before: Vec::new(),
+                completions,
+            },
+        })
+        .unwrap();
+    super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
+
     assert!(command_lane.take_carried(&workspace_path).is_none());
 }
 
@@ -6896,7 +6997,10 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
     let mut newer_record = ui.workspace.sessions()[0].clone();
     newer_record.name = "newer".to_owned();
 
-    ui.active_session_command = Some(2);
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: 2,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
@@ -6919,7 +7023,10 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
         .unwrap();
     super::session_lane::drain_session_completions(&mut ui, &mut command_lane);
 
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),
@@ -6977,7 +7084,10 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
         completions,
     };
     super::emit_session_command_result(&result, &completion);
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
 
     ui.session_completion_sender
         .send(super::session_lane::SessionCommandCompletion {
@@ -7390,7 +7500,10 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
     let mut command_lane = SessionCommandLane::new();
     let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
-    ui.active_session_command = Some(2);
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: 2,
+        inherited: false,
+    });
     let result = Ok(SessionCommandResult::message("done"));
     let (completions, _) = crate::usecase::application::daemon_backend::Completions::channel();
 
@@ -7407,7 +7520,7 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
         })
         .unwrap();
     drain_session_completions(&mut ui, &mut command_lane);
-    assert_eq!(ui.active_session_command, Some(2));
+    assert_eq!(ui.active_session_command.map(|command| command.id), Some(2));
 
     let (completions, _) = crate::usecase::application::daemon_backend::Completions::channel();
     ui.session_completion_sender
@@ -7521,7 +7634,10 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         completions,
     };
     super::emit_session_command_result(&result, &completion);
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(super::session_lane::ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(super::session_lane::SessionCommandCompletion {
             workspace: ui.workspace.record().path.clone(),

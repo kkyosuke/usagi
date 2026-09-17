@@ -19,8 +19,8 @@ use crate::usecase::overview::SessionCommand;
 
 use super::workspace_runtime::WorkspaceRuntime;
 use super::{
-    FRAME_EVENT_BUDGET, WorkspaceIoRuntime, adopt_session_snapshot, emit_session_command_result,
-    safe_session_error,
+    FRAME_EVENT_BUDGET, PendingCreate, WorkspaceIoRuntime, adopt_session_snapshot,
+    emit_session_command_result, safe_session_error,
 };
 
 pub(super) struct SessionCommandCompletion {
@@ -44,6 +44,18 @@ pub(super) struct CarriedCreate {
     pub(super) name: String,
     /// `None` when the daemon created the session, otherwise the safe message.
     pub(super) error: Option<String>,
+}
+
+/// The session command a composition currently owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ActiveSessionCommand {
+    /// Lane identity of the command.
+    pub(super) id: u64,
+    /// Whether the command was inherited from the lane instead of started by
+    /// this composition. An inherited command's reducer sink died with the
+    /// composition that started it, so its outcome is reported through the
+    /// lane's carry instead of that sink (#768).
+    pub(super) inherited: bool,
 }
 
 /// One session command admitted for a workspace.
@@ -174,7 +186,10 @@ pub(super) fn begin_session_command(
         );
         return false;
     };
-    ui.active_session_command = Some(command_id);
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: command_id,
+        inherited: false,
+    });
     let port = std::sync::Arc::clone(&ui.session_commands);
     let sender = ui.session_completion_sender.clone();
     let lane_workspace = workspace.path.clone();
@@ -203,7 +218,10 @@ pub(super) fn drain_session_completions(
 ) {
     for completion in lane.drain(FRAME_EVENT_BUDGET) {
         let admitted = lane.finish(&completion.workspace, completion.command_id);
-        if ui.active_session_command != Some(completion.command_id) {
+        let active = ui
+            .active_session_command
+            .filter(|command| command.id == completion.command_id);
+        let Some(active) = active else {
             // The composition that started this command is gone: the user
             // switched projects while it ran. Its reducer sink died with it, so
             // a create's outcome is parked on the lane and replayed when its own
@@ -222,8 +240,9 @@ pub(super) fn drain_session_completions(
                 );
             }
             continue;
-        }
+        };
         ui.active_session_command = None;
+        let inherited = active.inherited;
         match &completion.completion {
             SessionBackendCompletion::Create { .. } => ui.creating_session = None,
             SessionBackendCompletion::Remove { session, .. }
@@ -233,34 +252,75 @@ pub(super) fn drain_session_completions(
             }
             SessionBackendCompletion::Remove { .. } | SessionBackendCompletion::Sleep { .. } => {}
         }
+        // This composition owns the command's skeleton but not its reducer sink:
+        // the create was started before a project switch, so the pending row and
+        // the `OperationResult` channel that would have reported it died with the
+        // composition that asked. Carry the outcome so the skeleton it just
+        // cleared is not replaced by silence (#768).
+        if let Some(name) = inherited
+            .then_some(admitted)
+            .flatten()
+            .and_then(|command| command.create_name)
+        {
+            lane.carry(
+                &completion.workspace,
+                CarriedCreate {
+                    name,
+                    error: completion
+                        .result
+                        .as_ref()
+                        .err()
+                        .map(|message| safe_session_error(message)),
+                },
+            );
+        }
         if let Ok(result) = completion.result {
             adopt_session_snapshot(ui, result);
         }
     }
 }
 
-/// Hand a fresh composition everything the lane still holds for its workspace.
+/// Hand a fresh composition the command its workspace still has in flight.
 ///
-/// Two things outlive the composition a create was started in: the command
-/// itself, which must stay this workspace's command so its completion is not
-/// fenced out as stale, and a create outcome that landed while another project
-/// was on screen, which must still be reported (#768).
-///
-/// A carried success is a notice naming the session, so the row the workspace
-/// reopened with is explained instead of appearing unannounced. A carried
-/// failure keeps the create-failure dialog it would have opened had the user
-/// stayed.
+/// The command outlives the composition it was started in, so it stays this
+/// workspace's command: its completion is not fenced out as stale, and a create
+/// still running draws its skeleton again instead of leaving the user with no
+/// sign that the session they asked for is on its way (#768). The command is
+/// marked inherited because its reducer sink died with the composition that
+/// started it.
 pub(super) fn adopt_session_command_lane(
-    lane: &mut SessionCommandLane,
+    lane: &SessionCommandLane,
     workspace: &Path,
     ui: &mut WorkspaceIoRuntime,
+) {
+    let Some(command) = lane.in_flight(workspace) else {
+        return;
+    };
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: command.id,
+        inherited: true,
+    });
+    ui.creating_session = command
+        .create_name
+        .clone()
+        .map(|name| PendingCreate { name });
+}
+
+/// Report a create whose outcome the lane carried for this workspace.
+///
+/// A success is a notice naming the session, so a row that arrived while the
+/// project was away is explained instead of appearing unannounced. A failure
+/// opens the create-failure dialog it would have opened had the user stayed.
+pub(super) fn deliver_carried_create(
+    lane: &mut SessionCommandLane,
+    workspace: &Path,
     runtime: &mut WorkspaceRuntime,
 ) {
-    ui.active_session_command = lane.in_flight(workspace).map(|command| command.id);
-    if let Some(carried) = lane.take_carried(workspace) {
-        let _ = runtime.apply_event(AppEvent::CarriedCreateOutcome {
-            name: carried.name,
-            error: carried.error,
-        });
-    }
+    let Some(carried) = lane.take_carried(workspace) else {
+        return;
+    };
+    let _ = runtime.apply_event(AppEvent::CarriedCreateOutcome {
+        name: carried.name,
+        error: carried.error,
+    });
 }
