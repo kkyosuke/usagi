@@ -24,6 +24,21 @@ fn muted() -> Style {
     Style::new().fg(Color::White).dim()
 }
 
+/// How this pane names a provider. `agy` is the odd one out: its selector is the
+/// CLI's name, which says nothing about the model behind it.
+fn provider_name(provider: usagi_core::domain::settings::DefaultModel) -> &'static str {
+    if provider == usagi_core::domain::settings::DefaultModel::Agy {
+        "Gemini (agy)"
+    } else {
+        provider.selector()
+    }
+}
+
+/// A goal is free text the person typed; it is shown on one row.
+fn one_line(text: &str) -> String {
+    safe_line(&text.replace('\n', " / "))
+}
+
 /// Render within the pane's content rectangle, never over its tab strip.
 #[must_use]
 pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String> {
@@ -100,9 +115,11 @@ fn history(panel: &WorkflowPanel) -> Vec<String> {
                 } else {
                     Role::Warning.style().paint(&tag)
                 },
-                safe_line(&ended.goal.replace('\n', " / ")),
-                muted().paint(ended.phase.label())
-            )
+                one_line(&ended.goal),
+                muted().paint(ended.phase.label()),
+            ) + &ended.pr_url.as_deref().map_or_else(String::new, |url| {
+                format!(" {}", Role::Info.style().paint(&safe_line(url)))
+            })
         })
         .collect::<Vec<_>>();
     history.extend(panel.run.as_ref().map_or_else(Vec::new, |run| {
@@ -156,11 +173,7 @@ fn agent_rows(panel: &WorkflowPanel) -> Vec<String> {
         } else {
             " ".to_owned()
         };
-        let name = if provider == usagi_core::domain::settings::DefaultModel::Agy {
-            "Gemini (agy)"
-        } else {
-            provider.selector()
-        };
+        let name = provider_name(provider);
         let value = if focused {
             Role::Accent.style().bold()
         } else {
@@ -183,16 +196,33 @@ fn agent_rows(panel: &WorkflowPanel) -> Vec<String> {
     .collect()
 }
 
-/// What a started run is doing, and what it is waiting on.
+/// What a started run is doing, who is on it, and what it is waiting on.
+///
+/// Rows are ordered by what a short pane must keep. A goal and the participants
+/// are what makes the run identifiable at all, so they sit above the pipeline
+/// and the reference detail; the reason the run stopped moving is handled by
+/// [`header`] and outranks all of it.
 fn run_rows(run: &usagi_core::domain::workflow::WorkflowRun) -> Vec<String> {
     let owner = match run.phase {
-        usagi_core::domain::workflow::Phase::Reviewing => run.agents.reviewer.selector(),
+        usagi_core::domain::workflow::Phase::Reviewing => provider_name(run.agents.reviewer),
         usagi_core::domain::workflow::Phase::Waiting => "Human decision",
         usagi_core::domain::workflow::Phase::Ready => "None (complete)",
-        _ => run.agents.implementer.selector(),
+        _ => provider_name(run.agents.implementer),
     };
     let mut rows = vec![
-        format!("Current owner: {}", Role::Accent.style().paint(owner)),
+        // Without this the pane stops saying what it was asked to do the moment
+        // the run starts: the goal was only ever drawn for *ended* runs.
+        format!("Goal: {}", one_line(&run.goal)),
+        format!(
+            "Current owner: {} {}",
+            Role::Accent.style().paint(owner),
+            muted().paint(&format!(
+                "| plan {} · impl {} · review {}",
+                provider_name(run.agents.planner),
+                provider_name(run.agents.implementer),
+                provider_name(run.agents.reviewer),
+            )),
+        ),
         format!(
             "{} | revisions {}/{}",
             muted().paint("Implement -> Review -> PR ready"),
@@ -206,8 +236,10 @@ fn run_rows(run: &usagi_core::domain::workflow::WorkflowRun) -> Vec<String> {
             Role::Info.style().paint(&format!("#{issue}"))
         ));
     }
-    if let Some(reason) = &run.waiting_reason {
-        rows.push(Role::Warning.style().paint(&safe_line(reason)));
+    // The run exists to produce this. It was stored but never drawn, so a run
+    // that reached `PR ready` gave the person no way to reach its PR.
+    if let Some(url) = &run.pr_url {
+        rows.push(format!("PR: {}", Role::Info.style().paint(&safe_line(url))));
     }
     if let Some(review) = &run.review {
         rows.push(format!(
@@ -235,10 +267,14 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
             ))
     };
     let mut header = vec![status];
-    if let Some(run) = &panel.run {
-        header.extend(run_rows(run));
-    } else {
-        header.extend(agent_rows(panel));
+    // Why the run stopped moving outranks everything describing the run: on a
+    // short pane these are the rows that must survive.
+    if let Some(reason) = panel
+        .run
+        .as_ref()
+        .and_then(|run| run.waiting_reason.as_ref())
+    {
+        header.push(Role::Warning.style().paint(&safe_line(reason)));
     }
     if let Some(error) = &panel.error {
         header.push(
@@ -246,6 +282,11 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
                 .style()
                 .paint(&format!("Error: {}", safe_line(error))),
         );
+    }
+    if let Some(run) = &panel.run {
+        header.extend(run_rows(run));
+    } else {
+        header.extend(agent_rows(panel));
     }
     // Offered in every phase, not only the two that are already the person's
     // turn: the run that most needs ending is the one still insisting it is
@@ -729,6 +770,85 @@ mod tests {
             .expect("the count is on this row");
         assert!(!after_count.contains(BARE_DIM));
         assert!(!after_count.contains("\u{1b}[2;37m"));
+    }
+
+    #[test]
+    fn a_running_run_names_its_goal_participants_and_pr() {
+        use usagi_core::domain::settings::DefaultModel;
+        use usagi_core::domain::workflow::{Phase, WorkflowAgents};
+
+        let mut run = crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        );
+        run.goal = "Implement login\nwith tests".into();
+        run.agents = WorkflowAgents {
+            planner: DefaultModel::Agy,
+            implementer: DefaultModel::Claude,
+            reviewer: DefaultModel::OpenAi,
+        };
+        let panel = WorkflowPanel {
+            run: Some(run),
+            ..WorkflowPanel::default()
+        };
+        let rendered = plain(&render(24, 120, &panel));
+        // The goal used to be drawn for ended runs only, so a started run stopped
+        // saying what it had been asked to do. A multi-line goal stays on one row.
+        assert!(rendered.contains("Goal: Implement login / with tests"));
+        // All three participants are named while the run is going, not just the
+        // one whose turn it is.
+        assert!(rendered.contains("Current owner: claude"));
+        assert!(rendered.contains("plan Gemini (agy) · impl claude · review codex"));
+
+        // The PR is the thing the run exists to produce; it was stored but never
+        // drawn, so `PR ready` gave the person no way to reach it.
+        let mut panel = panel;
+        let run = panel.run.as_mut().expect("the run is set");
+        run.phase = Phase::Ready;
+        run.pr_url = Some("https://github.com/o/r/pull/7".into());
+        assert!(plain(&render(24, 120, &panel)).contains("PR: https://github.com/o/r/pull/7"));
+    }
+
+    #[test]
+    fn an_ended_run_keeps_the_pr_it_produced() {
+        use usagi_core::domain::workflow::{FinishedRun, Outcome, Phase};
+        let panel = WorkflowPanel {
+            finished: vec![FinishedRun {
+                id: usagi_core::domain::id::OperationId::new(),
+                outcome: Outcome::Completed,
+                goal: "Ship login".into(),
+                phase: Phase::Ready,
+                issue: None,
+                pr_url: Some("https://github.com/o/r/pull/9".into()),
+            }],
+            ..WorkflowPanel::default()
+        };
+        let rendered = plain(&render(20, 120, &panel));
+        assert!(
+            rendered.contains("[completed] Ship login (PR ready) https://github.com/o/r/pull/9")
+        );
+    }
+
+    #[test]
+    fn a_short_pane_keeps_the_reason_the_run_stopped_moving() {
+        use usagi_core::domain::workflow::Phase;
+        let mut run = crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        );
+        run.phase = Phase::Waiting;
+        run.waiting_reason = Some("Revision limit reached".into());
+        run.goal = "Implement login".into();
+        let panel = WorkflowPanel {
+            run: Some(run),
+            ..WorkflowPanel::default()
+        };
+        // Describing the run costs rows; the reason it is stuck must not be the
+        // thing those rows push off a short pane.
+        for height in 5..12 {
+            assert!(
+                plain(&render(height, 100, &panel)).contains("Revision limit reached"),
+                "height {height} keeps the waiting reason"
+            );
+        }
     }
 
     #[test]
