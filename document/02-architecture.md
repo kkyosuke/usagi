@@ -138,7 +138,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │               ├── theme            # 色テーマ（意味的な役割→具体色の単一情報源。ANSI SGR を吐く）
 │               ├── views/            # 各画面の view（splash / welcome / open / new / config / home）
 │               │   ├── welcome            # トップメニュー（Open/New/Config/Quit ＋ recent 2 カラム。単体 workspace と unite を描き分け）の状態と描画
-│               │   ├── open                # 登録済み workspace 一覧（名前＋最終利用の相対時刻＋選択中パス）の状態と描画
+│               │   ├── open                # 登録済み workspace 一覧（全件。名前＋最終利用の相対時刻＋選択中パス。端末に収まらない分は選択に追従する窓で scroll）の状態と描画
 │               │   ├── new                 # 新規 workspace 作成フォーム（Clone/Existing 切替・入力フィールド・自動導出）の状態と描画
 │               │   ├── config             # 設定画面（global/workspace scope の draft・明示 save・失敗時 retry）の状態と描画
 │               │   ├── workspace          # ホーム画面（Switch／Closeup mode ＋ state-backed な左 session menu／右 tab pane）の状態と描画

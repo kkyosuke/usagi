@@ -121,7 +121,7 @@ pub use startup::{StartupSplash, play_startup_splash};
 use config_setup::save_setup_commands_responsive;
 use config_setup::{save_config_source_responsive, step_setup_commands_editor};
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -144,7 +144,7 @@ use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, Sup
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 #[cfg(test)]
 use usagi_core::domain::user_decision::UserDecisionAnswer;
-use usagi_core::domain::workspace::Workspace;
+use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 #[cfg(test)]
 use usagi_core::usecase::env::EnvScope;
 use usagi_core::usecase::vt_screen::RetainedRowMotion;
@@ -2681,21 +2681,31 @@ pub(crate) fn run_workspace_controller(
 
 /// Open list 用に、registry の生値と recent projection を結び付ける。
 ///
-/// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つ。互換呼び出しで
-/// projection が無いときだけ、生値から 0 件の overview を組み立てる。
+/// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つので、一覧はその集計値で
+/// 描く。ただし **Open は登録済み workspace を 1 件も落とさない**のが契約なので、projection に
+/// 現れない registry entry は 0 件 overview として必ず補う（projection は Welcome カードの
+/// 表示枠で切られていることがあり、それをそのまま一覧にすると `usagi open` で登録した
+/// workspace が一覧から消える）。
 fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
-    let open_overviews = recent
-        .iter()
-        .filter_map(|recent| match recent {
-            Recent::Workspace(overview) => Some(overview.clone()),
-            Recent::Unite(_) => None,
-        })
-        .collect::<Vec<_>>();
-    if open_overviews.is_empty() && !workspaces.is_empty() {
-        Open::new(workspaces)
-    } else {
-        Open::with_overviews(open_overviews)
+    // Unite card の member も集計済みなので、単体 recent が無い workspace はそちらから拾う
+    // （0 件で補うのは、どちらの形でも projection に現れなかった entry だけにする）。
+    let mut open_overviews = Vec::new();
+    let mut projected = HashSet::new();
+    for overview in recent.iter().flat_map(|recent| match recent {
+        Recent::Workspace(overview) => std::slice::from_ref(overview),
+        Recent::Unite(unite) => unite.members(),
+    }) {
+        if projected.insert(overview.workspace.path.clone()) {
+            open_overviews.push(overview.clone());
+        }
     }
+    open_overviews.extend(
+        workspaces
+            .into_iter()
+            .filter(|workspace| !projected.contains(&workspace.path))
+            .map(|workspace| WorkspaceOverview::new(workspace, 0, 0, 0)),
+    );
+    Open::with_overviews(open_overviews)
 }
 
 #[cfg(test)]
