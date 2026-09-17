@@ -12,8 +12,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::{
     AppEvent, AppState, BackendEvent, Completions, FRAME_EVENT_BUDGET, Notice, OperationResult,
-    ProjectedSession, ProviderResumeProjection, SessionBackendCompletion, SessionCommand,
-    SessionCommandResult, SessionId, SessionLifecycle, SessionLifecycleProjection,
+    PendingCreate, ProjectedSession, ProviderResumeProjection, SessionBackendCompletion,
+    SessionCommand, SessionCommandResult, SessionId, SessionLifecycle, SessionLifecycleProjection,
     SessionRefreshPort, SessionRoleProjection, WorkspaceIoRuntime, WorkspaceRuntime,
     runtime_identities_are_valid,
 };
@@ -98,14 +98,23 @@ pub(super) struct ActiveSessionCommand {
 /// disappearing with its sink (#768). Admission is per workspace, so two
 /// projects can each have one command in flight while a single project still
 /// admits exactly one.
+/// One session command admitted for a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InFlightSessionCommand {
+    /// Lane identity. Unique across compositions, so a completion from a
+    /// torn-down composition can never be mistaken for a newer command.
+    id: u64,
+    /// Name drawn in the create skeleton; `None` for remove and sleep.
+    create_name: Option<String>,
+    /// Session drawn as a removal skeleton; `None` for create and sleep.
+    removing: Option<SessionId>,
+}
+
 pub(super) struct SessionCommandLane {
     sender: Sender<SessionCommandCompletion>,
     pub(super) completions: Receiver<SessionCommandCompletion>,
     next_command: u64,
-    /// Lane identity of the one command each workspace has admitted. Unique
-    /// across compositions, so a completion from a torn-down composition can
-    /// never be mistaken for a newer command.
-    in_flight: BTreeMap<PathBuf, u64>,
+    in_flight: BTreeMap<PathBuf, InFlightSessionCommand>,
     carried: BTreeMap<PathBuf, CarriedOutcome>,
 }
 
@@ -129,33 +138,49 @@ impl SessionCommandLane {
 
     /// Admit one command for `workspace`, or refuse when that workspace already
     /// owns the slot.
-    pub(super) fn admit(&mut self, workspace: &Path) -> Option<u64> {
+    pub(super) fn admit(
+        &mut self,
+        workspace: &Path,
+        create_name: Option<String>,
+        removing: Option<SessionId>,
+    ) -> Option<u64> {
         if self.in_flight.contains_key(workspace) {
             return None;
         }
         let id = self.next_command;
         self.next_command = self.next_command.wrapping_add(1);
-        self.in_flight.insert(workspace.to_path_buf(), id);
+        self.in_flight.insert(
+            workspace.to_path_buf(),
+            InFlightSessionCommand {
+                id,
+                create_name,
+                removing,
+            },
+        );
         Some(id)
     }
 
     /// Release the admission a completion belongs to.
     fn finish(&mut self, workspace: &Path, id: u64) {
-        if self.in_flight.get(workspace) == Some(&id) {
+        if self
+            .in_flight
+            .get(workspace)
+            .is_some_and(|command| command.id == id)
+        {
             self.in_flight.remove(workspace);
         }
     }
 
     /// The command this workspace's next composition must re-adopt, if any.
-    fn in_flight(&self, workspace: &Path) -> Option<u64> {
-        self.in_flight.get(workspace).copied()
+    fn in_flight(&self, workspace: &Path) -> Option<&InFlightSessionCommand> {
+        self.in_flight.get(workspace)
     }
 
     /// Identity of the command this workspace holds, for tests that assert the
     /// admission survived a completion it does not own.
     #[cfg(test)]
     pub(super) fn in_flight_id(&self, workspace: &Path) -> Option<u64> {
-        self.in_flight(workspace)
+        self.in_flight(workspace).map(|command| command.id)
     }
 
     /// Park a create outcome until its workspace is composed again.
@@ -183,11 +208,21 @@ pub(super) fn begin_session_command(
     completion: SessionBackendCompletion,
 ) -> bool {
     let workspace = ui.workspace.record().clone();
+    let create_name = if let SessionCommand::Create { name, .. } = &command {
+        Some(name.clone())
+    } else {
+        None
+    };
+    let removing = if let SessionBackendCompletion::Remove { session, .. } = &completion {
+        Some(*session)
+    } else {
+        None
+    };
     // Admission is taken before the worker exists so a second request cannot
     // slip in while the thread starts. `std::thread::spawn` aborts rather than
     // returning, and the worker always answers through `catch_unwind`, so the
     // slot is released by exactly one completion.
-    let Some(command_id) = lane.admit(&workspace.path) else {
+    let Some(command_id) = lane.admit(&workspace.path, create_name, removing) else {
         emit_session_command_result(
             &Err("session command is already running".to_owned()),
             &completion,
@@ -373,21 +408,28 @@ fn carried_outcome(completion: &SessionCommandCompletion) -> Option<CarriedOutco
 /// Hand a fresh composition the command its workspace still has in flight.
 ///
 /// The command outlives the composition it was started in, so it stays this
-/// workspace's command and its completion is not fenced out as stale (#768). It
-/// is marked inherited because its reducer sink died with the composition that
-/// started it, so its outcome has to travel the lane's carry instead.
+/// workspace's command: its completion is not fenced out as stale, and a command
+/// still running draws its skeleton again instead of leaving the user with no
+/// sign that the session they asked for is on its way (#768). It is marked
+/// inherited because its reducer sink died with the composition that started it,
+/// so its outcome has to travel the lane's carry instead.
 pub(super) fn adopt_session_command_lane(
     lane: &SessionCommandLane,
     workspace: &Path,
     ui: &mut WorkspaceIoRuntime,
 ) {
-    let Some(id) = lane.in_flight(workspace) else {
+    let Some(command) = lane.in_flight(workspace) else {
         return;
     };
     ui.active_session_command = Some(ActiveSessionCommand {
-        id,
+        id: command.id,
         inherited: true,
     });
+    ui.creating_session = command
+        .create_name
+        .clone()
+        .map(|name| PendingCreate { name });
+    ui.removing_session = command.removing;
 }
 
 /// Report an outcome the lane carried for this workspace.

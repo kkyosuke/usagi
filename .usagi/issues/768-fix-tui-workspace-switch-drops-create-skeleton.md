@@ -1,7 +1,7 @@
 ---
 number: 768
 title: fix(tui): workspace を切り替えて戻ると作成中 session の skeleton と完了通知が消える
-status: todo
+status: done
 priority: medium
 labels: [bug, tui]
 dependson: []

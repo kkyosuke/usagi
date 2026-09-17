@@ -510,7 +510,7 @@ fn a_create_that_lands_after_its_project_left_is_carried_to_the_next_composition
     let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let workspace_path = ui.workspace.record().path.clone();
     let command_id = command_lane
-        .admit(&workspace_path)
+        .admit(&workspace_path, None, None)
         .expect("an idle workspace admits its first command");
 
     // A torn-down composition leaves no admitted command behind.
@@ -560,7 +560,7 @@ fn a_carried_create_that_returned_no_session_is_a_failure_not_a_silent_success()
         (created_snapshot(SessionId::new()), None),
     ] {
         let command_id = command_lane
-            .admit(&workspace_path)
+            .admit(&workspace_path, Some("atlas".to_owned()), None)
             .expect("the previous command released its admission");
         ui.active_session_command = None;
         ui.session_completion_sender
@@ -607,7 +607,7 @@ fn a_remove_that_lands_after_its_project_left_carries_only_its_failure() {
         (Ok(SessionCommandResult::message("removed")), None),
     ] {
         let command_id = command_lane
-            .admit(&workspace_path)
+            .admit(&workspace_path, None, Some(removed))
             .expect("the previous command released its admission");
         ui.active_session_command = None;
         let (completions, receiver) =
@@ -637,20 +637,24 @@ fn a_stale_completion_releases_no_admission_its_workspace_does_not_own() {
     let mut command_lane = SessionCommandLane::new();
     let workspace_path = std::path::PathBuf::from("/tmp/demo");
     let newer = command_lane
-        .admit(&workspace_path)
+        .admit(&workspace_path, Some("atlas".to_owned()), None)
         .expect("an idle workspace admits its first command");
-    assert!(command_lane.admit(&workspace_path).is_none());
+    assert!(command_lane.admit(&workspace_path, None, None).is_none());
     assert_eq!(command_lane.in_flight_id(&workspace_path), Some(newer));
 }
 
 #[test]
-fn a_reopened_project_adopts_the_command_it_still_has_in_flight() {
+fn a_reopened_project_adopts_its_in_flight_command_and_redraws_its_skeleton() {
     // Coming back to a project must not fence out the command it still has in
-    // flight: the completion still belongs to the workspace that started it, and
-    // its outcome still has to be reported there (#768).
-    let snapshot = snapshot("demo");
-    let view =
-        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    // flight, and the create or remove the user started has to look like it is
+    // still running instead of leaving the sidebar with no sign of it (#768).
+    let snapshot = snapshot_with_sessions("demo", &["api"]);
+    let removed = snapshot.session_ids[0];
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
     let mut command_lane = SessionCommandLane::new();
     let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let workspace_path = ui.workspace.record().path.clone();
@@ -658,9 +662,11 @@ fn a_reopened_project_adopts_the_command_it_still_has_in_flight() {
     // Nothing in flight: a fresh composition adopts nothing.
     adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
     assert_eq!(ui.active_session_command, None);
+    assert!(ui.creating_session.is_none());
+    assert_eq!(ui.removing_session, None);
 
     let create_id = command_lane
-        .admit(&workspace_path)
+        .admit(&workspace_path, Some("atlas".to_owned()), None)
         .expect("an idle workspace admits its first command");
     adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
     assert_eq!(
@@ -670,11 +676,18 @@ fn a_reopened_project_adopts_the_command_it_still_has_in_flight() {
             inherited: true,
         })
     );
+    assert_eq!(
+        ui.creating_session
+            .as_ref()
+            .map(|create| create.name.as_str()),
+        Some("atlas")
+    );
+    assert_eq!(ui.removing_session, None);
 
-    // A second workspace's command is adopted with its own identity.
+    // A remove redraws its own skeleton and clears the create's.
     let other = std::path::PathBuf::from("/tmp/other");
     let remove_id = command_lane
-        .admit(&other)
+        .admit(&other, None, Some(removed))
         .expect("a second workspace admits its own command");
     adopt_session_command_lane(&command_lane, &other, &mut ui);
     assert_eq!(
@@ -684,6 +697,8 @@ fn a_reopened_project_adopts_the_command_it_still_has_in_flight() {
             inherited: true,
         })
     );
+    assert!(ui.creating_session.is_none());
+    assert_eq!(ui.removing_session, Some(removed));
 }
 
 #[test]
@@ -704,7 +719,7 @@ fn an_inherited_create_reports_its_outcome_instead_of_clearing_the_skeleton_in_s
     let workspace_path = ui.workspace.record().path.clone();
     let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
     let command_id = command_lane
-        .admit(&workspace_path)
+        .admit(&workspace_path, None, None)
         .expect("an idle workspace admits its first command");
     adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
 
@@ -718,7 +733,8 @@ fn an_inherited_create_reports_its_outcome_instead_of_clearing_the_skeleton_in_s
         .unwrap();
     crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
 
-    // The admission is released here, and the outcome handed to the next frame.
+    // The skeleton clears here, and the outcome is handed to the next frame.
+    assert!(ui.creating_session.is_none());
     assert_eq!(ui.active_session_command, None);
     deliver_carried_outcome(&mut command_lane, &workspace_path, &mut runtime);
     assert_eq!(runtime.state().overlay(), Some(Overlay::CreateSessionError));
@@ -748,7 +764,7 @@ fn an_inherited_remove_failure_reaches_the_user_as_a_notice() {
     let workspace_path = ui.workspace.record().path.clone();
     let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
     let command_id = command_lane
-        .admit(&workspace_path)
+        .admit(&workspace_path, None, None)
         .expect("an idle workspace admits its first command");
     adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
 
@@ -791,7 +807,7 @@ fn a_create_this_composition_started_reports_through_its_own_sink_only() {
     let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let workspace_path = ui.workspace.record().path.clone();
     let command_id = command_lane
-        .admit(&workspace_path)
+        .admit(&workspace_path, None, None)
         .expect("an idle workspace admits its first command");
     ui.active_session_command = Some(ActiveSessionCommand {
         id: command_id,
