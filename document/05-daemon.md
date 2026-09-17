@@ -628,14 +628,20 @@ generation なので、seamless の successor 候補にはならない。
 | 0 | planned replacement | cold transition |
 | 1 以上、全て generic Terminal | planned replacement、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
 | 1 以上、Agent credential あり | planned replacement | typed refusal。old active / current / Agent PTY / credential は維持 |
+| 1 以上、Agent credential あり | `restart --restart-agents`、plan が全件成立 | 同じ barrier 内で live Agent を停止してから seamless rollover。successor が exact resume する |
 | 1 以上 | planned replacement、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
-| 1 以上 | replacement `--force` | 明示的な cold transition |
+| 1 以上 | replacement `--force`（`--restart-agents` なし） | 明示的な cold transition |
 | 1 以上 | `stop` | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
 | 1 以上 | `stop --force` | cold transition |
 
 拒否は typed であり、何を守ったか（Agent runtime 数と generic terminal 数）と、
 seamless に保てなかった理由を示す。`daemon stop` は rollover とは別契約であり、渡す先の successor が
 そもそも存在しないため seamless refusal を報告しない。live runtime を明示的に手放したかどうかだけを問う。
+
+live Agent の拒否だけは、live runtime を手放さずに進む道が `--force` の他にもう 1 本ある。**`--restart-agents`
+は Agent の PTY を維持する経路ではなく、provider conversation を維持したまま Agent process を作り直す経路**で
+ある。plan の全件成立条件と停止・再開の順序は
+[daemon restart による Agent integration 更新](#daemon-restart-による-agent-integration-更新)を参照する。
 
 ## service supervision
 

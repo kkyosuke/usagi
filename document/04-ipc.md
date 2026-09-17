@@ -158,10 +158,12 @@ standby を確認してから old active へ request を送り、commit 前の f
 ## daemon rollover request
 
 `DaemonRequest` の lifecycle verb は
-`{"kind":"rollover","operation_id":"<durable operation>"}` である。CLI は authority を直接書き換えず、
-current old active へこの request を送る。old active は registry の active が自 generation であることを確認し、
-登録済み successor の private endpoint へ read-only hello を行い、artifact / handoff / owner-routing capability を
-再検証する。その後、connection ledger と planned registry revision を `RolloverPlan` に束ね、自 process の
+`{"kind":"rollover","operation_id":"<durable operation>"}` に、利用者が `--restart-agents` を明示した場合だけ
+`"restart_agents":{"expected":[…],"runtimes":[…],"force":<bool>}` を加えた形である。省略時は field 自体を載せない。
+Agent 選択の契約は [provider conversation resume request](#provider-conversation-resume-request) が正本である。
+CLI は authority を直接書き換えず、current old active へこの request を送る。old active は registry の
+active が自 generation であることを確認し、登録済み successor の private endpoint へ read-only hello を行い、
+artifact / handoff / owner-routing capability を再検証する。その後、connection ledger と planned registry revision を `RolloverPlan` に束ね、自 process の
 `AdmissionGate` で gated handoff を実行する。
 
 `rollover` request は active role だけが受理するが `ActiveControl` lease は取らない。trigger 自身がその lease class を
