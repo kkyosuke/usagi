@@ -23,7 +23,7 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
 
     let mut empty_state = state("empty");
     empty_state.sessions.clear();
-    let empty_ui = WorkspaceIoRuntime::new(
+    let empty_ui = io_runtime(
         WorkspaceView::with_runtime_ids(ws("empty"), empty_state, Vec::new()),
         Box::new(UnavailableSessionCommandPort),
     );
@@ -86,7 +86,7 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
     roles.get_mut(&director_child).unwrap().role_id =
         Some(usagi_core::domain::role::RoleId::new("manager").expect("valid company role"));
     view.set_session_roles(roles);
-    let ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
 
     let rows = director_organization(&ui);
     assert_eq!(
@@ -438,7 +438,7 @@ fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
     let durable = Arc::new(Mutex::new(intent));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
         .with_agent_tab_intent(
             workspace,
@@ -724,7 +724,7 @@ fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
 fn director_projection_covers_picker_empty_and_launching_states() {
     let workspace = WorkspaceId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
     runtime.set_agent_models(
         AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
@@ -798,7 +798,7 @@ fn director_tab_cycle_fails_closed_when_intent_cannot_commit() {
         });
     }
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
         .with_agent_tab_intent(
             workspace,
@@ -857,18 +857,17 @@ fn director_pointer_uses_the_drawer_viewport() {
     let workspace = WorkspaceId::new();
     let terminal = scoped_terminal_ref(workspace, None);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            Vec::new(),
-            Box::new(ScriptedAgentPort {
-                terminal: terminal.clone(),
-                subscription: 919,
-                replay: b"drawer output".to_vec(),
-                poll_error: None,
-                detaches: Arc::new(Mutex::new(Vec::new())),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        Vec::new(),
+        Box::new(ScriptedAgentPort {
+            terminal: terminal.clone(),
+            subscription: 919,
+            replay: b"drawer output".to_vec(),
+            poll_error: None,
+            detaches: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
     let fence = runtime.restore_fence();
     assert!(runtime.restore_snapshot(
@@ -973,7 +972,7 @@ fn director_selection_rejects_placeholders_and_surfaces_intent_failure() {
     let operation = OperationId::new();
     let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     assert!(!crate::presentation::select_director_selection(
         TabSelection::Pending(operation),
         &mut ui,
@@ -1042,20 +1041,19 @@ fn production_route_makes_director_picker_the_exclusive_foreground_owner() {
     let root_agent = scoped_terminal_ref(workspace, None);
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RestoreInventoryPort {
-                entries: vec![TerminalInventoryEntry {
-                    terminal: root_agent,
-                    kind: TerminalKind::Agent,
-                    live: true,
-                }],
-                fail: false,
-                inputs: Arc::clone(&inputs),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RestoreInventoryPort {
+            entries: vec![TerminalInventoryEntry {
+                terminal: root_agent,
+                kind: TerminalKind::Agent,
+                live: true,
+            }],
+            fail: false,
+            inputs: Arc::clone(&inputs),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     runtime.set_agent_models(
         AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
@@ -1387,7 +1385,7 @@ fn clicking_the_exposed_shell_focuses_it_and_keeps_copy_available_under_director
     selection.extend(TerminalPoint { row: 0, column: 4 });
     controls.begin_selection(selection);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut term = FakeTerminal::default();
     assert!(forward_live_terminal_input(
         &mut ui,

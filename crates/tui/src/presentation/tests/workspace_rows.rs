@@ -45,7 +45,7 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
     let target = Target::Session(session);
     let terminal = live_terminal_ref(workspace, session);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
 
     ui.start_terminal_session(terminal.clone(), Geometry { cols: 20, rows: 5 });
     ui.set_allowed_agent_sessions(BTreeSet::new());
@@ -427,15 +427,14 @@ fn drawer_root_final_without_conversation_identity_fails_closed() {
     let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::new(),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::clone(&mutations),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::new(),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
     let operation = OperationId::new();
     let target = Target::Root(workspace);
@@ -496,7 +495,9 @@ fn workspace_exit_does_not_drop_the_admitted_effect_completion() {
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(
+        &command_lane,
         view,
         Box::new(BlockingSessionPort {
             existing: session,
@@ -518,6 +519,7 @@ fn workspace_exit_does_not_drop_the_admitted_effect_completion() {
     drain_host_actions(
         &actions,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -577,20 +579,19 @@ fn production_input_order_reserves_drawer_picker_before_root_agent_pty() {
     let root_agent = scoped_terminal_ref(workspace, None);
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RestoreInventoryPort {
-                entries: vec![TerminalInventoryEntry {
-                    terminal: root_agent.clone(),
-                    kind: TerminalKind::Agent,
-                    live: true,
-                }],
-                fail: false,
-                inputs: Arc::clone(&inputs),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RestoreInventoryPort {
+            entries: vec![TerminalInventoryEntry {
+                terminal: root_agent.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            }],
+            fail: false,
+            inputs: Arc::clone(&inputs),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     runtime.set_agent_models(
         AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
@@ -766,20 +767,19 @@ fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
     let root_agent = scoped_terminal_ref(workspace, None);
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RestoreInventoryPort {
-                entries: vec![TerminalInventoryEntry {
-                    terminal: root_agent.clone(),
-                    kind: TerminalKind::Agent,
-                    live: true,
-                }],
-                fail: false,
-                inputs: Arc::clone(&inputs),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RestoreInventoryPort {
+            entries: vec![TerminalInventoryEntry {
+                terminal: root_agent.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            }],
+            fail: false,
+            inputs: Arc::clone(&inputs),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
     let mut controls = LiveTerminalControls::default();
@@ -829,7 +829,7 @@ fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
 
     // With no conversation to receive it, Esc keeps its drawer meaning.
     let empty_view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut empty_ui = WorkspaceIoRuntime::new(empty_view, Box::new(UnavailableSessionCommandPort));
+    let mut empty_ui = io_runtime(empty_view, Box::new(UnavailableSessionCommandPort));
     let mut empty_runtime = WorkspaceRuntime::new(workspace, vec![session]);
     assert!(
         empty_runtime

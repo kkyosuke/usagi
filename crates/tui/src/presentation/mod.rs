@@ -65,13 +65,14 @@ use flow_steps::{
 };
 
 use session_commands::{
-    SessionCommandCompletion, begin_session_command, drain_session_completions,
+    ActiveSessionCommand, SessionCommandCompletion, SessionCommandLane, adopt_session_command_lane,
+    begin_session_command, deliver_carried_outcome, drain_session_completions,
     drain_session_refresh, project_controller_sessions, session_name_for, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{
-    UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory, apply_session_projection,
-    emit_session_command_result, safe_session_error,
+    CarriedOutcome, UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
+    apply_session_projection, emit_session_command_result, safe_session_error,
 };
 
 use restore::{
@@ -1032,6 +1033,10 @@ struct AgentContext {
 enum SessionBackendCompletion {
     Create {
         token: PendingToken,
+        /// Name the user asked for. A create that outlives its composition is
+        /// reported by name, so the completion carries it rather than depending
+        /// on state that died with the composition (#768).
+        name: String,
         before: Vec<SessionId>,
         completions: Completions,
     },
@@ -2470,10 +2475,12 @@ pub(crate) fn run_workspace_controller_with_backend(
     backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<Exit> {
     let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut lane = SessionCommandLane::new();
     drive_workspace_controller(
         term,
         snapshot,
         &mut deck,
+        &mut lane,
         &[],
         None,
         backend_factory,
@@ -2499,10 +2506,12 @@ pub(crate) fn run_workspace_controller_with_backend_and_settings(
     settings: &usagi_core::domain::settings::Settings,
 ) -> io::Result<Exit> {
     let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut lane = SessionCommandLane::new();
     drive_workspace_controller(
         term,
         snapshot,
         &mut deck,
+        &mut lane,
         &[],
         None,
         backend_factory,
@@ -2537,10 +2546,12 @@ pub(crate) fn run_workspace_controller_with_backend_and_config(
     settings.select_workspace(&snapshot.workspace.path)?;
     let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
     let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut lane = SessionCommandLane::new();
     drive_workspace_controller(
         term,
         snapshot,
         &mut deck,
+        &mut lane,
         &[],
         None,
         backend_factory,
@@ -2792,6 +2803,7 @@ fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     deck: &mut WorkspaceDeck,
+    lane: &mut SessionCommandLane,
     registry: &[Workspace],
     loader: &mut dyn WorkspaceLoader,
     settings: &mut dyn SettingsPort,
@@ -2804,6 +2816,7 @@ fn open_snapshot_via_controller(
         term,
         snapshot,
         deck,
+        lane,
         registry,
         Some(loader),
         backend_factory,
@@ -2870,11 +2883,15 @@ fn enter_workspace_deck(
     if deck.slots().len() > 1 {
         let _ = loader.record_unite(&deck.paths());
     }
+    // The lane outlives every composition this loop builds, which is what lets a
+    // create started before a project switch still reach the user (#768).
+    let mut lane = SessionCommandLane::new();
     loop {
         let step = open_snapshot_via_controller(
             term,
             snapshot,
             &mut deck,
+            &mut lane,
             registry,
             loader,
             settings,

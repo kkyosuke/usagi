@@ -42,7 +42,7 @@ fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
     let session = SessionId::new();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
 
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let click = GardenClick::Visit {
@@ -251,12 +251,11 @@ fn malformed_session_identity_refreshes_clear_rows_ids_and_agent_targets() {
             },
             vec![first, second],
         );
-        let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-            .with_agent_context(
-                workspace,
-                vec![first, second],
-                Box::new(UnavailableAgentCommandPort),
-            );
+        let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+            workspace,
+            vec![first, second],
+            Box::new(UnavailableAgentCommandPort),
+        );
 
         crate::presentation::apply_session_projection(
             &mut ui,
@@ -421,7 +420,8 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
     let snapshot = snapshot("demo");
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let token = PendingToken::from_raw(41);
 
     // A create worker returned a display-safe daemon rejection (e.g. a name the
@@ -432,20 +432,25 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
     let result = Err("daemon refused the session".to_owned());
     let completion = crate::presentation::SessionBackendCompletion::Create {
         token,
+        name: "atlas".to_owned(),
         before: Vec::new(),
         completions: backend_completions,
     };
     crate::presentation::emit_session_command_result(&result, &completion);
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result,
             completion,
         })
         .unwrap();
 
-    crate::presentation::drain_session_completions(&mut ui);
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
     assert!(matches!(
         backend_receiver.recv().unwrap(),
         AppEvent::OperationResult(result)
@@ -456,12 +461,363 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
     ));
 }
 
+/// One completion, as the lane would receive it from a worker.
+fn lane_completion(
+    workspace: &std::path::Path,
+    command_id: u64,
+    result: Result<SessionCommandResult, String>,
+    completion: crate::presentation::SessionBackendCompletion,
+) -> crate::presentation::SessionCommandCompletion {
+    crate::presentation::SessionCommandCompletion {
+        workspace: workspace.to_path_buf(),
+        command_id,
+        result,
+        completion,
+    }
+}
+
+fn create_completion(before: Vec<SessionId>) -> crate::presentation::SessionBackendCompletion {
+    let (completions, receiver) =
+        crate::usecase::application::daemon_backend::Completions::channel();
+    // The reducer sink a torn-down composition leaves behind is closed; keeping
+    // the receiver alive here would make it look live.
+    drop(receiver);
+    crate::presentation::SessionBackendCompletion::Create {
+        token: PendingToken::from_raw(7),
+        name: "atlas".to_owned(),
+        before,
+        completions,
+    }
+}
+
+fn created_snapshot(created: SessionId) -> SessionCommandResult {
+    SessionCommandResult {
+        session_ids: Some(vec![created]),
+        ..SessionCommandResult::message("created")
+    }
+}
+
+#[test]
+fn a_create_that_lands_after_its_project_left_is_carried_to_the_next_composition() {
+    // The user started a create, switched projects, and the daemon answered
+    // while another project owned the screen. The composition that started it is
+    // gone, so the completion matches no admitted command — but its outcome must
+    // not vanish with the composition that asked for it (#768).
+    let snapshot = snapshot("demo");
+    let view =
+        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let command_id = command_lane
+        .admit(&workspace_path)
+        .expect("an idle workspace admits its first command");
+
+    // A torn-down composition leaves no admitted command behind.
+    ui.active_session_command = None;
+    ui.session_completion_sender
+        .send(lane_completion(
+            &workspace_path,
+            command_id,
+            Err("daemon refused the session\ninternal detail".to_owned()),
+            create_completion(Vec::new()),
+        ))
+        .unwrap();
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
+
+    // The admission is released and only the safe first line is carried.
+    assert_eq!(
+        command_lane.take_carried(&workspace_path),
+        Some(CarriedOutcome::Create {
+            name: "atlas".to_owned(),
+            error: Some("daemon refused the session".to_owned()),
+        })
+    );
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
+#[test]
+fn a_carried_create_that_returned_no_session_is_a_failure_not_a_silent_success() {
+    // `emit_session_command_result` treats a daemon `Ok` with no new session as
+    // a failure. The carried path has to agree, or a project switch would turn
+    // that failure into "session created" with no row to show for it (#768).
+    let snapshot = snapshot("demo");
+    let existing = snapshot.session_ids.clone();
+    let view =
+        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+
+    for (result, expected) in [
+        (
+            SessionCommandResult {
+                session_ids: Some(existing.clone()),
+                ..SessionCommandResult::message("nothing new")
+            },
+            Some("daemon did not return the created session".to_owned()),
+        ),
+        (created_snapshot(SessionId::new()), None),
+    ] {
+        let command_id = command_lane
+            .admit(&workspace_path)
+            .expect("the previous command released its admission");
+        ui.active_session_command = None;
+        ui.session_completion_sender
+            .send(lane_completion(
+                &workspace_path,
+                command_id,
+                Ok(result),
+                create_completion(existing.clone()),
+            ))
+            .unwrap();
+        crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
+        assert_eq!(
+            command_lane.take_carried(&workspace_path),
+            Some(CarriedOutcome::Create {
+                name: "atlas".to_owned(),
+                error: expected,
+            })
+        );
+    }
+}
+
+#[test]
+fn a_remove_that_lands_after_its_project_left_carries_only_its_failure() {
+    // A remove leaves no dialog to reopen, but a failure the user never sees is
+    // the same silence #768 is about. A success has nothing left to explain.
+    let snapshot = snapshot_with_sessions("demo", &["api"]);
+    let removed = snapshot.session_ids[0];
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+
+    for (result, expected) in [
+        (
+            Err("daemon refused the removal".to_owned()),
+            Some(CarriedOutcome::Failed(
+                "daemon refused the removal".to_owned(),
+            )),
+        ),
+        (Ok(SessionCommandResult::message("removed")), None),
+    ] {
+        let command_id = command_lane
+            .admit(&workspace_path)
+            .expect("the previous command released its admission");
+        ui.active_session_command = None;
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        drop(receiver);
+        ui.session_completion_sender
+            .send(lane_completion(
+                &workspace_path,
+                command_id,
+                result,
+                crate::presentation::SessionBackendCompletion::Remove {
+                    session: removed,
+                    before: Vec::new(),
+                    completions,
+                },
+            ))
+            .unwrap();
+        crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
+        assert_eq!(command_lane.take_carried(&workspace_path), expected);
+    }
+}
+
+#[test]
+fn a_stale_completion_releases_no_admission_its_workspace_does_not_own() {
+    // A completion whose identity the workspace no longer owns must not release
+    // a newer command's admission.
+    let mut command_lane = SessionCommandLane::new();
+    let workspace_path = std::path::PathBuf::from("/tmp/demo");
+    let newer = command_lane
+        .admit(&workspace_path)
+        .expect("an idle workspace admits its first command");
+    assert!(command_lane.admit(&workspace_path).is_none());
+    assert_eq!(command_lane.in_flight_id(&workspace_path), Some(newer));
+}
+
+#[test]
+fn a_reopened_project_adopts_the_command_it_still_has_in_flight() {
+    // Coming back to a project must not fence out the command it still has in
+    // flight: the completion still belongs to the workspace that started it, and
+    // its outcome still has to be reported there (#768).
+    let snapshot = snapshot("demo");
+    let view =
+        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+
+    // Nothing in flight: a fresh composition adopts nothing.
+    adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
+    assert_eq!(ui.active_session_command, None);
+
+    let create_id = command_lane
+        .admit(&workspace_path)
+        .expect("an idle workspace admits its first command");
+    adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
+    assert_eq!(
+        ui.active_session_command,
+        Some(ActiveSessionCommand {
+            id: create_id,
+            inherited: true,
+        })
+    );
+
+    // A second workspace's command is adopted with its own identity.
+    let other = std::path::PathBuf::from("/tmp/other");
+    let remove_id = command_lane
+        .admit(&other)
+        .expect("a second workspace admits its own command");
+    adopt_session_command_lane(&command_lane, &other, &mut ui);
+    assert_eq!(
+        ui.active_session_command,
+        Some(ActiveSessionCommand {
+            id: remove_id,
+            inherited: true,
+        })
+    );
+}
+
+#[test]
+fn an_inherited_create_reports_its_outcome_instead_of_clearing_the_skeleton_in_silence() {
+    // The skeleton was redrawn from the lane, so this composition owns it — but
+    // the reducer sink that would have reported the outcome died with the
+    // composition that started the create. Clearing the skeleton without a word
+    // is exactly the silence #768 is about.
+    let snapshot = snapshot("demo");
+    let workspace_id = snapshot.workspace_id;
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
+    let command_id = command_lane
+        .admit(&workspace_path)
+        .expect("an idle workspace admits its first command");
+    adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
+
+    ui.session_completion_sender
+        .send(lane_completion(
+            &workspace_path,
+            command_id,
+            Err("worktree path already exists".to_owned()),
+            create_completion(Vec::new()),
+        ))
+        .unwrap();
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
+
+    // The admission is released here, and the outcome handed to the next frame.
+    assert_eq!(ui.active_session_command, None);
+    deliver_carried_outcome(&mut command_lane, &workspace_path, &mut runtime);
+    assert_eq!(runtime.state().overlay(), Some(Overlay::CreateSessionError));
+    assert_eq!(
+        runtime
+            .state()
+            .create_session_error()
+            .map(|notice| notice.message.as_str()),
+        Some("worktree path already exists")
+    );
+    // Delivered exactly once.
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
+#[test]
+fn an_inherited_remove_failure_reaches_the_user_as_a_notice() {
+    let snapshot = snapshot_with_sessions("demo", &["api"]);
+    let workspace_id = snapshot.workspace_id;
+    let removed = snapshot.session_ids[0];
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
+    let command_id = command_lane
+        .admit(&workspace_path)
+        .expect("an idle workspace admits its first command");
+    adopt_session_command_lane(&command_lane, &workspace_path, &mut ui);
+
+    let (completions, receiver) =
+        crate::usecase::application::daemon_backend::Completions::channel();
+    drop(receiver);
+    ui.session_completion_sender
+        .send(lane_completion(
+            &workspace_path,
+            command_id,
+            Err("session is busy".to_owned()),
+            crate::presentation::SessionBackendCompletion::Remove {
+                session: removed,
+                before: Vec::new(),
+                completions,
+            },
+        ))
+        .unwrap();
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
+
+    deliver_carried_outcome(&mut command_lane, &workspace_path, &mut runtime);
+    assert_eq!(
+        runtime
+            .state()
+            .notice()
+            .map(|notice| notice.message.as_str()),
+        Some("session is busy")
+    );
+    assert_eq!(runtime.state().overlay(), None);
+}
+
+#[test]
+fn a_create_this_composition_started_reports_through_its_own_sink_only() {
+    // The composition that started the create still owns a live reducer sink,
+    // so nothing is carried and the outcome is not reported twice.
+    let snapshot = snapshot("demo");
+    let view =
+        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let command_id = command_lane
+        .admit(&workspace_path)
+        .expect("an idle workspace admits its first command");
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: command_id,
+        inherited: false,
+    });
+
+    ui.session_completion_sender
+        .send(lane_completion(
+            &workspace_path,
+            command_id,
+            Err("worktree path already exists".to_owned()),
+            create_completion(Vec::new()),
+        ))
+        .unwrap();
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
+
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
 #[test]
 fn session_commands_reject_the_second_request_as_busy() {
     let snapshot = snapshot("demo");
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let (first_completions, _) =
         crate::usecase::application::daemon_backend::Completions::channel();
     let (second_completions, _) =
@@ -469,6 +825,7 @@ fn session_commands_reject_the_second_request_as_busy() {
 
     assert!(crate::presentation::begin_session_command(
         &mut ui,
+        &mut command_lane,
         SessionCommand::List,
         crate::presentation::SessionBackendCompletion::Remove {
             session: SessionId::new(),
@@ -478,6 +835,7 @@ fn session_commands_reject_the_second_request_as_busy() {
     ));
     assert!(!crate::presentation::begin_session_command(
         &mut ui,
+        &mut command_lane,
         SessionCommand::List,
         crate::presentation::SessionBackendCompletion::Remove {
             session: SessionId::new(),
@@ -493,7 +851,8 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
     let original = snapshot.session_ids[0];
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let (newer_completions, _) =
         crate::usecase::application::daemon_backend::Completions::channel();
     let (older_completions, _) =
@@ -502,9 +861,13 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
     let mut newer_record = ui.workspace.sessions()[0].clone();
     newer_record.name = "newer".to_owned();
 
-    ui.active_session_command = Some(2);
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: 2,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 2,
             result: Ok(SessionCommandResult {
                 message: "newer".to_owned(),
@@ -522,11 +885,15 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
             },
         })
         .unwrap();
-    crate::presentation::drain_session_completions(&mut ui);
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
 
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result: Ok(SessionCommandResult {
                 message: "older".to_owned(),
@@ -545,7 +912,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
         })
         .unwrap();
 
-    crate::presentation::drain_session_completions(&mut ui);
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
     assert_eq!(ui.workspace.session_ids(), &[newer]);
     assert_eq!(ui.workspace.sessions()[0].name, "newer");
 }
@@ -561,7 +928,8 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
     records.push(new_record);
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let token = PendingToken::from_raw(42);
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
@@ -576,20 +944,25 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
     });
     let completion = crate::presentation::SessionBackendCompletion::Create {
         token,
+        name: "atlas".to_owned(),
         before: vec![existing],
         completions,
     };
     crate::presentation::emit_session_command_result(&result, &completion);
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
 
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result,
             completion,
         })
         .unwrap();
-    crate::presentation::drain_session_completions(&mut ui);
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
 
     assert!(matches!(
         receiver.recv().unwrap(),
@@ -670,7 +1043,9 @@ fn session_worker_panic_completes_and_returns_the_port() {
     let session = snapshot.session_ids[0];
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(
+        &command_lane,
         view,
         Box::new(PanicOnceSessionPort {
             existing: session,
@@ -689,6 +1064,7 @@ fn session_worker_panic_completes_and_returns_the_port() {
     drain_host_actions(
         &actions,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -701,7 +1077,7 @@ fn session_worker_panic_completes_and_returns_the_port() {
                 && result.notice.as_ref().is_some_and(|notice| notice.message == "session command worker failed")
     ));
     for _ in 0..100 {
-        drain_session_completions(&mut ui);
+        drain_session_completions(&mut ui, &mut command_lane);
         if ui.active_session_command.is_none() {
             break;
         }
@@ -718,6 +1094,7 @@ fn session_worker_panic_completes_and_returns_the_port() {
     drain_host_actions(
         &actions,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -770,13 +1147,18 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
     let snapshot = snapshot("demo");
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
-    ui.active_session_command = Some(2);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: 2,
+        inherited: false,
+    });
     let result = Ok(SessionCommandResult::message("done"));
     let (completions, _) = crate::usecase::application::daemon_backend::Completions::channel();
 
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result: result.clone(),
             completion: crate::presentation::SessionBackendCompletion::Remove {
@@ -786,12 +1168,13 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
             },
         })
         .unwrap();
-    drain_session_completions(&mut ui);
-    assert_eq!(ui.active_session_command, Some(2));
+    drain_session_completions(&mut ui, &mut command_lane);
+    assert_eq!(ui.active_session_command.map(|command| command.id), Some(2));
 
     let (completions, _) = crate::usecase::application::daemon_backend::Completions::channel();
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 2,
             result,
             completion: crate::presentation::SessionBackendCompletion::Remove {
@@ -801,7 +1184,7 @@ fn out_of_order_session_completion_cannot_release_the_active_port() {
             },
         })
         .unwrap();
-    drain_session_completions(&mut ui);
+    drain_session_completions(&mut ui, &mut command_lane);
     assert_eq!(ui.active_session_command, None);
 }
 
@@ -816,7 +1199,8 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
     let records = snapshot.state.sessions.clone();
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace_id, vec![session]);
     let _ = runtime.apply_event(AppEvent::Resize {
         width: 100,
@@ -845,15 +1229,19 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         completions,
     };
     crate::presentation::emit_session_command_result(&result, &completion);
-    ui.active_session_command = Some(1);
+    ui.active_session_command = Some(ActiveSessionCommand {
+        id: 1,
+        inherited: false,
+    });
     ui.session_completion_sender
         .send(crate::presentation::SessionCommandCompletion {
+            workspace: ui.workspace.record().path.clone(),
             command_id: 1,
             result,
             completion,
         })
         .unwrap();
-    crate::presentation::drain_session_completions(&mut ui);
+    crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
     let _ = runtime.apply_event(receiver.recv().unwrap());
     assert_eq!(runtime.state().sessions(), &[session]);
     let _ = runtime.apply_event(sidebar_pointer_event(
@@ -924,15 +1312,14 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
     let durable = Arc::new(Mutex::new(initial));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session, removed_session]),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::clone(&mutations),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session, removed_session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let mut retry = crate::presentation::RestoreRetryState::new();
     assert!(retry.begin_if_due(std::time::Duration::ZERO));
