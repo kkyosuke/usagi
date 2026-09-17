@@ -1,5 +1,5 @@
 ---
-number: 767
+number: 769
 title: 削除した interrupted を Garden とサイドバーの一覧・件数から除外する
 status: done
 priority: medium
