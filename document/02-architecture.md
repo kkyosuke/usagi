@@ -57,7 +57,14 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   ├── main.rs           # 面の選択だけを担う合成ルート
 │   ├── runtime/          # 実 IO adapter（各面のライブラリ port を接続）
 │   │   ├── cli.rs        # CLI outcome、実 git、TUI / daemon への bridge
-│   │   ├── daemon.rs     # Unix socket・signal・process・daemon record / lock
+│   │   ├── daemon.rs     # daemon 面の composition root（責務別の子モジュールを束ねる）
+│   │   ├── daemon/ipc_accept.rs # Unix socket の accept ループと handshake・response 書き出し
+│   │   ├── daemon/standby.rs    # standby generation の IPC・custody・昇格
+│   │   ├── daemon/workers.rs    # 背景 worker 群と shutdown、orphan / retention の回収
+│   │   ├── daemon/agent.rs      # Agent runtime の open / restart 復旧・tenant inventory
+│   │   ├── daemon/pty.rs        # PTY の確保と所有、terminal runtime の composition
+│   │   ├── daemon/instance_lock.rs # single-instance lock と workspace fence、custody 監視
+│   │   ├── daemon/broker.rs     # bootstrap broker の起動・endpoint 公開・idle 監視
 │   │   ├── daemon/dispatch.rs # admitted request と daemon owner / store の composition adapter
 │   │   ├── daemon/agent_provisioning.rs # provider argv・sandbox・role・MCP 注入の合成
 │   │   └── tui.rs        # crossterm terminal と workspace filesystem adapter
@@ -82,7 +89,9 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │       ├── presentation/    # daemon サーバ入口（daemon verb と IPC request の dispatch・応答整形）
 │   │       │   └── ipc.rs       # handshake 後の IPC protocol handler
 │   │       ├── usecase/         # daemon 専用ロジック（lifecycle verb、terminal/runtime・orchestration）
-│   │       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
+│   │       │   ├── agent_ipc/   # Agent runtime の admission / delivery / dispatch / lifecycle と tests
+│       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
+│       │   ├── supervisor_runtime/ # supervisor の reservation / obligations と tests
 │   │       │   └── resources/   # owner generation ごとの runtime shard と global resource allocator
 │   │       └── infrastructure/  # daemon 専用の外部接続（Unix socket transport）
 │   │           ├── child_identity.rs # spawn した child の OS process-start / process-group identity 観測
@@ -92,6 +101,17 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   └── tui/              # usagi-tui: TUI 面
 │       └── src/
 │           ├── lib.rs
+│           ├── infrastructure/  # daemon reply / live 入力を TUI 語彙へ翻訳する純粋 adapter（実 IO は合成ルートが注入）
+│           ├── presentation/    # 画面描画とフレームループ（bounded context ごとに module を分ける）
+│           │   ├── frame_loop.rs        # 実端末の Home frame loop と screen graph の起動
+│           │   ├── workspace_io.rs      # frame loop が使う daemon transport の調整役
+│           │   ├── terminal_io.rs       # pane / terminal の起動・入力転送・選択・投影
+│           │   ├── flow_steps.rs        # Welcome / New / Open / Config の起動フロー
+│           │   ├── session_commands.rs  # Overview の session コマンド発行と完了反映
+│           │   ├── restore.rs           # pane / terminal の復元 job と対象選定
+│           │   ├── director.rs          # Director drawer / tab の選択と projection
+│           │   ├── work_run.rs          # Work run pane の入力と observation / control job
+│           │   └── garden.rs            # Garden の入力 routing と observation job
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
 │           │   │   ├── controller/    # Entry / New / Home の純粋 reducer（bounded context と tests を分離）
@@ -118,7 +138,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │               ├── theme            # 色テーマ（意味的な役割→具体色の単一情報源。ANSI SGR を吐く）
 │               ├── views/            # 各画面の view（splash / welcome / open / new / config / home）
 │               │   ├── welcome            # トップメニュー（Open/New/Config/Quit ＋ recent 2 カラム。単体 workspace と unite を描き分け）の状態と描画
-│               │   ├── open                # 登録済み workspace 一覧（名前＋最終利用の相対時刻＋選択中パス）の状態と描画
+│               │   ├── open                # 登録済み workspace 一覧（全件。名前＋最終利用の相対時刻＋選択中パス。端末に収まらない分は選択に追従する窓で scroll）の状態と描画
 │               │   ├── new                 # 新規 workspace 作成フォーム（Clone/Existing 切替・入力フィールド・自動導出）の状態と描画
 │               │   ├── config             # 設定画面（global/workspace scope の draft・明示 save・失敗時 retry）の状態と描画
 │               │   ├── workspace          # ホーム画面（Switch／Closeup mode ＋ state-backed な左 session menu／右 tab pane）の状態と描画
@@ -649,12 +669,15 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | `Workspace` / `Settings` / `Issue` などのエンティティ、および画面が並べて見せる読み取り値（`WorkspaceOverview` = workspace＋各カウント、`UniteOverview` = 合併した workspace 群の合計、welcome 画面の recent 一覧が持つ `Recent` = そのどちらか） | `crates/core/src/domain/` |
 | agent の static profile、product-neutral capability、immutable launch request / plan / durable snapshot、injected MCP wiring が公開する tool 系統、system prompt 本文 | `crates/core/src/domain/agent/`。CLI 文法・shell rendering・PTY・secret・provisioning は置かない |
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
+| daemon reply の decode・operation の correlate・live 入力の `Key` 分類 | `crates/tui/src/infrastructure/`。payload と入力だけを見る純関数で、接続・lane・thread・端末 backend の所有は合成ルート（`src/runtime/tui.rs`）に残る。`tests/architecture.rs` の `tui_infrastructure_translates_without_owning_real_io` が実 IO の混入を禁じる |
+| 注入する時計の語彙（monotonic ミリ秒 / wall clock / 論理カウンタ） | `crates/core/src/domain/clock.rs` の `MonotonicClock` / `WallClock` / `LogicalClock`。同じ意味の時計を層ごとに別 trait で宣言せず、実装（`Instant` 由来の process uptime、`Utc::now`、粗いカウンタ）は infrastructure と合成ルートが束ねる。待機は時計ではないため `infrastructure::daemon` の `Sleeper` が持つ |
 | workspace の登録・touch・recent overview 構築、セッション作成・設定解決など両面が使うロジック | `crates/core/src/usecase/` |
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
-| daemon IPC の request/reply 語彙、client connection state machine、planned restart 中の request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | request と client state machine は `crates/core/src/infrastructure/client.rs`、session observation reply は `session_snapshot.rs`、generation routing は `owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
+| daemon IPC の request/reply 語彙、client connection state machine、planned restart 中の request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | request / reply の wire 契約は `crates/core/src/infrastructure/ipc/request.rs`（`ipc` が re-export するので呼び手の import path は `infrastructure::ipc`）、接続 state machine・retry・deadline は同じ層の `client.rs`、session observation reply は `session_snapshot.rs`、generation routing は `owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/tui/src/usecase/application/daemon_health.rs`。TUI-local な sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は同層の `metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
 | TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden / Work Run 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
+| daemon usecase の巨大 module の内訳 | `agent_ipc`（受け入れ判定 `admission` / prompt・report の `delivery` / worker 計画の `dispatch` / 起動・再開の `lifecycle`）と `supervisor_runtime`（予約の `reservation` / worker stop・artifact・promotion の `obligations`）は bounded context ごとの子 module に分ける。各 module の test は同じ階層の `tests.rs` に置き、production と同居させない |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |

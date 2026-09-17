@@ -127,9 +127,10 @@ pub enum BranchStatus {
     Synced,
 }
 
+// いずれも独立した設定で、enum にまとめると組み合わせが表現できなくなる。
+#[allow(clippy::struct_excessive_bools)]
 /// Permission derived solely from the session lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct LifecycleCapabilities {
     pub can_use: bool,
     pub can_remove: bool,
@@ -1304,8 +1305,9 @@ mod tests {
         assert!(state.operations.is_empty());
     }
 
-    #[test]
+    // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     #[allow(clippy::too_many_lines)]
+    #[test]
     fn reducer_covers_recovery_cancel_and_transition_failures() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         assert!(SessionLifecycle::Creating.capabilities().can_cancel);

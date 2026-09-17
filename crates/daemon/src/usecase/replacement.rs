@@ -383,7 +383,7 @@ fn owned_runtime<F: RecordFile, P: LivenessProbe>(
 // One seam per real-IO concern the stop needs (record store, owner probe,
 // terminator, sleeper, stale cleanup, census) plus the mode and app info;
 // grouping them would only hide the composition wiring.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 pub fn stop_daemon<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
     store: &DaemonRecordStore<F>,
     probe: &P,
@@ -415,7 +415,7 @@ pub fn stop_daemon<F: RecordFile, P: LivenessProbe, T: Terminator, K: Sleeper>(
 // One seam per real-IO concern the two phases need (record store, owner probe,
 // terminator, launcher, sleeper, stale cleanup, census) plus the operation
 // identity and app info; grouping them would only hide the composition wiring.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 pub fn replace_daemon<
     F: RecordFile,
     P: LivenessProbe,

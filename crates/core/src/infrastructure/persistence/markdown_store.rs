@@ -271,7 +271,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     // Takes `&self` for call-site consistency with the store's other methods
     // even though it only needs `path` and `E`.
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self)] // trait 実装と署名を揃えるため、`self` を取る。
     pub(crate) fn read_existing_path(&self, path: &Path) -> Result<E::Entry> {
         let text =
             fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;

@@ -1810,7 +1810,8 @@ fn cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code() {
 /// named (#548).
 #[test]
 fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
-    use usagi_core::infrastructure::client::{ClientError, ClientPolicy, IpcClient};
+    use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
+    use usagi_core::infrastructure::ipc::ClientError;
     use usagi_core::infrastructure::ipc::ClientWorkspace;
 
     let _guard = daemon_fixture::heavy_e2e_lock();
@@ -1887,7 +1888,8 @@ fn the_running_daemon_admits_only_clients_inside_its_own_workspace() {
 /// without disturbing the ones this daemon holds (#710).
 #[test]
 fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() {
-    use usagi_core::infrastructure::client::{ClientError, ClientPolicy, IpcClient};
+    use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
+    use usagi_core::infrastructure::ipc::ClientError;
     use usagi_core::infrastructure::ipc::ClientWorkspace;
 
     let _guard = daemon_fixture::heavy_e2e_lock();
@@ -1977,9 +1979,7 @@ fn one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one() 
     let second_fence = hold_workspace_fence(
         &usagi_core::infrastructure::paths::canonical_workspace_root(second.path()).unwrap(),
     );
-    let initial_connection = connect(ClientWorkspace::Bound {
-        root: initial_root.clone(),
-    });
+    let initial_connection = connect(ClientWorkspace::Bound { root: initial_root });
     if let Err(error) = initial_connection {
         panic!("{error}");
     }

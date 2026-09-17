@@ -252,6 +252,63 @@ fn layer_violations(root: &Path, forbidden: &[&str]) -> BTreeMap<PathBuf, BTreeS
         .collect()
 }
 
+/// The TUI's own infrastructure layer translates daemon replies and live input
+/// into TUI vocabulary. It must stay free of real IO: terminal backends, PTYs,
+/// subprocesses, threads and the filesystem belong to the composition root, which
+/// injects what this layer needs. Keeping the layer pure is what lets it be unit
+/// tested from payloads alone instead of behind another `#[coverage(off)]`.
+#[test]
+fn tui_infrastructure_translates_without_owning_real_io() {
+    let root = workspace_root().join("crates/tui/src/infrastructure");
+    let mut sources = Vec::new();
+    rust_sources(&root, &mut sources);
+    assert!(
+        !sources.is_empty(),
+        "the TUI infrastructure layer must hold its adapters"
+    );
+    let forbidden_crates = [
+        "crossterm",
+        "portable_pty",
+        "libc",
+        "signal_hook",
+        "fs2",
+        "dirs",
+    ];
+    let violations = sources
+        .into_iter()
+        .filter_map(|path| {
+            let source = fs::read_to_string(&path).expect("TUI infrastructure source is readable");
+            let syntax: File = syn::parse_file(&source).expect("TUI infrastructure source parses");
+            let forbidden = ["fs", "process", "thread"]
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let mut visitor = DependencyVisitor {
+                forbidden: &forbidden,
+                required_root: Some("std"),
+                violations: BTreeSet::new(),
+            };
+            visitor.visit_file(&syntax);
+            let mut found = visitor.violations;
+            for name in forbidden_crates {
+                let forbidden = [name].into_iter().collect::<BTreeSet<_>>();
+                let mut visitor = DependencyVisitor {
+                    forbidden: &forbidden,
+                    required_root: None,
+                    violations: BTreeSet::new(),
+                };
+                visitor.visit_file(&syntax);
+                found.extend(visitor.violations);
+            }
+            (!found.is_empty()).then_some((path, found))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert!(
+        violations.is_empty(),
+        "TUI infrastructure must take real IO from the composition root:\n{violations:#?}"
+    );
+}
+
 #[test]
 fn tui_views_are_pure_projections_without_filesystem_or_process_io() {
     let root = workspace_root().join("crates/tui/src/presentation/views");
@@ -468,12 +525,14 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
             .intersection(&application_ports)
             .collect::<Vec<_>>()
     );
+    let coordinator = fs::read_to_string(root.join("crates/tui/src/presentation/workspace_io.rs"))
+        .expect("TUI transport coordinator is readable");
     assert!(
-        source.contains("struct WorkspaceIoRuntime"),
+        coordinator.contains("struct WorkspaceIoRuntime"),
         "the presentation loop must name its transport-only coordinator explicitly"
     );
     assert!(
-        !source.contains("WorkspaceUi"),
+        !source.contains("WorkspaceUi") && !coordinator.contains("WorkspaceUi"),
         "the retired dual-state WorkspaceUi name must not return"
     );
 }
@@ -481,8 +540,15 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
 #[test]
 fn tui_presentation_discovers_session_catalogs_through_an_application_port() {
     let root = workspace_root();
-    let presentation = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))
-        .expect("TUI presentation source is readable");
+    // The frame loop and its bounded contexts now live in sibling modules, so the
+    // contract is checked across the whole presentation layer rather than one file.
+    let mut sources = Vec::new();
+    rust_sources(&root.join("crates/tui/src/presentation"), &mut sources);
+    let presentation = sources
+        .iter()
+        .filter(|path| !path.ends_with("tests.rs"))
+        .map(|path| fs::read_to_string(path).expect("TUI presentation source is readable"))
+        .collect::<String>();
     let ports =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/runtime_ports.rs"))
             .expect("TUI runtime ports are readable");
@@ -514,21 +580,75 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         .expect("TUI banner presentation is readable");
     let startup = fs::read_to_string(root.join("crates/tui/src/presentation/startup.rs"))
         .expect("TUI startup presentation is readable");
-    let tests = fs::read_to_string(root.join("crates/tui/src/presentation/tests.rs"))
-        .expect("TUI presentation tests are readable");
+    // The presentation tests are split per bounded context; every file keeps the
+    // module-level coverage exclusion so test fixtures never enter the gate.
+    let mut test_sources = Vec::new();
+    rust_sources(
+        &root.join("crates/tui/src/presentation/tests"),
+        &mut test_sources,
+    );
+    assert!(
+        !test_sources.is_empty(),
+        "the presentation tests must live in their own module"
+    );
+    let tests = test_sources
+        .iter()
+        .map(|path| fs::read_to_string(path).expect("TUI presentation tests are readable"))
+        .collect::<Vec<_>>();
     let observation =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/observation_lane.rs"))
             .expect("TUI observation policy is readable");
 
-    for module in ["mod banner;", "mod startup;", "mod tests;"] {
+    for module in [
+        "mod banner;",
+        "mod startup;",
+        "mod tests;",
+        "mod director;",
+        "mod flow_steps;",
+        "mod frame_loop;",
+        "mod garden;",
+        "mod restore;",
+        "mod session_commands;",
+        "mod terminal_io;",
+        "mod work_run;",
+        "mod workspace_io;",
+    ] {
         assert!(composition.contains(module));
+    }
+    // Each bounded context keeps its own module. Moving one back into the
+    // composition module is what let it grow to ten thousand lines before, so
+    // the split is fixed here rather than left to review.
+    for (module, marker) in [
+        ("director.rs", "fn director_drawer_projection"),
+        ("flow_steps.rs", "fn step_welcome"),
+        ("frame_loop.rs", "fn drive_workspace_controller"),
+        ("garden.rs", "fn route_garden_input"),
+        ("restore.rs", "fn spawn_restore_job"),
+        ("session_commands.rs", "fn begin_session_command"),
+        ("terminal_io.rs", "fn forward_live_terminal_input"),
+        ("work_run.rs", "fn handle_work_run_list_input"),
+        ("workspace_io.rs", "struct WorkspaceIoRuntime"),
+    ] {
+        let source = fs::read_to_string(root.join("crates/tui/src/presentation").join(module))
+            .unwrap_or_else(|error| panic!("{module} is readable: {error}"));
+        assert!(source.contains(marker), "{module} must hold {marker}");
+        assert!(
+            !composition.contains(marker),
+            "{marker} belongs in {module}, not the composition module"
+        );
     }
     assert!(!composition.contains("mod tests {"));
     assert!(!composition.contains("pub struct BannerScreenRunner"));
     assert!(!composition.contains("pub struct StartupSplash"));
     assert!(banner.contains("pub struct BannerScreenRunner"));
     assert!(startup.contains("pub struct StartupSplash"));
-    assert!(tests.contains("#![coverage(off)]"));
+    for (path, source) in test_sources.iter().zip(&tests) {
+        assert!(
+            source.contains("#![coverage(off)]"),
+            "{} must keep the module-level coverage exclusion",
+            path.display()
+        );
+    }
     assert!(observation.contains("struct ObservationLane"));
     assert!(!composition.contains("struct GardenObservation {"));
     assert!(!composition.contains("struct WorkRunObservation {"));
@@ -549,9 +669,15 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
             .expect("TUI entry controller is readable");
     let new = fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/new.rs"))
         .expect("TUI new-workspace controller is readable");
-    let tests =
-        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/tests.rs"))
-            .expect("TUI controller tests are readable");
+    let mut controller_test_sources = Vec::new();
+    rust_sources(
+        &root.join("crates/tui/src/usecase/application/controller/tests"),
+        &mut controller_test_sources,
+    );
+    assert!(
+        !controller_test_sources.is_empty(),
+        "the controller tests must live in their own module"
+    );
     let pull_requests = fs::read_to_string(
         root.join("crates/tui/src/usecase/application/controller/pull_requests.rs"),
     )
@@ -574,7 +700,14 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
     assert!(pull_requests.contains("pub struct PrOverlay"));
     assert!(entry.contains("pub fn update_entry("));
     assert!(new.contains("pub fn update_new("));
-    assert!(tests.contains("#![coverage(off)]"));
+    for path in &controller_test_sources {
+        let source = fs::read_to_string(path).expect("TUI controller tests are readable");
+        assert!(
+            source.contains("#![coverage(off)]"),
+            "{} must keep the module-level coverage exclusion",
+            path.display()
+        );
+    }
     assert!(
         controller.lines().count() <= 6_500,
         "TUI Home controller grew beyond its reviewable boundary"
@@ -597,6 +730,44 @@ fn clipboard_platform_variants_are_compiled_only_for_their_targets_or_tests() {
     );
 }
 
+/// The daemon composition root grew to twenty-five thousand lines because every
+/// new concern was appended to one file. Each concern now owns a module, and
+/// this guard keeps them there: it fails if a representative symbol reappears in
+/// the composition module, or if the module itself grows back past the size the
+/// split brought it to.
+#[test]
+fn daemon_composition_root_keeps_its_concerns_in_their_modules() {
+    let root = workspace_root();
+    let composition = fs::read_to_string(root.join("src/runtime/daemon.rs"))
+        .expect("daemon composition root is readable");
+    for (module, marker) in [
+        ("agent.rs", "fn open_agent_runtime"),
+        ("broker.rs", "fn spawn_bootstrap_broker"),
+        ("instance_lock.rs", "fn open_private_lock"),
+        ("ipc_accept.rs", "fn start_ipc_accept_loop"),
+        ("pty.rs", "fn new_terminal_runtime"),
+        ("standby.rs", "fn promote_standby_generation"),
+        ("workers.rs", "fn spawn_critical_worker"),
+    ] {
+        let source = fs::read_to_string(root.join("src/runtime/daemon").join(module))
+            .unwrap_or_else(|error| panic!("{module} is readable: {error}"));
+        assert!(source.contains(marker), "{module} must hold {marker}");
+        assert!(
+            !composition.contains(marker),
+            "{marker} belongs in daemon/{module}, not the composition module"
+        );
+    }
+    assert!(
+        composition.contains("mod tests;") && !composition.contains("mod tests {"),
+        "the composition module keeps its tests in a sibling file"
+    );
+    assert!(
+        composition.lines().count() <= 4_500,
+        "the daemon composition module must stay split: {} lines",
+        composition.lines().count()
+    );
+}
+
 #[test]
 fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_module() {
     let root = workspace_root();
@@ -604,10 +775,15 @@ fn daemon_tenant_control_stays_out_of_the_socket_and_lifecycle_composition_modul
         .expect("daemon composition source is readable");
     let tenant = fs::read_to_string(root.join("src/runtime/daemon/tenant_control.rs"))
         .expect("tenant control source is readable");
+    // The accept loop now lives in its own module; it is the caller that must
+    // route tenant requests through the tenant module rather than inline them.
+    let accept = fs::read_to_string(root.join("src/runtime/daemon/ipc_accept.rs"))
+        .expect("daemon accept loop source is readable");
 
     assert!(composition.contains("mod tenant_control;"));
-    assert!(composition.contains("tenant_control::dispatch("));
+    assert!(accept.contains("tenant_control::dispatch("));
     assert!(!composition.contains("fn dispatch_tenant("));
+    assert!(!accept.contains("fn dispatch_tenant("));
     for source in [&composition, &tenant] {
         assert!(
             !source

@@ -7,7 +7,7 @@
 //! scope's [`TerminalAction::Inventory`] at a bounded cadence on its own thread
 //! and reports which tracked terminals the daemon no longer lists as live.
 //!
-//! [`TerminalAction::Inventory`]: usagi_core::infrastructure::client::TerminalAction::Inventory
+//! [`TerminalAction::Inventory`]: usagi_core::infrastructure::ipc::TerminalAction::Inventory
 //!
 //! The contract this lane deliberately keeps narrow:
 //!
@@ -670,7 +670,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let hung = scope_terminal(workspace, None, WorktreeId::new());
         let healthy = scope_terminal(workspace, Some(SessionId::new()), WorktreeId::new());
-        state.watch(1, &[hung.clone(), healthy.clone()], ms(0));
+        state.watch(1, &[hung, healthy.clone()], ms(0));
         let first = state.begin_round(ms(0));
         assert_eq!(first.len(), 2);
         // The hung scope never answers; the healthy one completes and is due again.

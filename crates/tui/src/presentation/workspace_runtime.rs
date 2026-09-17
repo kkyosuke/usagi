@@ -19,7 +19,7 @@ use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 
 /// Daemon capacity refusal and the action-oriented copy shown in Closeup.
 /// The daemon owns the resource fact; the TUI owns the recovery vocabulary.
@@ -2175,12 +2175,13 @@ impl WorkspaceRuntime {
         }
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Build the Home frame from the controller state, pane strip, and the
     /// per-frame projection material the shell polls (metrics, git diffs, live
     /// terminal viewport). This is the only render path for the controller
     /// runtime.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         height: usize,
@@ -3055,7 +3056,7 @@ mod tests {
         // controller が phase を観測した runtime は inventory 無しでも引ける。
         let second_runtime = AgentRuntimeRef {
             agent_runtime_id: AgentRuntimeId::new(),
-            terminal: second.clone(),
+            terminal: second,
             session_id: Some(session),
         };
         let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::RuntimePhase {
@@ -3444,7 +3445,7 @@ mod tests {
         let second_op = OperationId::new();
         let second = terminal_ref(workspace, session);
         let _ = runtime.request_pane(target, second_op, PaneKind::Agent);
-        let _ = runtime.complete_pane(target, second_op, second.clone());
+        let _ = runtime.complete_pane(target, second_op, second);
 
         assert_eq!(
             runtime.tab_selection_at(0),
@@ -3535,7 +3536,7 @@ mod tests {
         let discovered = terminal_ref(workspace, session);
         let mut runtime = closeup_on(workspace, session);
         let (dispatched_interaction, dispatched_revision) = runtime.restore_fence();
-        for terminal in [first.clone(), second.clone()] {
+        for terminal in [first.clone(), second] {
             let operation = OperationId::new();
             let _ = runtime.request_pane(target, operation, PaneKind::Agent);
             let _ = runtime.complete_pane(target, operation, terminal);
@@ -3887,7 +3888,7 @@ mod tests {
         };
         let root_generic = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
@@ -3975,11 +3976,11 @@ mod tests {
         };
         let root_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let first_root_agent = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let fence = runtime.restore_fence();
@@ -4068,11 +4069,11 @@ mod tests {
         };
         let first_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let second_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let fence = runtime.restore_fence();
@@ -4204,7 +4205,7 @@ mod tests {
         };
         let second = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..first.clone()
+            ..first
         };
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let fence = runtime.restore_fence();
@@ -4270,11 +4271,11 @@ mod tests {
         };
         let first_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let second_terminal = TerminalRef {
             terminal_id: TerminalId::new(),
-            ..root_agent.clone()
+            ..root_agent
         };
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::<SessionId>::new());
         let fence = runtime.restore_fence();
@@ -4535,7 +4536,7 @@ mod tests {
             managed_operation,
             PaneKind::Terminal,
         );
-        let _ = runtime.complete_pane(Target::Session(session), managed_operation, managed.clone());
+        let _ = runtime.complete_pane(Target::Session(session), managed_operation, managed);
         let managed_before = runtime
             .panes()
             .pane(Target::Session(session))
@@ -5394,7 +5395,7 @@ mod tests {
         with_history(
             &mut runtime,
             Target::Session(session),
-            vec![resumed.clone(), other.clone()],
+            vec![resumed.clone(), other],
         );
 
         let command = runtime.resume_selected_tab(OperationId::new()).unwrap();
@@ -5444,7 +5445,7 @@ mod tests {
         with_history(
             &mut runtime,
             Target::Session(session),
-            vec![unresumable.clone(), resumable.clone()],
+            vec![unresumable, resumable.clone()],
         );
         assert_eq!(
             runtime.resume_selected_tab(OperationId::new()),

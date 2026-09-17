@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use usagi_core::domain::agent::CallerRef;
 use usagi_core::domain::agent_message::SendMessage;
 use usagi_core::domain::id::{OperationId, WorkspaceId};
-use usagi_core::infrastructure::client::DispatchToolAction;
+use usagi_core::infrastructure::ipc::DispatchToolAction;
 use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
 
@@ -301,7 +301,7 @@ mod tests {
             handoff_payload(
                 &CallerRef {
                     session_id: None,
-                    ..caller.clone()
+                    ..caller
                 },
                 &snapshot,
                 input.clone()

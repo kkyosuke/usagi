@@ -136,7 +136,7 @@ pub trait GenerationAuthority {
 // endpoint readiness, generation authority, shutdown, workspace fence,
 // single-instance lock, process identity) plus its own pid and app info;
 // grouping them would only hide the composition wiring.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
 pub fn serve(
     out: &mut dyn Write,
     store: &dyn DaemonRecordPort,

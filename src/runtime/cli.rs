@@ -7,7 +7,8 @@ use std::process::ExitCode;
 
 use usagi_cli::cli::{InstallerRequest, RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
-use usagi_core::infrastructure::client::{ClientError, ClientPolicy, DaemonClient, DaemonReply};
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient};
+use usagi_core::infrastructure::ipc::{ClientError, DaemonReply};
 use usagi_core::usecase::claude_sandbox::{
     self, Platform, SandboxMode, SandboxPlan, SandboxRequest,
 };
@@ -104,7 +105,7 @@ mod action_io {
         write_client_error, write_daemon_outcome,
     };
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     pub(super) fn execute_action(
         action: Action,
         outcome: RunOutcome,
@@ -169,9 +170,9 @@ mod action_io {
                     };
                 match client {
                     Ok(mut client) => {
-                        let (credential, store_root, memory_root) = match client.request(
-                            usagi_core::infrastructure::client::DaemonRequest::McpChildClaim,
-                        ) {
+                        let (credential, store_root, memory_root) = match client
+                            .request(usagi_core::infrastructure::ipc::DaemonRequest::McpChildClaim)
+                        {
                             Ok(DaemonReply::Ok(body)) => (
                                 body.get("credential")
                                     .and_then(serde_json::Value::as_str)
@@ -810,7 +811,7 @@ mod tests {
     use std::path::PathBuf;
 
     use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
-    use usagi_core::infrastructure::client::{ClientError, DaemonReply, DaemonRequest};
+    use usagi_core::infrastructure::ipc::{ClientError, DaemonReply, DaemonRequest};
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
     use usagi_core::usecase::claude_sandbox::SandboxMode;
 
@@ -1023,7 +1024,7 @@ mod tests {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             validate_launcher_policy_inputs(&LauncherPolicyInputs {
-                protected_root: Some(protected.clone()),
+                protected_root: Some(protected),
                 backend: Some(parent_alias.join("executable")),
                 ..LauncherPolicyInputs::default()
             }),

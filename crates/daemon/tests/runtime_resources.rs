@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::id::{
     DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
@@ -41,7 +42,7 @@ use usagi_daemon::usecase::resources::identity::{
 use usagi_daemon::usecase::resources::launch::{
     LaunchIntent, ResourceSpawner, SpawnRefusal, execute_launch,
 };
-use usagi_daemon::usecase::resources::retention::{LogicalClock, RetentionLimits};
+use usagi_daemon::usecase::resources::retention::RetentionLimits;
 use usagi_daemon::usecase::resources::shard::{OwnerShard, ResourceState, collectable};
 use usagi_daemon::usecase::terminal::{Geometry, PtyWriter};
 

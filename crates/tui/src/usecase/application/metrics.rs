@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use crate::usecase::application::daemon_health::DaemonHealthTracker;
 use usagi_core::domain::id::SessionId;
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 
 /// Read-only Git facts supplied asynchronously by the composition layer.
 ///
@@ -214,7 +214,7 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
     use usagi_core::domain::id::SessionId;
-    use usagi_core::infrastructure::client::DaemonMetrics;
+    use usagi_core::infrastructure::ipc::DaemonMetrics;
 
     /// A fake port that returns scripted metrics and records the session paths it
     /// was polled with, through a shared handle a test can inspect after boxing.

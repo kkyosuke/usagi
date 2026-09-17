@@ -28,12 +28,12 @@ use usagi_core::domain::supervisor::{
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::client::{
-    AgentGoalIntent, AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonReply,
-    DaemonRequest, IpcClient, McpCallerContext, SessionAction, TerminalAction, TerminalGeometry,
-    TerminalLaunchIntent, TerminalRequest,
-};
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient, IpcClient};
 use usagi_core::infrastructure::ipc::ErrorCode;
+use usagi_core::infrastructure::ipc::{
+    AgentGoalIntent, AgentLaunchIntent, ClientError, DaemonReply, DaemonRequest, McpCallerContext,
+    SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+};
 use usagi_core::infrastructure::owner_routing::GenerationDirectory;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::generation_registry::{
@@ -660,7 +660,7 @@ fn launch_intent(
 /// another intent cannot be correlated to it (#522).
 fn expected_digest(intent: &AgentLaunchIntent) -> String {
     usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::infrastructure::client::agent_launch_semantic_key(intent),
+        &usagi_core::infrastructure::ipc::agent_launch_semantic_key(intent),
     )
 }
 
@@ -1237,7 +1237,7 @@ fn root_ipc_goal_launch_is_root_scoped_and_replays_only_the_same_goal() {
     assert_eq!(
         body["semantic_digest"],
         usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::infrastructure::client::agent_goal_semantic_key(&intent)
+            &usagi_core::infrastructure::ipc::agent_goal_semantic_key(&intent)
         )
     );
     let terminal: TerminalRef = serde_json::from_value(body["terminal"].clone()).unwrap();
@@ -1662,7 +1662,7 @@ fn root_ipc_fixture_login_shell_is_fenced_and_replays_exit() {
     let stale = launch(
         TerminalLaunchScope {
             worktree_id: WorktreeId::new(),
-            ..scope.clone()
+            ..scope
         },
         "login-shell",
     )
@@ -2207,7 +2207,7 @@ fn root_ipc_cold_restart_projects_interrupted_history_and_resumes_one_exact_tab(
     let replayed = client
         .request(DaemonRequest::ResumeAgent {
             operation_id: command.operation.to_string(),
-            target: command.target.clone(),
+            target: command.target,
             caller_context: None,
         })
         .expect("a replayed exact resume is idempotent");
@@ -2382,7 +2382,7 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
     .expect("restart returns with a successor that completes the first handshake");
     successor
         .request(DaemonRequest::Tenant {
-            action: usagi_core::infrastructure::client::TenantAction::Inventory,
+            action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
             root: None,
             force: false,
         })
@@ -2477,7 +2477,7 @@ fn root_restart_rolls_over_two_real_generic_ptys_without_a_readiness_retry() {
         .request(DaemonRequest::Terminal {
             action: TerminalAction::Launch,
             payload: serde_json::to_value(TerminalRequest::Launch {
-                intent: successor_intent.clone(),
+                intent: successor_intent,
             })
             .unwrap(),
         })

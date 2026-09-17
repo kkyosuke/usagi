@@ -53,15 +53,16 @@ pub(super) fn session_organization(
     (parent_name, lineage.len(), path)
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn dispatch_session_action(
     context: &SessionDispatchContext<'_>,
-    action: usagi_core::infrastructure::client::SessionAction,
+    action: usagi_core::infrastructure::ipc::SessionAction,
     operation_id: &str,
     payload: &serde_json::Value,
 ) -> Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError> {
-    use usagi_core::infrastructure::client::SessionAction;
+    use usagi_core::infrastructure::ipc::SessionAction;
     use usagi_core::infrastructure::store::issue::IssueStore;
     use usagi_core::usecase::issue;
     use usagi_daemon::usecase::agent_ipc::PromptMode;
@@ -838,7 +839,7 @@ fn delegate_brief(
     operation_id: &str,
     payload: &serde_json::Value,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
-    use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+    use usagi_core::infrastructure::ipc::{DispatchAgentIntent, DispatchIntent};
 
     let bound = context.bound;
     let teardown = context.teardown;
@@ -971,10 +972,7 @@ fn delegate_brief(
     {
         sessions.retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
     }
-    let selected = DispatchAgentIntent::New {
-        runtime: runtime.clone(),
-        model: model.clone(),
-    };
+    let selected = DispatchAgentIntent::New { runtime, model };
     let reserved_worker = if supervision_at_preflight.is_some() {
         let planned = agent
             .lock()
@@ -1237,11 +1235,8 @@ pub(in crate::runtime::daemon) fn reconcile_orphan_delegations(
 }
 
 pub(super) enum AgentDispatchRequest {
-    Launch(
-        String,
-        usagi_core::infrastructure::client::AgentLaunchIntent,
-    ),
-    Goal(String, usagi_core::infrastructure::client::AgentGoalIntent),
+    Launch(String, usagi_core::infrastructure::ipc::AgentLaunchIntent),
+    Goal(String, usagi_core::infrastructure::ipc::AgentGoalIntent),
     Inventory(WorkspaceId),
     WorkspaceObservation(WorkspaceId),
     Diagnose(

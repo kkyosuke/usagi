@@ -24,8 +24,8 @@ pub use crate::domain::presentation_text::presentation_text_is_safe;
 pub struct SupervisorRunId(Uuid);
 
 impl SupervisorRunId {
+    #[allow(clippy::new_without_default)] // 生成のたびに新しい識別子を作るため、`Default` は意味を持たない。
     #[must_use]
-    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
@@ -2491,7 +2491,7 @@ mod tests {
             &event(
                 3,
                 SupervisorEventKind::Dispatch {
-                    task_id: id.clone(),
+                    task_id: id,
                     generation: 1,
                     provenance,
                 },
@@ -2652,7 +2652,7 @@ mod tests {
             ),
             Err(SupervisorError::StaleGeneration)
         ));
-        let mut invalid_state = run.clone();
+        let mut invalid_state = run;
         invalid_state.tasks.get_mut(&id).unwrap().state = TaskState::Running;
         assert!(matches!(
             reduce(
@@ -2662,7 +2662,7 @@ mod tests {
                     SupervisorEventKind::VerificationExpectationRecorded {
                         task_id: id.clone(),
                         generation: 1,
-                        expectation: expectation.clone(),
+                        expectation,
                     },
                 ),
             ),
@@ -2856,7 +2856,7 @@ mod tests {
                 &event(
                     9,
                     SupervisorEventKind::VerificationExpectationRecorded {
-                        task_id: id.clone(),
+                        task_id: id,
                         generation: 1,
                         expectation: conflicting,
                     },
@@ -3194,8 +3194,9 @@ mod tests {
         assert_eq!(run, before);
     }
 
-    #[test]
+    // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     #[allow(clippy::too_many_lines)]
+    #[test]
     fn rejects_duplicate_parent_and_dispatch_fences() {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
         let run_id = run.supervisor_run_id;

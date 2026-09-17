@@ -155,13 +155,13 @@ mod tests {
 
     /// A probe whose three observations are configured independently, so every
     /// invariant can be broken in isolation.
-    struct FakeProbe {
+    struct FakeCustodyProbe {
         locked: io::Result<NodeIdentity>,
         pathname: io::Result<Option<NodeIdentity>>,
         record: io::Result<Option<DaemonRecord>>,
     }
 
-    impl Default for FakeProbe {
+    impl Default for FakeCustodyProbe {
         fn default() -> Self {
             Self {
                 locked: Ok(identity(11)),
@@ -178,7 +178,7 @@ mod tests {
         }
     }
 
-    impl CustodyProbe for FakeProbe {
+    impl CustodyProbe for FakeCustodyProbe {
         fn locked_inode(&self) -> io::Result<NodeIdentity> {
             clone_result(&self.locked)
         }
@@ -195,25 +195,25 @@ mod tests {
     #[test]
     fn holds_custody_while_the_locked_inode_and_owner_record_are_intact() {
         assert_eq!(
-            evaluate(&FakeProbe::default(), &owner()).unwrap(),
+            evaluate(&FakeCustodyProbe::default(), &owner()).unwrap(),
             Custody::Held
         );
     }
 
     #[test]
     fn loses_custody_when_the_lock_path_disappears_or_is_replaced() {
-        let absent = FakeProbe {
+        let absent = FakeCustodyProbe {
             pathname: Ok(None),
-            ..FakeProbe::default()
+            ..FakeCustodyProbe::default()
         };
         assert_eq!(
             evaluate(&absent, &owner()).unwrap(),
             Custody::Lost(CustodyLoss::LockPathAbsent)
         );
 
-        let replaced = FakeProbe {
+        let replaced = FakeCustodyProbe {
             pathname: Ok(Some(identity(12))),
-            ..FakeProbe::default()
+            ..FakeCustodyProbe::default()
         };
         assert_eq!(
             evaluate(&replaced, &owner()).unwrap(),
@@ -223,10 +223,10 @@ mod tests {
 
     #[test]
     fn a_lost_lock_is_reported_without_reading_the_record() {
-        let probe = FakeProbe {
+        let probe = FakeCustodyProbe {
             pathname: Ok(None),
             record: Err(io::Error::other("the record must not be read")),
-            ..FakeProbe::default()
+            ..FakeCustodyProbe::default()
         };
         assert_eq!(
             evaluate(&probe, &owner()).unwrap(),
@@ -236,9 +236,9 @@ mod tests {
 
     #[test]
     fn loses_custody_when_the_record_disappears_or_names_another_incarnation() {
-        let absent = FakeProbe {
+        let absent = FakeCustodyProbe {
             record: Ok(None),
-            ..FakeProbe::default()
+            ..FakeCustodyProbe::default()
         };
         assert_eq!(
             evaluate(&absent, &owner()).unwrap(),
@@ -250,9 +250,9 @@ mod tests {
             DaemonRecord::identified(4321, "test:9999"),
             DaemonRecord::new(4321),
         ] {
-            let replaced = FakeProbe {
+            let replaced = FakeCustodyProbe {
                 record: Ok(Some(foreign)),
-                ..FakeProbe::default()
+                ..FakeCustodyProbe::default()
             };
             assert_eq!(
                 evaluate(&replaced, &owner()).unwrap(),
@@ -265,9 +265,9 @@ mod tests {
     fn a_re_stamped_record_with_this_exact_identity_keeps_custody() {
         let mut restamped = owner();
         restamped.started_at += chrono::Duration::seconds(5);
-        let probe = FakeProbe {
+        let probe = FakeCustodyProbe {
             record: Ok(Some(restamped)),
-            ..FakeProbe::default()
+            ..FakeCustodyProbe::default()
         };
         assert_eq!(evaluate(&probe, &owner()).unwrap(), Custody::Held);
     }
@@ -275,17 +275,17 @@ mod tests {
     #[test]
     fn an_undecidable_observation_is_an_error_and_never_a_loss() {
         for probe in [
-            FakeProbe {
+            FakeCustodyProbe {
                 locked: Err(io::Error::other("held identity unobserved")),
-                ..FakeProbe::default()
+                ..FakeCustodyProbe::default()
             },
-            FakeProbe {
+            FakeCustodyProbe {
                 pathname: Err(io::Error::other("stat failed")),
-                ..FakeProbe::default()
+                ..FakeCustodyProbe::default()
             },
-            FakeProbe {
+            FakeCustodyProbe {
                 record: Err(io::Error::other("read failed")),
-                ..FakeProbe::default()
+                ..FakeCustodyProbe::default()
             },
         ] {
             assert!(evaluate(&probe, &owner()).is_err());

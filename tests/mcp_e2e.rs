@@ -23,9 +23,9 @@ use usagi_core::domain::{
     role::RoleId,
     user_decision::UserDecision,
 };
-use usagi_core::infrastructure::client::{
-    DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
-    TuiUserDecisionAction,
+use usagi_core::infrastructure::client::DaemonClient;
+use usagi_core::infrastructure::ipc::{
+    DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent, TuiUserDecisionAction,
 };
 use usagi_core::infrastructure::store::{
     DerivedState, issue::IssueStore, memory::MemoryStore, user_decision::UserDecisionStore,
@@ -1985,7 +1985,7 @@ fi
         .unwrap();
     assert!(matches!(fetched, DaemonReply::Ok(ref body) if body["answer"]["option_id"] == "yes"));
 
-    let mut cancellable = decision.clone();
+    let mut cancellable = decision;
     cancellable.decision_id = UserDecisionId::new();
     cancellable.title = "Cancel me".into();
     cancellable.idempotency_key = None;

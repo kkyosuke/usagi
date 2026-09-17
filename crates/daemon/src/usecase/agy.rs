@@ -233,9 +233,9 @@ mod tests {
         id::{SessionId, WorkspaceId, WorktreeId},
     };
 
-    struct FakeProvisioner(Option<Result<AgyProvision, AgyProvisionFailure>>);
+    struct FakeAgyProvisioner(Option<Result<AgyProvision, AgyProvisionFailure>>);
 
-    impl AgyProvisioner for FakeProvisioner {
+    impl AgyProvisioner for FakeAgyProvisioner {
         fn provision(&mut self, _: &ProvisionContext) -> Result<AgyProvision, AgyProvisionFailure> {
             self.0.take().expect("fake provisioner called once")
         }
@@ -277,8 +277,8 @@ mod tests {
         }
     }
 
-    fn adapter() -> AgyAdapter<FakeProvisioner> {
-        AgyAdapter::new(FakeProvisioner(Some(Ok(provision()))))
+    fn adapter() -> AgyAdapter<FakeAgyProvisioner> {
+        AgyAdapter::new(FakeAgyProvisioner(Some(Ok(provision()))))
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
                 AdapterError::ProvisionFailed,
             ),
         ] {
-            let mut adapter = AgyAdapter::new(FakeProvisioner(Some(Err(failure))));
+            let mut adapter = AgyAdapter::new(FakeAgyProvisioner(Some(Err(failure))));
             assert!(matches!(
                 adapter.resolve(&request(LaunchMode::Interactive)),
                 Err(error) if error == expected
@@ -419,12 +419,12 @@ mod tests {
             .resolve(&request(LaunchMode::Interactive))
             .unwrap();
         assert!(
-            AgyAdapter::new(FakeProvisioner(None))
+            AgyAdapter::new(FakeAgyProvisioner(None))
                 .validate_snapshot(&resolved.snapshot)
                 .is_ok()
         );
         assert!(
-            AgyAdapter::with_revision(FakeProvisioner(None), PROFILE_REVISION + 1)
+            AgyAdapter::with_revision(FakeAgyProvisioner(None), PROFILE_REVISION + 1)
                 .validate_snapshot(&resolved.snapshot)
                 .is_err()
         );

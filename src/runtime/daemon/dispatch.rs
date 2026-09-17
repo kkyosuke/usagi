@@ -98,7 +98,7 @@ pub(super) fn dispatch_agent_tool(
         AgentProfileId, AgentStatus, InboxKind, ModelSelector, StructuredResult,
     };
     use usagi_core::domain::id::{AgentId, OperationId};
-    use usagi_core::infrastructure::client::{DispatchAgentIntent, DispatchIntent};
+    use usagi_core::infrastructure::ipc::{DispatchAgentIntent, DispatchIntent};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     #[derive(Deserialize)]
@@ -472,7 +472,7 @@ pub(super) fn dispatch_agent_tool(
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
                 let created_body = if handoff {
-                    snapshot.clone()
+                    snapshot
                 } else {
                     perform_create(
                         bound.sessions(),
@@ -1326,6 +1326,7 @@ pub(super) struct AuthenticatedSupervisorCaller {
     pub(super) runtime: AgentRuntimeRef,
 }
 
+// 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
 pub(super) fn dispatch_supervisor_tool(
@@ -1666,7 +1667,7 @@ pub(super) fn dispatch_supervisor_snapshot(
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot;
-    use usagi_core::infrastructure::client::DaemonRequest;
+    use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     let result = (|| {
@@ -1738,7 +1739,7 @@ pub(super) fn dispatch_supervisor_control(
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use chrono::Utc;
     use usagi_core::domain::supervisor::SupervisorRunState;
-    use usagi_core::infrastructure::client::DaemonRequest;
+    use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     let result = (|| {
@@ -2083,7 +2084,7 @@ pub(super) fn dispatch_pr_snapshot(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::{DaemonRequest, PrAction};
+    use usagi_core::infrastructure::ipc::{DaemonRequest, PrAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     let result = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -2200,7 +2201,7 @@ pub(super) fn dispatch_user_decision(
                 ..
             } => Some((action, payload, caller_context, false)),
             DaemonRequest::UserDecision { action, payload } => {
-                use usagi_core::infrastructure::client::TuiUserDecisionAction;
+                use usagi_core::infrastructure::ipc::TuiUserDecisionAction;
                 let action = match action {
                     TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
                     TuiUserDecisionAction::List => DispatchToolAction::UserDecisionList,
@@ -2488,7 +2489,7 @@ pub(super) fn dispatch_dispatch(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::DaemonRequest;
+    use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
     let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -2826,7 +2827,7 @@ pub(super) fn dispatch_metrics(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::{DaemonRequest, MetricsAction};
+    use usagi_core::infrastructure::ipc::{DaemonRequest, MetricsAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     let action = serde_json::from_value::<DaemonRequest>(body.clone())
@@ -2923,7 +2924,7 @@ pub(super) fn dispatch_session(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::DaemonRequest;
+    use usagi_core::infrastructure::ipc::DaemonRequest;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
         .and_then(|request| match request {
@@ -2970,7 +2971,7 @@ pub(super) fn dispatch_mcp_child_claim(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::DaemonRequest;
+    use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     let result = (|| {
@@ -3072,13 +3073,13 @@ pub(super) fn dispatch_mcp_child_claim(
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
 pub(super) fn session_response_envelope(
-    action: usagi_core::infrastructure::client::SessionAction,
+    action: usagi_core::infrastructure::ipc::SessionAction,
     result: Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::SessionAction;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
+    use usagi_core::infrastructure::ipc::SessionAction;
     match result {
         Ok(reply) => {
             let outcome = if matches!(action, SessionAction::Create | SessionAction::Remove) {
@@ -3185,7 +3186,7 @@ pub(super) fn session_response_envelope(
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 pub(super) fn exact_merged_pr_head(
-    inventory: Option<usagi_core::infrastructure::client::PrSnapshot>,
+    inventory: Option<usagi_core::infrastructure::ipc::PrSnapshot>,
     branch_head: Option<String>,
 ) -> Option<String> {
     inventory.and_then(|inventory| {
@@ -3221,7 +3222,7 @@ pub(super) fn best_effort_merged_pr_head(
 /// resource that became linked after inventory cannot be removed.
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 pub(super) fn clean_orphan_session_resources(
     bound: &ConnectionWorkspace,
     agent: Option<&SharedAgentRuntime>,
@@ -3452,9 +3453,7 @@ fn admit_agent_dispatch_request(
                 operation_id,
                 intent,
                 resolve_goal_artifact_repository(supervisor, scope, operation_id, intent)?,
-                goal_worker_profile
-                    .clone()
-                    .expect("Goal request resolved its worker profile"),
+                goal_worker_profile.expect("Goal request resolved its worker profile"),
             )?
             .supervisor_run_id,
         ),
@@ -3536,7 +3535,7 @@ pub(super) fn goal_supervisor_caller(workspace: WorkspaceId) -> String {
 pub(super) fn reserve_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
-    intent: &usagi_core::infrastructure::client::AgentGoalIntent,
+    intent: &usagi_core::infrastructure::ipc::AgentGoalIntent,
     artifact_repository: usagi_core::domain::pr_inventory::GitHubRepository,
     worker_profile_id: AgentProfileId,
 ) -> Result<
@@ -3561,7 +3560,7 @@ pub(super) fn reserve_goal_supervisor_run(
             ),
             worker_profile_id,
             usagi_core::infrastructure::ipc::agent_operation_digest(
-                &usagi_core::infrastructure::client::agent_goal_semantic_key(intent),
+                &usagi_core::infrastructure::ipc::agent_goal_semantic_key(intent),
             ),
             Some("standard".into()),
             Utc::now(),
@@ -3573,7 +3572,7 @@ pub(super) fn resolve_goal_artifact_repository(
     supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
     operation_id: &str,
-    intent: &usagi_core::infrastructure::client::AgentGoalIntent,
+    intent: &usagi_core::infrastructure::ipc::AgentGoalIntent,
 ) -> Result<
     usagi_core::domain::pr_inventory::GitHubRepository,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -3645,7 +3644,7 @@ pub(super) fn bind_delegated_supervisor_dispatch(
 pub(super) fn start_goal_supervisor_run(
     supervisor: &SharedSupervisorRuntime,
     operation_id: &str,
-    intent: &usagi_core::infrastructure::client::AgentGoalIntent,
+    intent: &usagi_core::infrastructure::ipc::AgentGoalIntent,
     worker: &usagi_core::domain::id::AgentRuntimeRef,
 ) -> Result<
     usagi_core::domain::supervisor::SupervisorRunQuery,
@@ -4146,7 +4145,7 @@ pub(super) fn dispatch_agent(
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    use usagi_core::infrastructure::client::DaemonRequest;
+    use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
     let request = serde_json::from_value::<DaemonRequest>(body.clone())
         .ok()
@@ -4362,7 +4361,7 @@ pub(super) fn run_agent_readiness(
 pub(super) fn dispatch_agent_after_preflight(
     agent: &SharedAgentRuntime,
     operation_id: &str,
-    intent: &usagi_core::infrastructure::client::DispatchIntent,
+    intent: &usagi_core::infrastructure::ipc::DispatchIntent,
     session: SessionId,
     scope: &dyn SessionScopeResolver,
     planned_worker: Option<&usagi_core::domain::agent::Agent>,

@@ -5,7 +5,8 @@ use usagi_core::usecase::settings::SettingsPort;
 use crate::presentation::views::config::Config;
 use crate::usecase::application::{Key, Terminal};
 
-use super::{ConfigStep, run_workspace_loading, save_environment_responsive};
+use super::flow_steps::save_environment_responsive;
+use super::{ConfigStep, run_workspace_loading};
 
 pub(super) fn save_setup_commands_responsive(
     term: &mut dyn Terminal,
@@ -37,7 +38,6 @@ pub(super) fn save_config_source_responsive(
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn step_setup_commands_editor(
     config: &mut Config,
     key: Key,

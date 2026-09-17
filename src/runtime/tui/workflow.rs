@@ -4,10 +4,9 @@ use std::sync::mpsc::{self, SyncSender};
 use std::thread::JoinHandle;
 
 use usagi_core::domain::workflow::WorkflowSnapshot;
-use usagi_core::infrastructure::client::{
-    ClientError, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest,
-};
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient};
 use usagi_core::infrastructure::ipc::RetryMode;
+use usagi_core::infrastructure::ipc::{ClientError, DaemonReply, DaemonRequest};
 use usagi_tui::usecase::application::controller::{AppEvent, BackendEvent};
 use usagi_tui::usecase::application::daemon_backend::Completions;
 use usagi_tui::usecase::application::workflow::{WorkflowError, WorkflowJob, WorkflowPort};
