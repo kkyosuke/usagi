@@ -11,35 +11,36 @@ mod terminal;
 mod work_run;
 mod workspace_rows;
 use super::{
-    AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission, AgentTabIntentPort,
-    AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener, Config, ConfigStep,
-    ControllerHost, ControllerHostAction, DecisionCommandPort, DefaultSettingsPort,
-    DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort, FixedBackendFactory,
-    FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort, Geometry, GitDiff, IdleWatch,
-    MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory, MissingWorkspacePrompt,
-    NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS, PaneLaunch,
-    PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession, SerializedPaneLaunchPort,
-    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SessionLifecycle,
-    SessionLifecycleProjection, SessionRefreshPort, SessionWorktreeHint, SessionWorktreeScanPort,
-    Start, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
-    TerminalInputResolution, TerminalSubscription, TerminalViewProjection,
-    UnavailableAgentCommandPort, UnavailableBackendPort, UnavailableBrowserOpener,
-    UnavailableDecisionCommandPort, UnavailableEnvironmentStore, UnavailableExternalTerminalPort,
-    UnavailableGardenInventoryPort, UnavailablePaneLaunchPort, UnavailablePrSnapshotPort,
-    UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
+    ActiveSessionCommand, AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission,
+    AgentTabIntentPort, AgentTabIntentPortCommit, BTreeMap, BannerScreenRunner, BrowserOpener,
+    CarriedOutcome, Config, ConfigStep, ControllerHost, ControllerHostAction, DecisionCommandPort,
+    DefaultSettingsPort, DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
+    FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
+    Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory,
+    MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS,
+    PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
+    SerializedPaneLaunchPort, SessionCommandLane, SessionCommandPort, SessionCommandPortFactory,
+    SessionCommandResult, SessionLifecycle, SessionLifecycleProjection, SessionRefreshPort,
+    SessionWorktreeHint, SessionWorktreeScanPort, Start, TerminalAttach, TerminalChunk,
+    TerminalError, TerminalInputOutcome, TerminalInputResolution, TerminalSubscription,
+    TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
+    UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
+    UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
+    UnavailablePrSnapshotPort, UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
     WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep, WorkspaceConfigContext, WorkspaceConfigStep,
     WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
     WorkspaceInputRoute, WorkspaceIoRuntime, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot,
     WorkspaceView, activate_focused_interrupted_tab, activate_workspace_responsive,
-    adjust_project_bar_pointer, app_event_from_key, apply_drawer_header_while_director_open,
-    cached_workspace_switch_frame, close_exited_panes, compose_workspace_shell_frame,
-    controller_terminal_view, copy_terminal_selection, director_organization,
-    dismiss_pr_modal_on_project_bar_click, drain_session_completions,
-    focus_workspace_drawer_from_pointer, foreground_terminal_geometry, forward_live_terminal_input,
-    garden_click_at, garden_fits, garden_shell_owned_wake, handle_interrupted_removal_confirmation,
-    handle_terminal_pointer, home_frame_material, intercept_live_terminal_control,
-    is_user_activity, key_to_terminal_bytes, key_to_terminal_bytes_for_mode, new_project_notice,
-    open_from_registry, open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
+    adjust_project_bar_pointer, adopt_session_command_lane, app_event_from_key,
+    apply_drawer_header_while_director_open, cached_workspace_switch_frame, close_exited_panes,
+    compose_workspace_shell_frame, controller_terminal_view, copy_terminal_selection,
+    deliver_carried_outcome, director_organization, dismiss_pr_modal_on_project_bar_click,
+    drain_session_completions, focus_workspace_drawer_from_pointer, foreground_terminal_geometry,
+    forward_live_terminal_input, garden_click_at, garden_fits, garden_shell_owned_wake,
+    handle_interrupted_removal_confirmation, handle_terminal_pointer, home_frame_material,
+    intercept_live_terminal_control, is_user_activity, key_to_terminal_bytes,
+    key_to_terminal_bytes_for_mode, new_project_notice, open_from_registry,
+    open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
     prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
     prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
     remember_workspace_session_focus, remove_registry_paths, render_controller_frame,
@@ -226,15 +227,35 @@ fn complete_work_run_control(
 /// exercise which action a dispatched effect produces; the lane's own
 /// behaviour is covered by [`FakeSessionRefreshPort`] and the frame-loop
 /// tests below.
+/// A workspace runtime whose session-command completions return on `lane`.
+///
+/// The lane outlives a composition in production ([`SessionCommandLane`]), so a
+/// test that sends, drains, or admits completions keeps it alive alongside the
+/// runtime it feeds.
+fn io_runtime_on(
+    lane: &SessionCommandLane,
+    view: WorkspaceView,
+    port: Box<dyn SessionCommandPort>,
+) -> WorkspaceIoRuntime {
+    WorkspaceIoRuntime::new(view, port, lane.sender())
+}
+
+/// A workspace runtime for tests that never inspect its session completions.
+fn io_runtime(view: WorkspaceView, port: Box<dyn SessionCommandPort>) -> WorkspaceIoRuntime {
+    io_runtime_on(&SessionCommandLane::new(), view, port)
+}
+
 fn drain_host_actions(
     actions: &Receiver<ControllerHostAction>,
     ui: &mut WorkspaceIoRuntime,
+    lane: &mut SessionCommandLane,
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
 ) {
     super::drain_controller_host_actions(
         actions,
         ui,
+        lane,
         runtime,
         pending_targets,
         &mut super::UnavailableSessionRefreshPort,
@@ -662,7 +683,7 @@ fn ui_with_split_ports(
     launch: Box<dyn PaneLaunchCommandPort>,
 ) -> WorkspaceIoRuntime {
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],
@@ -1519,7 +1540,9 @@ fn assert_busy_pair(first: ConcurrentSessionRequest, second: ConcurrentSessionRe
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
-    let mut ui = WorkspaceIoRuntime::new(
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(
+        &command_lane,
         view,
         Box::new(BlockingSessionPort {
             existing: session,
@@ -1536,6 +1559,7 @@ fn assert_busy_pair(first: ConcurrentSessionRequest, second: ConcurrentSessionRe
     drain_host_actions(
         &actions,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -1547,6 +1571,7 @@ fn assert_busy_pair(first: ConcurrentSessionRequest, second: ConcurrentSessionRe
     drain_host_actions(
         &actions,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -1573,7 +1598,7 @@ fn assert_busy_pair(first: ConcurrentSessionRequest, second: ConcurrentSessionRe
         .unwrap();
     assert!(first_completion.try_recv().is_err());
     for _ in 0..100 {
-        drain_session_completions(&mut ui);
+        drain_session_completions(&mut ui, &mut command_lane);
         if ui.active_session_command.is_none() {
             break;
         }
@@ -1845,8 +1870,11 @@ fn focused_live_pane_of_kind(
     port: Box<dyn AgentCommandPort>,
 ) -> (WorkspaceIoRuntime, WorkspaceRuntime) {
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(workspace, vec![session], port);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        port,
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     // The first managed session is already selected; Enter activates it.
     let _ = runtime.handle_key(Key::Enter);
@@ -3225,7 +3253,7 @@ fn closeup_with_history(
     launch: Box<dyn PaneLaunchCommandPort>,
 ) -> (WorkspaceIoRuntime, WorkspaceRuntime) {
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],

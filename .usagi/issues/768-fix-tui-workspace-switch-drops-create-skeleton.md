@@ -7,7 +7,7 @@ labels: [bug, tui]
 dependson: []
 related: [336, 384, 489]
 created_at: 2026-09-18T00:00:00+00:00
-updated_at: 2026-09-18T00:00:00+00:00
+updated_at: 2026-09-18T12:00:00+00:00
 ---
 
 ## 症状

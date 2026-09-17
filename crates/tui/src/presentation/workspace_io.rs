@@ -3,15 +3,15 @@
 use std::sync::mpsc;
 
 use super::{
-    AgentCommandPort, AgentContext, AgentContinuationRef, AgentInventory, AgentStreamPort,
-    AgentTabIntent, AgentTabIntentContext, AgentTabIntentError, AgentTabIntentMutation,
-    AgentTabIntentPort, AgentTabObservation, AgentTabProjection, BTreeMap, BTreeSet,
-    DETACHED_TERMINAL_LIMIT, ExternalTerminalPort, Geometry, MAX_BACKGROUND_EXITS_PER_FRAME,
-    PANE_LAUNCH_FIRST, PaneLaunch, PaneLaunchCommandPort, PaneLaunchCompletion, PendingCreate,
-    ProviderResumeProjection, Receiver, RetainedRowMotion, Sender, SessionCommandCompletion,
-    SessionCommandPort, SessionId, SessionState, TerminalBuffer, TerminalInputModes,
-    TerminalInventoryEntry, TerminalKind, TerminalPoint, TerminalRef, TerminalSelection,
-    TerminalSession, TerminalViewProjection, UnavailableExternalTerminalPort,
+    ActiveSessionCommand, AgentCommandPort, AgentContext, AgentContinuationRef, AgentInventory,
+    AgentStreamPort, AgentTabIntent, AgentTabIntentContext, AgentTabIntentError,
+    AgentTabIntentMutation, AgentTabIntentPort, AgentTabObservation, AgentTabProjection, BTreeMap,
+    BTreeSet, DETACHED_TERMINAL_LIMIT, ExternalTerminalPort, Geometry,
+    MAX_BACKGROUND_EXITS_PER_FRAME, PANE_LAUNCH_FIRST, PaneLaunch, PaneLaunchCommandPort,
+    PaneLaunchCompletion, PendingCreate, ProviderResumeProjection, Receiver, RetainedRowMotion,
+    Sender, SessionCommandCompletion, SessionCommandPort, SessionId, SessionState, TerminalBuffer,
+    TerminalInputModes, TerminalInventoryEntry, TerminalKind, TerminalPoint, TerminalRef,
+    TerminalSelection, TerminalSession, TerminalViewProjection, UnavailableExternalTerminalPort,
     UnavailablePaneLaunchPort, VecDeque, WorkspaceId, WorkspaceView,
 };
 
@@ -33,12 +33,13 @@ pub(super) struct WorkspaceIoRuntime {
     /// lane. Kept as draw material for the read-only daemon status modal.
     pub(super) agent_inventory: Option<AgentInventory>,
     pub(super) material_revision: u64,
-    pub(super) session_completions: Receiver<SessionCommandCompletion>,
+    /// Sink the lane hands to every session-command worker. It outlives this
+    /// composition, so a completion is never dropped by a project switch (#768).
     pub(super) session_completion_sender: Sender<SessionCommandCompletion>,
-    /// Monotonic fence for the one admitted session command. A delayed or
-    /// synthetic completion can never return its port into a newer command.
-    pub(super) next_session_command: u64,
-    pub(super) active_session_command: Option<u64>,
+    /// The session command this composition owns. Re-adopted on entry from
+    /// `SessionCommandLane`, so a command started before a project switch is
+    /// still this workspace's command when it is composed again.
+    pub(super) active_session_command: Option<ActiveSessionCommand>,
     /// Session displayed as a removal skeleton until its daemon command returns.
     pub(super) removing_session: Option<SessionId>,
     /// An in-flight create's controller token and the name drawn in its sidebar
@@ -92,8 +93,8 @@ impl WorkspaceIoRuntime {
     pub(super) fn new(
         workspace: WorkspaceView,
         session_commands: Box<dyn SessionCommandPort>,
+        session_completion_sender: Sender<SessionCommandCompletion>,
     ) -> Self {
-        let (session_completion_sender, session_completions) = mpsc::channel();
         let (pane_completion_sender, pane_completions) = mpsc::channel();
         Self {
             workspace,
@@ -102,9 +103,7 @@ impl WorkspaceIoRuntime {
             agent_resumes: BTreeMap::new(),
             agent_inventory: None,
             material_revision: 0,
-            session_completions,
             session_completion_sender,
-            next_session_command: 1,
             active_session_command: None,
             removing_session: None,
             creating_session: None,

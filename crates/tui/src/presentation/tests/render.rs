@@ -837,7 +837,7 @@ fn physical_wheel_follows_full_screen_program_input_modes() {
     ));
 
     let empty_view = WorkspaceView::with_runtime_ids(ws("empty"), empty_state("empty"), vec![]);
-    let mut empty_ui = WorkspaceIoRuntime::new(empty_view, Box::new(UnavailableSessionCommandPort));
+    let mut empty_ui = io_runtime(empty_view, Box::new(UnavailableSessionCommandPort));
     let mut empty_runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![]);
     let _ = empty_runtime.handle_key(Key::Live(LiveTerminalAction::Director));
     let drawer = crate::presentation::director_drawer::geometry(20, 80);
@@ -879,15 +879,14 @@ fn visible_old_ref_can_close_latest_lineage_while_fresh_observation_is_pending()
     initial.revision = 1;
     let durable = Arc::new(Mutex::new(initial));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::new(Mutex::new(Vec::new())),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
@@ -1015,7 +1014,7 @@ fn closing_selected_agent_keeps_it_visible_without_focus_drift() {
     });
     let durable = Arc::new(Mutex::new(intent));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],

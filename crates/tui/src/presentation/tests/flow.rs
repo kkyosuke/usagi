@@ -54,7 +54,7 @@ fn clicking_a_usagi_opens_that_agents_tab() {
         phase: usagi_core::domain::session_lifecycle::AgentPhase::Running,
     }));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
 
     // 区画の click（agent 無し）は tab を動かさない。
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
@@ -101,7 +101,7 @@ fn drawer_new_root_completion_commits_one_selected_exact_tab_across_reopen() {
     let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(workspace, Vec::new(), Box::new(UnavailableAgentCommandPort))
         .with_agent_tab_intent(
             workspace,
@@ -535,7 +535,8 @@ fn persistence_failures_leave_close_and_reopen_ui_unchanged_with_typed_notice() 
     let attempts = Arc::new(AtomicUsize::new(0));
     let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],
@@ -598,7 +599,7 @@ fn persistence_failures_leave_close_and_reopen_ui_unchanged_with_typed_notice() 
     let closed_bytes = serde_json::to_vec(&*closed.lock().unwrap()).unwrap();
     let reopen_attempts = Arc::new(AtomicUsize::new(0));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],
@@ -624,6 +625,7 @@ fn persistence_failures_leave_close_and_reopen_ui_unchanged_with_typed_notice() 
     drain_host_actions(
         &receiver,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -652,7 +654,7 @@ fn generic_close_survives_inventory_replay_until_explicit_open() {
     let terminal = scoped_terminal_ref(workspace, Some(session));
     let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],
@@ -834,7 +836,7 @@ fn reorder_control_commits_agent_lineages_in_the_new_stable_order() {
     let second = AgentContinuationRef::new();
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort))
         .with_agent_context(
             workspace,
             vec![session],

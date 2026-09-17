@@ -308,7 +308,8 @@ fn workflow_menu_selection_reaches_host_and_displays_loading_and_error() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let (host, actions) = ControllerHost::channel();
     let mut backend = DaemonBackend::new(
@@ -345,7 +346,13 @@ fn workflow_menu_selection_reaches_host_and_displays_loading_and_error() {
         for effect in runtime.handle_key(Key::Enter) {
             backend.dispatch(effect);
         }
-        drain_host_actions(&actions, &mut ui, &mut runtime, &mut pending);
+        drain_host_actions(
+            &actions,
+            &mut ui,
+            &mut command_lane,
+            &mut runtime,
+            &mut pending,
+        );
         assert_eq!(runtime.state().overlay(), None);
         assert!(
             matches!(runtime.active_pane().tabs(), [PaneTab::Ready(tab)] if tab.kind == PaneKind::Workflow)
@@ -842,7 +849,7 @@ fn work_run_routes_confirmations_and_console_activation_without_implicit_mutatio
     let run_id = run_with_director.supervisor_run_id;
     let overview_runs = crate::presentation::WorkRunProjection::fresh(vec![run_with_director]);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     ui.agent_inventory = Some(AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {

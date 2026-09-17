@@ -572,6 +572,35 @@ fn tui_presentation_discovers_session_catalogs_through_an_application_port() {
 }
 
 #[test]
+fn tui_frame_loop_reports_a_carried_session_outcome_after_its_entry_restores() {
+    // A composition's one-shot entry restores apply an `Enter` (Closeup) and a
+    // `VisitSession` (Garden), and both close whatever overlay is open. Reporting
+    // a carried create failure before them would open the create-failure dialog
+    // and dismiss it on the same frame, which is the silence #768 set out to fix.
+    // The frame loop has no seam to observe this from a unit test, so the order
+    // is fixed here.
+    let root = workspace_root();
+    let frame_loop = fs::read_to_string(root.join("crates/tui/src/presentation/frame_loop.rs"))
+        .expect("TUI frame loop is readable");
+    let deliver = frame_loop
+        .find("deliver_carried_outcome(lane,")
+        .expect("the frame loop delivers a carried session outcome");
+    for restore in [
+        "restore_workspace_closeup(deck,",
+        "pending_garden_visit.take()",
+    ] {
+        let at = frame_loop
+            .find(restore)
+            .unwrap_or_else(|| panic!("the frame loop still runs {restore}"));
+        assert!(
+            at < deliver,
+            "a carried session outcome must be reported after {restore}, or the \
+             entry restore dismisses the dialog on the frame it opened"
+        );
+    }
+}
+
+#[test]
 fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_module() {
     let root = workspace_root();
     let composition = fs::read_to_string(root.join("crates/tui/src/presentation/mod.rs"))

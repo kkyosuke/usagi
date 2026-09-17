@@ -168,7 +168,7 @@ fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
     let no_diffs = BTreeMap::new();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut pointer_gesture = false;
 
     for key in [
@@ -362,7 +362,7 @@ fn garden_arrow_wakes_home_without_reaching_the_surface_behind_it() {
                 .collect(),
         );
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut pointer_gesture = false;
 
     assert_eq!(
@@ -391,7 +391,7 @@ fn garden_list_keys_and_wheel_scroll_without_waking_the_terminal() {
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut gesture = false;
     let mut material = home_frame_material(
         24,
@@ -674,7 +674,7 @@ fn garden_routes_an_inactive_projects_agent_row_to_the_deck_shell() {
         })
         .expect("the inactive project's Agent row is clickable");
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut pointer_gesture = false;
 
     assert_eq!(
@@ -720,7 +720,7 @@ fn garden_consumes_every_kind_of_user_input_before_the_terminal() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let mut pointer_gesture = false;
     for key in user_interactions() {
@@ -770,7 +770,7 @@ fn garden_pointer_press_owns_its_drag_and_release_after_dismissal() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.apply_event(AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
     let mut pointer_gesture = false;
@@ -1097,7 +1097,7 @@ fn garden_hover_never_wakes_activates_or_leaks_to_the_covered_terminal() {
     let session = SessionId::new();
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let key = Key::Pointer(PointerEvent {
         kind: PointerKind::Move,
         column: 10,
