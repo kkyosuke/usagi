@@ -2106,7 +2106,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
     let mut registry = workspaces.clone();
     let mut welcome = Welcome::new(recent);
     welcome.set_notice(notice);
-    let mut open = open_from_registry(workspaces, welcome.recent());
+    let mut open = open_from_registry(workspaces, welcome.all_recent());
     let mut new_form = New::default();
     let mut config_form = Config::load_with_available_models(settings, available_models);
     let mut screen = match start {

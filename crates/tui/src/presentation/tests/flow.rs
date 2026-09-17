@@ -2935,6 +2935,35 @@ fn open_prev_wraps_and_escape_returns_to_welcome() {
 }
 
 #[test]
+fn open_list_keeps_registry_entries_the_recent_projection_does_not_carry() {
+    // Welcome の recent カードは 3 枠だが、Open は登録済みを 1 件も落とさない。
+    let registry = vec![ws("alpha"), ws("beta"), ws("gamma"), ws("delta")];
+    // delta は単体 recent と Unite card の両方に現れる（production の `recent()` は常にこの形）。
+    let projection = vec![
+        Recent::Workspace(WorkspaceOverview::new(ws("delta"), 2, 3, 4)),
+        Recent::Unite(UniteOverview::new(vec![
+            WorkspaceOverview::new(ws("delta"), 2, 3, 4),
+            WorkspaceOverview::new(ws("gamma"), 1, 1, 1),
+        ])),
+    ];
+
+    let open = open_from_registry(registry, &projection);
+
+    let names = open
+        .workspaces()
+        .iter()
+        .map(|workspace| workspace.name.clone())
+        .collect::<Vec<_>>();
+    // 両方に現れる path も 1 行だけになる。
+    assert_eq!(names, ["alpha", "beta", "delta", "gamma"]);
+    // 単体 recent も Unite card の member も集計値を保ち、どちらにも無い entry だけ 0 件で補われる。
+    let rendered = render_open(24, 80, &open, now()).join("\n");
+    assert!(rendered.contains("⎇ 2 sessions"));
+    assert!(rendered.contains("⎇ 1 session"));
+    assert!(rendered.contains("⎇ 0 sessions"));
+}
+
+#[test]
 fn open_touch_keeps_workspace_open_when_escape_is_pressed() {
     let alpha = ws_minutes_ago("alpha", 20);
     let beta = ws_minutes_ago("beta", 10);
