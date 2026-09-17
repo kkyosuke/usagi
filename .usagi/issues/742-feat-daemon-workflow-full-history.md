@@ -1,13 +1,13 @@
 ---
 number: 742
 title: feat(daemon): workflow 履歴に phase を動かさないメッセージも残す
-status: todo
+status: done
 priority: medium
 labels: [v2, daemon, tui, workflow]
 dependson: []
 related: []
 created_at: 2026-09-12T00:00:00+00:00
-updated_at: 2026-09-12T00:00:00+00:00
+updated_at: 2026-09-18T00:00:00+00:00
 ---
 
 ## 問題
@@ -27,8 +27,8 @@ updated_at: 2026-09-12T00:00:00+00:00
 
 ## 受入条件
 
-- [ ] phase を動かさないメッセージも履歴に残る。
-- [ ] 各エントリに時刻と actor と kind がある。
-- [ ] phase を動かしたエントリが区別できる。
-- [ ] 上限 100 件・本文 512 文字が維持される。
-- [ ] 旧レコードを読み込んでも壊れない。
+- [x] phase を動かさないメッセージも履歴に残る。
+- [x] 各エントリに時刻と actor と kind がある。
+- [x] phase を動かしたエントリが区別できる。
+- [x] 上限 100 件・本文 512 文字が維持される。
+- [x] 旧レコードを読み込んでも壊れない。

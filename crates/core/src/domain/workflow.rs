@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::agent_message::ReviewTarget;
+use chrono::{DateTime, Utc};
+
+use super::agent_message::{MessageKind, ReviewTarget};
 use super::id::{AgentId, OperationId, SessionId};
 
 /// Provider choices retained with each run and used as the next workspace defaults.
@@ -180,11 +182,28 @@ pub struct WorkflowRun {
     pub history: Vec<WorkflowHistoryEntry>,
 }
 
+/// Records written before the history carried a kind read as a plain message.
+fn plain_message() -> MessageKind {
+    MessageKind::Message
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowHistoryEntry {
     pub id: OperationId,
     pub actor: String,
     pub body: String,
+    /// When the message was sent. `None` only for records written before the
+    /// history carried time, which is exactly the state the pane could not tell
+    /// apart from "nothing has happened".
+    #[serde(default)]
+    pub at: Option<DateTime<Utc>>,
+    #[serde(default = "plain_message")]
+    pub kind: MessageKind,
+    /// Whether this is the message that moved the run's phase or review. Every
+    /// message is recorded now, so the few that advanced the run have to stay
+    /// distinguishable from the many that did not.
+    #[serde(default)]
+    pub advanced: bool,
 }
 
 impl WorkflowRun {
@@ -692,5 +711,35 @@ mod tests {
         ] {
             assert!(!phase.label().is_empty());
         }
+    }
+
+    #[test]
+    fn a_history_entry_written_before_time_and_kind_still_loads() {
+        // Records persisted by an earlier build carry only the three original
+        // fields. They must keep loading, and read as an ordinary message that
+        // moved nothing.
+        let legacy =
+            r#"{"id":"01890000-0000-7000-8000-000000000000","actor":"claude","body":"Plan ready"}"#;
+        let entry: WorkflowHistoryEntry =
+            serde_json::from_str(legacy).expect("a legacy history entry loads");
+        assert_eq!(entry.actor, "claude");
+        assert_eq!(entry.at, None);
+        assert_eq!(entry.kind, MessageKind::Message);
+        assert!(!entry.advanced);
+
+        // A record written now round-trips with all three.
+        let entry = WorkflowHistoryEntry {
+            id: OperationId::new(),
+            actor: "codex".into(),
+            body: "Approved".into(),
+            at: Some(DateTime::from_timestamp(1_700_000_000, 0).expect("a valid instant")),
+            kind: MessageKind::Approved,
+            advanced: true,
+        };
+        let text = serde_json::to_string(&entry).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<WorkflowHistoryEntry>(&text).expect("round trip"),
+            entry
+        );
     }
 }

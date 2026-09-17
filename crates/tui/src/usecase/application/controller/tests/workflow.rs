@@ -684,6 +684,9 @@ fn history_scrolling_is_bounded_and_returns_to_the_latest_in_one_operation() {
         id: usagi_core::domain::id::OperationId::new(),
         actor: "claude".into(),
         body: format!("entry {index}"),
+        at: None,
+        kind: usagi_core::domain::agent_message::MessageKind::Message,
+        advanced: false,
     };
     run.history.extend((0..12).map(entry));
     let land = |state: &mut AppState, run: &usagi_core::domain::workflow::WorkflowRun| {

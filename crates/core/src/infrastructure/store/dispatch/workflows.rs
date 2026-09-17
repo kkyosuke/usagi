@@ -408,6 +408,9 @@ mod tests {
                 id: OperationId::new(),
                 actor: "Codex".into(),
                 body: "x".repeat(MAX_BYTES),
+                at: None,
+                kind: crate::domain::agent_message::MessageKind::Message,
+                advanced: false,
             }],
         };
         store
