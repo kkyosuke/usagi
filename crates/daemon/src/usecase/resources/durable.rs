@@ -910,6 +910,36 @@ impl LiveCensus {
             ResourceKind::Terminal => self.terminals += 1,
         }
     }
+
+    /// Fold another count into this one, pool by pool.
+    ///
+    /// Summing the fields at each call site would let a third pool compile and
+    /// be silently dropped; this keeps the set of pools in one place with
+    /// [`Self::add`].
+    fn merge(&mut self, other: Self) {
+        let Self { agents, terminals } = other;
+        self.agents += agents;
+        self.terminals += terminals;
+    }
+}
+
+/// How much live runtime one generation's shard holds, per pool.
+///
+/// [`census`] sums this across every retained shard. A lifecycle verb that has
+/// to explain *which* generation is holding something apart needs the same
+/// count for one owner alone, so the per-shard step is named rather than
+/// inlined twice.
+#[must_use]
+pub fn shard_census(document: &ShardDocument) -> LiveCensus {
+    let mut census = LiveCensus::default();
+    for entry in document
+        .resources
+        .iter()
+        .filter(|entry| entry.state.is_live())
+    {
+        census.add(entry.kind);
+    }
+    census
 }
 
 /// Count the live runtime this data directory holds, writing nothing.
@@ -928,13 +958,7 @@ pub fn census(archive: &dyn ShardArchive) -> Result<LiveCensus, ResourceFailure>
     for raw in archive.documents()? {
         let document = shard_document(&raw)?;
         document.validate()?;
-        for entry in document
-            .resources
-            .iter()
-            .filter(|entry| entry.state.is_live())
-        {
-            census.add(entry.kind);
-        }
+        census.merge(shard_census(&document));
     }
     let legacy = archive.legacy()?;
     let agents = legacy.agents.as_deref().map(legacy_agents).transpose()?;
