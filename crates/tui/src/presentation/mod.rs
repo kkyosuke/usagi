@@ -3555,17 +3555,30 @@ fn drain_session_completions(ui: &mut WorkspaceIoRuntime, lane: &mut SessionComm
     }
 }
 
-/// Replay a create that finished while its workspace was not on screen into the
-/// composition that now owns it.
+/// Hand a fresh composition everything the lane still holds for its workspace.
 ///
-/// A success is a notice naming the session, so the row the resident lane has
-/// already brought back is explained instead of appearing unannounced. A failure
-/// keeps the create-failure dialog it would have opened had the user stayed.
-fn deliver_carried_create(runtime: &mut WorkspaceRuntime, carried: CarriedCreate) {
-    let _ = runtime.apply_event(AppEvent::CarriedCreateOutcome {
-        name: carried.name,
-        error: carried.error,
-    });
+/// Two things outlive the composition a create was started in: the command
+/// itself, which must stay this workspace's command so its completion is not
+/// fenced out as stale, and a create outcome that landed while another project
+/// was on screen, which must still be reported (#768).
+///
+/// A carried success is a notice naming the session, so the row the workspace
+/// reopened with is explained instead of appearing unannounced. A carried
+/// failure keeps the create-failure dialog it would have opened had the user
+/// stayed.
+fn adopt_session_command_lane(
+    lane: &mut SessionCommandLane,
+    workspace: &Path,
+    ui: &mut WorkspaceIoRuntime,
+    runtime: &mut WorkspaceRuntime,
+) {
+    ui.active_session_command = lane.in_flight(workspace).map(|command| command.id);
+    if let Some(carried) = lane.take_carried(workspace) {
+        let _ = runtime.apply_event(AppEvent::CarriedCreateOutcome {
+            name: carried.name,
+            error: carried.error,
+        });
+    }
 }
 
 /// Reconcile one daemon lifecycle snapshot into the session cache, ignoring a
@@ -7606,15 +7619,9 @@ fn drive_workspace_controller(
             composition.agent_tab_intents,
         )
         .with_external_terminal(composition.external_terminal);
-    // Re-adopt the session command this workspace already had in flight. The
-    // composition is new but the command is not, so its completion still lands
-    // on the workspace that started it instead of being fenced out (#768).
-    ui.active_session_command = lane.in_flight(&root_cwd).map(|command| command.id);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
-    if let Some(carried) = lane.take_carried(&root_cwd) {
-        deliver_carried_create(&mut runtime, carried);
-    }
+    adopt_session_command_lane(lane, &root_cwd, &mut ui, &mut runtime);
     restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;

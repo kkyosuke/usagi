@@ -6694,6 +6694,149 @@ fn drain_session_completions_refluxes_create_failure_with_its_token() {
 }
 
 #[test]
+fn a_create_that_lands_after_its_project_left_is_carried_to_the_next_composition() {
+    // The user started a create, switched projects, and the daemon answered
+    // while another project owned the screen. The composition that started it is
+    // gone, so the completion no longer matches any admitted command — but its
+    // outcome must not vanish with the composition that asked for it (#768).
+    let snapshot = snapshot("demo");
+    let view =
+        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let (completions, _receiver) =
+        crate::usecase::application::daemon_backend::Completions::channel();
+    let command_id = command_lane
+        .admit(&workspace_path, Some("atlas".to_owned()))
+        .expect("an idle workspace admits its first command");
+
+    // A torn-down composition leaves no admitted command behind.
+    ui.active_session_command = None;
+    ui.session_completion_sender
+        .send(super::SessionCommandCompletion {
+            workspace: workspace_path.clone(),
+            command_id,
+            result: Err("daemon refused the session\ninternal detail".to_owned()),
+            completion: super::SessionBackendCompletion::Create {
+                token: PendingToken::from_raw(7),
+                before: Vec::new(),
+                completions,
+            },
+        })
+        .unwrap();
+    super::drain_session_completions(&mut ui, &mut command_lane);
+
+    // The admission is released and only the safe first line is carried.
+    assert!(command_lane.in_flight(&workspace_path).is_none());
+    assert_eq!(
+        command_lane.take_carried(&workspace_path),
+        Some(super::CarriedCreate {
+            name: "atlas".to_owned(),
+            error: Some("daemon refused the session".to_owned()),
+        })
+    );
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
+#[test]
+fn a_reopened_project_adopts_its_in_flight_command_and_its_carried_outcome() {
+    // Coming back to a project must not fence out the command it still has in
+    // flight, and an outcome parked while it was away has to be reported (#768).
+    let snapshot = snapshot("demo");
+    let workspace_id = snapshot.workspace_id;
+    let view = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        snapshot.session_ids.clone(),
+    );
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let mut runtime = WorkspaceRuntime::new(workspace_id, snapshot.session_ids);
+
+    // Nothing parked: a fresh composition adopts nothing and reports nothing.
+    super::adopt_session_command_lane(&mut command_lane, &workspace_path, &mut ui, &mut runtime);
+    assert_eq!(ui.active_session_command, None);
+    assert_eq!(runtime.state().overlay(), None);
+
+    let command_id = command_lane
+        .admit(&workspace_path, Some("atlas".to_owned()))
+        .expect("an idle workspace admits its first command");
+    command_lane.carry(
+        &workspace_path,
+        super::CarriedCreate {
+            name: "atlas".to_owned(),
+            error: Some("worktree path already exists".to_owned()),
+        },
+    );
+
+    super::adopt_session_command_lane(&mut command_lane, &workspace_path, &mut ui, &mut runtime);
+    assert_eq!(ui.active_session_command, Some(command_id));
+    assert_eq!(
+        runtime.state().overlay(),
+        Some(crate::usecase::application::controller::Overlay::CreateSessionError)
+    );
+    // The outcome is delivered exactly once.
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
+#[test]
+fn a_remove_that_lands_after_its_project_left_is_dropped() {
+    // Only a create leaves a pending row and a dialog the user must still see.
+    // A remove that returns to a torn-down composition stays dropped (#768).
+    let snapshot = snapshot("demo");
+    let view =
+        WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort));
+    let workspace_path = ui.workspace.record().path.clone();
+    let (completions, _receiver) =
+        crate::usecase::application::daemon_backend::Completions::channel();
+    let command_id = command_lane
+        .admit(&workspace_path, None)
+        .expect("an idle workspace admits its first command");
+
+    ui.active_session_command = None;
+    ui.session_completion_sender
+        .send(super::SessionCommandCompletion {
+            workspace: workspace_path.clone(),
+            command_id,
+            result: Err("daemon refused the removal".to_owned()),
+            completion: super::SessionBackendCompletion::Remove {
+                session: SessionId::new(),
+                before: Vec::new(),
+                completions,
+            },
+        })
+        .unwrap();
+    super::drain_session_completions(&mut ui, &mut command_lane);
+
+    assert!(command_lane.in_flight(&workspace_path).is_none());
+    assert!(command_lane.take_carried(&workspace_path).is_none());
+}
+
+#[test]
+fn a_stale_completion_releases_no_admission_its_workspace_does_not_own() {
+    // A completion whose identity the workspace no longer owns must not release
+    // a newer command's admission.
+    let mut command_lane = SessionCommandLane::new();
+    let workspace_path = std::path::PathBuf::from("/tmp/demo");
+    let newer = command_lane
+        .admit(&workspace_path, Some("atlas".to_owned()))
+        .expect("an idle workspace admits its first command");
+    assert!(command_lane.admit(&workspace_path, None).is_none());
+    assert!(
+        command_lane
+            .finish(&workspace_path, newer.wrapping_add(1))
+            .is_none()
+    );
+    assert!(command_lane.in_flight(&workspace_path).is_some());
+    assert!(command_lane.finish(&workspace_path, newer).is_some());
+    assert!(command_lane.in_flight(&workspace_path).is_none());
+}
+
+#[test]
 fn session_commands_reject_the_second_request_as_busy() {
     let snapshot = snapshot("demo");
     let view =

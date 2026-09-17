@@ -3679,6 +3679,72 @@ fn a_failed_create_opens_the_error_dialog_with_only_the_safe_message() {
 }
 
 #[test]
+fn a_create_carried_back_from_another_project_reports_without_a_pending_row() {
+    // The create finished while another project owned the screen, so this state
+    // has no pending row to match and no form to clear. The outcome still has to
+    // reach the user (#768).
+    let (workspace, _, _) = ids();
+
+    let mut succeeded = AppState::home(workspace, Vec::new());
+    let effects = update(
+        &mut succeeded,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: None,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(succeeded.overlay(), None);
+    assert_eq!(
+        succeeded.notice().map(|notice| notice.message.as_str()),
+        Some("session atlas created")
+    );
+
+    let mut failed = AppState::home(workspace, Vec::new());
+    let effects = update(
+        &mut failed,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: Some("worktree path already exists".to_owned()),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(failed.overlay(), Some(Overlay::CreateSessionError));
+    assert_eq!(
+        failed
+            .create_session_error()
+            .map(|notice| notice.message.as_str()),
+        Some("worktree path already exists")
+    );
+    assert!(failed.sessions().is_empty());
+    assert_eq!(failed.active(), None);
+}
+
+#[test]
+fn a_carried_create_failure_keeps_an_open_overlay_and_notices_instead() {
+    // The same rule the in-composition failure follows: a dialog never clobbers
+    // an overlay the user already has open.
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    state.overlay = Some(Overlay::Garden);
+
+    let effects = update(
+        &mut state,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: Some("daemon unavailable".to_owned()),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(state.overlay(), Some(Overlay::Garden));
+    assert!(state.create_session_error().is_none());
+    assert_eq!(
+        state.notice().map(|notice| notice.message.as_str()),
+        Some("daemon unavailable")
+    );
+}
+
+#[test]
 fn dismissing_the_create_error_dialog_returns_to_home_without_residue() {
     let (workspace, _, _) = ids();
     for dismiss in [AppKey::Escape, AppKey::Enter, AppKey::CtrlC] {
