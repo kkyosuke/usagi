@@ -160,7 +160,14 @@ fn every_refusal_names_itself() {
             observed: 2,
         },
         RolloverRefusal::RoutingAdmissionBusy,
-        RolloverRefusal::McpAuthorityRetained { credentials: 1 },
+        RolloverRefusal::McpAuthorityRetained {
+            credentials: 1,
+            restart_requested: false,
+        },
+        RolloverRefusal::McpAuthorityRetained {
+            credentials: 1,
+            restart_requested: true,
+        },
         RolloverRefusal::McpAuthorityUnavailable,
         RolloverRefusal::AgentRestartRefused {
             reason: "agent selection changed".to_owned(),
@@ -168,6 +175,34 @@ fn every_refusal_names_itself() {
     ] {
         assert!(!refusal.to_string().is_empty());
     }
+    // The one refusal an operator can act on says how: `--force` would destroy
+    // the conversations this refusal just protected, so the remedy that keeps
+    // them is part of the message.
+    let retained = RolloverRefusal::McpAuthorityRetained {
+        credentials: 2,
+        restart_requested: false,
+    }
+    .to_string();
+    assert!(retained.contains("2 daemon-provisioned MCP caller credential(s)"));
+    assert!(
+        retained.contains("usagi daemon restart --restart-agents"),
+        "the refusal leaves the operator without a non-destructive route: {retained}"
+    );
+    // Having already asked for the restart, asking again would change nothing,
+    // so the same refusal stops offering it.
+    let again = RolloverRefusal::McpAuthorityRetained {
+        credentials: 2,
+        restart_requested: true,
+    }
+    .to_string();
+    assert!(
+        again.contains("even after the requested Agent restart"),
+        "{again}"
+    );
+    assert!(
+        !again.contains("--restart-agents"),
+        "the refusal repeats a remedy that was already applied: {again}"
+    );
     assert_eq!(
         ParticipantRouting::of(&routing_client()),
         ParticipantRouting {

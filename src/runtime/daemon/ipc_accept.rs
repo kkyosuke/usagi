@@ -42,20 +42,21 @@ use super::{
     dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
     dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
     dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
-    dispatch_supervisor_tool, dispatch_user_decision, ensure_private_dir, ensure_private_dir_all,
-    envelope, expected_client_disconnect, handle_bootstrap_broker_request, is_same_child,
-    launch_broker_daemon, live_generation_endpoints, new_terminal_runtime,
+    dispatch_supervisor_tool, dispatch_user_decision, draining_collection, ensure_private_dir,
+    ensure_private_dir_all, envelope, expected_client_disconnect, handle_bootstrap_broker_request,
+    is_same_child, launch_broker_daemon, live_generation_endpoints, new_terminal_runtime,
     observe_generation_process, open_agent_runtime, open_runtime_state, parent_pid, peer_pid,
-    process_group, process_start_identity, readable_within, reconcile_orphan_delegations,
-    reconcile_pending_supervisor_promotions, reconcile_removed_session_agents,
-    reconcile_startup_supervisor_promotions, reconcile_startup_supervisor_workers,
-    request_mcp_credential, retain_client_worker, retire_stale_current_preserving,
-    seamless_refusal, spawn_bootstrap_broker, spawn_broker_idle_watch, spawn_critical_worker,
-    start_connection_cleanup_worker, start_custody_worker, start_daemon_agent_restart_recovery,
-    start_decision_maintenance, start_draining_collection_worker, start_orphan_cleanup_worker,
-    start_pr_projection_worker, start_pr_refresh_worker, start_retention_gc_worker,
-    start_session_teardown_worker, start_supervisor_recovery, start_tenant_retire_worker,
-    start_workflow_lane, terminal_capacity_limit, terminal_environment, trusted_repository_root,
+    process_group, process_start_identity, read_allocator_document, read_shard_documents,
+    readable_within, reconcile_orphan_delegations, reconcile_pending_supervisor_promotions,
+    reconcile_removed_session_agents, reconcile_startup_supervisor_promotions,
+    reconcile_startup_supervisor_workers, request_mcp_credential, retain_client_worker,
+    retire_stale_current_preserving, seamless_refusal, spawn_bootstrap_broker,
+    spawn_broker_idle_watch, spawn_critical_worker, start_connection_cleanup_worker,
+    start_custody_worker, start_daemon_agent_restart_recovery, start_decision_maintenance,
+    start_draining_collection_worker, start_orphan_cleanup_worker, start_pr_projection_worker,
+    start_pr_refresh_worker, start_retention_gc_worker, start_session_teardown_worker,
+    start_supervisor_recovery, start_tenant_retire_worker, start_workflow_lane,
+    terminal_capacity_limit, terminal_environment, trusted_repository_root,
     unexpected_daemon_response_entry,
 };
 
@@ -90,6 +91,11 @@ impl IdentityAuthority for ObservedChildren {
 /// An unreadable or unparsable registry is reported as such rather than treated
 /// as absent, so an operator sees the difference between "no daemon ever
 /// registered a generation" and "the registry cannot be trusted".
+///
+/// The draining predecessor's own shard and the global allocator are read too,
+/// so a refusal about a wait can name what that wait is. Both reads are best
+/// effort: an unobservable wait leaves the refusal without a cause rather than
+/// with a guessed one.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 pub(super) fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
     match usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir) {
@@ -101,7 +107,29 @@ pub(super) fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefus
                     observe_generation_process(&entry.process)
                         == ProcessObservation::VerifiedAlive(entry.process.clone())
                 });
-            seamless_refusal(document.as_ref(), active_is_alive, DEFAULT_GENERATION_LIMIT)
+            let refusal = seamless_refusal(
+                document.as_ref(),
+                active_is_alive,
+                DEFAULT_GENERATION_LIMIT,
+                None,
+            );
+            // Only the refusal that is *about* a wait pays for observing it, so
+            // the lifecycle commands that never report one read nothing extra.
+            let Some(SeamlessRefusal::DrainingCollectionPending(None)) = refusal else {
+                return refusal;
+            };
+            let Some(registry) = document.as_ref() else {
+                return refusal;
+            };
+            let Ok(shards) = read_shard_documents(data_dir) else {
+                return refusal;
+            };
+            let Ok(allocator) = read_allocator_document(data_dir) else {
+                return refusal;
+            };
+            Some(SeamlessRefusal::DrainingCollectionPending(
+                draining_collection(registry, &shards, allocator.as_ref()),
+            ))
         }
         Err(error) => Some(SeamlessRefusal::RegistryUnreadable(error.to_string())),
     }

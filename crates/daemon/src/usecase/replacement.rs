@@ -46,6 +46,11 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_rollover_trigger};
 
 use crate::usecase::authority::registry::{REGISTRY_SCHEMA, RegistryDocument};
+use crate::usecase::generation::GenerationRole;
+use crate::usecase::resources::CasDocument as _;
+use crate::usecase::resources::allocator::AllocatorDocument;
+use crate::usecase::resources::durable::shard_census;
+use crate::usecase::resources::shard::{CollectionBlocker, ShardDocument, retired_collectable};
 use crate::usecase::stop::StaleDaemonCleanup;
 use crate::usecase::terminal::TerminalRuntimeState;
 use crate::usecase::{restart, stop};
@@ -79,12 +84,21 @@ impl LiveResources {
 }
 
 impl fmt::Display for LiveResources {
+    /// Name only the kinds that are actually live.
+    ///
+    /// A refusal is read to decide what to go and close, and "0 Agent
+    /// runtime(s) and 3 generic terminal(s)" makes the reader rule out a kind
+    /// that was never there. Both counts appear only when both are non-zero.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} Agent runtime(s) and {} generic terminal(s)",
-            self.agents, self.terminals
-        )
+        match (self.agents, self.terminals) {
+            (0, 0) => f.write_str("no live runtime"),
+            (0, terminals) => write!(f, "{terminals} generic terminal(s)"),
+            (agents, 0) => write!(f, "{agents} Agent runtime(s)"),
+            (agents, terminals) => write!(
+                f,
+                "{agents} Agent runtime(s) and {terminals} generic terminal(s)"
+            ),
+        }
     }
 }
 
@@ -157,6 +171,100 @@ pub trait RetainedGenerationControl {
     fn shutdown_all(&self) -> io::Result<()>;
 }
 
+/// The part of the draining refusal that is true whether or not the wait itself
+/// could be observed.
+const DRAINING_COLLECTION_PENDING: &str = "the generation limit is already reached while a draining generation is still awaiting collection";
+
+/// What the draining predecessor is still waiting on before it can be collected.
+///
+/// A rollover that hits the retained-generation limit is correct behaviour, but
+/// "still awaiting collection" is not something an operator can act on: the
+/// wait ends when one named condition clears, and only one of those conditions
+/// is theirs to clear (closing the terminals the old generation still serves).
+/// So the refusal carries both the condition and what that generation owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainingCollection {
+    /// The first condition that still holds for that generation, or `None` when
+    /// every one of them has cleared and only its own collection pass is
+    /// outstanding.
+    pub blocker: Option<CollectionBlocker>,
+    /// What it still owns, which is what there is to go and close.
+    pub live: LiveResources,
+}
+
+impl fmt::Display for DrainingCollection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.blocker {
+            // The one condition the operator can clear themselves, so it is the
+            // one that names what to go and close.
+            Some(CollectionBlocker::LiveResource) => {
+                write!(f, "it still serves {}", self.live)
+            }
+            Some(CollectionBlocker::InFlightCommand) => {
+                f.write_str("a terminal command it accepted has not completed")
+            }
+            Some(CollectionBlocker::UnackedOutbox) => {
+                f.write_str("its exit events have not been applied yet")
+            }
+            Some(CollectionBlocker::CapacityClaim) => f.write_str("it still holds capacity claims"),
+            None => f.write_str("its collection pass has not run yet"),
+        }
+    }
+}
+
+/// What the registry's draining predecessor is waiting on, read from its own
+/// durable state.
+///
+/// `None` means no answer can be given rather than "nothing is blocking": the
+/// registry may name no draining generation at all, or its shard may be missing
+/// or unparsable. A refusal that cannot read the cause says so by omission
+/// instead of naming one it did not observe. A predecessor whose conditions
+/// have all cleared is a different answer, and is reported as one.
+///
+/// Only the draining role is inspected. The active generation is still issuing
+/// claims, so a condition observed on it would say nothing about the wait.
+///
+/// The registry retains at most one draining generation (the limit is one
+/// draining plus one active, and this refusal is only reached with a live
+/// active), so the first one found is the one the wait is about. A shard whose
+/// own invariants do not hold is skipped rather than interpreted with this
+/// build's field semantics.
+///
+/// `allocator` is `None` when the global allocator could not be read. That is
+/// not the same as an empty one: capacity claims are the last condition
+/// [`retired_collectable`] checks, so a lost allocator would silently turn a
+/// real claim into "nothing is blocking". Without it, no cause is reported.
+#[must_use]
+pub fn draining_collection(
+    registry: &RegistryDocument,
+    shards: &[ShardDocument],
+    allocator: Option<&AllocatorDocument>,
+) -> Option<DrainingCollection> {
+    let allocator = allocator?;
+    for entry in &registry.generations {
+        if entry.role != GenerationRole::Draining {
+            continue;
+        }
+        for shard in shards {
+            if shard.owner != entry.generation || shard.validate().is_err() {
+                continue;
+            }
+            let live = shard_census(shard);
+            return Some(DrainingCollection {
+                // The owner's own check sweeps its outbox before reading it;
+                // from outside that sweep has not run, so the measure that does
+                // not need it is the one that tells the truth here.
+                blocker: retired_collectable(shard, allocator).err(),
+                live: LiveResources {
+                    agents: live.agents,
+                    terminals: live.terminals,
+                },
+            });
+        }
+    }
+    None
+}
+
 /// Why this build cannot hand authority to a live successor.
 ///
 /// Every variant is a statement about the durable generation registry, so the
@@ -178,7 +286,12 @@ pub enum SeamlessRefusal {
     /// The retained-generation limit is occupied by a predecessor that is
     /// correctly still draining. Refuse a repeated rollover rather than
     /// overwriting it or disguising the wait as a generic capacity failure.
-    DrainingCollectionPending,
+    ///
+    /// The payload is what that predecessor is still waiting on, when its
+    /// durable state could be observed. `None` keeps the refusal honest when it
+    /// could not: the limit is still reached, but this build will not name a
+    /// cause it did not read.
+    DrainingCollectionPending(Option<DrainingCollection>),
 }
 
 impl fmt::Display for SeamlessRefusal {
@@ -197,9 +310,13 @@ impl fmt::Display for SeamlessRefusal {
                 f.write_str("no live registered active generation exists")
             }
             Self::GenerationLimit => f.write_str("the generation limit is already reached"),
-            Self::DrainingCollectionPending => f.write_str(
-                "the generation limit is already reached while a draining generation is still awaiting collection",
-            ),
+            // "awaiting collection" alone leaves the operator with nothing to
+            // act on: the wait ends when the predecessor's last condition
+            // clears, so the refusal names that condition.
+            Self::DrainingCollectionPending(Some(waiting)) => {
+                write!(f, "{DRAINING_COLLECTION_PENDING}: {waiting}")
+            }
+            Self::DrainingCollectionPending(None) => f.write_str(DRAINING_COLLECTION_PENDING),
         }
     }
 }
@@ -207,6 +324,9 @@ impl fmt::Display for SeamlessRefusal {
 /// Why this build cannot hand authority to a live successor right now.
 ///
 /// The answer comes from the durable registry plus exact liveness observation.
+/// `draining` is what the retained predecessor is waiting on, as
+/// [`draining_collection`] observed it; it is reported only by the one refusal
+/// that is about that wait.
 /// A free generation slot is required because the synthesis root stages the
 /// successor after this preflight.
 #[must_use]
@@ -214,6 +334,7 @@ pub fn seamless_refusal(
     registry: Option<&RegistryDocument>,
     active_is_alive: bool,
     generation_limit: usize,
+    draining: Option<DrainingCollection>,
 ) -> Option<SeamlessRefusal> {
     let Some(document) = registry else {
         return Some(SeamlessRefusal::NoGenerationRegistry);
@@ -231,9 +352,9 @@ pub fn seamless_refusal(
         if document
             .generations
             .iter()
-            .any(|entry| entry.role == crate::usecase::generation::GenerationRole::Draining)
+            .any(|entry| entry.role == GenerationRole::Draining)
         {
-            SeamlessRefusal::DrainingCollectionPending
+            SeamlessRefusal::DrainingCollectionPending(draining)
         } else {
             SeamlessRefusal::GenerationLimit
         },
@@ -333,6 +454,12 @@ pub fn manual_operation_id(build: &BuildIdentity, channel: &str) -> Option<Opera
 }
 
 /// Refuse a transition that would destroy live runtime.
+///
+/// This refusal is reached only when a seamless prerequisite is missing
+/// ([`plan_replacement`]), and `--restart-agents` is planned the same way — so
+/// it would meet the same refusal. Naming it here would send the operator round
+/// a loop; the refusal that *can* be cleared that way names it instead
+/// ([`crate::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained`]).
 fn refuse_live(action: &str, live: LiveResources, why: Option<&SeamlessRefusal>) -> io::Error {
     let reason = why.map_or_else(String::new, |refusal| format!("; {refusal}"));
     io::Error::new(
