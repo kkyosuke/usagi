@@ -2344,6 +2344,20 @@ pub enum AppEvent {
     Backend(BackendEvent),
     /// request completion。
     OperationResult(OperationResult),
+    /// A session create that finished while its workspace was not the composed
+    /// project.
+    ///
+    /// Its `OperationResult` sink was a clone of that composition's completion
+    /// channel and died with it, and the pending row it would have matched is
+    /// gone too. The shell replays the outcome here so a create the user started
+    /// before switching projects is still reported when they come back (#768).
+    CarriedCreateOutcome {
+        /// Name the user typed, so a success names its session.
+        name: String,
+        /// `None` when the daemon created the session, otherwise the safe
+        /// message the create-failure dialog shows.
+        error: Option<String>,
+    },
     /// The shell finished exactly one drawer-originated workspace-root Agent
     /// launch. A mismatched operation is ignored, preserving the in-flight
     /// fence against stale or replayed completions.
@@ -3487,6 +3501,23 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
                 // being clobbered by the dialog.
                 state.create_session_error = result.notice;
                 state.overlay = Some(Overlay::CreateSessionError);
+            }
+            Vec::new()
+        }
+        AppEvent::CarriedCreateOutcome { name, error } => {
+            let Some(message) = error else {
+                // The row itself is already back: this workspace was reopened
+                // after the create finished. Name it so it is not an unexplained
+                // new row (#768).
+                state.notice = Some(Notice::new(format!("session {name} created")));
+                return Vec::new();
+            };
+            let notice = Notice::new(message);
+            if state.overlay.is_none() && !state.workspace_drawer_open() {
+                state.create_session_error = Some(notice);
+                state.overlay = Some(Overlay::CreateSessionError);
+            } else {
+                state.notice = Some(notice);
             }
             Vec::new()
         }

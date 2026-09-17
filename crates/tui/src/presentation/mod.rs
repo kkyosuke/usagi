@@ -1584,11 +1584,12 @@ struct WorkspaceIoRuntime {
     /// lane. Kept as draw material for the read-only daemon status modal.
     agent_inventory: Option<AgentInventory>,
     material_revision: u64,
-    session_completions: Receiver<SessionCommandCompletion>,
+    /// Sink the lane hands to every session-command worker. It outlives this
+    /// composition, so a completion is never dropped by a project switch (#768).
     session_completion_sender: Sender<SessionCommandCompletion>,
-    /// Monotonic fence for the one admitted session command. A delayed or
-    /// synthetic completion can never return its port into a newer command.
-    next_session_command: u64,
+    /// Lane identity of the command this composition owns. Re-adopted on entry
+    /// from [`SessionCommandLane`], so a command started before a project
+    /// switch is still this workspace's command when it is composed again.
     active_session_command: Option<u64>,
     /// Session displayed as a removal skeleton until its daemon command returns.
     removing_session: Option<SessionId>,
@@ -1972,9 +1973,118 @@ struct AgentContext {
 }
 
 struct SessionCommandCompletion {
+    /// Workspace the command was started for. A completion outlives the
+    /// composition that started it, so it names its own workspace instead of
+    /// being assumed to belong to whichever project is on screen (#768).
+    workspace: PathBuf,
     command_id: u64,
     result: Result<SessionCommandResult, String>,
     completion: SessionBackendCompletion,
+}
+
+/// A create that finished while its workspace was not the composed project.
+///
+/// The worker's own `OperationResult` sink is a clone of the composition's
+/// completion channel, so it is already closed by the time such a create lands.
+/// This is what the shell replays into the workspace's next composition instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CarriedCreate {
+    /// Name the user typed, echoed back so the outcome names its session.
+    name: String,
+    /// `None` when the daemon created the session, otherwise the safe message.
+    error: Option<String>,
+}
+
+/// One session command admitted for a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InFlightSessionCommand {
+    /// Lane-wide identity. Unique across compositions, so a completion from a
+    /// torn-down composition can never be mistaken for a newer command.
+    id: u64,
+    /// Name drawn in the create skeleton; `None` for remove and sleep.
+    create_name: Option<String>,
+}
+
+/// Session-command lane that outlives one workspace composition.
+///
+/// A create/remove worker is detached, but the composition that started it is
+/// torn down on every project switch ([`enter_workspace_deck`]). Parking the
+/// completion channel, the admitted identity, and a create's outcome here is
+/// what keeps a create that finishes while another project is on screen from
+/// disappearing with its sink (#768). Admission is per workspace, so two
+/// projects can each have one command in flight while a single project still
+/// admits exactly one.
+struct SessionCommandLane {
+    sender: Sender<SessionCommandCompletion>,
+    completions: Receiver<SessionCommandCompletion>,
+    next_command: u64,
+    in_flight: BTreeMap<PathBuf, InFlightSessionCommand>,
+    carried: BTreeMap<PathBuf, CarriedCreate>,
+}
+
+impl SessionCommandLane {
+    fn new() -> Self {
+        let (sender, completions) = mpsc::channel();
+        Self {
+            sender,
+            completions,
+            next_command: 1,
+            in_flight: BTreeMap::new(),
+            carried: BTreeMap::new(),
+        }
+    }
+
+    /// The sink a worker returns its completion on. It is the lane's, not the
+    /// composition's, so the completion survives a project switch.
+    fn sender(&self) -> Sender<SessionCommandCompletion> {
+        self.sender.clone()
+    }
+
+    /// Admit one command for `workspace`, or refuse when that workspace already
+    /// owns the slot.
+    fn admit(&mut self, workspace: &Path, create_name: Option<String>) -> Option<u64> {
+        if self.in_flight.contains_key(workspace) {
+            return None;
+        }
+        let id = self.next_command;
+        self.next_command = self.next_command.wrapping_add(1);
+        self.in_flight.insert(
+            workspace.to_path_buf(),
+            InFlightSessionCommand { id, create_name },
+        );
+        Some(id)
+    }
+
+    /// Release the admission a completion belongs to.
+    fn finish(&mut self, workspace: &Path, id: u64) -> Option<InFlightSessionCommand> {
+        if self
+            .in_flight
+            .get(workspace)
+            .is_some_and(|command| command.id == id)
+        {
+            return self.in_flight.remove(workspace);
+        }
+        None
+    }
+
+    /// The command this workspace's next composition must re-adopt, if any.
+    fn in_flight(&self, workspace: &Path) -> Option<&InFlightSessionCommand> {
+        self.in_flight.get(workspace)
+    }
+
+    /// Park a create outcome until its workspace is composed again.
+    fn carry(&mut self, workspace: &Path, outcome: CarriedCreate) {
+        self.carried.insert(workspace.to_path_buf(), outcome);
+    }
+
+    /// Take the outcome parked for a workspace that is being composed now.
+    fn take_carried(&mut self, workspace: &Path) -> Option<CarriedCreate> {
+        self.carried.remove(workspace)
+    }
+
+    fn drain(&mut self, budget: usize) -> Vec<SessionCommandCompletion> {
+        self.completions.try_iter().take(budget).collect()
+    }
 }
 
 enum SessionBackendCompletion {
@@ -2127,8 +2237,11 @@ impl PaneLaunchIdentity {
 }
 
 impl WorkspaceIoRuntime {
-    fn new(workspace: WorkspaceView, session_commands: Box<dyn SessionCommandPort>) -> Self {
-        let (session_completion_sender, session_completions) = mpsc::channel();
+    fn new(
+        workspace: WorkspaceView,
+        session_commands: Box<dyn SessionCommandPort>,
+        session_completion_sender: Sender<SessionCommandCompletion>,
+    ) -> Self {
         let (pane_completion_sender, pane_completions) = mpsc::channel();
         Self {
             workspace,
@@ -2137,9 +2250,7 @@ impl WorkspaceIoRuntime {
             agent_resumes: BTreeMap::new(),
             agent_inventory: None,
             material_revision: 0,
-            session_completions,
             session_completion_sender,
-            next_session_command: 1,
             active_session_command: None,
             removing_session: None,
             creating_session: None,
@@ -3292,32 +3403,38 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 /// Busy without reaching the shared daemon port.
 fn begin_session_command(
     ui: &mut WorkspaceIoRuntime,
+    lane: &mut SessionCommandLane,
     command: SessionCommand,
     completion: SessionBackendCompletion,
 ) -> bool {
-    if ui.active_session_command.is_some() {
+    let workspace = ui.workspace.record().clone();
+    let create_name = if let SessionCommand::Create { name, .. } = &command {
+        Some(name.clone())
+    } else {
+        None
+    };
+    let Some(command_id) = lane.admit(&workspace.path, create_name) else {
         emit_session_command_result(
             &Err("session command is already running".to_owned()),
             &completion,
         );
         return false;
-    }
-    let command_id = ui.next_session_command;
-    ui.next_session_command = ui.next_session_command.wrapping_add(1);
+    };
     ui.active_session_command = Some(command_id);
     let port = std::sync::Arc::clone(&ui.session_commands);
-    let workspace = ui.workspace.record().clone();
     let sender = ui.session_completion_sender.clone();
+    let lane_workspace = workspace.path.clone();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             port.execute(&workspace, None, command)
         }))
         .unwrap_or_else(|_| Err("session command worker failed".to_owned()));
         // Complete the reducer request before returning the projection/port to
-        // the UI. If the workspace exited, the sink is closed harmlessly but
-        // the accepted Effect still took exactly one completion path.
+        // the UI. If the workspace exited, the sink is closed harmlessly; the
+        // lane below still carries a create's outcome to the next composition.
         emit_session_command_result(&result, &completion);
         let _ = sender.send(SessionCommandCompletion {
+            workspace: lane_workspace,
             command_id,
             result,
             completion,
@@ -3399,14 +3516,27 @@ fn apply_session_projection(
 /// the create-failure dialog; any other failure (e.g. remove) refluxes as a
 /// controller [`BackendEvent::Notice`]. Both are distinct from an in-form local
 /// validation error.
-fn drain_session_completions(ui: &mut WorkspaceIoRuntime) {
-    let completions = ui
-        .session_completions
-        .try_iter()
-        .take(FRAME_EVENT_BUDGET)
-        .collect::<Vec<_>>();
-    for completion in completions {
+fn drain_session_completions(ui: &mut WorkspaceIoRuntime, lane: &mut SessionCommandLane) {
+    for completion in lane.drain(FRAME_EVENT_BUDGET) {
+        let admitted = lane.finish(&completion.workspace, completion.command_id);
         if ui.active_session_command != Some(completion.command_id) {
+            // The composition that started this command is gone: the user
+            // switched projects while it ran. Its reducer sink died with it, so
+            // a create's outcome is parked on the lane and replayed when its own
+            // workspace is composed again (#768). A remove or sleep leaves no
+            // pending row behind and stays dropped, as it always was.
+            if let Some(name) = admitted.and_then(|command| command.create_name) {
+                lane.carry(
+                    &completion.workspace,
+                    CarriedCreate {
+                        name,
+                        error: completion
+                            .result
+                            .err()
+                            .map(|message| safe_session_error(&message)),
+                    },
+                );
+            }
             continue;
         }
         ui.active_session_command = None;
@@ -3423,6 +3553,19 @@ fn drain_session_completions(ui: &mut WorkspaceIoRuntime) {
             adopt_session_snapshot(ui, result);
         }
     }
+}
+
+/// Replay a create that finished while its workspace was not on screen into the
+/// composition that now owns it.
+///
+/// A success is a notice naming the session, so the row the resident lane has
+/// already brought back is explained instead of appearing unannounced. A failure
+/// keeps the create-failure dialog it would have opened had the user stayed.
+fn deliver_carried_create(runtime: &mut WorkspaceRuntime, carried: CarriedCreate) {
+    let _ = runtime.apply_event(AppEvent::CarriedCreateOutcome {
+        name: carried.name,
+        error: carried.error,
+    });
 }
 
 /// Reconcile one daemon lifecycle snapshot into the session cache, ignoring a
@@ -6161,6 +6304,7 @@ fn compose_workspace_shell_frame(
 fn drain_controller_host_actions(
     actions: &Receiver<ControllerHostAction>,
     ui: &mut WorkspaceIoRuntime,
+    lane: &mut SessionCommandLane,
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
     session_refresh: &mut dyn SessionRefreshPort,
@@ -6175,6 +6319,7 @@ fn drain_controller_host_actions(
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
                     ui,
+                    lane,
                     SessionCommand::Create {
                         name: name.clone(),
                         role_id,
@@ -6202,6 +6347,7 @@ fn drain_controller_host_actions(
                     let before = ui.workspace.session_ids().to_vec();
                     if begin_session_command(
                         ui,
+                        lane,
                         SessionCommand::Remove {
                             name,
                             force: request.force,
@@ -6227,6 +6373,7 @@ fn drain_controller_host_actions(
                     let before = ui.workspace.session_ids().to_vec();
                     begin_session_command(
                         ui,
+                        lane,
                         SessionCommand::Sleep { name },
                         SessionBackendCompletion::Sleep {
                             before,
@@ -7394,6 +7541,7 @@ fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     deck: &mut WorkspaceDeck,
+    lane: &mut SessionCommandLane,
     registry: &[Workspace],
     mut loader: Option<&mut dyn WorkspaceLoader>,
     backend_factory: &mut dyn ControllerBackendFactory,
@@ -7444,7 +7592,7 @@ fn drive_workspace_controller(
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
-    let mut ui = WorkspaceIoRuntime::new(workspace, composition.session_commands)
+    let mut ui = WorkspaceIoRuntime::new(workspace, composition.session_commands, lane.sender())
         .with_agent_resumes(agent_resumes)
         .with_agent_context(
             workspace_id,
@@ -7458,8 +7606,15 @@ fn drive_workspace_controller(
             composition.agent_tab_intents,
         )
         .with_external_terminal(composition.external_terminal);
+    // Re-adopt the session command this workspace already had in flight. The
+    // composition is new but the command is not, so its completion still lands
+    // on the workspace that started it instead of being fenced out (#768).
+    ui.active_session_command = lane.in_flight(&root_cwd).map(|command| command.id);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    if let Some(carried) = lane.take_carried(&root_cwd) {
+        deliver_carried_create(&mut runtime, carried);
+    }
     restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
@@ -7626,6 +7781,7 @@ fn drive_workspace_controller(
         drain_controller_host_actions(
             &host_rx,
             &mut ui,
+            lane,
             &mut runtime,
             &mut pending_targets,
             session_refresh.as_mut(),
@@ -7637,7 +7793,7 @@ fn drive_workspace_controller(
         if ui.take_agent_inventory_change_observation_request() {
             restore_retry.request_changed_observation(restore_clock.elapsed());
         }
-        drain_session_completions(&mut ui);
+        drain_session_completions(&mut ui, lane);
         drain_session_refresh(
             &mut ui,
             session_refresh.as_mut(),
@@ -8756,10 +8912,12 @@ pub fn run_workspace_controller_with_backend(
     backend_factory: &mut dyn ControllerBackendFactory,
 ) -> io::Result<Exit> {
     let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut lane = SessionCommandLane::new();
     drive_workspace_controller(
         term,
         snapshot,
         &mut deck,
+        &mut lane,
         &[],
         None,
         backend_factory,
@@ -8784,10 +8942,12 @@ pub fn run_workspace_controller_with_backend_and_settings(
     settings: &usagi_core::domain::settings::Settings,
 ) -> io::Result<Exit> {
     let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut lane = SessionCommandLane::new();
     drive_workspace_controller(
         term,
         snapshot,
         &mut deck,
+        &mut lane,
         &[],
         None,
         backend_factory,
@@ -8821,10 +8981,12 @@ pub fn run_workspace_controller_with_backend_and_config(
     settings.select_workspace(&snapshot.workspace.path)?;
     let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
     let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut lane = SessionCommandLane::new();
     drive_workspace_controller(
         term,
         snapshot,
         &mut deck,
+        &mut lane,
         &[],
         None,
         backend_factory,
@@ -9087,6 +9249,7 @@ fn open_snapshot_via_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     deck: &mut WorkspaceDeck,
+    lane: &mut SessionCommandLane,
     registry: &[Workspace],
     loader: &mut dyn WorkspaceLoader,
     settings: &mut dyn SettingsPort,
@@ -9099,6 +9262,7 @@ fn open_snapshot_via_controller(
         term,
         snapshot,
         deck,
+        lane,
         registry,
         Some(loader),
         backend_factory,
@@ -9164,11 +9328,15 @@ fn enter_workspace_deck(
     if deck.slots().len() > 1 {
         let _ = loader.record_unite(&deck.paths());
     }
+    // The lane outlives every composition this loop builds, which is what lets a
+    // create started before a project switch still reach the user (#768).
+    let mut lane = SessionCommandLane::new();
     loop {
         let step = open_snapshot_via_controller(
             term,
             snapshot,
             &mut deck,
+            &mut lane,
             registry,
             loader,
             settings,
