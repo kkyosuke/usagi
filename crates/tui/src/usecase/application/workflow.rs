@@ -20,11 +20,20 @@ pub enum WorkflowFreshness {
     Observed,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Form field index of the revision-limit selector, after the three providers.
+pub const REVISION_LIMIT_FIELD: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowPanel {
     pub agents: usagi_core::domain::workflow::WorkflowAgents,
-    /// None focuses the goal; 0..3 select planner, implementer and reviewer.
+    /// Revision rounds the next start takes before it asks for a person.
+    pub revision_limit: u8,
+    /// None focuses the goal; 0..=2 select planner, implementer and reviewer,
+    /// and 3 selects the revision limit.
     pub agent_field: Option<usize>,
+    /// Whether the person has changed anything in the start form. A background
+    /// snapshot must not repaint a choice they just made, and that holds for the
+    /// revision limit exactly as it does for the providers.
     pub agents_edited: bool,
     pub run: Option<WorkflowRun>,
     /// Runs this session already finished, oldest first.
@@ -83,6 +92,29 @@ pub enum WorkflowEdit {
     HistoryLatest,
 }
 
+impl Default for WorkflowPanel {
+    fn default() -> Self {
+        Self {
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
+            agent_field: None,
+            agents_edited: false,
+            run: None,
+            finished: Vec::new(),
+            draft: EnvironmentSourceEditor::default(),
+            recipient: None,
+            error: None,
+            loading: false,
+            freshness: WorkflowFreshness::default(),
+            snapshot_due_tick: 0,
+            submitting: false,
+            history_offset: 0,
+            observed_anchor: None,
+            pending: None,
+        }
+    }
+}
+
 impl WorkflowPanel {
     #[must_use]
     pub fn recipient_label(&self) -> String {
@@ -101,6 +133,7 @@ impl WorkflowPanel {
                     None => Some(0),
                     Some(0) => Some(1),
                     Some(1) => Some(2),
+                    Some(2) => Some(REVISION_LIMIT_FIELD),
                     _ => None,
                 };
             }
@@ -120,6 +153,15 @@ impl WorkflowPanel {
     /// would otherwise be selectable here and refused at launch.
     pub fn cycle_agent(&mut self, forward: bool, available: AvailableModels) {
         if self.run.is_some() || self.pending.is_some() || self.submitting {
+            return;
+        }
+        // The limit shares the form's left/right cycle but not its vocabulary:
+        // it is a number, and no provider has to be installed to pick one.
+        if self.agent_field == Some(REVISION_LIMIT_FIELD) {
+            let span = i16::from(usagi_core::domain::workflow::MAX_REVISION_LIMIT);
+            let moved = i16::from(self.revision_limit) + if forward { 1 } else { -1 };
+            self.revision_limit = u8::try_from(moved.clamp(1, span)).unwrap_or(self.revision_limit);
+            self.agents_edited = true;
             return;
         }
         let choices = available.iter().collect::<Vec<_>>();
@@ -305,6 +347,9 @@ mod tests {
             panel.cycle_agent(false, all);
             assert_eq!(panel.agents, initial);
         }
+        // The limit now sits between the last provider and the goal.
+        panel.cycle_recipient();
+        assert_eq!(panel.agent_field, Some(REVISION_LIMIT_FIELD));
         panel.cycle_recipient();
         assert_eq!(panel.agent_field, None);
         panel.cycle_recipient();
@@ -313,6 +358,7 @@ mod tests {
             WorkflowCommand::Start {
                 goal: "Task".into(),
                 agents: panel.agents,
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
         ));
         panel.cycle_agent(true, all);
@@ -532,6 +578,48 @@ mod tests {
         history.retain(|entry| entry.id != watched);
         panel.anchor_history();
         assert_eq!(panel.history_offset, panel.history_rows() - 1);
+    }
+
+    #[test]
+    fn the_revision_limit_is_chosen_in_range_and_frozen_once_a_run_starts() {
+        use usagi_core::domain::workflow::{DEFAULT_REVISION_LIMIT, MAX_REVISION_LIMIT};
+        let all = AvailableModels::all();
+        let mut panel = WorkflowPanel::default();
+        assert_eq!(panel.revision_limit, DEFAULT_REVISION_LIMIT);
+
+        // Tab reaches the limit after the three providers.
+        for expected in [Some(0), Some(1), Some(2), Some(REVISION_LIMIT_FIELD), None] {
+            panel.cycle_recipient();
+            assert_eq!(panel.agent_field, expected);
+        }
+        panel.agent_field = Some(REVISION_LIMIT_FIELD);
+
+        // Right walks up to the maximum and stops; left walks down to 1 and stops.
+        for _ in 0..20 {
+            panel.cycle_agent(true, all);
+        }
+        assert_eq!(panel.revision_limit, MAX_REVISION_LIMIT);
+        for _ in 0..20 {
+            panel.cycle_agent(false, all);
+        }
+        assert_eq!(panel.revision_limit, 1);
+        assert!(panel.agents_edited);
+
+        // No provider has to be installed to pick a number.
+        panel.cycle_agent(true, AvailableModels::default());
+        assert_eq!(panel.revision_limit, 2);
+
+        // Picking the limit never disturbs the providers.
+        assert_eq!(panel.agents, WorkflowPanel::default().agents);
+
+        // A started run reports what it is running; the form stops accepting edits.
+        panel.run = Some(fixture_run(SessionId::new()));
+        panel.cycle_agent(true, all);
+        assert_eq!(panel.revision_limit, 2);
+        panel.run = None;
+        panel.submitting = true;
+        panel.cycle_agent(true, all);
+        assert_eq!(panel.revision_limit, 2);
     }
 
     #[test]

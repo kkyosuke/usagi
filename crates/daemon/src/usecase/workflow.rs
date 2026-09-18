@@ -18,64 +18,11 @@ pub fn admit(
 ) -> Result<()> {
     store.update_workflow(workspace, session, |value| {
         match command {
-            WorkflowCommand::Start { goal, agents } => {
-                ensure!(
-                    !goal.trim().is_empty() && goal.len() <= 16384 && !goal.contains('\0'),
-                    "invalid workflow goal"
-                );
-                if let Some(existing) = value.as_mut().filter(|record| record.finish.is_some()) {
-                    // The previous run ended, so this is a new intent in the
-                    // same session: everything the old run owned is reset, and
-                    // only the archive of ended runs carries over.
-                    ensure!(
-                        !existing.finished.iter().any(|ended| ended.id == operation),
-                        "workflow operation has already finished"
-                    );
-                    existing.agents = *agents;
-                    existing.operation = operation;
-                    existing.goal.clone_from(goal);
-                    existing.issue = issue;
-                    existing.finish = None;
-                    existing.run = None;
-                    existing.initial_notified = false;
-                    existing.preferences_saved = false;
-                    existing.start_error = None;
-                    existing.authorized_operations.clear();
-                } else if let Some(existing) = value {
-                    // An issue-backed start is identified by the issue, not by
-                    // the rendered text: the issue moves to `in-progress` as
-                    // soon as the run starts, so re-rendering it would make a
-                    // retry look like a different intent.
-                    let same_goal = if issue.is_some() {
-                        existing.issue == issue
-                    } else {
-                        existing.goal == *goal && existing.issue.is_none()
-                    };
-                    ensure!(
-                        existing.operation == operation && same_goal && existing.agents == *agents,
-                        "session already has another workflow"
-                    );
-                } else {
-                    *value = Some(WorkflowRecord {
-                        agents: *agents,
-                        version: 1,
-                        operation,
-                        goal: goal.clone(),
-                        run: None,
-                        initial_notified: false,
-                        preferences_saved: false,
-                        cursor: None,
-                        start_error: None,
-                        suspended_phase: None,
-                        implementation_operation: None,
-                        authorized_operations: Vec::new(),
-                        announced: None,
-                        issue,
-                        finish: None,
-                        finished: Vec::new(),
-                    });
-                }
-            }
+            WorkflowCommand::Start {
+                goal,
+                agents,
+                revision_limit,
+            } => admit_start(value, operation, goal, *agents, *revision_limit, issue)?,
             WorkflowCommand::Instruct { recipient, body } => {
                 let record = value.as_mut().context("workflow has not started")?;
                 ensure!(record.finish.is_none(), "workflow has already finished");
@@ -131,6 +78,87 @@ pub fn admit(
     })
 }
 
+/// The `Start` arm of [`admit`], lifted out so the admission function stays
+/// readable: a start is three different intents (a new record, a retry of the
+/// same one, and a fresh intent after the previous run ended) and each has its
+/// own conflict rule.
+fn admit_start(
+    value: &mut Option<WorkflowRecord>,
+    operation: OperationId,
+    goal: &str,
+    agents: usagi_core::domain::workflow::WorkflowAgents,
+    revision_limit: u8,
+    issue: Option<u32>,
+) -> Result<()> {
+    ensure!(
+        !goal.trim().is_empty() && goal.len() <= 16384 && !goal.contains('\0'),
+        "invalid workflow goal"
+    );
+    ensure!(
+        usagi_core::domain::workflow::valid_revision_limit(revision_limit),
+        "invalid workflow revision limit"
+    );
+    if let Some(existing) = value.as_mut().filter(|record| record.finish.is_some()) {
+        // The previous run ended, so this is a new intent in the
+        // same session: everything the old run owned is reset, and
+        // only the archive of ended runs carries over.
+        ensure!(
+            !existing.finished.iter().any(|ended| ended.id == operation),
+            "workflow operation has already finished"
+        );
+        existing.agents = agents;
+        existing.revision_limit = revision_limit;
+        existing.operation = operation;
+        existing.goal.clear();
+        existing.goal.push_str(goal);
+        existing.issue = issue;
+        existing.finish = None;
+        existing.run = None;
+        existing.initial_notified = false;
+        existing.preferences_saved = false;
+        existing.start_error = None;
+        existing.authorized_operations.clear();
+    } else if let Some(existing) = value {
+        // An issue-backed start is identified by the issue, not by
+        // the rendered text: the issue moves to `in-progress` as
+        // soon as the run starts, so re-rendering it would make a
+        // retry look like a different intent.
+        let same_goal = if issue.is_some() {
+            existing.issue == issue
+        } else {
+            existing.goal == goal && existing.issue.is_none()
+        };
+        ensure!(
+            existing.operation == operation
+                && same_goal
+                && existing.agents == agents
+                && existing.revision_limit == revision_limit,
+            "session already has another workflow"
+        );
+    } else {
+        *value = Some(WorkflowRecord {
+            agents,
+            revision_limit,
+            version: 1,
+            operation,
+            goal: goal.to_owned(),
+            run: None,
+            initial_notified: false,
+            preferences_saved: false,
+            cursor: None,
+            start_error: None,
+            suspended_phase: None,
+            implementation_operation: None,
+            authorized_operations: Vec::new(),
+            announced: None,
+            issue,
+            finish: None,
+            finished: Vec::new(),
+        });
+    }
+    Ok(())
+}
+
 /// Bind only the actual admitted implementation participant.
 /// # Errors
 /// Rejects absent intent or a mismatched launch.
@@ -167,7 +195,7 @@ pub fn bind(
             implementer,
             reviewer: None,
             phase: Phase::Implementing,
-            revision_limit: 3,
+            revision_limit: record.revision_limit,
             revisions: 0,
             review: None,
             waiting_reason: None,
@@ -194,8 +222,10 @@ pub fn projection(
     session: SessionId,
 ) -> Result<WorkflowSnapshot> {
     let Some(record) = store.workflow(workspace, session)? else {
+        let defaults = store.workflow_defaults(workspace)?;
         return Ok(WorkflowSnapshot {
-            agents: store.workflow_agents(workspace)?,
+            agents: defaults.agents,
+            revision_limit: defaults.revision_limit,
             session,
             run: None,
             pending_start: None,
@@ -207,6 +237,7 @@ pub fn projection(
     let pending_start = (record.run.is_none() && record.finish.is_none()).then(|| {
         usagi_core::domain::workflow::WorkflowPendingStart {
             agents: record.agents,
+            revision_limit: record.revision_limit,
             operation_id: record.operation,
             goal: record.goal.clone(),
             error: record.start_error.clone(),
@@ -215,6 +246,7 @@ pub fn projection(
     });
     Ok(WorkflowSnapshot {
         agents: record.agents,
+        revision_limit: record.revision_limit,
         session,
         run: record.run,
         pending_start,
@@ -391,12 +423,16 @@ pub fn issue_conventions(issue: u32) -> String {
 }
 
 #[must_use]
-pub fn initial_prompt(goal: &str, agents: usagi_core::domain::workflow::WorkflowAgents) -> String {
+pub fn initial_prompt(
+    goal: &str,
+    agents: usagi_core::domain::workflow::WorkflowAgents,
+    revision_limit: u8,
+) -> String {
     let implementer = agents.implementer.profile_id();
     let reviewer = agents.reviewer.profile_id();
     let planner = agents.planner.profile_id();
     format!(
-        "Session Workflow: implementation and review. You are {implementer}, the implementation owner. Work only in this session. First use agent_handoff to launch a separate planning Agent (runtime={planner}, model=default) INSIDE THIS SAME SESSION with planning-only instructions. Ask it to inspect the goal and return a concrete implementation plan via agent_message; no edits. Wait for its plan and acknowledge its message before implementing. The planner is not the reviewer; launch a separate review Agent later. Implement, test, and commit the user's goal. Use agent_handoff to launch the reviewer (runtime={reviewer}, model=default) INSIDE THIS SAME SESSION, with review-only instructions. Do not create a review session. Send review_request via agent_message to that exact Agent with full base_sha and head_sha. The reviewer must reply approved or changes_requested with the identical review target and in_reply_to request ID; no edits. Read agent_messages, acknowledge processed messages, fix and commit findings then request another review. Stop and ask the user after 3 revision rounds. After approval verify latest HEAD and checks, prepare the PR, report its URL. Never merge. Treat later Workflow instruction IDs as idempotent: process each ID at most once. If authentication or policy blocks handoff, report the error; do not claim success.\n\nUser goal:\n{goal}"
+        "Session Workflow: implementation and review. You are {implementer}, the implementation owner. Work only in this session. First use agent_handoff to launch a separate planning Agent (runtime={planner}, model=default) INSIDE THIS SAME SESSION with planning-only instructions. Ask it to inspect the goal and return a concrete implementation plan via agent_message; no edits. Wait for its plan and acknowledge its message before implementing. The planner is not the reviewer; launch a separate review Agent later. Implement, test, and commit the user's goal. Use agent_handoff to launch the reviewer (runtime={reviewer}, model=default) INSIDE THIS SAME SESSION, with review-only instructions. Do not create a review session. Send review_request via agent_message to that exact Agent with full base_sha and head_sha. The reviewer must reply approved or changes_requested with the identical review target and in_reply_to request ID; no edits. Read agent_messages, acknowledge processed messages, fix and commit findings then request another review. Stop and ask the user after {revision_limit} revision rounds. After approval verify latest HEAD and checks, prepare the PR, report its URL. Never merge. Treat later Workflow instruction IDs as idempotent: process each ID at most once. If authentication or policy blocks handoff, report the error; do not claim success.\n\nUser goal:\n{goal}"
     )
 }
 
@@ -534,12 +570,21 @@ mod tests {
             implementer: DefaultModel::Claude,
             reviewer: DefaultModel::OpenAi,
         };
-        store.remember_workflow_agents(workspace, agents).unwrap();
+        store
+            .remember_workflow_defaults(
+                workspace,
+                usagi_core::domain::workflow::WorkflowDefaults {
+                    agents,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert_eq!(snapshot(&store, workspace, session).unwrap().agents, agents);
         assert!(store.remember_workflow_start(workspace, session).is_err());
         let command = WorkflowCommand::Start {
             goal: "Task".into(),
             agents,
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         admit(&store, workspace, session, operation, &command, None).unwrap();
         assert!(store.remember_workflow_start(workspace, session).is_err());
@@ -549,6 +594,7 @@ mod tests {
         let conflict = WorkflowCommand::Start {
             goal: "Task".into(),
             agents: WorkflowAgents::default(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         assert!(admit(&store, workspace, session, operation, &conflict, None).is_err());
         bind(&store, workspace, session, operation, AgentId::new()).unwrap();
@@ -569,13 +615,16 @@ mod tests {
         );
         std::fs::remove_dir(&defaults).unwrap();
         store.remember_workflow_start(workspace, session).unwrap();
-        assert_eq!(store.workflow_agents(workspace).unwrap(), agents);
+        assert_eq!(store.workflow_defaults(workspace).unwrap().agents, agents);
         store
-            .remember_workflow_agents(workspace, WorkflowAgents::default())
+            .remember_workflow_defaults(
+                workspace,
+                usagi_core::domain::workflow::WorkflowDefaults::default(),
+            )
             .unwrap();
         store.remember_workflow_start(workspace, session).unwrap();
         assert_eq!(
-            store.workflow_agents(workspace).unwrap(),
+            store.workflow_defaults(workspace).unwrap().agents,
             WorkflowAgents::default()
         );
         let run = store
@@ -585,7 +634,11 @@ mod tests {
             .run
             .unwrap();
         assert_eq!(run.agents, agents);
-        let prompt = initial_prompt(&run.goal, agents);
+        let prompt = initial_prompt(
+            &run.goal,
+            agents,
+            usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
+        );
         assert!(prompt.contains("You are claude"));
         assert!(prompt.contains("runtime=agy"));
         assert!(prompt.contains("runtime=codex"));
@@ -606,6 +659,7 @@ mod tests {
         let start = |goal: &str| WorkflowCommand::Start {
             goal: goal.to_owned(),
             agents: WorkflowAgents::default(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         let record = || store.workflow(workspace, session).unwrap().unwrap();
 
@@ -780,6 +834,7 @@ mod tests {
         let start = |goal: &str| WorkflowCommand::Start {
             goal: goal.to_owned(),
             agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         admit(
             &store,
@@ -1102,6 +1157,7 @@ mod tests {
             operation,
             &WorkflowCommand::Start {
                 goal: "Task".into(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 agents: usagi_core::domain::workflow::WorkflowAgents {
                     reviewer: reviewer_provider,
                     ..usagi_core::domain::workflow::WorkflowAgents::default()
@@ -1542,6 +1598,7 @@ mod tests {
         let start = WorkflowCommand::Start {
             goal: "implement authentication".into(),
             agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         for goal in [String::new(), "\0".into(), "x".repeat(16385)] {
             assert!(
@@ -1552,7 +1609,8 @@ mod tests {
                     operation,
                     &WorkflowCommand::Start {
                         goal,
-                        agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                     },
                     None,
                 )
@@ -1587,6 +1645,7 @@ mod tests {
             &WorkflowCommand::Start {
                 goal: pending.goal,
                 agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
             None,
         )
@@ -1619,14 +1678,78 @@ mod tests {
         assert_eq!(run.instructions[0].recipient, implementer);
         assert_eq!(run.reviewer, None);
         assert_eq!(run.phase, Phase::Implementing);
-        assert!(initial_prompt(&run.goal, run.agents).contains("agent_handoff"));
+        assert!(
+            initial_prompt(
+                &run.goal,
+                run.agents,
+                usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT
+            )
+            .contains("agent_handoff")
+        );
         assert!(
             initial_prompt(
                 &"x".repeat(16384),
-                usagi_core::domain::workflow::WorkflowAgents::default()
+                usagi_core::domain::workflow::WorkflowAgents::default(),
+                usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             )
             .len()
                 < 24 * 1024
+        );
+    }
+
+    #[test]
+    fn a_start_outside_the_revision_range_is_refused_and_a_valid_one_is_bound() {
+        use usagi_core::domain::workflow::{MAX_REVISION_LIMIT, WorkflowAgents};
+        let dir = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(dir.path());
+        let workspace = WorkspaceId::new();
+        let start = |limit: u8| WorkflowCommand::Start {
+            goal: "Task".into(),
+            agents: WorkflowAgents::default(),
+            revision_limit: limit,
+        };
+        for refused in [0, MAX_REVISION_LIMIT + 1] {
+            let session = SessionId::new();
+            assert!(
+                admit(
+                    &store,
+                    workspace,
+                    session,
+                    OperationId::new(),
+                    &start(refused),
+                    None
+                )
+                .is_err(),
+                "{refused} is outside the domain's range"
+            );
+            // Nothing durable was created for a refused number.
+            assert!(store.workflow(workspace, session).unwrap().is_none());
+        }
+
+        // A number inside the range reaches the run the launch binds, instead of
+        // the constant every construction site used to hard-code.
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        admit(&store, workspace, session, operation, &start(9), None).unwrap();
+        bind(&store, workspace, session, operation, AgentId::new()).unwrap();
+        let run = store
+            .workflow(workspace, session)
+            .unwrap()
+            .and_then(|record| record.run)
+            .expect("the run is bound");
+        assert_eq!(run.revision_limit, 9);
+        assert!(run.is_valid());
+        // The launch prompt states the same number it will actually stop at.
+        assert!(
+            initial_prompt(&run.goal, run.agents, run.revision_limit)
+                .contains("after 9 revision rounds")
+        );
+
+        // A retry that asks for a different number is a different intent, not the
+        // same one: admitting it must not quietly change a live run's limit.
+        assert!(
+            admit(&store, workspace, session, operation, &start(4), None).is_err(),
+            "the limit is part of the start's identity"
         );
     }
 }

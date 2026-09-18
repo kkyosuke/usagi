@@ -506,7 +506,7 @@ impl Tool for WorkflowStart {
         "workflow_start"
     }
     fn description(&self) -> &'static str {
-        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name は必須で、goal か issue のどちらかを指定する。issue を指定すると backlog の内容が goal になり、その PR は `Internal-Issue: #<番号>` を書き、同じ PR で issue を done にすることが完了の条件になる。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer は省略時に workspace が最後に開始できた組合せを使い、未知の綴りは拒否する。"
+        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name は必須で、goal か issue のどちらかを指定する。issue を指定すると backlog の内容が goal になり、その PR は `Internal-Issue: #<番号>` を書き、同じ PR で issue を done にすることが完了の条件になる。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer と revision_limit は省略時に workspace が最後に開始できた値を使い、未知の綴りと範囲外の回数は拒否する。revision_limit は実装担当が人へ判断を戻すまでの修正往復の上限で、1〜10 の範囲で指定する。"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -521,6 +521,11 @@ impl Tool for WorkflowStart {
                         "planner": participant_schema(),
                         "implementer": participant_schema(),
                         "reviewer": participant_schema(),
+                        "revision_limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": usagi_core::domain::workflow::MAX_REVISION_LIMIT,
+                        },
                     },
                     "required": ["name"],
                     "additionalProperties": false,

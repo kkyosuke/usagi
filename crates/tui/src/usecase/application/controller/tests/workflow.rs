@@ -32,8 +32,10 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
             goal: "Build login".into(),
             error: Some("Sign in to retry".into()),
             issue: None,
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         }),
         finished: Vec::new(),
+        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
     };
     let _ = update(
         &mut state,
@@ -51,7 +53,8 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
             operation,
             WorkflowCommand::Start {
                 goal: "Build login".into(),
-                agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             }
         ))
     );
@@ -95,6 +98,7 @@ fn workflow_recovers_pending_start_and_accepts_instruction_completion() {
                 run: Some(fixture_run(session)),
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -182,6 +186,7 @@ fn finishing_a_workflow_opens_the_tab_and_resends_one_operation() {
                 run: None,
                 pending_start: None,
                 finished: vec![ended.clone()],
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -234,6 +239,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -315,6 +321,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
                 run: Some(run.clone()),
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -394,6 +401,7 @@ fn workflow_control_roundtrip_preserves_unknown_requests_and_newer_text() {
                 run: Some(run),
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -442,6 +450,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -465,6 +474,7 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -483,7 +493,8 @@ fn workflow_rejects_foreign_stale_and_overlay_input() {
                     session,
                     run: None,
                     pending_start: None,
-                    finished: Vec::new()
+                    finished: Vec::new(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 }))
             })
         )
@@ -561,6 +572,7 @@ fn workflow_offers_and_submits_only_providers_this_machine_can_launch() {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );
@@ -625,6 +637,7 @@ fn workflow_uses_saved_agents_without_overwriting_edits_and_submits_exact_choice
             run: None,
             pending_start: None,
             finished: Vec::new(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         })),
     });
     let _ = update(&mut state, snapshot.clone());
@@ -664,7 +677,7 @@ fn workflow_uses_saved_agents_without_overwriting_edits_and_submits_exact_choice
         panic!("workflow submission");
     };
     assert!(
-        matches!(&job.control, Some((_, WorkflowCommand::Start { goal, agents })) if goal == "Task" && *agents == chosen)
+        matches!(&job.control, Some((_, WorkflowCommand::Start { goal, agents, .. })) if goal == "Task" && *agents == chosen)
     );
 }
 
@@ -704,6 +717,7 @@ fn history_scrolling_is_bounded_and_returns_to_the_latest_in_one_operation() {
                     run: Some(run.clone()),
                     pending_start: None,
                     finished: Vec::new(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 })),
             }),
         );
@@ -771,6 +785,7 @@ fn history_keys_stay_live_while_the_start_form_owns_the_caret() {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );

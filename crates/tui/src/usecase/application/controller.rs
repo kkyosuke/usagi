@@ -3267,6 +3267,7 @@ fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) 
                     usagi_core::domain::workflow::WorkflowCommand::Start {
                         goal: body,
                         agents: panel.agents,
+                        revision_limit: panel.revision_limit,
                     }
                 };
                 panel.pending = Some((OperationId::new(), command));
@@ -3556,6 +3557,7 @@ fn update_workflow_backend(
             panel.freshness = super::workflow::WorkflowFreshness::Observed;
             if !panel.agents_edited && panel.pending.is_none() {
                 panel.agents = snapshot.agents;
+                panel.revision_limit = snapshot.revision_limit;
             }
             if let Some(start) = snapshot.pending_start {
                 // A background read can now land while the person's own
@@ -3566,6 +3568,7 @@ fn update_workflow_backend(
                 // only holds back the overlapping read.
                 if !panel.submitting {
                     panel.agents = start.agents;
+                    panel.revision_limit = start.revision_limit;
                 }
                 if panel.pending.is_none() {
                     if panel.draft.value().is_empty() {
@@ -3576,6 +3579,7 @@ fn update_workflow_backend(
                         usagi_core::domain::workflow::WorkflowCommand::Start {
                             goal: start.goal,
                             agents: start.agents,
+                            revision_limit: start.revision_limit,
                         },
                     ));
                 }
