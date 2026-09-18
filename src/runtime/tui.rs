@@ -2080,9 +2080,18 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
             .map_err(|_| "Agent workspace observation is unavailable".to_owned())?
         {
             DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => {
-                serde_json::from_value(body).map_err(|_| {
-                    "daemon returned an invalid Agent workspace observation".to_owned()
-                })
+                let mut observation: usagi_core::domain::agent::AgentWorkspaceObservation =
+                    serde_json::from_value(body).map_err(|_| {
+                        "daemon returned an invalid Agent workspace observation".to_owned()
+                    })?;
+                let intent = UserAgentTabIntentPort::new()
+                    .load(workspace)
+                    .map_err(|_| "Agent display intent is unavailable".to_owned())?;
+                usagi_tui::usecase::application::interrupted_tab::retain_visible_interrupted(
+                    &mut observation.inventory,
+                    &intent.dismissed,
+                );
+                Ok(observation)
             }
         }
     }

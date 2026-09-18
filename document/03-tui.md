@@ -1268,11 +1268,16 @@ membership の権威にするので、庭のうさぎは常に「開ける tab �
 controller の runtime-local phase は session が生きている限り積み上がるため、この絞り込みが無いと利用者が
 閉じた Agent が `done` のうさぎとして庭に残る。
 
+`interrupted` は保存済みのタブ表示 intent に従う。削除済みの会話は Garden のうさぎ・右一覧・件数と
+左サイドバーから除外し、明示的な再表示で復帰する。同じ会話を live / reserved runtime が保持する場合も
+中断元を重複表示しない。履歴そのものは daemon に保持する。
+
 phase は 2 つの投影を重ねて決める。同じ `AgentRuntimeId` を controller が既に観測していれば、daemon が報告した
 phase をそのまま保つ runtime-local phase を優先し、まだ観測していない runtime は inventory の粗い state
 （`reserved → ready`、`live → running`、`interrupted → interrupted`）で描く。inventory を 1 度も観測していない
-（起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase がそのまま
-うさぎになる。workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
+（起動直後・`daemon` surface を開いた直後の再取得中）間は、controller が持つ runtime-local phase のうち
+exact terminal が live / interrupted pane に残るものだけを描き、削除済み履歴を復活させない。
+workspace root の runtime と、Home に存在しない session の runtime は区画へ加えない。
 dispatch status も区画へ重ねる。active project は `session list`、inactive project は観測した
 `AgentWorkspaceObservation.session_statuses` を使い、どちらも全 Agent を
 `running > starting > failed > idle > exited` の共通順位で
@@ -1327,6 +1332,7 @@ Garden は開いている project 全件を描くが、workspace controller が 
 | 性質 | 内容 |
 |---|---|
 | 何を読むか | project ごとの `AgentWorkspaceObservation`。`AgentInventory` の runtime detail と、session ごとの daemon-authoritative な dispatch status を同じ応答で読む。request が名指しした `WorkspaceId` を daemon が自分の record から filter して答えるので、その project の tenant へ接続し直さない |
+| 表示 intent | 各観測で同じ project の保存済み表示 intent を再読込し、中断タブと同じ規則で削除済み・重複履歴を除外する。読込失敗時はその観測を採用せず、直前の表示を保つ |
 | いつ読むか | Garden が前面にある間だけ。1 round ずつ直列で、成功後は 1 秒、daemon が 1 件も答えなかった round のあとは 5 秒あけて次の round に入る。Garden を閉じると次に開いた瞬間へ再武装する |
 | 何をしないか | daemon の cold start、session の変更、terminal の attach。observation 専用の port を使い、active project の lane とは接続を共有しない |
 | 上限 | 1 round で観測する project は 16 件まで。超えた分は `project inactive` のまま残る |

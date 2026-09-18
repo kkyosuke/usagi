@@ -377,6 +377,8 @@ pub struct HomeProjection {
     /// 2 つの surface で別々に畳むと、同じ session の Agent 数が画面の 2 か所で
     /// 食い違うため、ここで 1 度だけ束ねる。
     session_agents: BTreeMap<SessionId, Vec<widgets::agent_status::AgentStatus>>,
+    /// Exact fences for cached runtime phases while a fresh inventory is pending.
+    runtime_terminals: BTreeMap<AgentRuntimeId, TerminalRef>,
     /// Garden の描画素材。overlay が閉じている間は `None` で、開いている frame だけ
     /// session と、それに属する runtime-local phase を庭の projection へ写す。
     garden_sessions: Option<Vec<widgets::garden::GardenSession>>,
@@ -735,6 +737,16 @@ impl HomeProjection {
                 == Some(crate::usecase::application::controller::Overlay::Daemon))
             .then(|| state.daemon_control().clone()),
             session_agents,
+            runtime_terminals: state
+                .runtimes()
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.runtime.agent_runtime_id,
+                        entry.runtime.terminal.clone(),
+                    )
+                })
+                .collect(),
             garden_sessions,
             garden_scope: workspace_name.to_owned(),
             garden_sidebar_scroll: state.garden_sidebar_scroll(),
@@ -950,6 +962,27 @@ impl HomeProjection {
         panes: &PaneRegistry,
     ) -> Self {
         let interrupted = panes.interrupted_terminals();
+        if inventory.is_none() {
+            // A phase push can outlive its tab, even retaining a Running phase
+            // after the conversation was interrupted and dismissed. During the
+            // daemon modal's loading state, exact pane ownership still fences
+            // these cached rows instead of reviving unfiltered history.
+            let visible = panes
+                .live_terminals()
+                .into_iter()
+                .chain(interrupted.values().cloned())
+                .collect::<std::collections::BTreeSet<_>>();
+            self.session_agents.retain(|_, agents| {
+                agents.retain(|agent| {
+                    self.runtime_terminals
+                        .get(&agent.runtime_id)
+                        .is_some_and(|terminal| visible.contains(terminal))
+                });
+                !agents.is_empty()
+            });
+        }
+        // These fences are reconciliation input, not drawn frame material.
+        self.runtime_terminals.clear();
         self.apply_agent_inventory(inventory, Some(&interrupted));
         self
     }
@@ -1013,16 +1046,16 @@ impl HomeProjection {
                     agents.push(widgets::agent_status::AgentStatus { runtime_id, phase });
                 }
             }
-            // Garden は sidebar と同じ束を描く。inventory を重ねたあとに配り直すことで、
-            // 庭とサイドバーが別々の Agent 数を出す余地を残さない。
-            if let Some(garden_sessions) = self.garden_sessions.as_mut() {
-                for session in garden_sessions.iter_mut() {
-                    session.agents = self
-                        .session_agents
-                        .get(&session.id)
-                        .cloned()
-                        .unwrap_or_default();
-                }
+        }
+        // Garden は sidebar と同じ束を描く。inventory を重ねたあとに配り直すことで、
+        // 庭とサイドバーが別々の Agent 数を出す余地を残さない。
+        if let Some(garden_sessions) = self.garden_sessions.as_mut() {
+            for session in garden_sessions.iter_mut() {
+                session.agents = self
+                    .session_agents
+                    .get(&session.id)
+                    .cloned()
+                    .unwrap_or_default();
             }
         }
         self.daemon_runtimes = inventory.map(|inventory| {
@@ -4386,6 +4419,118 @@ mod tests {
             Some(1),
             "diagnostic inventory remains visible without inventing an actionable tab"
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Exercise both surfaces, observation states, and exact fences.
+    fn loading_inventory_keeps_only_exact_visible_tabs_in_sidebar_and_garden() {
+        use crate::usecase::application::pane::{
+            LivePane, PaneEvent, PaneRegistryEvent, reduce_registry,
+        };
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let live = runtime_ref(workspace, session);
+        let history = runtime_ref(workspace, session);
+        let dismissed = runtime_ref(workspace, session);
+        let superseded = runtime_ref(workspace, session);
+        for (runtime, phase) in [
+            (live.clone(), AgentPhase::Waiting),
+            (history.clone(), AgentPhase::Interrupted),
+            (dismissed.clone(), AgentPhase::Running),
+            (superseded.clone(), AgentPhase::Interrupted),
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase { runtime, phase }),
+            );
+        }
+        let mut inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: [live.clone(), history.clone(), dismissed, superseded.clone()]
+                .into_iter()
+                .map(|runtime| AgentRuntimeInventoryItem {
+                    state: if runtime == live {
+                        AgentRuntimeInventoryState::Live
+                    } else {
+                        AgentRuntimeInventoryState::Interrupted
+                    },
+                    runtime,
+                    continuation: AgentContinuationRef::new(),
+                    resumed_from: None,
+                })
+                .collect(),
+            resumable: Vec::new(),
+        };
+        let mut panes = PaneRegistry::new(Target::Session(session));
+        let _ = reduce_registry(
+            &mut panes,
+            PaneRegistryEvent::Pane {
+                target: Target::Session(session),
+                event: PaneEvent::Restore(LivePane {
+                    terminal: live.terminal.clone(),
+                    kind: PaneKind::Agent,
+                }),
+            },
+        );
+        // A matching lineage with a different exact terminal must not admit
+        // the old runtime's cached phase during loading or with an inventory.
+        inventory.runtimes[3].runtime.terminal.terminal_id = TerminalId::new();
+        let tabs = crate::usecase::application::interrupted_tab::project(
+            &inventory,
+            workspace,
+            &std::collections::BTreeSet::from([session]),
+            &[],
+            &std::collections::BTreeSet::from([inventory.runtimes[2].continuation]),
+            &std::collections::BTreeSet::new(),
+        )
+        .tabs;
+        let _ = reduce_registry(
+            &mut panes,
+            PaneRegistryEvent::Pane {
+                target: Target::Session(session),
+                event: PaneEvent::RestoreInterrupted { tabs },
+            },
+        );
+        inventory.runtimes[3].runtime.terminal = superseded.terminal;
+        for garden in [false, true] {
+            if garden {
+                let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+                let _ = update(
+                    &mut state,
+                    AppEvent::Key(AppKey::SubmitOverview("garden".into())),
+                );
+            }
+            for observation in [None, Some(&inventory)] {
+                let home = HomeProjection::from_state(
+                    &state,
+                    "atlas",
+                    &[projected_session(session, "builder", "/work/builder")],
+                )
+                .with_agent_inventory_and_panes(observation, &panes);
+                let agents = &home.session_agents[&session];
+                assert_eq!(agents.len(), 2);
+                assert!(agents.iter().any(|agent| {
+                    agent.runtime_id == live.agent_runtime_id && agent.phase == AgentPhase::Waiting
+                }));
+                assert!(agents.iter().any(|agent| {
+                    agent.runtime_id == history.agent_runtime_id
+                        && agent.phase == AgentPhase::Interrupted
+                }));
+                if garden {
+                    assert_eq!(&home.garden_sessions.as_ref().unwrap()[0].agents, agents);
+                }
+            }
+        }
+        let empty = PaneRegistry::new(Target::Session(session));
+        let home = HomeProjection::from_state(
+            &state,
+            "atlas",
+            &[projected_session(session, "builder", "/work/builder")],
+        )
+        .with_agent_inventory_and_panes(None, &empty);
+        assert!(home.session_agents.is_empty());
+        assert!(home.garden_sessions.as_ref().unwrap()[0].agents.is_empty());
     }
 
     #[test]

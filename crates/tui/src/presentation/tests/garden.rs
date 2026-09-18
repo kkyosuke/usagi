@@ -5,6 +5,61 @@
 use super::*;
 
 #[test]
+fn inactive_garden_counts_follow_dismissal_and_reopen() {
+    use crate::usecase::application::interrupted_tab::retain_visible_interrupted;
+
+    let alpha = snapshot("alpha");
+    let beta = snapshot("beta");
+    let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+    let continuation = AgentContinuationRef::new();
+    let runtime_id = AgentRuntimeId::new();
+    let observation = AgentWorkspaceObservation {
+        inventory: AgentInventory {
+            workspace_id: beta.workspace_id,
+            runtimes: vec![AgentRuntimeInventoryItem {
+                runtime: AgentRuntimeRef {
+                    agent_runtime_id: runtime_id,
+                    terminal: TerminalRef {
+                        daemon_generation: DaemonGeneration::new(),
+                        terminal_id: TerminalId::new(),
+                        workspace_id: beta.workspace_id,
+                        session_id: Some(beta.session_ids[0]),
+                        worktree_id: WorktreeId::new(),
+                    },
+                    session_id: Some(beta.session_ids[0]),
+                },
+                continuation,
+                state: AgentRuntimeInventoryState::Interrupted,
+                resumed_from: None,
+            }],
+            resumable: Vec::new(),
+        },
+        session_statuses: BTreeMap::new(),
+    };
+    assert!(deck.apply_garden_inventory(&observation));
+    assert_eq!(deck.garden_projection(&[]).1[0].1.agents.len(), 1);
+
+    let mut closed = observation.clone();
+    retain_visible_interrupted(&mut closed.inventory, &BTreeSet::from([continuation]));
+    assert!(deck.apply_garden_inventory(&closed));
+    let (_, plots) = deck.garden_projection(&[]);
+    assert!(plots[0].1.agents.is_empty());
+    assert!(plots[0].1.agents_observed);
+    assert!(
+        !deck.apply_garden_inventory(&closed),
+        "unchanged refresh needs no redraw"
+    );
+
+    let mut reopened = observation;
+    retain_visible_interrupted(&mut reopened.inventory, &BTreeSet::new());
+    assert!(deck.apply_garden_inventory(&reopened));
+    assert_eq!(
+        deck.garden_projection(&[]).1[0].1.agents[0].runtime_id,
+        runtime_id
+    );
+}
+
+#[test]
 fn garden_claims_shell_owned_terminal_input_as_wake_events() {
     assert!(garden_shell_owned_wake(&Key::Pointer(PointerEvent {
         kind: crate::usecase::terminal_input::PointerKind::Drag,
