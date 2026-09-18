@@ -13,7 +13,7 @@ use usagi_tui::usecase::application::controller::{PreviewFileFilter, Target};
 
 use super::file_preview::FilePreviewError;
 
-pub(crate) type PreviewPayload = (Vec<String>, Vec<String>);
+pub(crate) use super::file_preview::PreviewPayload;
 
 #[derive(Debug)]
 pub(crate) struct PreviewCompletion {
@@ -186,6 +186,7 @@ mod tests {
             assert_eq!(filter, PreviewFileFilter::Tracked);
             Ok((
                 vec![root.display().to_string()],
+                Vec::new(),
                 vec![path.unwrap_or_default().to_owned()],
             ))
         });
@@ -205,7 +206,11 @@ mod tests {
         assert_eq!(completion.filter, PreviewFileFilter::Tracked);
         assert_eq!(
             completion.result.unwrap(),
-            (vec!["/repo".to_owned()], vec!["README.md".to_owned()])
+            (
+                vec!["/repo".to_owned()],
+                Vec::new(),
+                vec!["README.md".to_owned()]
+            )
         );
         assert!(pump.take().is_none());
     }
@@ -221,7 +226,11 @@ mod tests {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
             }
-            Ok((Vec::new(), vec![path.unwrap_or_default().to_owned()]))
+            Ok((
+                Vec::new(),
+                Vec::new(),
+                vec![path.unwrap_or_default().to_owned()],
+            ))
         });
         let target = Target::Root(WorkspaceId::new());
         pump.request(
@@ -253,7 +262,7 @@ mod tests {
         assert_eq!(completion.request_id, latest_request);
         assert_eq!(completion.path.as_deref(), Some("latest"));
         assert_eq!(completion.filter, PreviewFileFilter::Tracked);
-        assert_eq!(completion.result.unwrap().1, vec!["latest"]);
+        assert_eq!(completion.result.unwrap().2, vec!["latest"]);
     }
 
     #[test]

@@ -762,7 +762,7 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
 
     let prs = PrOverlay::showing(root, Vec::new(), None);
     assert_eq!(prs.target(), root);
-    let preview = PreviewOverlay::loading(root);
+    let preview = PreviewOverlay::loading(root, Vec::new());
     assert_eq!(preview.target(), root);
     let environment = EnvironmentEditor::loading(EnvScope::Global);
     assert_eq!(environment.scope(), EnvScope::Global);

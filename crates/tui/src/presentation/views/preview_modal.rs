@@ -83,7 +83,11 @@ fn render_finder(
         body.extend(empty_rows(state, inner));
     } else {
         let file_rows = body_height.saturating_sub(3);
-        body.extend(modal::bounded_list_rows(&rows, state.selected(), file_rows));
+        let (rows, selected) = match state.rest_sections() {
+            Some(sections) => sectioned_rows(rows, sections, state.selected()),
+            None => (rows, state.selected()),
+        };
+        body.extend(modal::bounded_list_rows(&rows, selected, file_rows));
     }
     body.push(modal::footer(
         "←→ scope / type filter / ↑↓ select / Enter preview / Esc close",
@@ -97,6 +101,31 @@ fn render_finder(
         desired_body,
         body,
     )
+}
+
+/// Insert the resting view's section headings and move the cursor with them.
+///
+/// The resting rows are two lists in one column — recently opened files, then
+/// changed ones — so the headings have to be part of the same scrolling body
+/// the cursor lives in. The returned index points at the same candidate after
+/// the headings are interleaved.
+fn sectioned_rows(
+    rows: Vec<String>,
+    (recent, changed): (usize, usize),
+    selected: usize,
+) -> (Vec<String>, usize) {
+    let mut sectioned = Vec::with_capacity(rows.len() + 2);
+    let mut rows = rows.into_iter();
+    if recent > 0 {
+        sectioned.push(modal::caption("recent"));
+        sectioned.extend(rows.by_ref().take(recent));
+    }
+    if changed > 0 {
+        sectioned.push(modal::caption(&format!("changed · {changed}")));
+        sectioned.extend(rows);
+    }
+    let headings = usize::from(recent > 0) + usize::from(selected >= recent && changed > 0);
+    (sectioned, selected + headings)
 }
 
 /// Width of the file-name column: the longest name on screen, within the half
@@ -230,6 +259,12 @@ fn count_line(state: &PreviewOverlay, matched: usize, inner: usize) -> String {
 /// how large the searched group is, and names the way out.
 fn empty_rows(state: &PreviewOverlay, inner: usize) -> Vec<String> {
     if state.filter().is_empty() {
+        if state.is_resting() && state.total_files() > 0 {
+            return vec![modal::empty_notice(&format!(
+                "Nothing opened or changed yet. Type to search {} files.",
+                state.total_files()
+            ))];
+        }
         return vec![modal::empty_notice(match state.file_filter() {
             PreviewFileFilter::All => "No files available.",
             PreviewFileFilter::Changed => "No changed files.",
@@ -511,6 +546,7 @@ mod tests {
                 request_id,
                 path: path.map(str::to_owned),
                 filter,
+                changed: files.clone(),
                 files,
                 lines,
             }),
@@ -715,6 +751,77 @@ mod tests {
                 .map(|line| strip_ansi(line))
                 .any(|line| line.contains("1/1"))
         );
+    }
+
+    #[test]
+    fn the_resting_finder_draws_its_sections_and_keeps_the_cursor_with_them() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec![
+                    "Cargo.toml".into(),
+                    "src/lib.rs".into(),
+                    "src/main.rs".into(),
+                ],
+                changed: vec!["src/lib.rs".into(), "src/main.rs".into()],
+                lines: Vec::new(),
+            }),
+        );
+
+        let resting = joined(&state);
+        assert!(resting.contains("changed · 2"));
+        assert!(!resting.contains("recent"));
+        assert!(resting.contains("3 files"));
+        // 全件は並べない。
+        assert!(!resting.contains("Cargo.toml"));
+
+        // cursor は heading を跨いで候補の上に乗る。
+        let base = vec![String::new(); 24];
+        let styled = render_over(24, 90, &base, state.preview_overlay().unwrap());
+        let cursor = styled
+            .iter()
+            .position(|line| strip_ansi(line).contains('›'))
+            .unwrap();
+        assert!(strip_ansi(&styled[cursor]).contains("lib.rs"));
+        assert!(strip_ansi(&styled[cursor - 1]).contains("changed · 2"));
+
+        // 1 件開くと recent 見出しが増え、changed 側からは重複が落ちる。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let reopened = joined(&state);
+        assert!(reopened.contains("recent"));
+        assert!(reopened.contains("changed · 1"));
+    }
+
+    #[test]
+    fn a_resting_finder_with_nothing_to_show_points_at_the_search() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec!["Cargo.toml".into(), "src/lib.rs".into()],
+                changed: Vec::new(),
+                lines: Vec::new(),
+            }),
+        );
+        assert!(joined(&state).contains("Nothing opened or changed yet. Type to search 2 files."));
     }
 
     #[test]

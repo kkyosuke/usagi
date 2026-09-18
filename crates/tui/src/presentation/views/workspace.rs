@@ -6839,6 +6839,8 @@ mod tests {
                 path: None,
                 filter: PreviewFileFilter::All,
                 files: vec!["README.md".into()],
+                // 空 query の finder は changed と recent だけを出す。
+                changed: vec!["README.md".into()],
                 lines: vec![],
             }),
         );
@@ -6852,6 +6854,7 @@ mod tests {
                 path: Some("README.md".into()),
                 filter: PreviewFileFilter::All,
                 files: vec![],
+                changed: Vec::new(),
                 lines: vec!["# Heading".into(), "content line".into()],
             }),
         );
