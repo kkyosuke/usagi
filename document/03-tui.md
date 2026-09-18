@@ -1551,7 +1551,10 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 端末が下限より大きければ背景を左右 3 桁・上下 2 行だけ残した残り全部を取る。下限に満たない端末では余白を
 削って端末いっぱいへ clip するため、見え方は従来と変わらない。Switch では sidebar cursor の
 session、Closeup では active session の worktree を検索し、`+ new session` 行では開かない。候補は `git ls-files` が返す tracked file と
-gitignore 対象外の未追跡 file に限定し、path の大文字小文字を区別しない fuzzy subsequence match で絞り込む。
+gitignore 対象外の未追跡 file に限定し、fuzzy subsequence match で絞り込む。順位はファイル名に当たった候補を
+常にディレクトリだけに当たった候補より上に置き、そのうえで連続一致・単語境界（`/` `_` `-` `.` と camelCase）・
+早い開始・短い候補を上位にする。query が全部小文字なら大文字小文字を無視し、大文字を含むと区別する（smart case）。
+順位付けは query か候補群が変わったときに 1 回だけ行い、描画はその結果を読むだけである。
 候補行はファイル名を先頭の列に、親ディレクトリをその右へ dim で描き、filter が一致した cell だけを反転する。
 名前の列幅は画面に出ている候補のうちいちばん長い名前に合わせ、枠の半分を上限とする（全角は 2 桁として数える）。
 filter 行の右端には、filter が空なら群の総数、入力中なら `一致数/総数` を出す（読み込み中と、幅が足りない
