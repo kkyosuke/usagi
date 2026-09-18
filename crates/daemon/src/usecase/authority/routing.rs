@@ -33,6 +33,15 @@ use usagi_core::infrastructure::ipc::{
 
 use crate::usecase::authority::registry::{REGISTRY_SCHEMA, RegistryDocument};
 
+/// What to do about live Agents that block a rollover, in the operator's own
+/// vocabulary.
+///
+/// Two surfaces refuse for this reason — the rollover gate and managed update —
+/// and an operator who sees one and then the other must be told the same thing,
+/// so the sentence lives here rather than in each of them.
+pub const RESTART_AGENTS_REMEDY: &str = "restart those Agents in place with 'usagi daemon restart --restart-agents', \
+     which resumes the same provider conversations";
+
 /// Why a rollover must not start. Every variant is effect zero: the old active
 /// generation stays active, `current` stays published, and no PTY is touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +61,14 @@ pub enum RolloverRefusal {
     RoutingAdmissionBusy,
     /// MCP caller credentials are process-local and cannot move to the
     /// successor. This includes credentials whose child has not connected yet.
-    McpAuthorityRetained { credentials: usize },
+    McpAuthorityRetained {
+        credentials: usize,
+        /// Whether this rollover already asked for the Agents to be restarted.
+        /// It decides whether the refusal may offer that as the remedy: having
+        /// asked for it and still holding credentials means asking again would
+        /// change nothing.
+        restart_requested: bool,
+    },
     /// The active process could not inspect its process-local MCP authority.
     McpAuthorityUnavailable,
     /// The explicit Agent restart selection could not be prepared atomically.
@@ -80,9 +96,26 @@ impl fmt::Display for RolloverRefusal {
             Self::RoutingAdmissionBusy => {
                 f.write_str("routing admission is frozen by another rollover")
             }
-            Self::McpAuthorityRetained { credentials } => write!(
+            // The count alone leaves the operator with no route but `--force`,
+            // which destroys the very conversations this refusal protected.
+            // `--restart-agents` keeps them, so the refusal names it — unless
+            // this rollover already asked for it, in which case repeating it
+            // would change nothing and the message must not suggest it.
+            Self::McpAuthorityRetained {
+                credentials,
+                restart_requested: false,
+            } => write!(
                 f,
-                "{credentials} daemon-provisioned MCP caller credential(s) remain on the active generation"
+                "{credentials} daemon-provisioned MCP caller credential(s) remain on the active generation; \
+                 {RESTART_AGENTS_REMEDY}"
+            ),
+            Self::McpAuthorityRetained {
+                credentials,
+                restart_requested: true,
+            } => write!(
+                f,
+                "{credentials} daemon-provisioned MCP caller credential(s) remain on the active generation \
+                 even after the requested Agent restart"
             ),
             Self::McpAuthorityUnavailable => {
                 f.write_str("daemon-provisioned MCP caller authority is unavailable")

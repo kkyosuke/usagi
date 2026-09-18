@@ -109,7 +109,7 @@ fn a_skipped_tick_still_admits_the_restore_retry() {
 fn restore_without_agent_intent_caches_inventory_and_refresh_clears_it() {
     let workspace = WorkspaceId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
     let fence = runtime.restore_fence();
     let applied = crate::presentation::apply_restore_completion(
@@ -295,15 +295,14 @@ fn partial_transport_failure_restores_nothing_and_outranks_a_stale_fence() {
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::clone(&mutations),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let dispatched = runtime.restore_fence();
     let runtime_before = runtime.active_pane().clone();
@@ -530,7 +529,7 @@ fn restore_scope_change_rejects_snapshot_and_exact_duplicates_normalize_once() {
         view_state,
         vec![original_session, added_session],
     );
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![original_session, added_session]);
     let fence = runtime.restore_fence();
     let applied = crate::presentation::apply_restore_completion(
@@ -574,16 +573,15 @@ fn restore_intent_publish_failure_keeps_bytes_but_does_not_block_generic_restore
     let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
     let attempts = Arc::new(AtomicUsize::new(0));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(FailingIntentPort {
-                state: Arc::clone(&durable),
-                error: AgentTabIntentError::Unavailable,
-                attempts: Arc::clone(&attempts),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(FailingIntentPort {
+            state: Arc::clone(&durable),
+            error: AgentTabIntentError::Unavailable,
+            attempts: Arc::clone(&attempts),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let fence = runtime.restore_fence();
     let applied = crate::presentation::apply_restore_completion(
@@ -666,16 +664,15 @@ fn mixed_restore_intent_failure_preserves_visible_agents_and_restores_generics()
     let bytes_before = serde_json::to_vec(&*durable.lock().unwrap()).unwrap();
     let attempts = Arc::new(AtomicUsize::new(0));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(FailingIntentPort {
-                state: Arc::clone(&durable),
-                error: AgentTabIntentError::Unavailable,
-                attempts: Arc::clone(&attempts),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(FailingIntentPort {
+            state: Arc::clone(&durable),
+            error: AgentTabIntentError::Unavailable,
+            attempts: Arc::clone(&attempts),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let fence = runtime.restore_fence();
     assert!(runtime.restore_snapshot(
@@ -906,7 +903,7 @@ fn failed_restore_keeps_the_port_for_a_reconnect_dispatch() {
         .recv_timeout(std::time::Duration::from_secs(1))
         .unwrap();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
 
     let applied = crate::presentation::apply_restore_completion(
@@ -955,15 +952,14 @@ fn late_restore_leaves_runtime_and_durable_intent_bytes_unchanged() {
     let durable = Arc::new(Mutex::new(initial));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::clone(&mutations),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.handle_key(Key::Down);
     let _ = runtime.handle_key(Key::Enter);
@@ -1135,15 +1131,14 @@ fn cross_tui_stale_observe_omits_old_ref_then_fresh_observation_restores_replace
     let durable = Arc::new(Mutex::new(initial));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::clone(&mutations),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let dispatched = runtime.restore_fence();
 
@@ -1266,15 +1261,14 @@ fn successful_restore_retains_port_and_reconnect_reobserves_exactly_once() {
     let durable = Arc::new(Mutex::new(AgentTabIntent::empty(workspace)));
     let mutations = Arc::new(Mutex::new(Vec::new()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            BTreeSet::from([session]),
-            Box::new(MemoryIntentPort {
-                state: Arc::clone(&durable),
-                mutations: Arc::clone(&mutations),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut retry = crate::presentation::RestoreRetryState::new();
@@ -1365,12 +1359,11 @@ fn drawer_round_trip_restores_both_views_and_restates_each_viewport_without_resy
     let root = scoped_terminal_ref(workspace, None);
     let calls = Arc::new(Mutex::new(StreamCalls::default()));
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RecordingStreamPort(Arc::clone(&calls))),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RecordingStreamPort(Arc::clone(&calls))),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.handle_key(Key::Enter);
     let (interaction, revision) = runtime.restore_fence();
@@ -1496,7 +1489,8 @@ fn workflow_focus_survives_agent_restore_and_explicit_agent_selection_still_work
         })
         .collect::<Vec<_>>();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
+    let mut command_lane = SessionCommandLane::new();
+    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort))
         .with_agent_tab_intent(
             workspace,
             allowed.clone(),
@@ -1555,6 +1549,7 @@ fn workflow_focus_survives_agent_restore_and_explicit_agent_selection_still_work
         drain_host_actions(
             &receiver,
             &mut ui,
+            &mut command_lane,
             &mut runtime,
             &mut std::collections::HashMap::new(),
         );
@@ -1566,6 +1561,7 @@ fn workflow_focus_survives_agent_restore_and_explicit_agent_selection_still_work
     drain_host_actions(
         &receiver,
         &mut ui,
+        &mut command_lane,
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
@@ -1610,16 +1606,15 @@ fn restore_open_panes_projects_live_runtimes_and_skips_dead_and_duplicates() {
         },
     ];
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RestoreInventoryPort {
-                entries,
-                fail: false,
-                inputs: Arc::new(Mutex::new(Vec::new())),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RestoreInventoryPort {
+            entries,
+            fail: false,
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
 
     restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
@@ -1655,16 +1650,15 @@ fn restored_terminal_and_agent_tabs_deliver_ordinary_closeup_input() {
         },
     ];
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            Vec::new(),
-            Box::new(RestoreInventoryPort {
-                entries,
-                fail: false,
-                inputs: inputs.clone(),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        Vec::new(),
+        Box::new(RestoreInventoryPort {
+            entries,
+            fail: false,
+            inputs: inputs.clone(),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let mut controls = LiveTerminalControls::default();
     let mut term = FakeTerminal::default();
@@ -1733,16 +1727,15 @@ fn double_clicked_append_restored_session_attaches_and_receives_input() {
         },
     ];
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RestoreInventoryPort {
-                entries,
-                fail: false,
-                inputs: inputs.clone(),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RestoreInventoryPort {
+            entries,
+            fail: false,
+            inputs: inputs.clone(),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let (interaction, revision) = runtime.restore_fence();
     assert!(runtime.append_restore_snapshot(
@@ -1814,16 +1807,15 @@ fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
 
     // A daemon failure restores nothing (and never spawns locally).
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_context(
-            workspace,
-            vec![session],
-            Box::new(RestoreInventoryPort {
-                entries: vec![live],
-                fail: true,
-                inputs: Arc::new(Mutex::new(Vec::new())),
-            }),
-        );
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RestoreInventoryPort {
+            entries: vec![live],
+            fail: true,
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
     assert!(runtime.active_pane().tabs().is_empty());
@@ -1831,7 +1823,7 @@ fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
 
     // An embedder with no Agent port simply finds nothing to restore.
     let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut ui = WorkspaceIoRuntime::new(view, Box::new(UnavailableSessionCommandPort));
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
     assert!(runtime.active_pane().tabs().is_empty());

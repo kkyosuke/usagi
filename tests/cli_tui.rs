@@ -804,7 +804,10 @@ fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator
                     .expect("the shipping daemon writes a registry this build understands")
             ),
             true,
-            2
+            2,
+            // A standby, not a draining predecessor: there is no collection
+            // wait to observe, and the refusal must not invent one.
+            None,
         ),
         Some(SeamlessRefusal::GenerationLimit)
     );

@@ -575,6 +575,94 @@ fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
 }
 
 #[test]
+fn a_create_carried_back_from_another_project_reports_without_a_pending_row() {
+    // The create finished while another project owned the screen, so this state
+    // has no pending row to match and no form to clear. The outcome still has to
+    // reach the user (#768).
+    let (workspace, _, _) = ids();
+
+    let mut succeeded = AppState::home(workspace, Vec::new());
+    let effects = update(
+        &mut succeeded,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: None,
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(succeeded.overlay(), None);
+    assert_eq!(
+        succeeded.notice().map(|notice| notice.message.as_str()),
+        Some("session atlas created")
+    );
+
+    let mut failed = AppState::home(workspace, Vec::new());
+    let effects = update(
+        &mut failed,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: Some("worktree path already exists".to_owned()),
+        },
+    );
+    assert!(effects.is_empty());
+    assert_eq!(failed.overlay(), Some(Overlay::CreateSessionError));
+    assert_eq!(
+        failed
+            .create_session_error()
+            .map(|notice| notice.message.as_str()),
+        Some("worktree path already exists")
+    );
+    // The live path notices as well as opening the dialog; keep them identical.
+    assert_eq!(
+        failed.notice().map(|notice| notice.message.as_str()),
+        Some("worktree path already exists")
+    );
+    assert!(failed.sessions().is_empty());
+    assert_eq!(failed.active(), None);
+}
+
+#[test]
+fn a_carried_create_failure_never_clobbers_a_surface_the_user_already_opened() {
+    // Same rule the in-composition failure follows, for both halves of the
+    // guard: an open overlay and an open workspace drawer each keep the notice
+    // fallback instead of being covered by the dialog.
+    let (workspace, _, _) = ids();
+
+    let mut overlaid = AppState::home(workspace, Vec::new());
+    overlaid.overlay = Some(Overlay::Garden);
+    let _ = update(
+        &mut overlaid,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: Some("daemon unavailable".to_owned()),
+        },
+    );
+    assert_eq!(overlaid.overlay(), Some(Overlay::Garden));
+    assert!(overlaid.create_session_error().is_none());
+    assert_eq!(
+        overlaid.notice().map(|notice| notice.message.as_str()),
+        Some("daemon unavailable")
+    );
+
+    let mut drawered = AppState::home(workspace, Vec::new());
+    drawered.director_drawer_open = true;
+    assert!(drawered.workspace_drawer_open());
+    let _ = update(
+        &mut drawered,
+        AppEvent::CarriedCreateOutcome {
+            name: "atlas".to_owned(),
+            error: Some("daemon unavailable".to_owned()),
+        },
+    );
+    assert_eq!(drawered.overlay(), None);
+    assert!(drawered.create_session_error().is_none());
+    assert_eq!(
+        drawered.notice().map(|notice| notice.message.as_str()),
+        Some("daemon unavailable")
+    );
+}
+
+#[test]
 fn a_failed_create_opens_the_error_dialog_with_only_the_safe_message() {
     let (workspace, _, _) = ids();
     let mut state = AppState::home(workspace, Vec::new());

@@ -15,18 +15,19 @@ use super::{
     Overlay, OverlayIntent, PROJECT_BAR_ROWS, PaneLaunch, PaneTab, Path, PendingCreate,
     PendingWorkspaceCreate, PointerEvent, PointerKind, PrModalClickRoute, ProjectBarTarget,
     ProjectedSession, REGISTRY_REFRESH_INTERVAL, Receiver, Recent, RestoreJobOutcome,
-    RestoreRetryState, Route, Screen, SessionBackendCompletion, SessionCommand, SessionId,
-    SessionRefreshPort, SessionWorktreeHint, SettingsPort, Start, Style, TabSelection, Target,
-    Terminal, TerminalRef, TerminalViewProjection, Utc, WORK_RUN_OBSERVATION_BACKOFF,
+    RestoreRetryState, Route, Screen, SessionBackendCompletion, SessionCommand, SessionCommandLane,
+    SessionId, SessionRefreshPort, SessionWorktreeHint, SettingsPort, Start, Style, TabSelection,
+    Target, Terminal, TerminalRef, TerminalViewProjection, Utc, WORK_RUN_OBSERVATION_BACKOFF,
     WORK_RUN_OBSERVATION_INTERVAL, Welcome, WelcomeStep, WorkMode, WorkRunControl,
     WorkRunControlInput, WorkRunControlOutcome, WorkRunControlResult, WorkRunLaneCompletion,
     WorkRunProjection, Workspace, WorkspaceConfigContext, WorkspaceCreateEffect,
     WorkspaceCreateToken, WorkspaceDeck, WorkspaceDrawerFocus, WorkspaceEntryPolicy,
     WorkspaceInputRoute, WorkspaceIoRuntime, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot,
     WorkspaceStep, WorkspaceView, activate_focused_interrupted_tab, activate_workspace_responsive,
-    adjust_project_bar_pointer, apply_drawer_header_while_director_open, apply_restore_completion,
-    begin_session_command, close_exited_panes, closes_workspace_help,
-    compose_workspace_shell_frame, controller_terminal_view, director_drawer_projection,
+    adjust_project_bar_pointer, adopt_session_command_lane,
+    apply_drawer_header_while_director_open, apply_restore_completion, begin_session_command,
+    close_exited_panes, closes_workspace_help, compose_workspace_shell_frame,
+    controller_terminal_view, deliver_carried_outcome, director_drawer_projection,
     dismiss_pr_modal_on_project_bar_click, drain_pane_completions_into_runtime,
     drain_pane_launches, drain_session_completions, drain_session_refresh, enqueue_pane_launch,
     enter_workspace, enter_workspace_deck, entry_help_context, fail_terminal_launch,
@@ -403,6 +404,7 @@ pub(super) fn render_controller_frame(
 pub(super) fn drain_controller_host_actions(
     actions: &Receiver<ControllerHostAction>,
     ui: &mut WorkspaceIoRuntime,
+    lane: &mut SessionCommandLane,
     runtime: &mut WorkspaceRuntime,
     pending_targets: &mut std::collections::HashMap<OperationId, Target>,
     session_refresh: &mut dyn SessionRefreshPort,
@@ -417,6 +419,7 @@ pub(super) fn drain_controller_host_actions(
                 let before = ui.workspace.session_ids().to_vec();
                 if begin_session_command(
                     ui,
+                    lane,
                     SessionCommand::Create {
                         name: name.clone(),
                         role_id,
@@ -424,6 +427,7 @@ pub(super) fn drain_controller_host_actions(
                     },
                     SessionBackendCompletion::Create {
                         token: request.token,
+                        name: name.clone(),
                         before,
                         completions,
                     },
@@ -444,6 +448,7 @@ pub(super) fn drain_controller_host_actions(
                     let before = ui.workspace.session_ids().to_vec();
                     if begin_session_command(
                         ui,
+                        lane,
                         SessionCommand::Remove {
                             name,
                             force: request.force,
@@ -469,6 +474,7 @@ pub(super) fn drain_controller_host_actions(
                     let before = ui.workspace.session_ids().to_vec();
                     begin_session_command(
                         ui,
+                        lane,
                         SessionCommand::Sleep { name },
                         SessionBackendCompletion::Sleep {
                             before,
@@ -659,6 +665,7 @@ pub(super) fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     deck: &mut WorkspaceDeck,
+    lane: &mut SessionCommandLane,
     registry: &[Workspace],
     mut loader: Option<&mut dyn WorkspaceLoader>,
     backend_factory: &mut dyn ControllerBackendFactory,
@@ -709,7 +716,7 @@ pub(super) fn drive_workspace_controller(
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
-    let mut ui = WorkspaceIoRuntime::new(workspace, composition.session_commands)
+    let mut ui = WorkspaceIoRuntime::new(workspace, composition.session_commands, lane.sender())
         .with_agent_resumes(agent_resumes)
         .with_agent_context(
             workspace_id,
@@ -725,6 +732,7 @@ pub(super) fn drive_workspace_controller(
         .with_external_terminal(composition.external_terminal);
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
+    adopt_session_command_lane(lane, &root_cwd, &mut ui);
     restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
@@ -891,6 +899,7 @@ pub(super) fn drive_workspace_controller(
         drain_controller_host_actions(
             &host_rx,
             &mut ui,
+            lane,
             &mut runtime,
             &mut pending_targets,
             session_refresh.as_mut(),
@@ -902,7 +911,7 @@ pub(super) fn drive_workspace_controller(
         if ui.take_agent_inventory_change_observation_request() {
             restore_retry.request_changed_observation(restore_clock.elapsed());
         }
-        drain_session_completions(&mut ui);
+        drain_session_completions(&mut ui, lane);
         drain_session_refresh(
             &mut ui,
             session_refresh.as_mut(),
@@ -919,6 +928,10 @@ pub(super) fn drive_workspace_controller(
             let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
             pending_garden_agent = visit.agent.map(|agent| (visit.session, agent));
         }
+        // After the one-shot entry restores above: both apply events that close
+        // an overlay, so delivering earlier would dismiss the create-failure
+        // dialog on the very frame it opened (#768).
+        deliver_carried_outcome(lane, &root_cwd, &mut runtime);
         let workspace_material_revision = ui.workspace.material_revision();
         if allowed_sessions_revision != workspace_material_revision {
             current_sessions = ui.workspace.session_ids().iter().copied().collect();

@@ -614,7 +614,7 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
 | `no live registered active` | registry の active と exact process identity の生存を一致させられない |
 | `generation limit` | retained generation が上限に達しており、standby を追加できない |
-| `draining collection pending` | retained generation 上限を、まだ resource / lease / outbox / capacity claim のいずれかを持つ draining predecessor が占有している。PTY を落として slot を空けず fail closed |
+| `draining collection pending` | retained generation 上限を、まだ resource / lease / outbox / capacity claim のいずれかを持つ draining predecessor が占有している。PTY を落として slot を空けず fail closed。その predecessor が何を待っているかを併記する（[generation collection](#generation-collection)） |
 
 registry へ登録された active generation 自身は standby として数えない。`verified_build` は
 「その generation の hello がこの artifact を証明した」という意味であり、active は standby role を抜けた
@@ -628,14 +628,34 @@ generation なので、seamless の successor 候補にはならない。
 | 0 | planned replacement | cold transition |
 | 1 以上、全て generic Terminal | planned replacement、seamless refusal なし | standby を stage し、old active の gate を通した seamless rollover |
 | 1 以上、Agent credential あり | planned replacement | typed refusal。old active / current / Agent PTY / credential は維持 |
+| 1 以上、Agent credential あり | `restart --restart-agents`、plan が全件成立 | 同じ barrier 内で live Agent を停止してから seamless rollover。successor が exact resume する |
 | 1 以上 | planned replacement、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
-| 1 以上 | replacement `--force` | 明示的な cold transition |
+| 1 以上 | replacement `--force`（`--restart-agents` なし） | 明示的な cold transition |
 | 1 以上 | `stop` | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
 | 1 以上 | `stop --force` | cold transition |
 
 拒否は typed であり、何を守ったか（Agent runtime 数と generic terminal 数）と、
-seamless に保てなかった理由を示す。`daemon stop` は rollover とは別契約であり、渡す先の successor が
+seamless に保てなかった理由を示す。**守った数は live な種類だけを挙げ**、live でない種類を 0 として並べない。
+`daemon stop` は rollover とは別契約であり、渡す先の successor が
 そもそも存在しないため seamless refusal を報告しない。live runtime を明示的に手放したかどうかだけを問う。
+
+拒否はさらに **次にできることを名指す**。ただし提示するのは、その拒否を実際に解く経路だけである。
+
+| 拒否 | 提示する経路 |
+|---|---|
+| live runtime を守った seamless refusal（上表） | close するか、`--force` の cold transition |
+| `mcp_authority_retained`（[rollover の routing 前提条件](#rollover-の-routing-前提条件)） | `daemon restart --restart-agents`。同じ provider conversation を resume する |
+| `mcp_authority_retained` で、その rollover が既に `--restart-agents` を要求済み | 提示しない。credential が残った事実だけを述べる |
+
+seamless refusal の側が `--restart-agents` を提示しないのは、**その flag も同じ seamless 前提を必要とする**ためである。
+前提が欠けている状態で案内すると、利用者は同じ拒否へ戻るだけになる。逆に `mcp_authority_retained` は
+`--restart-agents` が credential を 0 にして解ける拒否なので、そこでは名指す。守った会話を破棄する `--force` だけを
+提示して唯一の破壊的な経路へ送ることも、解けない flag を案内して空振りさせることも避ける。
+
+live Agent の拒否だけは、live runtime を手放さずに進む道が `--force` の他にもう 1 本ある。**`--restart-agents`
+は Agent の PTY を維持する経路ではなく、provider conversation を維持したまま Agent process を作り直す経路**で
+ある。plan の全件成立条件と停止・再開の順序は
+[daemon restart による Agent integration 更新](#daemon-restart-による-agent-integration-更新)を参照する。
 
 ## service supervision
 
@@ -2586,6 +2606,31 @@ PTY が長時間生き続ければ draining generation はその間ずっと残�
 generation 上限と衝突する。次の rollover が上限に当たったとき、draining generation が居れば
 `draining collection pending` を typed に報告して fail closed になり、居なければ `generation limit` になる
 （[planned replacement](#planned-replacement)）。いずれも old active / current / PTY を変更しない。
+
+`draining collection pending` は **その predecessor が待っている条件**も報告する。上限に当たったこと自体は
+利用者が動かせないが、上の 4 条件のうち live resource は利用者が閉じられるものなので、どれが残っているかで
+次の行動が変わる。条件は predecessor 自身の shard と global allocator から観測し、上と同じ順序で最初に
+成立しているものを 1 つ挙げる。
+
+| 観測 | 報告 |
+|---|---|
+| live resource | `it still serves <Agent runtime 数と generic terminal 数>`。利用者が閉じられる唯一の条件なので、何を閉じればよいかを数で示す |
+| in-flight command | `a terminal command it accepted has not completed` |
+| 未 consume の outbox | `its exit events have not been applied yet` |
+| capacity claim | `it still holds capacity claims` |
+| 4 条件すべて解消済み | `its collection pass has not run yet`（回収 worker の次の tick を待っている） |
+| shard または allocator を読めない | 条件を併記しない。読まなかった原因を名指さない |
+
+この観測は 3 つの性質を守る。
+
+- **outbox は consume 済みを除いて数える**。owner 自身の判定は自分の outbox を sweep してから読むが、
+  外から読む時点でその sweep は走っていない。sweep を前提にした数え方だと、既に適用済みの event を
+  「まだ適用されていない」と報告してしまう。
+- **allocator を読めなければ何も報告しない**。capacity claim は最後に検査する条件なので、読めない allocator を
+  空として扱うと、実在する claim が「何も待っていない」に化ける。
+- **この読み出しは書き手にならない**。private directory を作らず、lock node も取らない（registry の
+  reader と同じ契約）。`daemon status` や `daemon stop` が、詰まった daemon の持つ lock を待って
+  自分も詰まることがあってはならないためである。観測は `draining collection pending` を報告する場合だけ行う。
 
 ### operation ledger の retention / expiry / GC
 

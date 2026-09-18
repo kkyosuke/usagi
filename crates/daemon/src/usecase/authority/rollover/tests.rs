@@ -382,7 +382,10 @@ fn the_process_local_guard_runs_after_control_drains_and_before_any_write() {
             assert_eq!(world.gate.role(), GenerationRole::Draining);
             assert!(!world.gate.is_open(LeaseClass::ActiveControl));
             assert_eq!(world.gate.outstanding(LeaseClass::ActiveControl), 0);
-            Err(RolloverRefusal::McpAuthorityRetained { credentials: 1 })
+            Err(RolloverRefusal::McpAuthorityRetained {
+                credentials: 1,
+                restart_requested: false,
+            })
         },
     )
     .unwrap_err();
@@ -390,7 +393,10 @@ fn the_process_local_guard_runs_after_control_drains_and_before_any_write() {
     assert!(observed_barrier);
     assert!(matches!(
         failure,
-        HandoffFailure::Routing(RolloverRefusal::McpAuthorityRetained { credentials: 1 })
+        HandoffFailure::Routing(RolloverRefusal::McpAuthorityRetained {
+            credentials: 1,
+            restart_requested: false,
+        })
     ));
     assert_eq!(world.file.writes(), writes);
     assert_eq!(world.file.contents(), contents);

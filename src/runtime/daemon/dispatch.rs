@@ -2726,6 +2726,7 @@ pub(super) fn dispatch_rollover(
                 Err(
                     usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityRetained {
                         credentials,
+                        restart_requested: restart_agents.is_some(),
                     },
                 )
             }

@@ -1659,6 +1659,17 @@ fn a_census_counts_live_runtime_without_touching_anything() {
     let corrupt = World::new();
     corrupt.archive.bytes(old).set("not-json");
     assert!(census(&corrupt.archive).is_err());
+
+    // The per-shard count a refusal uses to explain one generation's wait is the
+    // same one the global census folds together, and it stays out of the legacy
+    // stores, which belong to no generation.
+    assert_eq!(
+        shard_census(&world.shard(old)),
+        LiveCensus {
+            agents: 1,
+            terminals: 1
+        }
+    );
 }
 
 #[test]

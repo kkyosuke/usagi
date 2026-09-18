@@ -2345,6 +2345,20 @@ pub enum AppEvent {
     Backend(BackendEvent),
     /// request completion。
     OperationResult(OperationResult),
+    /// A session create that finished while its workspace was not the composed
+    /// project.
+    ///
+    /// Its `OperationResult` sink was a clone of that composition's completion
+    /// channel and died with it, and the pending row it would have matched is
+    /// gone too. The shell replays the outcome here so a create the user started
+    /// before switching projects is still reported when they come back (#768).
+    CarriedCreateOutcome {
+        /// Name the user typed, so a success names its session.
+        name: String,
+        /// `None` when the daemon created the session, otherwise the safe
+        /// message the create-failure dialog shows.
+        error: Option<String>,
+    },
     /// The shell finished exactly one drawer-originated workspace-root Agent
     /// launch. A mismatched operation is ignored, preserving the in-flight
     /// fence against stale or replayed completions.
@@ -2936,6 +2950,9 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::WorkspaceDrawerFocused(focus) => update_workspace_drawer_focused(state, focus),
         AppEvent::OperationResult(result) => update_operation_result(state, result),
+        AppEvent::CarriedCreateOutcome { name, error } => {
+            update_carried_create_outcome(state, &name, error)
+        }
     }
 }
 
@@ -3115,6 +3132,34 @@ fn update_operation_result(state: &mut AppState, result: OperationResult) -> Vec
         // A concurrently open overlay keeps the notice fallback instead of
         // being clobbered by the dialog.
         state.create_session_error = result.notice;
+        state.overlay = Some(Overlay::CreateSessionError);
+    }
+    Vec::new()
+}
+
+/// Report a create that finished while its workspace was not the composed
+/// project.
+///
+/// There is no pending row to match here and no form to clear: both died with
+/// the composition that started the create. The outcome still has to reach the
+/// user, so a success names the session that arrived and a failure keeps the
+/// same create-failure dialog — including its rule that an overlay the user
+/// already has open is never clobbered (#768).
+fn update_carried_create_outcome(
+    state: &mut AppState,
+    name: &str,
+    error: Option<String>,
+) -> Vec<Effect> {
+    let Some(message) = error else {
+        state.notice = Some(Notice::new(format!("session {name} created")));
+        return Vec::new();
+    };
+    let notice = Notice::new(message);
+    // The live path notices unconditionally and opens the dialog on top; keep
+    // the two reports identical so dismissing either leaves the same Home.
+    state.notice = Some(notice.clone());
+    if state.overlay.is_none() && !state.workspace_drawer_open() {
+        state.create_session_error = Some(notice);
         state.overlay = Some(Overlay::CreateSessionError);
     }
     Vec::new()

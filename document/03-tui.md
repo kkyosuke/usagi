@@ -1004,7 +1004,19 @@ worker が daemon port を所有している間に届いた 2 件目は backend 
 pending overlay は残らず、実行順序・queue cancel policy は発生しない。worker panic は安全な失敗 completion に変換して
 admission を回復し、遅延・順序外の worker completion は command 世代で fence して現在の pending 表示を上書きしない。
 workspace を離れた場合は実行中の daemon operation 自体を取り消さず、worker は completion 経路を 1 回完了して終了する。
-閉じた workspace の receiver はその completion を破棄し、次に開く workspace は factory から fresh port を取得する。
+completion の受け取り口は 1 つの workspace composition ではなく project deck が持つため、project を切り替えても completion は失われない。
+admission はこの deck-level lane が workspace ごとに 1 件として持ち、composition をまたいでも同じ workspace の 2 件目は Busy になる。
+離れている間に完了した場合は、その安全な outcome を当該 workspace へ持ち越し、同じ workspace を再び開いたフレームで提示する。
+create の成功は作成された session を名指す notice を出し、row が無通知で現れることはない。create の失敗は上記の作成失敗 dialog を開く
+（前面に別の overlay か workspace drawer があれば従来どおり notice へ退避する）。daemon が `Ok` を返しても新しい session を返さなかった場合は、
+滞在中と同じく失敗として扱う。remove / sleep は成功なら説明すべき表示が残らないので破棄し、失敗だけを安全な notice として提示する。
+持ち越した outcome の提示は、そのフレームの Closeup 復帰と Garden visit の**後**に行う。どちらも overlay を閉じる event を適用するため、
+先に提示すると開いた dialog を同じフレームで消してしまう。
+再び開いた composition はその workspace がまだ実行中の command をそのまま引き継ぐため、遅れて届いた completion が stale として捨てられることもない。
+引き継いだ command がまだ実行中なら**作成中 skeleton と削除中 skeleton を同じ対象で描き直す**ので、戻った直後の sidebar に実行中である手掛かりが残る。
+引き継いだ command の完了は、開始した composition の reducer sink がすでに閉じているため、skeleton を消すと同時に上記の持ち越し経路で提示する。
+したがって skeleton が黙って消えることはない。次に開く workspace は factory から fresh port を取得する。
+なお lane は project deck と同じ寿命なので、deck 自体を抜けて project 一覧へ戻ると持ち越しは失われる。
 
 GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 
