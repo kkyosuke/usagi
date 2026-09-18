@@ -13,7 +13,10 @@ use crate::usecase::application::controller::{
 /// ように固定寸法にせず端末いっぱいに近い枠を取る。枠の外に残す背景は左右
 /// [`HORIZONTAL_MARGIN`] 桁・上下 [`VERTICAL_MARGIN`] 行だけで、残りはすべて
 /// 本文に充てる。狭い端末では下限（`MIN_*`）を希望値に据えるため、`modal` 側の
-/// clip が従来どおり「枠いっぱい」に収める。
+/// clip が従来どおり「枠いっぱい」に収める（この背景は下限を超える端末でだけ
+/// ちょうど残り、下限付近では clip に食われる）。希望寸法は正規化前の生の端末
+/// サイズから決めるが、`0` は下限へ落ちるので `modal` 側の
+/// [`normalize_size`](crate::presentation::widgets::normalize_size) と食い違わない。
 const MIN_INNER_WIDTH: usize = 108;
 const MIN_BODY_HEIGHT: usize = 24;
 const HORIZONTAL_MARGIN: usize = 3;
