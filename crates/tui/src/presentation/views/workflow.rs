@@ -186,23 +186,29 @@ fn history(panel: &WorkflowPanel) -> Vec<String> {
     history
 }
 
-/// The three provider choices, each opening its `< value >` in the same column
-/// so the longest label cannot push its own value out of line.
+/// The start form: the three provider choices and the revision limit, each
+/// opening its `< value >` in the same column so the longest label cannot push
+/// its own value out of line.
 fn agent_rows(panel: &WorkflowPanel) -> Vec<String> {
+    let limit = panel.revision_limit.to_string();
     [
-        (0, "Planner", panel.agents.planner),
-        (1, "Implementer", panel.agents.implementer),
-        (2, "Reviewer", panel.agents.reviewer),
+        (0, "Planner", provider_name(panel.agents.planner)),
+        (1, "Implementer", provider_name(panel.agents.implementer)),
+        (2, "Reviewer", provider_name(panel.agents.reviewer)),
+        (
+            crate::usecase::application::workflow::REVISION_LIMIT_FIELD,
+            "Revisions",
+            limit.as_str(),
+        ),
     ]
     .into_iter()
-    .map(|(index, label, provider)| {
+    .map(|(index, label, name)| {
         let focused = panel.agent_field == Some(index);
         let marker = if focused {
             Role::Danger.style().bold().paint(">")
         } else {
             " ".to_owned()
         };
-        let name = provider_name(provider);
         let value = if focused {
             Role::Accent.style().bold()
         } else {
@@ -563,6 +569,7 @@ mod tests {
                 WorkflowCommand::Start {
                     goal: "task".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )),
             ..WorkflowPanel::default()
@@ -678,6 +685,7 @@ mod tests {
             WorkflowCommand::Start {
                 goal: "task".into(),
                 agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
         ));
         assert!(render(20, 90, &panel).join("\n").contains("retry previous"));
@@ -775,6 +783,7 @@ mod tests {
             usagi_core::domain::workflow::WorkflowCommand::Start {
                 goal: "task".into(),
                 agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
         ));
         assert!(!render(24, 100, &panel).join("\n").contains(BARE_DIM));
@@ -941,19 +950,26 @@ mod tests {
                 .collect(),
             ..WorkflowPanel::default()
         };
-        // 4 header rows + 10 history rows + 3 composer rows.
+        // The header's height depends on what the pane is showing, so locate the
+        // history structurally: it runs from its first drawn row to the three
+        // composer rows at the bottom. A part-empty window puts blanks in there.
         let height = 17;
         let history_rows = |panel: &WorkflowPanel| {
-            render(height, 100, panel)[4..14]
+            let rows = render(height, 100, panel)
                 .iter()
                 .map(|row| strip(row).trim_end().to_owned())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let first = rows
+                .iter()
+                .position(|row| row.contains("attempt"))
+                .expect("a history row is drawn");
+            rows[first..height - 3].to_vec()
         };
         assert!(history_rows(&panel).iter().all(|row| !row.is_empty()));
 
         // Bounding the offset by the row count alone leaves every offset past
         // `rows - height` drawing a part-empty window; one page back would show
-        // 7 rows over 3 blank lines. The window has to stay full.
+        // a handful of rows over blank lines. The window has to stay full.
         let mut scrolled = panel.clone();
         for _ in 0..5 {
             scrolled.scroll_history(true);
@@ -1032,6 +1048,39 @@ mod tests {
         assert!(!row("Plan ready").contains("|>"));
         // A timeless record still lines the column up.
         assert!(row("Older entry").contains("--:--"));
+    }
+
+    #[test]
+    fn the_start_form_offers_the_revision_limit_in_the_selector_column() {
+        let mut panel = WorkflowPanel {
+            revision_limit: 7,
+            agent_field: Some(crate::usecase::application::workflow::REVISION_LIMIT_FIELD),
+            ..WorkflowPanel::default()
+        };
+        let rows = render(20, 100, &panel)
+            .into_iter()
+            .map(|row| strip(&row))
+            .collect::<Vec<_>>();
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .expect("the form row is drawn")
+                .clone()
+        };
+        let revisions = row("Revisions:");
+        assert!(revisions.contains("< 7 >"));
+        // It opens in the same column as the three providers.
+        let opens_at = |row: &str| row.find('<').expect("the selector opens");
+        assert_eq!(opens_at(&revisions), opens_at(&row("Planner:")));
+        // Only the focused row carries the cursor.
+        assert!(revisions.starts_with('>'));
+        assert!(row("Reviewer:").starts_with(' '));
+
+        // A started run replaces the form with what it is running.
+        panel.run = Some(crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        ));
+        assert!(!plain(&render(20, 100, &panel)).contains("Revisions:"));
     }
 
     #[test]

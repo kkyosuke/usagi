@@ -66,6 +66,7 @@ fn a_background_read_never_swallows_the_person_s_submission() {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             })),
         }),
     );

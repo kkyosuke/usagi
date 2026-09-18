@@ -354,11 +354,14 @@ pub(super) fn dispatch_session_action(
                         }
                         None => string("goal")?.to_owned(),
                     };
+                    let remembered = workflow::remembered_defaults(agent, workspace);
                     Some(usagi_core::domain::workflow::WorkflowCommand::Start {
                         goal,
-                        agents: workflow::requested_agents(
+                        agents: workflow::requested_agents(payload, remembered.agents)
+                            .ok_or(SessionRuntimeError::InvalidRequest)?,
+                        revision_limit: workflow::requested_revision_limit(
                             payload,
-                            workflow::remembered_agents(agent, workspace),
+                            remembered.revision_limit,
                         )
                         .ok_or(SessionRuntimeError::InvalidRequest)?,
                     })

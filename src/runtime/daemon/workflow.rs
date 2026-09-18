@@ -188,15 +188,28 @@ pub(super) fn issue_goal(
 /// A caller that does not name the three Agents gets what the workspace already
 /// works with, which is the same seed the TUI's start form shows. An unreadable
 /// store falls back to the product defaults rather than refusing to start.
-pub(super) fn remembered_agents(
+pub(super) fn remembered_defaults(
     agent: &SharedAgentRuntime,
     workspace: WorkspaceId,
-) -> usagi_core::domain::workflow::WorkflowAgents {
+) -> usagi_core::domain::workflow::WorkflowDefaults {
     agent
         .lock()
         .ok()
-        .and_then(|owner| owner.dispatch_store().workflow_agents(workspace).ok())
+        .and_then(|owner| owner.dispatch_store().workflow_defaults(workspace).ok())
         .unwrap_or_default()
+}
+
+/// How many revision rounds a caller asked for, defaulted to what the workspace
+/// remembers.
+///
+/// Returns `None` for anything outside the domain's `1..=10`, so a bad number is
+/// refused before a durable run exists rather than failing `is_valid` later.
+pub(super) fn requested_revision_limit(payload: &serde_json::Value, fallback: u8) -> Option<u8> {
+    let Some(value) = payload.get("revision_limit") else {
+        return Some(fallback);
+    };
+    let limit = u8::try_from(value.as_u64()?).ok()?;
+    usagi_core::domain::workflow::valid_revision_limit(limit).then_some(limit)
 }
 
 /// The three participants a caller asked for, defaulted per field.
@@ -260,7 +273,11 @@ pub(super) fn control_workflow(
     workflow::admit(&store, workspace, session, operation, &command, issue)
         .map_err(|error| admission_error(&error))?;
     match command {
-        WorkflowCommand::Start { goal, agents } => {
+        WorkflowCommand::Start {
+            goal,
+            agents,
+            revision_limit,
+        } => {
             if let Err(error) = start(
                 agent,
                 bound,
@@ -270,6 +287,7 @@ pub(super) fn control_workflow(
                     operation,
                     goal: &goal,
                     agents,
+                    revision_limit,
                     issue,
                 },
             ) {
@@ -790,6 +808,7 @@ struct StartIntent<'a> {
     operation: OperationId,
     goal: &'a str,
     agents: usagi_core::domain::workflow::WorkflowAgents,
+    revision_limit: u8,
     issue: Option<u32>,
 }
 
@@ -804,6 +823,7 @@ fn start(
         operation,
         goal,
         agents,
+        revision_limit,
         issue,
     } = *intent;
     let intent = AgentLaunchIntent {
@@ -811,7 +831,7 @@ fn start(
         session: Some(session),
         profile: Some(AgentProfileId::new(agents.implementer.profile_id()).map_err(unavailable)?),
     };
-    let mut prompt = workflow::initial_prompt(goal, agents);
+    let mut prompt = workflow::initial_prompt(goal, agents, revision_limit);
     if let Some(issue) = issue {
         prompt.push_str(&workflow::issue_conventions(issue));
     }
@@ -986,6 +1006,7 @@ mod tests {
         let start = |goal: &str| WorkflowCommand::Start {
             goal: goal.to_owned(),
             agents,
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         let admit = |session, operation, command: &WorkflowCommand| {
             workflow::admit(&store, workspace, session, operation, command, None).unwrap();
@@ -1081,6 +1102,40 @@ mod tests {
     }
 
     #[test]
+    fn a_requested_revision_limit_is_in_range_or_refused() {
+        use usagi_core::domain::workflow::{DEFAULT_REVISION_LIMIT, MAX_REVISION_LIMIT};
+        // Omitting it keeps whatever the workspace remembers.
+        assert_eq!(requested_revision_limit(&serde_json::json!({}), 7), Some(7));
+        // Every value the domain accepts is accepted here.
+        for limit in 1..=MAX_REVISION_LIMIT {
+            assert_eq!(
+                requested_revision_limit(
+                    &serde_json::json!({ "revision_limit": limit }),
+                    DEFAULT_REVISION_LIMIT
+                ),
+                Some(limit)
+            );
+        }
+        // Everything else is refused before a durable run exists, rather than
+        // failing `WorkflowRun::is_valid` after the record is written.
+        for refused in [
+            serde_json::json!({"revision_limit": 0}),
+            serde_json::json!({"revision_limit": u64::from(MAX_REVISION_LIMIT) + 1}),
+            serde_json::json!({"revision_limit": 4096}),
+            serde_json::json!({"revision_limit": -1}),
+            serde_json::json!({"revision_limit": "3"}),
+            serde_json::json!({"revision_limit": 3.5}),
+            serde_json::json!({"revision_limit": null}),
+        ] {
+            assert_eq!(
+                requested_revision_limit(&refused, DEFAULT_REVISION_LIMIT),
+                None,
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
     fn requested_participants_default_per_field_and_refuse_unknown_spellings() {
         use usagi_core::domain::settings::DefaultModel;
         use usagi_core::domain::workflow::{Recipient, WorkflowAgents};
@@ -1154,6 +1209,7 @@ mod tests {
             &WorkflowCommand::Start {
                 goal: "task".into(),
                 agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
             None,
         )

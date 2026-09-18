@@ -9,10 +9,39 @@ use serde::{Deserialize, Serialize};
 // Leave space for the response envelope inside the 1 MiB IPC frame budget.
 const MAX_BYTES: usize = 512 * 1024;
 
+/// What `defaults.json` may hold on disk.
+///
+/// Files written before the revision limit was selectable are a bare
+/// `WorkflowAgents` object. `deny_unknown_fields` on both shapes keeps the
+/// untagged choice unambiguous: the current shape has an `agents` key the legacy
+/// one rejects, and the legacy shape has provider keys the current one rejects.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredWorkflowDefaults {
+    Current(crate::domain::workflow::WorkflowDefaults),
+    Legacy(crate::domain::workflow::WorkflowAgents),
+}
+
+impl From<StoredWorkflowDefaults> for crate::domain::workflow::WorkflowDefaults {
+    fn from(stored: StoredWorkflowDefaults) -> Self {
+        match stored {
+            StoredWorkflowDefaults::Current(defaults) => defaults,
+            StoredWorkflowDefaults::Legacy(agents) => Self {
+                agents,
+                ..Self::default()
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRecord {
     #[serde(default)]
     pub agents: crate::domain::workflow::WorkflowAgents,
+    /// The limit this intent was admitted with, so the launch binds the number
+    /// the person chose rather than a constant.
+    #[serde(default = "crate::domain::workflow::default_revision_limit")]
+    pub revision_limit: u8,
     pub version: u32,
     pub operation: OperationId,
     pub goal: String,
@@ -54,11 +83,11 @@ impl DispatchStore {
     /// Read the last successfully launched choices in this workspace.
     /// # Errors
     /// Returns malformed or unreadable preferences instead of silently replacing them.
-    pub fn workflow_agents(
+    pub fn workflow_defaults(
         &self,
         workspace: WorkspaceId,
-    ) -> Result<crate::domain::workflow::WorkflowAgents> {
-        Ok(json_file::read_bounded(
+    ) -> Result<crate::domain::workflow::WorkflowDefaults> {
+        Ok(json_file::read_bounded::<StoredWorkflowDefaults>(
             &self
                 .dir
                 .join("workflows")
@@ -66,20 +95,21 @@ impl DispatchStore {
                 .join("defaults.json"),
             MAX_BYTES,
         )?
+        .map(Into::into)
         .unwrap_or_default())
     }
 
     /// Remember a successful start for subsequent sessions and daemon restarts.
     /// # Errors
     /// Returns persistence failures.
-    pub fn remember_workflow_agents(
+    pub fn remember_workflow_defaults(
         &self,
         workspace: WorkspaceId,
-        agents: crate::domain::workflow::WorkflowAgents,
+        defaults: crate::domain::workflow::WorkflowDefaults,
     ) -> Result<()> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let directory = self.dir.join("workflows").join(workspace.as_str());
-        json_file::write_atomic(&directory, &directory.join("defaults.json"), &agents)
+        json_file::write_atomic(&directory, &directory.join("defaults.json"), &defaults)
     }
 
     fn workflow_path(&self, workspace: WorkspaceId, session: SessionId) -> std::path::PathBuf {
@@ -107,7 +137,14 @@ impl DispatchStore {
         }
         ensure!(record.run.is_some(), "workflow has not launched");
         let directory = self.dir.join("workflows").join(workspace.as_str());
-        json_file::write_atomic(&directory, &directory.join("defaults.json"), &record.agents)?;
+        json_file::write_atomic(
+            &directory,
+            &directory.join("defaults.json"),
+            &crate::domain::workflow::WorkflowDefaults {
+                agents: record.agents,
+                revision_limit: record.revision_limit,
+            },
+        )?;
         record.preferences_saved = true;
         self.save_workflow(workspace, session, record)
     }
@@ -229,6 +266,7 @@ mod tests {
             .update_workflow(workspace, session, |value| {
                 *value = Some(WorkflowRecord {
                     agents: crate::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: crate::domain::workflow::DEFAULT_REVISION_LIMIT,
                     version: 1,
                     operation: OperationId::new(),
                     goal: "task".into(),
@@ -249,9 +287,9 @@ mod tests {
             })
             .unwrap();
         store
-            .remember_workflow_agents(
+            .remember_workflow_defaults(
                 workspace,
-                crate::domain::workflow::WorkflowAgents::default(),
+                crate::domain::workflow::WorkflowDefaults::default(),
             )
             .unwrap();
         let workspace_dir = dir.path().join("workflows").join(workspace.as_str());
@@ -275,38 +313,61 @@ mod tests {
 
     #[test]
     fn workflow_choices_survive_restart_and_are_workspace_scoped() {
-        use crate::domain::{settings::DefaultModel, workflow::WorkflowAgents};
+        use crate::domain::{
+            settings::DefaultModel,
+            workflow::{WorkflowAgents, WorkflowDefaults},
+        };
         let dir = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(dir.path());
         let workspace = WorkspaceId::new();
-        let agents = WorkflowAgents {
-            planner: DefaultModel::Agy,
-            implementer: DefaultModel::Claude,
-            reviewer: DefaultModel::OpenAi,
+        let chosen = WorkflowDefaults {
+            agents: WorkflowAgents {
+                planner: DefaultModel::Agy,
+                implementer: DefaultModel::Claude,
+                reviewer: DefaultModel::OpenAi,
+            },
+            revision_limit: 7,
         };
         assert_eq!(
-            store.workflow_agents(workspace).unwrap(),
-            WorkflowAgents::default()
+            store.workflow_defaults(workspace).unwrap(),
+            WorkflowDefaults::default()
         );
-        store.remember_workflow_agents(workspace, agents).unwrap();
+        store.remember_workflow_defaults(workspace, chosen).unwrap();
         let reopened = DispatchStore::new(dir.path());
-        assert_eq!(reopened.workflow_agents(workspace).unwrap(), agents);
+        assert_eq!(reopened.workflow_defaults(workspace).unwrap(), chosen);
         assert_eq!(
-            reopened.workflow_agents(WorkspaceId::new()).unwrap(),
-            WorkflowAgents::default()
+            reopened.workflow_defaults(WorkspaceId::new()).unwrap(),
+            WorkflowDefaults::default()
         );
         let path = dir
             .path()
             .join("workflows")
             .join(workspace.as_str())
             .join("defaults.json");
+
+        // A file written before the limit was selectable is a bare agents
+        // object. It has to keep loading, with the limit falling back to the
+        // constant those builds hard-coded.
+        std::fs::write(
+            &path,
+            serde_json::to_string(&chosen.agents).expect("serialize the legacy shape"),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.workflow_defaults(workspace).unwrap(),
+            WorkflowDefaults {
+                agents: chosen.agents,
+                revision_limit: crate::domain::workflow::DEFAULT_REVISION_LIMIT,
+            }
+        );
+
         std::fs::write(&path, "invalid").unwrap();
-        assert!(reopened.workflow_agents(workspace).is_err());
+        assert!(reopened.workflow_defaults(workspace).is_err());
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(
             reopened
-                .remember_workflow_agents(workspace, agents)
+                .remember_workflow_defaults(workspace, chosen)
                 .is_err()
         );
     }
@@ -324,6 +385,7 @@ mod tests {
             let result = store.update_workflow(workspace, session, |record| {
                 *record = Some(WorkflowRecord {
                     agents: crate::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: crate::domain::workflow::DEFAULT_REVISION_LIMIT,
                     version: 1,
                     operation: OperationId::new(),
                     goal: "task".into(),
@@ -365,6 +427,7 @@ mod tests {
             let result = store.update_workflow(workspace, session, |value| {
                 *value = Some(WorkflowRecord {
                     agents: crate::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: crate::domain::workflow::DEFAULT_REVISION_LIMIT,
                     version: 1,
                     operation,
                     goal: if oversized {
@@ -417,6 +480,7 @@ mod tests {
             .update_workflow(workspace, session, |value| {
                 *value = Some(WorkflowRecord {
                     agents: crate::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: crate::domain::workflow::DEFAULT_REVISION_LIMIT,
                     version: 1,
                     operation,
                     goal: "Task".into(),
@@ -513,6 +577,7 @@ mod tests {
             .update_workflow(workspace, session, |record| {
                 *record = Some(WorkflowRecord {
                     agents: crate::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: crate::domain::workflow::DEFAULT_REVISION_LIMIT,
                     version: 1,
                     operation,
                     goal: "test".into(),

@@ -708,6 +708,7 @@ mod tests {
                     run: None,
                     pending_start: None,
                     finished: Vec::new(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 };
                 completions.emit(AppEvent::Backend(
                     super::super::controller::BackendEvent::Workflow {

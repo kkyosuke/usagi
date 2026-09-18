@@ -11738,6 +11738,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "Selected providers".into(),
                     agents,
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap();
@@ -11752,7 +11753,10 @@ mod workflow_composition {
             .find(|entry| entry.agent_id == run.implementer)
             .unwrap();
         assert_eq!(implementer.runtime.as_str(), "claude");
-        assert_eq!(store.workflow_agents(fixture.workspace).unwrap(), agents);
+        assert_eq!(
+            store.workflow_defaults(fixture.workspace).unwrap().agents,
+            agents
+        );
     }
 
     #[test]
@@ -11770,6 +11774,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "resume safely".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap()
@@ -11905,6 +11910,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "review recovery".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap()
@@ -12089,6 +12095,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "legacy journal replay".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap()
@@ -12238,6 +12245,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "lane progress".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap();
@@ -12469,7 +12477,7 @@ mod workflow_composition {
         let fixture = Fixture::new();
         // Nothing launched yet: the product defaults stand in.
         assert_eq!(
-            workflow::remembered_agents(&fixture.agent, fixture.workspace),
+            workflow::remembered_defaults(&fixture.agent, fixture.workspace).agents,
             WorkflowAgents::default()
         );
         let remembered = WorkflowAgents {
@@ -12482,12 +12490,18 @@ mod workflow_composition {
             .lock()
             .unwrap()
             .dispatch_store()
-            .remember_workflow_agents(fixture.workspace, remembered)
+            .remember_workflow_defaults(
+                fixture.workspace,
+                usagi_core::domain::workflow::WorkflowDefaults {
+                    agents: remembered,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         // A caller that names nobody gets what this workspace already works
         // with, which is the same seed the start form shows.
         assert_eq!(
-            workflow::remembered_agents(&fixture.agent, fixture.workspace),
+            workflow::remembered_defaults(&fixture.agent, fixture.workspace).agents,
             remembered
         );
         assert_eq!(
@@ -12496,7 +12510,7 @@ mod workflow_composition {
         );
         // Another workspace keeps its own answer.
         assert_eq!(
-            workflow::remembered_agents(&fixture.agent, WorkspaceId::new()),
+            workflow::remembered_defaults(&fixture.agent, WorkspaceId::new()).agents,
             WorkflowAgents::default()
         );
     }
@@ -12512,6 +12526,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "Add login\nwith tests".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap();
@@ -12593,6 +12608,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "verification error".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap();
@@ -12651,7 +12667,8 @@ mod workflow_composition {
                     operation,
                     WorkflowCommand::Start {
                         goal: "recover me".into(),
-                        agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                     }
                 )
                 .is_err()
@@ -12674,6 +12691,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: pending.goal,
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap();
@@ -12717,6 +12735,7 @@ mod workflow_composition {
             WorkflowCommand::Start {
                 goal,
                 agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
             Some(742),
         )
@@ -12764,6 +12783,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "start anyway".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap_err();
@@ -12794,6 +12814,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "start anyway".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap_err();
@@ -12845,6 +12866,7 @@ mod workflow_composition {
                 WorkflowCommand::Start {
                     goal: "verify me".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )
             .unwrap()
@@ -12984,7 +13006,8 @@ mod workflow_composition {
                     operation,
                     WorkflowCommand::Start {
                         goal: " ".into(),
-                        agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                     }
                 )
                 .unwrap_err()
@@ -12994,6 +13017,7 @@ mod workflow_composition {
         let command = WorkflowCommand::Start {
             goal: "Implement feature".into(),
             agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         let first = fixture.control(operation, command.clone()).unwrap();
         assert_eq!(fixture.control(operation, command).unwrap(), first);
@@ -13003,7 +13027,8 @@ mod workflow_composition {
                     operation,
                     WorkflowCommand::Start {
                         goal: "Changed".into(),
-                        agents: usagi_core::domain::workflow::WorkflowAgents::default()
+                        agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                     }
                 )
                 .unwrap_err()

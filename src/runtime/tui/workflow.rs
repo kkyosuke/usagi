@@ -181,6 +181,7 @@ mod tests {
                 WorkflowCommand::Start {
                     goal: "Review login".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )),
         ] {
@@ -191,6 +192,7 @@ mod tests {
                 run: None,
                 pending_start: None,
                 finished: Vec::new(),
+                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             };
             let mut fake = Fake {
                 requests: vec![],
@@ -226,6 +228,7 @@ mod tests {
             run: None,
             pending_start: None,
             finished: Vec::new(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         };
         fake.reply = Some(Ok(DaemonReply::Ok(serde_json::to_value(snapshot).unwrap())));
         assert!(execute(&job, &mut fake).unwrap_err().unconfirmed);
@@ -275,6 +278,7 @@ mod tests {
             run: None,
             pending_start: None,
             finished: Vec::new(),
+            revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
         })
     }
     #[test]
@@ -301,6 +305,7 @@ mod tests {
                 WorkflowCommand::Start {
                     goal: "task".into(),
                     agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
                 },
             )),
             ..job

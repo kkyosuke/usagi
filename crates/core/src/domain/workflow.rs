@@ -56,6 +56,46 @@ impl WorkflowAgents {
     }
 }
 
+/// Revision rounds a run takes before it stops and asks the person.
+///
+/// The domain has always accepted `1..=10` and validated it in
+/// [`WorkflowRun::is_valid`]; every construction site nonetheless hard-coded 3,
+/// so the field described a choice nobody could make.
+pub const DEFAULT_REVISION_LIMIT: u8 = 3;
+/// Inclusive upper bound of the selectable range.
+pub const MAX_REVISION_LIMIT: u8 = 10;
+
+/// Records written before the limit was selectable read as the old constant.
+#[must_use]
+pub const fn default_revision_limit() -> u8 {
+    DEFAULT_REVISION_LIMIT
+}
+
+/// Whether a caller-supplied revision limit is one the domain accepts.
+#[must_use]
+pub const fn valid_revision_limit(limit: u8) -> bool {
+    limit >= 1 && limit <= MAX_REVISION_LIMIT
+}
+
+/// The choices a workspace offers the next start: who runs it, and how many
+/// revision rounds it takes before asking for a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefaults {
+    pub agents: WorkflowAgents,
+    #[serde(default = "default_revision_limit")]
+    pub revision_limit: u8,
+}
+
+impl Default for WorkflowDefaults {
+    fn default() -> Self {
+        Self {
+            agents: WorkflowAgents::default(),
+            revision_limit: DEFAULT_REVISION_LIMIT,
+        }
+    }
+}
+
 /// The participant chosen for an instruction. Automatic is resolved on admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -399,6 +439,9 @@ fn valid_text(text: &str) -> bool {
 pub struct WorkflowSnapshot {
     #[serde(default)]
     pub agents: WorkflowAgents,
+    /// The workspace's remembered limit, offered to the next start.
+    #[serde(default = "default_revision_limit")]
+    pub revision_limit: u8,
     pub session: SessionId,
     pub run: Option<WorkflowRun>,
     #[serde(default)]
@@ -412,6 +455,8 @@ pub struct WorkflowSnapshot {
 pub struct WorkflowPendingStart {
     #[serde(default)]
     pub agents: WorkflowAgents,
+    #[serde(default = "default_revision_limit")]
+    pub revision_limit: u8,
     pub operation_id: OperationId,
     pub goal: String,
     pub error: Option<String>,
@@ -428,6 +473,8 @@ pub enum WorkflowCommand {
         goal: String,
         #[serde(default)]
         agents: WorkflowAgents,
+        #[serde(default = "default_revision_limit")]
+        revision_limit: u8,
     },
     Instruct {
         recipient: Recipient,
