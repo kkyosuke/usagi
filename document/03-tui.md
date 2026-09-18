@@ -1571,6 +1571,13 @@ finder 上部の All / Changed / Tracked を `←` / `→` で切り替える。
 tracked file と同じ未追跡 file、Tracked は tracked file だけを表示する。文字 / paste / `Backspace` で fuzzy filter を編集し、`↑` / `↓` で選択、
 `Enter` で file 本文へ進む。scope を切り替えた後に古い scope の取得結果が届いても表示へ採用しない。
 
+枠が十分広いとき（内側 96 桁以上）、finder は右半分に選択中 file の中身を出す。選択が変わるたびに読み直すので、
+開かずに中身を確かめられる。pane の読み取りは finder の一覧要求とも `Enter` で開いた本文とも別の identity を持ち、
+遅れて届いた pane の結果が本文を上書きすることはない。本文から finder へ戻ったときも、cursor の下の file を
+読み直す。読めない file（binary・大きすぎる・UTF-8 でない）は pane の中だけで理由を出し、一覧は開いたままにする。
+狭い端末では pane を出さず一覧だけを出す。pane も一覧・本文と同じ resident preview lane を使うため、同時に走るのは
+常に 1 件で、新しい要求は未着手の古い要求を置き換える。
+
 一覧取得と本文読み取りは render thread ではなく、pending 1件・completion 1件の resident preview lane で実行する。
 新しい要求は未着手の古い要求を置換し、`Esc` は pending と実行中結果を fence する。`git ls-files` は2秒・stdout/stderr
 各8 MiBの上限を持ち、超過・timeout・非zero終了は内容を表示しない。候補は最大20,000件である。

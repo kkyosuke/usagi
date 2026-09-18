@@ -1982,11 +1982,15 @@ fn preview_loaded(
     })
 }
 
+/// Press Esc in the preview overlay.
+///
+/// Leaving the document fences the previous work and, when the finder still has
+/// a cursor, starts reading that row into the side pane again; closing the
+/// finder only fences. Both shapes begin with the cancellation.
 fn escape_preview(state: &mut AppState) {
-    assert_eq!(
-        update(state, AppEvent::Key(AppKey::Escape)),
-        vec![Effect::CancelPreview]
-    );
+    let effects = update(state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(effects.first(), Some(&Effect::CancelPreview));
+    assert!(effects.len() <= 2, "unexpected effects: {effects:?}");
 }
 
 fn assert_preview_load(
