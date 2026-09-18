@@ -9,8 +9,33 @@ use crate::usecase::application::controller::{
     PreviewFileFilter, PreviewOverlay, PreviewSearchMatch,
 };
 
-const INNER_WIDTH: usize = 108;
-const BODY_HEIGHT: usize = 24;
+/// Preview だけは 1 ファイルの本文を読むための overlay なので、他の modal の
+/// ように固定寸法にせず端末いっぱいに近い枠を取る。枠の外に残す背景は左右
+/// [`HORIZONTAL_MARGIN`] 桁・上下 [`VERTICAL_MARGIN`] 行だけで、残りはすべて
+/// 本文に充てる。狭い端末では下限（`MIN_*`）を希望値に据えるため、`modal` 側の
+/// clip が従来どおり「枠いっぱい」に収める。
+const MIN_INNER_WIDTH: usize = 108;
+const MIN_BODY_HEIGHT: usize = 24;
+const HORIZONTAL_MARGIN: usize = 3;
+const VERTICAL_MARGIN: usize = 2;
+
+/// 端末幅に追随する希望内側幅。box 幅は内側幅 + 4（枠と左右 padding）なので、
+/// 左右の背景を差し引いた残りを返す。実際の clip は
+/// [`modal::modal_inner_width`] が行う。
+fn desired_inner_width(width: usize) -> usize {
+    width
+        .saturating_sub(4 + HORIZONTAL_MARGIN * 2)
+        .max(MIN_INNER_WIDTH)
+}
+
+/// 端末高に追随する希望本文行数。box 高は本文 + 4（枠と上下 padding）なので、
+/// 上下の背景を差し引いた残りを返す。実際の clip は
+/// [`modal::reserved_body_height`] が行う。
+fn desired_body_height(height: usize) -> usize {
+    height
+        .saturating_sub(4 + VERTICAL_MARGIN * 2)
+        .max(MIN_BODY_HEIGHT)
+}
 
 /// Compose Preview over an existing Home frame.
 #[must_use]
@@ -32,8 +57,9 @@ fn render_finder(
     base: &[String],
     state: &PreviewOverlay,
 ) -> Vec<String> {
-    let inner = modal::modal_inner_width(width, INNER_WIDTH);
-    let body_height = modal::reserved_body_height(height, width, BODY_HEIGHT);
+    let inner = modal::modal_inner_width(width, desired_inner_width(width));
+    let desired_body = desired_body_height(height);
+    let body_height = modal::reserved_body_height(height, width, desired_body);
     let visible = state.visible_files();
     let rows = visible
         .iter()
@@ -83,7 +109,7 @@ fn render_finder(
         base,
         "Preview files",
         inner,
-        BODY_HEIGHT,
+        desired_body,
         body,
     )
 }
@@ -107,7 +133,7 @@ fn render_document(
     state: &PreviewOverlay,
     path: &str,
 ) -> Vec<String> {
-    let inner = modal::modal_inner_width(width, INNER_WIDTH);
+    let inner = modal::modal_inner_width(width, desired_inner_width(width));
     let (projected_lines, projected_scroll) = project_document(state, inner);
     let document = state.error().map_or_else(
         || {
@@ -151,8 +177,8 @@ fn render_document(
         &TextOverlay::new(title, document)
             .scrolled_to(projected_scroll)
             .with_footer(footer),
-        INNER_WIDTH,
-        BODY_HEIGHT,
+        desired_inner_width(width),
+        desired_body_height(height),
     )
 }
 
@@ -456,18 +482,12 @@ mod tests {
 
         let base = vec![String::new(); 40];
         let finder = render_over(40, 120, &base, state.preview_overlay().unwrap());
-        let finder_box_rows = finder
-            .iter()
-            .map(|line| strip_ansi(line))
-            .filter(|line| line.contains('┌') || line.contains('│') || line.contains('└'))
-            .count();
-        assert_eq!(finder_box_rows, BODY_HEIGHT + 4);
-        let finder_top = finder
-            .iter()
-            .map(|line| strip_ansi(line))
-            .find(|line| line.contains("Preview files"))
-            .unwrap();
-        assert_eq!(display_width(finder_top.trim()), INNER_WIDTH + 4);
+        assert_eq!(box_rows(&finder), desired_body_height(40) + 4);
+        let finder_top = titled_row(&finder, "Preview files");
+        assert_eq!(
+            display_width(finder_top.trim()),
+            desired_inner_width(120) + 4
+        );
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         complete_preview(
@@ -479,18 +499,43 @@ mod tests {
             vec!["body".into()],
         );
         let document = render_over(40, 120, &base, state.preview_overlay().unwrap());
-        let document_box_rows = document
+        assert_eq!(box_rows(&document), desired_body_height(40) + 4);
+        let document_top = titled_row(&document, "Preview · src/file-0.rs");
+        assert_eq!(
+            display_width(document_top.trim()),
+            desired_inner_width(120) + 4
+        );
+
+        // 広い端末では枠も一緒に育ち、背景は左右 3 桁・上下 2 行だけ残る。
+        let wide_base = vec![String::new(); 60];
+        let wide = render_over(60, 200, &wide_base, state.preview_overlay().unwrap());
+        assert_eq!(box_rows(&wide), 60 - VERTICAL_MARGIN * 2);
+        let wide_top = titled_row(&wide, "Preview · src/file-0.rs");
+        assert_eq!(display_width(wide_top.trim()), 200 - HORIZONTAL_MARGIN * 2);
+        assert!(!strip_ansi(wide.first().unwrap()).contains('┌'));
+
+        // 下限より狭い端末では従来どおり端末いっぱいに clip される。
+        let narrow_base = vec![String::new(); 24];
+        let narrow = render_over(24, 80, &narrow_base, state.preview_overlay().unwrap());
+        assert_eq!(box_rows(&narrow), 24 - 2);
+        let narrow_top = titled_row(&narrow, "Preview · src/file-0.rs");
+        assert_eq!(display_width(narrow_top.trim()), 80);
+    }
+
+    fn box_rows(frame: &[String]) -> usize {
+        frame
             .iter()
             .map(|line| strip_ansi(line))
             .filter(|line| line.contains('┌') || line.contains('│') || line.contains('└'))
-            .count();
-        assert_eq!(document_box_rows, BODY_HEIGHT + 4);
-        let document_top = document
+            .count()
+    }
+
+    fn titled_row(frame: &[String], title: &str) -> String {
+        frame
             .iter()
             .map(|line| strip_ansi(line))
-            .find(|line| line.contains("Preview · src/file-0.rs"))
-            .unwrap();
-        assert_eq!(display_width(document_top.trim()), INNER_WIDTH + 4);
+            .find(|line| line.contains(title))
+            .unwrap()
     }
 
     #[test]

@@ -1546,7 +1546,9 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 
 ### File Preview
 
-`Ctrl-O v` は選択中 session の File Preview overlay を大きな中央 modal で開く。Switch では sidebar cursor の
+`Ctrl-O v` は選択中 session の File Preview overlay を大きな中央 modal で開く。この modal だけは寸法を固定せず、
+枠が端末サイズに追随する。背景は左右 3 桁・上下 2 行だけ残し、finder と本文の双方が同じ枠を使う。希望寸法の下限は
+内側 108 桁 / 本文 24 行で、それより狭い端末では従来どおり端末いっぱいへ clip する。Switch では sidebar cursor の
 session、Closeup では active session の worktree を検索し、`+ new session` 行では開かない。候補は `git ls-files` が返す tracked file と
 gitignore 対象外の未追跡 file に限定し、path の大文字小文字を区別しない fuzzy subsequence match で絞り込む。
 finder 上部の All / Changed / Tracked を `←` / `→` で切り替える。All は tracked と gitignore 対象外の
