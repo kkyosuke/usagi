@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use usagi_core::domain::id::RequestId;
 use usagi_core::domain::presentation_text::presentation_character_is_safe;
 
-use crate::usecase::fuzzy::fuzzy_score;
+use crate::usecase::fuzzy::{FuzzyMatch, fuzzy_match};
 
 use super::{AppKey, AppState, Effect, SafeError, Target};
 
@@ -88,6 +88,28 @@ impl PreviewSearchMatch {
     }
 }
 
+/// One filtered finder row: a repository-relative path and the cells the
+/// current filter matched inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewCandidate<'a> {
+    path: &'a str,
+    matched: FuzzyMatch,
+}
+
+impl<'a> PreviewCandidate<'a> {
+    /// Repository-relative path of this candidate.
+    #[must_use]
+    pub const fn path(&self) -> &'a str {
+        self.path
+    }
+
+    /// Ascending `char` indices of [`Self::path`] that the filter matched.
+    #[must_use]
+    pub fn positions(&self) -> &[usize] {
+        self.matched.positions()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct PreviewDisplay {
     line_numbers: bool,
@@ -163,23 +185,32 @@ impl PreviewOverlay {
     pub const fn file_filter(&self) -> PreviewFileFilter {
         self.file_filter
     }
-    /// Filtered file paths in fuzzy rank order.
+    /// Filtered candidates in fuzzy rank order, each carrying the query
+    /// positions so the finder can show what the filter explains.
     #[must_use]
-    pub fn visible_files(&self) -> Vec<&str> {
-        let mut files = self
+    pub fn visible_candidates(&self) -> Vec<PreviewCandidate<'_>> {
+        let mut candidates = self
             .files
             .iter()
             .enumerate()
             .filter_map(|(order, path)| {
-                fuzzy_score(path, &self.filter).map(|score| (score, order, path.as_str()))
+                fuzzy_match(path, &self.filter).map(|matched| (order, path.as_str(), matched))
             })
             .collect::<Vec<_>>();
         if !self.filter.is_empty() {
-            files.sort_by_key(|(score, order, _)| (*score, *order));
+            candidates.sort_by_key(|(order, _, matched)| (matched.score(), *order));
         }
-        files.into_iter().map(|(_, _, path)| path).collect()
+        candidates
+            .into_iter()
+            .map(|(_, path, matched)| PreviewCandidate { path, matched })
+            .collect()
     }
-    /// Selected row within [`Self::visible_files`].
+    /// Number of candidates offered by the loaded file group, before filtering.
+    #[must_use]
+    pub fn total_files(&self) -> usize {
+        self.files.len()
+    }
+    /// Selected row within [`Self::visible_candidates`].
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
@@ -187,7 +218,9 @@ impl PreviewOverlay {
     /// Selected repository-relative path, if the current filter has a match.
     #[must_use]
     pub fn selected_file(&self) -> Option<&str> {
-        self.visible_files().get(self.selected).copied()
+        self.visible_candidates()
+            .get(self.selected)
+            .map(PreviewCandidate::path)
     }
     /// Open repository-relative document path. `None` means the finder is open.
     #[must_use]
@@ -442,7 +475,7 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
                 .preview_overlay
                 .as_ref()
                 .unwrap()
-                .visible_files()
+                .visible_candidates()
                 .len();
             let overlay = state.preview_overlay.as_mut().unwrap();
             overlay.selected = (overlay.selected + 1).min(visible_len.saturating_sub(1));
@@ -568,7 +601,7 @@ mod tests {
         );
         let overlay = state.preview_overlay().unwrap();
         assert!(overlay.is_loading());
-        assert!(overlay.visible_files().is_empty());
+        assert!(overlay.visible_candidates().is_empty());
 
         complete(
             &mut state,

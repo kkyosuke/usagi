@@ -6,7 +6,7 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::{
-    PreviewFileFilter, PreviewOverlay, PreviewSearchMatch,
+    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewSearchMatch,
 };
 
 /// Preview だけは 1 ファイルの本文を読むための overlay なので、他の modal の
@@ -63,42 +63,24 @@ fn render_finder(
     let inner = modal::modal_inner_width(width, desired_inner_width(width));
     let desired_body = desired_body_height(height);
     let body_height = modal::reserved_body_height(height, width, desired_body);
-    let visible = state.visible_files();
-    let rows = visible
+    let candidates = state.visible_candidates();
+    let name_column = name_column_width(&candidates, inner);
+    let rows = candidates
         .iter()
         .enumerate()
-        .map(|(index, path)| {
-            let marker = modal::selection_marker(index == state.selected());
-            let row = format!("{marker} {path}");
-            let row = if index == state.selected() {
-                Role::Accent.style().bold().paint(&row)
-            } else {
-                row
-            };
-            modal::content_line(&row, inner)
+        .map(|(index, candidate)| {
+            candidate_row(candidate, index == state.selected(), name_column, inner)
         })
         .collect::<Vec<_>>();
 
     let mut body = vec![file_tabs(state.file_filter())];
-    body.push(modal::filter_line(
-        state.filter(),
-        state.filter().len(),
-        None,
-    ));
+    body.push(count_line(state, candidates.len(), inner));
     if state.is_loading() {
         body.push(modal::empty_notice("Loading files…"));
     } else if let Some(error) = state.error() {
         body.push(modal::error_line(error.message.as_str(), inner));
     } else if rows.is_empty() {
-        body.push(modal::empty_notice(if state.filter().is_empty() {
-            match state.file_filter() {
-                PreviewFileFilter::All => "No files available.",
-                PreviewFileFilter::Changed => "No changed files.",
-                PreviewFileFilter::Tracked => "No tracked files.",
-            }
-        } else {
-            "No files match the filter."
-        }));
+        body.extend(empty_rows(state, inner));
     } else {
         let file_rows = body_height.saturating_sub(3);
         body.extend(modal::bounded_list_rows(&rows, state.selected(), file_rows));
@@ -115,6 +97,162 @@ fn render_finder(
         desired_body,
         body,
     )
+}
+
+/// Width of the file-name column: the longest name on screen, within the half
+/// of the frame the directory column does not need.
+///
+/// A fixed cap would clip exactly the long names that need reading — this
+/// repository has file names past 90 cells — while the frame now grows with the
+/// terminal. Sizing from the rows themselves keeps short listings tight and
+/// long ones readable.
+fn name_column_width(candidates: &[PreviewCandidate<'_>], inner: usize) -> usize {
+    let budget = inner.saturating_sub(modal::BODY_INDENT_WIDTH + 2) / 2;
+    let longest = candidates
+        .iter()
+        .map(|candidate| widgets::display_width(file_name(candidate.path())))
+        .max()
+        .unwrap_or(0);
+    longest.clamp(1, budget.max(1))
+}
+
+/// The file-name part of a repository-relative path.
+fn file_name(path: &str) -> &str {
+    &path[path.rfind('/').map_or(0, |index| index + 1)..]
+}
+
+/// One finder row: the file name first, then its directory in a dim second
+/// column, with the filter's matched cells reversed in both.
+///
+/// Reading a picker is reading file names; the directory only disambiguates
+/// two files that share one. Splitting them keeps the names left-aligned in one
+/// column instead of ending wherever their path happens to end.
+fn candidate_row(
+    candidate: &PreviewCandidate<'_>,
+    selected: bool,
+    name_column: usize,
+    inner: usize,
+) -> String {
+    let path = candidate.path();
+    let split = path.rfind('/').map_or(0, |index| index + 1);
+    let directory_cells = path[..split].chars().count();
+    let name_style = if selected {
+        Role::Accent.style().bold()
+    } else {
+        Style::new()
+    };
+    let name = highlighted(
+        &path[split..],
+        candidate.positions(),
+        directory_cells,
+        name_style,
+    );
+    let marker = modal::selection_marker(selected);
+    let row = if split == 0 {
+        format!("{marker} {name}")
+    } else {
+        let directory = highlighted(
+            path[..split].trim_end_matches('/'),
+            candidate.positions(),
+            0,
+            Style::new().dim(),
+        );
+        format!(
+            "{marker} {}  {directory}",
+            widgets::pad_to_width(&name, name_column)
+        )
+    };
+    modal::content_line(&row, inner)
+}
+
+/// Paint `text` with `base`, reversing the cells the filter matched.
+///
+/// `offset` is the `char` index of `text` inside the candidate path, so a slice
+/// of the path can be highlighted with the positions of the whole.
+fn highlighted(text: &str, positions: &[usize], offset: usize, base: Style) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    let mut run_matched = false;
+    for (index, character) in text.chars().enumerate() {
+        let matched = positions.binary_search(&(offset + index)).is_ok();
+        if matched != run_matched && !run.is_empty() {
+            out.push_str(&paint_run(&run, run_matched, base));
+            run.clear();
+        }
+        run_matched = matched;
+        run.push(character);
+    }
+    if !run.is_empty() {
+        out.push_str(&paint_run(&run, run_matched, base));
+    }
+    out
+}
+
+fn paint_run(text: &str, matched: bool, base: Style) -> String {
+    if matched {
+        Role::Accent.style().bold().reverse().paint(text)
+    } else {
+        base.paint(text)
+    }
+}
+
+/// The filter row, with the match count against the loaded group on its right.
+///
+/// The count is what tells a reader the filter is working: `12/3184` narrows,
+/// `0/3184` says the query is wrong rather than the group being empty. While the
+/// group is still loading there is no honest count to show, so the row carries
+/// the filter alone.
+fn count_line(state: &PreviewOverlay, matched: usize, inner: usize) -> String {
+    let filter = state.filter();
+    let left = modal::filter_line(filter, filter.len(), None);
+    if state.is_loading() {
+        return widgets::clip_to_width(&left, inner);
+    }
+    let total = state.total_files();
+    let count = if filter.is_empty() {
+        format!("{total} files")
+    } else {
+        format!("{matched}/{total}")
+    };
+    let count = Style::new().dim().paint(&count);
+    let used = widgets::display_width(&left) + widgets::display_width(&count);
+    if used + modal::BODY_INDENT_WIDTH > inner {
+        return widgets::clip_to_width(&left, inner);
+    }
+    let gap = inner.saturating_sub(used + modal::BODY_INDENT_WIDTH);
+    format!("{left}{}{count}", " ".repeat(gap))
+}
+
+/// Rows shown when the loaded group has no row to offer.
+///
+/// An empty group and an unmatched filter are different problems, so they get
+/// different copy: the first names the group, the second quotes the query, says
+/// how large the searched group is, and names the way out.
+fn empty_rows(state: &PreviewOverlay, inner: usize) -> Vec<String> {
+    if state.filter().is_empty() {
+        return vec![modal::empty_notice(match state.file_filter() {
+            PreviewFileFilter::All => "No files available.",
+            PreviewFileFilter::Changed => "No changed files.",
+            PreviewFileFilter::Tracked => "No tracked files.",
+        })];
+    }
+    let query = widgets::clip_to_width(state.filter(), 32);
+    vec![
+        modal::content_line(
+            &Style::new().dim().paint(&format!(
+                "No file matches “{query}” in {} ({} files).",
+                state.file_filter().label(),
+                state.total_files()
+            )),
+            inner,
+        ),
+        modal::content_line(
+            &Style::new()
+                .dim()
+                .paint("←→ switches the file group; Backspace edits the filter."),
+            inner,
+        ),
+    ]
 }
 
 fn file_tabs(active: PreviewFileFilter) -> String {
@@ -454,7 +592,9 @@ mod tests {
         );
         assert!(joined(&state).contains("No files available"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
-        assert!(joined(&state).contains("No files match"));
+        let unmatched = joined(&state);
+        assert!(unmatched.contains("No file matches “x” in all (0 files)."));
+        assert!(unmatched.contains("←→ switches the file group"));
 
         fail_preview(&mut state, target, "files unavailable");
         let frame = render_over(
@@ -464,6 +604,117 @@ mod tests {
             state.preview_overlay().unwrap(),
         );
         assert!(frame.iter().all(|line| display_width(line) <= 30));
+    }
+
+    #[test]
+    fn finder_rows_split_the_name_from_its_directory_and_mark_the_match() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        complete_preview(
+            &mut state,
+            target,
+            None,
+            PreviewFileFilter::All,
+            vec![
+                "crates/tui/src/presentation/views/preview_modal.rs".into(),
+                "document/03-tui.md".into(),
+                "Cargo.toml".into(),
+            ],
+            vec![],
+        );
+
+        // 空フィルタでは群の総数を出す。
+        assert!(joined(&state).contains("3 files"));
+
+        let base = vec![String::new(); 24];
+        let overlay = state.preview_overlay().unwrap();
+        let styled = render_over(24, 90, &base, overlay).join("\n");
+        let plain = strip_ansi(&styled);
+        // 名前が先頭、ディレクトリは第 2 列。列幅は画面上でいちばん長い名前に合う。
+        assert!(plain.contains("preview_modal.rs  crates/tui/src/presentation/views"));
+        assert!(plain.contains("03-tui.md         document"));
+        // ディレクトリを持たない候補は名前だけの行になる。
+        assert!(plain.contains("  Cargo.toml"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("prevmod".into())));
+        let filtered = joined(&state);
+        assert!(filtered.contains("1/3"));
+        assert!(filtered.contains("preview_modal.rs"));
+        assert!(!filtered.contains("03-tui.md"));
+
+        // 一致した cell だけが反転する。名前側の `mod` と、いま greedy に選ばれて
+        // いるディレクトリ側の一致（`pre`）の両方が同じ反転で出る。
+        let styled = render_over(24, 90, &base, state.preview_overlay().unwrap()).join("\n");
+        assert!(styled.contains("\u{1b}[1;7;36mmod"));
+        assert!(styled.contains("\u{1b}[1;7;36mpre"));
+    }
+
+    #[test]
+    fn the_name_column_follows_the_longest_name_and_counts_wide_cells() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        complete_preview(
+            &mut state,
+            target,
+            None,
+            PreviewFileFilter::All,
+            vec!["document/設計メモ.md".into(), "src/a.rs".into()],
+            vec![],
+        );
+
+        let base = vec![String::new(); 24];
+        let plain = render_over(24, 120, &base, state.preview_overlay().unwrap())
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>();
+        // 全角を 2 桁として数えるので、ディレクトリ列の開始桁がそろう。
+        let column = |needle: &str| {
+            let line = plain.iter().find(|line| line.contains(needle)).unwrap();
+            display_width(line.split(needle).next().unwrap())
+        };
+        assert_eq!(column("document"), column("src"));
+        // 列幅はいちばん長い名前（全角 4 文字 + `.md` で 11 桁）に合う。
+        assert_eq!(column("document"), column("設計メモ.md") + 13);
+
+        // 読み込み中は件数を出さない（総数がまだ 0 のため）。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        let loading = joined(&state);
+        assert!(loading.contains("Loading files"));
+        assert!(!loading.contains("0 files"));
+    }
+
+    #[test]
+    fn a_narrow_finder_drops_the_count_instead_of_breaking_the_frame() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        complete_preview(
+            &mut state,
+            target,
+            None,
+            PreviewFileFilter::All,
+            vec!["src/lib.rs".into()],
+            vec![],
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("lib".into())));
+        let frame = render_over(
+            12,
+            8,
+            &vec!["background".into(); 12],
+            state.preview_overlay().unwrap(),
+        );
+        assert!(frame.iter().all(|line| display_width(line) <= 8));
+        assert!(
+            !frame
+                .iter()
+                .map(|line| strip_ansi(line))
+                .any(|line| line.contains("1/1"))
+        );
     }
 
     #[test]
