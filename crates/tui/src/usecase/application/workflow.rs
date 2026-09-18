@@ -461,6 +461,13 @@ mod tests {
         assert_eq!(panel.history_offset, anchored + 2);
         assert!(panel.observed_anchor.is_some());
 
+        // An offset set straight on the public field, with no anchor recorded
+        // for it, is left where it was put and only bounded.
+        panel.observed_anchor = None;
+        panel.history_offset = 3;
+        panel.anchor_history();
+        assert_eq!(panel.history_offset, 3);
+
         // Rows disappearing (a finished run archived away) cannot push the
         // offset past the new bound.
         panel.history_offset = 14;

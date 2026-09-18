@@ -806,4 +806,20 @@ fn history_keys_stay_live_while_the_start_form_owns_the_caret() {
     let panel = state.workflow_panel(session).unwrap();
     assert!(panel.draft.value().is_empty());
     assert_eq!(panel.agent_field, Some(0));
+
+    // The draft edits are the ones the form does take the caret away from.
+    state
+        .workflows
+        .get_mut(&session)
+        .unwrap()
+        .draft
+        .replace("goal text");
+    for edit in [WorkflowEdit::Start, WorkflowEdit::End, WorkflowEdit::Delete] {
+        let _ = update(&mut state, AppEvent::WorkflowEdit { session, edit });
+    }
+    assert_eq!(
+        state.workflow_panel(session).unwrap().draft.value(),
+        "goal text",
+        "the start form holds the caret, so no draft edit lands"
+    );
 }

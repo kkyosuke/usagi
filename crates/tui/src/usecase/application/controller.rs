@@ -3020,20 +3020,16 @@ fn update_workflow_edit(
         return Vec::new();
     }
     if let Some(panel) = state.workflows.get_mut(&session) {
-        // Reading the history is not editing the draft, so it stays available
-        // while the start form owns the caret.
-        if edit == super::workflow::WorkflowEdit::HistoryLatest {
-            panel.show_latest_history();
-            return Vec::new();
-        }
-        if panel.run.is_none() && panel.agent_field.is_some() {
-            return Vec::new();
-        }
         match edit {
+            // Reading the history is not editing the draft, so it stays
+            // available while the start form owns the caret.
+            super::workflow::WorkflowEdit::HistoryLatest => panel.show_latest_history(),
+            // The draft edits are exactly what the start form takes the caret
+            // away from.
+            _ if panel.run.is_none() && panel.agent_field.is_some() => {}
             super::workflow::WorkflowEdit::Start => panel.draft.move_edge(false),
             super::workflow::WorkflowEdit::End => panel.draft.move_edge(true),
             super::workflow::WorkflowEdit::Delete => panel.draft.delete_forward(),
-            super::workflow::WorkflowEdit::HistoryLatest => {}
         }
     }
     Vec::new()
