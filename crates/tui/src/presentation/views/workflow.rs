@@ -1,6 +1,6 @@
 //! Fixed progress header and instruction composer around a scrollable history.
 
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::widgets::{clip_to_width, pad_to_width};
 use crate::usecase::application::workflow::{WorkflowFreshness, WorkflowPanel};
 use usagi_core::domain::workflow::{Delivery, Outcome};
@@ -8,6 +8,21 @@ use usagi_core::domain::workflow::{Delivery, Outcome};
 /// Column the agent selectors open in, so `Planner` and `Implementer` put their
 /// `< value >` under each other instead of stepping right with the label.
 const AGENT_LABEL_WIDTH: usize = "Implementer:".len();
+
+/// Secondary text: white *and* dim, never a bare `dim()`.
+///
+/// `Style::new().dim()` emits SGR 2 over whatever foreground the emulator
+/// happens to default to, which is exactly the combination that renders as
+/// near-invisible grey on the palettes people actually use. Naming the base
+/// colour is the same discipline
+/// [`session_tab`](crate::presentation::widgets::session_tab) already applies.
+///
+/// It is for captions and key hints only. Anything that reports what the run is
+/// doing stays at full brightness — a progress line the reader has to lean in
+/// for is the bug this pane was reported with.
+fn muted() -> Style {
+    Style::new().fg(Color::White).dim()
+}
 
 /// Render within the pane's content rectangle, never over its tab strip.
 #[must_use]
@@ -63,13 +78,9 @@ fn composer(panel: &WorkflowPanel, width: usize) -> Vec<String> {
             .style()
             .paint("Ctrl+S: retry previous request (same operation ID)")
     } else if panel.run.is_some() {
-        Style::new()
-            .dim()
-            .paint("Enter: newline | Tab: recipient | Ctrl+S: submit")
+        muted().paint("Enter: newline | Tab: recipient | Ctrl+S: submit")
     } else {
-        Style::new()
-            .dim()
-            .paint("Tab: goal/agents | Left/Right: choose | Ctrl+S: start")
+        muted().paint("Tab: goal/agents | Left/Right: choose | Ctrl+S: start")
     });
     composer
 }
@@ -87,10 +98,10 @@ fn history(panel: &WorkflowPanel) -> Vec<String> {
                 if ended.outcome == Outcome::Completed {
                     Role::Success.style().paint(&tag)
                 } else {
-                    Style::new().dim().paint(&tag)
+                    Role::Warning.style().paint(&tag)
                 },
                 safe_line(&ended.goal.replace('\n', " / ")),
-                Style::new().dim().paint(ended.phase.label())
+                muted().paint(ended.phase.label())
             )
         })
         .collect::<Vec<_>>();
@@ -116,10 +127,10 @@ fn history(panel: &WorkflowPanel) -> Vec<String> {
             let tag = format!("[{delivery}]");
             format!(
                 "{} {}",
-                if instruction.delivery == Delivery::Unconfirmed {
-                    Role::Warning.style().paint(&tag)
-                } else {
-                    Style::new().dim().paint(&tag)
+                match instruction.delivery {
+                    Delivery::Unconfirmed => Role::Warning.style().paint(&tag),
+                    Delivery::Acknowledged => Role::Success.style().paint(&tag),
+                    Delivery::Queued | Delivery::Notified => muted().paint(&tag),
                 },
                 safe_line(&instruction.body.replace('\n', " / "))
             )
@@ -158,7 +169,7 @@ fn agent_rows(panel: &WorkflowPanel) -> Vec<String> {
         let arrow = if focused {
             Role::Accent.style().bold()
         } else {
-            Style::new().dim()
+            muted()
         };
         format!(
             "{marker} {:<width$} {} {} {}",
@@ -182,10 +193,12 @@ fn run_rows(run: &usagi_core::domain::workflow::WorkflowRun) -> Vec<String> {
     };
     let mut rows = vec![
         format!("Current owner: {}", Role::Accent.style().paint(owner)),
-        Style::new().dim().paint(&format!(
-            "Implement -> Review -> PR ready | revisions {}/{}",
-            run.revisions, run.revision_limit
-        )),
+        format!(
+            "{} | revisions {}/{}",
+            muted().paint("Implement -> Review -> PR ready"),
+            run.revisions,
+            run.revision_limit
+        ),
     ];
     if let Some(issue) = run.issue {
         rows.push(format!(
@@ -199,9 +212,7 @@ fn run_rows(run: &usagi_core::domain::workflow::WorkflowRun) -> Vec<String> {
     if let Some(review) = &run.review {
         rows.push(format!(
             "Review HEAD: {}",
-            Style::new()
-                .dim()
-                .paint(&safe_line(&review.target.head_sha))
+            muted().paint(&safe_line(&review.target.head_sha))
         ));
     }
     rows
@@ -244,11 +255,7 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
     // short pane keeps the header's first rows, and a standing hint is worth
     // less than an error or a waiting reason.
     if panel.run.is_some() {
-        header.push(
-            Style::new()
-                .dim()
-                .paint("Closeup `workflow finish` ends this run"),
-        );
+        header.push(muted().paint("Closeup `workflow finish` ends this run"));
     } else if panel.error.is_some()
         && matches!(
             panel.pending,
@@ -258,11 +265,7 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
             ))
         )
     {
-        header.push(
-            Style::new()
-                .dim()
-                .paint("Closeup `workflow finish` abandons this start"),
-        );
+        header.push(muted().paint("Closeup `workflow finish` abandons this start"));
     }
     header
 }
@@ -293,9 +296,9 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
         .take(3)
         .map(|(index, line)| {
             let safe = safe_line(line);
-            let marker = Style::new().dim().paint(">");
+            let marker = muted().paint(">");
             if index != current {
-                return format!("{marker} {}", Role::Accent.style().paint(&safe));
+                return format!("{marker} {safe}");
             }
             let caret = safe_line(&line[..cursor - line_start]).len();
             let mut start = 0;
@@ -310,7 +313,7 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
                 crate::presentation::widgets::block_caret(
                     &safe[start..],
                     caret - start,
-                    &Role::Accent.style()
+                    &Style::new()
                 )
             )
         })
@@ -618,6 +621,114 @@ mod tests {
         assert!(
             input_rows(&panel, 12)[0].contains(crate::presentation::frame::INPUT_CURSOR_MARKER)
         );
+    }
+
+    /// Every faint run in this pane names its own foreground.
+    ///
+    /// A bare `dim()` is `ESC[2m`, which leaves the base colour to the emulator
+    /// and is what made the whole pane unreadable. White + dim is `ESC[2;37m`,
+    /// so the bare form is detectable in the painted output and this test is the
+    /// backstop that keeps it out.
+    const BARE_DIM: &str = "\u{1b}[2m";
+
+    #[test]
+    fn nothing_is_painted_with_an_uncoloured_dim() {
+        use usagi_core::domain::id::{OperationId, SessionId};
+        use usagi_core::domain::workflow::{
+            FinishedRun, Instruction, Outcome, Phase, Recipient, Review,
+        };
+
+        // Exercise every branch that used to carry a bare dim: the two composer
+        // hints, both standing hints, ended runs, all four delivery states, the
+        // unfocused selector arrows, the progress line, the review SHA and the
+        // draft's own gutter marker.
+        let mut panel = WorkflowPanel::default();
+        panel.draft.replace("Ship login\nwith tests");
+        assert!(!render(24, 100, &panel).join("\n").contains(BARE_DIM));
+
+        panel.agent_field = Some(1);
+        assert!(!render(24, 100, &panel).join("\n").contains(BARE_DIM));
+
+        let mut run = crate::usecase::application::workflow::fixture_run(SessionId::new());
+        run.review = Some(Review {
+            request: OperationId::new(),
+            target: usagi_core::domain::agent_message::ReviewTarget {
+                base_sha: "a".repeat(40),
+                head_sha: "b".repeat(40),
+            },
+            approved: true,
+        });
+        for delivery in [
+            Delivery::Queued,
+            Delivery::Notified,
+            Delivery::Acknowledged,
+            Delivery::Unconfirmed,
+        ] {
+            run.instructions.push(Instruction {
+                id: OperationId::new(),
+                requested_recipient: Recipient::Automatic,
+                recipient: run.implementer,
+                body: "Check the error path".into(),
+                delivery,
+            });
+        }
+        panel.run = Some(run);
+        panel.finished = vec![
+            FinishedRun {
+                id: OperationId::new(),
+                outcome: Outcome::Completed,
+                goal: "Ship login".into(),
+                phase: Phase::Ready,
+                issue: None,
+                pr_url: None,
+            },
+            FinishedRun {
+                id: OperationId::new(),
+                outcome: Outcome::Stopped,
+                goal: "Rewrite the parser".into(),
+                phase: Phase::Revising,
+                issue: None,
+                pr_url: None,
+            },
+        ];
+        let rendered = render(24, 100, &panel).join("\n");
+        assert!(!rendered.contains(BARE_DIM));
+
+        // A refused start reaches the other standing hint.
+        panel.run = None;
+        panel.error = Some("stop the session's existing Agent".into());
+        panel.pending = Some((
+            OperationId::new(),
+            usagi_core::domain::workflow::WorkflowCommand::Start {
+                goal: "task".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            },
+        ));
+        assert!(!render(24, 100, &panel).join("\n").contains(BARE_DIM));
+    }
+
+    #[test]
+    fn the_live_revision_count_is_not_dimmed_away() {
+        let mut run = crate::usecase::application::workflow::fixture_run(
+            usagi_core::domain::id::SessionId::new(),
+        );
+        run.revisions = 2;
+        let panel = WorkflowPanel {
+            run: Some(run),
+            ..WorkflowPanel::default()
+        };
+        let rows = render(20, 100, &panel);
+        let progress = rows
+            .iter()
+            .find(|row| strip(row).contains("revisions 2/3"))
+            .expect("the progress row is drawn");
+        // The static pipeline may be quiet; the count the person is watching is
+        // outside every faint run on the line.
+        let (_, after_count) = progress
+            .split_once("revisions")
+            .expect("the count is on this row");
+        assert!(!after_count.contains(BARE_DIM));
+        assert!(!after_count.contains("\u{1b}[2;37m"));
     }
 
     #[test]
