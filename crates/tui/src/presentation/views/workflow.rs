@@ -57,7 +57,15 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
     // would strip the SGR this pane is drawn with.
     let mut rows = header.into_iter().take(header_height).collect::<Vec<_>>();
     let history = history(panel);
-    let end = history.len().saturating_sub(panel.history_offset);
+    // Clamp to the viewport, not just to the row count. `rows - 1` alone leaves
+    // every offset past `rows - history_height` drawing a part-empty window, so
+    // one page back from the top would show a handful of rows over blank lines —
+    // the same near-empty pane the bound exists to prevent.
+    let end = history.len().saturating_sub(
+        panel
+            .history_offset
+            .min(history.len().saturating_sub(history_height)),
+    );
     let start = end.saturating_sub(history_height);
     rows.extend(history[start..end].iter().cloned());
     rows.resize(header_height + history_height, String::new());
@@ -891,6 +899,50 @@ mod tests {
         // `WorkflowPanel::history_rows` bounds the scroll; if it drifts from the
         // rows this view draws, the bound stops matching the window it bounds.
         assert_eq!(history(&panel).len(), panel.history_rows());
+    }
+
+    #[test]
+    fn paging_back_keeps_the_history_window_full() {
+        use usagi_core::domain::id::OperationId;
+        use usagi_core::domain::workflow::{FinishedRun, Outcome, Phase};
+        let panel = WorkflowPanel {
+            finished: (0..12)
+                .map(|index| FinishedRun {
+                    id: OperationId::new(),
+                    outcome: Outcome::Stopped,
+                    goal: format!("attempt {index}"),
+                    phase: Phase::Revising,
+                    issue: None,
+                    pr_url: None,
+                })
+                .collect(),
+            ..WorkflowPanel::default()
+        };
+        // 4 header rows + 10 history rows + 3 composer rows.
+        let height = 17;
+        let history_rows = |panel: &WorkflowPanel| {
+            render(height, 100, panel)[4..14]
+                .iter()
+                .map(|row| strip(row).trim_end().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(history_rows(&panel).iter().all(|row| !row.is_empty()));
+
+        // Bounding the offset by the row count alone leaves every offset past
+        // `rows - height` drawing a part-empty window; one page back would show
+        // 7 rows over 3 blank lines. The window has to stay full.
+        let mut scrolled = panel.clone();
+        for _ in 0..5 {
+            scrolled.scroll_history(true);
+            let rows = history_rows(&scrolled);
+            assert!(
+                rows.iter().all(|row| !row.is_empty()),
+                "offset {} drew a part-empty window: {rows:?}",
+                scrolled.history_offset
+            );
+        }
+        // The oldest row is reachable, and paging back further stays there.
+        assert!(history_rows(&scrolled)[0].contains("attempt 0"));
     }
 
     #[test]

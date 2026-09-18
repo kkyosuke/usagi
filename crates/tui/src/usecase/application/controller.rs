@@ -3227,7 +3227,11 @@ fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) 
                 panel.cycle_agent(true, available);
                 return Vec::new();
             }
-            AppKey::Tab | AppKey::SaveRoles => {}
+            // Reading the history is not editing the draft, so the scroll keys
+            // stay live while the start form owns the caret — the same rule
+            // `WorkflowEdit::HistoryLatest` follows, and what the pane's hint and
+            // `document/11-keybindings.md` promise.
+            AppKey::Tab | AppKey::SaveRoles | AppKey::PageUp | AppKey::PageDown => {}
             _ => return Vec::new(),
         }
     }

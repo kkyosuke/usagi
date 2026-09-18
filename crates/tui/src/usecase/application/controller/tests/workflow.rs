@@ -728,8 +728,7 @@ fn history_scrolling_is_bounded_and_returns_to_the_latest_in_one_operation() {
         offset + 3
     );
 
-    // One operation follows the latest again, and it works while the start form
-    // owns the caret too: reading history is not editing the draft.
+    // One operation follows the latest again.
     let _ = update(
         &mut state,
         AppEvent::WorkflowEdit {
@@ -743,4 +742,68 @@ fn history_scrolling_is_bounded_and_returns_to_the_latest_in_one_operation() {
     run.history.extend((15..17).map(entry));
     land(&mut state, &run);
     assert_eq!(state.workflow_panel(session).unwrap().history_offset, 0);
+}
+
+#[test]
+fn history_keys_stay_live_while_the_start_form_owns_the_caret() {
+    use crate::usecase::application::workflow::{WorkflowEdit, WorkflowJob};
+    use usagi_core::domain::workflow::WorkflowSnapshot;
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = submit_closeup_workflow(&mut state, session, "");
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Workflow {
+            job: WorkflowJob {
+                workspace,
+                session,
+                control: None,
+            },
+            result: Ok(Box::new(WorkflowSnapshot {
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                session,
+                run: None,
+                pending_start: None,
+                finished: Vec::new(),
+            })),
+        }),
+    );
+
+    // Reading the history is not editing the draft, and the pane's hint and
+    // `document/11-keybindings.md` promise these keys without a caveat.
+    let panel = state.workflows.get_mut(&session).unwrap();
+    panel.agent_field = Some(0);
+    panel.finished = (0..8)
+        .map(|index| usagi_core::domain::workflow::FinishedRun {
+            id: usagi_core::domain::id::OperationId::new(),
+            outcome: usagi_core::domain::workflow::Outcome::Stopped,
+            goal: format!("attempt {index}"),
+            phase: usagi_core::domain::workflow::Phase::Revising,
+            issue: None,
+            pr_url: None,
+        })
+        .collect();
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowInput {
+            session,
+            key: AppKey::PageUp,
+        },
+    );
+    assert_eq!(state.workflow_panel(session).unwrap().history_offset, 5);
+    let _ = update(
+        &mut state,
+        AppEvent::WorkflowEdit {
+            session,
+            edit: WorkflowEdit::HistoryLatest,
+        },
+    );
+    assert_eq!(state.workflow_panel(session).unwrap().history_offset, 0);
+    // Neither of them touched the draft, and the form still owns the caret.
+    let panel = state.workflow_panel(session).unwrap();
+    assert!(panel.draft.value().is_empty());
+    assert_eq!(panel.agent_field, Some(0));
 }
