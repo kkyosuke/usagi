@@ -1,13 +1,13 @@
 ---
 number: 737
 title: perf(daemon): workflow の PR 検証をキャッシュしてバックオフする
-status: todo
+status: done
 priority: high
 labels: [v2, daemon, workflow, pr]
 dependson: []
 related: [736]
 created_at: 2026-09-12T00:00:00+00:00
-updated_at: 2026-09-12T00:00:00+00:00
+updated_at: 2026-09-18T00:00:00+00:00
 ---
 
 ## 問題
@@ -29,7 +29,7 @@ updated_at: 2026-09-12T00:00:00+00:00
 
 ## 受入条件
 
-- [ ] 同一 `(session, head_sha)` への連続した検証で `gh` 呼び出しが TTL ごとに 1 回になる。
-- [ ] 「待ち」理由が続く間はバックオフし、上限で頭打ちになる。
-- [ ] HEAD 変更・phase 離脱でキャッシュを破棄し、古い判定を再利用しない。
-- [ ] fake の `GhProcessPort` で呼び出し回数を数える test がある。
+- [x] 同一 `(session, head_sha)` への連続した検証で `gh` 呼び出しが TTL ごとに 1 回になる。
+- [x] 「待ち」理由が続く間はバックオフし、上限で頭打ちになる。
+- [x] HEAD 変更・phase 離脱でキャッシュを破棄し、古い判定を再利用しない。
+- [x] fake の `GhProcessPort` で呼び出し回数を数える test がある。

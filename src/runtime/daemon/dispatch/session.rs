@@ -71,6 +71,8 @@ pub(super) fn dispatch_session_action(
     let teardown = context.teardown;
     let agent = context.agent;
     let pr_inventory = context.pr_inventory;
+    let verification = context.verification;
+    let verification_clock = context.verification_clock;
 
     let authenticated_caller = payload
         .get("_caller_credential")
@@ -379,6 +381,10 @@ pub(super) fn dispatch_session_action(
                 None => workflow::advance(
                     agent,
                     pr_inventory,
+                    super::super::workflow::Verification {
+                        cache: verification,
+                        clock: verification_clock,
+                    },
                     &bound.scope_resolver(),
                     workspace,
                     session,

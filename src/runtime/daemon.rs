@@ -823,6 +823,13 @@ type SharedTerminalRuntime = Arc<
 /// document, so a draining process's PTY observation cannot lose an update.
 type SharedPrInventory = Arc<Mutex<OutputPrProjector<FencedPrInventory<PrInventoryStore>>>>;
 
+/// Process-lifetime cache of workflow PR verification reads.
+///
+/// The resident lane and every client request share one handle, because they
+/// verify the same runs: without that sharing an open tab and the sweep would
+/// each keep their own copy and the GitHub reads would simply double.
+type SharedVerificationCache = Arc<Mutex<usagi_daemon::usecase::workflow::VerificationCache>>;
+
 /// How often the PR refresh worker claims due work.
 ///
 /// This bounds how quickly a freshly detected PR gets its title and state, and
@@ -2136,6 +2143,8 @@ impl workflow::AttentionNotifier for PlatformWorkflowNotifier {
 fn start_workflow_lane(
     agent: SharedAgentRuntime,
     pr_inventory: SharedPrInventory,
+    verification: SharedVerificationCache,
+    verification_clock: Arc<SystemClock>,
     workspaces: Workspaces,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
@@ -2148,9 +2157,17 @@ fn start_workflow_lane(
     spawn_workflow_lane(
         Box::new(move || {
             let scope = SharedScopeResolver(Arc::clone(&workspaces));
-            let failure = workflow::sweep(&agent, &pr_inventory, &scope, &notifier, &|| {
-                sweeping.is_requested()
-            })
+            let failure = workflow::sweep(
+                &agent,
+                &pr_inventory,
+                workflow::Verification {
+                    cache: &verification,
+                    clock: verification_clock.as_ref(),
+                },
+                &scope,
+                &notifier,
+                &|| sweeping.is_requested(),
+            )
             .err()
             .map(|error| format!("workflow lane sweep deferred: {}", error.message));
             if let Some(entry) = failures.changed(failure) {
