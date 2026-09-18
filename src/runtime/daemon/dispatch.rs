@@ -20,14 +20,15 @@ use super::{
     OperationId, Ordering, Path, PathBuf, PeerProcess, PendingDaemonAgentRestart, ResponseOutcome,
     SessionId, SessionRuntimeError, SessionScopeResolver, SharedAgentRuntime, SharedMetricsBroker,
     SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime, SharedSupervisorRuntime,
-    SharedTerminalRuntime, SupervisorRuntime, SupervisorToolAction, SystemGit, TeardownSignal,
-    Tenant, TerminalId, TerminalPipelineMetrics, UnixStandbyProbe, UserDecisionStore, WorkspaceId,
-    Workspaces, aggregate_agent_status, bounded_supervisor_query,
-    clear_pending_daemon_agent_restart, current_build, observe_generation_process,
-    output_pipeline_counters, paths, perform_compensating_remove, perform_create,
-    perform_delegated_create, perform_remove_with_merged_head, pr_projection_counters,
-    process_start_identity, recover_rollover, restore_pending_daemon_agents, rollover_trigger,
-    validate_owned_directory, write_pending_daemon_agent_restart,
+    SharedTerminalRuntime, SharedVerificationCache, SupervisorRuntime, SupervisorToolAction,
+    SystemClock, SystemGit, TeardownSignal, Tenant, TerminalId, TerminalPipelineMetrics,
+    UnixStandbyProbe, UserDecisionStore, WorkspaceId, Workspaces, aggregate_agent_status,
+    bounded_supervisor_query, clear_pending_daemon_agent_restart, current_build,
+    observe_generation_process, output_pipeline_counters, paths, perform_compensating_remove,
+    perform_create, perform_delegated_create, perform_remove_with_merged_head,
+    pr_projection_counters, process_start_identity, recover_rollover,
+    restore_pending_daemon_agents, rollover_trigger, validate_owned_directory,
+    write_pending_daemon_agent_restart,
 };
 
 pub(super) struct DispatchToolContext<'a> {
@@ -2915,6 +2916,10 @@ pub(super) struct SessionDispatchContext<'a> {
     pub(super) teardown: &'a TeardownSignal,
     pub(super) agent: &'a SharedAgentRuntime,
     pub(super) pr_inventory: &'a SharedPrInventory,
+    /// Shared with the resident lane so an open tab and the sweep do not each
+    /// keep their own copy of the same GitHub read.
+    pub(super) verification: &'a SharedVerificationCache,
+    pub(super) verification_clock: &'a SystemClock,
     pub(super) supervisor: &'a SharedSupervisorRuntime,
 }
 

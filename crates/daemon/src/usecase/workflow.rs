@@ -436,13 +436,97 @@ pub fn initial_prompt(
     )
 }
 
+/// Shortest gap between two `gh pr view` reads for the same approved HEAD.
+const VERIFICATION_TTL_MS: u64 = 15_000;
+/// Longest gap the backoff may grow to while the answer stays "still waiting".
+const VERIFICATION_MAX_BACKOFF_MS: u64 = 300_000;
+
+/// One remembered `gh pr view` read.
+struct CachedRead {
+    /// The approved HEAD the read was made for. A different HEAD is different
+    /// evidence, never a cache hit.
+    head_sha: String,
+    output: String,
+    read_at_ms: u64,
+    /// Consecutive reads that answered "still waiting". This is what the backoff
+    /// lengthens: a PR whose checks are running says the same thing every time,
+    /// and asking GitHub every sweep buys nothing.
+    waits: u32,
+}
+
+/// Rate-limits the one expensive part of verification.
+///
+/// `Verifying` and `Ready` re-verify on every sweep *and* on every snapshot the
+/// open tab asks for, and each one shelled out to `gh pr view`. The local git
+/// probes are cheap and stay on every pass — they are also the TOCTOU fence — so
+/// only the GitHub read is cached.
+#[derive(Default)]
+pub struct VerificationCache {
+    entries: std::collections::BTreeMap<SessionId, CachedRead>,
+}
+
+impl VerificationCache {
+    /// The remembered read for this HEAD, if another one is not due yet.
+    #[must_use]
+    pub fn fresh(&self, session: SessionId, head_sha: &str, now_ms: u64) -> Option<&str> {
+        let entry = self.entries.get(&session)?;
+        if entry.head_sha != head_sha {
+            return None;
+        }
+        let wait = VERIFICATION_TTL_MS
+            .saturating_mul(1_u64.checked_shl(entry.waits).unwrap_or(u64::MAX))
+            .min(VERIFICATION_MAX_BACKOFF_MS);
+        (now_ms.saturating_sub(entry.read_at_ms) < wait).then_some(entry.output.as_str())
+    }
+
+    /// Remember what GitHub answered. `waiting` lengthens the next gap.
+    pub fn record(
+        &mut self,
+        session: SessionId,
+        head_sha: &str,
+        now_ms: u64,
+        output: String,
+        waiting: bool,
+    ) {
+        let waits = match self.entries.get(&session) {
+            // A streak only continues for the same HEAD and the same answer.
+            Some(entry) if entry.head_sha == head_sha && waiting => entry.waits.saturating_add(1),
+            _ => 0,
+        };
+        self.entries.insert(
+            session,
+            CachedRead {
+                head_sha: head_sha.to_owned(),
+                output,
+                read_at_ms: now_ms,
+                waits,
+            },
+        );
+    }
+
+    /// Drop what is remembered for a session that is no longer being verified,
+    /// so re-entering `Verifying` reads GitHub rather than an old answer.
+    pub fn forget(&mut self, session: SessionId) {
+        self.entries.remove(&session);
+    }
+}
+
+/// Whether a verification refusal is "not yet" rather than "no".
+///
+/// Only the former is worth backing off: the others are answered by changing
+/// something, and the next pass will see that change through the local probes.
+#[must_use]
+pub fn is_waiting(reason: &str) -> bool {
+    reason.starts_with("Waiting")
+}
+
 /// Independently verify an approved HEAD against a clean worktree and GitHub.
 /// Unknown, stale and missing evidence remain a concrete pending reason.
 /// # Errors
 /// Returns a safe pending reason for every absent or mismatched proof.
 pub fn verify_pr(
     git: &dyn usagi_core::infrastructure::git::GitRunner,
-    gh: &mut dyn super::pr_inventory::GhProcessPort<Error = std::io::Error>,
+    view: &mut dyn FnMut(&str) -> Result<String, &'static str>,
     directory: &std::path::Path,
     target: &usagi_core::domain::agent_message::ReviewTarget,
     entries: &[usagi_core::domain::pr_inventory::PrEntry],
@@ -464,20 +548,7 @@ pub fn verify_pr(
         .iter()
         .find(|entry| entry.head_oid.as_deref() == Some(target.head_sha.as_str()))
         .ok_or("Waiting for a PR for the approved HEAD")?;
-    let output = gh
-        .run(
-            "gh",
-            &[
-                "pr".into(),
-                "view".into(),
-                entry.url().into(),
-                "--json".into(),
-                "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,body"
-                    .into(),
-            ],
-            5000,
-        )
-        .map_err(|_| "Could not refresh PR checks")?;
+    let output = view(entry.url())?;
     let value: serde_json::Value =
         serde_json::from_str(&output).map_err(|_| "PR verification response is invalid")?;
     let view = super::pr_inventory::parse_gh_pr_view(&output)
@@ -1382,7 +1453,21 @@ mod tests {
             })
         }
     }
-    struct Gh(String);
+    /// The PR view `verify_pr` asks for, as the caller now supplies it.
+    ///
+    /// `verify_pr` no longer runs `gh` itself: the caller decides whether to
+    /// shell out or answer from [`VerificationCache`]. These tests are about the
+    /// judgement applied to the answer, so they supply it directly.
+    fn gh_view(output: &str) -> impl FnMut(&str) -> Result<String, &'static str> {
+        let output = output.to_owned();
+        move |url: &str| {
+            assert!(url.starts_with("https://github.com/"));
+            if output == "unavailable" {
+                return Err("Could not refresh PR checks");
+            }
+            Ok(output.clone())
+        }
+    }
     struct FailingGit {
         calls: std::cell::Cell<usize>,
         at: usize,
@@ -1409,24 +1494,6 @@ mod tests {
             Git.run(path, args)
         }
     }
-    impl super::super::pr_inventory::GhProcessPort for Gh {
-        type Error = std::io::Error;
-        fn run(
-            &mut self,
-            program: &str,
-            argv: &[String],
-            timeout: u64,
-        ) -> Result<String, Self::Error> {
-            assert_eq!(program, "gh");
-            assert_eq!(argv[0], "pr");
-            assert_eq!(timeout, 5000);
-            if self.0 == "unavailable" {
-                return Err(std::io::Error::other("fake GitHub failure"));
-            }
-            Ok(self.0.clone())
-        }
-    }
-
     #[test]
     fn workflow_verification_rejects_every_git_probe_failure_or_race() {
         let target = usagi_core::domain::agent_message::ReviewTarget {
@@ -1448,7 +1515,7 @@ mod tests {
                             at,
                             mode
                         },
-                        &mut Gh(output.clone()),
+                        &mut gh_view(&output.clone()),
                         std::path::Path::new("/fixture"),
                         &target,
                         std::slice::from_ref(&entry),
@@ -1479,7 +1546,7 @@ mod tests {
         assert_eq!(
             verify_pr(
                 &Git,
-                &mut Gh(value.to_string()),
+                &mut gh_view(&value.to_string()),
                 directory,
                 &target,
                 std::slice::from_ref(&entry),
@@ -1494,7 +1561,7 @@ mod tests {
         assert_eq!(
             verify_pr(
                 &Git,
-                &mut Gh(without_marker.to_string()),
+                &mut gh_view(&without_marker.to_string()),
                 directory,
                 &target,
                 std::slice::from_ref(&entry),
@@ -1505,7 +1572,7 @@ mod tests {
         assert!(
             verify_pr(
                 &Git,
-                &mut Gh(value.to_string()),
+                &mut gh_view(&value.to_string()),
                 directory,
                 &target,
                 &[],
@@ -1516,7 +1583,7 @@ mod tests {
         assert!(
             verify_pr(
                 &Git,
-                &mut Gh("{}".into()),
+                &mut gh_view("{}"),
                 directory,
                 &target,
                 std::slice::from_ref(&entry),
@@ -1527,7 +1594,7 @@ mod tests {
         assert!(
             verify_pr(
                 &Git,
-                &mut Gh("unavailable".into()),
+                &mut gh_view("unavailable"),
                 directory,
                 &target,
                 std::slice::from_ref(&entry),
@@ -1540,7 +1607,7 @@ mod tests {
         assert!(
             verify_pr(
                 &Git,
-                &mut Gh(value.to_string()),
+                &mut gh_view(&value.to_string()),
                 directory,
                 &target,
                 std::slice::from_ref(&entry),
@@ -1563,7 +1630,7 @@ mod tests {
             assert!(
                 verify_pr(
                     &Git,
-                    &mut Gh(value.to_string()),
+                    &mut gh_view(&value.to_string()),
                     directory,
                     &target,
                     std::slice::from_ref(&entry),
@@ -1576,7 +1643,7 @@ mod tests {
         assert!(
             verify_pr(
                 &Git,
-                &mut Gh("invalid".into()),
+                &mut gh_view("invalid"),
                 directory,
                 &target,
                 &[entry],
@@ -1751,5 +1818,76 @@ mod tests {
             admit(&store, workspace, session, operation, &start(4), None).is_err(),
             "the limit is part of the start's identity"
         );
+    }
+
+    #[test]
+    fn the_verification_cache_spends_one_github_read_per_window_and_backs_off() {
+        use usagi_core::domain::id::SessionId;
+        let session = SessionId::new();
+        let head = "a".repeat(40);
+        let mut cache = VerificationCache::default();
+
+        // Nothing remembered: the first pass has to read.
+        assert!(cache.fresh(session, &head, 0).is_none());
+        cache.record(session, &head, 0, "first".into(), false);
+
+        // Inside the window every further pass is answered without GitHub.
+        for now in [0, 1, VERIFICATION_TTL_MS - 1] {
+            assert_eq!(cache.fresh(session, &head, now), Some("first"));
+        }
+        // At the window's edge another read is due.
+        assert!(cache.fresh(session, &head, VERIFICATION_TTL_MS).is_none());
+
+        // A "still waiting" answer doubles the next gap, and keeps doubling.
+        let mut at = VERIFICATION_TTL_MS;
+        let mut expected = VERIFICATION_TTL_MS * 2;
+        for _ in 0..3 {
+            cache.record(session, &head, at, "waiting".into(), true);
+            assert_eq!(
+                cache.fresh(session, &head, at + expected - 1),
+                Some("waiting")
+            );
+            assert!(cache.fresh(session, &head, at + expected).is_none());
+            at += expected;
+            expected *= 2;
+        }
+
+        // The backoff stops growing at the cap rather than running away.
+        for _ in 0..40 {
+            cache.record(session, &head, at, "waiting".into(), true);
+        }
+        assert_eq!(
+            cache.fresh(session, &head, at + VERIFICATION_MAX_BACKOFF_MS - 1),
+            Some("waiting")
+        );
+        assert!(
+            cache
+                .fresh(session, &head, at + VERIFICATION_MAX_BACKOFF_MS)
+                .is_none()
+        );
+
+        // An answer that is not "waiting" ends the streak.
+        cache.record(session, &head, at, "settled".into(), false);
+        assert!(
+            cache
+                .fresh(session, &head, at + VERIFICATION_TTL_MS)
+                .is_none()
+        );
+
+        // A different HEAD is different evidence, never a hit.
+        cache.record(session, &head, at, "settled".into(), false);
+        assert!(cache.fresh(session, &"b".repeat(40), at).is_none());
+        assert_eq!(cache.fresh(session, &head, at), Some("settled"));
+
+        // Leaving verification drops what was remembered.
+        cache.forget(session);
+        assert!(cache.fresh(session, &head, at).is_none());
+        // Another session never reads this one's answer.
+        cache.record(session, &head, at, "settled".into(), false);
+        assert!(cache.fresh(SessionId::new(), &head, at).is_none());
+
+        // Only "not yet" refusals are worth backing off.
+        assert!(is_waiting("Waiting for successful PR checks"));
+        assert!(!is_waiting("PR has unresolved review requests"));
     }
 }

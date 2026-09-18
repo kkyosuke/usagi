@@ -31,15 +31,15 @@ use super::{
     SecureUnixListener, SessionDispatchContext, SharedAgent, SharedAgentRuntime, SharedAgentState,
     SharedMetricsBroker, SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime,
     SharedSupervisorRuntime, SharedTerminal, SharedTerminalOwner, SharedTerminalRuntime,
-    ShutdownOnIpcWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe, ShutdownRequest, SpawnedChildren,
-    StaleCleanup, StaleDaemonCleanup, SupervisorRuntime, SystemClock, SystemTenantOpener,
-    TeardownSignal, TenantRegistry, TenantWorkspaces, TerminalPipelineMetrics,
-    TerminalScopeResolver, TerminalStore, TrustedLoginShell, UnixChildProbe, UserDecisionStore,
-    UserEnvironment, WORKFLOW_LANE_TICK, Workspaces, Write, authenticated_supervisor_caller,
-    bind_ipc_listener, bootstrap_broker_address, client_connection_capacity_available,
-    client_connection_limit, connection_cleanup_channel, connection_workspace, current_build,
-    current_daemon_is_reachable, daemon_request_surface, dispatch_agent,
-    dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
+    SharedVerificationCache, ShutdownOnIpcWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe,
+    ShutdownRequest, SpawnedChildren, StaleCleanup, StaleDaemonCleanup, SupervisorRuntime,
+    SystemClock, SystemTenantOpener, TeardownSignal, TenantRegistry, TenantWorkspaces,
+    TerminalPipelineMetrics, TerminalScopeResolver, TerminalStore, TrustedLoginShell,
+    UnixChildProbe, UserDecisionStore, UserEnvironment, WORKFLOW_LANE_TICK, Workspaces, Write,
+    authenticated_supervisor_caller, bind_ipc_listener, bootstrap_broker_address,
+    client_connection_capacity_available, client_connection_limit, connection_cleanup_channel,
+    connection_workspace, current_build, current_daemon_is_reachable, daemon_request_surface,
+    dispatch_agent, dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
     dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
     dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
     dispatch_supervisor_tool, dispatch_user_decision, draining_collection, ensure_private_dir,
@@ -345,9 +345,15 @@ pub(super) fn spawn_ipc_server(
         Arc::clone(&projection),
         Arc::clone(&shutdown),
     )?);
+    let verification: SharedVerificationCache = Arc::default();
+    // `SystemClock` measures from its own construction, so the cache's TTL only
+    // means anything while one clock outlives every read of it.
+    let verification_clock = Arc::new(SystemClock::new());
     background_workers.push(start_workflow_lane(
         Arc::clone(&agent),
         Arc::clone(&pr_inventory),
+        Arc::clone(&verification),
+        Arc::clone(&verification_clock),
         Arc::clone(&workspaces),
         Arc::clone(&shutdown),
         WORKFLOW_LANE_TICK,
@@ -440,6 +446,8 @@ pub(super) fn spawn_ipc_server(
             agent,
             retention,
             pr_inventory,
+            verification,
+            verification_clock,
             projection,
             decisions,
             metrics: Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
@@ -617,6 +625,9 @@ pub(super) struct IpcAcceptContext {
     pub(super) agent: SharedAgentRuntime,
     pub(super) retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     pub(super) pr_inventory: SharedPrInventory,
+    /// Shared with the resident workflow lane so both sides reuse one GitHub read.
+    pub(super) verification: SharedVerificationCache,
+    pub(super) verification_clock: Arc<SystemClock>,
     pub(super) projection: Arc<PrProjectionQueue>,
     pub(super) decisions: Arc<UserDecisionStore>,
     pub(super) metrics: SharedMetricsBroker,
@@ -649,6 +660,8 @@ pub(super) fn start_ipc_accept_loop(
         agent,
         retention,
         pr_inventory,
+        verification,
+        verification_clock,
         projection,
         decisions,
         metrics,
@@ -765,6 +778,8 @@ pub(super) fn start_ipc_accept_loop(
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
+                        let verification = Arc::clone(&verification);
+                        let verification_clock = Arc::clone(&verification_clock);
                         let decisions = Arc::clone(&decisions);
                         let metrics = Arc::clone(&metrics);
                         let process_metrics = Arc::clone(&process_metrics);
@@ -981,7 +996,7 @@ pub(super) fn start_ipc_accept_loop(
                                             DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
                                             DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
                                             DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, supervisor: &supervisor }, request_id, &body, hello),
+                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, verification: &verification, verification_clock: &verification_clock, supervisor: &supervisor }, request_id, &body, hello),
                                             DaemonRequest::Agent { .. }
                                             | DaemonRequest::AgentGoal { .. }
                                             | DaemonRequest::AgentInventory { .. }
@@ -1005,7 +1020,7 @@ pub(super) fn start_ipc_accept_loop(
                                             },
                                             DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
                                             DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
-                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&agent_launch, &pr_inventory, &bound, request_id, request, &body, hello),
+                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&workflow::WorkflowDispatchContext { agent: &agent_launch, inventory: &pr_inventory, verification: workflow::Verification { cache: &verification, clock: verification_clock.as_ref() }, bound: &bound }, request_id, request, &body, hello),
                                             DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }

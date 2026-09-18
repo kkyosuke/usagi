@@ -25,16 +25,30 @@ fn unavailable(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::new(ErrorCode::Unavailable, format!("Workflow: {error}"))
 }
 
+/// The rate limiter for PR verification and the clock its windows are measured
+/// against. Neither means anything without the other, so they travel together.
+#[derive(Clone, Copy)]
+pub(super) struct Verification<'a> {
+    pub(super) cache: &'a super::SharedVerificationCache,
+    pub(super) clock: &'a dyn usagi_core::domain::clock::MonotonicClock,
+}
+
+/// What one workflow request is answered against.
+pub(super) struct WorkflowDispatchContext<'a> {
+    pub(super) agent: &'a SharedAgentRuntime,
+    pub(super) inventory: &'a SharedPrInventory,
+    pub(super) verification: Verification<'a>,
+    pub(super) bound: &'a ConnectionWorkspace,
+}
+
 pub(super) fn dispatch(
-    agent: &SharedAgentRuntime,
-    inventory: &SharedPrInventory,
-    bound: &ConnectionWorkspace,
+    context: &WorkflowDispatchContext<'_>,
     request_id: RequestId,
     request: DaemonRequest,
     raw: &serde_json::Value,
     hello: &ServerHello,
 ) -> Envelope {
-    let result = reject_agent_context(raw).and_then(|()| handle(agent, inventory, bound, request));
+    let result = reject_agent_context(raw).and_then(|()| handle(context, request));
     match result {
         Ok(value) => envelope(hello, request_id, ResponseOutcome::Ok, value),
         Err(error) => envelope(
@@ -63,11 +77,15 @@ fn reject_agent_context(raw: &serde_json::Value) -> Result<(), ProtocolError> {
 }
 
 fn handle(
-    agent: &SharedAgentRuntime,
-    inventory: &SharedPrInventory,
-    bound: &ConnectionWorkspace,
+    context: &WorkflowDispatchContext<'_>,
     request: DaemonRequest,
 ) -> Result<serde_json::Value, ProtocolError> {
+    let WorkflowDispatchContext {
+        agent,
+        inventory,
+        verification,
+        bound,
+    } = context;
     let (workspace, session, control) = match request {
         DaemonRequest::WorkflowSnapshot { workspace, session } => (workspace, session, None),
         DaemonRequest::WorkflowControl {
@@ -112,6 +130,7 @@ fn handle(
     serde_json::to_value(advance(
         agent,
         inventory,
+        *verification,
         &scope,
         workspace,
         session,
@@ -362,6 +381,7 @@ impl Attention {
 pub(super) fn advance(
     agent: &SharedAgentRuntime,
     inventory: &SharedPrInventory,
+    verification: Verification<'_>,
     scope: &dyn SessionScopeResolver,
     workspace: WorkspaceId,
     session: SessionId,
@@ -380,6 +400,8 @@ pub(super) fn advance(
             verify_progress(
                 &store,
                 inventory,
+                verification.cache,
+                verification.clock.now_ms(),
                 scope,
                 workspace,
                 session,
@@ -387,9 +409,14 @@ pub(super) fn advance(
                 &super::SystemGit,
                 &mut super::GhProcess,
             )?;
+        } else {
+            // Not being verified any more: the next entry into `Verifying` has to
+            // read GitHub rather than an answer from the previous one.
+            forget_verification(verification.cache, session);
         }
         return workflow::projection(&store, workspace, session).map_err(unavailable);
     }
+    forget_verification(verification.cache, session);
     Ok(snapshot)
 }
 
@@ -517,10 +544,20 @@ pub(super) fn reconcile_runtime(
     }).map_err(unavailable)
 }
 
+/// Drop a session's remembered GitHub read. A poisoned lock is not worth
+/// failing a pass over: the cache only ever makes verification cheaper.
+fn forget_verification(verification: &super::SharedVerificationCache, session: SessionId) {
+    if let Ok(mut cache) = verification.lock() {
+        cache.forget(session);
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // Keep both external verification ports explicit and injectable.
 pub(super) fn verify_progress(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     inventory: &SharedPrInventory,
+    verification: &super::SharedVerificationCache,
+    now_ms: u64,
     scope: &dyn SessionScopeResolver,
     workspace: WorkspaceId,
     session: SessionId,
@@ -543,8 +580,59 @@ pub(super) fn verify_progress(
             .resolve_available_scope(workspace, Some(session))
             .map_err(unavailable_scope)?
             .working_directory;
-        let verified =
-            workflow::verify_pr(git, gh, &directory, &review.target, &entries, run.issue);
+        // Only the GitHub read is rate-limited. The git probes around it stay on
+        // every pass: they are cheap, and the second one is the TOCTOU fence that
+        // makes the answer trustworthy.
+        let head_sha = review.target.head_sha.as_str();
+        // What a real read returned, so the cache remembers only reads that
+        // actually happened.
+        let mut fetched: Option<String> = None;
+        // The closure borrows `fetched`; the block is what ends that borrow
+        // before the recording below reads it.
+        let verified = {
+            let mut view = |url: &str| -> Result<String, &'static str> {
+                if let Ok(cache) = verification.lock()
+                    && let Some(output) = cache.fresh(session, head_sha, now_ms)
+                {
+                    return Ok(output.to_owned());
+                }
+                let output = gh
+                .run(
+                    "gh",
+                    &[
+                        "pr".into(),
+                        "view".into(),
+                        url.into(),
+                        "--json".into(),
+                        "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,body"
+                            .into(),
+                    ],
+                    5000,
+                )
+                .map_err(|_| "Could not refresh PR checks")?;
+                fetched = Some(output.clone());
+                Ok(output)
+            };
+            workflow::verify_pr(
+                git,
+                &mut view,
+                &directory,
+                &review.target,
+                &entries,
+                run.issue,
+            )
+        };
+        // Remember the read that produced this answer, and let a "still waiting"
+        // answer lengthen the next gap.
+        if let Some(output) = fetched
+            && let Ok(mut cache) = verification.lock()
+        {
+            let waiting = verified
+                .as_ref()
+                .err()
+                .is_some_and(|reason| workflow::is_waiting(reason));
+            cache.record(session, head_sha, now_ms, output, waiting);
+        }
         publish_verification(store, workspace, session, run, verified)?;
     }
     Ok(())
@@ -675,6 +763,7 @@ fn first_line(goal: &str) -> String {
 pub(super) fn sweep(
     agent: &SharedAgentRuntime,
     inventory: &SharedPrInventory,
+    verification: Verification<'_>,
     scope: &dyn SessionScopeResolver,
     notifier: &dyn AttentionNotifier,
     stopping: &dyn Fn() -> bool,
@@ -701,6 +790,7 @@ pub(super) fn sweep(
         if let Ok(snapshot) = advance(
             agent,
             inventory,
+            verification,
             scope,
             workspace,
             session,

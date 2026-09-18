@@ -5316,6 +5316,22 @@ struct FixedRefreshClock {
     calls: Arc<AtomicUsize>,
     shutdown_after: Option<(usize, Arc<ShutdownRequest>)>,
 }
+/// A monotonic clock that stands still, for tests that are not about the
+/// verification cache's own timing.
+struct StoppedClock(u64);
+impl MonotonicClock for StoppedClock {
+    fn now_ms(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A cache nothing else has warmed, so an existing test still exercises the real
+/// `gh` read rather than a leftover answer from an earlier assertion.
+fn fresh_verification_cache()
+-> std::sync::Arc<std::sync::Mutex<usagi_daemon::usecase::workflow::VerificationCache>> {
+    std::sync::Arc::default()
+}
+
 impl MonotonicClock for FixedRefreshClock {
     fn now_ms(&self) -> u64 {
         let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
@@ -11638,10 +11654,17 @@ mod workflow_composition {
             request: DaemonRequest,
             raw: &serde_json::Value,
         ) -> Result<WorkflowSnapshot, usagi_core::infrastructure::ipc::ProtocolError> {
+            let cache = fresh_verification_cache();
             let response = workflow::dispatch(
-                &self.agent,
-                &self.inventory,
-                &self.bound,
+                &workflow::WorkflowDispatchContext {
+                    agent: &self.agent,
+                    inventory: &self.inventory,
+                    verification: workflow::Verification {
+                        cache: &cache,
+                        clock: &StoppedClock(0),
+                    },
+                    bound: &self.bound,
+                },
                 usagi_core::infrastructure::ipc::RequestId("workflow-test".into()),
                 request,
                 raw,
@@ -12272,6 +12295,10 @@ mod workflow_composition {
         let advanced = workflow::sweep(
             &fixture.agent,
             &fixture.inventory,
+            workflow::Verification {
+                cache: &fresh_verification_cache(),
+                clock: &StoppedClock(0),
+            },
             &fixture.bound.scope_resolver(),
             &notices,
             &|| false,
@@ -12318,6 +12345,10 @@ mod workflow_composition {
             workflow::sweep(
                 &fixture.agent,
                 &fixture.inventory,
+                workflow::Verification {
+                    cache: &fresh_verification_cache(),
+                    clock: &StoppedClock(0),
+                },
                 &fixture.bound.scope_resolver(),
                 &notices,
                 &|| false,
@@ -12334,6 +12365,10 @@ mod workflow_composition {
             workflow::sweep(
                 &fixture.agent,
                 &fixture.inventory,
+                workflow::Verification {
+                    cache: &fresh_verification_cache(),
+                    clock: &StoppedClock(0),
+                },
                 &fixture.bound.scope_resolver(),
                 &notices,
                 &|| {
@@ -12394,6 +12429,10 @@ mod workflow_composition {
             workflow::sweep(
                 &fixture.agent,
                 &fixture.inventory,
+                workflow::Verification {
+                    cache: &fresh_verification_cache(),
+                    clock: &StoppedClock(0),
+                },
                 &fixture.bound.scope_resolver(),
                 &notices,
                 &|| false,
@@ -12536,6 +12575,10 @@ mod workflow_composition {
             workflow::sweep(
                 &fixture.agent,
                 &fixture.inventory,
+                workflow::Verification {
+                    cache: &fresh_verification_cache(),
+                    clock: &StoppedClock(0),
+                },
                 &fixture.bound.scope_resolver(),
                 &notices,
                 &|| false,
@@ -12855,7 +12898,157 @@ mod workflow_composition {
         }
     }
 
+    /// Counts what reached GitHub, which is the whole point of the cache.
+    #[derive(Default)]
+    struct CountingGh {
+        output: String,
+        calls: usize,
+    }
+    impl GhProcessPort for CountingGh {
+        type Error = std::io::Error;
+        fn run(&mut self, _: &str, _: &[String], _: u64) -> Result<String, Self::Error> {
+            self.calls += 1;
+            Ok(self.output.clone())
+        }
+    }
+
     #[test]
+    #[allow(clippy::too_many_lines)] // One cache lifecycle: warm, expire, back off, invalidate.
+    fn repeated_verification_of_one_head_spends_a_single_github_read_per_window() {
+        use usagi_core::domain::workflow::{Phase, Review};
+        let fixture = Fixture::new();
+        let operation = usagi_core::domain::id::OperationId::new();
+        let mut run = fixture
+            .control(
+                operation,
+                WorkflowCommand::Start {
+                    goal: "verify me".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
+                },
+            )
+            .unwrap()
+            .run
+            .unwrap();
+        run.phase = Phase::Verifying;
+        run.review = Some(Review {
+            request: usagi_core::domain::id::OperationId::new(),
+            target: usagi_core::domain::agent_message::ReviewTarget {
+                base_sha: "b".repeat(40),
+                head_sha: "a".repeat(40),
+            },
+            approved: true,
+        });
+        let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+        store
+            .update_workflow(fixture.workspace, fixture.session, |record| {
+                record.as_mut().unwrap().run = Some(run.clone());
+                Ok(())
+            })
+            .unwrap();
+        let url = "https://github.com/owner/repo/pull/1";
+        // Checks that have not finished: the answer that used to be re-asked of
+        // GitHub on every sweep and every snapshot the open tab requested.
+        let output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE"}).to_string();
+        let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
+        let view = usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output).unwrap();
+        fixture
+            .inventory
+            .lock()
+            .unwrap()
+            .observe_reported(fixture.session, url)
+            .unwrap();
+        fixture
+            .inventory
+            .lock()
+            .unwrap()
+            .publish_success(&identity, &view)
+            .unwrap();
+
+        let cache = fresh_verification_cache();
+        let mut gh = CountingGh {
+            output: output.clone(),
+            calls: 0,
+        };
+        let verify = |now_ms: u64, gh: &mut CountingGh| {
+            workflow::verify_progress(
+                &store,
+                &fixture.inventory,
+                &cache,
+                now_ms,
+                &fixture.bound.scope_resolver(),
+                fixture.workspace,
+                fixture.session,
+                &run,
+                &VerificationGit("a".repeat(40)),
+                gh,
+            )
+            .unwrap();
+        };
+
+        // Ten passes inside one window cost exactly one GitHub read.
+        for tick in 0..10 {
+            verify(tick * 100, &mut gh);
+        }
+        assert_eq!(gh.calls, 1);
+
+        // The run still reaches the same conclusion from the cached answer: the
+        // local git probes still run on every pass, so the verdict is not stale.
+        assert_eq!(
+            store
+                .workflow(fixture.workspace, fixture.session)
+                .unwrap()
+                .unwrap()
+                .run
+                .unwrap()
+                .waiting_reason
+                .as_deref(),
+            Some("Waiting for successful PR checks")
+        );
+
+        // Past the window a second read happens, and because the answer was
+        // "still waiting" the next window is longer than the first.
+        verify(20_000, &mut gh);
+        assert_eq!(gh.calls, 2);
+        verify(45_000, &mut gh);
+        assert_eq!(gh.calls, 2, "the backoff doubled the window");
+        verify(50_001, &mut gh);
+        assert_eq!(gh.calls, 3);
+
+        // A new approved HEAD is different evidence and is never answered from
+        // the previous one's cache. The inventory has to carry a PR for it, or
+        // verification refuses locally before GitHub is consulted at all.
+        let moved_output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"c".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE"}).to_string();
+        fixture
+            .inventory
+            .lock()
+            .unwrap()
+            .publish_success(
+                &identity,
+                &usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&moved_output).unwrap(),
+            )
+            .unwrap();
+        gh.output = moved_output;
+        let mut moved = run.clone();
+        moved.review.as_mut().unwrap().target.head_sha = "c".repeat(40);
+        workflow::verify_progress(
+            &store,
+            &fixture.inventory,
+            &cache,
+            50_002,
+            &fixture.bound.scope_resolver(),
+            fixture.workspace,
+            fixture.session,
+            &moved,
+            &VerificationGit("c".repeat(40)),
+            &mut gh,
+        )
+        .unwrap();
+        assert_eq!(gh.calls, 4);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One publication scenario: the evidence, its staleness, and the demotion.
     fn workflow_pr_publication_uses_injected_independent_git_and_github_evidence() {
         use usagi_core::domain::workflow::{Phase, Review};
         let fixture = Fixture::new();
@@ -12908,6 +13101,8 @@ mod workflow_composition {
         workflow::verify_progress(
             &store,
             &fixture.inventory,
+            &fresh_verification_cache(),
+            0,
             &fixture.bound.scope_resolver(),
             fixture.workspace,
             fixture.session,
@@ -12938,6 +13133,8 @@ mod workflow_composition {
         workflow::verify_progress(
             &store,
             &fixture.inventory,
+            &fresh_verification_cache(),
+            0,
             &fixture.bound.scope_resolver(),
             fixture.workspace,
             fixture.session,
