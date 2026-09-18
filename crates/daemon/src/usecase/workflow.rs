@@ -981,6 +981,54 @@ mod tests {
         assert!(run.history.iter().all(|item| item.at.is_some()));
         assert!(run.history.iter().any(|item| item.advanced));
         assert!(run.history.iter().any(|item| !item.advanced));
+
+        // Each participant is named by the role it actually holds. Before the
+        // reviewer is bound, the only other agent that speaks is the planner the
+        // implementer launched; attributing it to the reviewer would name a
+        // participant that has not said anything yet.
+        let agents = usagi_core::domain::workflow::WorkflowAgents {
+            planner: usagi_core::domain::settings::DefaultModel::Agy,
+            implementer: usagi_core::domain::settings::DefaultModel::Claude,
+            reviewer: usagi_core::domain::settings::DefaultModel::OpenAi,
+        };
+        run.agents = agents;
+        let reviewer = AgentId::new();
+        let planner = AgentId::new();
+        // Bound before the closure so it does not hold a borrow of `run` across
+        // the `&mut run` calls below.
+        let implementer = run.implementer;
+        let from = |agent: AgentId| usagi_core::domain::agent_message::AgentMessage {
+            from_agent_id: agent,
+            from_run_id: OperationId::new(),
+            message: usagi_core::domain::agent_message::SendMessage {
+                message_id: OperationId::new(),
+                to_agent_id: implementer,
+                kind: MessageKind::Message,
+                body: "spoke".into(),
+                in_reply_to: None,
+                review: None,
+            },
+            created_at: chrono::Utc::now(),
+            acknowledged: false,
+        };
+
+        run.history.clear();
+        append_history(&mut run, &from(implementer), false);
+        // Not the implementer and not the bound reviewer: the planner.
+        append_history(&mut run, &from(planner), false);
+        run.reviewer = Some(reviewer);
+        append_history(&mut run, &from(reviewer), false);
+        assert_eq!(
+            run.history
+                .iter()
+                .map(|entry| entry.actor.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                agents.implementer.profile_id(),
+                agents.planner.profile_id(),
+                agents.reviewer.profile_id(),
+            ]
+        );
     }
 
     #[test]
