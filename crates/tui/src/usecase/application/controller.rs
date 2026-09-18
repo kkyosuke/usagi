@@ -3020,10 +3020,13 @@ fn update_workflow_edit(
         return Vec::new();
     }
     if let Some(panel) = state.workflows.get_mut(&session) {
-        if panel.run.is_none() && panel.agent_field.is_some() {
-            return Vec::new();
-        }
         match edit {
+            // Reading the history is not editing the draft, so it stays
+            // available while the start form owns the caret.
+            super::workflow::WorkflowEdit::HistoryLatest => panel.show_latest_history(),
+            // The draft edits are exactly what the start form takes the caret
+            // away from.
+            _ if panel.run.is_none() && panel.agent_field.is_some() => {}
             super::workflow::WorkflowEdit::Start => panel.draft.move_edge(false),
             super::workflow::WorkflowEdit::End => panel.draft.move_edge(true),
             super::workflow::WorkflowEdit::Delete => panel.draft.delete_forward(),
@@ -3220,7 +3223,11 @@ fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) 
                 panel.cycle_agent(true, available);
                 return Vec::new();
             }
-            AppKey::Tab | AppKey::SaveRoles => {}
+            // Reading the history is not editing the draft, so the scroll keys
+            // stay live while the start form owns the caret — the same rule
+            // `WorkflowEdit::HistoryLatest` follows, and what the pane's hint and
+            // `document/11-keybindings.md` promise.
+            AppKey::Tab | AppKey::SaveRoles | AppKey::PageUp | AppKey::PageDown => {}
             _ => return Vec::new(),
         }
     }
@@ -3234,8 +3241,8 @@ fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) 
         AppKey::Up => panel.draft.move_vertical(false),
         AppKey::Down => panel.draft.move_vertical(true),
         AppKey::Tab => panel.cycle_recipient(),
-        AppKey::PageUp => panel.history_offset = panel.history_offset.saturating_add(5),
-        AppKey::PageDown => panel.history_offset = panel.history_offset.saturating_sub(5),
+        AppKey::PageUp => panel.scroll_history(true),
+        AppKey::PageDown => panel.scroll_history(false),
         AppKey::SaveRoles => {
             // A background snapshot read is not the person's request,
             // so it must not swallow this one. Only a submission still
@@ -3578,6 +3585,7 @@ fn update_workflow_backend(
             }
             panel.run = snapshot.run;
             panel.finished = snapshot.finished;
+            panel.anchor_history();
             if panel.pending.is_none() {
                 panel.error = None;
             }

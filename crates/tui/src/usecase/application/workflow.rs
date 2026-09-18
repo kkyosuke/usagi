@@ -40,7 +40,18 @@ pub struct WorkflowPanel {
     /// single-flight and off the frame rate.
     pub snapshot_due_tick: u64,
     pub submitting: bool,
+    /// Rows hidden below the viewport, counted from the newest row.
+    ///
+    /// Zero is "following the latest". It is bounded by [`WorkflowPanel::history_rows`]:
+    /// an unbounded offset scrolls the window clean off the top of the history
+    /// and leaves the pane blank with nothing on screen saying why.
     pub history_offset: usize,
+    /// Identity of the newest row the person can see while scrolled back.
+    ///
+    /// Row *counts* cannot anchor this: the daemon caps history at 100 entries
+    /// and drops the oldest, so once a long run reaches the cap the count stops
+    /// changing while the rows underneath keep moving. The identity does not.
+    pub observed_anchor: Option<OperationId>,
     pub pending: Option<(OperationId, WorkflowCommand)>,
 }
 
@@ -68,6 +79,8 @@ pub enum WorkflowEdit {
     Start,
     End,
     Delete,
+    /// Return the history to its newest row in one operation.
+    HistoryLatest,
 }
 
 impl WorkflowPanel {
@@ -138,6 +151,105 @@ impl WorkflowPanel {
             return;
         }
         self.agents = self.agents.restricted_to(available);
+    }
+
+    /// Identity of every history row, in the order
+    /// [`crate::presentation::views::workflow`] draws them.
+    ///
+    /// Scrolling is bounded by the length of this and anchored by its contents.
+    /// `views::workflow` has a test asserting it matches the drawn rows one for
+    /// one — a list that drifted from them would put both the bound and the
+    /// anchor out of step with the window they describe.
+    #[must_use]
+    pub fn history_row_ids(&self) -> Vec<OperationId> {
+        let mut ids = self
+            .finished
+            .iter()
+            .map(|ended| ended.id)
+            .collect::<Vec<_>>();
+        if let Some(run) = &self.run {
+            ids.extend(run.history.iter().map(|entry| entry.id));
+            ids.extend(run.instructions.iter().map(|instruction| instruction.id));
+        }
+        ids
+    }
+
+    /// How many rows the history draws.
+    #[must_use]
+    pub fn history_rows(&self) -> usize {
+        self.history_row_ids().len()
+    }
+
+    /// The furthest back the history can be scrolled: one row always stays on
+    /// screen, so paging up can never empty the pane.
+    #[must_use]
+    fn max_history_offset(&self) -> usize {
+        self.history_rows().saturating_sub(1)
+    }
+
+    /// Page the history, keeping the offset inside its bounds.
+    pub fn scroll_history(&mut self, back: bool) {
+        const PAGE: usize = 5;
+        self.history_offset = if back {
+            self.history_offset
+                .saturating_add(PAGE)
+                .min(self.max_history_offset())
+        } else {
+            self.history_offset.saturating_sub(PAGE)
+        };
+        self.remember_anchor();
+    }
+
+    /// Follow the newest row again.
+    pub fn show_latest_history(&mut self) {
+        self.history_offset = 0;
+        self.remember_anchor();
+    }
+
+    /// Record which row the offset is currently measured against.
+    ///
+    /// Recorded the moment the person scrolls, not only when a snapshot lands:
+    /// rows can arrive between the two, and an offset with nothing to hold would
+    /// let exactly those rows slide the window.
+    fn remember_anchor(&mut self) {
+        self.observed_anchor = if self.history_offset > 0 {
+            let ids = self.history_row_ids();
+            ids.len()
+                .checked_sub(self.history_offset + 1)
+                .and_then(|index| ids.get(index).copied())
+        } else {
+            // Following the latest is not a position to hold.
+            None
+        };
+    }
+
+    /// Hold a scrolled-back reader in place as rows arrive.
+    ///
+    /// The offset counts from the end, so rows appended under a non-zero offset
+    /// would otherwise slide the window forward and move the text the person is
+    /// reading. At offset zero the pane is following the latest and should.
+    ///
+    /// The row the offset is measured against is remembered by identity. A count
+    /// would hold only until the daemon's history cap starts evicting: past that
+    /// the total stops growing while the contents keep shifting, and the window
+    /// would slide again with nothing to notice it.
+    pub fn anchor_history(&mut self) {
+        let ids = self.history_row_ids();
+        if self.history_offset > 0 {
+            // No anchor means the person scrolled since the last snapshot: the
+            // offset is already measured against these rows and needs no
+            // correction, only the bound.
+            if let Some(anchor) = self.observed_anchor {
+                self.history_offset = ids.iter().position(|id| *id == anchor).map_or_else(
+                    // The row being read has been evicted; the oldest
+                    // retained row is as far back as the person can go.
+                    || ids.len().saturating_sub(1),
+                    |index| ids.len().saturating_sub(index + 1),
+                );
+            }
+            self.history_offset = self.history_offset.min(self.max_history_offset());
+        }
+        self.remember_anchor();
     }
 
     /// Accept a successful submission without losing a later edit.
@@ -263,6 +375,151 @@ mod tests {
         panel.submitting = true;
         panel.restrict_agents(claude_only);
         assert_eq!(panel.agents, started);
+    }
+
+    fn panel_with_history(rows: usize) -> WorkflowPanel {
+        use usagi_core::domain::workflow::WorkflowHistoryEntry;
+        let mut run = fixture_run(SessionId::new());
+        for index in 0..rows {
+            run.history.push(WorkflowHistoryEntry {
+                id: OperationId::new(),
+                actor: "claude".into(),
+                body: format!("entry {index}"),
+            });
+        }
+        WorkflowPanel {
+            run: Some(run),
+            ..WorkflowPanel::default()
+        }
+    }
+
+    #[test]
+    fn paging_back_cannot_scroll_the_history_off_its_own_top() {
+        let mut panel = panel_with_history(12);
+        // Paging back past the oldest row used to drive `history_offset` past the
+        // row count, which left the viewport empty with nothing explaining it.
+        for _ in 0..20 {
+            panel.scroll_history(true);
+        }
+        assert_eq!(panel.history_offset, 11);
+        assert!(panel.history_offset < panel.history_rows());
+
+        // One operation comes back to the newest row.
+        panel.show_latest_history();
+        assert_eq!(panel.history_offset, 0);
+
+        // Paging forward from the latest stays there rather than underflowing.
+        panel.scroll_history(false);
+        assert_eq!(panel.history_offset, 0);
+
+        // An empty history has nowhere to go.
+        let mut empty = WorkflowPanel::default();
+        empty.scroll_history(true);
+        assert_eq!(empty.history_offset, 0);
+    }
+
+    #[test]
+    fn arriving_rows_move_the_view_only_while_it_follows_the_latest() {
+        let mut panel = panel_with_history(10);
+        panel.anchor_history();
+        // Following the latest, there is no row to hold on to.
+        assert_eq!(panel.observed_anchor, None);
+
+        // Following the latest: new rows are what the reader wants to see.
+        panel
+            .run
+            .as_mut()
+            .expect("run")
+            .history
+            .extend(
+                (0..3).map(|index| usagi_core::domain::workflow::WorkflowHistoryEntry {
+                    id: OperationId::new(),
+                    actor: "codex".into(),
+                    body: format!("late {index}"),
+                }),
+            );
+        panel.anchor_history();
+        assert_eq!(panel.history_offset, 0);
+
+        // Scrolled back: the offset counts from the end, so it has to grow by
+        // exactly what arrived or the text under the reader slides forward.
+        panel.scroll_history(true);
+        let anchored = panel.history_offset;
+        panel
+            .run
+            .as_mut()
+            .expect("run")
+            .history
+            .extend(
+                (0..2).map(|index| usagi_core::domain::workflow::WorkflowHistoryEntry {
+                    id: OperationId::new(),
+                    actor: "codex".into(),
+                    body: format!("later {index}"),
+                }),
+            );
+        panel.anchor_history();
+        assert_eq!(panel.history_offset, anchored + 2);
+        assert!(panel.observed_anchor.is_some());
+
+        // An offset set straight on the public field, with no anchor recorded
+        // for it, is left where it was put and only bounded.
+        panel.observed_anchor = None;
+        panel.history_offset = 3;
+        panel.anchor_history();
+        assert_eq!(panel.history_offset, 3);
+
+        // Rows disappearing (a finished run archived away) cannot push the
+        // offset past the new bound.
+        panel.history_offset = 14;
+        panel.run.as_mut().expect("run").history.truncate(2);
+        panel.anchor_history();
+        assert_eq!(panel.history_offset, panel.history_rows() - 1);
+    }
+
+    #[test]
+    fn the_anchor_holds_when_the_history_cap_starts_evicting() {
+        use usagi_core::domain::workflow::WorkflowHistoryEntry;
+        // A run at the daemon's retention cap: rows arrive and the same number
+        // leave, so the total never changes. A count-based anchor sees "nothing
+        // grew" and lets the window slide over the reader.
+        let mut panel = panel_with_history(100);
+        panel.scroll_history(true);
+        panel.anchor_history();
+        let watched = panel.observed_anchor.expect("a row is being read");
+        let body = |panel: &WorkflowPanel, id| {
+            panel
+                .run
+                .as_ref()
+                .expect("run")
+                .history
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.body.clone())
+        };
+        let reading = body(&panel, watched).expect("the watched row is present");
+
+        for index in 0..3 {
+            let history = &mut panel.run.as_mut().expect("run").history;
+            history.push(WorkflowHistoryEntry {
+                id: OperationId::new(),
+                actor: "codex".into(),
+                body: format!("late {index}"),
+            });
+            history.remove(0);
+        }
+        assert_eq!(panel.history_rows(), 100, "the cap kept the total still");
+        panel.anchor_history();
+        // The offset moved by exactly the three rows that were evicted, so the
+        // row being read is still the newest one on screen.
+        assert_eq!(panel.observed_anchor, Some(watched));
+        assert_eq!(body(&panel, watched).as_deref(), Some(reading.as_str()));
+
+        // Once the watched row is itself evicted, the oldest retained row is as
+        // far back as the person can go.
+        let history = &mut panel.run.as_mut().expect("run").history;
+        history.retain(|entry| entry.id != watched);
+        panel.anchor_history();
+        assert_eq!(panel.history_offset, panel.history_rows() - 1);
     }
 
     #[test]

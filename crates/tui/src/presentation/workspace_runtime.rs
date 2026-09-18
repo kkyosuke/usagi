@@ -572,6 +572,10 @@ impl WorkspaceRuntime {
                 Key::LineStart | Key::Home | Key::Char('\u{1}') => Some(WorkflowEdit::Start),
                 Key::LineEnd | Key::End => Some(WorkflowEdit::End),
                 Key::Delete => Some(WorkflowEdit::Delete),
+                // Home / End / Delete keep editing the draft. Shift+End is inert
+                // in this pane, so the jump to the newest row costs no existing
+                // binding.
+                Key::SelectEnd => Some(WorkflowEdit::HistoryLatest),
                 _ => None,
             };
             if let Some(edit) = edit {
@@ -2445,6 +2449,12 @@ mod tests {
                 .value(),
             "heck login\nand errors!"
         );
+        // Shift+End is the history jump, not a draft edit: Home / End / Delete
+        // keep editing the input exactly as they did.
+        let _ = runtime.handle_key(Key::SelectEnd);
+        let panel = runtime.state().workflow_panel(session).unwrap();
+        assert_eq!(panel.draft.value(), "heck login\nand errors!");
+        assert_eq!(panel.history_offset, 0);
         let _ = runtime.apply_event(AppEvent::Key(AppKey::CtrlO));
         assert_eq!(runtime.state().route(), Route::Home(HomeMode::Switch));
     }
