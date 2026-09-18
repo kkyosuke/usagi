@@ -396,6 +396,11 @@ pub(super) fn advance(
                 let _ = deliver(agent, workspace, session, instruction.id);
             }
         }
+        let verified_phase = matches!(
+            run.phase,
+            usagi_core::domain::workflow::Phase::Verifying
+                | usagi_core::domain::workflow::Phase::Ready
+        );
         if attention.verifies(run.phase) {
             verify_progress(
                 &store,
@@ -409,9 +414,12 @@ pub(super) fn advance(
                 &super::SystemGit,
                 &mut super::GhProcess,
             )?;
-        } else {
-            // Not being verified any more: the next entry into `Verifying` has to
-            // read GitHub rather than an answer from the previous one.
+        }
+        // Forget on leaving the verified phases, not on a pass that merely chose
+        // not to verify. An unattended sweep skips a `Ready` run every tick, and
+        // dropping the entry there would wipe what the open tab just read — the
+        // 10 s lane tick would then set the effective interval, not the TTL.
+        if !verified_phase {
             forget_verification(verification.cache, session);
         }
         return workflow::projection(&store, workspace, session).map_err(unavailable);
@@ -586,13 +594,13 @@ pub(super) fn verify_progress(
         let head_sha = review.target.head_sha.as_str();
         // What a real read returned, so the cache remembers only reads that
         // actually happened.
-        let mut fetched: Option<String> = None;
+        let mut fetched: Option<(String, String)> = None;
         // The closure borrows `fetched`; the block is what ends that borrow
         // before the recording below reads it.
         let verified = {
             let mut view = |url: &str| -> Result<String, &'static str> {
                 if let Ok(cache) = verification.lock()
-                    && let Some(output) = cache.fresh(session, head_sha, now_ms)
+                    && let Some(output) = cache.fresh(session, head_sha, url, now_ms)
                 {
                     return Ok(output.to_owned());
                 }
@@ -610,7 +618,7 @@ pub(super) fn verify_progress(
                     5000,
                 )
                 .map_err(|_| "Could not refresh PR checks")?;
-                fetched = Some(output.clone());
+                fetched = Some((url.to_owned(), output.clone()));
                 Ok(output)
             };
             workflow::verify_pr(
@@ -624,14 +632,14 @@ pub(super) fn verify_progress(
         };
         // Remember the read that produced this answer, and let a "still waiting"
         // answer lengthen the next gap.
-        if let Some(output) = fetched
+        if let Some((url, output)) = fetched
             && let Ok(mut cache) = verification.lock()
         {
             let waiting = verified
                 .as_ref()
                 .err()
                 .is_some_and(|reason| workflow::is_waiting(reason));
-            cache.record(session, head_sha, now_ms, output, waiting);
+            cache.record(session, head_sha, &url, now_ms, output, waiting);
         }
         publish_verification(store, workspace, session, run, verified)?;
     }

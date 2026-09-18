@@ -440,12 +440,19 @@ pub fn initial_prompt(
 const VERIFICATION_TTL_MS: u64 = 15_000;
 /// Longest gap the backoff may grow to while the answer stays "still waiting".
 const VERIFICATION_MAX_BACKOFF_MS: u64 = 300_000;
+/// How many sessions the cache remembers at once.
+const MAX_CACHED_SESSIONS: usize = 64;
 
 /// One remembered `gh pr view` read.
 struct CachedRead {
     /// The approved HEAD the read was made for. A different HEAD is different
     /// evidence, never a cache hit.
     head_sha: String,
+    /// The PR the read was made against. Two PRs can share a head commit (a
+    /// backport opened from the same HEAD), and the entry chosen from the
+    /// inventory can change between passes, so serving one PR's checks as
+    /// another's would publish a URL whose checks were never read.
+    url: String,
     output: String,
     read_at_ms: u64,
     /// Consecutive reads that answered "still waiting". This is what the backoff
@@ -468,9 +475,15 @@ pub struct VerificationCache {
 impl VerificationCache {
     /// The remembered read for this HEAD, if another one is not due yet.
     #[must_use]
-    pub fn fresh(&self, session: SessionId, head_sha: &str, now_ms: u64) -> Option<&str> {
+    pub fn fresh(
+        &self,
+        session: SessionId,
+        head_sha: &str,
+        url: &str,
+        now_ms: u64,
+    ) -> Option<&str> {
         let entry = self.entries.get(&session)?;
-        if entry.head_sha != head_sha {
+        if entry.head_sha != head_sha || entry.url != url {
             return None;
         }
         let wait = VERIFICATION_TTL_MS
@@ -484,19 +497,36 @@ impl VerificationCache {
         &mut self,
         session: SessionId,
         head_sha: &str,
+        url: &str,
         now_ms: u64,
         output: String,
         waiting: bool,
     ) {
         let waits = match self.entries.get(&session) {
-            // A streak only continues for the same HEAD and the same answer.
-            Some(entry) if entry.head_sha == head_sha && waiting => entry.waits.saturating_add(1),
+            // A streak only continues for the same evidence and the same answer.
+            Some(entry) if entry.head_sha == head_sha && entry.url == url && waiting => {
+                entry.waits.saturating_add(1)
+            }
             _ => 0,
         };
+        // One entry per session, and a session that disappeared while its run was
+        // live is never enumerated again. Shed the least recently read rather
+        // than letting a daemon's lifetime accumulate payloads.
+        if self.entries.len() >= MAX_CACHED_SESSIONS
+            && !self.entries.contains_key(&session)
+            && let Some(stalest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.read_at_ms)
+                .map(|(session, _)| *session)
+        {
+            self.entries.remove(&stalest);
+        }
         self.entries.insert(
             session,
             CachedRead {
                 head_sha: head_sha.to_owned(),
+                url: url.to_owned(),
                 output,
                 read_at_ms: now_ms,
                 waits,
@@ -1825,66 +1855,97 @@ mod tests {
         use usagi_core::domain::id::SessionId;
         let session = SessionId::new();
         let head = "a".repeat(40);
+        let url = "https://github.com/owner/repo/pull/1";
         let mut cache = VerificationCache::default();
 
         // Nothing remembered: the first pass has to read.
-        assert!(cache.fresh(session, &head, 0).is_none());
-        cache.record(session, &head, 0, "first".into(), false);
+        assert!(cache.fresh(session, &head, url, 0).is_none());
+        cache.record(session, &head, url, 0, "first".into(), false);
 
         // Inside the window every further pass is answered without GitHub.
         for now in [0, 1, VERIFICATION_TTL_MS - 1] {
-            assert_eq!(cache.fresh(session, &head, now), Some("first"));
+            assert_eq!(cache.fresh(session, &head, url, now), Some("first"));
         }
         // At the window's edge another read is due.
-        assert!(cache.fresh(session, &head, VERIFICATION_TTL_MS).is_none());
+        assert!(
+            cache
+                .fresh(session, &head, url, VERIFICATION_TTL_MS)
+                .is_none()
+        );
 
         // A "still waiting" answer doubles the next gap, and keeps doubling.
         let mut at = VERIFICATION_TTL_MS;
         let mut expected = VERIFICATION_TTL_MS * 2;
         for _ in 0..3 {
-            cache.record(session, &head, at, "waiting".into(), true);
+            cache.record(session, &head, url, at, "waiting".into(), true);
             assert_eq!(
-                cache.fresh(session, &head, at + expected - 1),
+                cache.fresh(session, &head, url, at + expected - 1),
                 Some("waiting")
             );
-            assert!(cache.fresh(session, &head, at + expected).is_none());
+            assert!(cache.fresh(session, &head, url, at + expected).is_none());
             at += expected;
             expected *= 2;
         }
 
         // The backoff stops growing at the cap rather than running away.
         for _ in 0..40 {
-            cache.record(session, &head, at, "waiting".into(), true);
+            cache.record(session, &head, url, at, "waiting".into(), true);
         }
         assert_eq!(
-            cache.fresh(session, &head, at + VERIFICATION_MAX_BACKOFF_MS - 1),
+            cache.fresh(session, &head, url, at + VERIFICATION_MAX_BACKOFF_MS - 1),
             Some("waiting")
         );
         assert!(
             cache
-                .fresh(session, &head, at + VERIFICATION_MAX_BACKOFF_MS)
+                .fresh(session, &head, url, at + VERIFICATION_MAX_BACKOFF_MS)
                 .is_none()
         );
 
         // An answer that is not "waiting" ends the streak.
-        cache.record(session, &head, at, "settled".into(), false);
+        cache.record(session, &head, url, at, "settled".into(), false);
         assert!(
             cache
-                .fresh(session, &head, at + VERIFICATION_TTL_MS)
+                .fresh(session, &head, url, at + VERIFICATION_TTL_MS)
                 .is_none()
         );
 
         // A different HEAD is different evidence, never a hit.
-        cache.record(session, &head, at, "settled".into(), false);
-        assert!(cache.fresh(session, &"b".repeat(40), at).is_none());
-        assert_eq!(cache.fresh(session, &head, at), Some("settled"));
+        cache.record(session, &head, url, at, "settled".into(), false);
+        assert!(cache.fresh(session, &"b".repeat(40), url, at).is_none());
+        // So is a different PR: two PRs can share a head commit, and serving one
+        // PR's checks as another's would publish a URL nothing was read for.
+        assert!(
+            cache
+                .fresh(session, &head, "https://github.com/owner/repo/pull/2", at)
+                .is_none()
+        );
+        assert_eq!(cache.fresh(session, &head, url, at), Some("settled"));
 
         // Leaving verification drops what was remembered.
         cache.forget(session);
-        assert!(cache.fresh(session, &head, at).is_none());
+        assert!(cache.fresh(session, &head, url, at).is_none());
         // Another session never reads this one's answer.
-        cache.record(session, &head, at, "settled".into(), false);
-        assert!(cache.fresh(SessionId::new(), &head, at).is_none());
+        cache.record(session, &head, url, at, "settled".into(), false);
+        assert!(cache.fresh(SessionId::new(), &head, url, at).is_none());
+
+        // Sessions removed while their run was live are never enumerated again,
+        // so the map sheds the least recently read instead of growing for the
+        // daemon's lifetime.
+        for index in 0..MAX_CACHED_SESSIONS {
+            cache.record(
+                SessionId::new(),
+                &head,
+                url,
+                at + 1 + index as u64,
+                "settled".into(),
+                false,
+            );
+        }
+        assert_eq!(cache.entries.len(), MAX_CACHED_SESSIONS);
+        assert!(
+            cache.fresh(session, &head, url, at).is_none(),
+            "the stalest entry was shed"
+        );
 
         // Only "not yet" refusals are worth backing off.
         assert!(is_waiting("Waiting for successful PR checks"));
