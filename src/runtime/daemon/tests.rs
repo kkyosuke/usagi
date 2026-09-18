@@ -12208,7 +12208,21 @@ mod workflow_composition {
         assert_eq!(replay.review.unwrap().request, next);
         assert_eq!(replay.reviewer, Some(reviewer));
         assert_eq!(replay.revisions, 1);
-        assert_eq!(replay.history.len(), 3);
+        // Four, not three: the reviewer's "still in progress" message moves no
+        // phase, and the history now keeps those too. Exactly the three that
+        // advanced the run are marked.
+        assert_eq!(replay.history.len(), 4);
+        assert_eq!(
+            replay.history.iter().filter(|entry| entry.advanced).count(),
+            3
+        );
+        let idle = replay
+            .history
+            .iter()
+            .find(|entry| !entry.advanced)
+            .expect("the non-advancing message is kept");
+        assert!(idle.body.contains("still in progress"));
+        assert!(idle.at.is_some());
         assert_eq!(replay.phase, usagi_core::domain::workflow::Phase::Reviewing);
     }
 

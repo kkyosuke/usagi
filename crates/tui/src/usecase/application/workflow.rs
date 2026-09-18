@@ -385,6 +385,9 @@ mod tests {
                 id: OperationId::new(),
                 actor: "claude".into(),
                 body: format!("entry {index}"),
+                at: None,
+                kind: usagi_core::domain::agent_message::MessageKind::Message,
+                advanced: false,
             });
         }
         WorkflowPanel {
@@ -436,6 +439,9 @@ mod tests {
                     id: OperationId::new(),
                     actor: "codex".into(),
                     body: format!("late {index}"),
+                    at: None,
+                    kind: usagi_core::domain::agent_message::MessageKind::Message,
+                    advanced: false,
                 }),
             );
         panel.anchor_history();
@@ -455,6 +461,9 @@ mod tests {
                     id: OperationId::new(),
                     actor: "codex".into(),
                     body: format!("later {index}"),
+                    at: None,
+                    kind: usagi_core::domain::agent_message::MessageKind::Message,
+                    advanced: false,
                 }),
             );
         panel.anchor_history();
@@ -504,6 +513,9 @@ mod tests {
                 id: OperationId::new(),
                 actor: "codex".into(),
                 body: format!("late {index}"),
+                at: None,
+                kind: usagi_core::domain::agent_message::MessageKind::Message,
+                advanced: false,
             });
             history.remove(0);
         }

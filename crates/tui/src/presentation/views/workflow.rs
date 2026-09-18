@@ -34,6 +34,17 @@ fn provider_name(provider: usagi_core::domain::settings::DefaultModel) -> &'stat
     }
 }
 
+/// Wall time of a history entry in the reader's own zone.
+///
+/// Records written before the history carried time have none; they draw a
+/// placeholder of the same width so the column does not jump.
+fn clock(at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    at.map_or_else(
+        || "--:--".to_owned(),
+        |at| at.with_timezone(&chrono::Local).format("%H:%M").to_string(),
+    )
+}
+
 /// A goal is free text the person typed; it is shown on one row.
 fn one_line(text: &str) -> String {
     safe_line(&text.replace('\n', " / "))
@@ -140,7 +151,13 @@ fn history(panel: &WorkflowPanel) -> Vec<String> {
             .iter()
             .map(|entry| {
                 format!(
-                    "{}: {}",
+                    "{} {} {}: {}",
+                    if entry.advanced {
+                        Role::Success.style().paint("|>")
+                    } else {
+                        muted().paint(" ·")
+                    },
+                    muted().paint(&clock(entry.at)),
                     Role::Accent.style().paint(&safe_line(&entry.actor)),
                     safe_line(&entry.body.replace('\n', " / "))
                 )
@@ -590,6 +607,9 @@ mod tests {
             id: OperationId::new(),
             actor: format!("Claude{poison}"),
             body: format!("Review completed {poison}"),
+            at: None,
+            kind: usagi_core::domain::agent_message::MessageKind::Message,
+            advanced: false,
         });
         for delivery in [
             Delivery::Queued,
@@ -875,6 +895,9 @@ mod tests {
                 id: OperationId::new(),
                 actor: "claude".into(),
                 body: format!("step {index}"),
+                at: None,
+                kind: usagi_core::domain::agent_message::MessageKind::Message,
+                advanced: false,
             });
             run.instructions.push(Instruction {
                 id: OperationId::new(),
@@ -943,6 +966,72 @@ mod tests {
         }
         // The oldest row is reachable, and paging back further stays there.
         assert!(history_rows(&scrolled)[0].contains("attempt 0"));
+    }
+
+    #[test]
+    fn history_rows_carry_their_time_and_mark_what_moved_the_run() {
+        use usagi_core::domain::agent_message::MessageKind;
+        use usagi_core::domain::id::{OperationId, SessionId};
+        use usagi_core::domain::workflow::WorkflowHistoryEntry;
+
+        let mut run = crate::usecase::application::workflow::fixture_run(SessionId::new());
+        run.history.push(WorkflowHistoryEntry {
+            id: OperationId::new(),
+            actor: "codex".into(),
+            body: "Plan ready".into(),
+            at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            kind: MessageKind::Message,
+            advanced: false,
+        });
+        run.history.push(WorkflowHistoryEntry {
+            id: OperationId::new(),
+            actor: "claude".into(),
+            body: "Approved".into(),
+            at: chrono::DateTime::from_timestamp(1_700_003_600, 0),
+            kind: MessageKind::Approved,
+            advanced: true,
+        });
+        // A record from before the history carried time keeps its column width.
+        run.history.push(WorkflowHistoryEntry {
+            id: OperationId::new(),
+            actor: "claude".into(),
+            body: "Older entry".into(),
+            at: None,
+            kind: MessageKind::Message,
+            advanced: false,
+        });
+        let panel = WorkflowPanel {
+            run: Some(run),
+            ..WorkflowPanel::default()
+        };
+        let rows = render(24, 120, &panel)
+            .into_iter()
+            .map(|row| strip(&row))
+            .collect::<Vec<_>>();
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .expect("the history row is drawn")
+                .clone()
+        };
+        // The clock is rendered in the reader's own zone, so assert its shape
+        // rather than an hour that depends on where the test runs.
+        let stamp = |row: &str| {
+            row.split_whitespace()
+                .find(|word| {
+                    word.len() == 5
+                        && word.as_bytes()[2] == b':'
+                        && word.bytes().filter(u8::is_ascii_digit).count() == 4
+                })
+                .map(str::to_owned)
+        };
+        assert!(stamp(&row("Plan ready")).is_some());
+        assert!(stamp(&row("Approved")).is_some());
+        // The message that moved the run is marked; the ones that did not are not.
+        assert!(row("Approved").trim_start().starts_with("|>"));
+        assert!(!row("Plan ready").contains("|>"));
+        // A timeless record still lines the column up.
+        assert!(row("Older entry").contains("--:--"));
     }
 
     #[test]

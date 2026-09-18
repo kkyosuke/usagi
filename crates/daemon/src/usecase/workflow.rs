@@ -306,9 +306,11 @@ fn replay(store: &DispatchStore, workspace: WorkspaceId, session: SessionId) -> 
                     message.kind == MessageKind::Approved,
                 );
             }
-            if previous != (run.phase, run.review.clone()) {
-                append_history(run, entry);
-            }
+            // Every workflow-scope message is recorded, not only the ones that
+            // moved the run. A run spends most of its life exchanging messages
+            // that change no phase — the plan coming back, the implementer
+            // reporting — and the pane was blank for all of it.
+            append_history(run, entry, previous != (run.phase, run.review.clone()));
             record.cursor = Some(message.message_id);
         }
         Ok(())
@@ -340,23 +342,40 @@ fn original_reviewer_binding(
         && binding.caller.session_id == Some(run.session)
 }
 
-fn append_history(run: &mut WorkflowRun, entry: &usagi_core::domain::agent_message::AgentMessage) {
+fn append_history(
+    run: &mut WorkflowRun,
+    entry: &usagi_core::domain::agent_message::AgentMessage,
+    advanced: bool,
+) {
     let message = &entry.message;
+    // The reviewer is bound at its first review request, so before that the
+    // only other participant that speaks is the planner the implementer
+    // launched. Attributing it to the reviewer named a participant that had not
+    // said anything yet.
     let actor = if entry.from_agent_id == run.implementer {
         run.agents.implementer.profile_id()
-    } else {
+    } else if run.reviewer == Some(entry.from_agent_id) {
         run.agents.reviewer.profile_id()
+    } else {
+        run.agents.planner.profile_id()
     };
     run.history
         .push(usagi_core::domain::workflow::WorkflowHistoryEntry {
             id: message.message_id,
             actor: actor.into(),
             body: message.body.chars().take(512).collect(),
+            at: Some(entry.created_at),
+            kind: message.kind,
+            advanced,
         });
-    if run.history.len() > 100 {
+    if run.history.len() > HISTORY_LIMIT {
         run.history.remove(0);
     }
 }
+
+/// How many history entries one run keeps. Recording every message rather than
+/// only the phase-moving ones makes this bound load-bearing.
+const HISTORY_LIMIT: usize = 100;
 
 /// The repository conventions a run started from an issue has to satisfy before
 /// its PR counts as ready.
@@ -951,11 +970,65 @@ mod tests {
             created_at: chrono::Utc::now(),
             acknowledged: false,
         };
-        for _ in 0..101 {
-            append_history(&mut run, &entry);
+        for index in 0..101 {
+            append_history(&mut run, &entry, index % 2 == 0);
         }
         assert_eq!(run.history.len(), 100);
         assert_eq!(run.history[0].body.chars().count(), 512);
+        // Every entry now carries when it happened and what it was, and the
+        // ones that moved the run stay distinguishable from the ones that did
+        // not.
+        assert!(run.history.iter().all(|item| item.at.is_some()));
+        assert!(run.history.iter().any(|item| item.advanced));
+        assert!(run.history.iter().any(|item| !item.advanced));
+
+        // Each participant is named by the role it actually holds. Before the
+        // reviewer is bound, the only other agent that speaks is the planner the
+        // implementer launched; attributing it to the reviewer would name a
+        // participant that has not said anything yet.
+        let agents = usagi_core::domain::workflow::WorkflowAgents {
+            planner: usagi_core::domain::settings::DefaultModel::Agy,
+            implementer: usagi_core::domain::settings::DefaultModel::Claude,
+            reviewer: usagi_core::domain::settings::DefaultModel::OpenAi,
+        };
+        run.agents = agents;
+        let reviewer = AgentId::new();
+        let planner = AgentId::new();
+        // Bound before the closure so it does not hold a borrow of `run` across
+        // the `&mut run` calls below.
+        let implementer = run.implementer;
+        let from = |agent: AgentId| usagi_core::domain::agent_message::AgentMessage {
+            from_agent_id: agent,
+            from_run_id: OperationId::new(),
+            message: usagi_core::domain::agent_message::SendMessage {
+                message_id: OperationId::new(),
+                to_agent_id: implementer,
+                kind: MessageKind::Message,
+                body: "spoke".into(),
+                in_reply_to: None,
+                review: None,
+            },
+            created_at: chrono::Utc::now(),
+            acknowledged: false,
+        };
+
+        run.history.clear();
+        append_history(&mut run, &from(implementer), false);
+        // Not the implementer and not the bound reviewer: the planner.
+        append_history(&mut run, &from(planner), false);
+        run.reviewer = Some(reviewer);
+        append_history(&mut run, &from(reviewer), false);
+        assert_eq!(
+            run.history
+                .iter()
+                .map(|entry| entry.actor.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                agents.implementer.profile_id(),
+                agents.planner.profile_id(),
+                agents.reviewer.profile_id(),
+            ]
+        );
     }
 
     #[test]
