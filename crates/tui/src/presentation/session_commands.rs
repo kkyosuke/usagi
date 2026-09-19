@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::{
-    AppEvent, AppState, BackendEvent, Completions, FRAME_EVENT_BUDGET, Notice, OperationResult,
-    PendingCreate, ProjectedSession, ProviderResumeProjection, SessionBackendCompletion,
-    SessionCommand, SessionCommandResult, SessionId, SessionLifecycle, SessionLifecycleProjection,
-    SessionRefreshPort, SessionRoleProjection, WorkspaceIoRuntime, WorkspaceRuntime,
-    runtime_identities_are_valid,
+    AppEvent, AppState, BackendEvent, Completions, Effect, FRAME_EVENT_BUDGET, Notice,
+    OperationResult, PendingCreate, ProjectedSession, ProviderResumeProjection,
+    SessionBackendCompletion, SessionCommand, SessionCommandResult, SessionId, SessionLifecycle,
+    SessionLifecycleProjection, SessionRefreshPort, SessionRoleProjection, WorkspaceIoRuntime,
+    WorkspaceRuntime, runtime_identities_are_valid,
 };
 
 #[cfg(test)]
@@ -651,14 +651,20 @@ pub(super) fn project_controller_sessions(
 /// [`SessionWorktreeHint`]. It is empty while the form is closed, because the
 /// scan that produces it is filesystem IO which must not ride the frame budget
 /// (#554).
+#[must_use = "a dropped effect is what froze the resident PR lane at the entry session set"]
 pub(super) fn sync_runtime_sessions(
     runtime: &mut WorkspaceRuntime,
     ui: &WorkspaceIoRuntime,
     worktree_names: &[String],
-) {
+) -> Vec<Effect> {
+    let mut effects = Vec::new();
     let ids = ui.workspace.session_ids().to_vec();
     if runtime.state().sessions() != ids.as_slice() {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+        // The reducer answers a changed session set with the effects that keep
+        // daemon-backed observation aimed at it — the resident PR lane above
+        // all. The caller dispatches them; dropping them here is what froze the
+        // lane at the sessions the workspace opened with.
+        effects.extend(runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids))));
     }
     // Keep the reducer's advisory name copy in step so the create form can reject
     // a known worktree collision locally before it ever reaches the daemon. The
@@ -673,19 +679,24 @@ pub(super) fn sync_runtime_sessions(
     names.extend(worktree_names.iter().cloned());
     let names: Vec<String> = names.into_iter().collect();
     if runtime.state().session_names() != names.as_slice() {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names)));
+        effects.extend(runtime.apply_event(AppEvent::Backend(BackendEvent::SessionNames(names))));
     }
     // Keep the reducer's per-session lifecycle in step so it can gate attach
     // and recognize a typed delete failure without parsing display text.
     let lifecycles = ui.workspace.session_lifecycles().clone();
     if runtime.state().session_lifecycles() != &lifecycles {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
-            lifecycles,
-        )));
+        effects.extend(
+            runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+                lifecycles,
+            ))),
+        );
     }
     if runtime.state().session_roles() != ui.workspace.session_roles() {
-        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoles(
-            ui.workspace.session_roles().clone(),
-        )));
+        effects.extend(
+            runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoles(
+                ui.workspace.session_roles().clone(),
+            ))),
+        );
     }
+    effects
 }

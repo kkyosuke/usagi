@@ -331,7 +331,15 @@ fn a_failed_lifecycle_flows_to_the_sidebar_rows_and_the_reducer() {
 
     // The reducer receives the lifecycle so it can gate attach by capability.
     let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-    crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let effects = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    // A changed session set owes the caller the effects that keep daemon-backed
+    // observation aimed at it; the frame loop dispatches what is returned here.
+    assert!(
+        effects.contains(&Effect::SyncPullRequestTargets {
+            sessions: vec![session],
+        }),
+        "the adopted session set did not re-aim the PR lane: {effects:?}"
+    );
     assert_eq!(runtime.state().sessions(), &[session]);
     assert_eq!(runtime.state().session_roles().get(&session), Some(&role));
     assert_eq!(
@@ -383,7 +391,7 @@ fn sidebar_groups_children_and_navigation_survives_snapshot_refresh() {
     view.set_session_roles(roles.clone());
     let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![ids[0]]);
-    crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
     let expected = [ids[0], ids[3], ids[5], ids[1], ids[2], ids[4]];
     assert_eq!(runtime.state().sessions(), &expected);
     let rows = crate::presentation::project_controller_sessions(&ui, runtime.state());
@@ -408,7 +416,7 @@ fn sidebar_groups_children_and_navigation_survives_snapshot_refresh() {
     let active = runtime.state().active();
     ui.workspace.replace_sessions_with_runtime_ids(records, ids);
     ui.workspace.set_session_roles(roles);
-    crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
     assert_eq!(runtime.state().sessions(), &expected);
     assert_eq!(
         runtime.state().selected(),
