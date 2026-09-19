@@ -16,7 +16,7 @@ pub use new::{
     NewEvent, NewForm, NewMode, NewRequest, NewRoute, NewState, NewValidationError, update_new,
     validate_new_form,
 };
-pub use preview::{PreviewFileFilter, PreviewOverlay, PreviewSearchMatch};
+pub use preview::{PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewSearchMatch};
 pub use pull_requests::{PrFilter, PrOverlay};
 
 use std::collections::{BTreeMap, BTreeSet};

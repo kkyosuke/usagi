@@ -593,6 +593,11 @@ fn decision_snapshots_auto_open_only_for_new_pending_rows_without_stealing_an_ov
     assert_eq!(state.decisions().len(), 2);
 }
 
+/// Rows the preview finder currently offers.
+fn visible(state: &AppState) -> usize {
+    state.preview_overlay().unwrap().visible_candidates().len()
+}
+
 #[test]
 fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     let (workspace, session, _) = ids();
@@ -610,7 +615,7 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     // rejected when the matching result lands.
     let event = preview_loaded(&state, Target::Root(workspace), None, &["stale"], &[]);
     let _ = update(&mut state, event);
-    assert!(state.preview_overlay().unwrap().visible_files().is_empty());
+    assert_eq!(visible(&state), 0);
     let event = preview_loaded(
         &state,
         target,
@@ -620,12 +625,12 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     );
     let _ = update(&mut state, event);
     assert!(!state.preview_overlay().unwrap().is_loading());
-    assert_eq!(state.preview_overlay().unwrap().visible_files().len(), 3);
+    assert_eq!(visible(&state), 3);
 
     // Finder navigation saturates, and filtering resets selection. A query
     // with several matches also exercises fuzzy rank ordering.
     let _ = update(&mut state, AppEvent::Key(AppKey::Char('s')));
-    assert_eq!(state.preview_overlay().unwrap().visible_files().len(), 2);
+    assert_eq!(visible(&state), 2);
     let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     assert_eq!(state.preview_overlay().unwrap().selected(), 1);
