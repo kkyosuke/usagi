@@ -6,7 +6,7 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::{
-    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewSearchMatch,
+    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
 };
 
 /// Preview だけは 1 ファイルの本文を読むための overlay なので、他の modal の
@@ -64,12 +64,20 @@ fn render_finder(
     let desired_body = desired_body_height(height);
     let body_height = modal::reserved_body_height(height, width, desired_body);
     let candidates = state.visible_candidates();
-    let name_column = name_column_width(&candidates, inner);
+    // 候補側はこの幅で組む。pane を出す枠では list 側の桁だけが使える。
+    let split = pane_split(inner);
+    let list_inner = split.unwrap_or(inner);
+    let name_column = name_column_width(&candidates, list_inner);
     let rows = candidates
         .iter()
         .enumerate()
         .map(|(index, candidate)| {
-            candidate_row(candidate, index == state.selected(), name_column, inner)
+            candidate_row(
+                candidate,
+                index == state.selected(),
+                name_column,
+                list_inner,
+            )
         })
         .collect::<Vec<_>>();
 
@@ -78,9 +86,9 @@ fn render_finder(
     if state.is_loading() {
         body.push(modal::empty_notice("Loading files…"));
     } else if let Some(error) = state.error() {
-        body.push(modal::error_line(error.message.as_str(), inner));
+        body.push(modal::error_line(error.message.as_str(), list_inner));
     } else if rows.is_empty() {
-        body.extend(empty_rows(state, inner));
+        body.extend(empty_rows(state, list_inner));
     } else {
         let file_rows = body_height.saturating_sub(3);
         let (rows, selected) = match state.rest_sections() {
@@ -88,6 +96,10 @@ fn render_finder(
             None => (rows, state.selected()),
         };
         body.extend(modal::bounded_list_rows(&rows, selected, file_rows));
+    }
+    if let Some(list_width) = split {
+        let pane_rows = body_height.saturating_sub(3);
+        body = beside_pane(body, state.pane(), list_width, inner, pane_rows);
     }
     body.push(modal::footer(
         "←→ scope / type filter / ↑↓ select / Enter preview / Esc close",
@@ -101,6 +113,90 @@ fn render_finder(
         desired_body,
         body,
     )
+}
+
+/// Narrowest frame that still fits a list and a readable side pane.
+const PANE_MIN_INNER: usize = 96;
+/// Widest list column before the pane starts taking the rest.
+const PANE_LIST_WIDTH: usize = 52;
+/// Cells spent on the vertical rule between the list and the pane.
+const PANE_RULE_WIDTH: usize = 3;
+/// Rows above the split: the group tabs and the filter line stay full width.
+const PANE_HEAD_ROWS: usize = 2;
+
+/// Width of the list column when the frame is wide enough to carry a pane.
+fn pane_split(inner: usize) -> Option<usize> {
+    (inner >= PANE_MIN_INNER).then(|| PANE_LIST_WIDTH.min(inner / 2))
+}
+
+/// Put the pane beside the list rows, keeping both inside `inner`.
+///
+/// Only the candidate rows are split: the tabs, the filter line, and the footer
+/// stay full width, so the pane cannot push the controls around as it loads.
+fn beside_pane(
+    mut body: Vec<String>,
+    pane: &PreviewPane,
+    list_width: usize,
+    inner: usize,
+    rows: usize,
+) -> Vec<String> {
+    let pane_width = inner.saturating_sub(list_width + PANE_RULE_WIDTH);
+    let mut pane_rows = pane_lines(pane, pane_width, rows).into_iter();
+    // 候補が少なくても pane は枠の高さいっぱいまで読める。list が短いぶんは
+    // 空行を足してから並べる（枠の最終調整は render_body_over が行う）。
+    body.resize(PANE_HEAD_ROWS + rows, String::new());
+    body.into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index < PANE_HEAD_ROWS {
+                return line;
+            }
+            let Some(pane_line) = pane_rows.next() else {
+                return line;
+            };
+            let rule = Style::new().dim().paint("│");
+            format!(
+                "{} {rule} {pane_line}",
+                widgets::pad_to_width(&line, list_width)
+            )
+        })
+        .collect()
+}
+
+/// The pane's own rows: the file it is showing, then its first lines.
+fn pane_lines(pane: &PreviewPane, width: usize, rows: usize) -> Vec<String> {
+    if rows == 0 {
+        return Vec::new();
+    }
+    let Some(path) = pane.path() else {
+        return vec![Style::new().dim().paint("No file selected.")];
+    };
+    let mut lines = vec![
+        Role::Accent
+            .style()
+            .bold()
+            .paint(&widgets::clip_to_width(path, width)),
+    ];
+    if pane.is_loading() {
+        lines.push(Style::new().dim().paint("Loading…"));
+    } else if let Some(error) = pane.error() {
+        lines.push(
+            Style::new()
+                .dim()
+                .paint(&widgets::clip_to_width(error.message.as_str(), width)),
+        );
+    } else if pane.lines().is_empty() {
+        lines.push(Style::new().dim().paint("(empty file)"));
+    } else {
+        lines.extend(
+            pane.lines()
+                .iter()
+                .take(rows.saturating_sub(1))
+                .map(|line| widgets::clip_to_width(line, width)),
+        );
+    }
+    lines.truncate(rows);
+    lines
 }
 
 /// Insert the resting view's section headings and move the cursor with them.
@@ -517,8 +613,10 @@ mod tests {
 
     use super::*;
     use crate::presentation::widgets::{display_width, strip_ansi};
+    use usagi_core::domain::id::RequestId;
+
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, Target, update,
+        AppEvent, AppKey, AppState, BackendEvent, Effect, SafeError, SafeMessage, Target, update,
     };
 
     fn joined(state: &AppState) -> String {
@@ -702,8 +800,9 @@ mod tests {
             vec![],
         );
 
+        // pane を出さない幅で、候補側の列だけを見る。
         let base = vec![String::new(); 24];
-        let plain = render_over(24, 120, &base, state.preview_overlay().unwrap())
+        let plain = render_over(24, 90, &base, state.preview_overlay().unwrap())
             .iter()
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>();
@@ -825,6 +924,167 @@ mod tests {
     }
 
     #[test]
+    fn the_pane_says_what_it_has_instead_of_going_blank() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let base = vec![String::new(); 30];
+        let wide = |state: &AppState| {
+            render_over(30, 120, &base, state.preview_overlay().unwrap())
+                .iter()
+                .map(|line| strip_ansi(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // 候補が無ければ読む file も無い。
+        complete_preview(
+            &mut state,
+            target,
+            None,
+            PreviewFileFilter::All,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(wide(&state).contains("No file selected."));
+
+        // 読めた中身が空でも、空であることを言う。
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let effects = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec!["src/empty.rs".into()],
+                changed: vec!["src/empty.rs".into()],
+                lines: Vec::new(),
+            }),
+        );
+        let pane_request = pane_read(&state, &effects);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id: pane_request,
+                path: Some("src/empty.rs".into()),
+                filter: PreviewFileFilter::All,
+                files: Vec::new(),
+                changed: Vec::new(),
+                lines: Vec::new(),
+            }),
+        );
+        assert!(wide(&state).contains("(empty file)"));
+
+        // 読めない file は pane の中で理由を言う。
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewError {
+                target,
+                request_id: pane_request,
+                path: Some("src/empty.rs".into()),
+                filter: PreviewFileFilter::All,
+                error: SafeError {
+                    message: SafeMessage::new("Binary files cannot be previewed."),
+                    error_id: "preview-binary".into(),
+                },
+            }),
+        );
+        assert!(wide(&state).contains("Binary files cannot be previewed."));
+
+        // pane に割ける行が無い高さでも枠は壊れない。
+        let short = render_over(
+            7,
+            120,
+            &vec![String::new(); 7],
+            state.preview_overlay().unwrap(),
+        );
+        assert!(short.iter().all(|line| display_width(line) == 120));
+        assert!(
+            !short
+                .iter()
+                .map(|line| strip_ansi(line))
+                .any(|line| line.contains("Binary files"))
+        );
+    }
+
+    #[test]
+    fn a_wide_finder_reads_the_selected_file_beside_the_list() {
+        let workspace = WorkspaceId::new();
+        let target = Target::Session(SessionId::new());
+        let mut state = AppState::home(workspace, vec![target.session_id().unwrap()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let effects = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec!["src/lib.rs".into()],
+                changed: vec!["src/lib.rs".into()],
+                lines: Vec::new(),
+            }),
+        );
+        let base = vec![String::new(); 30];
+
+        // 読み込み中も枠は動かない。
+        let loading = render_over(30, 120, &base, state.preview_overlay().unwrap())
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(loading.contains("│ src/lib.rs"));
+        assert!(loading.contains("Loading…"));
+
+        let pane_request = pane_read(&state, &effects);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id: pane_request,
+                path: Some("src/lib.rs".into()),
+                filter: PreviewFileFilter::All,
+                files: Vec::new(),
+                changed: Vec::new(),
+                lines: vec!["pub fn main() {}".into()],
+            }),
+        );
+
+        let wide = render_over(30, 120, &base, state.preview_overlay().unwrap());
+        let plain = wide
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("pub fn main() {}"));
+        // 候補と pane が同じ行に並ぶ。
+        assert!(
+            wide.iter()
+                .map(|line| strip_ansi(line))
+                .any(|line| line.contains("lib.rs") && line.contains("│ src/lib.rs"))
+        );
+        assert!(wide.iter().all(|line| display_width(line) == 120));
+
+        // 狭い端末では pane を出さず、一覧だけを出す。
+        let narrow = render_over(
+            30,
+            90,
+            &vec![String::new(); 30],
+            state.preview_overlay().unwrap(),
+        )
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(!narrow.contains("pub fn main() {}"));
+        assert!(narrow.contains("lib.rs"));
+    }
+
+    #[test]
     fn finder_and_document_use_the_large_preview_layout() {
         let workspace = WorkspaceId::new();
         let target = Target::Session(SessionId::new());
@@ -881,6 +1141,22 @@ mod tests {
         assert_eq!(box_rows(&narrow), 24 - 2);
         let narrow_top = titled_row(&narrow, "Preview · src/file-0.rs");
         assert_eq!(display_width(narrow_top.trim()), 80);
+    }
+
+    /// The pane read the finder just issued, asserted to be its only effect.
+    fn pane_read(state: &AppState, effects: &[Effect]) -> RequestId {
+        let overlay = state.preview_overlay().unwrap();
+        let request_id = overlay.pane().request().expect("a pane read in flight");
+        assert_eq!(
+            effects,
+            [Effect::LoadPreview {
+                target: overlay.target(),
+                request_id,
+                path: overlay.pane().path().map(ToOwned::to_owned),
+                filter: overlay.file_filter(),
+            }]
+        );
+        request_id
     }
 
     fn box_rows(frame: &[String]) -> usize {

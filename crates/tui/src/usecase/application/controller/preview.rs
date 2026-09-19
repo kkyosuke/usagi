@@ -114,6 +114,75 @@ impl<'a> PreviewCandidate<'a> {
     }
 }
 
+/// The finder's side pane: the selected candidate read while the cursor rests
+/// on it.
+///
+/// The pane is what makes a picker answer "is this the file?" without leaving
+/// the list, so it follows the cursor rather than an explicit open. It keeps its
+/// own request identity: a pane read must never be mistaken for the document the
+/// user actually opened.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreviewPane {
+    path: Option<String>,
+    lines: Vec<String>,
+    loading: bool,
+    error: Option<SafeError>,
+    request_id: Option<RequestId>,
+}
+
+impl PreviewPane {
+    /// Repository-relative path the pane is showing, if any.
+    #[must_use]
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    /// Safe lines of the pane's file.
+    #[must_use]
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    /// Whether the pane is waiting for its read.
+    #[must_use]
+    pub const fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// Safe failure of the pane's read, such as a binary or oversized file.
+    #[must_use]
+    pub const fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
+
+    /// Whether `request_id` identifies this pane's in-flight read.
+    pub(super) fn owns(&self, request_id: RequestId) -> bool {
+        self.request_id == Some(request_id)
+    }
+
+    /// Identity of the in-flight read. Tests assert the emitted effect against
+    /// it instead of destructuring the effect list.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn request(&self) -> Option<RequestId> {
+        self.request_id
+    }
+
+    /// Absorb a completed pane read.
+    pub(super) fn loaded(&mut self, lines: Vec<String>) {
+        self.lines = lines;
+        self.loading = false;
+        self.error = None;
+    }
+
+    /// Absorb a failed pane read.
+    pub(super) fn failed(&mut self, error: SafeError) {
+        self.lines.clear();
+        self.loading = false;
+        self.error = Some(error);
+    }
+}
+
 /// One ranked row of the finder, kept between keystrokes.
 ///
 /// Ranking 20,000 candidates is the expensive part of the finder, and the view
@@ -153,6 +222,8 @@ pub struct PreviewOverlay {
     visible: Vec<PreviewRow>,
     /// Rows the resting view took from [`Self::recent`], when it is showing.
     rest_recent: usize,
+    /// The side pane following the finder cursor.
+    pane: PreviewPane,
     /// Current fuzzy filter. Private for the same reason as `files`; edits go
     /// through [`PreviewOverlay::edit_filter`].
     filter: String,
@@ -182,6 +253,7 @@ impl PreviewOverlay {
             changed: Vec::new(),
             visible: Vec::new(),
             rest_recent: 0,
+            pane: PreviewPane::default(),
             filter: String::new(),
             file_filter: PreviewFileFilter::All,
             selected: 0,
@@ -369,6 +441,17 @@ impl PreviewOverlay {
         self.selected = 0;
         self.refilter();
     }
+    /// The side pane following the finder cursor.
+    #[must_use]
+    pub const fn pane(&self) -> &PreviewPane {
+        &self.pane
+    }
+
+    /// Mutable access for absorbing this pane's own completions.
+    pub(super) const fn pane_mut(&mut self) -> &mut PreviewPane {
+        &mut self.pane
+    }
+
     /// Number of candidates offered by the loaded file group, before filtering.
     #[must_use]
     pub fn total_files(&self) -> usize {
@@ -542,10 +625,54 @@ pub(super) fn update_preview_overlay(state: &mut AppState, key: &AppKey) -> Vec<
         return vec![Effect::CancelPreview];
     };
 
-    if document_open {
-        return update_preview_document(state.preview_overlay.as_mut().unwrap(), key);
+    let mut effects = if document_open {
+        update_preview_document(state.preview_overlay.as_mut().unwrap(), key)
+    } else {
+        update_preview_finder(state, key)
+    };
+    // 本文から finder へ戻った直後も、cursor の下の file を読み直す。
+    effects.extend(sync_preview_pane(state));
+    effects
+}
+
+/// Keep the finder's side pane on whatever the cursor is resting on.
+///
+/// Every input that can move the cursor — a key, or a listing that lands — ends
+/// here, so the pane cannot drift from the selection. A read is issued only when
+/// the selected path changes; the resident preview lane coalesces the rest, so
+/// holding an arrow key does not queue a read per frame.
+pub(super) fn sync_preview_pane(state: &mut AppState) -> Vec<Effect> {
+    let Some(overlay) = state.preview_overlay.as_ref() else {
+        return Vec::new();
+    };
+    if overlay.path.is_some() {
+        return Vec::new();
     }
-    update_preview_finder(state, key)
+    let selected = overlay.selected_file().map(str::to_owned);
+    let overlay = state.preview_overlay.as_mut().unwrap();
+    match selected {
+        None => {
+            overlay.pane = PreviewPane::default();
+            Vec::new()
+        }
+        Some(path) if overlay.pane.path.as_deref() == Some(path.as_str()) => Vec::new(),
+        Some(path) => {
+            let request_id = RequestId::new();
+            overlay.pane = PreviewPane {
+                path: Some(path.clone()),
+                lines: Vec::new(),
+                loading: true,
+                error: None,
+                request_id: Some(request_id),
+            };
+            vec![Effect::LoadPreview {
+                target: overlay.target,
+                request_id,
+                path: Some(path),
+                filter: overlay.file_filter,
+            }]
+        }
+    }
 }
 
 fn update_preview_document(overlay: &mut PreviewOverlay, key: &AppKey) -> Vec<Effect> {
@@ -682,6 +809,7 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             let recent = overlay.recent().to_vec();
             state.set_preview_recent(target, recent);
             let overlay = state.preview_overlay.as_mut().unwrap();
+            overlay.pane = PreviewPane::default();
             overlay.path = Some(path.clone());
             overlay.lines.clear();
             overlay.scroll = 0;
@@ -711,7 +839,7 @@ fn pop_last_grapheme(value: &mut String) {
 mod tests {
     use usagi_core::domain::id::{SessionId, WorkspaceId};
 
-    use super::super::{AppEvent, BackendEvent, Overlay, update};
+    use super::super::{AppEvent, BackendEvent, Overlay, SafeMessage, update};
     use super::*;
 
     fn complete(
@@ -1167,5 +1295,140 @@ mod tests {
             .iter()
             .map(PreviewCandidate::path)
             .collect()
+    }
+
+    /// A finder resting on two changed files, with its first pane read issued.
+    fn finder_with_pane() -> (AppState, Target, RequestId) {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let effects = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec!["src/lib.rs".into(), "src/main.rs".into()],
+                changed: vec!["src/lib.rs".into(), "src/main.rs".into()],
+                lines: Vec::new(),
+            }),
+        );
+        let pane_request = pane_read(&state, &effects, "src/lib.rs");
+        assert_ne!(pane_request, request_id);
+        (state, target, pane_request)
+    }
+
+    /// The single pane read `effects` asks for, asserted to be on `path`.
+    fn pane_read(state: &AppState, effects: &[Effect], path: &str) -> RequestId {
+        let overlay = state.preview_overlay().unwrap();
+        let request_id = overlay.pane().request().expect("a pane read in flight");
+        assert_eq!(
+            effects,
+            [Effect::LoadPreview {
+                target: overlay.target(),
+                request_id,
+                path: Some(path.to_owned()),
+                filter: overlay.file_filter(),
+            }]
+        );
+        request_id
+    }
+
+    #[test]
+    fn the_side_pane_follows_the_cursor_without_opening_the_document() {
+        let (mut state, target, pane_request) = finder_with_pane();
+        assert!(state.preview_overlay().unwrap().pane().is_loading());
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id: pane_request,
+                path: Some("src/lib.rs".into()),
+                filter: PreviewFileFilter::All,
+                files: Vec::new(),
+                changed: Vec::new(),
+                lines: vec!["fn main() {}".into()],
+            }),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        assert_eq!(overlay.pane().lines(), ["fn main() {}"]);
+        assert!(!overlay.pane().is_loading());
+        assert_eq!(overlay.path(), None);
+
+        // cursor が動けば次の候補を読み直し、読めない file は pane の中だけで報告する。
+        let effects = update(&mut state, AppEvent::Key(AppKey::Down));
+        let moved = pane_read(&state, &effects, "src/main.rs");
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewError {
+                target,
+                request_id: moved,
+                path: Some("src/main.rs".into()),
+                filter: PreviewFileFilter::All,
+                error: SafeError {
+                    message: SafeMessage::new("Binary files cannot be previewed."),
+                    error_id: "preview-binary".into(),
+                },
+            }),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        assert_eq!(
+            overlay.pane().error().map(|error| error.message.as_str()),
+            Some("Binary files cannot be previewed.")
+        );
+        assert!(overlay.error().is_none());
+    }
+
+    #[test]
+    fn opening_a_file_fences_the_pane_read_behind_it() {
+        let (mut state, target, pane_request) = finder_with_pane();
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let overlay = state.preview_overlay().unwrap();
+        let document_request = overlay.request_id();
+        assert_eq!(
+            effects,
+            [Effect::LoadPreview {
+                target: overlay.target(),
+                request_id: document_request,
+                path: Some("src/lib.rs".to_owned()),
+                filter: overlay.file_filter(),
+            }]
+        );
+        assert_ne!(document_request, pane_request);
+        assert_eq!(state.preview_overlay().unwrap().pane().path(), None);
+
+        // 本文から戻ると、cursor の下の file をもう一度読み始める。
+        let effects = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(effects.first(), Some(&Effect::CancelPreview));
+        let reopened = pane_read(&state, &effects[1..], "src/lib.rs");
+        assert_ne!(reopened, document_request);
+        assert_eq!(
+            state.preview_overlay().unwrap().pane().path(),
+            Some("src/lib.rs")
+        );
+
+        // 遅れて届いた pane の完了は document を汚さない。
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id: pane_request,
+                path: Some("src/lib.rs".into()),
+                filter: PreviewFileFilter::All,
+                files: Vec::new(),
+                changed: Vec::new(),
+                lines: vec!["stale".into()],
+            }),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        assert!(overlay.lines().is_empty());
+        assert!(overlay.pane().lines().is_empty());
+        assert!(overlay.pane().is_loading());
     }
 }

@@ -16,7 +16,9 @@ pub use new::{
     NewEvent, NewForm, NewMode, NewRequest, NewRoute, NewState, NewValidationError, update_new,
     validate_new_form,
 };
-pub use preview::{PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewSearchMatch};
+pub use preview::{
+    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
+};
 pub use pull_requests::{PrFilter, PrOverlay};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -3365,7 +3367,8 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
         | BackendEvent::PreviewLoaded { .. }
         | BackendEvent::PreviewError { .. }) => {
             let _ = update_editor_backend(state, &event);
-            Vec::new()
+            // 候補が届いた直後の選択にも側 pane を追随させる。
+            preview::sync_preview_pane(state)
         }
         BackendEvent::Sessions(sessions) => update_session_snapshot(state, sessions),
         BackendEvent::SessionNames(names) => {
@@ -3775,6 +3778,19 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             changed,
             lines,
         } => {
+            if let Some(overlay) = state
+                .preview_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target && overlay.pane().owns(*request_id))
+            {
+                overlay.pane_mut().loaded(
+                    lines
+                        .iter()
+                        .map(|line| sanitize_presentation_line(line))
+                        .collect(),
+                );
+                return true;
+            }
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
                 overlay.target == *target
                     && overlay.request_id == *request_id
@@ -3811,6 +3827,14 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             filter,
             error,
         } => {
+            if let Some(overlay) = state
+                .preview_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target && overlay.pane().owns(*request_id))
+            {
+                overlay.pane_mut().failed(error.clone());
+                return true;
+            }
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
                 overlay.target == *target
                     && overlay.request_id == *request_id
