@@ -762,7 +762,8 @@ fn every_existing_modal_blocks_director_drawer_entry() {
                     Some(PrOverlay::showing(Target::Session(first), Vec::new(), None));
             }
             Overlay::Preview => {
-                state.preview_overlay = Some(PreviewOverlay::loading(Target::Session(first)));
+                state.preview_overlay =
+                    Some(PreviewOverlay::loading(Target::Session(first), Vec::new()));
             }
             Overlay::Notes => {
                 state.note_editor = Some(NoteEditor::loading(Target::Session(first)));

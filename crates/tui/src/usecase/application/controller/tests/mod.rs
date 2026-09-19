@@ -1977,6 +1977,7 @@ fn preview_loaded(
         path: path.map(str::to_owned),
         filter: state.preview_overlay().unwrap().file_filter(),
         files: files.iter().map(ToString::to_string).collect(),
+        changed: files.iter().map(ToString::to_string).collect(),
         lines: lines.iter().map(ToString::to_string).collect(),
     })
 }
@@ -2216,6 +2217,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
             path: None,
             filter: PreviewFileFilter::All,
             files: Vec::new(),
+            changed: Vec::new(),
             lines: Vec::new(),
         },
         BackendEvent::PreviewError {
@@ -2402,7 +2404,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     }
     state.preview_overlay = None;
     let _ = preview::update_preview_overlay(&mut state, &AppKey::Home);
-    state.preview_overlay = Some(PreviewOverlay::loading(Target::Root(workspace)));
+    state.preview_overlay = Some(PreviewOverlay::loading(Target::Root(workspace), Vec::new()));
     let _ = preview::update_preview_overlay(&mut state, &AppKey::Home);
 
     state.overlay = Some(Overlay::Environment);

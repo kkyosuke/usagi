@@ -18,6 +18,11 @@ use usagi_core::infrastructure::bounded_process::{
 use usagi_core::infrastructure::git::confined_git_command;
 use usagi_tui::usecase::application::controller::PreviewFileFilter;
 
+/// `(files, changed, lines)` of one completed preview job. A document read
+/// populates only the lines; a listing populates the files and, for the All
+/// group, the changed files the finder rests on.
+pub(crate) type PreviewPayload = (Vec<String>, Vec<String>, Vec<String>);
+
 /// Maximum number of repository paths offered to the fuzzy finder.
 pub(crate) const MAX_PREVIEW_FILES: usize = 20_000;
 /// Maximum bytes read from one previewed file.
@@ -69,10 +74,8 @@ impl FilePreviewError {
 }
 
 /// Return the requested repository file group in stable order.
-pub(crate) fn list_files(
-    root: &Path,
-    filter: PreviewFileFilter,
-) -> Result<Vec<String>, FilePreviewError> {
+#[cfg(test)]
+fn list_files(root: &Path, filter: PreviewFileFilter) -> Result<Vec<String>, FilePreviewError> {
     list_files_with(root, filter, &mut run_git)
 }
 
@@ -172,16 +175,36 @@ fn extend_listed_files(
 }
 
 /// Load one finder listing or one selected document for the background preview
-/// lane. Exactly one side of the tuple is populated.
+/// lane.
+///
+/// A document read populates only `lines`. A listing populates `files`, and for
+/// the All group it also returns the changed files, which the finder shows as
+/// its starting point before anything is typed. A failing changed listing is
+/// not fatal: the group itself still opens.
 pub(crate) fn load_preview(
     root: &Path,
     path: Option<&str>,
     filter: PreviewFileFilter,
-) -> Result<(Vec<String>, Vec<String>), FilePreviewError> {
-    match path {
-        Some(path) => read_file(root, path).map(|lines| (Vec::new(), lines)),
-        None => list_files(root, filter).map(|files| (files, Vec::new())),
+) -> Result<PreviewPayload, FilePreviewError> {
+    load_preview_with(root, path, filter, &mut run_git)
+}
+
+fn load_preview_with(
+    root: &Path,
+    path: Option<&str>,
+    filter: PreviewFileFilter,
+    run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
+) -> Result<PreviewPayload, FilePreviewError> {
+    if let Some(path) = path {
+        return read_file(root, path).map(|lines| (Vec::new(), Vec::new(), lines));
     }
+    let files = list_files_with(root, filter, run)?;
+    let changed = if matches!(filter, PreviewFileFilter::All) {
+        list_files_with(root, PreviewFileFilter::Changed, run).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok((files, changed, Vec::new()))
 }
 
 /// Read one UTF-8 regular file without allowing the requested path to escape
@@ -362,6 +385,61 @@ mod tests {
     }
 
     #[test]
+    fn an_all_listing_also_returns_the_changed_files_and_survives_their_failure() {
+        // All 群は finder の起点になる changed も一緒に返す。
+        let mut observations = VecDeque::from([
+            output("README.md\0src/lib.rs\0"),
+            output("origin/main\n"),
+            output("src/lib.rs\0"),
+            output(""),
+        ]);
+        let mut run = |_: &Path, _: &[&str]| {
+            observations
+                .pop_front()
+                .unwrap_or(ChildOutputObservation::ObservationFailed)
+        };
+        let (files, changed, lines) =
+            load_preview_with(Path::new("/repo"), None, PreviewFileFilter::All, &mut run).unwrap();
+        assert_eq!(files, ["README.md", "src/lib.rs"]);
+        assert_eq!(changed, ["src/lib.rs"]);
+        assert!(lines.is_empty());
+
+        // changed が取れなくても群そのものは開く。
+        let mut observations = VecDeque::from([output("README.md\0")]);
+        let mut failing = |_: &Path, _: &[&str]| {
+            observations
+                .pop_front()
+                .unwrap_or(ChildOutputObservation::ObservationFailed)
+        };
+        let (files, changed, _) = load_preview_with(
+            Path::new("/repo"),
+            None,
+            PreviewFileFilter::All,
+            &mut failing,
+        )
+        .unwrap();
+        assert_eq!(files, ["README.md"]);
+        assert!(changed.is_empty());
+
+        // Tracked は changed を引かない。
+        let mut observations = VecDeque::from([output("README.md\0")]);
+        let mut tracked = |_: &Path, _: &[&str]| {
+            observations
+                .pop_front()
+                .unwrap_or(ChildOutputObservation::ObservationFailed)
+        };
+        let (files, changed, _) = load_preview_with(
+            Path::new("/repo"),
+            None,
+            PreviewFileFilter::Tracked,
+            &mut tracked,
+        )
+        .unwrap();
+        assert_eq!(files, ["README.md"]);
+        assert!(changed.is_empty());
+    }
+
+    #[test]
     fn changed_listing_falls_back_to_main_when_origin_head_is_unavailable() {
         let mut observations = VecDeque::from([
             ChildOutputObservation::ExitFailure,
@@ -521,7 +599,11 @@ mod tests {
 
         assert_eq!(
             load_preview(root.path(), Some("nested/file.txt"), PreviewFileFilter::All,).unwrap(),
-            (Vec::new(), vec!["one".to_owned(), "two".to_owned()])
+            (
+                Vec::new(),
+                Vec::new(),
+                vec!["one".to_owned(), "two".to_owned()]
+            )
         );
         assert!(matches!(
             open_beneath(root.path(), ""),

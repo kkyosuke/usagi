@@ -111,6 +111,8 @@ pub enum Overlay {
 
 /// session name に許される最大文字数（表示・path 双方の実害を避ける上限）。
 const MAX_SESSION_NAME_LEN: usize = 64;
+/// Targets that keep a preview history at once.
+const MAX_PREVIEW_RECENT_TARGETS: usize = 8;
 /// Goal composer bound. The daemon repeats this limit before admitting work.
 pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::infrastructure::ipc::MAX_AGENT_GOAL_BYTES;
 
@@ -1167,6 +1169,9 @@ pub struct AppState {
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
+    /// Recently opened preview files per target, newest first. The finder shows
+    /// them before anything is typed, so they outlive one overlay.
+    preview_recent: Vec<(Target, Vec<String>)>,
     create_session: Option<CreateSessionForm>,
     create_session_error: Option<Notice>,
     terminal_launch_error: Option<Notice>,
@@ -1396,6 +1401,7 @@ impl AppState {
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
+            preview_recent: Vec::new(),
             create_session: None,
             create_session_error: None,
             terminal_launch_error: None,
@@ -1807,6 +1813,29 @@ impl AppState {
     /// selected sidebar session just like the right-pane preview. Closeup keeps
     /// operating on its active session. Neither route manufactures a workspace
     /// root target or accepts a stale session identity.
+    /// Recently opened preview files of `target`, newest first.
+    fn preview_recent_of(&self, target: Target) -> Vec<String> {
+        self.preview_recent
+            .iter()
+            .find(|(recorded, _)| *recorded == target)
+            .map(|(_, files)| files.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace one target's recently opened preview files.
+    ///
+    /// The target moves to the end, so the history that gets dropped is the one
+    /// nobody has opened a file from for the longest time, not merely the one
+    /// recorded first.
+    pub(super) fn set_preview_recent(&mut self, target: Target, files: Vec<String>) {
+        self.preview_recent
+            .retain(|(recorded, _)| *recorded != target);
+        self.preview_recent.push((target, files));
+        if self.preview_recent.len() > MAX_PREVIEW_RECENT_TARGETS {
+            self.preview_recent.remove(0);
+        }
+    }
+
     fn file_preview_target(&self) -> Option<Target> {
         let session = match self.route {
             Route::Home(HomeMode::Switch) => match self.selected {
@@ -2579,6 +2608,9 @@ pub enum BackendEvent {
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
         files: Vec<String>,
+        /// Files changed from the integration base. Populated only for an All
+        /// listing, which shows them as the finder's starting point.
+        changed: Vec<String>,
         lines: Vec<String>,
     },
     /// A safe preview read failure.
@@ -3740,6 +3772,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             path,
             filter,
             files,
+            changed,
             lines,
         } => {
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
@@ -3749,13 +3782,14 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     && overlay.file_filter == *filter
             }) {
                 if path.is_none() {
-                    overlay.set_files(
-                        files
+                    let safe = |paths: &Vec<String>| {
+                        paths
                             .iter()
                             .filter(|path| presentation_text_is_safe(path))
                             .cloned()
-                            .collect(),
-                    );
+                            .collect::<Vec<_>>()
+                    };
+                    overlay.set_files(safe(files), safe(changed));
                 } else {
                     overlay.lines = lines
                         .iter()
@@ -5477,7 +5511,7 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
         return Vec::new();
     };
     state.overlay = Some(Overlay::Preview);
-    let overlay = PreviewOverlay::loading(target);
+    let overlay = PreviewOverlay::loading(target, state.preview_recent_of(target));
     let request_id = overlay.request_id();
     state.preview_overlay = Some(overlay);
     state.pr_overlay = None;

@@ -9,6 +9,10 @@ use crate::usecase::fuzzy::path_match;
 use super::{AppKey, AppState, Effect, SafeError, Target};
 
 const MAX_PREVIEW_FILTER_CHARS: usize = 256;
+/// Recently opened files kept per target and offered before anything is typed.
+const MAX_PREVIEW_RECENT: usize = 5;
+/// Changed files offered before anything is typed.
+const MAX_REST_CHANGED: usize = 8;
 const MAX_PREVIEW_SEARCH_CHARS: usize = 256;
 const MAX_PREVIEW_SEARCH_MATCHES: usize = 20_000;
 
@@ -141,8 +145,14 @@ pub struct PreviewOverlay {
     /// through [`PreviewOverlay::set_files`] / [`PreviewOverlay::clear_files`]
     /// so the ranked rows below cannot index a list they were not built from.
     files: Vec<String>,
+    /// Files changed from the integration base, for the resting view.
+    changed: Vec<String>,
+    /// Recently opened files of this target, newest first.
+    recent: Vec<String>,
     /// Ranked rows for the current filter; see [`PreviewOverlay::refilter`].
     visible: Vec<PreviewRow>,
+    /// Rows the resting view took from [`Self::recent`], when it is showing.
+    rest_recent: usize,
     /// Current fuzzy filter. Private for the same reason as `files`; edits go
     /// through [`PreviewOverlay::edit_filter`].
     filter: String,
@@ -163,12 +173,15 @@ pub struct PreviewOverlay {
 }
 
 impl PreviewOverlay {
-    pub(super) fn loading(target: Target) -> Self {
+    pub(super) fn loading(target: Target, recent: Vec<String>) -> Self {
         Self {
             target,
+            recent,
             request_id: RequestId::new(),
             files: Vec::new(),
+            changed: Vec::new(),
             visible: Vec::new(),
+            rest_recent: 0,
             filter: String::new(),
             file_filter: PreviewFileFilter::All,
             selected: 0,
@@ -218,11 +231,78 @@ impl PreviewOverlay {
             .collect()
     }
 
+    /// Whether the finder is resting: the All group with nothing typed.
+    ///
+    /// Resting is the state a picker opens in, and a dump of every tracked file
+    /// says nothing about this session. The All group therefore starts from what
+    /// this session has been touching — recently opened files, then changed
+    /// ones — and switches to the whole group as soon as a filter is typed. The
+    /// Tracked group stays the place to browse everything.
+    #[must_use]
+    pub fn is_resting(&self) -> bool {
+        self.filter.is_empty() && matches!(self.file_filter, PreviewFileFilter::All)
+    }
+
+    /// Row counts of the resting view: recently opened, then changed.
+    ///
+    /// `None` while the finder is filtering or showing another group, so the
+    /// view knows whether to draw section headings at all.
+    #[must_use]
+    pub fn rest_sections(&self) -> Option<(usize, usize)> {
+        if self.is_resting() {
+            Some((self.rest_recent, self.visible.len() - self.rest_recent))
+        } else {
+            None
+        }
+    }
+
+    /// Rows of the resting view: recent files that still exist, then changed
+    /// files that are not already listed above.
+    fn rest_rows(&self) -> (Vec<PreviewRow>, usize) {
+        let index = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(file, path)| (path.as_str(), file))
+            .collect::<std::collections::HashMap<_, _>>();
+        let known = |path: &String| index.get(path.as_str()).copied();
+        let recent = self
+            .recent
+            .iter()
+            .filter_map(known)
+            .take(MAX_PREVIEW_RECENT)
+            .collect::<Vec<_>>();
+        let changed = self
+            .changed
+            .iter()
+            .filter_map(known)
+            .filter(|file| !recent.contains(file))
+            .take(MAX_REST_CHANGED)
+            .collect::<Vec<_>>();
+        let rest_recent = recent.len();
+        let rows = recent
+            .into_iter()
+            .chain(changed)
+            .map(|file| PreviewRow {
+                file,
+                positions: Vec::new(),
+            })
+            .collect();
+        (rows, rest_recent)
+    }
+
     /// Re-rank the loaded group against the current filter.
     ///
     /// Every mutation of the filter or of the loaded files goes through this so
     /// the cached rows cannot drift from the inputs that produced them.
     fn refilter(&mut self) {
+        if self.is_resting() {
+            let (rows, rest_recent) = self.rest_rows();
+            self.visible = rows;
+            self.rest_recent = rest_recent;
+            return;
+        }
+        self.rest_recent = 0;
         let mut rows = self
             .files
             .iter()
@@ -243,16 +323,42 @@ impl PreviewOverlay {
             .collect();
     }
 
-    /// Replace the loaded candidates of the current group.
-    pub(super) fn set_files(&mut self, files: Vec<String>) {
+    /// Replace the loaded candidates of the current group, with the changed
+    /// files the resting view starts from.
+    pub(super) fn set_files(&mut self, files: Vec<String>, changed: Vec<String>) {
         self.files = files;
+        self.changed = changed;
         self.selected = 0;
         self.refilter();
+    }
+
+    /// Record one opened file as this target's most recent.
+    ///
+    /// The resting rows are rebuilt straight away, so returning from the
+    /// document shows the file that was just read at the top of `recent` with
+    /// the cursor still on it.
+    fn remember(&mut self, path: &str) {
+        self.recent.retain(|recent| recent != path);
+        self.recent.insert(0, path.to_owned());
+        self.recent.truncate(MAX_PREVIEW_RECENT);
+        self.refilter();
+        let selected = self
+            .visible
+            .iter()
+            .position(|row| self.files[row.file] == path)
+            .unwrap_or(0);
+        self.selected = selected;
+    }
+
+    /// Recently opened files of this target, newest first.
+    fn recent(&self) -> &[String] {
+        &self.recent
     }
 
     /// Drop the loaded candidates while a new group is in flight.
     fn clear_files(&mut self) {
         self.files.clear();
+        self.changed.clear();
         self.selected = 0;
         self.refilter();
     }
@@ -572,6 +678,10 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
                 return Vec::new();
             };
             let overlay = state.preview_overlay.as_mut().unwrap();
+            overlay.remember(&path);
+            let recent = overlay.recent().to_vec();
+            state.set_preview_recent(target, recent);
+            let overlay = state.preview_overlay.as_mut().unwrap();
             overlay.path = Some(path.clone());
             overlay.lines.clear();
             overlay.scroll = 0;
@@ -621,6 +731,9 @@ mod tests {
                 path: path.map(str::to_owned),
                 filter,
                 files: files.iter().map(ToString::to_string).collect(),
+                // 空 query の finder は recent と changed だけを出すので、
+                // helper は列挙した候補をそのまま changed として渡す。
+                changed: files.iter().map(ToString::to_string).collect(),
                 lines: lines.iter().map(ToString::to_string).collect(),
             }),
         );
@@ -743,7 +856,7 @@ mod tests {
     #[test]
     fn search_match_inventory_and_inputs_are_bounded() {
         let workspace = WorkspaceId::new();
-        let mut overlay = PreviewOverlay::loading(Target::Root(workspace));
+        let mut overlay = PreviewOverlay::loading(Target::Root(workspace), Vec::new());
         overlay.path = Some("file".to_owned());
         overlay.lines = vec!["x".repeat(MAX_PREVIEW_SEARCH_MATCHES + 1)];
         overlay.search = "x".to_owned();
@@ -784,7 +897,7 @@ mod tests {
             PreviewFileFilter::Changed
         );
 
-        let mut overlay = PreviewOverlay::loading(Target::Root(WorkspaceId::new()));
+        let mut overlay = PreviewOverlay::loading(Target::Root(WorkspaceId::new()), Vec::new());
         overlay.path = Some("file".to_owned());
         overlay.lines = vec!["n n".to_owned()];
         assert!(update_preview_document(&mut overlay, &AppKey::Char('/')).is_empty());
@@ -901,5 +1014,158 @@ mod tests {
         assert!(overlay.visible_candidates().is_empty());
         assert_eq!(overlay.total_files(), 0);
         assert_eq!(overlay.selected(), 0);
+    }
+
+    #[test]
+    fn the_all_group_rests_on_recent_and_changed_files_until_something_is_typed() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec![
+                    "Cargo.toml".into(),
+                    "document/03-tui.md".into(),
+                    "src/lib.rs".into(),
+                    "src/main.rs".into(),
+                ],
+                changed: vec!["src/lib.rs".into(), "document/03-tui.md".into()],
+                lines: Vec::new(),
+            }),
+        );
+
+        // 全件は出さず、変更ファイルだけが並ぶ。総数は別に読める。
+        let overlay = state.preview_overlay().unwrap();
+        assert_eq!(overlay.rest_sections(), Some((0, 2)));
+        assert_eq!(overlay.total_files(), 4);
+        assert_eq!(rows(overlay), ["src/lib.rs", "document/03-tui.md"]);
+
+        // 1 文字入れると群全体が対象になる。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('m')));
+        let overlay = state.preview_overlay().unwrap();
+        assert_eq!(overlay.rest_sections(), None);
+        // `m` を含まない src/lib.rs だけが落ちる。
+        assert_eq!(rows(overlay).len(), 3);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        assert_eq!(
+            state.preview_overlay().unwrap().rest_sections(),
+            Some((0, 2))
+        );
+
+        // 開いた file は recent になり、overlay を閉じても残る。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            state.preview_overlay().unwrap().path(),
+            Some("document/03-tui.md")
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec![
+                    "Cargo.toml".into(),
+                    "document/03-tui.md".into(),
+                    "src/lib.rs".into(),
+                ],
+                changed: vec!["src/lib.rs".into(), "document/03-tui.md".into()],
+                lines: Vec::new(),
+            }),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        // recent が先頭に来て、changed 側からは重複が落ちる。
+        assert_eq!(overlay.rest_sections(), Some((1, 1)));
+        assert_eq!(rows(overlay), ["document/03-tui.md", "src/lib.rs"]);
+
+        // Tracked は全件をそのまま並べる担当のまま。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Left));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::Tracked,
+                files: vec!["Cargo.toml".into(), "src/lib.rs".into()],
+                changed: Vec::new(),
+                lines: Vec::new(),
+            }),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        assert_eq!(overlay.rest_sections(), None);
+        assert_eq!(rows(overlay), ["Cargo.toml", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn the_recent_history_deduplicates_and_keeps_the_last_targets() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let files = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: files.clone(),
+                changed: files,
+                lines: Vec::new(),
+            }),
+        );
+
+        // a → b → a の順に開く。同じ file は重複せず、最後に開いたものが先頭に来る。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.preview_recent_of(target), ["src/a.rs", "src/b.rs"]);
+
+        // 履歴を持つ target は上限まで、古く使われたものから落ちる。
+        let first = Target::Root(WorkspaceId::new());
+        state.set_preview_recent(first, vec!["kept.rs".to_owned()]);
+        let others = (0..super::super::MAX_PREVIEW_RECENT_TARGETS - 1)
+            .map(|_| Target::Root(WorkspaceId::new()))
+            .collect::<Vec<_>>();
+        for other in &others {
+            state.set_preview_recent(*other, vec!["other.rs".to_owned()]);
+        }
+        // 触り直した target は最後尾へ移り、次の追加では落ちない。
+        state.set_preview_recent(first, vec!["kept.rs".to_owned(), "again.rs".to_owned()]);
+        state.set_preview_recent(Target::Root(WorkspaceId::new()), vec!["new.rs".to_owned()]);
+        assert_eq!(state.preview_recent_of(first), ["kept.rs", "again.rs"]);
+        assert!(state.preview_recent_of(others[0]).is_empty());
+    }
+
+    fn rows(overlay: &PreviewOverlay) -> Vec<&str> {
+        overlay
+            .visible_candidates()
+            .iter()
+            .map(PreviewCandidate::path)
+            .collect()
     }
 }
