@@ -140,7 +140,9 @@ binary の更新直後も TUI / CLI / MCP は停止中の Agent を巻き込ま�
 operation ID の typed rollover trigger を **planned replacement** で消費する（`--force` を付けない）。したがって live runtime の有無は
 daemon 自身の census が決め、何も live でなければ cold transition、generic Terminal だけが live なら PTY を維持する
 seamless rollover になる。live Agent の daemon-provisioned MCP credential は process 間で移送できないため、1 件でもあれば
-old active を維持して拒否する（[planned replacement](#planned-replacement)）。replacement 後は exact artifact を handshake で
+old active を維持して拒否する（[planned replacement](#planned-replacement)）。移送しない理由は
+[7. MCP サーバ#credential を generation 間で移送しない理由](07-mcp.md#credential-を-generation-間で移送しない理由)
+が正本である。replacement 後は exact artifact を handshake で
 確認してから再接続する。これにより `USAGI_RUNTIME_MODE=development cargo run` は再コンパイル後も起動でき、かつ再 build が
 他の client の live Agent を巻き添えにしない。同じ artifact の通常 TUI / CLI / MCP 起動は trigger 0 で daemon を再利用する。intentional な
 same-artifact replacement は通常 bootstrap と分離した `usagi daemon replace` が force trigger を発行する。

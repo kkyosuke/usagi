@@ -338,6 +338,21 @@ plugin root は全実効 writable surface との overlap を拒否した上で s
 `~/.gemini/GEMINI.md`、global config、state の plugin / skill / settings / import manifest / status・title script は
 未作成 path も含めて read-only のままとなり、既存 customization を読み取れる一方で新規作成・置換を防ぐ。
 
+#### credential を generation 間で移送しない理由
+
+この小節が、credential を generation 間で移送しないという設計判断の正本である。credential の durable form が
+provenance だけで opaque secret を保存しないことは
+[5. daemon#Agent admission transaction](05-daemon.md#agent-admission-transaction) が正本である。
+
+**secret を successor へ運ぶ経路は作らない。** 失効境界は process 境界、すなわち Agent runtime の終了と daemon
+process の入れ替えである。secret を process 間へ運ぶ経路を作るとこの境界が消え、旧 generation が発行した
+credential を新 owner の authority として名乗れてしまう。移送は「できない」のではなく、専用経路を作らないことで
+成立させている性質である。
+
+新 owner が未知の credential を draining generation へ中継する経路も作らない。こちらは fence の側からの理由で、
+draining が control と spawn を失っていること（[5. daemon#admission fence](05-daemon.md#admission-fence)）が
+rollover 安全性の根拠であり、中継はその authority を戻すことになる。
+
 ### delegation の atomicity
 
 `session_delegate_brief` は session 作成と dispatch の 2 つの effect を持つ composite operation だが、成功応答は
