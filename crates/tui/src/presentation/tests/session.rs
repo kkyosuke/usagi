@@ -230,6 +230,118 @@ fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
     );
 }
 
+/// A PR belongs to the session that opened it, and sessions are created while
+/// the workspace stays open. The lane that observes them is therefore re-aimed
+/// from the daemon's own snapshot, not only from the set the workspace was
+/// entered with: reducing that snapshot produces the effect, and the frame loop
+/// has to dispatch it. While it dropped it, a PR made by a session created
+/// after entry reached no surface until the workspace was reopened.
+#[test]
+fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
+    let snapshot = snapshot("pr-lane");
+    let original = snapshot.session_ids[0];
+    let added = SessionId::new();
+    let mut added_record = snapshot.state.sessions[0].clone();
+    added_record.name = "pr-lane-added".to_owned();
+    added_record.root = PathBuf::from("/tmp/pr-lane/pr-lane-added");
+    let update = SessionCommandResult {
+        message: "daemon snapshot changed".to_owned(),
+        sessions: Some(vec![snapshot.state.sessions[0].clone(), added_record]),
+        session_ids: Some(vec![original, added]),
+        agent_resumes: None,
+        session_lifecycles: None,
+        session_roles: None,
+        revision: Some(1),
+    };
+    let lane = RecordingPrLane::default();
+    let mut factory = PrLaneBackendFactory {
+        lane: lane.clone(),
+        session_refresh: Some(Box::new(ScheduledSessionRefreshPort {
+            publish_on_take: 2,
+            takes: 0,
+            update: Some(update),
+        })),
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Other,
+        Key::Other,
+        Key::Other,
+        Key::Other,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+        Exit::Quit
+    );
+
+    let observed = lane.observed();
+    assert_eq!(
+        observed.first().map(Vec::as_slice),
+        Some([original].as_slice()),
+        "the lane did not start on the sessions the workspace was entered with: {observed:?}"
+    );
+    assert!(
+        observed.iter().any(|targets| targets.contains(&added)),
+        "the session created after entry never reached the PR lane: {observed:?}"
+    );
+}
+
+/// Dispatching a batch of reducer effects is also where a stop takes effect.
+/// The loop's teardown *is* returning, so a stop must end the batch at the
+/// effect that asked for it instead of being averaged over the rest. No daemon
+/// snapshot reduces to one today, which is exactly why the contract is pinned
+/// here: the shell-fed dispatcher is shared, and a future event that does ask
+/// to leave must not be answered by running the effects behind it first.
+#[test]
+fn a_stopping_effect_ends_the_dispatched_batch() {
+    use crate::presentation::frame_loop::dispatch_reducer_effects;
+
+    let session = SessionId::new();
+    let lane = RecordingPrLane::default();
+    let (host, _actions) = ControllerHost::channel();
+    let mut backend = DaemonBackend::new(
+        Box::new(host.clone()),
+        Box::new(host),
+        Box::new(UnavailableBackendPort),
+        Box::new(UnavailableBackendPort),
+    )
+    .with_overlay(Box::new(lane.clone()));
+
+    assert_eq!(dispatch_reducer_effects(&mut backend, Vec::new()), None);
+    assert_eq!(
+        dispatch_reducer_effects(
+            &mut backend,
+            vec![Effect::SyncPullRequestTargets {
+                sessions: vec![session],
+            }],
+        ),
+        None
+    );
+    assert_eq!(
+        dispatch_reducer_effects(
+            &mut backend,
+            vec![
+                Effect::Detach,
+                Effect::SyncPullRequestTargets {
+                    sessions: Vec::new(),
+                },
+            ],
+        ),
+        Some(crate::presentation::WorkspaceStep::Quit)
+    );
+    assert_eq!(
+        dispatch_reducer_effects(&mut backend, vec![Effect::LeaveWorkspace]),
+        Some(crate::presentation::WorkspaceStep::Back)
+    );
+    assert_eq!(
+        lane.observed(),
+        vec![vec![session]],
+        "an effect behind the stop still reached its port"
+    );
+}
+
 #[test]
 fn malformed_session_identity_refreshes_clear_rows_ids_and_agent_targets() {
     let workspace = WorkspaceId::new();

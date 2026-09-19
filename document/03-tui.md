@@ -218,8 +218,8 @@ tab click と同じく target を先に prepare し、成功した場合だけ�
 composition は teardown 完了後に開始し、prepare が失敗した場合は現在の workspace と tab を保つ。
 
 離脱、左右移動、終了はいずれも **active workspace のために確立した資源をすべて落とす**。terminal lane・poll lane・
-pane launch client・restore client の接続、Home の 3 つの[背景観測 lane](#home-frame-loop-と背景観測-lane)、
-metrics lane はいずれも workspace の frame loop が所有しており、loop を抜けることが teardown そのものである。
+pane launch client・restore client の接続、Home の 4 つの[背景観測 lane](#home-frame-loop-と背景観測-lane)
+（decision / session / PR / metrics）はいずれも workspace の frame loop が所有しており、loop を抜けることが teardown そのものである。
 したがって**次の workspace を開く時点で、前の workspace の port・pump・worker は 1 つも残っていない**。
 唯一の例外は restore observation の client で、これは「hung な restore を終了が待たない」ために
 切り離した worker が持つ（[背景 observation lane](#背景-observation-lane)）。
@@ -839,20 +839,21 @@ daemon に残すが異なる画面 tree を開かない。
 ## Home frame loop と背景観測 lane
 
 **描画スレッドは daemon を同期で叩かない。** Home の 1 frame は `非ブロッキング drain → 純粋な projection → draw →
-入力` だけで構成し、daemon への request はすべて背景 lane が発行する。この不変条件は Home の 3 lane（decision /
-session / metrics）と、live terminal の
+入力` だけで構成し、daemon への request はすべて背景 lane が発行する。この不変条件は Home の 4 lane（decision /
+session / PR / metrics）と、live terminal の
 [背景 observation lane](#背景-observation-lane)（foreground poll pump / background inventory pump）に共通である。
 Garden が前面にある間だけ動く
 [inactive project の Agent 観測](#inactive-project-の-agent-観測)も同じ不変条件に従い、1 round ずつ detach した
 worker が request を発行して frame は結果を drain するだけである。
 
-Home の 3 lane はそれぞれ**専用の常駐 worker thread と専用の永続接続**を持ち、cadence は 250ms〜1s の範囲に clamp する。
+Home の 4 lane はそれぞれ**専用の常駐 worker thread と専用の永続接続**を持ち、cadence は 250ms〜1s の範囲に clamp する。
 worker は workspace を開いたときに 1 本ずつ起動して閉じるまで生存するため、frame が thread を作ることはない。
 
 | lane | 観測対象 | primitive | cadence | 起動する契機 | cold-start |
 |---|---|---|---|---|---|
 | decision | 保留中の user decision | `UserDecision::List` | 500ms。失敗中は 500ms から 8s 上限の指数 backoff | 最初の `RefreshDecisions` | しない |
 | session | 他 client（MCP server / CLI）が変えた session lifecycle | `Session::List` | 1s。失敗中は 1s から 8s 上限の指数 backoff | frame loop 開始時の wake | する（高々 3 回） |
+| PR | daemon が所有する session ごとの PR inventory | `PrBatch` | 1s。失敗中は 1s から 8s 上限の指数 backoff | 観測対象 session 集合の反映と PR modal の明示要求 | しない |
 | metrics | mascot の daemon metrics | `Metrics::Snapshot` | 1s。失敗中は 1s から 8s 上限の指数 backoff | 最初の描画 | しない |
 
 - **lane は駆動されるまで dormant である**。worker thread は composition と同時に起動するが、上表の契機で起こされるまで
@@ -865,20 +866,27 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   結果で反映する。
 - **順序は daemon の lifecycle revision で調停する**。lane の観測が利用者の command より前に始まって後に届いた場合、
   revision が古いので破棄する。どの lane が観測したかに関わらず最新の daemon 状態が勝つ。
-- **cold-start の権限は session lane だけが持つ**。observation lane（decision / metrics）は起動中の daemon へ attach
+- **cold-start の権限は session lane だけが持つ**。observation lane（decision / PR / metrics）は起動中の daemon へ attach
   するだけで、`bootstrap.lock` の取得も lifecycle subprocess の起動も readiness 待ちも行わない。session lane は attach に
   失敗したときだけ cold-start へ落ち、その回数は workspace あたり 3 回に bound する。いずれも背景 thread 上で起き、
   描画スレッドが subprocess や sleep を実行することはない。
 - **tick と resize は inventory を触らない**。terminal の wake-up（tick）と端末リサイズはどちらも再描画の機会であって
   観測の機会ではない。frame loop はこの 2 つを別のキーとして受け取り、どちらでも lane を起こさないため、ウィンドウの
   ドラッグリサイズは 1 event につき 1 回の再描画だけを費やす。実サイズは frame 先頭の `term.size()` から読む。
+- **観測対象の張り替えも effect である**。PR lane は「いまある session の集合」を観測するため、集合が変われば
+  lane を張り替える必要がある。frame loop は key / pointer / tick と同じく、**daemon snapshot を還元して返った
+  effect も dispatch する**（効果の出どころで区別しない）。session 一覧の変化が lane へ届くのはこの経路だけで、
+  ここで落とすと workspace を開いた時点の session しか観測されず、あとから作った session の PR がどの面にも出ない。
+- **明示要求は自力で回復する**。PR modal の要求は、対象 session が lane の集合に無ければ自分で加えてから起こす。
+  観測対象でない session を要求しても答えが返らない、という行き止まりを作らない。
 - **lane が応答しなくても frame は進む**。lane が hung / 不在でも frame loop は drain が空振りするだけなので、描画・
   入力・modal・quit は待たされない。
 - **1 frame が取り込む completion は各 queue 128 件まで**とする。producer が大量の結果を一度に届けても残りは次の
   frame へ持ち越し、入力と描画を starvation させない。
 - **失敗の表示は失敗の連続に対して 1 回である**。cadence ごとに notice を積まない。decision lane は失敗状態へ入った
   ときに 1 回だけ notice を出し、次に成功したらその抑止を解く。session lane の失敗は refresh を要求した完了経路の
-  notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。
+  notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。PR lane の失敗表示は
+  [PR modal と browser effect](#pr-modal-と-browser-effect) が正本である。
 
 ## frame 予算
 
@@ -888,7 +896,7 @@ frame から追い出したのに続き、**ローカルのファイル IO と�
 
 | 作業 | idle な tick で払うか | 決めるもの |
 |---|---|---|
-| lane の bounded drain（decision / session / metrics / terminal / pane completion） | 払う | 毎 tick、各 queue 最大 128 件 |
+| lane の bounded drain（decision / session / PR / metrics / terminal / pane completion） | 払う | 毎 tick、各 queue 最大 128 件 |
 | restore retry の admission、pane launch の投入、入力処理 | 払う | 毎 tick 無条件 |
 | `.usagi/sessions` のディレクトリ走査 | 払わない | inline create フォームが開いているか |
 | frame の構築と端末への diff | 変化した tick だけ払う | frame material が前 frame と異なるか |
@@ -1911,7 +1919,7 @@ pane が live へ戻った frame で古い順に送る。
 #### 背景 observation lane
 
 daemon の出力・exit を観測する lane は 2 本あり、どちらも描画スレッドの外で、専用接続と bounded cadence を持つ。
-Home の inventory（decision / session / metrics）を観測する 3 lane は
+Home の inventory（decision / session / PR / metrics）を観測する 4 lane は
 [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane) が正本で、この 2 本とは観測対象も cadence も別である。
 
 | lane | 観測対象 | primitive | cadence |

@@ -6,11 +6,11 @@ use std::sync::mpsc;
 use super::{
     AgentTabIntentMutation, AppEvent, AppKey, AppState, Arc, AvailableAgentModels, BTreeMap,
     BTreeSet, BackendEvent, BackendFlow, Color, Completions, Config, ConfigStep, ConfirmationView,
-    ControllerBackendFactory, ControllerHost, ControllerHostAction, DateTime, Effect, EntryForm,
-    Exit, FRAME_EVENT_BUDGET, Feedback, GARDEN_OBSERVATION_BACKOFF, GARDEN_OBSERVATION_INTERVAL,
-    GardenClick, GardenInputRoute, GardenObservationCompletion, Geometry, GitDiff,
-    HomeFrameMaterial, HomeHeaderAction, HomeMode, HomeProjection, IconMode, IdleWatch, Key,
-    LiveTerminalAction, LiveTerminalControls, MetricsBackend, MetricsProjection,
+    ControllerBackendFactory, ControllerHost, ControllerHostAction, DaemonBackend, DateTime,
+    Effect, EntryForm, Exit, FRAME_EVENT_BUDGET, Feedback, GARDEN_OBSERVATION_BACKOFF,
+    GARDEN_OBSERVATION_INTERVAL, GardenClick, GardenInputRoute, GardenObservationCompletion,
+    Geometry, GitDiff, HomeFrameMaterial, HomeHeaderAction, HomeMode, HomeProjection, IconMode,
+    IdleWatch, Key, LiveTerminalAction, LiveTerminalControls, MetricsBackend, MetricsProjection,
     MissingWorkspacePrompt, New, NewStep, Notice, ObservationLane, Open, OpenStep, OperationId,
     Overlay, OverlayIntent, PROJECT_BAR_ROWS, PaneLaunch, PaneTab, Path, PendingCreate,
     PendingWorkspaceCreate, PointerEvent, PointerKind, PrModalClickRoute, ProjectBarTarget,
@@ -651,6 +651,31 @@ pub(super) fn drain_controller_host_actions(
     }
 }
 
+/// Dispatch the effects a shell-fed event produced, reporting the stop one of
+/// them asked for.
+///
+/// A daemon snapshot is an event like any other: its reduction owns real work.
+/// `Sessions` re-aims the resident PR lane at the current session set and
+/// continues the cleanup/remove queue behind a completed member; a closed
+/// preview cancels its scan. Dropping those effects left the PR lane observing
+/// only the sessions that existed when the workspace was opened, so a PR made
+/// by a session created afterwards reached no surface until the workspace was
+/// reopened.
+#[must_use = "a stop asked for by an effect ends the workspace loop"]
+pub(super) fn dispatch_reducer_effects(
+    backend: &mut DaemonBackend,
+    effects: Vec<Effect>,
+) -> Option<WorkspaceStep> {
+    for effect in effects {
+        match backend.dispatch(effect) {
+            BackendFlow::Continue => {}
+            BackendFlow::Exit => return Some(WorkspaceStep::Quit),
+            BackendFlow::Leave => return Some(WorkspaceStep::Back),
+        }
+    }
+    None
+}
+
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
@@ -890,8 +915,12 @@ pub(super) fn drive_workspace_controller(
                 catalog,
             )));
         }
+        let mut backend_effects = Vec::new();
         for event in backend.drain_events_bounded(FRAME_EVENT_BUDGET) {
-            let _ = runtime.apply_event(event);
+            backend_effects.extend(runtime.apply_event(event));
+        }
+        if let Some(step) = dispatch_reducer_effects(&mut backend, backend_effects) {
+            return Ok(step);
         }
         while let Some(epoch) = restore_connection.take_reconnected_epoch() {
             restore_retry.reconnected(epoch, restore_clock.elapsed());
@@ -922,7 +951,10 @@ pub(super) fn drive_workspace_controller(
             ui.workspace.path(),
             restore_clock.elapsed(),
         );
-        sync_runtime_sessions(&mut runtime, &ui, worktree_names);
+        let session_effects = sync_runtime_sessions(&mut runtime, &ui, worktree_names);
+        if let Some(step) = dispatch_reducer_effects(&mut backend, session_effects) {
+            return Ok(step);
+        }
         restore_workspace_closeup(deck, &root_cwd, &mut runtime);
         if let Some(visit) = pending_garden_visit.take() {
             let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
@@ -1191,9 +1223,14 @@ pub(super) fn drive_workspace_controller(
             director_material_key = Some(next_director_key);
         }
         if ui.take_terminal_reconnected() {
-            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Feedback(
+            // Reconnecting re-aims the observation lanes: what happened while
+            // the stream was down is only knowable from a fresh snapshot.
+            let reconnect_effects = runtime.apply_event(AppEvent::Backend(BackendEvent::Feedback(
                 Feedback::Reconnected,
             )));
+            if let Some(step) = dispatch_reducer_effects(&mut backend, reconnect_effects) {
+                return Ok(step);
+            }
         }
         let next_session_key = (
             ui.workspace.material_revision(),

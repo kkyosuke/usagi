@@ -105,7 +105,7 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
     );
 
     let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), ids);
-    crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
     let projected = crate::presentation::project_controller_sessions(&ui, runtime.state());
     assert_eq!(
         projected

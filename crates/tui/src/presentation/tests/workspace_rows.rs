@@ -108,7 +108,7 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
         &mut std::collections::HashMap::new(),
         Geometry { cols: 20, rows: 5 },
     );
-    crate::presentation::sync_runtime_sessions(&mut mismatched_runtime, &ui, &[]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut mismatched_runtime, &ui, &[]);
     let mut no_controls = LiveTerminalControls::default();
     let _ = crate::presentation::poll_and_project_terminals(
         &mut ui,

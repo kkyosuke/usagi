@@ -741,14 +741,15 @@ impl BackendOverlayPort for ProductionOverlayPort {
     }
 
     fn load_pull_requests(&mut self, target: Target, completions: Completions) {
-        if matches!(target, Target::Root(_)) {
+        let Target::Session(session) = target else {
             completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
                 target,
                 revision: 0,
                 prs: Vec::new(),
             }));
             return;
-        }
+        };
+        remember_pr_target(&self.pr_sessions, session);
         self.pr_pump.wake();
         if let Some(result) = self.pr_pump.take() {
             self.publish_prs(result, &completions);
@@ -2852,6 +2853,23 @@ fn lock_pr_sessions(sessions: &Mutex<Vec<SessionId>>) -> std::sync::MutexGuard<'
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Adds `session` to the resident PR lane's target set, reporting whether it
+/// was missing.
+///
+/// An explicit request must answer for the session it names. The set is
+/// otherwise only replaced by lifecycle reconciliation, so a session absent
+/// from it would leave the modal waiting on a snapshot the lane never asks
+/// for. Reconciliation replaces the whole set, so an addition here cannot
+/// outlive the session.
+fn remember_pr_target(sessions: &Mutex<Vec<SessionId>>, session: SessionId) -> bool {
+    let mut current = lock_pr_sessions(sessions);
+    if current.contains(&session) {
+        return false;
+    }
+    current.push(session);
+    true
+}
+
 /// Spawns the resident PR snapshot lane. It keeps one connection and observes
 /// every current stable session identity off the render thread; the shared set
 /// is replaced when lifecycle reconciliation adds or removes a session.
@@ -4614,8 +4632,9 @@ mod tests {
         decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
         decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
         exact_agent_resume_request, global_icon_mode, lifecycle_snapshot, load_screen_graph_data,
-        load_workspace_state, map_terminal_error, metrics_cadence, passthrough_key, pr_cadence,
-        pr_snapshot_events, probe_path, reduced_motion_from_environment, remove_session_payload,
+        load_workspace_state, lock_pr_sessions, map_terminal_error, metrics_cadence,
+        passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
+        reduced_motion_from_environment, remember_pr_target, remove_session_payload,
         reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
         terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
         validate_workspace_directory, version_detail, version_result_from_observation,
@@ -4921,6 +4940,24 @@ mod tests {
                 })
             ] if *first == session && *second == failed
         ));
+    }
+
+    /// An explicit request has to answer for the session it names, whatever the
+    /// lane was last aimed at: a session missing from the set produces no
+    /// snapshot at all, so the modal waiting on it would never open.
+    #[test]
+    fn an_explicit_request_adds_its_session_to_the_pr_lane_once() {
+        let known = SessionId::new();
+        let requested = SessionId::new();
+        let sessions = std::sync::Mutex::new(vec![known]);
+
+        assert!(remember_pr_target(&sessions, requested));
+        assert!(!remember_pr_target(&sessions, requested));
+        assert!(!remember_pr_target(&sessions, known));
+        assert_eq!(
+            lock_pr_sessions(&sessions).as_slice(),
+            [known, requested].as_slice()
+        );
     }
 
     #[test]

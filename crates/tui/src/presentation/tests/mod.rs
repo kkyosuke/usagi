@@ -3462,6 +3462,86 @@ impl BackendDecisionPort for CountedPort {
 /// shares no teardown-sensitive resource with it.
 const RESIDENT_PORTS_PER_COMPOSITION: usize = 13;
 
+/// The resident PR lane, reduced to what it is aimed at. Every session set the
+/// frame loop hands over is kept in order, so a test can tell "never re-aimed"
+/// from "re-aimed at the wrong set".
+#[derive(Clone, Default)]
+struct RecordingPrLane(Arc<Mutex<Vec<Vec<SessionId>>>>);
+
+impl RecordingPrLane {
+    fn observed(&self) -> Vec<Vec<SessionId>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl super::BackendOverlayPort for RecordingPrLane {
+    fn sync_pull_request_targets(&mut self, sessions: Vec<SessionId>) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(sessions);
+    }
+
+    fn load_pull_requests(&mut self, _: Target, _: Completions) {}
+
+    fn load_preview(
+        &mut self,
+        _: Target,
+        _: RequestId,
+        _: Option<String>,
+        _: PreviewFileFilter,
+        _: Completions,
+    ) {
+    }
+
+    fn open_pull_request(&mut self, _: String, _: Completions) {}
+}
+
+/// A composition whose only observable port is the PR lane, plus the session
+/// lane that publishes the snapshot under test.
+struct PrLaneBackendFactory {
+    lane: RecordingPrLane,
+    session_refresh: Option<Box<dyn SessionRefreshPort>>,
+}
+
+impl super::ControllerBackendFactory for PrLaneBackendFactory {
+    fn create(
+        &mut self,
+        _: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> super::ControllerBackendComposition {
+        super::ControllerBackendComposition {
+            backend: DaemonBackend::new(
+                Box::new(host.clone()),
+                Box::new(host),
+                Box::new(UnavailableBackendPort),
+                Box::new(UnavailableBackendPort),
+            )
+            .with_overlay(Box::new(self.lane.clone())),
+            session_catalogs: Box::new(super::UnavailableSessionCatalogPort),
+            session_commands: Box::new(UnavailableSessionCommandPort),
+            session_refresh: self
+                .session_refresh
+                .take()
+                .expect("the session lane is created once"),
+            agent_commands: Box::new(UnavailableAgentCommandPort),
+            pane_launch_commands: Box::new(UnavailablePaneLaunchPort),
+            restore_commands: Box::new(UnavailableAgentCommandPort),
+            restore_connection: Box::new(super::UnavailableRestoreConnectionPort),
+            garden_inventory: Box::new(UnavailableGardenInventoryPort),
+            work_runs: Box::new(super::UnavailableWorkRunPort),
+            agent_tab_intents: Box::new(super::UnavailableAgentTabIntentPort),
+            external_terminal: Box::new(UnavailableExternalTerminalPort),
+            metrics: Box::new(NoMetrics),
+            browser: Box::new(UnavailableBrowserOpener),
+            session_worktrees: Box::new(super::UnavailableSessionWorktreeScanPort),
+        }
+    }
+}
+
 /// A production-shaped factory whose every port counts its own drop, and
 /// which records how many ports had been dropped when each workspace's
 /// composition was created.
