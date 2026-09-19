@@ -3749,12 +3749,13 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     && overlay.file_filter == *filter
             }) {
                 if path.is_none() {
-                    overlay.files = files
-                        .iter()
-                        .filter(|path| presentation_text_is_safe(path))
-                        .cloned()
-                        .collect();
-                    overlay.selected = 0;
+                    overlay.set_files(
+                        files
+                            .iter()
+                            .filter(|path| presentation_text_is_safe(path))
+                            .cloned()
+                            .collect(),
+                    );
                 } else {
                     overlay.lines = lines
                         .iter()

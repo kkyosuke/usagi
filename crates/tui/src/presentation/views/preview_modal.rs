@@ -644,11 +644,11 @@ mod tests {
         assert!(filtered.contains("preview_modal.rs"));
         assert!(!filtered.contains("03-tui.md"));
 
-        // 一致した cell だけが反転する。名前側の `mod` と、いま greedy に選ばれて
-        // いるディレクトリ側の一致（`pre`）の両方が同じ反転で出る。
+        // 一致した cell だけが反転する。ランキングが名前側を選ぶので、`prev` と
+        // `mod` の 2 つの run がファイル名の中で反転する。
         let styled = render_over(24, 90, &base, state.preview_overlay().unwrap()).join("\n");
+        assert!(styled.contains("\u{1b}[1;7;36mprev"));
         assert!(styled.contains("\u{1b}[1;7;36mmod"));
-        assert!(styled.contains("\u{1b}[1;7;36mpre"));
     }
 
     #[test]

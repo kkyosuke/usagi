@@ -4,7 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use usagi_core::domain::id::RequestId;
 use usagi_core::domain::presentation_text::presentation_character_is_safe;
 
-use crate::usecase::fuzzy::{FuzzyMatch, fuzzy_match};
+use crate::usecase::fuzzy::path_match;
 
 use super::{AppKey, AppState, Effect, SafeError, Target};
 
@@ -90,10 +90,10 @@ impl PreviewSearchMatch {
 
 /// One filtered finder row: a repository-relative path and the cells the
 /// current filter matched inside it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewCandidate<'a> {
     path: &'a str,
-    matched: FuzzyMatch,
+    positions: &'a [usize],
 }
 
 impl<'a> PreviewCandidate<'a> {
@@ -105,9 +105,21 @@ impl<'a> PreviewCandidate<'a> {
 
     /// Ascending `char` indices of [`Self::path`] that the filter matched.
     #[must_use]
-    pub fn positions(&self) -> &[usize] {
-        self.matched.positions()
+    pub const fn positions(&self) -> &'a [usize] {
+        self.positions
     }
+}
+
+/// One ranked row of the finder, kept between keystrokes.
+///
+/// Ranking 20,000 candidates is the expensive part of the finder, and the view
+/// reads the rows several times per frame. The reducer therefore ranks once per
+/// input — when the filter or the loaded group changes — and keeps the result
+/// here; rendering only borrows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewRow {
+    file: usize,
+    positions: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,8 +137,15 @@ struct PreviewDisplay {
 pub struct PreviewOverlay {
     pub(super) target: Target,
     pub(super) request_id: RequestId,
-    pub(super) files: Vec<String>,
-    pub(super) filter: String,
+    /// Loaded candidates of the current group. Private: every write must go
+    /// through [`PreviewOverlay::set_files`] / [`PreviewOverlay::clear_files`]
+    /// so the ranked rows below cannot index a list they were not built from.
+    files: Vec<String>,
+    /// Ranked rows for the current filter; see [`PreviewOverlay::refilter`].
+    visible: Vec<PreviewRow>,
+    /// Current fuzzy filter. Private for the same reason as `files`; edits go
+    /// through [`PreviewOverlay::edit_filter`].
+    filter: String,
     pub(super) file_filter: PreviewFileFilter,
     pub(super) selected: usize,
     pub(super) path: Option<String>,
@@ -149,6 +168,7 @@ impl PreviewOverlay {
             target,
             request_id: RequestId::new(),
             files: Vec::new(),
+            visible: Vec::new(),
             filter: String::new(),
             file_filter: PreviewFileFilter::All,
             selected: 0,
@@ -185,25 +205,63 @@ impl PreviewOverlay {
     pub const fn file_filter(&self) -> PreviewFileFilter {
         self.file_filter
     }
-    /// Filtered candidates in fuzzy rank order, each carrying the query
-    /// positions so the finder can show what the filter explains.
+    /// Filtered candidates in rank order, each carrying the query positions so
+    /// the finder can show what the filter explains.
     #[must_use]
     pub fn visible_candidates(&self) -> Vec<PreviewCandidate<'_>> {
-        let mut candidates = self
+        self.visible
+            .iter()
+            .map(|row| PreviewCandidate {
+                path: self.files[row.file].as_str(),
+                positions: &row.positions,
+            })
+            .collect()
+    }
+
+    /// Re-rank the loaded group against the current filter.
+    ///
+    /// Every mutation of the filter or of the loaded files goes through this so
+    /// the cached rows cannot drift from the inputs that produced them.
+    fn refilter(&mut self) {
+        let mut rows = self
             .files
             .iter()
             .enumerate()
-            .filter_map(|(order, path)| {
-                fuzzy_match(path, &self.filter).map(|matched| (order, path.as_str(), matched))
+            .filter_map(|(file, path)| {
+                path_match(path, &self.filter).map(|matched| (matched.score(), file, matched))
             })
             .collect::<Vec<_>>();
         if !self.filter.is_empty() {
-            candidates.sort_by_key(|(order, _, matched)| (matched.score(), *order));
+            rows.sort_by_key(|(score, file, _)| (*score, *file));
         }
-        candidates
+        self.visible = rows
             .into_iter()
-            .map(|(_, path, matched)| PreviewCandidate { path, matched })
-            .collect()
+            .map(|(_, file, matched)| PreviewRow {
+                file,
+                positions: matched.into_positions(),
+            })
+            .collect();
+    }
+
+    /// Replace the loaded candidates of the current group.
+    pub(super) fn set_files(&mut self, files: Vec<String>) {
+        self.files = files;
+        self.selected = 0;
+        self.refilter();
+    }
+
+    /// Drop the loaded candidates while a new group is in flight.
+    fn clear_files(&mut self) {
+        self.files.clear();
+        self.selected = 0;
+        self.refilter();
+    }
+
+    /// Edit the filter and re-rank from the top.
+    fn edit_filter(&mut self, edit: impl FnOnce(&mut String)) {
+        edit(&mut self.filter);
+        self.selected = 0;
+        self.refilter();
     }
     /// Number of candidates offered by the loaded file group, before filtering.
     #[must_use]
@@ -215,12 +273,22 @@ impl PreviewOverlay {
     pub const fn selected(&self) -> usize {
         self.selected
     }
+    /// Rows the finder currently offers.
+    ///
+    /// Reading the count or the cursor row must not rebuild the candidate list:
+    /// the reducer asks for both on every keystroke, and the list can hold
+    /// 20,000 rows.
+    #[must_use]
+    pub fn visible_len(&self) -> usize {
+        self.visible.len()
+    }
+
     /// Selected repository-relative path, if the current filter has a match.
     #[must_use]
     pub fn selected_file(&self) -> Option<&str> {
-        self.visible_candidates()
+        self.visible
             .get(self.selected)
-            .map(PreviewCandidate::path)
+            .map(|row| self.files[row.file].as_str())
     }
     /// Open repository-relative document path. `None` means the finder is open.
     #[must_use]
@@ -454,8 +522,7 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             } else {
                 overlay.file_filter.previous()
             };
-            overlay.files.clear();
-            overlay.selected = 0;
+            overlay.clear_files();
             overlay.loading = true;
             overlay.error = None;
             let request_id = overlay.begin_request();
@@ -471,36 +538,30 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             overlay.selected = overlay.selected.saturating_sub(1);
         }
         AppKey::Down => {
-            let visible_len = state
-                .preview_overlay
-                .as_ref()
-                .unwrap()
-                .visible_candidates()
-                .len();
+            let visible_len = state.preview_overlay.as_ref().unwrap().visible_len();
             let overlay = state.preview_overlay.as_mut().unwrap();
             overlay.selected = (overlay.selected + 1).min(visible_len.saturating_sub(1));
         }
         AppKey::Backspace => {
             let overlay = state.preview_overlay.as_mut().unwrap();
-            pop_last_grapheme(&mut overlay.filter);
-            overlay.selected = 0;
+            overlay.edit_filter(pop_last_grapheme);
         }
         AppKey::Char(character) if presentation_character_is_safe(*character) => {
             let overlay = state.preview_overlay.as_mut().unwrap();
             if overlay.filter.chars().count() < MAX_PREVIEW_FILTER_CHARS {
-                overlay.filter.push(*character);
-                overlay.selected = 0;
+                overlay.edit_filter(|filter| filter.push(*character));
             }
         }
         AppKey::Paste(text) => {
             let overlay = state.preview_overlay.as_mut().unwrap();
             let remaining = MAX_PREVIEW_FILTER_CHARS.saturating_sub(overlay.filter.chars().count());
-            overlay.filter.extend(
-                text.chars()
-                    .filter(|character| presentation_character_is_safe(*character))
-                    .take(remaining),
-            );
-            overlay.selected = 0;
+            overlay.edit_filter(|filter| {
+                filter.extend(
+                    text.chars()
+                        .filter(|character| presentation_character_is_safe(*character))
+                        .take(remaining),
+                );
+            });
         }
         AppKey::Enter => {
             let Some((target, path)) = state.preview_overlay.as_ref().and_then(|overlay| {
@@ -745,5 +806,100 @@ mod tests {
             [Effect::CancelPreview]
         );
         assert_eq!(state.overlay, None);
+    }
+
+    #[test]
+    fn the_filter_stops_at_its_character_cap() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        complete(
+            &mut state,
+            target,
+            request_id,
+            None,
+            PreviewFileFilter::All,
+            &["src/lib.rs"],
+            &[],
+        );
+
+        // paste は上限までしか取り込まない。
+        let long = "x".repeat(MAX_PREVIEW_FILTER_CHARS + 10);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste(long)));
+        assert_eq!(
+            state.preview_overlay().unwrap().filter().chars().count(),
+            MAX_PREVIEW_FILTER_CHARS
+        );
+
+        // 上限に達したあとの 1 文字は捨てる。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
+        let filter = state.preview_overlay().unwrap().filter().to_owned();
+        assert_eq!(filter.chars().count(), MAX_PREVIEW_FILTER_CHARS);
+        assert!(!filter.contains('z'));
+
+        // 上限まで詰まっていても paste は落ちず、何も増やさない。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("zz".to_owned())));
+        assert_eq!(state.preview_overlay().unwrap().filter(), filter);
+    }
+
+    #[test]
+    fn the_finder_ranks_file_names_first_and_re_ranks_on_every_input() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        complete(
+            &mut state,
+            target,
+            request_id,
+            None,
+            PreviewFileFilter::All,
+            &[
+                "crates/tui/src/usecase/application/controller/preview/mod.rs",
+                "crates/tui/src/presentation/views/preview_modal.rs",
+            ],
+            &[],
+        );
+
+        // 名前に当たった候補が、ディレクトリに当たった候補より前に来る。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("preview".into())));
+        let overlay = state.preview_overlay().unwrap();
+        let ranked = overlay
+            .visible_candidates()
+            .iter()
+            .map(PreviewCandidate::path)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ranked,
+            [
+                "crates/tui/src/presentation/views/preview_modal.rs",
+                "crates/tui/src/usecase/application/controller/preview/mod.rs",
+            ]
+        );
+        // 一致位置はその候補のファイル名側にある。
+        let candidates = overlay.visible_candidates();
+        let first = candidates.first().unwrap();
+        let name_start = first.path().rfind('/').unwrap() + 1;
+        assert!(first.positions().iter().all(|cell| *cell >= name_start));
+
+        // Backspace も候補を作り直す。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
+        assert_eq!(state.preview_overlay().unwrap().filter(), "previe");
+        assert_eq!(
+            state.preview_overlay().unwrap().visible_candidates().len(),
+            2
+        );
+
+        // 群の切り替えは候補を空にし、選択も先頭へ戻す。
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        let overlay = state.preview_overlay().unwrap();
+        assert!(overlay.visible_candidates().is_empty());
+        assert_eq!(overlay.total_files(), 0);
+        assert_eq!(overlay.selected(), 0);
     }
 }
