@@ -523,11 +523,8 @@ mod tests {
                     .args(args)
                     .output()
                     .unwrap();
-                assert!(
-                    result.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                assert!(result.status.success(), "{stderr}");
             };
             git(&["init", "--quiet", "--initial-branch", branch]);
             fs::write(root.path().join("tracked"), "before").unwrap();
@@ -578,15 +575,14 @@ mod tests {
             sender.send(read_file(&directory, "pipe")).unwrap();
         });
         let result = receiver.recv_timeout(Duration::from_secs(2));
-        // A regression must fail rather than leave a blocked worker behind.
-        let rescue = result.as_ref().err().map(|_| {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&path)
-                .unwrap()
-        });
+        // Rescue after the bounded observation, even on success: a regression
+        // must fail the timeout assertion without leaving a blocked worker.
+        let rescue = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
         worker.join().unwrap();
         drop(rescue);
         assert_eq!(result.unwrap(), Err(FilePreviewError::NotRegular));
