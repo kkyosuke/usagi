@@ -608,6 +608,12 @@ pub fn verify_pr(
             value.get("body").and_then(serde_json::Value::as_str),
         )?;
     }
+    let status = git
+        .run(directory, &["status", "--porcelain"])
+        .map_err(|_| "Could not recheck worktree changes")?;
+    if !status.success || !status.stdout.trim().is_empty() {
+        return Err("Worktree has uncommitted changes after verification");
+    }
     let current = git
         .run(directory, &["rev-parse", "--verify", "HEAD"])
         .map_err(|_| "Could not recheck worktree HEAD")?;
@@ -1536,7 +1542,7 @@ mod tests {
         );
         entry.head_oid = Some(target.head_sha.clone());
         let output=serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"}).to_string();
-        for at in 0..3 {
+        for at in 0..4 {
             for mode in 0..3 {
                 assert!(
                     verify_pr(
@@ -1555,6 +1561,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn workflow_verification_rechecks_cleanliness_after_the_pr_response() {
+        struct EditedWorktreeGit(std::cell::Cell<bool>);
+        impl usagi_core::infrastructure::git::GitRunner for EditedWorktreeGit {
+            fn run(
+                &self,
+                path: &std::path::Path,
+                args: &[&str],
+            ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+                let mut output = Git.run(path, args)?;
+                if args[0] == "status" && self.0.get() {
+                    output.stdout = " M tracked.txt\n".into();
+                }
+                Ok(output)
+            }
+        }
+        let target = usagi_core::domain::agent_message::ReviewTarget {
+            base_sha: "b".repeat(40),
+            head_sha: "a".repeat(40),
+        };
+        let mut entry = usagi_core::domain::pr_inventory::PrEntry::new(
+            usagi_core::domain::pr_inventory::extract(b"https://github.com/owner/repo/pull/1")
+                .remove(0),
+        );
+        entry.head_oid = Some(target.head_sha.clone());
+        let git = EditedWorktreeGit(std::cell::Cell::new(false));
+        let mut view = |_: &str| {
+            // Both initial probes succeeded. A writer changes the worktree
+            // while this request is outstanding, without moving HEAD.
+            git.0.set(true);
+            Ok(serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"}).to_string())
+        };
+        assert_eq!(
+            verify_pr(
+                &git,
+                &mut view,
+                std::path::Path::new("/fixture"),
+                &target,
+                &[entry],
+                None
+            ),
+            Err("Worktree has uncommitted changes after verification")
+        );
     }
 
     #[test]

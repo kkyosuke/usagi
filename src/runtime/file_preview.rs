@@ -100,9 +100,12 @@ fn list_files_with(
             ),
         )?,
         PreviewFileFilter::Changed => {
-            let base = integration_base(root, run);
-            let arguments = changed_diff_arguments(&base);
-            extend_listed_files(&mut files, run(root, &arguments))?;
+            let tracked = match integration_base(root, run)? {
+                Some(base) => run(root, &changed_diff_arguments(base)),
+                // Before the first commit every indexed path is newly added.
+                None => run(root, &["ls-files", "-z", "--cached"]),
+            };
+            extend_listed_files(&mut files, tracked)?;
             extend_listed_files(
                 &mut files,
                 run(root, &["ls-files", "-z", "--others", "--exclude-standard"]),
@@ -141,18 +144,25 @@ fn run_git(root: &Path, arguments: &[&str]) -> ChildOutputObservation {
 fn integration_base(
     root: &Path,
     run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
-) -> String {
-    match run(
-        root,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    ) {
-        ChildOutputObservation::Success { stdout, .. } => std::str::from_utf8(&stdout)
-            .ok()
-            .map(str::trim)
-            .filter(|base| !base.is_empty())
-            .unwrap_or("main")
-            .to_owned(),
-        _ => "main".to_owned(),
+) -> Result<Option<&'static str>, FilePreviewError> {
+    for base in [
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+        "refs/heads/master",
+        "HEAD",
+    ] {
+        let commit = format!("{base}^{{commit}}");
+        match run(root, &["rev-parse", "--verify", "--quiet", &commit]) {
+            ChildOutputObservation::Success { .. } => return Ok(Some(base)),
+            ChildOutputObservation::ExitFailure => {}
+            _ => return Err(FilePreviewError::FilesUnavailable),
+        }
+    }
+    // A symbolic HEAD without a commit is an unborn branch. A detached or
+    // unreadable HEAD must not be presented as an empty change list.
+    match run(root, &["symbolic-ref", "--quiet", "HEAD"]) {
+        ChildOutputObservation::Success { .. } => Ok(None),
+        _ => Err(FilePreviewError::FilesUnavailable),
     }
 }
 
@@ -179,8 +189,8 @@ fn extend_listed_files(
 ///
 /// A document read populates only `lines`. A listing populates `files`, and for
 /// the All group it also returns the changed files, which the finder shows as
-/// its starting point before anything is typed. A failing changed listing is
-/// not fatal: the group itself still opens.
+/// its starting point before anything is typed. A failed changed listing is
+/// reported rather than misrepresented as no changed files.
 pub(crate) fn load_preview(
     root: &Path,
     path: Option<&str>,
@@ -200,7 +210,7 @@ fn load_preview_with(
     }
     let files = list_files_with(root, filter, run)?;
     let changed = if matches!(filter, PreviewFileFilter::All) {
-        list_files_with(root, PreviewFileFilter::Changed, run).unwrap_or_default()
+        list_files_with(root, PreviewFileFilter::Changed, run)?
     } else {
         Vec::new()
     };
@@ -262,7 +272,13 @@ fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePreviewError> {
             libc::openat(
                 directory.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | directory_flag,
+                // A FIFO must reach the descriptor type check without waiting
+                // for a writer. O_NONBLOCK has no effect on regular file reads.
+                libc::O_RDONLY
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC
+                    | libc::O_NOFOLLOW
+                    | directory_flag,
             )
         };
         if descriptor < 0 {
@@ -385,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn an_all_listing_also_returns_the_changed_files_and_survives_their_failure() {
+    fn an_all_listing_returns_changed_files_and_reports_their_failure() {
         // All 群は finder の起点になる changed も一緒に返す。
         let mut observations = VecDeque::from([
             output("README.md\0src/lib.rs\0"),
@@ -404,22 +420,22 @@ mod tests {
         assert_eq!(changed, ["src/lib.rs"]);
         assert!(lines.is_empty());
 
-        // changed が取れなくても群そのものは開く。
+        // changed の取得失敗を「変更なし」に置き換えない。
         let mut observations = VecDeque::from([output("README.md\0")]);
         let mut failing = |_: &Path, _: &[&str]| {
             observations
                 .pop_front()
                 .unwrap_or(ChildOutputObservation::ObservationFailed)
         };
-        let (files, changed, _) = load_preview_with(
-            Path::new("/repo"),
-            None,
-            PreviewFileFilter::All,
-            &mut failing,
-        )
-        .unwrap();
-        assert_eq!(files, ["README.md"]);
-        assert!(changed.is_empty());
+        assert_eq!(
+            load_preview_with(
+                Path::new("/repo"),
+                None,
+                PreviewFileFilter::All,
+                &mut failing
+            ),
+            Err(FilePreviewError::FilesUnavailable)
+        );
 
         // Tracked は changed を引かない。
         let mut observations = VecDeque::from([output("README.md\0")]);
@@ -443,6 +459,7 @@ mod tests {
     fn changed_listing_falls_back_to_main_when_origin_head_is_unavailable() {
         let mut observations = VecDeque::from([
             ChildOutputObservation::ExitFailure,
+            output("commit\n"),
             output("changed\0"),
             output("untracked\0"),
         ]);
@@ -462,7 +479,117 @@ mod tests {
             list_files_with(Path::new("/repo"), PreviewFileFilter::Changed, &mut run).unwrap(),
             ["changed", "untracked"]
         );
-        assert!(calls[1].contains(&"main".to_owned()));
+        assert!(calls[2].contains(&"refs/heads/main".to_owned()));
+    }
+
+    #[test]
+    fn integration_base_checks_existing_refs_and_refuses_observation_failures() {
+        for (missing, expected) in [
+            (0, Some("refs/remotes/origin/HEAD")),
+            (1, Some("refs/heads/main")),
+            (2, Some("refs/heads/master")),
+            (3, Some("HEAD")),
+            (4, None),
+        ] {
+            let mut calls = 0;
+            let mut run = |_: &Path, _: &[&str]| {
+                calls += 1;
+                if calls <= missing {
+                    ChildOutputObservation::ExitFailure
+                } else {
+                    output("resolved")
+                }
+            };
+            assert_eq!(integration_base(Path::new("/repo"), &mut run), Ok(expected));
+        }
+        for failure in [
+            ChildOutputObservation::TimedOut,
+            ChildOutputObservation::ExitFailure,
+        ] {
+            let mut run = |_: &Path, _: &[&str]| failure.clone();
+            assert_eq!(
+                integration_base(Path::new("/repo"), &mut run),
+                Err(FilePreviewError::FilesUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn changed_and_all_work_on_local_non_main_and_unborn_branches() {
+        for branch in ["master", "develop"] {
+            let root = tempdir().unwrap();
+            let git = |args: &[&str]| {
+                let result = confined_git_command(root.path())
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            };
+            git(&["init", "--quiet", "--initial-branch", branch]);
+            fs::write(root.path().join("tracked"), "before").unwrap();
+            git(&["add", "tracked"]);
+            // An unborn branch still has both staged and untracked additions.
+            fs::write(root.path().join("untracked"), "new").unwrap();
+            assert_eq!(
+                list_files(root.path(), PreviewFileFilter::Changed).unwrap(),
+                ["tracked", "untracked"]
+            );
+            git(&[
+                "-c",
+                "user.name=Preview",
+                "-c",
+                "user.email=preview@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ]);
+            fs::write(root.path().join("tracked"), "after").unwrap();
+            for filter in [PreviewFileFilter::Changed, PreviewFileFilter::All] {
+                let (files, changed, _) = load_preview(root.path(), None, filter).unwrap();
+                assert_eq!(files, ["tracked", "untracked"]);
+                if filter == PreviewFileFilter::All {
+                    assert_eq!(changed, files);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_fifo_is_rejected_without_waiting_for_a_writer() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("pipe");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let directory = root.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            sender.send(read_file(&directory, "pipe")).unwrap();
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(2));
+        // A regression must fail rather than leave a blocked worker behind.
+        let rescue = result.as_ref().err().map(|_| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        worker.join().unwrap();
+        drop(rescue);
+        assert_eq!(result.unwrap(), Err(FilePreviewError::NotRegular));
     }
 
     #[test]
