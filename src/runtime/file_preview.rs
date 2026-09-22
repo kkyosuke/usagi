@@ -145,11 +145,22 @@ fn integration_base(
     root: &Path,
     run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
 ) -> Result<Option<&'static str>, FilePreviewError> {
+    // Check HEAD before choosing a base: an orphan branch can coexist with
+    // valid remote or local base refs, but has no merge base yet.
+    match run(root, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) {
+        ChildOutputObservation::Success { .. } => {}
+        ChildOutputObservation::ExitFailure => {
+            return match run(root, &["symbolic-ref", "--quiet", "HEAD"]) {
+                ChildOutputObservation::Success { .. } => Ok(None),
+                _ => Err(FilePreviewError::FilesUnavailable),
+            };
+        }
+        _ => return Err(FilePreviewError::FilesUnavailable),
+    }
     for base in [
         "refs/remotes/origin/HEAD",
         "refs/heads/main",
         "refs/heads/master",
-        "HEAD",
     ] {
         let commit = format!("{base}^{{commit}}");
         match run(root, &["rev-parse", "--verify", "--quiet", &commit]) {
@@ -158,12 +169,7 @@ fn integration_base(
             _ => return Err(FilePreviewError::FilesUnavailable),
         }
     }
-    // A symbolic HEAD without a commit is an unborn branch. A detached or
-    // unreadable HEAD must not be presented as an empty change list.
-    match run(root, &["symbolic-ref", "--quiet", "HEAD"]) {
-        ChildOutputObservation::Success { .. } => Ok(None),
-        _ => Err(FilePreviewError::FilesUnavailable),
-    }
+    Ok(Some("HEAD"))
 }
 
 fn extend_listed_files(
@@ -374,8 +380,13 @@ mod tests {
     fn changed_listing_propagates_each_bounded_git_failure() {
         let root = Path::new("/repo");
         for observations in [
-            vec![output("origin/main\n"), ChildOutputObservation::ExitFailure],
             vec![
+                output("head"),
+                output("origin/main\n"),
+                ChildOutputObservation::ExitFailure,
+            ],
+            vec![
+                output("head"),
                 output("origin/main\n"),
                 output("changed\0"),
                 ChildOutputObservation::TimedOut,
@@ -405,6 +416,7 @@ mod tests {
         // All 群は finder の起点になる changed も一緒に返す。
         let mut observations = VecDeque::from([
             output("README.md\0src/lib.rs\0"),
+            output("head"),
             output("origin/main\n"),
             output("src/lib.rs\0"),
             output(""),
@@ -458,6 +470,7 @@ mod tests {
     #[test]
     fn changed_listing_falls_back_to_main_when_origin_head_is_unavailable() {
         let mut observations = VecDeque::from([
+            output("head"),
             ChildOutputObservation::ExitFailure,
             output("commit\n"),
             output("changed\0"),
@@ -479,7 +492,7 @@ mod tests {
             list_files_with(Path::new("/repo"), PreviewFileFilter::Changed, &mut run).unwrap(),
             ["changed", "untracked"]
         );
-        assert!(calls[2].contains(&"refs/heads/main".to_owned()));
+        assert!(calls[3].contains(&"refs/heads/main".to_owned()));
     }
 
     #[test]
@@ -489,12 +502,11 @@ mod tests {
             (1, Some("refs/heads/main")),
             (2, Some("refs/heads/master")),
             (3, Some("HEAD")),
-            (4, None),
         ] {
             let mut calls = 0;
             let mut run = |_: &Path, _: &[&str]| {
                 calls += 1;
-                if calls <= missing {
+                if calls > 1 && calls <= missing + 1 {
                     ChildOutputObservation::ExitFailure
                 } else {
                     output("resolved")
@@ -502,6 +514,29 @@ mod tests {
             };
             assert_eq!(integration_base(Path::new("/repo"), &mut run), Ok(expected));
         }
+        let mut calls = 0;
+        let mut unborn = |_: &Path, _: &[&str]| {
+            calls += 1;
+            if calls == 1 {
+                ChildOutputObservation::ExitFailure
+            } else {
+                output("refs/heads/orphan")
+            }
+        };
+        assert_eq!(integration_base(Path::new("/repo"), &mut unborn), Ok(None));
+        let mut calls = 0;
+        let mut failed_base = |_: &Path, _: &[&str]| {
+            calls += 1;
+            if calls == 1 {
+                output("head")
+            } else {
+                ChildOutputObservation::TimedOut
+            }
+        };
+        assert_eq!(
+            integration_base(Path::new("/repo"), &mut failed_base),
+            Err(FilePreviewError::FilesUnavailable)
+        );
         for failure in [
             ChildOutputObservation::TimedOut,
             ChildOutputObservation::ExitFailure,
@@ -547,6 +582,18 @@ mod tests {
                 "-m",
                 "base",
             ]);
+            fs::write(root.path().join("tracked"), "after").unwrap();
+            assert_eq!(
+                list_files(root.path(), PreviewFileFilter::Changed).unwrap(),
+                ["tracked", "untracked"]
+            );
+            git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+            git(&[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ]);
+            git(&["checkout", "--quiet", "--orphan", "orphan"]);
             fs::write(root.path().join("tracked"), "after").unwrap();
             for filter in [PreviewFileFilter::Changed, PreviewFileFilter::All] {
                 let (files, changed, _) = load_preview(root.path(), None, filter).unwrap();
