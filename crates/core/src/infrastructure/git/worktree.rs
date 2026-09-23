@@ -282,18 +282,33 @@ fn line_enables_checkout_filter(line: &str) -> bool {
     })
 }
 
+/// Whether `stderr` reports that git could not resolve a repository at all.
+///
+/// A path that is not a repository holds neither a worktree registration nor a
+/// branch, so both are already in the desired end state. Teardown reaches this
+/// shape two ways: the worktree's administrative directory
+/// (`.git/worktrees/<name>`) is gone while its tree remains, so the `.git` file
+/// inside resolves to nothing; or the workspace root itself stopped being a
+/// repository. Git then fails the whole command instead of reporting a missing
+/// worktree or branch, and treating that as an error strands the session — the
+/// removal retries forever and no path, forced or not, can ever finish it.
+fn repository_unresolved(stderr: &str) -> bool {
+    stderr.contains("not a git repository")
+}
+
 /// Remove the worktree at `worktree` (with `--force` when `force`).
 ///
 /// A path git does not recognise as a worktree is already in the desired end
 /// state — a session whose worktree was never built, or a repeated removal — so
 /// it is treated as a no-op rather than an error, letting callers finish cleaning
-/// up the rest of a session.
+/// up the rest of a session. A path git cannot resolve a repository from is the
+/// same end state, for the reason [`repository_unresolved`] gives.
 ///
 /// # Errors
 ///
 /// Returns an error when the path is not valid UTF-8, the `git` process cannot be
 /// spawned, or `git worktree remove` fails for any reason other than the path not
-/// being a worktree.
+/// being a worktree of a repository git can resolve.
 pub fn remove_worktree(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -309,7 +324,10 @@ pub fn remove_worktree(
     }
     args.extend(["--", path]);
     let output = runner.run(repo, &args)?;
-    if output.success || output.stderr.contains("is not a working tree") {
+    if output.success
+        || output.stderr.contains("is not a working tree")
+        || repository_unresolved(&output.stderr)
+    {
         return Ok(());
     }
     bail!("git worktree remove failed: {}", output.stderr.trim());
@@ -319,18 +337,23 @@ pub fn remove_worktree(
 ///
 /// A branch git does not know is already in the desired end state — a create
 /// whose worktree add failed before branching, or a repeated deletion — so it is
-/// treated as a no-op. When `force` is false Git refuses to delete a branch with
-/// unmerged commits; compensating teardown passes true only for a branch that
-/// never became user-owned work.
+/// treated as a no-op, as is a repository git cannot resolve, for the reason
+/// [`repository_unresolved`] gives. When `force` is false Git refuses to delete a
+/// branch with unmerged commits; compensating teardown passes true only for a
+/// branch that never became user-owned work.
 ///
 /// # Errors
 ///
 /// Returns an error when the `git` process cannot be spawned, or `git branch -d`
-/// / `git branch -D` fails for any reason other than the branch not existing.
+/// / `git branch -D` fails for any reason other than the branch not existing in a
+/// repository git can resolve.
 pub fn delete_branch(runner: &dyn GitRunner, repo: &Path, branch: &str, force: bool) -> Result<()> {
     let delete_flag = if force { "-D" } else { "-d" };
     let output = runner.run(repo, &["branch", delete_flag, "--", branch])?;
-    if output.success || output.stderr.contains("not found") {
+    if output.success
+        || output.stderr.contains("not found")
+        || repository_unresolved(&output.stderr)
+    {
         return Ok(());
     }
     bail!("git branch delete failed: {}", output.stderr.trim());
@@ -738,6 +761,27 @@ mod tests {
         assert_eq!(
             git.calls.borrow()[0],
             vec!["worktree", "remove", "--", "/dest"]
+        );
+    }
+
+    #[test]
+    fn teardown_treats_an_unresolvable_repository_as_already_torn_down() {
+        // The two shapes a stranded session actually produces: the worktree's
+        // administrative directory is gone while its tree remains, and the
+        // workspace root stopped being a repository. Neither holds a worktree
+        // registration or a branch any more, so teardown must be free to finish.
+        let orphan = FakeGit::new(vec![fail(
+            "fatal: not a git repository: /repo/.git/worktrees/agy",
+        )]);
+        remove_worktree(&orphan, Path::new("/dest"), Path::new("/dest"), true).unwrap();
+
+        let gone = FakeGit::new(vec![fail(
+            "fatal: not a git repository (or any of the parent directories): .git",
+        )]);
+        delete_branch(&gone, Path::new("/repo"), "usagi/bug", true).unwrap();
+        assert_eq!(
+            gone.calls.borrow()[0],
+            vec!["branch", "-D", "--", "usagi/bug"]
         );
     }
 

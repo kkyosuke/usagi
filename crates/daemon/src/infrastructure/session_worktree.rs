@@ -1,6 +1,7 @@
 //! Real Git and filesystem adapters for daemon-owned session worktrees.
 
 use std::ffi::OsStr;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use usagi_core::infrastructure::git::{
@@ -109,7 +110,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
                     cleanup.push(error.to_string());
                 }
             }
-            if let Err(remove_error) = std::fs::remove_dir_all(destination)
+            if let Err(remove_error) = remove_tree(destination)
                 && remove_error.kind() != std::io::ErrorKind::NotFound
             {
                 cleanup.push(remove_error.to_string());
@@ -138,7 +139,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         for worktree in worktrees {
             remove_worktree(git, &worktree, &worktree, force)?;
         }
-        match std::fs::remove_dir_all(session_root) {
+        match remove_tree(session_root) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
@@ -184,6 +185,51 @@ fn mirror_directory(
     Ok(())
 }
 
+/// Remove `root` and everything under it.
+///
+/// A directory without the owner-write bit refuses the unlink of its own
+/// children, so `remove_dir_all` alone fails with `PermissionDenied` every time
+/// and the session can never be torn down. Sessions produce exactly that: usagi's
+/// own Agent-CLI tests build read-only `HOME` fixtures under `target/` and leave
+/// them behind. The repair is therefore attempted once, only on that error, and
+/// the removal retried — a tree already being deleted has no permissions left to
+/// preserve, while every other error still surfaces unchanged.
+fn remove_tree(root: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            grant_owner_access(root);
+            std::fs::remove_dir_all(root)
+        }
+        result => result,
+    }
+}
+
+/// Give the owner read, write and traverse permission on `root` and on every
+/// directory beneath it.
+///
+/// Only directories matter, because a read-only *file* is unlinked through its
+/// parent, so anything else ends the walk. Reading the metadata without
+/// following links is what keeps a symlink out: it is never reported as a
+/// directory, so the walk stops at the link rather than reaching through it into
+/// a tree that is not being deleted. Every effect is best-effort — the retry in
+/// [`remove_tree`] is what reports whether the removal actually became possible.
+fn grant_owner_access(root: &Path) {
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o700);
+    let _ = std::fs::set_permissions(root, permissions);
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            grant_owner_access(&entry.path());
+        }
+    }
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
 fn collect_session_worktrees(
     io: &SystemSessionWorktreeIo,
@@ -213,6 +259,84 @@ fn skipped_entry(name: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    #[test]
+    fn a_write_denying_directory_no_longer_strands_the_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("session");
+        std::fs::create_dir_all(root.join("locked").join("nested")).unwrap();
+        std::fs::write(root.join("locked").join("nested").join("deep.txt"), b"x").unwrap();
+        std::fs::write(root.join("locked").join("held.txt"), b"x").unwrap();
+        // Deepest first: a parent that already denies writes would refuse the
+        // chmod of its own children.
+        std::fs::set_permissions(
+            root.join("locked").join("nested"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+
+        // This is the behaviour that stranded sessions: a directory without the
+        // owner-write bit refuses the unlink of its own children, so the bare
+        // removal fails and the teardown worker retries it forever.
+        assert_eq!(
+            std::fs::remove_dir_all(&root).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        remove_tree(&root).unwrap();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn the_permission_walk_stops_at_anything_that_is_not_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        // A symlink to a directory is not itself a directory when its metadata is
+        // read without following it, so the walk stops at the link instead of
+        // rewriting a tree that is not being deleted.
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        grant_owner_access(&link);
+        assert_eq!(mode(&outside), 0o500);
+
+        // A read-only file is unlinked through its parent, and a path that is not
+        // there at all has nothing to grant.
+        let file = tmp.path().join("file.txt");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
+        grant_owner_access(&file);
+        grant_owner_access(&tmp.path().join("absent"));
+        assert_eq!(mode(&file), 0o400);
+
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn removal_reports_every_other_outcome_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(plain.join("child")).unwrap();
+        remove_tree(&plain).unwrap();
+        assert!(!plain.exists());
+
+        assert_eq!(
+            remove_tree(&tmp.path().join("missing")).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn orphan_session_entries_are_sorted_and_direct() {
