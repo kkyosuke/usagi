@@ -1580,7 +1580,7 @@ filter 行の右端には、filter が空なら群の総数、入力中なら `�
 finder 上部の All / Changed / Tracked を `←` / `→` で切り替える。All は tracked と gitignore 対象外の
 未追跡 file、Changed は integration base から変更された削除済みでない tracked file と同じ未追跡 file、
 Tracked は tracked file だけを表示する。integration base は `origin/HEAD`、local `main`、local `master`、
-現在の `HEAD` の順に、commit へ解決できる最初の ref を使う。最初の commit 前は staged file と未追跡 file を
+現在の `HEAD` の順に、HEAD と共通祖先を持つ最初の ref を使う。独立した履歴や shallow clone で共通祖先を取得できない候補は飛ばす。最初の commit 前は staged file と未追跡 file を
 Changed とする。変更一覧の取得失敗は All でも error として表示し、「変更なし」には置き換えない。文字 / paste / `Backspace` で fuzzy filter を編集し、`↑` / `↓` で選択、
 `Enter` で file 本文へ進む。scope を切り替えた後に古い scope の取得結果が届いても表示へ採用しない。
 

@@ -162,8 +162,8 @@ fn integration_base(
         "refs/heads/main",
         "refs/heads/master",
     ] {
-        let commit = format!("{base}^{{commit}}");
-        match run(root, &["rev-parse", "--verify", "--quiet", &commit]) {
+        // Existence alone is insufficient for independent or shallow histories.
+        match run(root, &["merge-base", "HEAD", base]) {
             ChildOutputObservation::Success { .. } => return Ok(Some(base)),
             ChildOutputObservation::ExitFailure => {}
             _ => return Err(FilePreviewError::FilesUnavailable),
@@ -603,6 +603,50 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn changed_and_all_skip_bases_with_no_common_ancestor() {
+        let root = tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let result = confined_git_command(root.path())
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(result.status.success(), "{stderr}");
+        };
+        git(&["init", "--quiet", "--initial-branch=main"]);
+        git(&["config", "user.name", "Preview"]);
+        git(&["config", "user.email", "preview@example.invalid"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("tracked"), "base").unwrap();
+        git(&["add", "tracked"]);
+        git(&["commit", "--quiet", "-m", "main"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        git(&["branch", "master"]);
+        git(&["checkout", "--quiet", "--orphan", "independent"]);
+        git(&["commit", "--quiet", "-m", "independent root"]);
+        fs::write(root.path().join("tracked"), "changed").unwrap();
+        fs::write(root.path().join("untracked"), "new").unwrap();
+        for filter in [PreviewFileFilter::Changed, PreviewFileFilter::All] {
+            let (files, changed, _) = load_preview(root.path(), None, filter).unwrap();
+            assert_eq!(files, ["tracked", "untracked"]);
+            if filter == PreviewFileFilter::All {
+                assert_eq!(changed, files);
+            }
+        }
+        // A later related candidate still wins over HEAD after an unrelated one.
+        git(&["branch", "--force", "master", "HEAD"]);
+        assert_eq!(
+            integration_base(root.path(), &mut run_git),
+            Ok(Some("refs/heads/master"))
+        );
     }
 
     #[test]
