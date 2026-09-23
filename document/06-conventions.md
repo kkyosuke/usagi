@@ -492,6 +492,8 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
+リリースノートは `action-gh-release` の `generate_release_notes: true` により GitHub 標準の自動生成を使う。
+AI API は呼ばず、ノート生成専用 job と Models 権限も持たない。
 
 `create-release-pr.yml` は dispatch の choice input を `run:` へ式展開せず環境変数で渡し、
 `scripts/ci/next-release-version.sh` が `major` / `minor` / `patch` の選択と現在の SemVer を検証して算出した値だけを

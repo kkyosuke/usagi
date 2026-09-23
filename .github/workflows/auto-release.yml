@@ -76,7 +76,6 @@ jobs:
     if: needs.check-version.outputs.bumped == 'true'
     permissions:
       contents: write
-      models: read
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.check-version.outputs.tag }}

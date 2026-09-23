@@ -53,6 +53,7 @@ Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-
 ## インストール
 
 公開 release の installer を利用する方法が最短です。
+各版の変更一覧は [GitHub Releases](https://github.com/KKyosuke/usagi/releases) で確認できます。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
