@@ -1467,6 +1467,14 @@ impl SessionCommandPort for BlockingSessionPort {
             let _ = self.started.send(());
             let _ = self.release.lock().unwrap().recv();
         }
+        let sessions = match &command {
+            SessionCommand::Create { name, .. } => Some(
+                snapshot_with_sessions("demo", &["existing", name])
+                    .state
+                    .sessions,
+            ),
+            _ => None,
+        };
         let session_ids = match command {
             SessionCommand::Create { .. } => {
                 vec![self.existing, self.created]
@@ -1476,7 +1484,7 @@ impl SessionCommandPort for BlockingSessionPort {
         };
         Ok(SessionCommandResult {
             message: "completed".to_owned(),
-            sessions: None,
+            sessions,
             session_ids: Some(session_ids),
             agent_resumes: None,
             session_lifecycles: None,
@@ -1619,15 +1627,22 @@ impl SessionCommandPort for PanicOnceSessionPort {
         &self,
         _: &Workspace,
         _: Option<&SessionRecord>,
-        _: SessionCommand,
+        command: SessionCommand,
     ) -> Result<SessionCommandResult, String> {
         assert!(
             !self.panics.swap(false, Ordering::SeqCst),
             "fake session worker panic"
         );
+        let SessionCommand::Create { name, .. } = command else {
+            panic!("this fixture only creates sessions");
+        };
         Ok(SessionCommandResult {
             message: "recovered".to_owned(),
-            sessions: None,
+            sessions: Some(
+                snapshot_with_sessions("demo", &["existing", &name])
+                    .state
+                    .sessions,
+            ),
             session_ids: Some(vec![self.existing, self.created]),
             agent_resumes: None,
             session_lifecycles: None,

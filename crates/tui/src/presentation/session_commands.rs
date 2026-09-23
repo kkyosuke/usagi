@@ -391,12 +391,10 @@ fn carried_outcome(completion: &SessionCommandCompletion) -> Option<CarriedOutco
     let SessionBackendCompletion::Create { name, before, .. } = &completion.completion else {
         return safe_error.map(CarriedOutcome::Failed);
     };
-    let created = completion.result.as_ref().is_ok_and(|result| {
-        result
-            .session_ids
-            .as_ref()
-            .is_some_and(|ids| ids.iter().any(|id| !before.contains(id)))
-    });
+    let created = completion
+        .result
+        .as_ref()
+        .is_ok_and(|result| created_session_id(result, name, before).is_some());
     let error = safe_error
         .or_else(|| (!created).then(|| "daemon did not return the created session".to_owned()));
     Some(CarriedOutcome::Create {
@@ -519,6 +517,26 @@ pub(super) fn drain_session_refresh(
     }
 }
 
+/// Match the requested name to its daemon identity. Other clients can create
+/// sessions during this operation, so a newly observed ID alone is not proof.
+fn created_session_id(
+    result: &SessionCommandResult,
+    name: &str,
+    before: &[SessionId],
+) -> Option<SessionId> {
+    let sessions = result.sessions.as_ref()?;
+    let ids = result.session_ids.as_ref()?;
+    if !runtime_identities_are_valid(sessions.len(), ids) {
+        return None;
+    }
+    let mut matches = sessions
+        .iter()
+        .zip(ids)
+        .filter(|(record, _)| record.name == name);
+    let (_, id) = matches.next()?;
+    (matches.next().is_none() && !before.contains(id)).then_some(*id)
+}
+
 /// Emit the exactly-one reducer completion owned by one admitted command.
 /// Projection and port recovery are deliberately separate so workspace exit or
 /// a closed host channel cannot strand controller pending state.
@@ -531,15 +549,12 @@ pub(super) fn emit_session_command_result(
             Ok(result),
             SessionBackendCompletion::Create {
                 token,
-                name: _,
+                name,
                 before,
                 completions,
             },
         ) => {
-            let created = result
-                .session_ids
-                .as_ref()
-                .and_then(|ids| ids.iter().copied().find(|id| !before.contains(id)));
+            let created = created_session_id(result, name, before);
             completions.emit(AppEvent::OperationResult(OperationResult {
                 token: *token,
                 succeeded: created.is_some(),

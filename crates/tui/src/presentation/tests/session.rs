@@ -604,6 +604,7 @@ fn create_completion(before: Vec<SessionId>) -> crate::presentation::SessionBack
 
 fn created_snapshot(created: SessionId) -> SessionCommandResult {
     SessionCommandResult {
+        sessions: Some(snapshot_with_sessions("demo", &["atlas"]).state.sessions),
         session_ids: Some(vec![created]),
         ..SessionCommandResult::message("created")
     }
@@ -666,6 +667,18 @@ fn a_carried_create_that_returned_no_session_is_a_failure_not_a_silent_success()
             SessionCommandResult {
                 session_ids: Some(existing.clone()),
                 ..SessionCommandResult::message("nothing new")
+            },
+            Some("daemon did not return the created session".to_owned()),
+        ),
+        (
+            SessionCommandResult {
+                sessions: Some(
+                    snapshot_with_sessions("demo", &["another-client"])
+                        .state
+                        .sessions,
+                ),
+                session_ids: Some(vec![SessionId::new()]),
+                ..SessionCommandResult::message("someone else created a session")
             },
             Some("daemon did not return the created session".to_owned()),
         ),
@@ -1046,13 +1059,51 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
 }
 
 #[test]
+fn create_completion_refuses_missing_ambiguous_or_old_requested_identity() {
+    let id = SessionId::new();
+    let other = SessionId::new();
+    let records = |names: &[&str]| Some(snapshot_with_sessions("demo", names).state.sessions);
+    for (sessions, ids, before) in [
+        (None, Some(vec![id]), vec![]),
+        (records(&["atlas"]), None, vec![]),
+        (records(&["atlas"]), Some(vec![]), vec![]),
+        (records(&["atlas", "other"]), Some(vec![id, id]), vec![]),
+        (records(&["other"]), Some(vec![other]), vec![]),
+        (records(&["atlas", "atlas"]), Some(vec![id, other]), vec![]),
+        (records(&["atlas"]), Some(vec![id]), vec![id]),
+    ] {
+        let (completions, receiver) =
+            crate::usecase::application::daemon_backend::Completions::channel();
+        let result = SessionCommandResult {
+            sessions,
+            session_ids: ids,
+            ..SessionCommandResult::message("completed")
+        };
+        let completion = crate::presentation::SessionBackendCompletion::Create {
+            token: PendingToken::from_raw(1),
+            name: "atlas".into(),
+            before,
+            completions,
+        };
+        crate::presentation::emit_session_command_result(&Ok(result), &completion);
+        assert!(
+            matches!(receiver.recv().unwrap(), AppEvent::OperationResult(result) if !result.succeeded && result.created.is_none())
+        );
+    }
+}
+
+#[test]
 fn drain_session_completions_refluxes_create_success_with_created_identity() {
     let snapshot = snapshot("demo");
     let existing = snapshot.session_ids[0];
     let created = SessionId::new();
+    let concurrent = SessionId::new();
     let mut records = snapshot.state.sessions.clone();
     let mut new_record = records[0].clone();
-    new_record.name = "created".to_owned();
+    new_record.name = "atlas".to_owned();
+    let mut other_record = new_record.clone();
+    other_record.name = "another-client".to_owned();
+    records.push(other_record);
     records.push(new_record);
     let view =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, snapshot.session_ids);
@@ -1064,7 +1115,7 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
     let result = Ok(SessionCommandResult {
         message: "created".to_owned(),
         sessions: Some(records),
-        session_ids: Some(vec![existing, created]),
+        session_ids: Some(vec![existing, concurrent, created]),
         agent_resumes: None,
         session_lifecycles: None,
         session_roles: None,

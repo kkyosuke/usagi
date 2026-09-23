@@ -1005,6 +1005,9 @@ raw detail は TUI state に保持しない。その safe message は dialog 幅
 これは入力段階の inline validation（未受付の名前を行の下に error 表示する挙動）とは別で、dialog は受付後の
 daemon 失敗だけを扱う。
 
+作成完了では要求名と daemon snapshot の session ID の対応を照合する。別クライアントが同時に追加した
+session を今回の作成結果として選ばず、対応する identity が欠ける・重複する応答は失敗として表示する。
+
 session create / remove / refresh の backend admission は workspace ごとに容量 1 とし、内部 queue は持たない。cleanup queue も
 daemon command を並列投入せず、直前の remove が消えた authoritative snapshot を受け取ってから次の1件だけを送る。先行 command の
 worker が daemon port を所有している間に届いた 2 件目は backend action を開始せず、create なら要求 token に対応する
@@ -1575,8 +1578,10 @@ filter 行の右端には、filter が空なら群の総数、入力中なら `�
 端末では出さない）。filter があって一致 0 件のときは query・群・総数と次の操作を書き、filter が空で候補も
 無いときは群の名前だけを書く。
 finder 上部の All / Changed / Tracked を `←` / `→` で切り替える。All は tracked と gitignore 対象外の
-未追跡 file、Changed は integration base（通常 `origin/main`、無ければ `main`）から変更された削除済みでない
-tracked file と同じ未追跡 file、Tracked は tracked file だけを表示する。文字 / paste / `Backspace` で fuzzy filter を編集し、`↑` / `↓` で選択、
+未追跡 file、Changed は integration base から変更された削除済みでない tracked file と同じ未追跡 file、
+Tracked は tracked file だけを表示する。integration base は `origin/HEAD`、local `main`、local `master`、
+現在の `HEAD` の順に、commit へ解決できる最初の ref を使う。最初の commit 前は staged file と未追跡 file を
+Changed とする。変更一覧の取得失敗は All でも error として表示し、「変更なし」には置き換えない。文字 / paste / `Backspace` で fuzzy filter を編集し、`↑` / `↓` で選択、
 `Enter` で file 本文へ進む。scope を切り替えた後に古い scope の取得結果が届いても表示へ採用しない。
 
 枠が十分広いとき（内側 96 桁以上）、finder は右半分に選択中 file の中身を出す。選択が変わるたびに読み直すので、
@@ -1591,7 +1596,7 @@ tracked file と同じ未追跡 file、Tracked は tracked file だけを表示�
 各8 MiBの上限を持ち、超過・timeout・非zero終了は内容を表示しない。候補は最大20,000件である。
 
 本文は UTF-8 regular file の読み取り専用 text-viewer で、512 KiB を上限とする。binary、UTF-8 でない file、
-directory、target root 外へ解決される path は safe error として表示し、内容を読まない。pathはroot directoryの
+directory、FIFO、target root 外へ解決される path は safe error として表示し、内容を読まない。FIFO の writer を待たずに拒否する。pathはroot directoryの
 descriptorから各要素をno-followで開き、検査後のsymlink差し替えでroot外へ向けられない。表示行に含まれる terminal
 control / bidi control は無害化する。`/` は大文字小文字を区別する literal 検索を開始し、入力中の文字 / paste /
 `Backspace` で query を編集する。先頭から最大 20,000 件の一致箇所を highlight して現在位置を強調し、検索入力を
