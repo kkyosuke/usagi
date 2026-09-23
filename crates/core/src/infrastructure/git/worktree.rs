@@ -773,12 +773,12 @@ mod tests {
         // administrative directory is gone while its tree remains, and the
         // workspace root stopped being a repository. Neither holds a worktree
         // registration or a branch any more, so teardown must be free to finish.
-        let orphan = FakeGit::new(vec![fail(
+        let orphan = FakeGitRunner::new(vec![fail(
             "fatal: not a git repository: /repo/.git/worktrees/agy",
         )]);
         remove_worktree(&orphan, Path::new("/dest"), Path::new("/dest"), true).unwrap();
 
-        let gone = FakeGit::new(vec![fail(
+        let gone = FakeGitRunner::new(vec![fail(
             "fatal: not a git repository (or any of the parent directories): .git",
         )]);
         delete_branch(&gone, Path::new("/repo"), "usagi/bug", true).unwrap();
