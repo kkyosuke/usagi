@@ -667,6 +667,18 @@ mod tests {
     }
 
     #[test]
+    fn review_replacement_cannot_bypass_startup_or_a_human_decision() {
+        for phase in [Phase::Starting, Phase::Waiting] {
+            let mut run = run();
+            run.phase = phase;
+            run.waiting_reason = Some("A human decision is required".into());
+            let before = run.clone();
+            assert!(run.request_review(OperationId::new(), target()).is_err());
+            assert_eq!(run, before);
+        }
+    }
+
+    #[test]
     fn an_in_flight_review_can_be_replaced_without_accepting_its_late_verdict() {
         for approved in [false, true] {
             let mut run = run();
