@@ -204,18 +204,20 @@ fn mirror_directory(
 /// Remove `root` and everything under it.
 ///
 /// A directory without the owner-write bit refuses the unlink of its own
-/// children, so `remove_dir_all` alone fails with `PermissionDenied` every time
-/// and the session can never be torn down. A session's tree grows such a
-/// directory from whatever it ran: an Agent CLI that creates its configuration
-/// directory read-only leaves one behind when its home sits inside the tree.
+/// children, so `remove_dir_all` alone fails with `PermissionDenied` and the
+/// session can never be torn down. A session tree picks such a directory up from
+/// whatever ran inside it, which the removal has to cope with rather than
+/// diagnose.
 ///
 /// The repair therefore runs on that one error, and the removal is retried only
-/// when a mode actually changed — a `PermissionDenied` the repair cannot explain
-/// (the session container itself is unwritable, say) keeps its original error
-/// instead of paying for a second full walk. Nothing here is lost by widening
-/// permissions: the tree is on its way out. The teardown worker re-runs this per
-/// attempt rather than once per session, which costs no more than the failed
-/// `remove_dir_all` it accompanies, since both traverse the same tree.
+/// when a mode actually changed: a `PermissionDenied` that no mode in the tree
+/// explains — the container above it is unwritable, say — keeps its original
+/// error rather than paying for a second traversal. That signal is a lower
+/// bound, not a proof. Widening a deep directory while a shallow one refuses the
+/// chmod still reports a change, so that attempt spends one more removal; the
+/// next one sees the deep directory already open and skips the retry. The walk
+/// itself is bounded by the tree being deleted, and widening permissions there
+/// costs nothing, since the tree is on its way out.
 fn remove_tree(root: &Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(root) {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -231,6 +233,9 @@ fn remove_tree(root: &Path) -> std::io::Result<()> {
 
 /// Give the owner read, write and traverse permission on `root` and on every
 /// directory beneath it, reporting whether any mode actually changed.
+///
+/// The chmod precedes the descent, so a directory that denied its own listing is
+/// readable by the time the walk reaches its children.
 ///
 /// Only directories matter, because a read-only *file* is unlinked through its
 /// parent, so anything else ends the walk. Reading the metadata without
@@ -290,6 +295,17 @@ fn skipped_entry(name: &OsStr) -> bool {
 mod tests {
     use super::*;
 
+    /// Leaves a narrowed directory usable again when the test ends, so an
+    /// assertion that fails partway cannot strand a temporary tree that the
+    /// runner is then unable to remove.
+    struct UnlockOnDrop(PathBuf);
+
+    impl Drop for UnlockOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
     fn mode(path: &Path) -> u32 {
         std::fs::symlink_metadata(path)
             .unwrap()
@@ -307,6 +323,10 @@ mod tests {
         std::fs::write(root.join("locked").join("held.txt"), b"x").unwrap();
         // Deepest first: a parent that already denies writes would refuse the
         // chmod of its own children.
+        let _unlock = [
+            UnlockOnDrop(root.join("locked")),
+            UnlockOnDrop(root.join("locked").join("nested")),
+        ];
         std::fs::set_permissions(
             root.join("locked").join("nested"),
             std::fs::Permissions::from_mode(0o500),
@@ -333,6 +353,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outside = tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
+        let _unlock = UnlockOnDrop(outside.clone());
         std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o500)).unwrap();
 
         // A symlink to a directory is not itself a directory when its metadata is
@@ -357,9 +378,10 @@ mod tests {
         // rather than retrying the removal.
         let open = tmp.path().join("open");
         std::fs::create_dir_all(open.join("child")).unwrap();
+        // Set explicitly rather than trusting the runner's umask to leave every
+        // owner bit on.
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(!grant_owner_access(&open));
-
-        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
@@ -381,13 +403,13 @@ mod tests {
         let container = tmp.path().join("locked-container");
         let inside = container.join("session");
         std::fs::create_dir_all(inside.join("child")).unwrap();
+        let _unlock = UnlockOnDrop(container.clone());
         std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o500)).unwrap();
         assert_eq!(
             remove_tree(&inside).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
         );
         assert_eq!(mode(&container), 0o500);
-        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

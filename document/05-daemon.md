@@ -1309,10 +1309,10 @@ teardown の冪等性は「対象が無ければ成功」だが、対象が*残�
 |---|---|---|
 | worktree の administrative directory（`.git/worktrees/<name>`）が消え、tree だけ残っている | `git worktree remove` が `fatal: not a git repository: <admin dir>` | worktree の登録は既に無いため no-op として進み、tree の除去へ移る |
 | workspace root が repository でなくなっている | `git branch -d` / `-D` が `fatal: not a git repository (or any of the parent directories): .git` | 削除すべき branch を持つ repository が無いため no-op として進む |
-| session tree に owner の write を拒否する directory が含まれる | `remove_dir_all` が `PermissionDenied`（directory は自分の子の unlink を拒否する） | owner の read/write/traverse を tree 全体へ回復してから、除去をその attempt で一度だけ再試行する。symlink は辿らず link 自体で走査を止めるため、削除対象でない tree の permission は変えない |
+| session tree に owner の write を拒否する directory が含まれる | `remove_dir_all` が `PermissionDenied`（directory は自分の子の unlink を拒否する） | owner の read/write/traverse を tree 全体へ回復してから、除去をその attempt で一度だけ再試行する。mode を実際に変えられなかった場合は元の error をそのまま返す。走査は symlink を辿らず link 自体で止まる |
 
-3 つ目は session が動かした process が残す。Agent CLI は設定 directory を読み取り専用で作ることがあり、
-session の tree 配下にその HOME を置いた場合、session は自分で自分を削除できない状態を残す。
+3 つ目は session の tree 配下で動いた process が残す。owner の write を落とした directory が 1 つ残るだけで、
+その session は自分で自分を削除できなくなる。teardown は原因を診断せず、除去できる状態へ戻してから進む。
 
 git が repository を解決できない場合を終端状態として扱う副作用として、workspace root が repository でない
 mirror 構成では、nested repository に作られた `usagi/<name>` branch が削除されないまま teardown が成功する。
