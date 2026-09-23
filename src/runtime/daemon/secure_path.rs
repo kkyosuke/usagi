@@ -9,13 +9,24 @@ pub(super) struct InvalidOwnedDirectory;
 /// Accepts only an absolute non-root directory owned by this daemon user, with
 /// no untrusted symlink component. macOS system firmlinks are OS-managed aliases
 /// and therefore remain admissible.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 pub(super) fn validate_owned_directory(path: &Path) -> Result<(), InvalidOwnedDirectory> {
+    validate_owned_path(path, false)
+}
+
+/// Applies the same identity checks to a directory or, when requested, a
+/// regular file used as an exact sandbox bind.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
+pub(super) fn validate_owned_path(
+    path: &Path,
+    allow_file: bool,
+) -> Result<(), InvalidOwnedDirectory> {
     if !path.is_absolute() || path == Path::new("/") {
         return Err(InvalidOwnedDirectory);
     }
     let metadata = std::fs::symlink_metadata(path).map_err(|_| InvalidOwnedDirectory)?;
-    if !metadata.file_type().is_dir() || path_has_symlink_component(path) {
+    if !(metadata.file_type().is_dir() || allow_file && metadata.file_type().is_file())
+        || path_has_symlink_component(path)
+    {
         return Err(InvalidOwnedDirectory);
     }
     #[cfg(unix)]

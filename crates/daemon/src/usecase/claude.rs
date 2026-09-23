@@ -9,10 +9,8 @@ use usagi_core::{
     domain::agent::{
         AgentCapability, AgentProfile, AgentProfileId, DurableLaunchSnapshot,
         EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchValidationError,
-        ProviderCaptureProvenance, ProviderKind, ProviderResumePhase, ProviderResumeRef,
-        ProviderResumeStatus, ProviderSessionId,
+        ProviderKind, ProviderResumePhase, ProviderResumeRef, ProviderResumeStatus,
     },
-    domain::id::OperationId,
     domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS,
     domain::settings::DefaultModel,
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
@@ -23,8 +21,18 @@ use super::runtime::{
 };
 
 /// Bump whenever Claude's launch-time hooks, sandbox, argv, or config changes.
-/// Revision 4 adds permission-waiting phase reporting.
-pub const PROFILE_REVISION: u32 = 4;
+/// Revision 5 captures provider-owned conversation IDs from `SessionStart`
+/// instead of assigning `--session-id` before spawn.
+pub const PROFILE_REVISION: u32 = 5;
+
+/// The `sakana-ai` profile's revision, deliberately distinct from
+/// [`PROFILE_REVISION`].
+///
+/// Until this revision the same profile ID was launched by the Codex adapter at
+/// *its* revision 5. A durable snapshot from that era describes Codex argv and a
+/// Codex provider resume, so it must not validate against this Claude-shaped
+/// profile — and it would, byte for byte, if both carried revision 5.
+pub const SAKANA_PROFILE_REVISION: u32 = 6;
 
 /// Claude's product-private provisioning result.
 ///
@@ -88,7 +96,26 @@ pub struct ClaudeAdapter<P> {
 impl<P> ClaudeAdapter<P> {
     #[must_use]
     pub fn new(provisioner: P) -> Self {
-        Self::with_revision(provisioner, PROFILE_REVISION)
+        Self::build(
+            provisioner,
+            PROFILE_REVISION,
+            DefaultModel::Claude.profile_id(),
+            "Claude",
+        )
+    }
+
+    /// The `sakana-ai` profile: the same Claude CLI grammar, pointed at Sakana's
+    /// Anthropic-compatible endpoint by the provisioner's launch environment.
+    /// Only the identity differs here; the argv, hooks, and resume contract are
+    /// Claude's, which is exactly why it reuses this adapter.
+    #[must_use]
+    pub fn sakana(provisioner: P) -> Self {
+        Self::build(
+            provisioner,
+            SAKANA_PROFILE_REVISION,
+            DefaultModel::SakanaAi.profile_id(),
+            "sakana.ai",
+        )
     }
 
     /// # Panics
@@ -97,12 +124,25 @@ impl<P> ClaudeAdapter<P> {
     /// core canonical-ID contract.
     #[must_use]
     pub fn with_revision(provisioner: P, revision: u32) -> Self {
+        Self::build(
+            provisioner,
+            revision,
+            DefaultModel::Claude.profile_id(),
+            "Claude",
+        )
+    }
+
+    /// # Panics
+    ///
+    /// Panics only if a hard-coded catalog profile ID stops satisfying the core
+    /// canonical-ID contract.
+    #[must_use]
+    fn build(provisioner: P, revision: u32, profile_id: &str, display_name: &str) -> Self {
         Self {
             provisioner,
             profile: AgentProfile::new(
-                AgentProfileId::new(DefaultModel::Claude.profile_id())
-                    .expect("catalog profile ID is canonical"),
-                "Claude",
+                AgentProfileId::new(profile_id).expect("catalog profile ID is canonical"),
+                display_name,
                 revision,
                 [
                     AgentCapability::Resume,
@@ -164,13 +204,8 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
         let provider_resume =
             provider_resume(request, &profile).map_err(AdapterError::Validation)?;
         if let Some(reference) = &provider_resume {
-            let flag = if request.resume {
-                "--resume"
-            } else {
-                "--session-id"
-            };
             provision.spawn.append_sensitive_arguments([
-                flag.to_owned(),
+                "--resume".to_owned(),
                 reference.native_session_id.expose_sensitive().to_owned(),
             ]);
         }
@@ -262,19 +297,10 @@ fn provider_resume(
         reference.last_known_status = ProviderResumeStatus::Active;
         reference.last_known_phase = Some(ProviderResumePhase::Starting);
         Ok(Some(reference))
+    } else if request.provider_resume.is_some() {
+        Err(LaunchValidationError::ProviderResumeMismatch)
     } else {
-        if request.provider_resume.is_some() {
-            return Err(LaunchValidationError::ProviderResumeMismatch);
-        }
-        Ok(Some(ProviderResumeRef {
-            provider: ProviderKind::Claude,
-            native_session_id: ProviderSessionId::new(OperationId::new().to_string())?,
-            adapter_revision: profile.revision,
-            scope: request.scope.clone(),
-            provenance: ProviderCaptureProvenance::DaemonIssued,
-            last_known_status: ProviderResumeStatus::Active,
-            last_known_phase: Some(ProviderResumePhase::Starting),
-        }))
+        Ok(None)
     }
 }
 
@@ -282,13 +308,13 @@ fn provider_resume(
 mod tests {
     use super::*;
     use usagi_core::domain::{
-        agent::{LaunchScope, ModelSelector},
+        agent::{LaunchScope, ModelSelector, ProviderCaptureProvenance, ProviderSessionId},
         id::{SessionId, WorkspaceId, WorktreeId},
     };
 
-    struct FakeProvisioner(Option<Result<ClaudeProvision, ClaudeProvisionFailure>>);
+    struct FakeClaudeProvisioner(Option<Result<ClaudeProvision, ClaudeProvisionFailure>>);
 
-    impl ClaudeProvisioner for FakeProvisioner {
+    impl ClaudeProvisioner for FakeClaudeProvisioner {
         fn provision(
             &mut self,
             _: &ProvisionContext,
@@ -314,6 +340,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_fugu_profile_is_a_separate_identity_over_the_same_claude_grammar() {
+        let sakana = ClaudeAdapter::sakana(FakeClaudeProvisioner(None));
+        let claude = ClaudeAdapter::new(FakeClaudeProvisioner(None));
+        assert_eq!(sakana.profile().id.as_str(), "sakana-ai");
+        assert_eq!(sakana.profile().display_name, "sakana.ai");
+        // Same grammar, same capabilities: only the environment a provisioner
+        // gives it makes one Fugu and the other Anthropic Claude.
+        assert_eq!(sakana.profile().capabilities, claude.profile().capabilities);
+        assert_eq!(
+            sakana.profile().allowed_modes,
+            claude.profile().allowed_modes
+        );
+        // The revision must differ from Claude's. Until this change the same
+        // `sakana-ai` ID was launched by the Codex adapter, which also carried
+        // revision 5: a durable snapshot from that era describes Codex argv, and
+        // a shared revision would let it validate against this profile.
+        assert_ne!(sakana.profile().revision, claude.profile().revision);
+        assert_eq!(sakana.profile().revision, SAKANA_PROFILE_REVISION);
+        // The snapshots that must not validate are the Codex adapter's, so the
+        // revision has to differ from *that* constant too. A resume reference
+        // is admitted on `adapter_revision` equality, and this is the whole
+        // fence that keeps a Codex-era `sakana-ai` record from being replayed.
+        assert_ne!(
+            SAKANA_PROFILE_REVISION,
+            crate::usecase::codex::PROFILE_REVISION
+        );
+
+        // A launch for the other profile is refused rather than answered with
+        // the wrong identity.
+        let mut sakana = ClaudeAdapter::sakana(FakeClaudeProvisioner(Some(Ok(provision()))));
+        assert!(matches!(
+            sakana.resolve(&request()),
+            Err(AdapterError::Validation(LaunchValidationError::UnknownProfile {
+                profile_id,
+            })) if profile_id.as_str() == "claude"
+        ));
+    }
+
     fn provision() -> ClaudeProvision {
         ClaudeProvision {
             working_directory: PathBuf::from("/workspace"),
@@ -337,7 +402,7 @@ mod tests {
 
     #[test]
     fn renders_claude_plan_and_keeps_private_provision_outside_snapshot() {
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let resolved = adapter.resolve(&request()).unwrap();
         assert_eq!(resolved.snapshot.plan.program, "claude");
         assert_eq!(
@@ -376,7 +441,7 @@ mod tests {
         ] {
             let mut request = request();
             request.initial_prompt = Some(prompt.to_owned());
-            let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+            let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
             let resolved = adapter.resolve(&request).unwrap();
 
             assert_eq!(
@@ -399,7 +464,7 @@ mod tests {
                 .collect()
         }
 
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let headless = adapter.resolve(&request()).unwrap();
         assert_eq!(
             effective_argv(&headless),
@@ -418,15 +483,9 @@ mod tests {
 
         let mut interactive_request = request();
         interactive_request.mode = LaunchMode::Interactive;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let interactive = adapter.resolve(&interactive_request).unwrap();
-        let session_id = interactive
-            .provider_resume
-            .as_ref()
-            .unwrap()
-            .native_session_id
-            .expose_sensitive()
-            .to_owned();
+        assert!(interactive.provider_resume.is_none());
         assert_eq!(
             effective_argv(&interactive),
             [
@@ -434,8 +493,6 @@ mod tests {
                 "/scoped/claude.json",
                 "--append-system-prompt",
                 "ephemeral system prompt",
-                "--session-id",
-                session_id.as_str(),
                 "--model",
                 "sonnet",
                 "--",
@@ -443,10 +500,19 @@ mod tests {
             ]
         );
 
-        let mut resume_request = interactive_request;
+        let mut resume_request = interactive_request.clone();
         resume_request.resume = true;
-        resume_request.provider_resume = interactive.provider_resume;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let session_id = "captured-claude-session";
+        resume_request.provider_resume = Some(ProviderResumeRef {
+            provider: ProviderKind::Claude,
+            native_session_id: ProviderSessionId::new(session_id).unwrap(),
+            adapter_revision: PROFILE_REVISION,
+            scope: resume_request.scope.clone(),
+            provenance: ProviderCaptureProvenance::ProviderStructured,
+            last_known_status: ProviderResumeStatus::Interrupted,
+            last_known_phase: Some(ProviderResumePhase::Interrupted),
+        });
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let resumed = adapter.resolve(&resume_request).unwrap();
         assert_eq!(
             effective_argv(&resumed),
@@ -456,7 +522,7 @@ mod tests {
                 "--append-system-prompt",
                 "ephemeral system prompt",
                 "--resume",
-                session_id.as_str(),
+                session_id,
                 "--model",
                 "sonnet",
                 "--",
@@ -467,25 +533,19 @@ mod tests {
         let mut no_prompt = request();
         no_prompt.mode = LaunchMode::Interactive;
         no_prompt.initial_prompt = None;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let no_prompt = adapter.resolve(&no_prompt).unwrap();
         assert_eq!(no_prompt.snapshot.plan.argv, ["--model", "sonnet"]);
     }
 
     #[test]
-    fn interactive_launch_pins_a_daemon_uuid_and_resume_reuses_only_that_id() {
+    fn interactive_launch_waits_for_structured_capture_before_resume_is_available() {
         let mut initial = request();
         initial.mode = LaunchMode::Interactive;
         initial.initial_prompt = None;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         let resolved = adapter.resolve(&initial).unwrap();
-        let reference = resolved.provider_resume.unwrap();
-        assert_eq!(reference.provider, ProviderKind::Claude);
-        assert_eq!(
-            reference.provenance,
-            ProviderCaptureProvenance::DaemonIssued
-        );
-        assert!(OperationId::parse(reference.native_session_id.expose_sensitive()).is_ok());
+        assert!(resolved.provider_resume.is_none());
         assert_eq!(
             resolved.provision.arguments(),
             [
@@ -493,52 +553,7 @@ mod tests {
                 "/scoped/claude.json",
                 "--append-system-prompt",
                 "ephemeral system prompt",
-                "--session-id",
-                reference.native_session_id.expose_sensitive(),
             ]
-        );
-        assert!(
-            !resolved
-                .snapshot
-                .plan
-                .argv
-                .iter()
-                .any(|argument| { argument == reference.native_session_id.expose_sensitive() })
-        );
-        assert!(
-            !serde_json::to_string(&resolved.snapshot)
-                .unwrap()
-                .contains(reference.native_session_id.expose_sensitive())
-        );
-
-        let mut resumed = initial;
-        resumed.resume = true;
-        resumed.provider_resume = Some(reference.clone());
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
-        let resumed = adapter.resolve(&resumed).unwrap();
-        assert_eq!(
-            resumed.provision.arguments(),
-            [
-                "--settings",
-                "/scoped/claude.json",
-                "--append-system-prompt",
-                "ephemeral system prompt",
-                "--resume",
-                reference.native_session_id.expose_sensitive(),
-            ]
-        );
-        assert!(
-            !resumed
-                .snapshot
-                .plan
-                .argv
-                .iter()
-                .any(|argument| { argument == reference.native_session_id.expose_sensitive() })
-        );
-        assert!(
-            !serde_json::to_string(&resumed.snapshot)
-                .unwrap()
-                .contains(reference.native_session_id.expose_sensitive())
         );
     }
 
@@ -546,7 +561,7 @@ mod tests {
     fn rejects_missing_headless_prompt_and_provision_failures() {
         let mut missing = request();
         missing.initial_prompt = None;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Err(
             ClaudeProvisionFailure::ExecutableUnavailable,
         ))));
         assert!(matches!(
@@ -557,14 +572,14 @@ mod tests {
             adapter.resolve(&request()),
             Err(AdapterError::ExecutableUnavailable)
         ));
-        let mut failed = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+        let mut failed = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Err(
             ClaudeProvisionFailure::MaterializationFailed,
         ))));
         assert!(matches!(
             failed.resolve(&request()),
             Err(AdapterError::ProvisionFailed)
         ));
-        let mut invalid_policy = ClaudeAdapter::new(FakeProvisioner(Some(Err(
+        let mut invalid_policy = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Err(
             ClaudeProvisionFailure::InvalidSandboxPolicy,
         ))));
         assert!(matches!(
@@ -574,7 +589,7 @@ mod tests {
 
         let mut headless_resume = request();
         headless_resume.resume = true;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             adapter.resolve(&headless_resume),
             Err(AdapterError::Validation(
@@ -589,7 +604,7 @@ mod tests {
         resume.mode = LaunchMode::Interactive;
         resume.initial_prompt = None;
         resume.resume = true;
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             adapter.resolve(&resume),
             Err(AdapterError::Validation(
@@ -607,7 +622,7 @@ mod tests {
             last_known_status: ProviderResumeStatus::Exited,
             last_known_phase: None,
         });
-        let mut adapter = ClaudeAdapter::new(FakeProvisioner(Some(Ok(provision()))));
+        let mut adapter = ClaudeAdapter::new(FakeClaudeProvisioner(Some(Ok(provision()))));
         assert!(matches!(
             adapter.resolve(&resume),
             Err(AdapterError::Validation(
@@ -706,12 +721,13 @@ mod tests {
 
     #[test]
     fn exposes_its_profile_and_validates_its_own_durable_snapshot() {
-        let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 4);
+        let mut adapter =
+            ClaudeAdapter::with_revision(FakeClaudeProvisioner(Some(Ok(provision()))), 5);
         assert_eq!(
             adapter.profile().id.as_str(),
             DefaultModel::Claude.profile_id()
         );
-        assert_eq!(adapter.profile().revision, 4);
+        assert_eq!(adapter.profile().revision, 5);
         assert!(
             adapter
                 .profile()

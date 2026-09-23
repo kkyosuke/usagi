@@ -56,7 +56,8 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
 | `uuid` | v2 resource incarnation の typed ID（UUIDv4）と durable operation ID（UUIDv7） | 本依存 |
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
-| `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist と global/workspace `roles.toml` の解析 | 本依存 |
+| `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist・session setup command と global/workspace `roles.toml` の解析 | 本依存 |
+| `toml_edit` | Workspace Config から `.usagi/config.toml` の session setup command だけをコメント・順序を保持して更新 | 本依存 |
 | `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity、self-update の embedded installer identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当）と、結合テストの重い E2E 直列化ロック | 本依存 |
@@ -78,7 +79,8 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
 JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`toml` は `usagi-core` の infrastructure
-（runtime/model と role catalog reader）、`shell-words` は同クレートの usecase が使い、いずれも domain には持ち込まない。
+（runtime/model と role catalog reader）、`toml_edit` は同じ infrastructure の workspace config writer、
+`shell-words` は同クレートの usecase が使い、いずれも domain には持ち込まない。
 `unicode-width` は
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
@@ -223,6 +225,8 @@ CI で full test / coverage gate が必須となる条件は次のとおり（�
   - `#[coverage(off)]` はその item だけに適用され、内部の closure など別 item には継承されない。除外した合成関数は closure-free に保つか、入れ子の item をテスト可能な関数へ分離し、意図しない未計測 item を作らない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
   - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は日付なしの `nightly` なので、pin した toolchain が使う component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` の `components` が正本である。
+- **`#[allow(clippy::…)]` には理由コメントを必ず添える**（属性の直前の行、または同じ行）。pedantic を黙らせるためだけの allow は、後から「まだ要るのか」を判断できなくなる。理由は lint 名の言い換えではなく、その item がその形である理由を書く。
+  **allow が不要かどうかをローカルの clippy 1 回で判断しない**。`libc` の型幅のように target で結果が変わる lint は、host によって発火する側が入れ替わる（macOS で `cast_lossless`、Linux で `unnecessary_cast`）。target 依存を理由に両方 allow している箇所は、その旨をコメントに書いて残す。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
 
 ## `coverage(off)` 例外
@@ -488,6 +492,8 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v2 のビルド（`--features production`）・SHA-256 / version artifact 生成・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
+リリースノートは `action-gh-release` の `generate_release_notes: true` により GitHub 標準の自動生成を使う。
+AI API は呼ばず、ノート生成専用 job と Models 権限も持たない。
 
 `create-release-pr.yml` は dispatch の choice input を `run:` へ式展開せず環境変数で渡し、
 `scripts/ci/next-release-version.sh` が `major` / `minor` / `patch` の選択と現在の SemVer を検証して算出した値だけを

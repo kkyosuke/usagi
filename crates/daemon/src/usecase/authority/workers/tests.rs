@@ -6,12 +6,12 @@ use super::*;
 /// A connection whose "parked read" is a channel receive; shutting it down
 /// closes the sender so the read returns, exactly as `shutdown(2)` unblocks a
 /// blocking `recv` on a socket.
-struct FakeConnection {
+struct FakeWorkerConnection {
     sender: std::sync::Mutex<Option<Sender<()>>>,
     failure: Option<&'static str>,
 }
 
-impl FakeConnection {
+impl FakeWorkerConnection {
     fn new(failure: Option<&'static str>) -> (Arc<Self>, Receiver<()>) {
         let (sender, receiver) = channel();
         (
@@ -24,7 +24,7 @@ impl FakeConnection {
     }
 }
 
-impl ConnectionShutdown for Arc<FakeConnection> {
+impl ConnectionShutdown for Arc<FakeWorkerConnection> {
     fn shutdown(&self) -> io::Result<()> {
         // The stream is closed even when the syscall reports a failure, so the
         // worker is still joinable afterwards.
@@ -41,7 +41,7 @@ fn retirement_unblocks_every_stream_before_joining_its_worker() {
 
     let mut parked = Vec::new();
     for _ in 0..3 {
-        let (connection, receiver) = FakeConnection::new(None);
+        let (connection, receiver) = FakeWorkerConnection::new(None);
         let served = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handle = {
             let served = Arc::clone(&served);
@@ -74,7 +74,7 @@ fn a_worker_registered_after_the_set_is_sealed_is_joined_immediately() {
     let workers = ClientWorkers::new();
     assert_eq!(workers.retire().joined, 0);
 
-    let (connection, receiver) = FakeConnection::new(None);
+    let (connection, receiver) = FakeWorkerConnection::new(None);
     let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = {
         let joined = Arc::clone(&joined);
@@ -93,7 +93,7 @@ fn a_worker_registered_after_the_set_is_sealed_is_joined_immediately() {
 #[test]
 fn a_shutdown_failure_is_reported_and_the_worker_is_still_joined() {
     let workers = ClientWorkers::default();
-    let (connection, receiver) = FakeConnection::new(Some("shutdown refused"));
+    let (connection, receiver) = FakeWorkerConnection::new(Some("shutdown refused"));
     let handle = std::thread::spawn(move || {
         assert!(receiver.recv().is_err());
     });
@@ -114,7 +114,7 @@ fn a_shutdown_failure_is_reported_and_the_worker_is_still_joined() {
 fn reaping_joins_the_finished_workers_and_leaves_the_parked_ones_connected() {
     let workers = ClientWorkers::new();
 
-    let (done_connection, done_receiver) = FakeConnection::new(None);
+    let (done_connection, done_receiver) = FakeWorkerConnection::new(None);
     let done = std::thread::spawn(move || drop(done_receiver));
     // Registered only once the thread has returned, so `is_finished` is settled
     // rather than raced on.
@@ -123,7 +123,7 @@ fn reaping_joins_the_finished_workers_and_leaves_the_parked_ones_connected() {
     }
     workers.register(Box::new(done_connection), done);
 
-    let (live_connection, live_receiver) = FakeConnection::new(None);
+    let (live_connection, live_receiver) = FakeWorkerConnection::new(None);
     let live = Arc::clone(&live_connection);
     let parked = std::thread::spawn(move || {
         assert!(live_receiver.recv().is_err());
@@ -150,7 +150,7 @@ fn reaping_joins_the_finished_workers_and_leaves_the_parked_ones_connected() {
 #[test]
 fn reaping_reports_a_worker_that_panicked_before_it_was_collected() {
     let workers = ClientWorkers::new();
-    let (connection, receiver) = FakeConnection::new(None);
+    let (connection, receiver) = FakeWorkerConnection::new(None);
     let handle = std::thread::spawn(move || {
         drop(receiver);
         panic!("client worker died");
@@ -170,7 +170,7 @@ fn reaping_reports_a_worker_that_panicked_before_it_was_collected() {
 #[test]
 fn a_panicking_worker_is_reported_rather_than_hidden() {
     let workers = ClientWorkers::new();
-    let (connection, receiver) = FakeConnection::new(None);
+    let (connection, receiver) = FakeWorkerConnection::new(None);
     let handle = std::thread::spawn(move || {
         assert!(receiver.recv().is_err());
         panic!("client worker died");

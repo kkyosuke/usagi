@@ -1495,7 +1495,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakePort {
+    struct FakeTerminalPort {
         attach: Vec<Result<TerminalAttach, TerminalError>>,
         polls: Vec<Result<Vec<TerminalChunk>, TerminalError>>,
         input: Option<TerminalError>,
@@ -1523,7 +1523,7 @@ mod tests {
         /// The shared transport epoch this port reports, when it models one.
         epoch: Option<u64>,
     }
-    impl TerminalStreamPort for FakePort {
+    impl TerminalStreamPort for FakeTerminalPort {
         fn connection_epoch(&self) -> Option<u64> {
             self.epoch
         }
@@ -1666,9 +1666,9 @@ mod tests {
 
     #[test]
     fn projection_key_gates_terminal_row_and_link_scan_across_one_thousand_idle_ticks() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 20, b"https://example.com", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1716,10 +1716,10 @@ mod tests {
             Ok(TerminalInputResolution::Unknown)
         );
         default_port.detach(&terminal(), sub(1));
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(7, 3, b"$ ", false))],
             polls: vec![Ok(vec![chunk(3, b"ls\r\n"), chunk(7, b"a.txt")])],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1734,9 +1734,9 @@ mod tests {
 
     #[test]
     fn resizing_clips_current_and_retained_output_without_reattaching() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 3, b"old", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1753,9 +1753,9 @@ mod tests {
 
     #[test]
     fn attach_reporting_exit_marks_the_session_exited() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 4, b"done", true))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1768,9 +1768,9 @@ mod tests {
 
     #[test]
     fn display_rows_shows_the_cursor_only_while_live() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 2, b"$ ", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1792,9 +1792,9 @@ mod tests {
 
     #[test]
     fn scrollback_display_hides_the_cursor_after_the_session_stops() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"one\r\ntwo\r\nthree", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1814,9 +1814,9 @@ mod tests {
 
     #[test]
     fn connect_failure_reports_safe_feedback_without_a_subscription() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Err(TerminalError::Unavailable)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1831,9 +1831,9 @@ mod tests {
 
     #[test]
     fn resize_failure_does_not_prevent_attach_or_hide_replay() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(7, 5, b"reply", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         let now = Instant::now();
@@ -1878,9 +1878,9 @@ mod tests {
 
     #[test]
     fn failed_resize_preserves_cells_until_the_daemon_acknowledges_the_geometry() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 16, b"abcdefghijklmnop", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         let now = Instant::now();
@@ -1905,9 +1905,9 @@ mod tests {
 
     #[test]
     fn returning_to_the_synchronized_geometry_cancels_a_failed_pending_resize() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         let now = Instant::now();
@@ -1929,9 +1929,9 @@ mod tests {
 
     #[test]
     fn input_is_sent_once_with_a_monotonic_sequence() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(9, 0, b"", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1945,14 +1945,14 @@ mod tests {
 
     #[test]
     fn known_input_outcomes_advance_sequence_without_losing_the_subscription() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(9, 0, b"", false))],
             input_outcomes: vec![
                 TerminalInputOutcome::Failed,
                 TerminalInputOutcome::Ambiguous { applied_prefix: 2 },
                 TerminalInputOutcome::Written,
             ],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -1997,13 +1997,13 @@ mod tests {
 
     #[test]
     fn same_connection_cursor_gap_reattach_preserves_the_next_input_sequence() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(11, 1, 0, b"", false)),
                 Ok(attach_at(11, 2, 0, b"fresh", false)),
             ],
             polls: vec![Ok(vec![chunk(2, b"gap")])],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2020,12 +2020,12 @@ mod tests {
 
     #[test]
     fn fresh_connection_epoch_resets_the_input_sequence() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(11, 1, 0, b"", false)),
                 Ok(attach_at(12, 2, 0, b"", false)),
             ],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2043,9 +2043,9 @@ mod tests {
     fn daemon_ledger_cursor_is_adopted_when_a_detached_session_was_evicted() {
         let mut adopted = attach_at(11, 1, 0, b"", false);
         adopted.next_input_seq = Some(7);
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(adopted)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -2061,7 +2061,7 @@ mod tests {
     #[test]
     fn an_unknown_input_fences_the_queue_until_its_operation_resolves() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Ok(attach_at(2, 2, 0, b"", false)),
@@ -2070,7 +2070,7 @@ mod tests {
             resolutions: vec![Ok(TerminalInputResolution::Final(
                 TerminalInputOutcome::Written,
             ))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2129,7 +2129,7 @@ mod tests {
     #[test]
     fn an_unresolvable_operation_latches_the_fence_without_resending() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Ok(attach_at(2, 2, 0, b"", false)),
@@ -2137,7 +2137,7 @@ mod tests {
             input: Some(TerminalError::InputEffectUnknown),
             resolutions: vec![Ok(TerminalInputResolution::Unknown)],
             polls: vec![Ok(Vec::new()), Ok(Vec::new()), Ok(Vec::new())],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2188,7 +2188,7 @@ mod tests {
             ),
         ] {
             let now = Instant::now();
-            let mut port = FakePort {
+            let mut port = FakeTerminalPort {
                 input: Some(TerminalError::InputEffectUnknown),
                 attach: vec![
                     Ok(attach_at(1, 1, 0, b"", false)),
@@ -2199,7 +2199,7 @@ mod tests {
                     Err(TerminalError::Unavailable),
                     Ok(TerminalInputResolution::Final(final_outcome)),
                 ],
-                ..FakePort::default()
+                ..FakeTerminalPort::default()
             };
             let mut session = TerminalSession::new(terminal(), geometry());
             session.connect_at(&mut port, now);
@@ -2243,7 +2243,7 @@ mod tests {
     #[test]
     fn an_interrupted_drain_keeps_the_rest_of_the_queue_in_order() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Ok(attach_at(2, 2, 0, b"", false)),
@@ -2252,7 +2252,7 @@ mod tests {
             resolutions: vec![Ok(TerminalInputResolution::Final(
                 TerminalInputOutcome::Written,
             ))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2278,7 +2278,7 @@ mod tests {
     #[test]
     fn retraction_only_removes_the_resolved_inputs_uncertainty() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Ok(attach_at(2, 2, 0, b"", false)),
@@ -2287,7 +2287,7 @@ mod tests {
             resolutions: vec![Ok(TerminalInputResolution::Final(
                 TerminalInputOutcome::Written,
             ))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2315,10 +2315,10 @@ mod tests {
     #[test]
     fn a_definitive_input_failure_does_not_fence_the_queue() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach_at(1, 1, 0, b"", false))],
             input_outcomes: vec![TerminalInputOutcome::Failed],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2337,13 +2337,13 @@ mod tests {
     #[test]
     fn same_socket_decode_failure_reattach_preserves_the_input_sequence() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(21, 1, 0, b"", false)),
                 Ok(attach_at(21, 2, 0, b"fresh", false)),
             ],
             polls: vec![Err(TerminalError::Unavailable)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2361,7 +2361,7 @@ mod tests {
 
     #[test]
     fn a_replaced_connection_attaches_freshly_before_the_next_poll() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Ok(attach_at(2, 2, 0, b"fresh", false)),
@@ -2370,7 +2370,7 @@ mod tests {
             // no `Resume` is sent on the replaced attachment.
             polls: vec![Err(TerminalError::Stale)],
             epoch: Some(1),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2402,13 +2402,13 @@ mod tests {
 
     #[test]
     fn the_first_key_after_a_replaced_connection_is_written_once_on_a_fresh_subscription() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(7, 1, 0, b"", false)),
                 Ok(attach_at(8, 2, 0, b"", false)),
             ],
             epoch: Some(7),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2427,13 +2427,13 @@ mod tests {
 
     #[test]
     fn a_replaced_connection_whose_attach_fails_reports_reconnecting_without_input() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Err(TerminalError::Unavailable),
             ],
             epoch: Some(1),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2449,10 +2449,10 @@ mod tests {
 
     #[test]
     fn input_failure_reports_safe_feedback() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(9, 0, b"", false))],
             input: Some(TerminalError::Stale),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2466,10 +2466,10 @@ mod tests {
 
     #[test]
     fn unknown_input_effect_never_advances_sequence_or_replays_the_bytes() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(9, 0, b"", false))],
             input: Some(TerminalError::InputEffectUnknown),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2499,14 +2499,14 @@ mod tests {
 
     #[test]
     fn unknown_input_warning_survives_recovery_and_composes_with_a_later_fatal_error() {
-        let mut clock = FakeClock(Instant::now());
-        let mut port = FakePort {
+        let mut clock = FakeSessionClock(Instant::now());
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(31, 1, 0, b"", false)),
                 Ok(attach_at(32, 2, 0, b"fresh", false)),
             ],
             input: Some(TerminalError::InputEffectUnknown),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, clock.0);
@@ -2561,14 +2561,14 @@ mod tests {
 
     #[test]
     fn a_cursor_gap_triggers_a_full_reattach() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach(1, 0, b"", false)),
                 Ok(attach(2, 5, b"fresh", false)),
             ],
             // Non-contiguous: the daemon trimmed output before offset 2.
             polls: vec![Ok(vec![chunk(2, b"late")])],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2579,14 +2579,14 @@ mod tests {
 
     #[test]
     fn a_mismatched_chunk_length_also_reattaches() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"", false)), Ok(attach(2, 0, b"ok", false))],
             polls: vec![Ok(vec![TerminalChunk {
                 start_offset: 0,
                 end_offset: 9,
                 data: b"short".to_vec(),
             }])],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2596,13 +2596,13 @@ mod tests {
 
     #[test]
     fn a_trimmed_output_cursor_reattaches_to_the_atomic_snapshot() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach(1, 0, b"old", false)),
                 Ok(attach(2, 12, b"fresh output", false)),
             ],
             polls: vec![Err(TerminalError::ResyncRequired)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2620,10 +2620,10 @@ mod tests {
 
     #[test]
     fn poll_reporting_exit_transitions_to_exited() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"", false))],
             polls: vec![Err(TerminalError::Exited)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2646,10 +2646,10 @@ mod tests {
 
     #[test]
     fn poll_transport_failure_reports_orphaned_and_disables_input() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"", false))],
             polls: vec![Err(TerminalError::Orphaned)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2674,13 +2674,13 @@ mod tests {
             TerminalError::OrderingMismatch,
             TerminalError::Orphaned,
         ] {
-            let mut port = FakePort {
+            let mut port = FakeTerminalPort {
                 attach: vec![
                     Ok(attach(1, 0, b"before", false)),
                     Ok(attach(2, 0, b"after", false)),
                 ],
                 polls: vec![Err(error)],
-                ..FakePort::default()
+                ..FakeTerminalPort::default()
             };
             let mut session = TerminalSession::new(terminal(), geometry());
             let now = Instant::now();
@@ -2717,13 +2717,13 @@ mod tests {
             TerminalError::ResyncRequired,
             TerminalError::Orphaned,
         ] {
-            let mut port = FakePort {
+            let mut port = FakeTerminalPort {
                 attach: vec![
                     Ok(attach(1, 0, b"before", false)),
                     Err(error),
                     Ok(attach(2, 0, b"after", false)),
                 ],
-                ..FakePort::default()
+                ..FakeTerminalPort::default()
             };
             let mut session = TerminalSession::new(terminal(), geometry());
             let now = Instant::now();
@@ -2757,7 +2757,7 @@ mod tests {
     #[test]
     fn an_interrupted_drain_keeps_its_queue_ahead_of_later_keystrokes() {
         let now = Instant::now();
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach_at(1, 1, 0, b"", false)),
                 Ok(attach_at(2, 2, 0, b"", false)),
@@ -2768,7 +2768,7 @@ mod tests {
                 TerminalInputOutcome::Written,
             ))],
             polls: vec![Ok(Vec::new()); 4],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, now);
@@ -2816,9 +2816,9 @@ mod tests {
     /// 逆側の不変条件: 明示的な detach（background へ回した pane）は retry しない。
     #[test]
     fn an_explicit_detach_is_not_a_failure_and_never_reattaches_itself() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         let now = Instant::now();
@@ -2831,12 +2831,12 @@ mod tests {
 
     #[test]
     fn detach_releases_the_subscription_and_reconnect_preserves_input_ordering() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach(4, 0, b"", false)),
                 Ok(attach(5, 0, b"back", false)),
             ],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2868,13 +2868,13 @@ mod tests {
     fn detach_and_reattach_preserve_an_unresolved_input_and_its_fenced_queue() {
         let mut reattached = attach(5, 0, b"", false);
         reattached.next_input_seq = Some(1);
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(4, 0, b"", false)), Ok(reattached)],
             input_error_once: Some(TerminalError::InputEffectUnknown),
             resolutions: vec![Ok(TerminalInputResolution::Final(
                 TerminalInputOutcome::Written,
             ))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -2895,9 +2895,9 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    struct FakeClock(Instant);
+    struct FakeSessionClock(Instant);
 
-    impl FakeClock {
+    impl FakeSessionClock {
         fn advance(&mut self, duration: Duration) {
             self.0 += duration;
         }
@@ -2905,8 +2905,8 @@ mod tests {
 
     #[test]
     fn unavailable_retries_same_terminal_with_capped_backoff_and_resets_after_attach() {
-        let mut clock = FakeClock(Instant::now());
-        let mut port = FakePort {
+        let mut clock = FakeSessionClock(Instant::now());
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Err(TerminalError::Unavailable),
                 Err(TerminalError::Unavailable),
@@ -2917,7 +2917,7 @@ mod tests {
                 Err(TerminalError::Unavailable),
                 Ok(attach(7, 5, b"back", false)),
             ],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let terminal = terminal();
         let mut session = TerminalSession::new(terminal.clone(), geometry());
@@ -2947,14 +2947,14 @@ mod tests {
 
     #[test]
     fn detach_cancels_a_scheduled_retry_and_non_live_input_is_typed() {
-        let mut clock = FakeClock(Instant::now());
-        let mut port = FakePort {
+        let mut clock = FakeSessionClock(Instant::now());
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach(4, 0, b"", false)),
                 Ok(attach(5, 0, b"unexpected", false)),
             ],
             polls: vec![Err(TerminalError::Unavailable)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect_at(&mut port, clock.0);
@@ -3139,7 +3139,7 @@ mod tests {
 
     #[test]
     fn a_daemon_without_checkpoints_shows_no_history_instead_of_parsing_a_tail() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 3, epoch: 1 },
                 revision: 7,
@@ -3149,7 +3149,7 @@ mod tests {
                 exited: false,
             })],
             polls: vec![Ok(vec![chunk(64, b"live")])],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3170,7 +3170,7 @@ mod tests {
 
     #[test]
     fn a_history_less_exited_attach_reports_both_facts() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 3, epoch: 1 },
                 revision: 1,
@@ -3179,7 +3179,7 @@ mod tests {
                 screen: TerminalAttachScreen::HistoryUnavailable,
                 exited: true,
             })],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3199,7 +3199,7 @@ mod tests {
         let complete = "\u{1b}[31mred\u{1b}[1mあ".as_bytes();
         for split in 1..complete.len() {
             let (head, suffix) = complete.split_at(split);
-            let mut port = FakePort {
+            let mut port = FakeTerminalPort {
                 attach: vec![Ok(TerminalAttach {
                     subscription: TerminalSubscription { id: 1, epoch: 1 },
                     revision: 1,
@@ -3209,7 +3209,7 @@ mod tests {
                     exited: false,
                 })],
                 polls: vec![Ok(vec![chunk(head.len() as u64, suffix)])],
-                ..FakePort::default()
+                ..FakeTerminalPort::default()
             };
             let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3233,7 +3233,7 @@ mod tests {
         // exist only in the checkpoint: the raw journal window is long gone.
         let head = b"one\r\ntwo\r\nthree\r\n\x1b[?1049h\x1b[1;1Halt-frame";
         let suffix = b"\x1b[?1049lback";
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
@@ -3243,7 +3243,7 @@ mod tests {
                 exited: false,
             })],
             polls: vec![Ok(vec![chunk(head.len() as u64, suffix)])],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3270,7 +3270,7 @@ mod tests {
     fn a_terminal_shared_with_a_smaller_window_is_decoded_at_the_shared_viewport() {
         // Another window holds this terminal at 10x2 while this pane is 20x3.
         let shared = Geometry { cols: 10, rows: 2 };
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(TerminalAttach {
                 subscription: sub(1),
                 revision: 2,
@@ -3280,7 +3280,7 @@ mod tests {
                 exited: false,
             })],
             effective_geometry: Some(shared),
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3319,9 +3319,9 @@ mod tests {
         // the daemon released this window's claim on the shared viewport with the
         // attachment. Staying silent here left a peer's smaller viewport holding
         // the terminal down after the peer was gone.
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 0, b"", false)), Ok(attach(2, 0, b"", false))],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -3343,7 +3343,7 @@ mod tests {
         // leave the pane clipped forever: the next redraw re-asks for the pane
         // viewport even though the pane size itself never changed.
         let larger = Geometry { cols: 40, rows: 4 };
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(TerminalAttach {
                 subscription: sub(1),
                 revision: 1,
@@ -3352,7 +3352,7 @@ mod tests {
                 screen: checkpoint_at(b"clipped", larger),
                 exited: false,
             })],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3367,7 +3367,7 @@ mod tests {
 
     #[test]
     fn one_interleaved_snapshot_converges_on_the_immediate_retry() {
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach(1, 3, b"applied", false)),
                 // A snapshot older than the one already applied: the immediate
@@ -3382,7 +3382,7 @@ mod tests {
                 }),
             ],
             polls: vec![Err(TerminalError::ResyncRequired)],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
@@ -3404,7 +3404,7 @@ mod tests {
         // with a geometry the pane cannot draw whole. Showing it clipped beats
         // hiding an attachable terminal.
         let daemon_geometry = Geometry { cols: 40, rows: 4 };
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![Ok(TerminalAttach {
                 subscription: TerminalSubscription { id: 1, epoch: 1 },
                 revision: 1,
@@ -3413,7 +3413,7 @@ mod tests {
                 screen: checkpoint_at(b"wide", daemon_geometry),
                 exited: false,
             })],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
 
@@ -3438,7 +3438,7 @@ mod tests {
             screen: checkpoint_of(b"rewound", geometry()),
             exited: false,
         };
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(TerminalAttach {
                     subscription: TerminalSubscription { id: 1, epoch: 1 },
@@ -3451,7 +3451,7 @@ mod tests {
                 Ok(stale(2)),
                 Ok(stale(3)),
             ],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let now = Instant::now();
         let mut session = TerminalSession::new(terminal(), geometry());
@@ -3484,13 +3484,13 @@ mod tests {
                 exited: false,
             }
         };
-        let mut port = FakePort {
+        let mut port = FakeTerminalPort {
             attach: vec![
                 Ok(attach(1, 4, b"kept", false)),
                 Ok(hostile(2)),
                 Ok(hostile(3)),
             ],
-            ..FakePort::default()
+            ..FakeTerminalPort::default()
         };
         let now = Instant::now();
         let mut session = TerminalSession::new(terminal(), geometry());

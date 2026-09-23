@@ -2,6 +2,7 @@
 
 use crate::presentation::theme::Style;
 use crate::presentation::widgets;
+use crate::usecase::application::terminal_selection::TerminalPoint;
 
 /// Presentation-only material for the selected live terminal.
 ///
@@ -27,10 +28,40 @@ pub const RIGHT_PANE_CONTENT_TOP: usize = 3;
 /// Blank breathing row plus footer reserved below live-terminal content.
 pub const FOOTER_ROWS: usize = 2;
 
+/// Exact frame-cell rectangle occupied by retained terminal cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportGeometry {
+    pub left: usize,
+    pub top: usize,
+    pub rows: usize,
+    pub cols: usize,
+}
+
 /// First retained terminal row in a bottom-anchored viewport.
 #[must_use]
 pub fn window_start(total_rows: usize, content_rows: usize, scroll: usize) -> usize {
     total_rows.saturating_sub(content_rows.saturating_add(scroll))
+}
+
+/// Map a frame-cell pointer into the retained row/column rendered by a
+/// bottom-anchored live-terminal viewport.
+#[must_use]
+pub fn retained_point_at(
+    viewport: ViewportGeometry,
+    total_rows: usize,
+    scroll: usize,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let column = usize::from(column).checked_sub(viewport.left)?;
+    let content_row = usize::from(row).checked_sub(viewport.top)?;
+    if column >= viewport.cols || content_row >= viewport.rows {
+        return None;
+    }
+    Some(TerminalPoint {
+        row: window_start(total_rows, viewport.rows, scroll) + content_row,
+        column,
+    })
 }
 
 /// Retained live-terminal rows clipped into a bottom-anchored content window.
@@ -117,6 +148,27 @@ mod tests {
         assert_eq!(
             viewport_rows(&projected_window, 80, 3),
             vec!["row 7", "row 8", "row 9"]
+        );
+    }
+
+    #[test]
+    fn retained_pointer_mapping_shares_bounds_and_bottom_anchor_policy() {
+        let viewport = ViewportGeometry {
+            left: 10,
+            top: 4,
+            rows: 3,
+            cols: 5,
+        };
+        assert_eq!(
+            retained_point_at(viewport, 20, 2, 12, 5),
+            Some(TerminalPoint { row: 16, column: 2 })
+        );
+        for (column, row) in [(9, 5), (15, 5), (12, 3), (12, 7)] {
+            assert_eq!(retained_point_at(viewport, 20, 2, column, row), None);
+        }
+        assert_eq!(
+            retained_point_at(viewport, 2, usize::MAX, 10, 4),
+            Some(TerminalPoint { row: 0, column: 0 })
         );
     }
 

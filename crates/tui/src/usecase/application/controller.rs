@@ -9,13 +9,17 @@ mod decision;
 mod entry;
 mod new;
 mod preview;
+mod pull_requests;
 
 pub use entry::{EntryEvent, EntryRoute, EntryState, EntryWorkspace, HomeSnapshot, update_entry};
 pub use new::{
     NewEvent, NewForm, NewMode, NewRequest, NewRoute, NewState, NewValidationError, update_new,
     validate_new_form,
 };
-pub use preview::{PreviewFileFilter, PreviewOverlay, PreviewSearchMatch};
+pub use preview::{
+    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
+};
+pub use pull_requests::{PrFilter, PrOverlay};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -28,7 +32,7 @@ use usagi_core::domain::id::{
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::pr_inventory::{PrEntry, PrState};
 use usagi_core::domain::presentation_text::{
-    presentation_character_is_safe, presentation_text_is_safe,
+    presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
 };
 use usagi_core::domain::role::RoleId;
 use usagi_core::domain::session_lifecycle::{
@@ -109,8 +113,10 @@ pub enum Overlay {
 
 /// session name に許される最大文字数（表示・path 双方の実害を避ける上限）。
 const MAX_SESSION_NAME_LEN: usize = 64;
+/// Targets that keep a preview history at once.
+const MAX_PREVIEW_RECENT_TARGETS: usize = 8;
 /// Goal composer bound. The daemon repeats this limit before admitting work.
-pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::infrastructure::client::MAX_AGENT_GOAL_BYTES;
+pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::infrastructure::ipc::MAX_AGENT_GOAL_BYTES;
 
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///
@@ -170,6 +176,18 @@ pub enum RoleEditorScope {
 }
 
 pub const ROLE_EDITOR_VIEWPORT_LINES: usize = 14;
+
+/// Frame ticks between two background Workflow snapshot reads.
+///
+/// The composition root wakes this reducer every 16ms, so gating the read on
+/// `mascot_tick % 10` ran a daemon round trip roughly six times a second for as
+/// long as a Workflow tab stayed selected — the per-frame inventory flood #551
+/// removed from the session and decision lanes, left behind on this one. It
+/// also kept `loading` set most of the time, which is what made the header
+/// flicker and, until the guard moved, swallowed Ctrl+S. Counting from the
+/// *completion* of the previous read keeps the lane single-flight and puts its
+/// steady cadence in the same one-second band as the resident lanes.
+const WORKFLOW_SNAPSHOT_TICKS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleEditor {
@@ -593,20 +611,6 @@ impl DecisionOverlayState {
     }
 }
 
-/// active target の Pull Request 一覧 overlay state。
-///
-/// 一覧 [`PrEntry`] は domain データで、素材は port（[`Effect::LoadPullRequests`]）から
-/// [`BackendEvent::PullRequestsLoaded`] として還流する。reducer が所有するのは選択位置と
-/// 表示可能なエラーだけで、URL の妥当性検証や browser 起動は executor 側に残す。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrOverlay {
-    target: Target,
-    prs: Vec<PrEntry>,
-    selected: usize,
-    error: Option<SafeError>,
-    filter: PrFilter,
-}
-
 /// Stable identities in the merge-confirmed cleanup queue.
 ///
 /// Names and PR metadata remain live projections outside this state. Selection
@@ -718,115 +722,6 @@ impl CleanupQueueState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PrFilter {
-    #[default]
-    All,
-    Open,
-    Closed,
-    Merged,
-}
-
-impl PrFilter {
-    fn next(self) -> Self {
-        match self {
-            Self::All => Self::Open,
-            Self::Open => Self::Closed,
-            Self::Closed => Self::Merged,
-            Self::Merged => Self::All,
-        }
-    }
-
-    fn previous(self) -> Self {
-        match self {
-            Self::All => Self::Merged,
-            Self::Open => Self::All,
-            Self::Closed => Self::Open,
-            Self::Merged => Self::Closed,
-        }
-    }
-
-    /// Status tabs in their horizontal navigation order.
-    pub const TABS: [Self; 4] = [Self::All, Self::Open, Self::Closed, Self::Merged];
-
-    #[must_use]
-    pub const fn tab_index(self) -> usize {
-        match self {
-            Self::All => 0,
-            Self::Open => 1,
-            Self::Closed => 2,
-            Self::Merged => 3,
-        }
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Open => "open",
-            Self::Closed => "closed",
-            Self::Merged => "merged",
-        }
-    }
-}
-
-fn filtered_prs(prs: &[PrEntry], filter: PrFilter) -> Vec<PrEntry> {
-    prs.iter()
-        .filter(|pr| {
-            pr.state != PrState::Dismissed
-                && match filter {
-                    PrFilter::All => true,
-                    PrFilter::Open => pr.state == PrState::Open,
-                    PrFilter::Closed => pr.state == PrState::Closed,
-                    PrFilter::Merged => pr.state == PrState::Merged,
-                }
-        })
-        .cloned()
-        .collect()
-}
-
-impl PrOverlay {
-    fn loading(target: Target) -> Self {
-        Self {
-            target,
-            prs: Vec::new(),
-            selected: 0,
-            error: None,
-            filter: PrFilter::All,
-        }
-    }
-
-    /// Overlay が対象とする stable identity。
-    #[must_use]
-    pub const fn target(&self) -> Target {
-        self.target
-    }
-    /// 表示中の PR 一覧。素材未着なら空。
-    #[must_use]
-    pub fn prs(&self) -> &[PrEntry] {
-        &self.prs
-    }
-    /// 選択中の添字。
-    #[must_use]
-    pub const fn selected(&self) -> usize {
-        self.selected
-    }
-    /// 選択中の PR。一覧が空なら `None`。
-    #[must_use]
-    pub fn selected_pr(&self) -> Option<&PrEntry> {
-        self.prs.get(self.selected)
-    }
-    /// port が分類した安全なエラー。
-    #[must_use]
-    pub fn error(&self) -> Option<&SafeError> {
-        self.error.as_ref()
-    }
-    #[must_use]
-    pub const fn filter(&self) -> PrFilter {
-        self.filter
-    }
-}
-
 impl EnvironmentEditor {
     fn loading(scope: EnvScope) -> Self {
         Self {
@@ -886,7 +781,9 @@ impl EnvironmentEditor {
 }
 
 /// daemon wire と独立した TUI の target projection。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `Ord` は [`AppState`] の PR inventory を target 単位で決定的に並べるために持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Target {
     /// workspace root。
     Root(WorkspaceId),
@@ -1221,6 +1118,7 @@ pub enum WorkspaceDrawerFocus {
 // These bools are independent runtime flags (live-pane availability, forced
 // action modal, Ctrl-C grace, quit-confirmation focus), not a combinable state
 // machine, so a single enum would not model them.
+// いずれも独立した設定で、enum にまとめると組み合わせが表現できなくなる。
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
@@ -1255,14 +1153,27 @@ pub struct AppState {
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
     role_editor: Option<RoleEditor>,
+    workflows: std::collections::BTreeMap<SessionId, super::workflow::WorkflowPanel>,
     daemon_control: DaemonControlState,
     decisions: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
+    /// The visible Pull Request modal. It exists exactly while
+    /// [`Overlay::Prs`] is the foreground overlay; an inventory request that has
+    /// not produced a modal yet lives in [`pr_request`](Self::pr_request).
     pr_overlay: Option<PrOverlay>,
+    /// Target of an explicit `p` request whose snapshot has not arrived yet.
+    ///
+    /// A request is not an overlay: nothing is drawn and no input is routed to
+    /// it. The reducer keeps it only so the returning snapshot can open the
+    /// modal on the target the user actually asked for.
+    pr_request: Option<Target>,
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
+    /// Recently opened preview files per target, newest first. The finder shows
+    /// them before anything is typed, so they outlive one overlay.
+    preview_recent: Vec<(Target, Vec<String>)>,
     create_session: Option<CreateSessionForm>,
     create_session_error: Option<Notice>,
     terminal_launch_error: Option<Notice>,
@@ -1278,9 +1189,11 @@ pub struct AppState {
     session_lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
     /// Non-persistent daemon role assignment projection by stable identity.
     session_roles: BTreeMap<SessionId, SessionRoleProjection>,
-    /// Daemon-authoritative PR rows by stable session identity. The sidebar and
-    /// modal deliberately read this same projection.
-    session_prs: BTreeMap<SessionId, (u64, Vec<PrEntry>)>,
+    /// Daemon-authoritative PR rows by target. The workspace root and every
+    /// session share this one projection, so the sidebar badge, the modal, and
+    /// the modal's status tabs all read the same rows through
+    /// [`prs_for`](Self::prs_for).
+    prs: BTreeMap<Target, (u64, Vec<PrEntry>)>,
     session_pr_revision: u64,
     pr_auto_open: PrAutoOpen,
     pr_merge_celebrations: BTreeMap<SessionId, u64>,
@@ -1304,6 +1217,7 @@ pub struct AppState {
     /// reducer uses it to admit both automatic and manual opening consistently.
     garden_available: bool,
     garden_sidebar_scroll: usize,
+    garden_pointer: Option<(u16, u16)>,
     /// Last session press eligible to become the first half of a double click.
     /// The controller owns this stable identity after hit-testing; the shell
     /// supplies only coordinates and a monotonic timestamp.
@@ -1479,14 +1393,17 @@ impl AppState {
             note_editor: None,
             environment_editor: None,
             role_editor: None,
+            workflows: std::collections::BTreeMap::new(),
             daemon_control: DaemonControlState::default(),
             decisions: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
             pr_overlay: None,
+            pr_request: None,
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
+            preview_recent: Vec::new(),
             create_session: None,
             create_session_error: None,
             terminal_launch_error: None,
@@ -1496,7 +1413,7 @@ impl AppState {
             session_names: Vec::new(),
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
-            session_prs: BTreeMap::new(),
+            prs: BTreeMap::new(),
             session_pr_revision: 0,
             pr_auto_open: PrAutoOpen::default(),
             pr_merge_celebrations: BTreeMap::new(),
@@ -1514,6 +1431,7 @@ impl AppState {
             size: None,
             garden_available: true,
             garden_sidebar_scroll: 0,
+            garden_pointer: None,
             pending_session_click: None,
             has_live_pane: false,
             has_pane_tab: false,
@@ -1532,6 +1450,12 @@ impl AppState {
     pub const fn route(&self) -> Route {
         self.route
     }
+    /// The pointer is display-only; stable click targets still come from the drawn frame.
+    #[must_use]
+    pub const fn garden_pointer(&self) -> Option<(u16, u16)> {
+        self.garden_pointer
+    }
+
     /// Requested scroll offset in the Garden session list.
     #[must_use]
     pub const fn garden_sidebar_scroll(&self) -> usize {
@@ -1625,6 +1549,11 @@ impl AppState {
     pub fn role_editor(&self) -> Option<&RoleEditor> {
         self.role_editor.as_ref()
     }
+
+    #[must_use]
+    pub fn workflow_panel(&self, session: SessionId) -> Option<&super::workflow::WorkflowPanel> {
+        self.workflows.get(&session)
+    }
     /// Current selection, pending action, and safe result in the daemon modal.
     #[must_use]
     pub const fn daemon_control(&self) -> &DaemonControlState {
@@ -1649,6 +1578,13 @@ impl AppState {
     #[must_use]
     pub fn pr_overlay(&self) -> Option<&PrOverlay> {
         self.pr_overlay.as_ref()
+    }
+    /// Target of the PR inventory request that has not produced a modal yet.
+    /// A request is invisible and owns no input; the modal appears only once
+    /// the daemon's snapshot proves there is something to show.
+    #[must_use]
+    pub const fn pr_request(&self) -> Option<Target> {
+        self.pr_request
     }
     /// Open merge-confirmed cleanup queue, including its stable selection.
     #[must_use]
@@ -1698,13 +1634,6 @@ impl AppState {
     #[must_use]
     pub fn session_roles(&self) -> &BTreeMap<SessionId, SessionRoleProjection> {
         &self.session_roles
-    }
-    /// Latest daemon PR rows for one stable session identity.
-    #[must_use]
-    pub fn session_prs(&self, session: SessionId) -> Option<&[PrEntry]> {
-        self.session_prs
-            .get(&session)
-            .map(|(_, prs)| prs.as_slice())
     }
     /// Local generation for change-driven sidebar row reconstruction.
     #[must_use]
@@ -1886,6 +1815,29 @@ impl AppState {
     /// selected sidebar session just like the right-pane preview. Closeup keeps
     /// operating on its active session. Neither route manufactures a workspace
     /// root target or accepts a stale session identity.
+    /// Recently opened preview files of `target`, newest first.
+    fn preview_recent_of(&self, target: Target) -> Vec<String> {
+        self.preview_recent
+            .iter()
+            .find(|(recorded, _)| *recorded == target)
+            .map(|(_, files)| files.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace one target's recently opened preview files.
+    ///
+    /// The target moves to the end, so the history that gets dropped is the one
+    /// nobody has opened a file from for the longest time, not merely the one
+    /// recorded first.
+    pub(super) fn set_preview_recent(&mut self, target: Target, files: Vec<String>) {
+        self.preview_recent
+            .retain(|(recorded, _)| *recorded != target);
+        self.preview_recent.push((target, files));
+        if self.preview_recent.len() > MAX_PREVIEW_RECENT_TARGETS {
+            self.preview_recent.remove(0);
+        }
+    }
+
     fn file_preview_target(&self) -> Option<Target> {
         let session = match self.route {
             Route::Home(HomeMode::Switch) => match self.selected {
@@ -2375,6 +2327,12 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    WorkflowEdit {
+        session: SessionId,
+        edit: super::workflow::WorkflowEdit,
+    },
+    /// Input captured by the selected native workflow pane, never by a PTY.
+    WorkflowInput { session: SessionId, key: AppKey },
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
     /// The runtime's current live-pane availability, sampled on every event.
@@ -2418,6 +2376,20 @@ pub enum AppEvent {
     Backend(BackendEvent),
     /// request completion。
     OperationResult(OperationResult),
+    /// A session create that finished while its workspace was not the composed
+    /// project.
+    ///
+    /// Its `OperationResult` sink was a clone of that composition's completion
+    /// channel and died with it, and the pending row it would have matched is
+    /// gone too. The shell replays the outcome here so a create the user started
+    /// before switching projects is still reported when they come back (#768).
+    CarriedCreateOutcome {
+        /// Name the user typed, so a success names its session.
+        name: String,
+        /// `None` when the daemon created the session, otherwise the safe
+        /// message the create-failure dialog shows.
+        error: Option<String>,
+    },
     /// The shell finished exactly one drawer-originated workspace-root Agent
     /// launch. A mismatched operation is ignored, preserving the in-flight
     /// fence against stale or replayed completions.
@@ -2474,6 +2446,8 @@ pub enum AppEvent {
     /// terminal capacity, so CJK labels and resize cannot
     /// move a rabbit away from the session it draws.
     GardenClick(GardenClick),
+    /// Passive motion over the Garden, without activating a session.
+    GardenHover { column: u16, row: u16 },
     /// Focus one stable session row without activating its Closeup. The process
     /// deck uses this when returning to a workspace whose controller was torn
     /// down during a project switch.
@@ -2529,6 +2503,13 @@ impl From<RuntimeEvent<BackendEvent>> for AppEvent {
 /// backend が TUI-local projection として返す event。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendEvent {
+    Workflow {
+        job: super::workflow::WorkflowJob,
+        result: Result<
+            Box<usagi_core::domain::workflow::WorkflowSnapshot>,
+            super::workflow::WorkflowError,
+        >,
+    },
     /// stable identity で表した session snapshot。
     Sessions(Vec<SessionId>),
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
@@ -2629,6 +2610,9 @@ pub enum BackendEvent {
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
         files: Vec<String>,
+        /// Files changed from the integration base. Populated only for an All
+        /// listing, which shows them as the finder's starting point.
+        changed: Vec<String>,
         lines: Vec<String>,
     },
     /// A safe preview read failure.
@@ -2666,6 +2650,11 @@ pub enum TabDirection {
 /// reducer が要求する外部操作。daemon wire 型への変換は adapter 側の責務。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    Workflow(super::workflow::WorkflowJob),
+    /// Select the session's non-terminal workflow tab without launching an Agent.
+    OpenWorkflow {
+        session: SessionId,
+    },
     /// Ask the pane owner to move its stable tab selection without exposing tab
     /// identities to this controller.
     SelectTab {
@@ -2858,129 +2847,62 @@ pub enum Effect {
     },
 }
 
+/// Reduce one event, then restore the invariants the modal surfaces share with
+/// the foreground overlay.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+    let mut effects = update_event(state, event);
+    effects.extend(reconcile_modal_surfaces(state));
+    effects
+}
+
+/// Keep the modal surfaces consistent with the foreground overlay.
+///
+/// Arms all over the reducer release the foreground when their own surface
+/// takes over — a live pane appearing under a Closeup, for one — and they
+/// cannot each remember what every modal owns. So the rule is applied once,
+/// after every event: **a modal that is not the foreground does not exist**.
+/// Without it the projection would keep drawing a box that no longer receives
+/// any key, because input is routed by the foreground overlay alone.
+///
+/// A pending PR request is not a modal and survives on Home, but any surface
+/// the user opens after asking supersedes it. Editors whose draft must outlive
+/// the foreground (notes, environment) are deliberately left alone; the
+/// projection is what stops drawing them.
+fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
+    if state.overlay != Some(Overlay::Prs) {
+        state.pr_overlay = None;
+    }
+    if state.overlay.is_some() {
+        state.pr_request = None;
+    }
+    // Dropping the preview also ends the scan behind it, like every other way
+    // the overlay closes. `take` keeps this to the drop that happens here: the
+    // Escape paths have already cleared the overlay and cancelled their own.
+    if state.overlay != Some(Overlay::Preview) && state.preview_overlay.take().is_some() {
+        return vec![Effect::CancelPreview];
+    }
+    Vec::new()
+}
+
+#[must_use]
+fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
-        AppEvent::Backend(BackendEvent::Decisions {
-            workspace,
-            decisions,
-        }) => decision::update(
-            state,
-            decision::Event::Snapshot {
-                workspace,
-                decisions,
-            },
-        ),
-        AppEvent::Backend(BackendEvent::DecisionResolved {
-            workspace,
-            decision_id,
-        }) => decision::update(
-            state,
-            decision::Event::Resolved {
-                workspace,
-                decision_id,
-            },
-        ),
-        AppEvent::Backend(BackendEvent::DecisionError {
-            workspace,
-            decision_id,
-            error,
-        }) => decision::update(
-            state,
-            decision::Event::Error {
-                workspace,
-                decision_id,
-                error,
-            },
-        ),
-        AppEvent::Backend(
-            event @ (BackendEvent::NotesLoaded { .. }
-            | BackendEvent::NotesError { .. }
-            | BackendEvent::EnvironmentLoaded { .. }
-            | BackendEvent::EnvironmentSaved { .. }
-            | BackendEvent::EnvironmentError { .. }
-            | BackendEvent::RolesLoaded { .. }
-            | BackendEvent::RolesError { .. }
-            | BackendEvent::PullRequestsLoaded { .. }
-            | BackendEvent::PullRequestsError { .. }
-            | BackendEvent::PreviewLoaded { .. }
-            | BackendEvent::PreviewError { .. }),
-        ) => {
-            let _ = update_editor_backend(state, &event);
-            Vec::new()
-        }
+        AppEvent::WorkflowEdit { session, edit } => update_workflow_edit(state, session, edit),
+        AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
             state.pending_session_click = None;
             update_key(state, key)
         }
-        AppEvent::RetainedPaneActivated(target) => {
-            let Target::Session(session) = target else {
-                return Vec::new();
-            };
-            if state.selected != Selection::Target(target)
-                || !state.sessions.contains(&session)
-                || state.session_can_use(session)
-            {
-                return Vec::new();
-            }
-            state.active = Some(session);
-            state.route = Route::Home(HomeMode::Closeup);
-            state.closeup_action_forced = false;
-            state.overlay = None;
-            Vec::new()
-        }
+        AppEvent::WorkflowInput { session, key } => update_workflow_input(state, session, key),
+        AppEvent::RetainedPaneActivated(target) => update_retained_pane_activated(state, target),
         AppEvent::LivePaneAvailability(has_live_pane) => {
-            // The runtime samples this level on every event; only an actual edge
-            // may move the grace one-shot or the Closeup overlay. A repeated
-            // level is inert so an overlay opened in the same batch (quit
-            // confirmation, PR / Preview, notes) and the Ctrl-C grace persist.
-            if has_live_pane == state.has_live_pane {
-                return Vec::new();
-            }
-            state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
-            state.has_live_pane = has_live_pane;
-            if state.workspace_drawer_open() {
-                return Vec::new();
-            }
-            if matches!(state.route, Route::Home(HomeMode::Closeup))
-                && has_live_pane
-                && !state.closeup_action_forced
-            {
-                state.overlay = None;
-            }
-            Vec::new()
+            update_live_pane_availability(state, has_live_pane)
         }
         AppEvent::PaneTabAvailability {
             available: has_pane_tab,
             error,
-        } => {
-            if has_pane_tab == state.has_pane_tab {
-                return Vec::new();
-            }
-            state.has_pane_tab = has_pane_tab;
-            if state.workspace_drawer_open() {
-                return Vec::new();
-            }
-            if !matches!(state.route, Route::Home(HomeMode::Closeup)) {
-                return Vec::new();
-            }
-            if has_pane_tab {
-                // Only the launcher steps aside: a forced action modal the user
-                // opened explicitly, and every other overlay, stay as they are.
-                if !state.closeup_action_forced && state.overlay == Some(Overlay::Closeup) {
-                    state.overlay = None;
-                }
-            } else if !state.has_live_pane && state.overlay.is_none() {
-                // A pane that failed to launch (rather than exiting cleanly)
-                // carries a safe reason; retain it on the empty Closeup so the
-                // failed shortcut is not indistinguishable from a no-op.
-                if let Some(message) = error {
-                    state.notice = Some(Notice::new(message));
-                }
-            }
-            Vec::new()
-        }
+        } => update_pane_tab_availability(state, has_pane_tab, error),
         AppEvent::TerminalLaunchFailed(error) => {
             state.notice = Some(error.clone());
             if state.overlay.is_none() {
@@ -2997,21 +2919,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        AppEvent::Resize { width, height } => {
-            // The frame loop re-applies the real terminal size every frame, so
-            // this arrives as a *level*. Only its edge closes the Garden: a
-            // screen saver must not survive a resize the user just performed,
-            // but an unchanged re-sample is inert.
-            if state.overlay == Some(Overlay::Garden)
-                && state
-                    .size
-                    .is_some_and(|previous| previous != (width, height))
-            {
-                state.overlay = None;
-            }
-            state.size = Some((width, height));
-            Vec::new()
-        }
+        AppEvent::Resize { width, height } => update_resize(state, width, height),
         AppEvent::GardenAvailability(available) => {
             state.garden_available = available;
             if !available && state.overlay == Some(Overlay::Garden) {
@@ -3022,6 +2930,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
+        AppEvent::GardenHover { column, row } => {
+            if state.overlay == Some(Overlay::Garden) {
+                state.garden_pointer = Some((column, row));
+            }
+            Vec::new()
+        }
         AppEvent::FocusSession(session) => focus_session(state, session),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
@@ -3041,212 +2955,12 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.interaction_count = state.interaction_count.saturating_add(1);
             Vec::new()
         }
-        AppEvent::Tick => {
-            state.mascot_tick = state.mascot_tick.saturating_add(1);
-            state
-                .pr_merge_celebrations
-                .retain(|_, until| state.mascot_tick <= *until);
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
-            // Never combine a press from before an authoritative snapshot with
-            // one after it, even when the same stable ID remains visible.
-            state.pending_session_click = None;
-            let previous_sessions = std::mem::replace(&mut state.sessions, sessions);
-            state
-                .runtimes
-                // A workspace-root runtime (no session) is always retained; a
-                // session runtime is dropped when its session is gone.
-                .retain(|entry| {
-                    entry
-                        .runtime
-                        .session_id
-                        .is_none_or(|session| state.sessions.contains(&session))
-                });
-            let before = state.session_prs.len();
-            state
-                .session_prs
-                .retain(|session, _| state.sessions.contains(session));
-            if state.session_prs.len() != before {
-                state.session_pr_revision = state.session_pr_revision.saturating_add(1);
-            }
-            if state.pr_overlay.as_ref().is_some_and(|overlay| {
-                matches!(overlay.target, Target::Session(session) if !state.sessions.contains(&session))
-            }) {
-                state.pr_overlay = None;
-                if state.overlay == Some(Overlay::Prs) {
-                    state.overlay = None;
-                }
-            }
-            state.reconcile_sessions(&previous_sessions);
-            reconcile_force_remove_confirmation(state);
-            let mut effects = vec![Effect::SyncPullRequestTargets {
-                sessions: state.sessions.clone(),
-            }];
-            effects.extend(continue_cleanup_after_snapshot(state));
-            effects.extend(continue_remove_after_snapshot(state));
-            effects
-        }
-        AppEvent::Backend(BackendEvent::SessionNames(names)) => {
-            state.session_names = names;
-            if let Some(form) = state.create_session.as_mut() {
-                form.replace_existing(&state.session_names);
-            }
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::SessionLifecycles(lifecycles)) => {
-            state.session_lifecycles = lifecycles;
-            let sessions = state.sessions.clone();
-            state.reconcile_sessions(&sessions);
-            reconcile_force_remove_confirmation(state);
-            let failed = state
-                .cleanup_queue
-                .as_ref()
-                .and_then(CleanupQueueState::in_flight)
-                .filter(|session| {
-                    state
-                        .session_lifecycles
-                        .get(session)
-                        .is_some_and(|projection| {
-                            projection.lifecycle == SessionLifecycle::Failed
-                                && projection.failure_stage == Some(FailureStage::Delete)
-                        })
-                });
-            if let Some(failed) = failed
-                && let Some(queue) = state.cleanup_queue.as_mut()
-            {
-                queue.in_flight = None;
-                queue.selected.remove(&failed);
-                queue.feedback = Some(Notice::new("cleanup paused after removal failed"));
-            }
-            let failed = state
-                .remove_queue
-                .as_ref()
-                .and_then(RemoveQueueState::in_flight)
-                .filter(|session| {
-                    state
-                        .session_lifecycles
-                        .get(session)
-                        .is_some_and(|projection| {
-                            projection.lifecycle == SessionLifecycle::Failed
-                                && projection.failure_stage == Some(FailureStage::Delete)
-                        })
-                });
-            if let Some(failed) = failed
-                && let Some(queue) = state.remove_queue.as_mut()
-            {
-                queue.in_flight = None;
-                queue.selected.remove(&failed);
-                queue.feedback = Some(Notice::new("removal paused after a session failed"));
-            }
-            reconcile_cleanup_queue(state);
-            reconcile_remove_queue(state);
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::SessionRoles(roles)) => {
-            state.session_roles = roles;
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::SessionRoleCatalog(catalog)) => {
-            state.role_catalog = catalog;
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::SessionBranchCatalog(catalog)) => {
-            state.branch_catalog = catalog;
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::DaemonControlFinished {
-            workspace,
-            action,
-            token,
-            result,
-        }) => {
-            if workspace != state.workspace || state.daemon_control.pending != Some((action, token))
-            {
-                return Vec::new();
-            }
-            state.daemon_control.pending = None;
-            state.notice = Some(match &result {
-                Ok(notice) => notice.clone(),
-                Err(error) => Notice::new(error.message.as_str()),
-            });
-            state.daemon_control.result = Some(result);
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::Notice(notice)) => {
-            if let Some(queue) = state.cleanup_queue.as_mut()
-                && let Some(failed) = queue.in_flight.take()
-            {
-                queue.selected.remove(&failed);
-                queue.feedback = Some(notice.clone());
-            }
-            if let Some(queue) = state.remove_queue.as_mut()
-                && let Some(failed) = queue.in_flight.take()
-            {
-                queue.selected.remove(&failed);
-                queue.feedback = Some(notice.clone());
-            }
-            state.notice = Some(notice);
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::RuntimePhase { runtime, phase }) => {
-            // The runtime's terminal must belong to its own scope, and a session
-            // runtime must name a known session. A workspace-root runtime (no
-            // session) is always in scope for the active workspace.
-            if runtime.terminal.workspace_id != state.workspace
-                || runtime.terminal.session_id != runtime.session_id
-                || runtime
-                    .session_id
-                    .is_some_and(|session| !state.sessions.contains(&session))
-            {
-                return Vec::new();
-            }
-            if let Some(entry) = state
-                .runtimes
-                .iter_mut()
-                .find(|entry| entry.runtime.fences(&runtime))
-            {
-                entry.phase = phase;
-            } else {
-                state.runtimes.push(RuntimePhase { runtime, phase });
-            }
-            reconcile_cleanup_queue(state);
-            Vec::new()
-        }
-        AppEvent::Backend(BackendEvent::Feedback(feedback)) => {
-            let refresh_prs = matches!(feedback, Feedback::Reconnected | Feedback::ResyncRequired);
-            state.feedback = Some(feedback);
-            if refresh_prs {
-                vec![Effect::SyncPullRequestTargets {
-                    sessions: state.sessions.clone(),
-                }]
-            } else {
-                Vec::new()
-            }
-        }
+        AppEvent::Tick => update_tick(state),
         AppEvent::DirectorLaunchFinished {
             operation,
             supervisor_run_id,
             succeeded,
-        } => {
-            if state.director_launching == Some(operation) {
-                state.director_launching = None;
-                if succeeded {
-                    state.director_route = match (state.work_mode, supervisor_run_id) {
-                        (WorkMode::GoalDriven, Some(run)) => DirectorRoute::RunOverview(run),
-                        (WorkMode::Classic, None) => {
-                            DirectorRoute::Console(DirectorConsoleParent::Organization)
-                        }
-                        // The launch belongs to the workflow active when it
-                        // was submitted. A later workflow switch keeps the
-                        // daemon-owned result alive without crossing the two
-                        // Director screen trees.
-                        (mode, _) => DirectorRoute::landing_for(mode),
-                    };
-                }
-            }
-            Vec::new()
-        }
+        } => update_director_launch_finished(state, operation, supervisor_run_id, succeeded),
         AppEvent::RootTerminalDrawerEmptied => {
             state.root_terminal_drawer_open = false;
             state.root_terminal_full_height = false;
@@ -3268,53 +2982,679 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        AppEvent::WorkspaceDrawerFocused(focus) => {
-            let open = match focus {
-                WorkspaceDrawerFocus::Director => state.director_drawer_open,
-                WorkspaceDrawerFocus::Terminal => state.root_terminal_drawer_open,
-            };
-            if open {
-                if focus == WorkspaceDrawerFocus::Director {
-                    state.root_terminal_full_height = false;
-                }
-                state.workspace_drawer_focus = Some(focus);
-            }
-            Vec::new()
-        }
-        AppEvent::OperationResult(result) => {
-            let pending = state
-                .pending
-                .iter()
-                .position(|pending| pending.token == result.token)
-                .map(|index| state.pending.remove(index));
-            state.notice = result.notice.clone();
-            if result.succeeded {
-                if let (Some(pending), Some(created)) = (pending, result.created)
-                    && pending.interaction_at_accept == state.interaction_count
-                {
-                    state.sessions.push(created);
-                    state.selected = Selection::Target(Target::Session(created));
-                    state.active = Some(created);
-                    state.route = Route::Home(HomeMode::Closeup);
-                    state.closeup_action_forced = false;
-                    state.overlay = None;
-                }
-            } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
-                && state.overlay.is_none()
-                && !state.workspace_drawer_open()
-            {
-                // A create accepted by the daemon later failed. Surface the safe
-                // message as a dismissible dialog over Home. The form was already
-                // cleared at submit and the pending row is now removed, so closing
-                // the dialog leaves no stale create input or half-created state.
-                // A concurrently open overlay keeps the notice fallback instead of
-                // being clobbered by the dialog.
-                state.create_session_error = result.notice;
-                state.overlay = Some(Overlay::CreateSessionError);
-            }
-            Vec::new()
+        AppEvent::WorkspaceDrawerFocused(focus) => update_workspace_drawer_focused(state, focus),
+        AppEvent::OperationResult(result) => update_operation_result(state, result),
+        AppEvent::CarriedCreateOutcome { name, error } => {
+            update_carried_create_outcome(state, &name, error)
         }
     }
+}
+
+fn update_workspace_drawer_focused(
+    state: &mut AppState,
+    focus: WorkspaceDrawerFocus,
+) -> Vec<Effect> {
+    let open = match focus {
+        WorkspaceDrawerFocus::Director => state.director_drawer_open,
+        WorkspaceDrawerFocus::Terminal => state.root_terminal_drawer_open,
+    };
+    if open {
+        if focus == WorkspaceDrawerFocus::Director {
+            state.root_terminal_full_height = false;
+        }
+        state.workspace_drawer_focus = Some(focus);
+    }
+    Vec::new()
+}
+
+fn update_resize(state: &mut AppState, width: u16, height: u16) -> Vec<Effect> {
+    // The frame loop re-applies the real terminal size every frame, so
+    // this arrives as a *level*. Only its edge closes the Garden: a
+    // screen saver must not survive a resize the user just performed,
+    // but an unchanged re-sample is inert.
+    if state.overlay == Some(Overlay::Garden)
+        && state
+            .size
+            .is_some_and(|previous| previous != (width, height))
+    {
+        state.overlay = None;
+    }
+    state.size = Some((width, height));
+    Vec::new()
+}
+
+fn update_retained_pane_activated(state: &mut AppState, target: Target) -> Vec<Effect> {
+    let Target::Session(session) = target else {
+        return Vec::new();
+    };
+    if state.selected != Selection::Target(target)
+        || !state.sessions.contains(&session)
+        || state.session_can_use(session)
+    {
+        return Vec::new();
+    }
+    state.active = Some(session);
+    state.route = Route::Home(HomeMode::Closeup);
+    state.closeup_action_forced = false;
+    state.overlay = None;
+    Vec::new()
+}
+
+fn update_workflow_edit(
+    state: &mut AppState,
+    session: SessionId,
+    edit: super::workflow::WorkflowEdit,
+) -> Vec<Effect> {
+    if state.active != Some(session)
+        || state.overlay.is_some()
+        || state.workspace_drawer_focus.is_some()
+        || state.route != Route::Home(HomeMode::Closeup)
+        || !state.session_can_use(session)
+    {
+        return Vec::new();
+    }
+    if let Some(panel) = state.workflows.get_mut(&session) {
+        match edit {
+            // Reading the history is not editing the draft, so it stays
+            // available while the start form owns the caret.
+            super::workflow::WorkflowEdit::HistoryLatest => panel.show_latest_history(),
+            // The draft edits are exactly what the start form takes the caret
+            // away from.
+            _ if panel.run.is_none() && panel.agent_field.is_some() => {}
+            super::workflow::WorkflowEdit::Start => panel.draft.move_edge(false),
+            super::workflow::WorkflowEdit::End => panel.draft.move_edge(true),
+            super::workflow::WorkflowEdit::Delete => panel.draft.delete_forward(),
+        }
+    }
+    Vec::new()
+}
+
+fn update_live_pane_availability(state: &mut AppState, has_live_pane: bool) -> Vec<Effect> {
+    // The runtime samples this level on every event; only an actual edge
+    // may move the grace one-shot or the Closeup overlay. A repeated
+    // level is inert so an overlay opened in the same batch (quit
+    // confirmation, PR / Preview, notes) and the Ctrl-C grace persist.
+    if has_live_pane == state.has_live_pane {
+        return Vec::new();
+    }
+    state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
+    state.has_live_pane = has_live_pane;
+    if state.workspace_drawer_open() {
+        return Vec::new();
+    }
+    if matches!(state.route, Route::Home(HomeMode::Closeup))
+        && has_live_pane
+        && !state.closeup_action_forced
+    {
+        state.overlay = None;
+    }
+    Vec::new()
+}
+
+fn update_tick(state: &mut AppState) -> Vec<Effect> {
+    state.mascot_tick = state.mascot_tick.saturating_add(1);
+    state
+        .pr_merge_celebrations
+        .retain(|_, until| state.mascot_tick <= *until);
+    let tick = state.mascot_tick;
+    if let Some(session) = state.active
+        && state.session_can_use(session)
+        && let Some(panel) = state.workflows.get_mut(&session)
+        && !panel.loading
+        && !panel.submitting
+        && tick >= panel.snapshot_due_tick
+    {
+        panel.loading = true;
+        vec![Effect::Workflow(super::workflow::WorkflowJob {
+            workspace: state.workspace,
+            session,
+            control: None,
+        })]
+    } else {
+        Vec::new()
+    }
+}
+
+fn update_director_launch_finished(
+    state: &mut AppState,
+    operation: OperationId,
+    supervisor_run_id: Option<SupervisorRunId>,
+    succeeded: bool,
+) -> Vec<Effect> {
+    if state.director_launching == Some(operation) {
+        state.director_launching = None;
+        if succeeded {
+            state.director_route = match (state.work_mode, supervisor_run_id) {
+                (WorkMode::GoalDriven, Some(run)) => DirectorRoute::RunOverview(run),
+                (WorkMode::Classic, None) => {
+                    DirectorRoute::Console(DirectorConsoleParent::Organization)
+                }
+                // The launch belongs to the workflow active when it
+                // was submitted. A later workflow switch keeps the
+                // daemon-owned result alive without crossing the two
+                // Director screen trees.
+                (mode, _) => DirectorRoute::landing_for(mode),
+            };
+        }
+    }
+    Vec::new()
+}
+
+fn update_operation_result(state: &mut AppState, result: OperationResult) -> Vec<Effect> {
+    let pending = state
+        .pending
+        .iter()
+        .position(|pending| pending.token == result.token)
+        .map(|index| state.pending.remove(index));
+    state.notice = result.notice.clone();
+    if result.succeeded {
+        if let (Some(pending), Some(created)) = (pending, result.created)
+            && pending.interaction_at_accept == state.interaction_count
+        {
+            state.sessions.push(created);
+            state.selected = Selection::Target(Target::Session(created));
+            state.active = Some(created);
+            state.route = Route::Home(HomeMode::Closeup);
+            state.closeup_action_forced = false;
+            state.overlay = None;
+        }
+    } else if pending.is_some_and(|pending| pending.kind == PendingKind::CreateSession)
+        && state.overlay.is_none()
+        && !state.workspace_drawer_open()
+    {
+        // A create accepted by the daemon later failed. Surface the safe
+        // message as a dismissible dialog over Home. The form was already
+        // cleared at submit and the pending row is now removed, so closing
+        // the dialog leaves no stale create input or half-created state.
+        // A concurrently open overlay keeps the notice fallback instead of
+        // being clobbered by the dialog.
+        state.create_session_error = result.notice;
+        state.overlay = Some(Overlay::CreateSessionError);
+    }
+    Vec::new()
+}
+
+/// Report a create that finished while its workspace was not the composed
+/// project.
+///
+/// There is no pending row to match here and no form to clear: both died with
+/// the composition that started the create. The outcome still has to reach the
+/// user, so a success names the session that arrived and a failure keeps the
+/// same create-failure dialog — including its rule that an overlay the user
+/// already has open is never clobbered (#768).
+fn update_carried_create_outcome(
+    state: &mut AppState,
+    name: &str,
+    error: Option<String>,
+) -> Vec<Effect> {
+    let Some(message) = error else {
+        state.notice = Some(Notice::new(format!("session {name} created")));
+        return Vec::new();
+    };
+    let notice = Notice::new(message);
+    // The live path notices unconditionally and opens the dialog on top; keep
+    // the two reports identical so dismissing either leaves the same Home.
+    state.notice = Some(notice.clone());
+    if state.overlay.is_none() && !state.workspace_drawer_open() {
+        state.create_session_error = Some(notice);
+        state.overlay = Some(Overlay::CreateSessionError);
+    }
+    Vec::new()
+}
+
+fn update_pane_tab_availability(
+    state: &mut AppState,
+    has_pane_tab: bool,
+    error: Option<String>,
+) -> Vec<Effect> {
+    if has_pane_tab == state.has_pane_tab {
+        return Vec::new();
+    }
+    state.has_pane_tab = has_pane_tab;
+    if state.workspace_drawer_open() {
+        return Vec::new();
+    }
+    if !matches!(state.route, Route::Home(HomeMode::Closeup)) {
+        return Vec::new();
+    }
+    if has_pane_tab {
+        // Only the launcher steps aside: a forced action modal the user
+        // opened explicitly, and every other overlay, stay as they are.
+        if !state.closeup_action_forced && state.overlay == Some(Overlay::Closeup) {
+            state.overlay = None;
+        }
+    } else if !state.has_live_pane && state.overlay.is_none() {
+        // A pane that failed to launch (rather than exiting cleanly)
+        // carries a safe reason; retain it on the empty Closeup so the
+        // failed shortcut is not indistinguishable from a no-op.
+        if let Some(message) = error {
+            state.notice = Some(Notice::new(message));
+        }
+    }
+    Vec::new()
+}
+
+fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) -> Vec<Effect> {
+    if state.active != Some(session)
+        || !state.sessions.contains(&session)
+        || !state.session_can_use(session)
+        || state.overlay.is_some()
+        || state.workspace_drawer_focus().is_some()
+        || state.route != Route::Home(HomeMode::Closeup)
+    {
+        return Vec::new();
+    }
+    let available = state.available_models;
+    let panel = state.workflows.entry(session).or_default();
+    panel.restrict_agents(available);
+    if panel.run.is_none() && panel.agent_field.is_some() {
+        match key {
+            AppKey::Left => {
+                panel.cycle_agent(false, available);
+                return Vec::new();
+            }
+            AppKey::Right => {
+                panel.cycle_agent(true, available);
+                return Vec::new();
+            }
+            // Reading the history is not editing the draft, so the scroll keys
+            // stay live while the start form owns the caret — the same rule
+            // `WorkflowEdit::HistoryLatest` follows, and what the pane's hint and
+            // `document/11-keybindings.md` promise.
+            AppKey::Tab | AppKey::SaveRoles | AppKey::PageUp | AppKey::PageDown => {}
+            _ => return Vec::new(),
+        }
+    }
+    match key {
+        AppKey::Char(character) => panel.draft.insert(&character.to_string()),
+        AppKey::Paste(text) => panel.draft.paste(&text),
+        AppKey::Enter => panel.draft.newline(),
+        AppKey::Backspace => panel.draft.backspace(),
+        AppKey::Left => panel.draft.move_cursor(false),
+        AppKey::Right => panel.draft.move_cursor(true),
+        AppKey::Up => panel.draft.move_vertical(false),
+        AppKey::Down => panel.draft.move_vertical(true),
+        AppKey::Tab => panel.cycle_recipient(),
+        AppKey::PageUp => panel.scroll_history(true),
+        AppKey::PageDown => panel.scroll_history(false),
+        AppKey::SaveRoles => {
+            // A background snapshot read is not the person's request,
+            // so it must not swallow this one. Only a submission still
+            // in flight owns the panel.
+            if panel.submitting {
+                return Vec::new();
+            }
+            if panel.pending.is_none() {
+                let body = panel.draft.value().to_owned();
+                if body.trim().is_empty() || body.len() > 16 * 1024 || body.contains('\0') {
+                    panel.error = Some("Enter a non-empty instruction of at most 16 KiB".into());
+                    return Vec::new();
+                }
+                let command = if panel.run.is_some() {
+                    usagi_core::domain::workflow::WorkflowCommand::Instruct {
+                        recipient: panel
+                            .recipient
+                            .unwrap_or(usagi_core::domain::workflow::Recipient::Automatic),
+                        body,
+                    }
+                } else {
+                    usagi_core::domain::workflow::WorkflowCommand::Start {
+                        goal: body,
+                        agents: panel.agents,
+                        revision_limit: panel.revision_limit,
+                    }
+                };
+                panel.pending = Some((OperationId::new(), command));
+            }
+            panel.submitting = true;
+            panel.error = None;
+            return vec![Effect::Workflow(super::workflow::WorkflowJob {
+                workspace: state.workspace,
+                session,
+                control: panel.pending.clone(),
+            })];
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+/// update backend event.
+fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
+    match event {
+        BackendEvent::Workflow { job, result } => update_workflow_backend(state, job, result),
+        BackendEvent::Decisions {
+            workspace,
+            decisions,
+        } => decision::update(
+            state,
+            decision::Event::Snapshot {
+                workspace,
+                decisions,
+            },
+        ),
+        BackendEvent::DecisionResolved {
+            workspace,
+            decision_id,
+        } => decision::update(
+            state,
+            decision::Event::Resolved {
+                workspace,
+                decision_id,
+            },
+        ),
+        BackendEvent::DecisionError {
+            workspace,
+            decision_id,
+            error,
+        } => decision::update(
+            state,
+            decision::Event::Error {
+                workspace,
+                decision_id,
+                error,
+            },
+        ),
+        event @ (BackendEvent::NotesLoaded { .. }
+        | BackendEvent::NotesError { .. }
+        | BackendEvent::EnvironmentLoaded { .. }
+        | BackendEvent::EnvironmentSaved { .. }
+        | BackendEvent::EnvironmentError { .. }
+        | BackendEvent::RolesLoaded { .. }
+        | BackendEvent::RolesError { .. }
+        | BackendEvent::PullRequestsLoaded { .. }
+        | BackendEvent::PullRequestsError { .. }
+        | BackendEvent::PreviewLoaded { .. }
+        | BackendEvent::PreviewError { .. }) => {
+            let _ = update_editor_backend(state, &event);
+            // 候補が届いた直後の選択にも側 pane を追随させる。
+            preview::sync_preview_pane(state)
+        }
+        BackendEvent::Sessions(sessions) => update_session_snapshot(state, sessions),
+        BackendEvent::SessionNames(names) => {
+            state.session_names = names;
+            if let Some(form) = state.create_session.as_mut() {
+                form.replace_existing(&state.session_names);
+            }
+            Vec::new()
+        }
+        BackendEvent::SessionLifecycles(lifecycles) => update_session_lifecycles(state, lifecycles),
+        BackendEvent::SessionRoles(roles) => {
+            state.session_roles = roles;
+            Vec::new()
+        }
+        BackendEvent::SessionRoleCatalog(catalog) => {
+            state.role_catalog = catalog;
+            Vec::new()
+        }
+        BackendEvent::SessionBranchCatalog(catalog) => {
+            state.branch_catalog = catalog;
+            Vec::new()
+        }
+        BackendEvent::DaemonControlFinished {
+            workspace,
+            action,
+            token,
+            result,
+        } => update_daemon_control_finished(state, workspace, action, token, result),
+        BackendEvent::Notice(notice) => update_backend_notice(state, notice),
+        BackendEvent::RuntimePhase { runtime, phase } => {
+            update_runtime_phase(state, runtime, phase)
+        }
+        BackendEvent::Feedback(feedback) => {
+            let refresh_prs = matches!(feedback, Feedback::Reconnected | Feedback::ResyncRequired);
+            state.feedback = Some(feedback);
+            if refresh_prs {
+                vec![Effect::SyncPullRequestTargets {
+                    sessions: state.sessions.clone(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+fn update_backend_notice(state: &mut AppState, notice: Notice) -> Vec<Effect> {
+    if let Some(queue) = state.cleanup_queue.as_mut()
+        && let Some(failed) = queue.in_flight.take()
+    {
+        queue.selected.remove(&failed);
+        queue.feedback = Some(notice.clone());
+    }
+    if let Some(queue) = state.remove_queue.as_mut()
+        && let Some(failed) = queue.in_flight.take()
+    {
+        queue.selected.remove(&failed);
+        queue.feedback = Some(notice.clone());
+    }
+    state.notice = Some(notice);
+    Vec::new()
+}
+
+fn update_daemon_control_finished(
+    state: &mut AppState,
+    workspace: WorkspaceId,
+    action: DaemonAction,
+    token: PendingToken,
+    result: Result<Notice, SafeError>,
+) -> Vec<Effect> {
+    if workspace != state.workspace || state.daemon_control.pending != Some((action, token)) {
+        return Vec::new();
+    }
+    state.daemon_control.pending = None;
+    state.notice = Some(match &result {
+        Ok(notice) => notice.clone(),
+        Err(error) => Notice::new(error.message.as_str()),
+    });
+    state.daemon_control.result = Some(result);
+    Vec::new()
+}
+
+fn update_runtime_phase(
+    state: &mut AppState,
+    runtime: AgentRuntimeRef,
+    phase: AgentPhase,
+) -> Vec<Effect> {
+    // The runtime's terminal must belong to its own scope, and a session
+    // runtime must name a known session. A workspace-root runtime (no
+    // session) is always in scope for the active workspace.
+    if runtime.terminal.workspace_id != state.workspace
+        || runtime.terminal.session_id != runtime.session_id
+        || runtime
+            .session_id
+            .is_some_and(|session| !state.sessions.contains(&session))
+    {
+        return Vec::new();
+    }
+    if let Some(entry) = state
+        .runtimes
+        .iter_mut()
+        .find(|entry| entry.runtime.fences(&runtime))
+    {
+        entry.phase = phase;
+    } else {
+        state.runtimes.push(RuntimePhase { runtime, phase });
+    }
+    reconcile_cleanup_queue(state);
+    Vec::new()
+}
+
+fn update_session_snapshot(state: &mut AppState, sessions: Vec<SessionId>) -> Vec<Effect> {
+    // Never combine a press from before an authoritative snapshot with
+    // one after it, even when the same stable ID remains visible.
+    state.pending_session_click = None;
+    let previous_sessions = std::mem::replace(&mut state.sessions, sessions);
+    state
+        .workflows
+        .retain(|session, _| state.sessions.contains(session));
+    state
+        .runtimes
+        // A workspace-root runtime (no session) is always retained; a
+        // session runtime is dropped when its session is gone.
+        .retain(|entry| {
+            entry
+                .runtime
+                .session_id
+                .is_none_or(|session| state.sessions.contains(&session))
+        });
+    pull_requests::forget_untracked_targets(state);
+    state.reconcile_sessions(&previous_sessions);
+    reconcile_force_remove_confirmation(state);
+    let mut effects = vec![Effect::SyncPullRequestTargets {
+        sessions: state.sessions.clone(),
+    }];
+    effects.extend(continue_cleanup_after_snapshot(state));
+    effects.extend(continue_remove_after_snapshot(state));
+    effects
+}
+
+fn update_session_lifecycles(
+    state: &mut AppState,
+    lifecycles: BTreeMap<SessionId, SessionLifecycleProjection>,
+) -> Vec<Effect> {
+    state.session_lifecycles = lifecycles;
+    let sessions = state.sessions.clone();
+    state.reconcile_sessions(&sessions);
+    reconcile_force_remove_confirmation(state);
+    let failed = state
+        .cleanup_queue
+        .as_ref()
+        .and_then(CleanupQueueState::in_flight)
+        .filter(|session| {
+            state
+                .session_lifecycles
+                .get(session)
+                .is_some_and(|projection| {
+                    projection.lifecycle == SessionLifecycle::Failed
+                        && projection.failure_stage == Some(FailureStage::Delete)
+                })
+        });
+    if let Some(failed) = failed
+        && let Some(queue) = state.cleanup_queue.as_mut()
+    {
+        queue.in_flight = None;
+        queue.selected.remove(&failed);
+        queue.feedback = Some(Notice::new("cleanup paused after removal failed"));
+    }
+    let failed = state
+        .remove_queue
+        .as_ref()
+        .and_then(RemoveQueueState::in_flight)
+        .filter(|session| {
+            state
+                .session_lifecycles
+                .get(session)
+                .is_some_and(|projection| {
+                    projection.lifecycle == SessionLifecycle::Failed
+                        && projection.failure_stage == Some(FailureStage::Delete)
+                })
+        });
+    if let Some(failed) = failed
+        && let Some(queue) = state.remove_queue.as_mut()
+    {
+        queue.in_flight = None;
+        queue.selected.remove(&failed);
+        queue.feedback = Some(Notice::new("removal paused after a session failed"));
+    }
+    reconcile_cleanup_queue(state);
+    reconcile_remove_queue(state);
+    Vec::new()
+}
+
+fn update_workflow_backend(
+    state: &mut AppState,
+    job: super::workflow::WorkflowJob,
+    result: Result<
+        Box<usagi_core::domain::workflow::WorkflowSnapshot>,
+        super::workflow::WorkflowError,
+    >,
+) -> Vec<Effect> {
+    if job.workspace != state.workspace || !state.sessions.contains(&job.session) {
+        return Vec::new();
+    }
+    let tick = state.mascot_tick;
+    let available = state.available_models;
+    let Some(panel) = state.workflows.get_mut(&job.session) else {
+        return Vec::new();
+    };
+    if let Some(control) = &job.control {
+        if panel.pending.as_ref() != Some(control) {
+            return Vec::new();
+        }
+        panel.submitting = false;
+    } else {
+        panel.loading = false;
+        panel.snapshot_due_tick = tick.saturating_add(WORKFLOW_SNAPSHOT_TICKS);
+    }
+    match result {
+        Ok(snapshot) if snapshot.session == job.session => {
+            panel.freshness = super::workflow::WorkflowFreshness::Observed;
+            if !panel.agents_edited && panel.pending.is_none() {
+                panel.agents = snapshot.agents;
+                panel.revision_limit = snapshot.revision_limit;
+            }
+            if let Some(start) = snapshot.pending_start {
+                // A background read can now land while the person's own
+                // submission is in flight, so the saved intent must not
+                // repaint the agents they just chose or bring back the
+                // error that submission already cleared. A control
+                // response has set `submitting` false above, so this
+                // only holds back the overlapping read.
+                if !panel.submitting {
+                    panel.agents = start.agents;
+                    panel.revision_limit = start.revision_limit;
+                }
+                if panel.pending.is_none() {
+                    if panel.draft.value().is_empty() {
+                        panel.draft.paste(&start.goal);
+                    }
+                    panel.pending = Some((
+                        start.operation_id,
+                        usagi_core::domain::workflow::WorkflowCommand::Start {
+                            goal: start.goal,
+                            agents: start.agents,
+                            revision_limit: start.revision_limit,
+                        },
+                    ));
+                }
+                if !panel.submitting {
+                    panel.error = start.error;
+                }
+            }
+            panel.run = snapshot.run;
+            panel.finished = snapshot.finished;
+            panel.anchor_history();
+            if panel.pending.is_none() {
+                panel.error = None;
+            }
+            if let Some((_, command)) = job.control {
+                // Finishing carries no draft, so nothing it submitted
+                // could have consumed one.
+                let body = match command {
+                    usagi_core::domain::workflow::WorkflowCommand::Start { goal, .. } => Some(goal),
+                    usagi_core::domain::workflow::WorkflowCommand::Instruct { body, .. } => {
+                        Some(body)
+                    }
+                    usagi_core::domain::workflow::WorkflowCommand::Finish => None,
+                };
+                panel.submitted(body.as_deref());
+                panel.pending = None;
+            }
+        }
+        Ok(_) => panel.error = Some("Workflow response belongs to another session".into()),
+        Err(error) => {
+            if job.control.is_some() && !error.unconfirmed {
+                panel.pending = None;
+            }
+            panel.error = Some(error.message);
+        }
+    }
+    // The daemon keeps the previous run's choices as the next start's
+    // defaults, and a machine that lost a CLI (or never configured a
+    // provider's credential) must not be offered them again.
+    panel.restrict_agents(available);
+    Vec::new()
 }
 
 #[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.
@@ -3423,146 +3763,11 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             revision,
             prs,
         } => {
-            let mut newly_detected = None;
-            let accepted = match target {
-                Target::Root(_) => true,
-                Target::Session(session) => {
-                    let current = state.session_prs.get(session);
-                    let accepted = state.sessions.contains(session)
-                        && current.is_none_or(|(current, _)| *revision > *current);
-                    if accepted {
-                        // The first authoritative snapshot establishes the
-                        // baseline. Only a URL added by a later revision is a
-                        // live discovery that should interrupt Home.
-                        newly_detected = current.and_then(|(_, current)| {
-                            prs.iter().position(|pr| {
-                                pr.state != PrState::Dismissed
-                                    && pr.auto_open
-                                    && current.iter().all(|known| known.identity != pr.identity)
-                            })
-                        });
-                        let newly_merged = current.is_some_and(|(_, current)| {
-                            prs.iter().any(|pr| {
-                                pr.state == PrState::Merged
-                                    && current.iter().any(|known| {
-                                        known.identity == pr.identity
-                                            && known.state != PrState::Merged
-                                    })
-                            })
-                        });
-                        if newly_merged {
-                            state
-                                .pr_merge_celebrations
-                                .insert(*session, state.mascot_tick.saturating_add(24));
-                        }
-                        state.session_prs.insert(*session, (*revision, prs.clone()));
-                        state.session_pr_revision = state.session_pr_revision.saturating_add(1);
-                    }
-                    accepted
-                }
-            };
-            if let Some(overlay) = state
-                .pr_overlay
-                .as_mut()
-                .filter(|overlay| accepted && overlay.target == *target)
-            {
-                overlay.prs = filtered_prs(prs, overlay.filter);
-                let detected_selection = newly_detected.and_then(|index| {
-                    prs.get(index).and_then(|detected| {
-                        overlay
-                            .prs
-                            .iter()
-                            .position(|pr| pr.identity == detected.identity)
-                    })
-                });
-                overlay.selected = detected_selection
-                    .unwrap_or(overlay.selected)
-                    .min(overlay.prs.len().saturating_sub(1));
-                overlay.error = None;
-            }
-            // An explicit `p` request is kept as a hidden pending overlay until
-            // its snapshot arrives. Only an inventory with no visible PR at all
-            // closes the modal. A status tab with no matches remains open so the
-            // user can navigate to another tab without reopening the inventory.
-            if state
-                .pr_overlay
-                .as_ref()
-                .is_some_and(|overlay| overlay.target == *target)
-            {
-                let has_visible_prs = match target {
-                    Target::Root(_) => !filtered_prs(prs, PrFilter::All).is_empty(),
-                    Target::Session(session) => state
-                        .session_prs(*session)
-                        .is_some_and(|prs| !filtered_prs(prs, PrFilter::All).is_empty()),
-                };
-                if !has_visible_prs {
-                    state.pr_overlay = None;
-                    if state.overlay == Some(Overlay::Prs) {
-                        state.overlay = None;
-                    }
-                } else if state.overlay.is_none() && !state.workspace_drawer_open() {
-                    state.overlay = Some(Overlay::Prs);
-                } else if state.overlay != Some(Overlay::Prs) {
-                    // Do not let a delayed explicit request steal a newer
-                    // foreground interaction.
-                    state.pr_overlay = None;
-                }
-            }
-            // A freshly discovered PR is the completion of work the user is
-            // waiting for, so surface it immediately. Metadata-only refreshes,
-            // duplicate snapshots, and deliberate dismissals stay quiet. An
-            // existing modal or Director interaction remains the input owner.
-            let may_auto_open = match state.pr_auto_open {
-                PrAutoOpen::Always => true,
-                PrAutoOpen::SwitchOnly => {
-                    matches!(state.route, Route::Home(HomeMode::Switch))
-                }
-                PrAutoOpen::NotifyOnly | PrAutoOpen::Never => false,
-            };
-            if accepted
-                && let Some(selected) = newly_detected
-                && may_auto_open
-                && state.overlay.is_none()
-                && !state.workspace_drawer_open()
-            {
-                let detected_identity = prs.get(selected).map(|pr| &pr.identity);
-                let visible = filtered_prs(prs, PrFilter::All);
-                let visible_selected = detected_identity
-                    .and_then(|identity| visible.iter().position(|pr| &pr.identity == identity))
-                    .unwrap_or(0);
-                state.overlay = Some(Overlay::Prs);
-                state.pr_overlay = Some(PrOverlay {
-                    target: *target,
-                    prs: visible,
-                    selected: visible_selected,
-                    error: None,
-                    filter: PrFilter::All,
-                });
-                state.preview_overlay = None;
-            } else if accepted
-                && let Some(selected) = newly_detected
-                && state.pr_auto_open == PrAutoOpen::NotifyOnly
-                && let Some(pr) = prs.get(selected)
-            {
-                state.notice = Some(Notice::new(format!("PR detected: {}", pr.url())));
-            }
+            pull_requests::absorb(state, *target, *revision, prs);
             reconcile_cleanup_queue(state);
         }
         BackendEvent::PullRequestsError { target, error } => {
-            let matching_request = state
-                .pr_overlay
-                .as_ref()
-                .is_some_and(|overlay| overlay.target == *target);
-            if matching_request {
-                if state.overlay.is_none() && !state.workspace_drawer_open() {
-                    state.overlay = Some(Overlay::Prs);
-                } else if state.overlay != Some(Overlay::Prs) {
-                    state.pr_overlay = None;
-                }
-                if let Some(overlay) = state.pr_overlay.as_mut() {
-                    overlay.error = Some(error.clone());
-                }
-            }
+            pull_requests::fail(state, *target, error);
         }
         BackendEvent::PreviewLoaded {
             target,
@@ -3570,8 +3775,22 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             path,
             filter,
             files,
+            changed,
             lines,
         } => {
+            if let Some(overlay) = state
+                .preview_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target && overlay.pane().owns(*request_id))
+            {
+                overlay.pane_mut().loaded(
+                    lines
+                        .iter()
+                        .map(|line| sanitize_presentation_line(line))
+                        .collect(),
+                );
+                return true;
+            }
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
                 overlay.target == *target
                     && overlay.request_id == *request_id
@@ -3579,16 +3798,18 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                     && overlay.file_filter == *filter
             }) {
                 if path.is_none() {
-                    overlay.files = files
-                        .iter()
-                        .filter(|path| presentation_text_is_safe(path))
-                        .cloned()
-                        .collect();
-                    overlay.selected = 0;
+                    let safe = |paths: &Vec<String>| {
+                        paths
+                            .iter()
+                            .filter(|path| presentation_text_is_safe(path))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    };
+                    overlay.set_files(safe(files), safe(changed));
                 } else {
                     overlay.lines = lines
                         .iter()
-                        .map(|line| preview::sanitize_preview_line(line))
+                        .map(|line| sanitize_presentation_line(line))
                         .collect();
                     overlay.scroll = 0;
                     overlay.search.clear();
@@ -3606,6 +3827,14 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             filter,
             error,
         } => {
+            if let Some(overlay) = state
+                .preview_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target && overlay.pane().owns(*request_id))
+            {
+                overlay.pane_mut().failed(error.clone());
+                return true;
+            }
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
                 overlay.target == *target
                     && overlay.request_id == *request_id
@@ -4428,7 +4657,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         Overlay::CreateSession => update_create_session_form(state, &key),
         // Dismissal is handled by the early Enter/Escape/Ctrl-C branch above; any
         // other key is inert while the create-failure dialog owns input.
-        Overlay::Prs => update_prs_overlay(state, &key),
+        Overlay::Prs => pull_requests::update_key(state, &key),
         Overlay::Preview => preview::update_preview_overlay(state, &key),
         Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
@@ -4825,6 +5054,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             Vec::new()
         }
         AppKey::OpenGarden => {
+            state.garden_pointer = None;
             state.overlay = Some(Overlay::Garden);
             state.notice = None;
             Vec::new()
@@ -4875,12 +5105,10 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 direction: TabDirection::Previous,
             }]
         }
-        // Ctrl-X removes only the cursor's session. A diagnosed integrity orphan
-        // is the sole direct purge target; every other row keeps the safe removal
-        // path. Keep this unavailable while an overlay owns input, and never turn
-        // the workspace root, the new-session row, or an ineligible lifecycle into
-        // a deletion target. A rejected safe removal opens the existing explicit
-        // force confirmation.
+        // Ctrl-X force-removes only the cursor's session, discarding a dirty
+        // worktree and an unmerged branch. Keep this unavailable while an overlay
+        // owns input, and never turn the workspace root, the new-session row, or
+        // an ineligible lifecycle into a deletion target.
         AppKey::CtrlX
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
@@ -4888,7 +5116,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
-        AppKey::OpenPrs => open_prs(state),
+        AppKey::OpenPrs => pull_requests::open(state),
         AppKey::OpenPreview => open_preview(state),
         AppKey::Char('a')
             if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
@@ -5057,10 +5285,16 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
 /// stable identity while the presentation turns the row into a loading skeleton.
 /// Snapshot reconciliation moves it only after the daemon removes the row.
 ///
-/// A diagnosed integrity orphan is already an unusable recovery row, so Ctrl-X
-/// acknowledges the whole destructive removal for that exact identity. Every
-/// other removable row stays on the safe path; ordinary force removal still
-/// requires the failed-delete confirmation or an explicit command.
+/// Ctrl-X is a force removal: it discards an uncommitted worktree and an
+/// unmerged branch for the exact selected identity. The safe variant it
+/// replaced refused nearly every real session — Git rejects `worktree remove`
+/// while the tree carries untracked build output, and rejects `branch -d`
+/// unless the branch is merged into the local base or the daemon can prove a
+/// squash merge from its PR inventory — so the usual outcome was a
+/// `failed/delete` row that then needed a second, forced attempt anyway.
+///
+/// `purge_orphan` stays reserved for a daemon-diagnosed integrity orphan: the
+/// daemon rejects that acknowledgement for any other row.
 fn remove_selected_session(state: &AppState) -> Vec<Effect> {
     let Selection::Target(Target::Session(session)) = state.selected else {
         return Vec::new();
@@ -5081,8 +5315,8 @@ fn remove_selected_session(state: &AppState) -> Vec<Effect> {
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
-        force: integrity_orphan,
-        force_delete_branch: integrity_orphan,
+        force: true,
+        force_delete_branch: true,
         purge_orphan: integrity_orphan,
     }]
 }
@@ -5296,34 +5530,12 @@ fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect>
     vec![Effect::LoadEnvironment { scope }]
 }
 
-fn open_prs(state: &mut AppState) -> Vec<Effect> {
-    let Some(target) = state.active_target() else {
-        return Vec::new();
-    };
-    open_prs_for_target(state, target)
-}
-
-fn open_prs_for_target(state: &mut AppState, target: Target) -> Vec<Effect> {
-    let mut overlay = PrOverlay::loading(target);
-    if let Target::Session(session) = target
-        && let Some(prs) = state.session_prs(session)
-    {
-        overlay.prs = filtered_prs(prs, PrFilter::All);
-    }
-    // Keep the request state so a newly returned PR can still open immediately,
-    // but do not render an empty loading/empty-state modal.
-    state.overlay = (!overlay.prs.is_empty()).then_some(Overlay::Prs);
-    state.pr_overlay = Some(overlay);
-    state.preview_overlay = None;
-    vec![Effect::LoadPullRequests { target }]
-}
-
 fn open_preview(state: &mut AppState) -> Vec<Effect> {
     let Some(target) = state.file_preview_target() else {
         return Vec::new();
     };
     state.overlay = Some(Overlay::Preview);
-    let overlay = PreviewOverlay::loading(target);
+    let overlay = PreviewOverlay::loading(target, state.preview_recent_of(target));
     let request_id = overlay.request_id();
     state.preview_overlay = Some(overlay);
     state.pr_overlay = None;
@@ -5333,86 +5545,6 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
         path: None,
         filter: PreviewFileFilter::All,
     }]
-}
-
-/// Pull Request overlay の入力を還元する。←→ で status tab、↑↓ で PR 選択を回し、
-/// Enter で選択 PR を browser で開く effect を出す。Esc は overlay を閉じる。
-/// 素材の再取得はしない。
-fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
-    if matches!(key, AppKey::Left | AppKey::Right) {
-        let Some((target, filter)) = state.pr_overlay.as_ref().map(|overlay| {
-            let filter = if matches!(key, AppKey::Right) {
-                overlay.filter.next()
-            } else {
-                overlay.filter.previous()
-            };
-            (overlay.target, filter)
-        }) else {
-            return Vec::new();
-        };
-        let all = target
-            .session_id()
-            .and_then(|session| state.session_prs(session))
-            .unwrap_or_default()
-            .to_vec();
-        if let Some(overlay) = state.pr_overlay.as_mut() {
-            overlay.filter = filter;
-            overlay.prs = filtered_prs(&all, filter);
-            overlay.selected = 0;
-        }
-        return Vec::new();
-    }
-    let Some(overlay) = state.pr_overlay.as_mut() else {
-        state.overlay = None;
-        return Vec::new();
-    };
-    match key {
-        AppKey::Escape => {
-            state.overlay = None;
-            state.pr_overlay = None;
-            Vec::new()
-        }
-        AppKey::Up => {
-            if !overlay.prs.is_empty() {
-                overlay.selected = (overlay.selected + overlay.prs.len() - 1) % overlay.prs.len();
-            }
-            Vec::new()
-        }
-        AppKey::Down => {
-            if !overlay.prs.is_empty() {
-                overlay.selected = (overlay.selected + 1) % overlay.prs.len();
-            }
-            Vec::new()
-        }
-        AppKey::Enter => overlay
-            .selected_pr()
-            .map(|pr| Effect::OpenPullRequest {
-                url: pr.url().to_owned(),
-            })
-            .into_iter()
-            .collect(),
-        AppKey::Char('c') => overlay
-            .selected_pr()
-            .map(|pr| Effect::CopyPullRequest {
-                url: pr.url().to_owned(),
-            })
-            .into_iter()
-            .collect(),
-        AppKey::CtrlX => overlay
-            .selected_pr()
-            .and_then(|pr| {
-                overlay
-                    .target
-                    .session_id()
-                    .map(|session| Effect::DismissPullRequest {
-                        session,
-                        url: pr.url().to_owned(),
-                    })
-            })
-            .into_iter()
-            .collect(),
-        _ => Vec::new(),
-    }
 }
 
 fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
@@ -5498,6 +5630,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         Ok(overview::Command::Garden { arguments }) => {
             if arguments.trim().is_empty() {
                 if state.garden_available {
+                    state.garden_pointer = None;
                     state.overlay = Some(Overlay::Garden);
                     state.notice = None;
                 } else {
@@ -5760,7 +5893,8 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         closeup::Command::Close { arguments } => {
             if let Some(force) = parse_close_force(&arguments) {
                 // One meaning of "force" across every TUI removal: `-f` drops a
-                // dirty worktree *and* an unmerged branch, exactly like `X`.
+                // dirty worktree *and* an unmerged branch, exactly like Switch's
+                // `Ctrl-X`.
                 Some(Effect::RemoveSession {
                     workspace: state.workspace,
                     session: active_session,
@@ -5780,6 +5914,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         // `env` owns the workspace-scoped editor rather than a per-session effect,
         // so it opens the editor and returns before the shared dismiss/notice tail.
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
+        closeup::Command::Workflow { arguments } => {
+            return submit_closeup_workflow(state, active_session, &arguments);
+        }
     };
     if effect.is_some() {
         dismiss_closeup_action_modal(state);
@@ -5798,6 +5935,65 @@ fn submit_empty_closeup_shortcut(state: &mut AppState, input: &str) -> Vec<Effec
     state.overlay = Some(Overlay::Closeup);
     state.closeup_action_forced = false;
     submit_closeup(state, input)
+}
+
+/// `workflow` opens the tab; `workflow finish` also ends the run it shows.
+///
+/// Finishing always opens the tab first: the daemon owns the decision, so its
+/// refusal — nothing to finish, or already finished — has to land somewhere the
+/// person is looking.
+fn submit_closeup_workflow(
+    state: &mut AppState,
+    session: SessionId,
+    arguments: &str,
+) -> Vec<Effect> {
+    let finish = match arguments.trim() {
+        "" => false,
+        "finish" => true,
+        _ => {
+            state.notice = Some(Notice::new("workflow accepts only `finish`"));
+            return Vec::new();
+        }
+    };
+    let workspace = state.workspace;
+    let available = state.available_models;
+    let panel = state.workflows.entry(session).or_default();
+    panel.restrict_agents(available);
+    let mut control = None;
+    let mut dispatch = false;
+    if finish {
+        // A request already in flight owns the panel. Otherwise resend a finish
+        // whose answer was lost rather than minting a second one, exactly as a
+        // resent instruction does.
+        if !panel.submitting {
+            if !matches!(
+                panel.pending,
+                Some((_, usagi_core::domain::workflow::WorkflowCommand::Finish))
+            ) {
+                panel.pending = Some((
+                    OperationId::new(),
+                    usagi_core::domain::workflow::WorkflowCommand::Finish,
+                ));
+            }
+            panel.submitting = true;
+            panel.error = None;
+            control.clone_from(&panel.pending);
+            dispatch = true;
+        }
+    } else if !panel.loading && !panel.submitting {
+        panel.loading = true;
+        dispatch = true;
+    }
+    dismiss_closeup_action_modal(state);
+    let mut effects = vec![Effect::OpenWorkflow { session }];
+    if dispatch {
+        effects.push(Effect::Workflow(super::workflow::WorkflowJob {
+            workspace,
+            session,
+            control,
+        }));
+    }
+    effects
 }
 
 /// Normalize the two supported terminal forms at the controller boundary.
@@ -5849,7 +6045,7 @@ fn update_pointer(
     }
     if let Some(session) = state.sidebar_pr_at(column, row) {
         state.pending_session_click = None;
-        return open_prs_for_target(state, Target::Session(session));
+        return pull_requests::open_for(state, Target::Session(session));
     }
     let Some(selection) = state.sidebar_selection_at(column, row) else {
         state.pending_session_click = None;
@@ -5884,6 +6080,7 @@ fn update_pointer(
 /// stays a pure comparison and needs no clock to test.
 fn update_idle(state: &mut AppState, elapsed: std::time::Duration) -> Vec<Effect> {
     if elapsed >= GARDEN_IDLE_THRESHOLD && garden_may_auto_open(state) {
+        state.garden_pointer = None;
         state.overlay = Some(Overlay::Garden);
     }
     Vec::new()

@@ -22,6 +22,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [managed session request](#managed-session-request)
 - [agent launch request](#agent-launch-request)
   - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
+- [session Workflow request](#session-workflow-request)
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
 - [provider conversation resume request](#provider-conversation-resume-request)
@@ -157,10 +158,12 @@ standby を確認してから old active へ request を送り、commit 前の f
 ## daemon rollover request
 
 `DaemonRequest` の lifecycle verb は
-`{"kind":"rollover","operation_id":"<durable operation>"}` である。CLI は authority を直接書き換えず、
-current old active へこの request を送る。old active は registry の active が自 generation であることを確認し、
-登録済み successor の private endpoint へ read-only hello を行い、artifact / handoff / owner-routing capability を
-再検証する。その後、connection ledger と planned registry revision を `RolloverPlan` に束ね、自 process の
+`{"kind":"rollover","operation_id":"<durable operation>"}` に、利用者が `--restart-agents` を明示した場合だけ
+`"restart_agents":{"expected":[…],"runtimes":[…],"force":<bool>}` を加えた形である。省略時は field 自体を載せない。
+Agent 選択の契約は [provider conversation resume request](#provider-conversation-resume-request) が正本である。
+CLI は authority を直接書き換えず、current old active へこの request を送る。old active は registry の
+active が自 generation であることを確認し、登録済み successor の private endpoint へ read-only hello を行い、
+artifact / handoff / owner-routing capability を再検証する。その後、connection ledger と planned registry revision を `RolloverPlan` に束ね、自 process の
 `AdmissionGate` で gated handoff を実行する。
 
 `rollover` request は active role だけが受理するが `ActiveControl` lease は取らない。trigger 自身がその lease class を
@@ -595,13 +598,52 @@ cached replay は direct final と同じ body（同じ identity・digest・`Term
 省略しない。semantic key を持たない旧 durable record は digest を持たないため replay しても intent の一致を証明できず、
 client は final として受けずに安全に失敗する。
 
+## session Workflow request
+
+Session 内 Workflow の human control は次の typed request を使う。操作画面は
+[Session Workflow タブ](03-tui.md#session-workflow-タブ)を正本とする。
+
+| request | payload | 結果 |
+|---|---|---|
+| `WorkflowSnapshot` | workspace、session | session、optional run、optional pending_start を含む snapshot |
+| `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
+
+command は `Start { goal, agents }`、`Instruct { recipient, body }`、`Finish` である。接続先 workspace と
+利用可能な session を照合し、**この 2 つの request** は Agent credential を伴う呼び出しを拒否する。
+同じ制御を MCP から行う経路は別にあり、session tool と同じ所有権規則（caller が作成した session に限り、
+caller 自身が動いている session は拒否）で守る（[7. MCP サーバ](07-mcp.md)が正本）。
+制御の再送は同じ operation ID と payload を使う。受理後の通信失敗は未受理と断定せず、
+保存済みの結果を再取得する。異なる payload で operation ID を再利用すると conflict になる。
+`agents` は planner / implementer / reviewer の provider 選択で、省略時は従来の実行・レビュー担当と Codex の計画担当を使う。
+run・pending_start は受理時の担当を固定し、snapshot の agents は開始済みならその担当、未開始ならワークスペースで前回開始した担当を返す。
+同じ operation ID の担当変更は競合として拒否する。
+開始前の intent は `pending_start` に元の operation ID・goal・agents・開始エラーを返すため、
+TUI を再起動しても同じ開始操作を再試行できる。
+
+`Finish` は active な run、または起動前の開始 intent を終了する。終了は保存済み状態の変更だけで、
+Agent の停止も worktree の削除も伴わない。終了した run は `PR ready` なら完了、それ以外の工程なら
+中止として記録し、snapshot の `finished` が古い順に最大 5 件返す。終了済みの record は `pending_start` を
+返さない（開始待ちではなく、次の開始を受け付けられる状態である）。同じ operation ID の再送は二度終了せず、
+別の operation ID による 2 度目の終了と、終了済み record への `Instruct` は拒否する。終了後の `Start` は
+新しい intent として受理し、終了済み run の履歴だけを引き継ぐ。履歴に残っている終了済み run については、
+その operation ID を使った `Start` を拒否する。
+
+daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。
+進捗の再照合と未通知の queued 指示の再試行を所有するのは daemon の常駐 lane であり、client の
+request はその進行を必要としない（[workflow lane](05-daemon.md#workflow-lane)が正本）。snapshot request は
+lane と同じ pass を通るため開いている画面は常に最新の進捗を受け取り、control request は reconcile の
+直後に受理して PR 検証を挟まない。
+PTY 通知の成功と Agent による処理完了は別であり、処理済み ACK は推定しない。
+
 ## Codex structured capture request
 
-`codex_session_capture` kind は、daemon が Codex の `SessionStart(startup)` command hook にだけ注入する
-private request である。documented hook JSON の current `session_id` と、同じ process provision にだけ存在する
-daemon-minted credential を持つ。client は runtime / session / provider / path を指定できず、daemon は credential
-から exact live Codex runtime を逆引きして structured capture 境界へ渡す。成功 response は body を持たず、
-provider ID を返さない。
+`codex_session_capture` kind は profile revision 4 以前の Codex `SessionStart(startup)` command hook と、
+更新済み daemon binary の組み合わせを受けるためだけに残す互換 request である。新しい integration は
+[`agent_phase_report`](#agent-phase-report-request) へ一本化する。旧 request は documented hook JSON の current
+`session_id` と、同じ process provision にだけ存在する daemon-minted credential を持つ。client は runtime /
+session / provider / path を指定できず、daemon は credential から exact live Codex runtime を逆引きする。同じ
+structured ID が新旧 hook から重複報告された場合だけ冪等に受理し、別 ID による置換は共通 `SessionStart`
+request 以外から許可しない。成功 response は body を持たず、provider ID を返さない。
 
 credential の欠落・不一致・失効、hook event / JSON / provider ID の不正、runtime の非 live、永続化失敗は safe error
 であり、metadata を作らない。request の native ID はこの capture の入力でだけ一時的に IPC を通り、通常の Agent /
@@ -612,17 +654,23 @@ session request、response、event、status projection、error detail には現�
 ## agent phase report request
 
 `agent_phase_report` kind は、daemon が起動した agent のライフサイクルフックだけが送る private request である。
-field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）と、同じ process
-provision にだけ存在する daemon-minted credential の 2 つだけである。client は runtime / session / worktree /
-path / provider を指定できず、daemon は credential から exact live runtime を逆引きする。成功 response は
-body を持たない。
+field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）、
+provider の structured starting hook（Claude / Codex の `SessionStart`、Antigravity の `PreInvocation`）でだけ current producer が付ける opaque `native_session_id`、同じ process provision にだけ存在する
+daemon-minted credential である。client は runtime / session / worktree / path / provider を指定できず、daemon は
+credential から exact live runtime を、runtime profile から provider を決める。成功 response は body を持たない。
 
 phase は wire に載る前に hook 側で検証する。共通 validator の lifecycle vocabulary は `SessionStart` /
 `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PermissionRequest` / `Notification` / `Stop` / `SessionEnd` である。
 Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 `PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
-`PermissionRequest` は発火せず、`Notification` も Codex event ではない。event と phase の対応が hook input の
-`hook_event_name` と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
+`PermissionRequest` は発火せず、`Notification` も Codex event ではない。Antigravity は `PreInvocation` /
+`PreToolUse` / `PostToolUse` / `Stop` を専用 plugin から配線する。Antigravity の payload は event 名を含まないため、
+plugin command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
+hook input または配線宣言と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
+`SessionStart` では current `session_id` と `ready`、`PreInvocation` では current `conversationId` と `running` を同じ
+request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。この 2 つ
+以外の組み合わせで native ID を付けた報告は拒否する。旧 hook
+producer の ID 無し `ready` は phase だけを反映して wire compatibility を保つが、新しい resume metadata は作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
 
 daemon 側では credential の欠落・不一致・失効、runtime の非 live、malformed body、永続化失敗が safe error に
@@ -638,7 +686,7 @@ durable な写像は [Agent phase の投影](05-daemon.md#agent-phase-の投影)
 `AgentContinuationRef`、runtime state、optional source relation を持つ。resumable item は runtime ごとに
 `available` と provider ID を含まない closed enum の safe reason を持ち、現 schema の record には
 `AgentResumeTarget` を載せる。加えて client が interrupted history を provider 単位で表示するための
-closed vocabulary だけを additive に載せる（`provider` = `claude` / `codex`、`last_known_phase` = safe phase enum）。
+closed vocabulary だけを additive に載せる（`provider` = `claude` / `codex` / `agy`、`last_known_phase` = safe phase enum）。
 metadata を保存していない record では両 field を省略し、client は欠落を推測で埋めない。旧 record は
 `target: null` / unavailable のまま読み、identity を推測しない。
 item は durable operation timestamp と stable runtime ID で決定的に並ぶため、同じ scope の複数 history

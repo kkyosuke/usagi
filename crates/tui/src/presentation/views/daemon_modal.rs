@@ -6,7 +6,7 @@
 
 use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
 use usagi_core::domain::agent::AgentRuntimeInventoryState;
-use usagi_core::infrastructure::client::DaemonMetrics;
+use usagi_core::infrastructure::ipc::DaemonMetrics;
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::theme::{Role, Style};
@@ -266,7 +266,7 @@ mod tests {
     use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
     use usagi_core::domain::agent::AgentRuntimeInventoryState;
     use usagi_core::domain::id::WorkspaceId;
-    use usagi_core::infrastructure::client::{AgentConcurrency, DaemonMetrics};
+    use usagi_core::infrastructure::ipc::{AgentConcurrency, DaemonMetrics};
     use usagi_core::usecase::session_state::SessionStateCounts;
 
     fn metrics(in_use: u32) -> DaemonMetrics {

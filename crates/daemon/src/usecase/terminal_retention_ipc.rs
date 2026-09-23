@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::{
+    clock::WallClock,
     id::TerminalRef,
     terminal_launch::TerminalKind,
     terminal_retention::{
@@ -38,16 +39,11 @@ use usagi_core::domain::{
 /// alone until it is collected.
 pub const RESTORED_FINAL_BYTES: u64 = 512;
 
-/// Reads the wall clock the retention budget ages finals against.
-pub trait RetentionClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
-}
-
-/// The production clock.
+/// The production wall clock the retention budget ages finals against.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SystemRetentionClock;
+pub struct SystemWallClock;
 
-impl RetentionClock for SystemRetentionClock {
+impl WallClock for SystemWallClock {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
     }
@@ -58,7 +54,7 @@ impl RetentionClock for SystemRetentionClock {
 #[derive(Clone)]
 pub struct SharedTerminalRetention {
     ledger: Arc<Mutex<RetentionLedger>>,
-    clock: Arc<dyn RetentionClock>,
+    clock: Arc<dyn WallClock>,
 }
 
 impl Default for SharedTerminalRetention {
@@ -78,13 +74,13 @@ impl SharedTerminalRetention {
     /// Creates an authority over `budget` and the system clock.
     #[must_use]
     pub fn with_budget(budget: RetentionBudget) -> Self {
-        Self::with_budget_and_clock(budget, Arc::new(SystemRetentionClock))
+        Self::with_budget_and_clock(budget, Arc::new(SystemWallClock))
     }
 
     /// Creates an authority over `budget` whose TTL and age budget are measured
     /// with `clock`.
     #[must_use]
-    pub fn with_budget_and_clock(budget: RetentionBudget, clock: Arc<dyn RetentionClock>) -> Self {
+    pub fn with_budget_and_clock(budget: RetentionBudget, clock: Arc<dyn WallClock>) -> Self {
         Self {
             ledger: Arc::new(Mutex::new(RetentionLedger::new(budget))),
             clock,
@@ -228,7 +224,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl RetentionClock for ManualClock {
+    impl WallClock for ManualClock {
         fn now(&self) -> DateTime<Utc> {
             DateTime::from_timestamp(1_700_000_000 + self.0.load(Ordering::Relaxed), 0)
                 .expect("the fixed test epoch is a valid timestamp")
@@ -358,6 +354,6 @@ pub(crate) mod tests {
         assert_eq!(retention.budget(), RetentionBudget::default());
         // A default authority still answers; the system clock is only read here.
         assert_eq!(retention.metrics().retained_finals, 0);
-        assert!(SystemRetentionClock.now() > DateTime::from_timestamp(0, 0).unwrap());
+        assert!(SystemWallClock.now() > DateTime::from_timestamp(0, 0).unwrap());
     }
 }

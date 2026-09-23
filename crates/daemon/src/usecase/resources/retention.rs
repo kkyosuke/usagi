@@ -30,6 +30,7 @@
 //! refused with [`ResourceError::RetentionBackpressure`] instead
 //! ([`admission_guard`]).
 
+use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::id::OperationId;
 
 use crate::usecase::resources::ResourceError;
@@ -38,13 +39,6 @@ use crate::usecase::resources::allocator::{
     AllocatorDocument, ClaimState, ExpiryClass, OperationOutcome, OperationTombstone,
     ResourceAllocator, precedes_or_equals,
 };
-
-/// Monotonic logical time. Production binds it to a coarse counter or clock; the
-/// retention tests inject a fake so every phase boundary is deterministic.
-pub trait LogicalClock {
-    /// The current logical time.
-    fn now(&self) -> u64;
-}
 
 /// The hard limits and the guaranteed windows of the operation ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

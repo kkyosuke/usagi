@@ -142,9 +142,22 @@ impl Welcome {
     }
 
     /// recent 項目（単体 workspace / unite が混在する）。
+    ///
+    /// Welcome の右カラムは番号キー `1`〜`3` に対応する先頭 [`RECENT_SLOTS`] 件だけを出すので、
+    /// この accessor もその範囲に切る。**登録済み workspace を漏れなく列挙する用途
+    /// （Open 画面など）には [`Welcome::all_recent`] を使う**。
     #[must_use]
     pub fn recent(&self) -> &[Recent] {
         &self.recent[..self.recent.len().min(RECENT_SLOTS)]
+    }
+
+    /// 保持している recent 項目の全件（表示枠で切らない）。
+    ///
+    /// Open 画面は登録済み workspace を 1 件も落とさずに並べる必要があるため、
+    /// Welcome カードの表示枠ではなくこちらを読む。
+    #[must_use]
+    pub fn all_recent(&self) -> &[Recent] {
+        &self.recent
     }
 
     /// `workspace` と同じ path の単体 recent に touch 後の identity / timestamp を反映し、
@@ -507,7 +520,7 @@ mod tests {
         assert_eq!(welcome.items().len(), 4);
         assert!(welcome.recent().is_empty());
         // derive された Clone / Debug も計測対象なのでここで触れる。
-        assert!(format!("{:?}", welcome.clone()).contains("Welcome"));
+        assert!(format!("{welcome:?}").contains("Welcome"));
     }
 
     #[test]
@@ -603,6 +616,9 @@ mod tests {
         ]);
         assert_eq!(welcome.recent().len(), 3);
         assert_eq!(welcome.action_for('4'), None);
+        // カードの枠で切るのは表示と番号キーだけで、projection は全件保つ
+        // （Open 画面は登録済みを 1 件も落とさずに並べるため）。
+        assert_eq!(welcome.all_recent().len(), 4);
         // MenuItem / MenuAction の derive も計測対象なのでここで触れる。
         assert_eq!(welcome.items()[0], welcome.items()[0]);
         assert!(format!("{:?}", welcome.items()[0]).contains("Open"));

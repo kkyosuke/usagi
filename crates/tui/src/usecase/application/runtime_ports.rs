@@ -16,7 +16,9 @@ use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::env::EnvScope;
 
-use super::controller::{BackendEvent, EnvironmentEntry, SessionRoleProjection};
+use super::controller::{
+    BackendEvent, EnvironmentEntry, SessionBranchCatalog, SessionRoleCatalog, SessionRoleProjection,
+};
 use crate::usecase::overview::SessionCommand;
 
 /// Platform-native terminal launch boundary.
@@ -60,7 +62,10 @@ pub trait DesktopNotificationPort {
 
 /// Read-only daemon lane used to observe other projects in the Garden.
 pub trait GardenInventoryPort: Send {
-    /// Returns the safe Agent observation for `workspace`.
+    /// Returns the safe Agent observation for `workspace`, with interrupted
+    /// history filtered through the saved display intent and tab projection.
+    /// Refresh that intent on every observation so another TUI's dismissal or
+    /// explicit reopen also updates an inactive project's Garden.
     ///
     /// # Errors
     ///
@@ -146,4 +151,31 @@ pub trait SessionCommandPortFactory {
 pub trait SessionWorktreeScanPort {
     /// Returns directory names directly under `<workspace>/.usagi/sessions`.
     fn scan(&mut self, workspace: &Path) -> Vec<String>;
+}
+
+/// Worker-local Git-ref discovery for the create-session form.
+///
+/// Implementations are freshly created by [`SessionCatalogPort`] and may
+/// outlive the workspace frame when a Git subprocess stalls. They must not
+/// borrow or share workspace-resident connections or other teardown-sensitive
+/// resources.
+pub trait SessionBranchCatalogPort: Send {
+    /// Returns branch choices and the effective default for `workspace`.
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog;
+}
+
+/// Workspace-local role and Git-ref discovery for the create-session form.
+///
+/// The controller consumes typed catalogs while the composition adapter owns
+/// filesystem and process IO. Synchronous refreshes stay on this resident port;
+/// detached discovery receives a fresh, explicitly worker-local adapter.
+pub trait SessionCatalogPort: Send {
+    /// Returns the effective session-role choices for `workspace`.
+    fn roles(&self, workspace: &Path) -> SessionRoleCatalog;
+
+    /// Returns branch choices and the effective default for `workspace`.
+    fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog;
+
+    /// Creates an adapter owned exclusively by one detached discovery worker.
+    fn branch_worker(&self) -> Box<dyn SessionBranchCatalogPort>;
 }

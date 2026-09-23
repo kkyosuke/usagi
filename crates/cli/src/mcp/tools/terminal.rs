@@ -1,7 +1,7 @@
 //! Read-only MCP observation of generic terminals in the authenticated caller scope.
 
 use crate::mcp::tool::{Tool, ToolDescriptor};
-use usagi_core::infrastructure::client::DispatchToolAction;
+use usagi_core::infrastructure::ipc::DispatchToolAction;
 use usagi_core::usecase::terminal_observation::TERMINAL_READ_MAX_LINES;
 
 const _: () = assert!(TERMINAL_READ_MAX_LINES == 500);

@@ -170,7 +170,7 @@ fn durable_snapshot_is_fail_closed_for_schema_and_revision_changes() {
         validate_snapshot(&catalog, &snapshot),
         Err(LaunchValidationError::PlanProvenanceMismatch)
     );
-    let mut invalid_request = request.clone();
+    let mut invalid_request = request;
     invalid_request.initial_prompt = Some(String::new());
     let invalid_snapshot =
         DurableLaunchSnapshot::new(invalid_request.clone(), plan(&invalid_request, 7));
@@ -241,7 +241,7 @@ fn exact_resume_inventory_round_trips_only_public_resource_fences() {
 #[test]
 fn durable_serialization_contains_no_environment_values_or_secret_argument() {
     let catalog = adapter("fake-claude", 7);
-    let request = request(catalog.profile.id.clone());
+    let request = request(catalog.profile.id);
     let snapshot = DurableLaunchSnapshot::new(request.clone(), plan(&request, 7));
     let json = serde_json::to_string(&snapshot).unwrap();
     assert!(json.contains("TERM"));

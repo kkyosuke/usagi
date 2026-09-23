@@ -43,12 +43,17 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
-対応する Agent は Claude、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
+対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex、Sakana AI です。通常の shell も同じ画面で利用できます。
+Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
+計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
+進捗の確認と追加指示も同じタブで行えます。
+Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール
 
 公開 release の installer を利用する方法が最短です。
+各版の変更一覧は [GitHub Releases](https://github.com/KKyosuke/usagi/releases) で確認できます。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
@@ -73,10 +78,17 @@ TUI が開いたら、次の順に進めます。
 
 1. `+ new session` から作業名と base branch を選ぶ。
 2. 作成した session で `agent` または `terminal` を実行する。
-3. Diff と PR の状態を確認しながら作業する。
+3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。Workflow はレビュー中の更新にも追従し、PR 検証では未追跡ファイルと GitHub のマージ要件も確認する。
+
+session 作成直後の環境構築は、開いた workspace の Overview から `config` を実行して
+`Session setup` を編集するか、`.usagi/config.toml` の
+[`[session].setup_commands`](document/05-daemon.md#session-作成後の-setup-command) に直接設定できます。
 
 次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
-Session Garden では庭と右側の session 一覧から作業状況を確認し、各 Agent を開けます。
+サイドバーでは、委譲して作成した子 session を親の直下にまとめて表示します。
+[Session Garden](document/assets/session-garden.gif) では、ゆったり動くうさぎと庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
+
+削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 

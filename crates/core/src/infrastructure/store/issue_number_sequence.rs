@@ -688,7 +688,7 @@ fn push_git_session_legacies(
         .iter()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut parents = registered.clone();
+    let mut parents = registered;
     parents.push(normalize_path_identity(workspace_root)?);
     parents.sort();
     parents.dedup();
@@ -2503,7 +2503,7 @@ mod tests {
 
         let unregistered_caller = GitRepository {
             worktree_root: fs::canonicalize(&unregistered).unwrap(),
-            common_dir: caller.common_dir.clone(),
+            common_dir: caller.common_dir,
         };
         let error =
             validate_conventional_workspace_repository(&unregistered_caller, &root).unwrap_err();
@@ -3445,9 +3445,9 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let nested_for_thread = nested.clone();
+        let nested_for_thread = nested;
         let root_for_thread = root.to_path_buf();
-        let local_store_for_thread = local_store.clone();
+        let local_store_for_thread = local_store;
         let reservation = thread::spawn(move || {
             IssueNumberSequence::new(
                 &nested_for_thread,

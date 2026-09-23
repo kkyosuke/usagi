@@ -178,7 +178,7 @@ mod tests {
 
         let held = StoreLock::acquire(&dir).unwrap();
         let (tx, rx) = mpsc::channel();
-        let dir2 = dir.clone();
+        let dir2 = dir;
         let handle = thread::spawn(move || {
             // Use a distinct fd so the OS treats this as a competing holder.
             let path = StoreLock::path(&dir2);
@@ -229,7 +229,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let held = StoreLock::acquire(&dir).unwrap();
 
-        let dir2 = dir.clone();
+        let dir2 = dir;
         let handle = thread::spawn(move || {
             // Generous budget: the holder is dropped well within it.
             StoreLock::acquire_with_timeout(&dir2, Duration::from_secs(5)).unwrap()

@@ -13,14 +13,17 @@ const SETTINGS_FILE: &str = "settings.json";
 
 /// File-backed local overrides for one workspace identity.
 pub struct WorkspaceSettingsStore {
+    workspace_root: PathBuf,
     dir: PathBuf,
 }
 
 impl WorkspaceSettingsStore {
     #[must_use]
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
+        let workspace_root = workspace_root.as_ref().to_path_buf();
         Self {
-            dir: project_data_dir(workspace_root),
+            dir: project_data_dir(&workspace_root),
+            workspace_root,
         }
     }
 
@@ -30,9 +33,17 @@ impl WorkspaceSettingsStore {
     /// unrelated ambient `USAGI_RUNTIME_MODE` value.
     #[must_use]
     pub fn new_for_mode(workspace_root: impl AsRef<Path>, mode: RuntimeMode) -> Self {
+        let workspace_root = workspace_root.as_ref().to_path_buf();
         Self {
-            dir: project_data_dir_for(workspace_root, mode),
+            dir: project_data_dir_for(&workspace_root, mode),
+            workspace_root,
         }
+    }
+
+    /// Repository root represented by this workspace-local store.
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
     }
 
     #[must_use]

@@ -469,7 +469,7 @@ mod tests {
             snapshots: vec![snapshot(terminal.clone(), 0, b"")],
             ..FakeDaemon::default()
         };
-        let mut runtime = PaneRuntime::new(pane(terminal.clone()));
+        let mut runtime = PaneRuntime::new(pane(terminal));
         runtime.reconnect(&mut daemon);
         runtime.input(&mut daemon, b"x");
         runtime.resize(

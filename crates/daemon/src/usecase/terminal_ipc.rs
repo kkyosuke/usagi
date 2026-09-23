@@ -21,8 +21,7 @@ use usagi_core::{
             TerminalLaunchScope, TerminalLaunchValidationError,
         },
     },
-    infrastructure::client::{TerminalGeometry, TerminalRequest},
-    infrastructure::ipc::{ErrorCode, ProtocolError},
+    infrastructure::ipc::{ErrorCode, ProtocolError, TerminalGeometry, TerminalRequest},
     usecase::vt_screen::{COLS_MAX, ROWS_MAX},
 };
 
@@ -184,9 +183,10 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         )
     }
 
+    // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
+    #[allow(clippy::too_many_arguments)]
     /// Restore a runtime with the configured generic Terminal PTY ceiling and
     /// the daemon-wide retention authority.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_snapshot_with_retention_and_limit(
         generation: DaemonGeneration,
         resolver: R,
@@ -693,7 +693,7 @@ mod tests {
         id::{ClientId, RequestId, SessionId, WorkspaceId, WorktreeId},
         terminal_launch::{DurableTerminalLaunchSnapshot, TerminalLaunchScope, TerminalProfileId},
     };
-    use usagi_core::infrastructure::client::TerminalAction;
+    use usagi_core::infrastructure::ipc::TerminalAction;
 
     #[derive(Default)]
     struct Store {
@@ -902,7 +902,7 @@ mod tests {
                 ClientId::new(),
                 TerminalAction::Launch,
                 TerminalRequest::Launch {
-                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope,
@@ -939,7 +939,7 @@ mod tests {
             Store::default(),
             Pty::default(),
             Scope {
-                scope: scope.clone(),
+                scope,
                 working_directory: PathBuf::from("/available-worktree"),
             },
         )
@@ -956,7 +956,7 @@ mod tests {
             Store::default(),
             Pty::default(),
             Scope {
-                scope: scope.clone(),
+                scope,
                 working_directory: PathBuf::from("/available-worktree"),
             },
             limit,
@@ -969,7 +969,7 @@ mod tests {
         cols: u16,
     ) -> TerminalRequest {
         TerminalRequest::Launch {
-            intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+            intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                 request: TerminalLaunchRequest {
                     profile_id: TerminalProfileId::new("login-shell").unwrap(),
                     scope: scope.clone(),
@@ -1468,7 +1468,7 @@ mod tests {
         );
         let connection = ConnectionId::new();
         let client = ClientId::new();
-        let intent = usagi_core::infrastructure::client::TerminalLaunchIntent {
+        let intent = usagi_core::infrastructure::ipc::TerminalLaunchIntent {
             request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                 profile_id: TerminalProfileId::new("login-shell").unwrap(),
                 scope: TerminalLaunchScope {
@@ -1649,7 +1649,7 @@ mod tests {
                 RequestId::new(),
                 TerminalAction::Launch,
                 serde_json::to_value(TerminalRequest::Launch {
-                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope: TerminalLaunchScope {
@@ -1692,7 +1692,7 @@ mod tests {
                     RequestId::new(),
                     TerminalAction::Launch,
                     serde_json::to_value(TerminalRequest::Launch {
-                        intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+                        intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                             request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                                 profile_id: TerminalProfileId::new("login-shell").unwrap(),
                                 scope: invalid_scope,
@@ -2040,7 +2040,7 @@ mod tests {
                 ClientId::new(),
                 TerminalAction::Launch,
                 TerminalRequest::Launch {
-                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope,
@@ -2273,7 +2273,7 @@ mod tests {
                 ClientId::new(),
                 TerminalAction::Launch,
                 TerminalRequest::Launch {
-                    intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+                    intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                         request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                             profile_id: TerminalProfileId::new("login-shell").unwrap(),
                             scope: scope.clone(),

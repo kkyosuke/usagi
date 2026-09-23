@@ -38,9 +38,9 @@ use usagi_core::domain::id::{DaemonGeneration, TerminalId, WorkspaceId, Worktree
 use usagi_core::domain::terminal_launch::{
     TerminalInventoryEntry, TerminalKind, TerminalLaunchScope,
 };
-use usagi_core::infrastructure::client::{
-    ClientError, ClientPolicy, DaemonRequest, DaemonSession, IpcClient, RearmableStream,
-    TerminalGeometry, TerminalRequest,
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonSession, IpcClient, RearmableStream};
+use usagi_core::infrastructure::ipc::{
+    ClientError, DaemonRequest, TerminalGeometry, TerminalRequest,
 };
 use usagi_core::infrastructure::ipc::{
     ClientWorkspace, DaemonGeneration as WireGeneration, Envelope, EnvelopeKind, ProtocolLimits,
@@ -564,7 +564,7 @@ fn a_client_pointed_at_the_new_active_still_drives_the_old_generation_terminal()
     // … while a launch is control work on the new active generation.
     router
         .request(terminal_request(&TerminalRequest::Launch {
-            intent: usagi_core::infrastructure::client::TerminalLaunchIntent {
+            intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
                 request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
                     scope: scope(),
                     profile_id: usagi_core::domain::terminal_launch::TerminalProfileId::new(

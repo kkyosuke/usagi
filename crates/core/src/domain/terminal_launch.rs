@@ -229,7 +229,7 @@ mod tests {
     fn the_canonical_digest_separates_scope_profile_and_geometry() {
         let base = request();
         let digest = canonical_launch_digest(&base, 80, 24);
-        assert_eq!(digest, canonical_launch_digest(&base.clone(), 80, 24));
+        assert_eq!(digest, canonical_launch_digest(&base, 80, 24));
         // Geometry, profile, and every scope component are part of the identity.
         assert_ne!(digest, canonical_launch_digest(&base, 120, 24));
         assert_ne!(digest, canonical_launch_digest(&base, 80, 48));
@@ -242,7 +242,7 @@ mod tests {
             profile_id: base.profile_id.clone(),
             scope: TerminalLaunchScope {
                 session_id: None,
-                ..base.scope.clone()
+                ..base.scope
             },
         };
         let root_digest = canonical_launch_digest(&root, 80, 24);
