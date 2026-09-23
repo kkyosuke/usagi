@@ -257,10 +257,13 @@ fn grant_owner_access(root: &Path) -> bool {
         permissions.set_mode(mode | 0o700);
         granted = std::fs::set_permissions(root, permissions).is_ok();
     }
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            granted |= grant_owner_access(&entry.path());
-        }
+    // Flattened rather than matched: a directory that cannot be listed
+    // contributes nothing, exactly as an empty one does, and giving that case a
+    // branch of its own would leave a line no test can reach — the chmod above
+    // is what would have to fail for the listing to, and the owner's own chmod
+    // does not.
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        granted |= grant_owner_access(&entry.path());
     }
     granted
 }
