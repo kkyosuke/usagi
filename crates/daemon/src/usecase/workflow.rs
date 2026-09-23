@@ -1325,6 +1325,53 @@ mod tests {
                 .len(),
             1
         );
+        // The implementation advances while its first review is still running.
+        let replacement = OperationId::new();
+        let replacement_target = ReviewTarget {
+            base_sha: target.base_sha.clone(),
+            head_sha: "e".repeat(40),
+        };
+        store
+            .send_message(
+                workspace,
+                &caller,
+                operation,
+                SendMessage {
+                    message_id: replacement,
+                    to_agent_id: reviewer,
+                    kind: MessageKind::ReviewRequest,
+                    body: "Replace the in-flight review".into(),
+                    in_reply_to: None,
+                    review: Some(replacement_target.clone()),
+                },
+            )
+            .unwrap();
+        store
+            .send_message(
+                workspace,
+                &CallerRef {
+                    agent_id: reviewer,
+                    session_id: Some(session),
+                },
+                reviewer_run,
+                SendMessage {
+                    message_id: OperationId::new(),
+                    to_agent_id: implementer,
+                    kind: MessageKind::Approved,
+                    body: "Delayed verdict for the old request".into(),
+                    in_reply_to: Some(request),
+                    review: Some(target),
+                },
+            )
+            .unwrap();
+        let replaced = snapshot(&store, workspace, session).unwrap().run.unwrap();
+        assert_eq!(replaced.phase, Phase::Reviewing);
+        assert_eq!(replaced.review.as_ref().unwrap().request, replacement);
+        assert!(!replaced.review.as_ref().unwrap().approved);
+        assert!(replaced.history[1].advanced);
+        assert!(!replaced.history[2].advanced);
+        let request = replacement;
+        let target = replacement_target;
         store
             .send_message(
                 workspace,
@@ -1345,7 +1392,7 @@ mod tests {
             .unwrap();
         let approved = snapshot(&store, workspace, session).unwrap().run.unwrap();
         assert_eq!(approved.phase, Phase::Verifying);
-        assert_eq!(approved.history.len(), 2);
+        assert_eq!(approved.history.len(), 4);
         let next_request = OperationId::new();
         let next_target = ReviewTarget {
             base_sha: "a".repeat(40),
@@ -1406,7 +1453,7 @@ mod tests {
         let current = snapshot(&store, workspace, session).unwrap().run.unwrap();
         assert_eq!(current.phase, Phase::Reviewing);
         assert_eq!(current.review.unwrap().request, latest);
-        assert_eq!(current.history.len(), 5);
+        assert_eq!(current.history.len(), 7);
         assert!(
             store
                 .workflow_messages(workspace, session)

@@ -77,7 +77,7 @@ TUI が開いたら、次の順に進めます。
 
 1. `+ new session` から作業名と base branch を選ぶ。
 2. 作成した session で `agent` または `terminal` を実行する。
-3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。Workflow の PR 検証は未追跡ファイルと GitHub のマージ要件も確認する。
+3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。Workflow はレビュー中の更新にも追従し、PR 検証では未追跡ファイルと GitHub のマージ要件も確認する。
 
 session 作成直後の環境構築は、開いた workspace の Overview から `config` を実行して
 `Session setup` を編集するか、`.usagi/config.toml` の

@@ -309,7 +309,11 @@ impl WorkflowRun {
     ) -> Result<(), &'static str> {
         if !matches!(
             self.phase,
-            Phase::Implementing | Phase::Revising | Phase::Verifying | Phase::Ready
+            Phase::Implementing
+                | Phase::Reviewing
+                | Phase::Revising
+                | Phase::Verifying
+                | Phase::Ready
         ) || !target.is_valid()
         {
             return Err("review requires an implementation and full commit SHAs");
@@ -327,6 +331,8 @@ impl WorkflowRun {
             approved: false,
         });
         self.phase = Phase::Reviewing;
+        self.waiting_reason = None;
+        self.pr_url = None;
         Ok(())
     }
 
@@ -649,10 +655,55 @@ mod tests {
         let mut run = run();
         for phase in [Phase::Verifying, Phase::Ready] {
             run.phase = phase;
+            run.waiting_reason = Some("Waiting for successful PR checks".into());
+            run.pr_url = Some("https://github.com/owner/repo/pull/1".into());
             let request = OperationId::new();
             run.request_review(request, target()).unwrap();
             assert_eq!(run.phase, Phase::Reviewing);
             assert!(!run.review.as_ref().unwrap().approved);
+            assert!(run.waiting_reason.is_none());
+            assert!(run.pr_url.is_none());
+        }
+    }
+
+    #[test]
+    fn review_replacement_cannot_bypass_startup_or_a_human_decision() {
+        for phase in [Phase::Starting, Phase::Waiting] {
+            let mut run = run();
+            run.phase = phase;
+            run.waiting_reason = Some("A human decision is required".into());
+            let before = run.clone();
+            assert!(run.request_review(OperationId::new(), target()).is_err());
+            assert_eq!(run, before);
+        }
+    }
+
+    #[test]
+    fn an_in_flight_review_can_be_replaced_without_accepting_its_late_verdict() {
+        for approved in [false, true] {
+            let mut run = run();
+            let old_request = OperationId::new();
+            let old_target = target();
+            run.request_review(old_request, old_target.clone()).unwrap();
+            let request = OperationId::new();
+            let target = ReviewTarget {
+                head_sha: "c".repeat(40),
+                ..old_target.clone()
+            };
+            run.request_review(request, target.clone()).unwrap();
+            assert_eq!(run.revisions, 0);
+            assert!(
+                run.verdict(run.reviewer.unwrap(), old_request, &old_target, approved)
+                    .is_err()
+            );
+            assert_eq!(run.phase, Phase::Reviewing);
+            assert_eq!(run.review.as_ref().unwrap().request, request);
+            assert!(!run.review.as_ref().unwrap().approved);
+            assert!(run.request_review(request, target.clone()).is_err());
+            run.verdict(run.reviewer.unwrap(), request, &target, true)
+                .unwrap();
+            assert_eq!(run.phase, Phase::Verifying);
+            assert_eq!(run.revisions, 0);
         }
     }
 
