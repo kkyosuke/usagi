@@ -205,23 +205,32 @@ fn mirror_directory(
 ///
 /// A directory without the owner-write bit refuses the unlink of its own
 /// children, so `remove_dir_all` alone fails with `PermissionDenied` every time
-/// and the session can never be torn down. Sessions produce exactly that: usagi's
-/// own Agent-CLI tests build read-only `HOME` fixtures under `target/` and leave
-/// them behind. The repair is therefore attempted once, only on that error, and
-/// the removal retried — a tree already being deleted has no permissions left to
-/// preserve, while every other error still surfaces unchanged.
+/// and the session can never be torn down. A session's tree grows such a
+/// directory from whatever it ran: an Agent CLI that creates its configuration
+/// directory read-only leaves one behind when its home sits inside the tree.
+///
+/// The repair therefore runs on that one error, and the removal is retried only
+/// when a mode actually changed — a `PermissionDenied` the repair cannot explain
+/// (the session container itself is unwritable, say) keeps its original error
+/// instead of paying for a second full walk. Nothing here is lost by widening
+/// permissions: the tree is on its way out. The teardown worker re-runs this per
+/// attempt rather than once per session, which costs no more than the failed
+/// `remove_dir_all` it accompanies, since both traverse the same tree.
 fn remove_tree(root: &Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(root) {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            grant_owner_access(root);
-            std::fs::remove_dir_all(root)
+            if grant_owner_access(root) {
+                std::fs::remove_dir_all(root)
+            } else {
+                Err(error)
+            }
         }
         result => result,
     }
 }
 
 /// Give the owner read, write and traverse permission on `root` and on every
-/// directory beneath it.
+/// directory beneath it, reporting whether any mode actually changed.
 ///
 /// Only directories matter, because a read-only *file* is unlinked through its
 /// parent, so anything else ends the walk. Reading the metadata without
@@ -229,21 +238,26 @@ fn remove_tree(root: &Path) -> std::io::Result<()> {
 /// directory, so the walk stops at the link rather than reaching through it into
 /// a tree that is not being deleted. Every effect is best-effort — the retry in
 /// [`remove_tree`] is what reports whether the removal actually became possible.
-fn grant_owner_access(root: &Path) {
+fn grant_owner_access(root: &Path) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(root) else {
-        return;
+        return false;
     };
     if !metadata.is_dir() {
-        return;
+        return false;
     }
-    let mut permissions = metadata.permissions();
-    permissions.set_mode(permissions.mode() | 0o700);
-    let _ = std::fs::set_permissions(root, permissions);
+    let mut granted = false;
+    let mode = metadata.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(mode | 0o700);
+        granted = std::fs::set_permissions(root, permissions).is_ok();
+    }
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
-            grant_owner_access(&entry.path());
+            granted |= grant_owner_access(&entry.path());
         }
     }
+    granted
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
@@ -303,7 +317,8 @@ mod tests {
 
         // This is the behaviour that stranded sessions: a directory without the
         // owner-write bit refuses the unlink of its own children, so the bare
-        // removal fails and the teardown worker retries it forever.
+        // removal fails and the teardown worker retries it forever. (Root would
+        // not be refused, but the gates run as an unprivileged user.)
         assert_eq!(
             std::fs::remove_dir_all(&root).unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
@@ -325,7 +340,7 @@ mod tests {
         // rewriting a tree that is not being deleted.
         let link = tmp.path().join("link");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
-        grant_owner_access(&link);
+        assert!(!grant_owner_access(&link));
         assert_eq!(mode(&outside), 0o500);
 
         // A read-only file is unlinked through its parent, and a path that is not
@@ -333,9 +348,16 @@ mod tests {
         let file = tmp.path().join("file.txt");
         std::fs::write(&file, b"x").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
-        grant_owner_access(&file);
-        grant_owner_access(&tmp.path().join("absent"));
+        assert!(!grant_owner_access(&file));
+        assert!(!grant_owner_access(&tmp.path().join("absent")));
         assert_eq!(mode(&file), 0o400);
+
+        // A directory the owner can already use fully has nothing to grant, so a
+        // `PermissionDenied` the walk cannot explain keeps its original error
+        // rather than retrying the removal.
+        let open = tmp.path().join("open");
+        std::fs::create_dir_all(open.join("child")).unwrap();
+        assert!(!grant_owner_access(&open));
 
         std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -352,6 +374,20 @@ mod tests {
             remove_tree(&tmp.path().join("missing")).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+
+        // A `PermissionDenied` the repair cannot explain keeps its original
+        // error: here the tree itself is fully usable and the refusal comes from
+        // the container above it, which is not the teardown's to widen.
+        let container = tmp.path().join("locked-container");
+        let inside = container.join("session");
+        std::fs::create_dir_all(inside.join("child")).unwrap();
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(
+            remove_tree(&inside).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(mode(&container), 0o500);
+        std::fs::set_permissions(&container, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
