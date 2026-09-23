@@ -612,7 +612,7 @@ pub(super) fn verify_progress(
                         "view".into(),
                         url.into(),
                         "--json".into(),
-                        "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,body"
+                        "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,body"
                             .into(),
                     ],
                     5000,

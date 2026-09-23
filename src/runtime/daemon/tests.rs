@@ -12949,7 +12949,7 @@ mod workflow_composition {
         let url = "https://github.com/owner/repo/pull/1";
         // Checks that have not finished: the answer that used to be re-asked of
         // GitHub on every sweep and every snapshot the open tab requested.
-        let output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE"}).to_string();
+        let output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
         let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
         let view = usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output).unwrap();
         fixture
@@ -13018,7 +13018,7 @@ mod workflow_composition {
         // A new approved HEAD is different evidence and is never answered from
         // the previous one's cache. The inventory has to carry a PR for it, or
         // verification refuses locally before GitHub is consulted at all.
-        let moved_output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"c".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE"}).to_string();
+        let moved_output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"c".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
         fixture
             .inventory
             .lock()
@@ -13082,7 +13082,7 @@ mod workflow_composition {
             })
             .unwrap();
         let url = "https://github.com/owner/repo/pull/1";
-        let mut output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
+        let mut output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
         let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
         let view =
             usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output.to_string()).unwrap();

@@ -569,7 +569,10 @@ pub fn verify_pr(
         return Err("Worktree HEAD changed; a new review is required");
     }
     let status = git
-        .run(directory, &["status", "--porcelain"])
+        .run(
+            directory,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )
         .map_err(|_| "Could not inspect worktree changes")?;
     if !status.success || !status.stdout.trim().is_empty() {
         return Err("Worktree has uncommitted changes");
@@ -598,6 +601,18 @@ pub fn verify_pr(
     {
         return Err("PR is neither merged nor open and conflict-free");
     }
+    // A rollup contains only checks that already exist. GitHub's merge state
+    // also accounts for required checks whose status has not been reported.
+    if view.state == usagi_core::domain::pr_inventory::PrState::Open
+        && !matches!(
+            value
+                .get("mergeStateStatus")
+                .and_then(serde_json::Value::as_str),
+            Some("CLEAN" | "HAS_HOOKS")
+        )
+    {
+        return Err("Waiting for GitHub merge requirements to pass");
+    }
     if view.review == Some(usagi_core::domain::pr_inventory::PrReviewDecision::ChangesRequested) {
         return Err("PR has unresolved review requests");
     }
@@ -609,7 +624,10 @@ pub fn verify_pr(
         )?;
     }
     let status = git
-        .run(directory, &["status", "--porcelain"])
+        .run(
+            directory,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )
         .map_err(|_| "Could not recheck worktree changes")?;
     if !status.success || !status.stdout.trim().is_empty() {
         return Err("Worktree has uncommitted changes after verification");
@@ -1531,6 +1549,116 @@ mod tests {
         }
     }
     #[test]
+    fn workflow_verification_waits_for_missing_required_checks() {
+        let target = usagi_core::domain::agent_message::ReviewTarget {
+            base_sha: "b".repeat(40),
+            head_sha: "a".repeat(40),
+        };
+        let mut entry = usagi_core::domain::pr_inventory::PrEntry::new(
+            usagi_core::domain::pr_inventory::extract(b"https://github.com/owner/repo/pull/1")
+                .remove(0),
+        );
+        entry.head_oid = Some(target.head_sha.clone());
+        // Lint exists and passes, but coverage has not published any check yet.
+        let mut value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"name":"lint","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
+        for state in [
+            serde_json::Value::Null,
+            serde_json::json!("BLOCKED"),
+            serde_json::json!("UNKNOWN"),
+            serde_json::json!("BEHIND"),
+            serde_json::json!("UNSTABLE"),
+        ] {
+            value["mergeStateStatus"] = state;
+            assert_eq!(
+                verify_pr(
+                    &Git,
+                    &mut gh_view(&value.to_string()),
+                    std::path::Path::new("/fixture"),
+                    &target,
+                    std::slice::from_ref(&entry),
+                    None
+                ),
+                Err("Waiting for GitHub merge requirements to pass")
+            );
+        }
+        for state in ["CLEAN", "HAS_HOOKS"] {
+            value["mergeStateStatus"] = serde_json::json!(state);
+            assert_eq!(
+                verify_pr(
+                    &Git,
+                    &mut gh_view(&value.to_string()),
+                    std::path::Path::new("/fixture"),
+                    &target,
+                    std::slice::from_ref(&entry),
+                    None
+                ),
+                Ok(entry.url().to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_verification_finds_untracked_files_hidden_by_git_config() {
+        use usagi_core::infrastructure::git::GitRunner;
+        let directory = tempfile::tempdir().unwrap();
+        let git = crate::infrastructure::session_worktree::SystemGit;
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["config", "user.name", "Review"],
+            vec!["config", "user.email", "review@example.invalid"],
+            vec!["config", "commit.gpgsign", "false"],
+            vec!["config", "status.showUntrackedFiles", "no"],
+            vec!["commit", "--allow-empty", "--quiet", "-m", "base"],
+        ] {
+            assert!(git.run(directory.path(), &args).unwrap().success);
+        }
+        let head = git
+            .run(directory.path(), &["rev-parse", "HEAD"])
+            .unwrap()
+            .stdout
+            .trim()
+            .to_owned();
+        let target = usagi_core::domain::agent_message::ReviewTarget {
+            base_sha: head.clone(),
+            head_sha: head,
+        };
+        let mut entry = usagi_core::domain::pr_inventory::PrEntry::new(
+            usagi_core::domain::pr_inventory::extract(b"https://github.com/owner/repo/pull/1")
+                .remove(0),
+        );
+        entry.head_oid = Some(target.head_sha.clone());
+        let value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
+        let file = directory.path().join("uncommitted.rs");
+        // Hidden untracked files must be caught on both sides of the remote read.
+        for after_read in [false, true] {
+            if !after_read {
+                std::fs::write(&file, "implementation").unwrap();
+            }
+            let mut view = |_: &str| {
+                std::fs::write(&file, "implementation").unwrap();
+                Ok(value.clone())
+            };
+            let result = verify_pr(
+                &git,
+                &mut view,
+                directory.path(),
+                &target,
+                std::slice::from_ref(&entry),
+                None,
+            );
+            assert_eq!(
+                result,
+                Err(if after_read {
+                    "Worktree has uncommitted changes after verification"
+                } else {
+                    "Worktree has uncommitted changes"
+                })
+            );
+            std::fs::remove_file(&file).unwrap();
+        }
+    }
+
+    #[test]
     fn workflow_verification_rejects_every_git_probe_failure_or_race() {
         let target = usagi_core::domain::agent_message::ReviewTarget {
             base_sha: "b".repeat(40),
@@ -1541,7 +1669,7 @@ mod tests {
                 .remove(0),
         );
         entry.head_oid = Some(target.head_sha.clone());
-        let output=serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"}).to_string();
+        let output=serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
         for at in 0..4 {
             for mode in 0..3 {
                 assert!(
@@ -1593,7 +1721,7 @@ mod tests {
             // Both initial probes succeeded. A writer changes the worktree
             // while this request is outstanding, without moving HEAD.
             git.0.set(true);
-            Ok(serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"}).to_string())
+            Ok(serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string())
         };
         assert_eq!(
             verify_pr(
@@ -1620,7 +1748,7 @@ mod tests {
                 .remove(0),
         );
         entry.head_oid = Some(target.head_sha.clone());
-        let mut value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
+        let mut value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
         let directory = std::path::Path::new("/fixture");
         // Verification names the PR it matched, so the notice a human reads can
         // link to it.

@@ -1197,6 +1197,10 @@ GitHub に聞くことになる。キャッシュの窓は 15 秒から始まり
 再検証しないのは検証を省くだけで、キャッシュは破棄しない（破棄すると lane の tick が
 実質の間隔になり、窓の意味が無くなる）。保持する session 数にも上限を設ける。窓の中でも **worktree の HEAD 一致と未コミット変更なしの判定はローカルで毎回行う**。
 PR の観測前後に両方を確認し、観測中に未コミット変更が生じた場合も `PR ready` に進めない。
+未追跡 file は `--untracked-files=all` で列挙し、利用者の `status.showUntrackedFiles` 設定に左右されない。
+open PR は checks 成功に加えて GitHub の `mergeStateStatus` が `CLEAN` または `HAS_HOOKS` であることを要求する。
+必須 check の未出現などで `BLOCKED`、基点更新待ちの `BEHIND`、不明・欠落を含むその他の状態は待機とし、
+既に出現した checks だけの成功で `PR ready` に進めない。merged PR は merge state の再確定を要求しない。
 安価であり、かつ検証の TOCTOU fence でもあるためである。キャッシュは daemon process の生存期間だけ
 保持し、lane と client 要求で 1 つを共有する。
 
