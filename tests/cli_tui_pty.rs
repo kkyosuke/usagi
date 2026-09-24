@@ -1431,6 +1431,19 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
         output.matches("\u{1b}[2J").count() >= 2,
         "the initial and resized surfaces must both be cleared: {output}"
     );
+    // Hiding what ran before usagi is not the alternate screen's job alone: a
+    // terminal keeps the primary buffer reachable underneath it, so the entry
+    // has to empty that buffer *before* switching away from it.
+    let purged = output
+        .find("\u{1b}[3J")
+        .unwrap_or_else(|| panic!("the entry must purge the primary scrollback: {output}"));
+    let entered = output
+        .find("\u{1b}[?1049h")
+        .unwrap_or_else(|| panic!("the entry must use the alternate screen: {output}"));
+    assert!(
+        purged < entered,
+        "the primary scrollback must be purged before the alternate screen hides it: {output}"
+    );
 
     assert_eq!(attributes_reattached.c_iflag, attributes_before.c_iflag);
     assert_eq!(attributes_reattached.c_oflag, attributes_before.c_oflag);
