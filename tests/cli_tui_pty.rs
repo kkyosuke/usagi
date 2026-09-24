@@ -1339,24 +1339,27 @@ fn assert_terminal_modes_entered_and_restored(output: &str) {
     // 入場時の主画面消去も `\e[2J` を出すため、renderer の全面再描画だけを数える。
     // 入場側は必ず `\e[2J\e[3J` と続けて出るので、その分を差し引けば
     // 「初回描画と resize 再描画」の 2 件という本来の下限が保てる。
-    let purges = output.matches("\u{1b}[2J\u{1b}[3J").count();
-    let renderer_clears = output.matches("\u{1b}[2J").count().saturating_sub(purges);
+    let entry_clears = output.matches("\u{1b}[2J\u{1b}[3J").count();
+    let renderer_clears = output
+        .matches("\u{1b}[2J")
+        .count()
+        .saturating_sub(entry_clears);
     assert!(
         renderer_clears >= 2,
         "the initial and resized surfaces must both be cleared: {output}"
     );
     assert!(
-        purges >= 2,
+        entry_clears >= 2,
         "both entries must purge the primary scrollback: {output}"
     );
-    let purged = output
+    let first_purge = output
         .find("\u{1b}[3J")
         .unwrap_or_else(|| panic!("the entry must purge the primary scrollback: {output}"));
-    let entered = output
+    let first_alternate_screen = output
         .find("\u{1b}[?1049h")
         .unwrap_or_else(|| panic!("the entry must use the alternate screen: {output}"));
     assert!(
-        purged < entered,
+        first_purge < first_alternate_screen,
         "the primary scrollback must be purged before the alternate screen hides it: {output}"
     );
 }
