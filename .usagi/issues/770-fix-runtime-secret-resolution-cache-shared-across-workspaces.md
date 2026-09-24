@@ -1,7 +1,7 @@
 ---
 number: 770
 title: fix(runtime): secret 解決 cache を参照単位で daemon 全体に共有する
-status: todo
+status: done
 priority: medium
 labels: [runtime, env, secret, daemon]
 dependson: []

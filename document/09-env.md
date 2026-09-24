@@ -113,8 +113,14 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - TUI の pane launch は background の専用 IPC policy でこの bounded queue の完了を待つ。1Password の承認モーダル中も
   通常操作用の短い deadline では pending pane を失敗にせず、描画・入力・quit は待たせない。policy の値は
   [daemon IPC](04-ipc.md#attempt-deadline-と-reconnect-budget)を正本とする。
-- 解決結果は workspace ごとに**設定内容をキーにキャッシュ**する。設定が変わらなければ次の pane 起動で
-  `op read` を再実行せず、設定または `OP_SERVICE_ACCOUNT_TOKEN` を編集すればキャッシュは無効になる。
+- 解決した secret は **`op read` の credential と参照の組をキーに daemon 全体でキャッシュ**する
+  （workspace ごとではない）。daemon は data directory ごとに 1 process で複数 workspace を adopt するため
+  （[5. daemon#tenant registry](05-daemon.md#tenant-registry)）、global に置いた同じ参照は workspace を
+  いくつ開いても 1 回しか読まない。credential は token そのものではなく digest をキーにし、別の credential で
+  解決した値を配らない。
+- 参照を編集すればその binding だけ、`OP_SERVICE_ACCOUNT_TOKEN` を編集すれば全参照を次の pane 起動で
+  解決し直す。解決に失敗した参照はキャッシュせず、次の起動で再試行する。キャッシュは daemon の memory だけに
+  持ち、件数の上限を超えたら全体を捨てて解決し直す。
 
 ## 注入のタイミングと優先順位
 
