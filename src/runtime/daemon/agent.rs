@@ -48,8 +48,14 @@ pub(super) struct TenantWorkspaces {
     /// record even when the workspace is no longer held.
     pub(super) daemon_dir: PathBuf,
     /// The workspace this process started in. A client that names no workspace
-    /// touches no workspace resource, so it is admitted against this one.
+    /// touches no workspace resource, so it is admitted against this one, and it
+    /// keeps answering for this root after the workspace is given back
+    /// ([`Self::known`]).
     pub(super) initial: PathBuf,
+    /// This generation's authority. Opening a workspace is taking authority over
+    /// it, which a generation that has handed off may no longer do
+    /// ([`Self::may_open`]).
+    pub(super) gate: AdmissionGate,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
@@ -65,6 +71,50 @@ impl TenantWorkspaces {
                 root,
             )
         })
+    }
+
+    /// Whether this generation may take authority over a workspace it does not
+    /// already hold.
+    ///
+    /// Adopting a workspace fences its worktrees, branches, and session names
+    /// for as long as the process lives, which only a generation that is still
+    /// the authority may do. A replaced generation stays reachable — clients
+    /// address it over its own socket to read the terminals it still owns, and
+    /// their handshake declares their own cwd while doing so — but it takes no
+    /// new work, and a workspace it adopted there would be fenced by a process
+    /// that will never serve it. That is the same standing refusal its own
+    /// startup workspace produced until it was given back
+    /// (`release_initial_workspace`).
+    pub(super) fn may_open(&self) -> bool {
+        !self.gate.handed_off()
+    }
+
+    /// The workspace this generation answers for at `root`, without opening one.
+    ///
+    /// A held tenant answers first. The startup workspace answers too, even once
+    /// it has been given back: a handoff may only begin when every participant
+    /// can still reach the draining generation, and the terminals it is kept
+    /// alive for are addressed by clients standing in that workspace. Answering
+    /// is not owning — the fence is gone, and nothing here takes it again.
+    pub(super) fn known(&self, root: &Path) -> Option<PathBuf> {
+        self.tenants
+            .owner_of(root)
+            .map(|tenant| tenant.root().to_path_buf())
+            .or_else(|| {
+                root.starts_with(&self.initial)
+                    .then(|| self.initial.clone())
+            })
+    }
+
+    /// The refusal for a workspace this generation holds no authority to open.
+    pub(super) fn replaced_generation_refusal(
+        &self,
+    ) -> usagi_core::infrastructure::ipc::ProtocolError {
+        usagi_core::infrastructure::ipc::workspace_refusal_serving(
+            "this daemon generation was replaced and opens no further workspace; \
+             reconnect to the daemon that is serving now",
+            &self.served(),
+        )
     }
 
     /// Every workspace this daemon currently holds, in wire spelling.
@@ -98,6 +148,14 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
             // authority over it now, or refuses that workspace alone.
             Some(ClientWorkspace::Selected { root }) => {
                 let root = Self::canonical(root)?;
+                // One read, not a check followed by an `adopt`: between the two
+                // the sweep could give this very workspace back, and the `adopt`
+                // would fence it again for a generation that will never serve it.
+                if !self.may_open() {
+                    return (self.known(&root).as_deref() == Some(root.as_path()))
+                        .then(|| paths::wire_workspace_root(&root))
+                        .ok_or_else(|| self.replaced_generation_refusal());
+                }
                 self.tenants.adopt(&root).map_err(|error| {
                     // The refused root is the one this daemon could *not* take,
                     // so naming it as the workspace served would contradict the
@@ -129,6 +187,12 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                     paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
                 if let Some(owner) = self.tenants.owner_of(&declared) {
                     return Ok(paths::wire_workspace_root(owner.root()));
+                }
+                if !self.may_open() {
+                    return self
+                        .known(&declared)
+                        .map(|root| paths::wire_workspace_root(&root))
+                        .ok_or_else(|| self.replaced_generation_refusal());
                 }
                 // Two ways a bound client may still name a workspace, tried in
                 // this order because the first is a workspace that exists and the

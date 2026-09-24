@@ -2013,6 +2013,7 @@ fn fresh_ipc_ready<'a>(data_dir: &'a Path, _info: &'a AppInfo) -> IpcReady<'a> {
         // root only has to be a resolved directory.
         workspace_root: data_dir,
         instance_lock: unacquired_instance_lock(data_dir),
+        initial_fence: None,
         build: BuildIdentity {
             version: "test".to_owned(),
             commit: "test".to_owned(),
@@ -2672,7 +2673,7 @@ fn workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
         workspace,
         pid,
         patience: WORKSPACE_FENCE_PATIENCE,
-        held: RefCell::new(None),
+        held: Mutex::new(None),
     }
 }
 
@@ -2695,7 +2696,7 @@ fn workspace_fence_refuses_a_second_owner_and_names_its_pid() {
             owner: Some(4242),
         }
     );
-    assert!(second.held.borrow().is_none());
+    assert!(second.held.lock().unwrap().is_none());
 
     // The fence node lives in a daemon-private directory beside — not inside
     // — the runtime-mode children, and the OS releases it with the owner.
@@ -2723,6 +2724,10 @@ fn a_home_workspace_reuses_its_fence_as_the_instance_lock() {
         &instance,
         ProcessInstanceLock::WorkspaceAlias { .. }
     ));
+    // One descriptor supplies both invariants, so this workspace is never given
+    // back: releasing the fence would release the single-instance guard with it
+    // and let a second daemon start on this data directory.
+    assert!(instance.aliases_workspace_fence());
     assert_eq!(
         instance.acquire().unwrap_err().to_string(),
         "daemon workspace fence must be acquired before its aliased instance lock"
@@ -2757,6 +2762,7 @@ fn a_home_workspace_reuses_its_fence_as_the_instance_lock() {
     ensure_private_dir_all(independent_path.parent().unwrap()).unwrap();
     let independent = process_instance_lock(independent_path, &workspace);
     assert!(matches!(&independent, ProcessInstanceLock::Independent(_)));
+    assert!(!independent.aliases_workspace_fence());
     assert!(independent.acquire().unwrap());
     assert!(independent.locked_inode().is_some());
     if let ProcessInstanceLock::Independent(lock) = &independent {
@@ -2870,7 +2876,7 @@ fn workspace_fence_rejects_a_path_replacement_after_flock() {
     replacement.join().unwrap();
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(error.to_string().contains("daemon workspace fence"));
-    assert!(fence.held.borrow().is_none());
+    assert!(fence.held.lock().unwrap().is_none());
 }
 
 #[test]
@@ -2945,6 +2951,10 @@ fn a_bound_client_adopts_the_repository_it_is_running_inside() {
         tenants: Arc::clone(&tenants),
         daemon_dir,
         initial: held_root.clone(),
+        gate: AdmissionGate::new(
+            usagi_core::domain::id::DaemonGeneration::new(),
+            GenerationRole::Active,
+        ),
     };
     let wire = |root: &Path| paths::wire_workspace_root(root);
 
@@ -3231,6 +3241,8 @@ fn an_idle_workspace_is_released_and_a_working_one_is_kept() {
     spawn_tenant_retire_worker(
         Arc::clone(&tenants),
         activity,
+        None,
+        AdmissionGate::new(generation, GenerationRole::Active),
         Arc::clone(&shutdown),
         Duration::from_millis(5),
         Duration::ZERO,
@@ -3253,6 +3265,293 @@ fn an_idle_workspace_is_released_and_a_working_one_is_kept() {
         vec![initial.root().to_path_buf()]
     );
     shutdown.request();
+}
+
+/// A generation that has handed its authority on gives its startup workspace
+/// back — and not one moment earlier.
+///
+/// `serve` fences the workspace this process was started in for the whole
+/// process, and a planned handoff leaves that process alive so its PTYs survive
+/// the replacement. Until the fence went back with the authority, the departed
+/// owner kept refusing the workspace to the new active generation — naming its
+/// own pid as the owner hint — for as long as it lived.
+///
+/// The pre-commit barrier is not the handoff: it enters `draining` before the
+/// registry commit and reopens to `active` for every handoff that never
+/// commits. Releasing there would leave a generation that came back to `active`
+/// without the workspace it was started in, and with its fence possibly taken.
+#[test]
+fn a_replaced_generation_gives_its_startup_workspace_back() {
+    let temporary = tempfile::tempdir_in("/tmp").unwrap();
+    let data = temporary.path().join("data");
+    let workspace = temporary.path().join("workspace");
+    for directory in [&data, &workspace] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    ensure_private_dir_all(&data.join("daemon")).unwrap();
+    let root = paths::canonical_workspace_root(&workspace).unwrap();
+    let generation = usagi_core::domain::id::DaemonGeneration::new();
+    let tenants = Arc::new(TenantRegistry::new(
+        data.join("daemon"),
+        FileWorkspaceFences {
+            pid: std::process::id(),
+        },
+        SystemTenantOpener {
+            data_home: data.clone(),
+            generation,
+        },
+        DEFAULT_TENANT_LIMIT,
+    ));
+
+    // What `serve` does: fence the startup workspace, then register the tenant
+    // with the fence the process already holds.
+    let held = Arc::new(workspace_fence(&root, 4242));
+    assert_eq!(held.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+    let initial = InitialWorkspaceFence {
+        root: root.clone(),
+        fence: Arc::clone(&held),
+    };
+    let tenant = tenants.adopt_initial(&root).unwrap();
+    let activity = daemon_activity(&data, &root, generation, &tenants);
+    let refused = || WorkspaceFenceOutcome::Held {
+        workspace: root.display().to_string(),
+        owner: Some(4242),
+    };
+
+    // While this generation is the authority the workspace stays owned: an
+    // unbound client is admitted against it, and a second daemon must not take a
+    // workspace this one is still serving.
+    let gate = AdmissionGate::new(generation, GenerationRole::Active);
+    assert!(!release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert_eq!(workspace_fence(&root, 5252).acquire().unwrap(), refused());
+
+    // The pre-commit barrier: `draining`, but the handoff is not durable yet.
+    gate.close(LeaseClass::ActiveControl);
+    gate.await_drain(LeaseClass::ActiveControl).unwrap();
+    gate.enter_draining().unwrap();
+    assert_eq!(gate.role(), GenerationRole::Draining);
+    assert!(!release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert_eq!(workspace_fence(&root, 5252).acquire().unwrap(), refused());
+
+    // That handoff failed: the authority — and its workspace — come back.
+    gate.abort_draining().unwrap();
+    assert!(!release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert!(tenants.tenant(&root).is_some());
+
+    // Committed: the tenant goes and the fence goes with it, so the next daemon
+    // acquires the workspace and publishes its own owner hint.
+    gate.close(LeaseClass::ActiveControl);
+    gate.await_drain(LeaseClass::ActiveControl).unwrap();
+    gate.enter_draining().unwrap();
+    gate.confirm_draining();
+    assert!(release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert!(tenants.adopted().is_empty());
+    assert!(held.held.lock().unwrap().is_none());
+    let successor = workspace_fence(&root, 5252);
+    assert_eq!(
+        successor.acquire().unwrap(),
+        WorkspaceFenceOutcome::Acquired
+    );
+
+    // At most once: the entry is gone, so a later tick releases nothing and
+    // cannot disturb the owner that took over.
+    assert!(!release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert_eq!(tenant.root(), root);
+}
+
+/// Work of its own keeps the startup workspace even after the handoff: a
+/// replaced generation still serves the runtimes it owns, and giving the
+/// workspace back would hand those worktrees to a second owner. An observation
+/// that cannot be made counts as work, like everywhere else.
+#[test]
+fn a_replaced_generation_keeps_a_startup_workspace_that_is_still_working() {
+    let temporary = tempfile::tempdir_in("/tmp").unwrap();
+    let data = temporary.path().join("data");
+    let workspace = temporary.path().join("workspace");
+    for directory in [&data, &workspace] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    ensure_private_dir_all(&data.join("daemon")).unwrap();
+    let root = paths::canonical_workspace_root(&workspace).unwrap();
+    let generation = usagi_core::domain::id::DaemonGeneration::new();
+    let tenants = Arc::new(TenantRegistry::new(
+        data.join("daemon"),
+        FileWorkspaceFences {
+            pid: std::process::id(),
+        },
+        SystemTenantOpener {
+            data_home: data.clone(),
+            generation,
+        },
+        DEFAULT_TENANT_LIMIT,
+    ));
+    let held = Arc::new(workspace_fence(&root, 4242));
+    assert_eq!(held.acquire().unwrap(), WorkspaceFenceOutcome::Acquired);
+    let initial = InitialWorkspaceFence {
+        root: root.clone(),
+        fence: Arc::clone(&held),
+    };
+    let tenant = tenants.adopt_initial(&root).unwrap();
+    let activity = daemon_activity(&data, &root, generation, &tenants);
+    let gate = AdmissionGate::new(generation, GenerationRole::Draining);
+    gate.confirm_draining();
+    assert!(gate.handed_off());
+
+    // Real work in the startup workspace: a goal this generation reserved and
+    // has not settled.
+    let goal_operation = usagi_core::domain::id::OperationId::new().to_string();
+    activity
+        .supervisor
+        .lock()
+        .unwrap()
+        .reserve_goal_for_workspace(
+            "goal",
+            tenant.workspace_id(),
+            &goal_operation,
+            usagi_daemon::usecase::supervisor_runtime::GoalSpecification::new(
+                "finish".into(),
+                usagi_core::domain::pr_inventory::GitHubRepository::from_name_with_owner(
+                    "acme/repo",
+                )
+                .unwrap(),
+            ),
+            None,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    assert!(!release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert!(held.held.lock().unwrap().is_some());
+    assert_eq!(
+        workspace_fence(&root, 5252).acquire().unwrap(),
+        WorkspaceFenceOutcome::Held {
+            workspace: root.display().to_string(),
+            owner: Some(4242),
+        }
+    );
+
+    // Settled: nothing is running, so the workspace goes back.
+    activity
+        .supervisor
+        .lock()
+        .unwrap()
+        .fail_reserved_goal(
+            &goal_operation,
+            "fixture complete".into(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    assert!(release_initial_workspace(
+        &tenants, &activity, &initial, &gate
+    ));
+    assert!(held.held.lock().unwrap().is_none());
+}
+
+/// A generation that has handed off answers for the workspaces it knows and
+/// opens no further one.
+///
+/// It stays reachable: clients address it over its own socket to read the
+/// terminals it still owns, and their handshake declares their own cwd while
+/// doing so. Adopting a workspace there would fence its worktrees with a process
+/// that will never serve them — the same standing refusal its startup workspace
+/// produced until it was given back. The startup root keeps answering even after
+/// the release, because a handoff may only begin when every participant can
+/// still reach the draining generation.
+#[test]
+fn a_replaced_generation_answers_for_what_it_knows_and_opens_nothing_new() {
+    use usagi_core::infrastructure::ipc::WorkspaceResolver;
+
+    let temporary = tempfile::tempdir_in("/tmp").unwrap();
+    let data = temporary.path().join("data");
+    let held = temporary.path().join("held");
+    let fresh = temporary.path().join("fresh");
+    for directory in [&data, &held, &fresh] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let daemon_dir = data.join("daemon");
+    ensure_private_dir_all(&daemon_dir).unwrap();
+    let held_root = paths::canonical_workspace_root(&held).unwrap();
+    let fresh_root = paths::canonical_workspace_root(&fresh).unwrap();
+    let generation = usagi_core::domain::id::DaemonGeneration::new();
+    let tenants = Arc::new(TenantRegistry::new(
+        daemon_dir.clone(),
+        FileWorkspaceFences {
+            pid: std::process::id(),
+        },
+        SystemTenantOpener {
+            data_home: data.clone(),
+            generation,
+        },
+        DEFAULT_TENANT_LIMIT,
+    ));
+    let initial = tenants.adopt_initial(&held_root).unwrap();
+    let workspaces: Workspaces = tenants.clone();
+    let gate = AdmissionGate::new(generation, GenerationRole::Draining);
+    gate.confirm_draining();
+    let resolver = TenantWorkspaces {
+        tenants: Arc::clone(&tenants),
+        daemon_dir,
+        initial: held_root.clone(),
+        gate,
+    };
+    let wire = |root: &Path| paths::wire_workspace_root(root);
+    let inside = ClientWorkspace::Bound {
+        root: wire(&held_root.join(".usagi/sessions/live")),
+    };
+    let selected = ClientWorkspace::Selected {
+        root: wire(&held_root),
+    };
+
+    // What it holds still answers, by either declaration.
+    assert_eq!(resolver.resolve(Some(&selected)).unwrap(), wire(&held_root));
+    assert_eq!(resolver.resolve(Some(&inside)).unwrap(), wire(&held_root));
+
+    // A workspace it does not hold is refused rather than fenced, whether the
+    // client selected it or is merely standing in it.
+    for declared in [
+        ClientWorkspace::Selected {
+            root: wire(&fresh_root),
+        },
+        ClientWorkspace::Bound {
+            root: wire(&fresh_root),
+        },
+    ] {
+        let refusal = resolver.resolve(Some(&declared)).unwrap_err();
+        assert!(usagi_core::infrastructure::ipc::is_workspace_mismatch(
+            &refusal
+        ));
+        assert!(
+            refusal.message.contains("replaced"),
+            "the refusal says which daemon to ask instead: {}",
+            refusal.message
+        );
+    }
+    assert_eq!(tenants.adopted().len(), 1);
+
+    // After the startup workspace is given back, the clients that reach this
+    // generation for the terminals it still owns keep resolving — through the
+    // handle it retained, never by taking the fence again.
+    assert!(tenants.retire(&held_root));
+    assert!(tenants.adopted().is_empty());
+    assert_eq!(resolver.resolve(Some(&selected)).unwrap(), wire(&held_root));
+    assert_eq!(resolver.resolve(Some(&inside)).unwrap(), wire(&held_root));
+    assert!(tenants.adopted().is_empty());
+    for declared in [Some(inside), Some(selected)] {
+        let bound = connection_workspace(&workspaces, &initial, declared.as_ref())
+            .expect("the retained startup workspace still answers");
+        assert_eq!(bound.tenant.root(), held_root);
+    }
 }
 
 /// An observation that cannot be made keeps the workspace.
@@ -3327,6 +3626,7 @@ fn the_handshake_resolves_a_selected_workspace_by_adopting_it() {
         tenants: Arc::clone(&tenants),
         daemon_dir,
         initial: first_root.clone(),
+        gate: AdmissionGate::new(generation, GenerationRole::Active),
     };
     let wire = |root: &Path| paths::wire_workspace_root(root);
 

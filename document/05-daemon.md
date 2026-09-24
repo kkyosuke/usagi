@@ -804,6 +804,7 @@ daemon process（machine あたり 1 つ）
 | adopt | client が `selected` で申告した workspace を、その handshake の中で adopt する。canonical 化 → workspace fence 取得 → state subtree 解決 → lifecycle document open → 登録の順で、`serve` の取得順と同じである |
 | 拒否 | fence を別 process が持つ、root が解決できない、tenant 上限（既定 32）に達した場合は **その workspace だけ**を typed refusal にする。保持中の tenant の接続は影響を受けない |
 | retire | 何もすることが無い状態が 10 分続いた workspace を自動的に返す（[遊休 workspace の retire](#遊休-workspace-の-retire)）。または `daemon retire <path>` が参照中でない 1 tenant を即時に返す。live runtime は `--force` でその workspace のものだけを terminate / reap し、起動 workspace と未完了 lifecycle work は force でも返さない |
+| 起動 workspace を返す | この generation の handoff が durable になり、その workspace に仕事が残っていなければ、同じ sweep が起動 workspace の tenant と `serve` の fence を返す（[draining 世代は起動 workspace を返す](#draining-世代は起動-workspace-を返す)） |
 | 停止 | shutdown は全 tenant を閉じ、fence を返す |
 
 adopt は client の handshake の中で走るため、fence の待ち時間は起動時（departing owner を待つ 2 秒）より短い
@@ -816,7 +817,7 @@ adopt した workspace を保持し続けると、一度開いただけの works
 
 | 条件 | 理由 |
 |---|---|
-| `serve` が fence した起動 workspace ではない | その fence は process のものなので、tenant を落としても workspace は返らない |
+| `serve` が fence した起動 workspace ではない | その fence は process のものなので、tenant を落としても workspace は返らない。この workspace を返す経路は [draining 世代は起動 workspace を返す](#draining-世代は起動-workspace-を返す)だけである |
 | registry の外に保持者が居ない | 接続中の client が次の request を送れる workspace は返さない |
 | 自分の仕事が無い | 稼働中の generic terminal・Agent runtime、`creating` / `initializing` / `deleting` の session、未決着の operation のいずれも無い（`failed` の行は人を待つものなので保持理由にしない） |
 | その状態が 10 分続いた | 離れて戻るたびに fence を churn させない |
@@ -844,6 +845,44 @@ ownership を別の durable fence として持つが、どちらも workspace �
 ことを「session が消えた」と読むと、閉じただけの workspace の
 記録（利用者が付けた pin / dismiss を含む）を消してしまう。判定材料は各 state subtree の lifecycle document で、
 1 つでも読めなければ prune しない。
+
+#### draining 世代は起動 workspace を返す
+
+planned replacement は旧 process を `draining` のまま生かして、所有している PTY を置き換えの向こう側まで serve させる
+（[planned replacement](#planned-replacement)）。その process はもう誰の authority でもない: read と自分の terminal だけを
+admit し、新しい仕事を起こす request はすべて拒否する。ところが起動 workspace の fence は `serve` が process 寿命で
+握るため、遊休 sweep の対象外のまま旧 process が生きている限り保持され続ける。session が 0 件でも、新しい active
+generation を含むすべての daemon がその workspace を「別 daemon が所有している（unverified owner pid hint …）」で
+拒否される。
+
+そこで同じ 30 秒 sweep が、**authority を durable に手放した generation の起動 workspace** も返す。
+
+| 条件 | 理由 |
+|---|---|
+| handoff が durable になっている | `draining` という role だけでは足りない。[admission fence](#admission-fence) の barrier は registry commit の**前**に `draining` へ移り、commit しなければ `active` へ戻る。その窓で返すと、`active` に戻った process が自分の起動 workspace を失う |
+| 自分の仕事が無い | 遊休 sweep と同じ fail-closed な観測。稼働中の generic terminal・Agent runtime・supervisor・未完了 lifecycle work のいずれかがあれば、あるいは観測できなければ保持する |
+| 単一インスタンス lock が同じ descriptor を共有していない | `$USAGI_HOME` が workspace の配下にあると 2 つの guard は同じ inode になる（[2 段 fence](#単一-daemon-の-2-段-fence)）。fence を返すと単一インスタンス lock も一緒に落ちるので、この場合は process 寿命まで保持する |
+
+遊休 sweep の「registry の外に保持者が居ない」は条件にしない。起動 workspace の tenant handle は process 寿命で
+保持される（workspace を申告しない接続がこの tenant に対して admit される）ため、その問いの答えは恒久的に
+「居る」であり、条件にすると永久に返せない。代わりに「handoff が durable になった」ことが「もう新しい仕事は
+起きない」を保証する。
+
+返すのは registry の entry と fence の両方で、fence を返した後は新しい owner が自分の pid hint を fence node へ
+書き直す。entry が消えた後の sweep は何もしないので、解放は高々 1 回である。
+
+**返した後も、その root を申告する client にはこの generation が答え続ける**。handoff は「終わったあとも全参加者が
+draining generation に到達できる」場合だけ開始してよく（[handoff protocol](#handoff-protocol)）、返した瞬間に
+handshake が `workspace-mismatch` になると、まさにこの generation が保持し続けている terminal を読む client が
+到達できなくなる。所有を返すことと答えることは別なので、保持していた tenant handle は残し、起動 root とその配下の
+`bound` / `selected` 申告はその handle に解決する。新しい workspace を開かないことと合わせて、この generation は
+**自分が知っている workspace にだけ答え、どの workspace も新たに fence しない**状態になる
+（[4. daemon IPC#workspace fence](04-ipc.md#workspace-fence)）。
+
+standby から昇格した generation は workspace fence も単一インスタンス lock も持たない（[planned replacement](#planned-replacement)）。
+返すものが無い一方、その generation の起動 workspace は旧 owner が fence を返した後どの process にも fence されない。
+別 mode の daemon がその workspace を取れてしまうこの穴は昇格の時点から存在し、本節の解放はそれを早めるだけで
+作り出してはいない（issue #771）。
 
 **workspace ごとに 1 つ**の資源（lifecycle document、fence）は tenant が持ち、**daemon ごとに 1 つ**の資源
 （PTY registry、Agent runtime とその provisioner、teardown worker、PR inventory）は request が名指す

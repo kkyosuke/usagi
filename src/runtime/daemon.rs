@@ -35,8 +35,8 @@ use agent::{
 
 use workers::{
     AgentReadiness, AgentReadinessProbe, AutomaticOrphanCleanup, ClosePrProjectionOnExit,
-    ConnectionCleanup, ConnectionCleanupInbox, DaemonBackgroundWorkers, OrphanCleanupPass,
-    ReadinessBounds, ShutdownOnIpcWorkerExit, ShutdownOnUnexpectedWorkerExit,
+    ConnectionCleanup, ConnectionCleanupInbox, DaemonBackgroundWorkers, InitialWorkspaceFence,
+    OrphanCleanupPass, ReadinessBounds, ShutdownOnIpcWorkerExit, ShutdownOnUnexpectedWorkerExit,
     ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown, SigtermTerminator, SystemAgentReadiness,
     retain_client_worker, spawn_critical_worker, spawn_orphan_cleanup_worker,
     spawn_pr_refresh_worker, spawn_tenant_retire_worker, start_connection_cleanup_worker,
@@ -45,8 +45,8 @@ use workers::{
 };
 #[cfg(test)]
 use workers::{
-    ReadinessState, spawn_draining_collection_worker, spawn_retention_gc_worker,
-    spawn_session_teardown_worker,
+    ReadinessState, release_initial_workspace, spawn_draining_collection_worker,
+    spawn_retention_gc_worker, spawn_session_teardown_worker,
 };
 
 pub(crate) use standby::trusted_generations;
@@ -692,14 +692,26 @@ fn connection_workspace(
     initial: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
     declared: Option<&ClientWorkspace>,
 ) -> Option<ConnectionWorkspace> {
+    // The startup workspace answers through the retained handle even after the
+    // registry entry is gone: a replaced generation gives that workspace back
+    // but must stay reachable for the terminals it still owns, which are
+    // addressed by clients standing in it (`release_initial_workspace`).
+    let retained_initial = |root: &Path| root.starts_with(initial.root()).then(|| initial.clone());
     let tenant = match declared {
         None | Some(ClientWorkspace::Unbound) => initial.clone(),
         Some(ClientWorkspace::Selected { root }) => {
-            workspaces.workspace_at(&paths::canonical_workspace_root(root).ok()?)?
+            let root = paths::canonical_workspace_root(root).ok()?;
+            workspaces
+                .workspace_at(&root)
+                .or_else(|| (root == initial.root()).then(|| initial.clone()))?
         }
-        Some(ClientWorkspace::Bound { root }) => workspaces.owner_of_path(
-            &paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root)),
-        )?,
+        Some(ClientWorkspace::Bound { root }) => {
+            let root =
+                paths::canonical_workspace_root(root).unwrap_or_else(|_| PathBuf::from(root));
+            workspaces
+                .owner_of_path(&root)
+                .or_else(|| retained_initial(&root))?
+        }
     };
     Some(ConnectionWorkspace {
         tenant,
@@ -1326,11 +1338,15 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
 fn start_tenant_retire_worker(
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     activity: DaemonWorkspaceActivity,
+    initial: Option<InitialWorkspaceFence>,
+    gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_tenant_retire_worker(
         tenants,
         activity,
+        initial,
+        gate,
         shutdown,
         TENANT_RETIRE_TICK,
         TENANT_IDLE_RETIREMENT,
@@ -2903,15 +2919,19 @@ fn run_inner(
     // another.
     let workspace_root = bound_workspace_root(&daemon_dir, &std::env::current_dir()?)?;
     let pid = std::process::id();
-    let workspace = FileWorkspaceFence {
+    let workspace = Arc::new(FileWorkspaceFence {
         path: paths::workspace_fence_path(&workspace_root),
         workspace: workspace_root.clone(),
         pid,
         patience: WORKSPACE_FENCE_PATIENCE,
-        held: RefCell::new(None),
-    };
+        held: Mutex::new(None),
+    });
     let lock = process_instance_lock(daemon_dir.join("daemon.lock"), &workspace);
-    let ready = IpcReady::new(&data_dir, &workspace_root, &lock);
+    // The fence a generation that has handed its authority on gives back. An
+    // aliased singleton guard shares this very descriptor, so there it is not
+    // the workspace's to release ([`ProcessInstanceLock`]).
+    let releasable_fence = (!lock.aliases_workspace_fence()).then(|| Arc::clone(&workspace));
+    let ready = IpcReady::new(&data_dir, &workspace_root, &lock, releasable_fence);
     let shutdown = SignalShutdown::new(Arc::clone(&ready.shutdown));
     let census = DurableResourceCensus {
         data_dir: data_dir.clone(),
@@ -2945,7 +2965,7 @@ fn run_inner(
         launcher: &launcher,
         sleeper: &RealSleeper,
         lock: &lock,
-        workspace: &workspace,
+        workspace: workspace.as_ref(),
         pid,
         census: &census,
         generations: &generations,
