@@ -1262,6 +1262,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 起床 | 起動時に pending を一度導出して中断分を resume し、以後は受理通知で即時起床する。確定に失敗している間だけ 1 秒 tick で pending を再導出して retry し、待機中の tick では durable state を読まない |
 | 冪等性 | 同一 `operation_id` の再送は journal replay。`deleting` な session への新しい `operation_id` は進行中 operation を返し、teardown を二重投入しない |
 | resume | 中断された delete は `failed` に落とさず `deleting` のまま残し、次の daemon 起動で worker が再開する。teardown は「対象が無ければ成功」で冪等なので、途中まで削除された tree に安全に再実行できる |
+| 既に終端状態 | git が repository を解決できない対象と、owner の write を拒否する directory は teardown を止めない。前者は worktree の登録も branch も残っていないため no-op として進み、後者は owner の read/write/traverse を回復してから除去を再試行する。いずれも上の冪等性を実際に成り立たせるための契約であり、これが無いと該当 session は `force` でも `purge_orphan` でも永久に `failed` を繰り返す（[3 つの形](#teardown-が終端状態とみなす形)） |
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
@@ -1298,6 +1299,25 @@ client 側の表示は既存の投影で足りる。受理直後から `deleting
 
 設計判断（却下した代替案・fence の単位・crash 時の再開契約）は
 [13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を参照する。
+
+### teardown が終端状態とみなす形
+
+teardown の冪等性は「対象が無ければ成功」だが、対象が*残っているのに git も filesystem も扱えない*形が 3 つある。
+いずれも効果としては「もう除去すべき登録は無い」か「除去できる」に落ちるため、teardown を止めない。
+
+| 形 | git / OS が返すもの | teardown の扱い |
+|---|---|---|
+| worktree の administrative directory（`.git/worktrees/<name>`）が消え、tree だけ残っている | `git worktree remove` が `fatal: not a git repository: <admin dir>` | worktree の登録は既に無いため no-op として進み、tree の除去へ移る |
+| workspace root が repository でなくなっている | `git branch -d` / `-D` が `fatal: not a git repository (or any of the parent directories): .git` | 削除すべき branch を持つ repository が無いため no-op として進む |
+| session tree に owner の write を拒否する directory が含まれる | `remove_dir_all` が `PermissionDenied`（directory は自分の子の unlink を拒否する） | owner の read/write/traverse を tree 全体へ回復してから、除去をその attempt で一度だけ再試行する。mode を実際に変えられなかった場合は元の error をそのまま返す。走査は symlink を辿らず link 自体で止まる |
+
+3 つ目は session の tree 配下で動いた process が残す。owner の write を落とした directory が 1 つ残るだけで、
+その session は自分で自分を削除できなくなる。teardown は原因を診断せず、除去できる状態へ戻してから進む。
+
+git が repository を解決できない場合を終端状態として扱う副作用として、workspace root が repository でない
+mirror 構成では、nested repository に作られた `usagi/<name>` branch が削除されないまま teardown が成功する。
+teardown が branch を削除するのは `DeletePlan` が持つ workspace root に対してだけだからである。以前は同じ形が
+「session を永久に削除できない」失敗として現れていた。
 
 ## terminal ownership
 
