@@ -4148,6 +4148,21 @@ fn run_in_terminal(
     let mut keyboard_enhancement_pushed = false;
     let mut setup = std::io::stdout();
     let setup_result = (|| {
+        // Empty the primary screen before switching away from it. The alternate
+        // screen alone does not hide what ran before usagi: terminals keep the
+        // primary buffer reachable while an alternate-screen app is on top
+        // (Apple documents it as View > Show/Hide Alternate Screen), so the
+        // scrollbar, a trackpad gesture, or the keyboard still reveals the
+        // pre-launch commands. Mouse reporting only takes the wheel away from
+        // the terminal, which is why `EnableMouseCapture` below cannot close
+        // those other routes. Clearing the surface and purging its scrollback
+        // leaves nothing to scroll back to.
+        execute!(
+            setup,
+            cursor::MoveTo(0, 0),
+            terminal::Clear(terminal::ClearType::All),
+            terminal::Clear(terminal::ClearType::Purge)
+        )?;
         execute!(setup, EnterAlternateScreen)?;
         if keyboard_enhancement {
             // Preserve modifier identity so Ctrl-] and Ctrl-5 remain distinct.

@@ -376,10 +376,15 @@ decision / PR / browser / notification は daemon または platform adapter の
   ないため、2 回目以降は 1 フレームも描かない。中断しても Welcome の初期状態は変わらない。
 
 実端末は raw mode、alternate screen、cursor、mouse、自動折返しを合成ルートで管理する。TUI は端末非依存の
-event stream を reducer に渡し、frame diff だけを返す。TUI の実行中は自動折返しを無効化し、右下セルへの描画が
-スクロールを起こさないようにする。resize は前 frame を無効化して全体を再描画し、終了時は端末属性、折返し設定、
-alternate screen を復元する。frame diff が実端末へ渡すエスケープ列は SGR（色・文字属性）だけに限定し、view text に
-混入した画面消去・カーソル移動・DEC private mode などの端末制御列は描画境界で破棄する。
+event stream を reducer に渡し、frame diff だけを返す。**alternate screen へ切り替える前に、主画面を消去して
+そのスクロールバックを破棄する**。端末は alternate screen の表示中も主画面を参照できるように作られており
+（macOS Terminal は View > Show/Hide Alternate Screen として提供する）、mouse reporting はホイールしか
+奪えないため、スクロールバー・トラックパッド・キーボードの経路では起動前のコマンドが見えてしまう。
+主画面を消してそのスクロールバックを破棄することでしか、この経路は塞げない。TUI の実行中は自動折返しを
+無効化し、右下セルへの描画がスクロールを起こさないようにする。resize は前 frame を無効化して全体を再描画し、終了時は端末属性、折返し設定、
+alternate screen を復元する（破棄したスクロールバックは戻らない）。frame diff が実端末へ渡すエスケープ列は
+SGR（色・文字属性）だけに限定し、view text に混入した画面消去・カーソル移動・DEC private mode などの
+端末制御列は描画境界で破棄する。
 
 ## Home と target
 

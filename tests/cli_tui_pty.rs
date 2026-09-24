@@ -1315,6 +1315,55 @@ fn assert_no_sensitive_output(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, sec
     }
 }
 
+/// 出荷 binary が実端末へ出した mode 遷移を、生バイト列で確認する。
+///
+/// 入場・退場の対称性（alternate screen・cursor・mouse reporting）に加えて、
+/// **起動前の主画面を隠す**契約もここで押さえる。alternate screen だけでは隠せない:
+/// 端末は alternate screen 表示中も主画面を参照できるため、主画面そのものを空に
+/// してからでないと、スクロールで起動前のコマンドが見えてしまう。
+fn assert_terminal_modes_entered_and_restored(output: &str) {
+    assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1000h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1000l"), "PTY output: {output}");
+    assert!(
+        output.matches("\u{1b}[?1049h").count() >= 2,
+        "both entries must use the alternate screen: {output}"
+    );
+    assert!(
+        output.matches("\u{1b}[?1049l").count() >= 2,
+        "both exits must restore the primary screen: {output}"
+    );
+    // 入場時の主画面消去も `\e[2J` を出すため、renderer の全面再描画だけを数える。
+    // 入場側は必ず `\e[2J\e[3J` と続けて出るので、その分を差し引けば
+    // 「初回描画と resize 再描画」の 2 件という本来の下限が保てる。
+    let entry_clears = output.matches("\u{1b}[2J\u{1b}[3J").count();
+    let renderer_clears = output
+        .matches("\u{1b}[2J")
+        .count()
+        .saturating_sub(entry_clears);
+    assert!(
+        renderer_clears >= 2,
+        "the initial and resized surfaces must both be cleared: {output}"
+    );
+    assert!(
+        entry_clears >= 2,
+        "both entries must purge the primary scrollback: {output}"
+    );
+    let first_purge = output
+        .find("\u{1b}[3J")
+        .unwrap_or_else(|| panic!("the entry must purge the primary scrollback: {output}"));
+    let first_alternate_screen = output
+        .find("\u{1b}[?1049h")
+        .unwrap_or_else(|| panic!("the entry must use the alternate screen: {output}"));
+    assert!(
+        first_purge < first_alternate_screen,
+        "the primary scrollback must be purged before the alternate screen hides it: {output}"
+    );
+}
+
 #[test]
 fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let _serial = serial();
@@ -1413,24 +1462,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert!(output.contains("pty-workspace"), "PTY output: {output}");
     assert!(output.contains("+ new session"), "PTY output: {output}");
     assert!(!output.contains("workspace main"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1000h"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1000l"), "PTY output: {output}");
-    assert!(
-        output.matches("\u{1b}[?1049h").count() >= 2,
-        "both entries must use the alternate screen: {output}"
-    );
-    assert!(
-        output.matches("\u{1b}[?1049l").count() >= 2,
-        "both exits must restore the primary screen: {output}"
-    );
-    assert!(
-        output.matches("\u{1b}[2J").count() >= 2,
-        "the initial and resized surfaces must both be cleared: {output}"
-    );
+    assert_terminal_modes_entered_and_restored(&output);
 
     assert_eq!(attributes_reattached.c_iflag, attributes_before.c_iflag);
     assert_eq!(attributes_reattached.c_oflag, attributes_before.c_oflag);
