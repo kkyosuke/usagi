@@ -5,7 +5,7 @@ status: todo
 priority: medium
 labels: [v2, daemon, generation, pr-inventory, correctness]
 dependson: []
-related: [555, 562, 770]
+related: [555, 562, 773]
 created_at: 2026-09-25T00:00:00+00:00
 updated_at: 2026-09-25T00:00:00+00:00
 ---
@@ -24,7 +24,7 @@ PR inventory は whole-snapshot document なので、書いてよい generation 
 
 同じ形で `supervisor-runs/runs.index.json` も store lock なしに書かれている。
 
-これらは data directory 側の document で workspace fence の内側ではないため、#770（置き換えられた世代が起動
+これらは data directory 側の document で workspace fence の内側ではないため、#773（置き換えられた世代が起動
 workspace の fence を返す）は本件を作らず、広げもしない。別件として扱う。
 
 ## 方針（案）

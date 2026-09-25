@@ -1,5 +1,5 @@
 ---
-number: 770
+number: 773
 title: "fix(daemon): 置き換えられた世代が起動 workspace の fence を返さない"
 status: done
 priority: high
