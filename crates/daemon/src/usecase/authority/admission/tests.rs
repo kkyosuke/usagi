@@ -330,3 +330,45 @@ fn every_refusal_reads_as_a_safety_outcome() {
         assert!(refusal.source().is_none());
     }
 }
+
+/// A pre-commit barrier is not a handoff.
+///
+/// `enter_draining` closes the barrier before the registry and locator commit,
+/// and every handoff that fails before that commit reopens it. Anything that
+/// gives a durable resource away — the workspace fence `serve` holds for the
+/// process's lifetime — has to wait for the barrier to become permanent, or a
+/// generation that returns to `active` would come back without it.
+#[test]
+fn a_generation_has_handed_off_only_once_its_barrier_is_durable() {
+    let active = gate(GenerationRole::Active);
+    assert!(!active.handed_off());
+
+    active.close(LeaseClass::ActiveControl);
+    active.await_drain(LeaseClass::ActiveControl).unwrap();
+    active.enter_draining().unwrap();
+    assert_eq!(active.role(), GenerationRole::Draining);
+    assert!(
+        !active.handed_off(),
+        "the barrier is closed but the handoff is not durable yet"
+    );
+
+    // The handoff never committed: the authority comes back, and so must the
+    // workspace it was started in.
+    active.abort_draining().unwrap();
+    assert!(!active.handed_off());
+
+    active.close(LeaseClass::ActiveControl);
+    active.await_drain(LeaseClass::ActiveControl).unwrap();
+    active.enter_draining().unwrap();
+    active.confirm_draining();
+    assert!(active.handed_off());
+
+    // A standby never held the authority; a retired generation has already
+    // given it up.
+    assert!(!gate(GenerationRole::Standby).handed_off());
+    let retired = gate(GenerationRole::Draining);
+    retired.close(LeaseClass::OwnerTerminal);
+    retired.await_drain(LeaseClass::OwnerTerminal).unwrap();
+    retired.enter_retired().unwrap();
+    assert!(retired.handed_off());
+}

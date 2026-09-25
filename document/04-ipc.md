@@ -219,6 +219,15 @@ fence を取り、`~/.usagi/sessions/<name>` を dotfiles の worktree として
 repository に**立っている**ことは、どの workspace を指しているかの明確な表明である。その下のどこかに居ることは、
 そうではない。
 
+**workspace を新しく開けるのは、authority をまだ手放していない generation だけである**。置き換えられた `draining`
+世代も、自分が所有する terminal を読むために自分専用の socket 経由で到達可能であり、その client は自分の cwd を
+申告する（[5. daemon#planned replacement](05-daemon.md#planned-replacement)）。そこで `selected` / `bound` の miss が
+adopt になると、二度と serve しない process がその workspace を fence してしまう。handoff が durable になった世代は
+**すでに保持している workspace と、返したばかりの起動 workspace には従来どおり答え**、それ以外は
+`workspace-mismatch` で拒否する。これは
+[置き換えられた世代が起動 workspace を返す](05-daemon.md#置き換えられた世代は起動-workspace-を返す)契約と対に
+なっている。
+
 いったん adopt されれば、その配下はすべて最長一致で同じ workspace に解決される（この 2 段が触るのは「保持して
 いない workspace をどう解決するか」だけである）。session worktree（`<root>/.usagi/sessions/<name>`）は自身の
 `.git` を持つが workspace ではないので、後段の対象としては常に除外する。それが存在する時点でその workspace は
@@ -236,14 +245,17 @@ child、workspace fence、project-local `.usagi` を作らない。`selected` �
 lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
 生死に依存しない。
 
-`selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
-他の workspace の接続には影響しない。
+adopt が失敗する理由は 4 つある。fence と tenant 上限は `selected` と `bound` の後段に共通し、root 解決の失敗は
+`selected` だけに掛かる（`bound` は解決できない path を申告どおりの綴りで比較し、当たらなければ上の
+`bound` の miss として拒否する）。4 つ目はこの generation が authority を手放したときに両方へ掛かる。
+いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する他の workspace の接続には影響しない。
 
 | 理由 | 例 |
 |---|---|
 | 別の daemon がその workspace を fence している | 別 mode・別 build の daemon が稼働している |
 | root が解決できない | 削除された path、非 UTF-8 |
 | tenant 上限に達した | 開いたままの workspace が多すぎる |
+| この generation が authority を手放し済み | 置き換えられた `draining` 世代へ、それが保持していない workspace を申告した |
 
 解決した root と申告の突き合わせ（fence 本体）は次のとおりで、比較は path component 単位である（`<root>-2` は
 `<root>` の子ではない。末尾スラッシュや `.` / `..` の綴り差は同じ root になる）。
