@@ -9,6 +9,7 @@
 - [現在の実装状態](#現在の実装状態)
 - [入口面](#入口面)
   - [CLI](#cli)
+  - [孤立資源の削除](#孤立資源の削除)
   - [daemon command](#daemon-command)
   - [session command](#session-command)
 - [実行モデル](#実行モデル)

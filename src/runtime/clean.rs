@@ -273,7 +273,7 @@ fn apply_via_daemon(candidate: &CleanCandidate, root: &Path, force: bool) -> io:
         _ => return Err(io::Error::other("only Git cleanup can be delegated")),
     };
     let mut client = crate::runtime::daemon::existing_policy_client(
-        usagi_core::infrastructure::client::ClientPolicy::tui(),
+        usagi_core::infrastructure::client::ClientPolicy::cli(),
         ClientWorkspace::Selected {
             root: paths::wire_workspace_root(root),
         },
@@ -1094,12 +1094,13 @@ not a process line
             };
             super::apply_selected_resource(&mut client, &target, force).unwrap();
             for (index, request) in client.requests.iter().enumerate() {
-                let DaemonRequest::Session { payload, .. } = request else {
-                    panic!("session request")
-                };
-                assert_eq!(payload["target"], serde_json::to_value(&target).unwrap());
-                assert_eq!(payload["apply"], index == 1);
-                assert_eq!(payload["force"], index == 1 && force);
+                assert!(
+                    matches!(request, DaemonRequest::Session { payload, .. }
+                    if payload["target"] == serde_json::to_value(&target).unwrap()
+                        && payload["apply"] == (index == 1)
+                        && payload["force"] == (index == 1 && force)),
+                    "{request:?}"
+                );
             }
         }
         for replies in [
@@ -1411,7 +1412,10 @@ not a process line
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("private/daemon.lock");
         let held = acquire_exclusive_fence(&path, "busy").unwrap();
-        assert!(acquire_exclusive_fence(&path, "busy").is_err());
+        assert_eq!(
+            acquire_exclusive_fence(&path, "busy").unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+        );
         drop(held);
         assert!(acquire_exclusive_fence(&path, "busy").is_ok());
 
