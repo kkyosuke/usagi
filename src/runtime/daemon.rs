@@ -28,8 +28,8 @@ use agent::{
     SharedAgentState, SystemTenantOpener, TenantWorkspaces, append_live_tenant_inventory,
     clear_pending_daemon_agent_restart, current_agent_integrations, open_agent_runtime,
     planned_agent_workspace_root, provisioned_agent_command, read_pending_daemon_agent_restart,
-    reconcile_removed_session_agents, restore_pending_daemon_agents, send_agent_observation,
-    start_daemon_agent_restart_recovery, start_decision_maintenance,
+    reconcile_removed_session_agents, restore_pending_daemon_agents, retained_startup_root,
+    send_agent_observation, start_daemon_agent_restart_recovery, start_decision_maintenance,
     write_pending_daemon_agent_restart,
 };
 
@@ -696,14 +696,19 @@ fn connection_workspace(
     // workspace, `bound` names a place inside one — and each falls back to the
     // startup workspace this process retained. That fallback is what keeps a
     // replaced generation reachable for the terminals it still owns once it has
-    // given that workspace back ([`retained_startup_tenant`]).
+    // given that workspace back ([`retained_startup_root`]).
     let tenant = match declared {
         None | Some(ClientWorkspace::Unbound) => initial.clone(),
         Some(ClientWorkspace::Selected { root }) => {
             let root = paths::canonical_workspace_root(root).ok()?;
             match workspaces.workspace_at(&root) {
                 Some(tenant) => tenant,
-                None => retained_startup_tenant(initial, &root, StartupMatch::Exact)?,
+                None if retained_startup_root(initial.root(), &root).as_deref()
+                    == Some(root.as_path()) =>
+                {
+                    initial.clone()
+                }
+                None => return None,
             }
         }
         Some(ClientWorkspace::Bound { root }) => {
@@ -713,7 +718,8 @@ fn connection_workspace(
             };
             match workspaces.owner_of_path(&root) {
                 Some(tenant) => tenant,
-                None => retained_startup_tenant(initial, &root, StartupMatch::Inside)?,
+                None if retained_startup_root(initial.root(), &root).is_some() => initial.clone(),
+                None => return None,
             }
         }
     };
@@ -721,35 +727,6 @@ fn connection_workspace(
         tenant,
         workspaces: Arc::clone(workspaces),
     })
-}
-
-/// How a declaration is compared against the startup workspace's root.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StartupMatch {
-    /// `selected` names one workspace and only that one.
-    Exact,
-    /// `bound` names where the client is running, so anything inside counts.
-    Inside,
-}
-
-/// The startup workspace, when `root` still names it after it was given back.
-///
-/// A replaced generation releases the workspace it was started in as soon as
-/// nothing is running there, but it keeps serving the terminals it owns — and
-/// those are addressed by clients standing in that very workspace. The registry
-/// entry is gone by then, so this retained handle is the only thing left that
-/// answers for it. Answering is not owning: nothing here adopts the workspace or
-/// takes its fence again.
-fn retained_startup_tenant(
-    initial: &usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>,
-    root: &Path,
-    matching: StartupMatch,
-) -> Option<usagi_daemon::usecase::tenant::Tenant<SharedSessionRuntime>> {
-    let names_it = match matching {
-        StartupMatch::Exact => root == initial.root(),
-        StartupMatch::Inside => root.starts_with(initial.root()),
-    };
-    names_it.then(|| initial.clone())
 }
 
 /// The workspace one connection acts on, plus the daemon's other workspaces.

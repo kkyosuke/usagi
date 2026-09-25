@@ -2677,6 +2677,18 @@ fn workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
     }
 }
 
+/// A fence that refuses at once instead of waiting a departing owner out.
+///
+/// A refusal assertion only asks who owns the workspace *now*, so waiting the
+/// production patience out adds seconds per assertion without changing the
+/// answer. The acquiring calls keep the real constant.
+fn impatient_workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
+    FileWorkspaceFence {
+        patience: Duration::ZERO,
+        ..workspace_fence(workspace, pid)
+    }
+}
+
 #[test]
 fn workspace_fence_refuses_a_second_owner_and_names_its_pid() {
     let workspace = tempfile::tempdir_in("/tmp").unwrap();
@@ -3325,7 +3337,10 @@ fn a_replaced_generation_gives_its_startup_workspace_back() {
     assert!(!release_initial_workspace(
         &tenants, &activity, &initial, &gate
     ));
-    assert_eq!(workspace_fence(&root, 5252).acquire().unwrap(), refused());
+    assert_eq!(
+        impatient_workspace_fence(&root, 5252).acquire().unwrap(),
+        refused()
+    );
 
     // The pre-commit barrier: `draining`, but the handoff is not durable yet.
     gate.close(LeaseClass::ActiveControl);
@@ -3335,7 +3350,10 @@ fn a_replaced_generation_gives_its_startup_workspace_back() {
     assert!(!release_initial_workspace(
         &tenants, &activity, &initial, &gate
     ));
-    assert_eq!(workspace_fence(&root, 5252).acquire().unwrap(), refused());
+    assert_eq!(
+        impatient_workspace_fence(&root, 5252).acquire().unwrap(),
+        refused()
+    );
 
     // That handoff failed: the authority — and its workspace — come back.
     gate.abort_draining().unwrap();
@@ -3434,7 +3452,7 @@ fn a_replaced_generation_keeps_a_startup_workspace_that_is_still_working() {
     ));
     assert!(held.held.lock().unwrap().is_some());
     assert_eq!(
-        workspace_fence(&root, 5252).acquire().unwrap(),
+        impatient_workspace_fence(&root, 5252).acquire().unwrap(),
         WorkspaceFenceOutcome::Held {
             workspace: root.display().to_string(),
             owner: Some(4242),
@@ -3465,7 +3483,7 @@ fn a_replaced_generation_keeps_a_startup_workspace_that_is_still_working() {
     ));
     assert!(held.held.lock().unwrap().is_some());
     assert_eq!(
-        workspace_fence(&root, 5252).acquire().unwrap(),
+        impatient_workspace_fence(&root, 5252).acquire().unwrap(),
         WorkspaceFenceOutcome::Held {
             workspace: root.display().to_string(),
             owner: Some(4242),

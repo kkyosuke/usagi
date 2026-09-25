@@ -245,9 +245,10 @@ child、workspace fence、project-local `.usagi` を作らない。`selected` �
 lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
 生死に依存しない。
 
-adopt が失敗する理由は 4 つある。上 3 つは `selected` と `bound` の後段に共通し、4 つ目はこの generation が
-authority を手放したときに両方へ掛かる。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
-他の workspace の接続には影響しない。
+adopt が失敗する理由は 4 つある。fence と tenant 上限は `selected` と `bound` の後段に共通し、root 解決の失敗は
+`selected` だけに掛かる（`bound` は解決できない path を申告どおりの綴りで比較し、当たらなければ上の
+`bound` の miss として拒否する）。4 つ目はこの generation が authority を手放したときに両方へ掛かる。
+いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する他の workspace の接続には影響しない。
 
 | 理由 | 例 |
 |---|---|

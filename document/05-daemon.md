@@ -846,6 +846,11 @@ ownership を別の durable fence として持つが、どちらも workspace �
 記録（利用者が付けた pin / dismiss を含む）を消してしまう。判定材料は各 state subtree の lifecycle document で、
 1 つでも読めなければ prune しない。
 
+**workspace ごとに 1 つ**の資源（lifecycle document、fence）は tenant が持ち、**daemon ごとに 1 つ**の資源
+（PTY registry、Agent runtime とその provisioner、teardown worker、PR inventory）は request が名指す
+`workspace_id` で tenant を引く。daemon 全体で 1 つしかない集約（PR inventory の prune、Agent の session 再照合）は
+**全 tenant の和**で判定する。1 workspace 分で判定すると他 workspace の記録を消してしまう。
+
 #### 置き換えられた世代は起動 workspace を返す
 
 planned replacement は旧 process を `draining` のまま生かして、所有している PTY を置き換えの向こう側まで serve させる
@@ -874,8 +879,10 @@ generation を含むすべての daemon がその workspace を「別 daemon が
 **返した後も、その root を申告する client にはこの generation が答え続ける**。handoff は「終わったあとも全参加者が
 draining generation に到達できる」場合だけ開始してよく（[handoff protocol](#handoff-protocol)）、返した瞬間に
 handshake が `workspace-mismatch` になると、まさにこの generation が保持し続けている terminal を読む client が
-到達できなくなる。所有を返すことと答えることは別なので、保持していた tenant handle は残し、起動 root とその配下の
-`bound` / `selected` 申告はその handle に解決する。新しい workspace を開かないことと合わせて、この generation は
+到達できなくなる。所有を返すことと答えることは別なので、保持していた tenant handle は残し、起動 root への
+`selected` 申告と、起動 root とその配下への `bound` 申告をその handle に解決する（申告ごとの一致規則は保持中の
+tenant と同じで、`selected` は完全一致、`bound` は配下を含む）。新しい workspace を開かないことと合わせて、
+この generation は
 **自分が知っている workspace にだけ答え、どの workspace も新たに fence しない**状態になる
 （[4. daemon IPC#workspace fence](04-ipc.md#workspace-fence)）。
 
@@ -887,11 +894,6 @@ standby から昇格した generation は workspace fence も単一インスタ�
 返すものが無い一方、その generation の起動 workspace は旧 owner が fence を返した後どの process にも fence されない。
 別 mode の daemon がその workspace を取れてしまうこの穴は昇格の時点から存在し、本節の解放はそれを早めるだけで
 作り出してはいない（issue #771）。
-
-**workspace ごとに 1 つ**の資源（lifecycle document、fence）は tenant が持ち、**daemon ごとに 1 つ**の資源
-（PTY registry、Agent runtime とその provisioner、teardown worker、PR inventory）は request が名指す
-`workspace_id` で tenant を引く。daemon 全体で 1 つしかない集約（PR inventory の prune、Agent の session 再照合）は
-**全 tenant の和**で判定する。1 workspace 分で判定すると他 workspace の記録を消してしまう。
 
 ### workspace state subtree
 

@@ -50,7 +50,7 @@ pub(super) struct TenantWorkspaces {
     /// The workspace this process started in. A client that names no workspace
     /// touches no workspace resource, so it is admitted against this one, and it
     /// keeps answering for this root after the workspace is given back
-    /// ([`Self::known`]).
+    /// ([`retained_startup_root`]).
     pub(super) initial: PathBuf,
     /// This generation's authority. Opening a workspace is taking authority over
     /// it, which a generation that has handed off may no longer do
@@ -89,31 +89,30 @@ impl TenantWorkspaces {
         !self.gate.handed_off()
     }
 
-    /// The workspace this generation answers for at `root`, without opening one.
-    ///
-    /// A held tenant answers first. The startup workspace answers too, even once
-    /// it has been given back: a handoff may only begin when every participant
-    /// can still reach the draining generation, and the terminals it is kept
-    /// alive for are addressed by clients standing in that workspace. Answering
-    /// is not owning — the fence is gone, and nothing here takes it again.
-    pub(super) fn known(&self, root: &Path) -> Option<PathBuf> {
-        self.tenants
-            .owner_of(root)
-            .map(|tenant| tenant.root().to_path_buf())
-            .or_else(|| {
-                root.starts_with(&self.initial)
-                    .then(|| self.initial.clone())
-            })
+    /// The startup workspace this generation still answers for at `root`, if it
+    /// is that workspace. See [`retained_startup_root`].
+    pub(super) fn retained_startup(&self, root: &Path) -> Option<PathBuf> {
+        retained_startup_root(&self.initial, root)
     }
 
     /// The refusal for a workspace this generation holds no authority to open.
+    ///
+    /// The list names what it still answers for — the tenants it holds, plus the
+    /// startup workspace it gave back — so a client that reached the wrong
+    /// generation can see whether the workspace it meant is among them.
     pub(super) fn replaced_generation_refusal(
         &self,
     ) -> usagi_core::infrastructure::ipc::ProtocolError {
+        let mut answering = self.served();
+        let initial = paths::wire_workspace_root(&self.initial);
+        if !answering.contains(&initial) {
+            answering.push(initial);
+            answering.sort_unstable();
+        }
         usagi_core::infrastructure::ipc::workspace_refusal_serving(
             "this daemon generation was replaced and opens no further workspace; \
              reconnect to the daemon that is serving now",
-            &self.served(),
+            &answering,
         )
     }
 
@@ -131,6 +130,24 @@ impl TenantWorkspaces {
         served.sort_unstable();
         served
     }
+}
+
+/// `initial` itself, when `root` still names the startup workspace.
+///
+/// A generation that has handed off gives that workspace back as soon as nothing
+/// is running there, but it keeps serving the terminals it owns — and those are
+/// addressed by clients standing in that very workspace. A handoff may only
+/// begin when every participant can still reach the draining generation, so the
+/// registry entry going away must not take the answer with it. Answering is not
+/// owning: nothing here adopts the workspace or takes its fence again.
+///
+/// Matching is by path component, like every other workspace comparison, so
+/// `<root>-2` is never read as a child of `<root>`.
+pub(super) fn retained_startup_root(initial: &Path, root: &Path) -> Option<PathBuf> {
+    if root.starts_with(initial) {
+        return Some(initial.to_path_buf());
+    }
+    None
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
@@ -152,9 +169,15 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                 // the sweep could give this very workspace back, and the `adopt`
                 // would fence it again for a generation that will never serve it.
                 if !self.may_open() {
-                    return (self.known(&root).as_deref() == Some(root.as_path()))
-                        .then(|| paths::wire_workspace_root(&root))
-                        .ok_or_else(|| self.replaced_generation_refusal());
+                    // `selected` names one workspace and only that one, so the
+                    // retained startup root answers only for itself.
+                    return match self.tenants.tenant(&root) {
+                        Some(_) => Ok(paths::wire_workspace_root(&root)),
+                        None if self.retained_startup(&root).as_deref() == Some(root.as_path()) => {
+                            Ok(paths::wire_workspace_root(&root))
+                        }
+                        None => Err(self.replaced_generation_refusal()),
+                    };
                 }
                 self.tenants.adopt(&root).map_err(|error| {
                     // The refused root is the one this daemon could *not* take,
@@ -189,10 +212,12 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
                     return Ok(paths::wire_workspace_root(owner.root()));
                 }
                 if !self.may_open() {
-                    return self
-                        .known(&declared)
-                        .map(|root| paths::wire_workspace_root(&root))
-                        .ok_or_else(|| self.replaced_generation_refusal());
+                    // The held tenants were already consulted just above; only
+                    // the workspace this process was started in is left.
+                    return match self.retained_startup(&declared) {
+                        Some(root) => Ok(paths::wire_workspace_root(&root)),
+                        None => Err(self.replaced_generation_refusal()),
+                    };
                 }
                 // Two ways a bound client may still name a workspace, tried in
                 // this order because the first is a workspace that exists and the

@@ -78,3 +78,7 @@ workspace を同じ process が fence し直してしまう。
   開く時刻を早めるだけで作り出してはいないが、窓は広がる。#771 で扱う。
 - PR inventory の writer role が構築時の `Active` 固定で live gate に追従しない。data directory 側の document で
   workspace fence の内側ではないため本 issue とは独立している。#772 で扱う。
+- handshake は `may_open()` を読んでから `adopt` する。`confirm_draining()` がその 2 文の間に入ると、handoff 済みの
+  generation が**起動 workspace ではない**新しい workspace を 1 つ fence しうる。その tenant は自分の fence を持つ
+  ので遊休 sweep が 10 分後に返し、起動 workspace の永久保持とは違って回復する。窓を閉じるなら `adopt` 後に
+  `handed_off()` を読み直して負けた側を `retire` する。
