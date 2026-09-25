@@ -276,10 +276,8 @@ initial prompt で起動する。`goal-driven` は明示的な opt-in で、New 
 Global / Workspace の field 欠落と Global の未知値は `classic`、Workspace の明示的な未知値も `classic` へ縮退するため、
 upgrade や typo だけで自律実行へ移らない。
 Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ安全に戻す。
-`default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `sakana.ai` / `agy`）であり、Config 画面の
-Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`sakana.ai` は Sakana の Fugu で、
-実行するのは **Claude CLI** を Sakana の Anthropic 互換 endpoint に向けたもの（daemon profile は `sakana-ai`）である。
-`agy` は Antigravity CLI を表す。
+`default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `agy`）であり、Config 画面の
+Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`agy` は Antigravity CLI を表す。
 Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
 全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field も読み飛ばし、次の保存時に除去する。
 Workspace の Agent・Workflow・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog)を正本とする。
@@ -667,7 +665,7 @@ Organization、Work Run progress、追加の command editor は混ぜない。
 drawer の開閉状態にかかわらず `Ctrl-O n`（または `Ctrl-O Ctrl-N`）、または `[ New ]` / `[ Start ]` の mouse-down hit で
 classic の `New Conversation` または goal-driven の `Start Work Run` を開く。合成ルートから注入された起動できる CLI
 （[正本](#closeup-の-agent-cli-選択)）だけを
-`claude`、`codex`、`sakana.ai`、`agy` の順で picker に表示する。
+`claude`、`codex`、`agy` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は保存済み Director route / selection と drawer open
 状態を変えず picker だけを閉じる。候補が 0 件なら installation と Config の確認を促す
@@ -2127,7 +2125,7 @@ terminal は起動時点と resize 後の右ペイン実幅・高さで geometry
 feedback だけを表示し、local PTY を生成しない。
 
 Closeup の `agent [-m <cli>]` は既存 session だけで実行できる。TUI は選択した CLI を product-neutral な
-profile ID（`claude` / `codex` / `sakana-ai` / `agy`）へ解決して durable operation に渡し、argv・model・secret は組み立てない。
+profile ID（`claude` / `codex` / `agy`）へ解決して durable operation に渡し、argv・model・secret は組み立てない。
 TUI は daemon の accepted response 後に Agent pending tab を置き、同じ operation の成功 final が返す
 完全な `TerminalRef` にだけ attach する。daemon 不通、拒否、未知・古い completion では local spawn や
 名前からの terminal 推測をしない。
@@ -2225,7 +2223,7 @@ MCP の `workflow_start` も同じ範囲で `revision_limit` を受け取り、�
 入力下書きは session ごとに保持し、配送中に追記した内容は先行する送信の完了で消さない。
 Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Agent 出力は各 Agent タブで確認する。
 
-担当候補は Claude、Codex、Sakana AI、Gemini（`agy`）のうち、この環境で起動できるものだけである
+担当候補は Claude、Codex、Gemini（`agy`）のうち、この環境で起動できるものだけである
 （判定は [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)が正本）。初回は計画・実行が Codex、レビューが Claude
 だが、その provider を起動できない環境では起動できる provider へ置き換えて表示・送信する。候補が 0 件なら担当は変更できない。
 開始できた担当の組合せをワークスペース単位で保存し、次の session や再起動後の初期候補に使う。保存された組合せが
@@ -2298,30 +2296,20 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 | `agent` | config の `default_model` | 解決した CLI の profile |
 | `agent -m claude` | Claude Code | `claude` |
 | `agent -m codex` | Codex | `codex` |
-| `agent -m sakana.ai` | sakana.ai（Fugu。実行は `claude` を Sakana の endpoint に向けたもの） | `sakana-ai` |
 | `agent -m agy` | Google Antigravity CLI | `agy` |
 
-- **候補は起動できる CLI だけ**である。合成ルートは起動時に provider CLI を実行せず、PATH lookup と
-  global 設定の環境 binding 名だけで `AvailableModels` snapshot を一度作り、process lifetime を通して
+- **候補は起動できる CLI だけ**である。合成ルートは起動時に provider CLI を実行せず、executable の PATH lookup
+  だけで `AvailableModels` snapshot を一度作り、process lifetime を通して
   Config、Closeup、Director、[Session Workflow タブ](#session-workflow-タブ)の担当欄に同じ値を注入する。Action menu の
   展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。候補にならない CLI は表示・補完せず、直接入力しても
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
-  - 候補の条件は 2 つある。**executable が PATH 上にあること**と、**provider が要求する credential が global 設定に
-    bind されていること**である。後者は provider が executable を共有しうるために必要である: `sakana.ai` は
-    `claude` を Sakana の endpoint へ向けたものなので、PATH だけを見ると Claude Code が入っている全ての環境で
-    install 済みに見え、`SAKANA_API_KEY` が無いまま候補に並んで daemon の
-    [readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight)に拒否される。判定に使うのは binding の
-    **名前**だけで、値（`op://` 参照を含む）は launch まで解決しない。
-  - snapshot は process lifetime を通して固定である。CLI の install や credential の設定（Config の環境
-    binding を含む）を反映するには TUI を起動し直す。候補外の CLI を直接入力したときの拒否文言は
-    `that agent CLI is not installed` の 1 種類で、install されていないのか credential が未設定なのかを
-    区別しない。
+  - snapshot は process lifetime を通して固定である。CLI の install を反映するには TUI を起動し直す。
 - **default は config の `default_model`** である。Action menu の展開行は default の行に `(default)` を付ける。
   default の CLI が install されていない場合は `the configured agent CLI is not installed` として拒否する。
 - daemon が CLI の未認証・readiness 不成立などで起動を拒否した場合は、daemon が返した安全な復旧理由を error modal に
   表示する。protocol rejection を接続失敗へ置き換えないため、`agent -m codex` では install・sign-in を確認して再試行
   すべきことを画面上で判断できる。
-- **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m a` → `agent -m agy`、`agent -m sak` → `agent -m sakana.ai`、
+- **Tab 補完**は Prompt mode の入力欄と Action menu の filter で同じ文法を使う。`agent -m a` → `agent -m agy`、
   `agent --` → `agent --model` のように候補が 1 つなら確定し、**候補が複数のときは Tab を押すたびに巡回する**
   （`agent -m c` → `agent -m claude` → `agent -m codex` → `agent -m claude`）。曖昧さで Tab が無反応になることはない。
   Action mode では `→` で `agent` 行を展開し、`↑↓` で `-m <cli>` を選ぶ。filter へ引数区切りを含む
@@ -2330,9 +2318,7 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
   tab に表示されるため、終了する Agent を選択して `Ctrl-D` を送ってから再試行する。Agent tab の close は非表示化しない。
 - 位置引数（`agent codex`）も同じ語彙・同じ install 判定で受け付ける。`-m` の重複、値の欠落、複数選択、未知の flag は
   安全な文言で拒否し、modal を閉じない（拒否の文言は [Closeup 入力の拒否表示](#closeup-入力の拒否表示) が正本）。
-- CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う（`sakana.ai` / `sakana_ai` /
-  `sakana-ai` は同じ provider）。executable は provider の identity ではない: `claude` は Claude 本体を指し、
-  同じ executable を使う `sakana.ai` には解決しない。`agy` は Antigravity CLI の executable と profile ID の両方を表す。
+- CLI 名の解決は大文字小文字を区別せず、`-` / `_` / `.` を同じ区切りとして扱う。`agy` は Antigravity CLI の executable と profile ID の両方を表す。
 
 ## Closeup 入力の拒否表示
 
