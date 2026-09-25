@@ -2712,21 +2712,15 @@ mod tests {
 
         // A policy applied while Closeup is open re-projects the live modal, so
         // its `-m` picker follows a newly saved setting immediately.
-        runtime.set_agent_models(
-            AvailableModels::new([DefaultModel::SakanaAi]),
-            DefaultModel::SakanaAi,
-        );
+        runtime.set_agent_models(AvailableModels::new([DefaultModel::Agy]), DefaultModel::Agy);
         assert_eq!(
             runtime.state().available_models(),
-            AvailableModels::new([DefaultModel::SakanaAi])
+            AvailableModels::new([DefaultModel::Agy])
         );
-        assert_eq!(runtime.state().default_model(), DefaultModel::SakanaAi);
+        assert_eq!(runtime.state().default_model(), DefaultModel::Agy);
         let modal = runtime.closeup_modal().unwrap().clone();
         assert_eq!(
-            modal.with_agent_models(
-                AvailableModels::new([DefaultModel::SakanaAi]),
-                DefaultModel::SakanaAi
-            ),
+            modal.with_agent_models(AvailableModels::new([DefaultModel::Agy]), DefaultModel::Agy),
             *runtime.closeup_modal().unwrap()
         );
 
@@ -2735,14 +2729,14 @@ mod tests {
         let _ = runtime.handle_key(Key::Right);
         assert_eq!(
             runtime.closeup_modal().unwrap().submission(),
-            "agent -m sakana.ai"
+            "agent -m agy"
         );
         let effects = runtime.handle_key(Key::Enter);
         assert!(
             effects.iter().any(|effect| matches!(
                 effect,
                 Effect::LaunchAgent { profile: Some(profile), .. }
-                    if profile.as_str() == "sakana-ai"
+                    if profile.as_str() == "agy"
             )),
             "{effects:?}"
         );

@@ -249,25 +249,18 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_exposes_sakana_when_its_cli_is_configured_and_available() {
-        let config = WorkspaceAgentConfig::from_runtime_allowlists([(
-            "sakana-ai",
-            vec!["fugu-model".into()],
-        )]);
-        // Fugu is served through the Claude CLI, so that executable is what
-        // makes this runtime available.
-        let schema = RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&["claude"]))
+    fn snapshot_exposes_agy_when_its_cli_is_configured_and_available() {
+        let config =
+            WorkspaceAgentConfig::from_runtime_allowlists([("agy", vec!["gemini-model".into()])]);
+        let schema = RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&["agy"]))
             .agent_schema();
-        assert_eq!(
-            schema["oneOf"][1]["properties"]["runtime"]["const"],
-            "sakana-ai"
-        );
+        assert_eq!(schema["oneOf"][1]["properties"]["runtime"]["const"], "agy");
         assert_eq!(
             schema["oneOf"][1]["properties"]["model"]["enum"],
-            json!(["fugu-model"])
+            json!(["gemini-model"])
         );
         assert_eq!(
-            RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&["sakana-ai"]))
+            RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&["codex"]))
                 .agent_schema()["oneOf"]
                 .as_array()
                 .unwrap()
@@ -280,7 +273,7 @@ mod tests {
     fn legacy_runtime_schema_uses_the_shared_catalog() {
         assert_eq!(
             RuntimeModelSnapshot::runtime_schema()["enum"],
-            json!(["claude", "codex", "sakana-ai", "agy"])
+            json!(["claude", "codex", "agy"])
         );
     }
 

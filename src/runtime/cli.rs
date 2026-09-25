@@ -483,9 +483,8 @@ fn claude_sandbox(
     }
     // Whether a HOME inventory is needed is exactly "does this launch get a
     // `~/.<config>` prefix", so it must be decided by the same resolution the
-    // grant itself uses. Reading it off the program would demand an inventory
-    // for `sakana-ai` (whose config lives inside `CLAUDE_CONFIG_DIR`) and refuse
-    // the launch when `$HOME` is unknown, for a prefix it never receives.
+    // grant itself uses, so a provider that never receives a prefix is not
+    // refused for an unknown `$HOME`.
     let linux_home_entries = if platform == Platform::Linux
         && claude_sandbox::granted_config_prefix(agent, command.first().map_or("", String::as_str))
             .is_some()
@@ -831,14 +830,11 @@ mod tests {
         // The selector decides which provider's `$HOME` state this launch may
         // write, so it is resolved through the closed vocabulary rather than
         // trusted as text.
-        assert_eq!(
-            resolve_launch_agent("sakana-ai"),
-            Ok(DefaultModel::SakanaAi)
-        );
+        assert_eq!(resolve_launch_agent("codex"), Ok(DefaultModel::OpenAi));
         assert_eq!(resolve_launch_agent("claude"), Ok(DefaultModel::Claude));
         // An unmodelled token yields no provider, and the caller refuses the
         // launch rather than falling back to a grant decided by the program.
-        for token in ["", "codex-fugu", "gemini"] {
+        for token in ["", "gemini"] {
             assert_eq!(resolve_launch_agent(token), Err(()), "{token}");
         }
     }

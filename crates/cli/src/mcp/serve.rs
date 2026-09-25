@@ -2377,13 +2377,10 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_exposes_sakana_for_dispatch_and_legacy_session_creation() {
+    fn tools_list_exposes_agy_for_dispatch_and_legacy_session_creation() {
         let snapshot = RuntimeModelSnapshot::capture(
-            &WorkspaceAgentConfig::from_runtime_allowlists([(
-                "sakana-ai",
-                vec!["fugu-model".into()],
-            )]),
-            &FakeServeLocator(&["claude"]),
+            &WorkspaceAgentConfig::from_runtime_allowlists([("agy", vec!["gemini-model".into()])]),
+            &FakeServeLocator(&["agy"]),
         );
         let input = initialized_input("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
         let mut out = Vec::new();
@@ -2401,7 +2398,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             dispatch["inputSchema"]["properties"]["agent"]["oneOf"][1]["properties"]["runtime"]["const"],
-            "sakana-ai"
+            "agy"
         );
         let create = tools
             .iter()
@@ -2409,7 +2406,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             create["inputSchema"]["properties"]["runtime"]["enum"],
-            serde_json::json!(["claude", "codex", "sakana-ai", "agy"])
+            serde_json::json!(["claude", "codex", "agy"])
         );
     }
 

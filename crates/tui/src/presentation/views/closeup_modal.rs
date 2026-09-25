@@ -595,21 +595,21 @@ mod tests {
     #[test]
     fn agent_expands_only_installed_clis_and_marks_the_configured_default() {
         let mut modal = CloseupModal::new("daemon").with_agent_models(
-            AvailableModels::new([DefaultModel::OpenAi, DefaultModel::SakanaAi]),
-            DefaultModel::SakanaAi,
+            AvailableModels::new([DefaultModel::OpenAi, DefaultModel::Agy]),
+            DefaultModel::Agy,
         );
         assert_eq!(modal.selected_action().name, "agent");
         modal.expand_selected();
         let frame = joined(&modal);
         assert!(frame.contains("-m codex"));
-        assert!(frame.contains("-m sakana.ai  (default)"));
+        assert!(frame.contains("-m agy  (default)"));
         // An absent CLI is never offered.
         assert!(!frame.contains("-m claude"));
 
         // Confirming a row submits the selection as `agent` arguments.
         assert_eq!(modal.submission(), "agent -m codex");
         modal.select_next();
-        assert_eq!(modal.submission(), "agent -m sakana.ai");
+        assert_eq!(modal.submission(), "agent -m agy");
 
         // With no CLI installed the action carries no choices and cannot expand.
         let mut none = CloseupModal::new("daemon")
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn tab_completes_the_agent_model_flag_and_only_installed_clis() {
-        let models = AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]);
+        let models = AvailableModels::new([DefaultModel::Claude, DefaultModel::Agy]);
         let complete = |input: &str| {
             let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt)
                 .with_agent_models(models, DefaultModel::Claude);
@@ -675,9 +675,9 @@ mod tests {
         };
 
         // A unique CLI prefix completes to its full selector.
-        assert_eq!(complete("agent -m sak"), "agent -m sakana.ai");
+        assert_eq!(complete("agent -m a"), "agent -m agy");
         assert_eq!(complete("agent -m c"), "agent -m claude");
-        assert_eq!(complete("agent --model sak"), "agent --model sakana.ai");
+        assert_eq!(complete("agent --model a"), "agent --model agy");
         // The flag itself completes from its unique prefix.
         assert_eq!(complete("agent --"), "agent --model");
         // An absent CLI has nothing to complete to, and neither has an unknown
@@ -741,7 +741,6 @@ mod tests {
                 "agent --model",
                 "agent claude",
                 "agent codex",
-                "agent sakana.ai",
                 "agent agy",
             ]
         );

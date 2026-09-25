@@ -36,7 +36,7 @@
 //! credential へ fallback して認証エラー（401）で起動できなくなる。
 //!
 //! agent state は `~/.claude` 固定ではなく、[`granted_state_directory`] が **起動する provider**
-//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`、sakana.ai なら `~/.claude-sakana`）。
+//! から決める（Claude なら `~/.claude`、Codex なら `~/.codex`）。
 //! provider が渡されない launch だけが [`agent_state_directory`] で program の basename に落ちる。
 //! 固定していた間、root の Codex は自分の state DB（`~/.codex/state_5.sqlite`）へ書けず
 //! 「attempt to write a readonly database」で起動できなかった。
@@ -130,8 +130,7 @@ pub struct SandboxRequest {
     pub passthrough: bool,
     /// 起動する agent provider。`$HOME` 配下の state grant と config prefix は、
     /// これがあるときは **provider** から決まり、無いときだけ command の basename から
-    /// 決まる。Claude と `sakana-ai` は同じ `claude` を exec するため、program 名だけでは
-    /// 両者を区別できず、Fugu の launch が Claude 本体の home を書けてしまう。
+    /// 決まる。executable は provider の identity ではないため、program 名だけを根拠にしない。
     pub agent: Option<DefaultModel>,
     /// sandbox の中で exec する program と引数（先頭が program、以降が引数）。
     pub command: Vec<String>,
@@ -287,9 +286,8 @@ fn reject_backend(backend: &str) -> SandboxPlan {
 /// のための **fallback** であり、通常の経路は [`granted_state_directory`] を使う。
 ///
 /// 値の単一情報源は [`DefaultModel::state_directory`] で、provider を増やしても sandbox 側に
-/// 写し漏れが起きない。ただし executable は provider の identity ではないため（`claude` は
-/// Claude と `sakana-ai` が共有する）、program だけを根拠にできるのは selector が無いときに
-/// 限る。AGY は自動ロードされる global
+/// 写し漏れが起きない。ただし executable は provider の identity ではないため、program だけを
+/// 根拠にできるのは selector が無いときに限る。AGY は自動ロードされる global
 /// customization と runtime state が同じ `~/.gemini` に同居するため、conversation subtree
 /// だけを返す。usagi が launch しない未知 program には state root を与えない（fail-closed）。
 #[must_use]
@@ -306,8 +304,7 @@ pub fn agent_state_directory(program: &str) -> Option<&'static str> {
 /// `~/.claude.json.tmp.<pid>.<random>` を書き、それを rename で被せる形で行う（`.backup.<ms>` も
 /// 隣に置く）。したがって grant は「その 1 ファイル」ではなく **prefix** でなければならず、
 /// prefix が無いと onboarding・folder trust・MCP 承認が毎起動やり直しになる。
-/// 自分の state directory の中に config を持つ provider（Codex）と、`CLAUDE_CONFIG_DIR` が指す
-/// directory の中に config を置く provider（`sakana-ai`）は `None`。
+/// 自分の state directory の中に config を持つ provider（Codex）は `None`。
 #[must_use]
 pub fn agent_config_prefix(program: &str) -> Option<&'static str> {
     let name = Path::new(program).file_name()?;
@@ -329,8 +326,7 @@ pub fn macos_mds_cache_root(cache_dir: &Path) -> PathBuf {
 /// この launch の `$HOME` 配下 state directory。
 ///
 /// provider が渡されていればそれが権威で、無いときだけ exec する program から決める。
-/// `claude` executable は Claude と `sakana-ai` が共有するので、program だけを根拠にすると
-/// Fugu の launch が Claude 本体の `~/.claude` を writable に得てしまう。daemon 側の policy
+/// executable は provider の identity ではないため、program だけを根拠にしない。daemon 側の policy
 /// 検証も同じ関数を使い、launcher が実際に配る grant と検証対象を分岐させない。
 #[must_use]
 pub fn granted_state_directory(agent: Option<DefaultModel>, program: &str) -> Option<&'static str> {
@@ -815,9 +811,8 @@ mod tests {
             (None, "agy", ".gemini/antigravity-cli/conversations"),
             // PATH 解決済みの絶対 path でも basename で判定する。
             (None, "/opt/homebrew/bin/codex", ".codex"),
-            // provider が渡されればそれが権威。`sakana-ai` は Claude と同じ
-            // `claude` を exec するため、program からは区別できない。
-            (Some(DefaultModel::SakanaAi), "claude", ".claude-sakana"),
+            // provider が渡されればそれが権威で、program の basename より優先する。
+            (Some(DefaultModel::OpenAi), "claude", ".codex"),
             (Some(DefaultModel::Claude), "claude", ".claude"),
         ] {
             let mut request = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
@@ -853,7 +848,6 @@ mod tests {
                 .any(|root| root.starts_with("/home/dev"))
         );
         // 判定は closed vocabulary（`DefaultModel`）で、未知 token は None を返す。
-        assert_eq!(agent_state_directory("sakana.ai"), Some(".claude-sakana"));
         assert_eq!(
             agent_state_directory("agy"),
             Some(".gemini/antigravity-cli/conversations")
@@ -1263,14 +1257,14 @@ mod tests {
         assert_eq!(agent_config_prefix("gemini"), None);
         assert_eq!(agent_config_prefix(""), None);
         assert_eq!(agent_config_prefix("/"), None);
-        // 同じ `claude` を exec しても、prefix を得るのは Claude だけである。
-        // `sakana-ai` の config は `CLAUDE_CONFIG_DIR` が指す state directory の中にある。
+        // provider が渡されればそれが権威で、program が `claude` でも prefix を得るのは
+        // Claude だけである。
         assert_eq!(
             granted_config_prefix(Some(DefaultModel::Claude), "claude"),
             Some(".claude.json")
         );
         assert_eq!(
-            granted_config_prefix(Some(DefaultModel::SakanaAi), "claude"),
+            granted_config_prefix(Some(DefaultModel::OpenAi), "claude"),
             None
         );
         // provider が無い launch だけが program の basename に落ちる。

@@ -658,12 +658,11 @@ fn closeup_agent_selects_an_installed_cli_and_refuses_the_rest() {
         _ => None,
     };
 
-    // Every selectable CLI maps to its daemon profile; `sakana.ai` is
-    // presented under its product name but launches the `sakana-ai` profile.
+    // Every selectable CLI maps to its daemon profile.
     for (input, expected) in [
         ("agent -m claude", "claude"),
         ("agent --model codex", "codex"),
-        ("agent -m sakana.ai", "sakana-ai"),
+        ("agent -m agy", "agy"),
     ] {
         assert_eq!(
             profile(&launch(&mut state, input)),
@@ -677,22 +676,19 @@ fn closeup_agent_selects_an_installed_cli_and_refuses_the_rest() {
     }
 
     // An omitted `-m` resolves the configured default and names it.
-    state.set_agent_models(AvailableModels::all(), DefaultModel::SakanaAi);
+    state.set_agent_models(AvailableModels::all(), DefaultModel::Agy);
     assert_eq!(
         profile(&launch(&mut state, "agent")),
-        Some("sakana-ai".to_owned())
+        Some("agy".to_owned())
     );
     assert_eq!(
         state.notice().map(|notice| notice.message.as_str()),
-        Some("Requested agent sakana.ai (default)")
+        Some("Requested agent agy (default)")
     );
 
     // A CLI outside the vocabulary, and one that is not installed, are
     // refused with safe feedback while the modal stays open.
-    state.set_agent_models(
-        AvailableModels::new([DefaultModel::SakanaAi]),
-        DefaultModel::SakanaAi,
-    );
+    state.set_agent_models(AvailableModels::new([DefaultModel::Agy]), DefaultModel::Agy);
     for (input, message) in [
         ("agent -m gemini", "unknown agent CLI"),
         ("agent -m claude", "that agent CLI is not installed"),

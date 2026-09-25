@@ -63,71 +63,20 @@ impl ExecutableLocator for PathExecutableLocator {
     }
 }
 
-/// The credential names bound in the user's global settings.
-///
-/// Only the *names* are carried. Whether a provider can be offered is decided
-/// by whether its key is configured at all, never by its value, so no secret is
-/// read — and an `op://` reference stays unresolved until a launch needs it.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct BoundCredentials(BTreeSet<String>);
-
-impl BoundCredentials {
-    /// Collect the bound names. Values are deliberately not accepted.
-    #[must_use]
-    pub fn new<I, S>(names: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self(names.into_iter().map(Into::into).collect())
-    }
-
-    /// The names bound in the user's global settings.
-    ///
-    /// Global scope is the whole story for a provider credential: every name a
-    /// provider injects is reserved from workspace bindings, so a checked-in
-    /// `.usagi/settings.json` can neither supply one nor take one away.
-    #[must_use]
-    pub fn from_settings(settings: &crate::domain::settings::Settings) -> Self {
-        Self(
-            settings
-                .env_bindings()
-                .map(|(name, _)| name.to_owned())
-                .collect(),
-        )
-    }
-
-    /// Whether `name` is bound.
-    #[must_use]
-    pub fn contains(&self, name: &str) -> bool {
-        self.0.contains(name)
-    }
-}
-
 /// Captures the selectable provider set without executing any provider CLI.
 ///
-/// A provider is selectable when its CLI is installed **and** every credential
-/// it declares through [`DefaultModel::credential_binding`] is configured. The
-/// second half is not a refinement: `sakana-ai` is Fugu served through the same
-/// `claude` executable, so a PATH lookup alone reports it installed on every
-/// machine that has Claude Code, and every picker would offer a provider the
-/// daemon refuses to launch because no `SAKANA_API_KEY` exists. Availability is
-/// per provider, so it is decided by what that provider needs.
+/// A provider is selectable when its CLI is installed.
 ///
 /// Callers retain this value for their process lifetime (or replace it only on
 /// an explicit refresh), so every picker and validation surface observes one
 /// stable snapshot.
 #[must_use]
-pub fn observe_available_models(
-    locator: &dyn ExecutableLocator,
-    credentials: &BoundCredentials,
-) -> AvailableModels {
-    AvailableModels::new(DefaultModel::ALL.into_iter().filter(|model| {
-        locator.is_available(model.command())
-            && model
-                .credential_binding()
-                .is_none_or(|(source, _)| credentials.contains(source))
-    }))
+pub fn observe_available_models(locator: &dyn ExecutableLocator) -> AvailableModels {
+    AvailableModels::new(
+        DefaultModel::ALL
+            .into_iter()
+            .filter(|model| locator.is_available(model.command())),
+    )
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -336,8 +285,8 @@ mod tests {
     use crate::domain::settings::DefaultModel;
 
     use super::{
-        BoundCredentials, ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
-        WorkspaceSessionConfig, observe_available_models, supported_agent_runtimes,
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, WorkspaceSessionConfig,
+        observe_available_models, supported_agent_runtimes,
     };
     use tempfile::tempdir;
 
@@ -347,24 +296,22 @@ mod tests {
             WorkspaceAgentConfig::from_allowlists(vec!["opus".into()], vec!["gpt-5".into()]);
         assert!(injected.allows("claude", "opus"));
         assert!(injected.allows("codex", "gpt-5"));
-        let injected_sakana = WorkspaceAgentConfig::from_runtime_allowlists([(
-            "sakana-ai",
-            vec!["fugu-model".into()],
-        )]);
-        assert!(injected_sakana.allows("sakana-ai", "fugu-model"));
+        let injected_agy =
+            WorkspaceAgentConfig::from_runtime_allowlists([("agy", vec!["gemini-model".into()])]);
+        assert!(injected_agy.allows("agy", "gemini-model"));
 
         let workspace = tempdir().unwrap();
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         std::fs::write(
             workspace.path().join(".usagi/config.toml"),
-            "[session]\nsetup_commands = [\"first\", \"  \", \"second\"]\n[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.sakana-ai]\nmodels = [\"fugu-model\"]\n",
+            "[session]\nsetup_commands = [\"first\", \"  \", \"second\"]\n[agents.claude]\nmodels = [\"sonnet\"]\n[agents.codex]\nmodels = [\"\", \"gpt\"]\n[agents.agy]\nmodels = [\"gemini-model\"]\n",
         )
         .unwrap();
         let config = WorkspaceAgentConfig::read(workspace.path());
         assert!(config.allows("claude", "sonnet"));
         assert!(!config.allows("claude", "opus"));
         assert!(config.models("codex").is_empty());
-        assert!(config.allows("sakana-ai", "fugu-model"));
+        assert!(config.allows("agy", "gemini-model"));
         assert_eq!(
             WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
             ["first", "second"]
@@ -481,12 +428,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             actual,
-            vec![
-                ("claude", "claude"),
-                ("codex", "codex"),
-                ("sakana-ai", "claude"),
-                ("agy", "agy"),
-            ]
+            vec![("claude", "claude"), ("codex", "codex"), ("agy", "agy"),]
         );
     }
 
@@ -503,78 +445,12 @@ mod tests {
         }
 
         let locator = RecordingLocator(Mutex::new(Vec::new()));
-        let available = observe_available_models(&locator, &BoundCredentials::default());
+        let available = observe_available_models(&locator);
         assert_eq!(
             available.iter().collect::<Vec<_>>(),
             vec![DefaultModel::OpenAi]
         );
-        // `sakana-ai` is Fugu served through the same Claude CLI, so the
-        // snapshot asks about `claude` once per provider rather than once per
-        // distinct executable — availability is per provider.
-        assert_eq!(
-            *locator.0.lock().unwrap(),
-            ["claude", "codex", "claude", "agy"]
-        );
-    }
-
-    #[test]
-    fn a_provider_that_declares_a_credential_is_offered_only_once_it_is_configured() {
-        struct InstalledLocator;
-        impl ExecutableLocator for InstalledLocator {
-            fn is_available(&self, _executable: &str) -> bool {
-                true
-            }
-        }
-
-        // Claude Code is installed, so the shared `claude` executable says
-        // nothing about whether Fugu is set up.
-        assert_eq!(
-            observe_available_models(&InstalledLocator, &BoundCredentials::default())
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![
-                DefaultModel::Claude,
-                DefaultModel::OpenAi,
-                DefaultModel::Agy
-            ]
-        );
-        let unrelated = BoundCredentials::new(["GH_TOKEN"]);
-        assert!(!unrelated.contains("SAKANA_API_KEY"));
-        assert_eq!(
-            observe_available_models(&InstalledLocator, &unrelated)
-                .iter()
-                .collect::<Vec<_>>(),
-            vec![
-                DefaultModel::Claude,
-                DefaultModel::OpenAi,
-                DefaultModel::Agy
-            ]
-        );
-        let configured = BoundCredentials::new(["SAKANA_API_KEY".to_owned()]);
-        assert_eq!(
-            observe_available_models(&InstalledLocator, &configured)
-                .iter()
-                .collect::<Vec<_>>(),
-            DefaultModel::ALL
-        );
-    }
-
-    #[test]
-    fn bound_credentials_read_the_usable_global_bindings_only() {
-        let mut settings = crate::domain::settings::Settings::default();
-        assert!(!BoundCredentials::from_settings(&settings).contains("SAKANA_API_KEY"));
-        settings.env = crate::domain::settings::EnvBindings::from([
-            (
-                " SAKANA_API_KEY ".to_owned(),
-                " op://Private/Sakana/key ".to_owned(),
-            ),
-            ("BLANK".to_owned(), "   ".to_owned()),
-        ]);
-        let credentials = BoundCredentials::from_settings(&settings);
-        // A name is enough: the reference is resolved by the launch, not by the
-        // picker, so no secret is read to decide what to offer.
-        assert!(credentials.contains("SAKANA_API_KEY"));
-        assert!(!credentials.contains("BLANK"));
+        assert_eq!(*locator.0.lock().unwrap(), ["claude", "codex", "agy"]);
     }
 
     #[test]

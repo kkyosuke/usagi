@@ -513,11 +513,7 @@ fn empty_provider_body(width: usize, height: usize, mut rows: Vec<String>) -> Ve
         rows.push(Role::Accent.style().bold().paint("No Agent CLI installed"));
     }
     if content_capacity > before + 1 {
-        rows.push(
-            Style::new()
-                .dim()
-                .paint("Install claude, codex, sakana.ai, or agy."),
-        );
+        rows.push(Style::new().dim().paint("Install claude, codex, or agy."));
     }
     rows.truncate(height.saturating_sub(1));
     rows.resize(height.saturating_sub(1), String::new());
@@ -1924,7 +1920,7 @@ mod tests {
         );
         assert!(
             body.iter()
-                .any(|row| row.contains("Install claude, codex, sakana.ai, or agy"))
+                .any(|row| row.contains("Install claude, codex, or agy"))
         );
         assert!(body.iter().any(|row| row.contains("Esc: back")));
         assert!(!body.iter().any(|row| row.contains("Loading Work Runs")));
@@ -2206,7 +2202,7 @@ mod tests {
                 candidates: vec![
                     "claude".to_owned(),
                     "codex".to_owned(),
-                    "sakana.ai 日本語".to_owned(),
+                    "agy 日本語".to_owned(),
                 ],
                 selected: 2,
             },
@@ -2220,7 +2216,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("claude"));
         assert!(text.contains("codex"));
-        assert!(text.contains("› sakana.ai 日本語"));
+        assert!(text.contains("› agy 日本語"));
         assert!(text.contains("Enter: launch"));
         assert!(frame.iter().all(|line| display_width(line) == 56));
 
@@ -2234,7 +2230,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("No Agent CLI installed"));
-        assert!(text.contains("Install claude, codex, sakana.ai, or agy"));
+        assert!(text.contains("Install claude, codex, or agy"));
 
         let launching = DirectorDrawerProjection {
             new: DirectorNewProjection::Launching,
@@ -2265,7 +2261,7 @@ mod tests {
 
     #[test]
     fn picker_viewport_follows_the_selection_on_short_terminals() {
-        let candidates = ["claude", "codex", "sakana.ai"];
+        let candidates = ["claude", "codex", "agy"];
         // 10 rows leave two candidate rows, 9 leave one, 8 leave none.
         for height in 8..=10 {
             for selected in 0..candidates.len() {
@@ -2375,7 +2371,7 @@ mod tests {
         let candidates = [
             "日本語のエージェント",
             "\u{1b}[1;31mcodex\u{1b}[0m",
-            "sakana.ai 日本語",
+            "agy 日本語",
         ];
         for height in 0..=14 {
             for width in [40, 56, 100] {
