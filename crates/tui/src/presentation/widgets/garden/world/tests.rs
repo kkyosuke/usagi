@@ -103,7 +103,7 @@ fn every_runtime_fits_and_remains_clickable_across_sizes_and_densities() {
                 let frame = render(height, width, "atlas", &sessions, tick, false);
                 assert_frame(&frame, height, width, &sessions);
                 let text = text(&frame);
-                for feature in ["~~~~~~~~", "Y  v  Y", "&&&"] {
+                for feature in ["~~~~~", "Y   v    Y", "&&&"] {
                     assert!(text.contains(feature), "{text}");
                 }
                 assert!(!text.contains("scroll") && !text.contains("more"));
@@ -289,16 +289,17 @@ fn sprites_keep_the_original_walk_directions_and_activity_illustrations() {
         shade: Point { x: 60, y: 5 },
     };
     assert_eq!(lifestyle_motion(places, 5).facing, Facing::Right);
-    assert_eq!(lifestyle_motion(places, 85).facing, Facing::Left);
+    assert_eq!(lifestyle_motion(places, 260).facing, Facing::Left);
     for (tick, expected) in [
-        (15, Activity::Drinking),
-        (45, Activity::Eating),
-        (70, Activity::Sleeping),
+        (60, Activity::Drinking),
+        (140, Activity::Eating),
+        (210, Activity::Sleeping),
     ] {
         assert_eq!(lifestyle_motion(places, tick).activity, expected);
     }
     for activity in [
         Activity::Walking,
+        Activity::Looking,
         Activity::Drinking,
         Activity::Eating,
         Activity::Sleeping,
@@ -308,7 +309,7 @@ fn sprites_keep_the_original_walk_directions_and_activity_illustrations() {
         Activity::Celebrating,
     ] {
         for facing in [Facing::Left, Facing::Right] {
-            for tick in 0..6 {
+            for tick in 0..24 {
                 let sprite = rabbit_sprite(
                     Motion {
                         point: places.home,
@@ -352,7 +353,7 @@ fn crowded_homes_never_displace_agents_and_physical_limits_do_not_overlap_target
         let frame = render(18, 80, "atlas", &fixtures, 19, false);
         assert_frame(&frame, 18, 80, &fixtures);
         if count <= 418 {
-            assert!(text(&frame).contains("~~~~~~~~"));
+            assert!(text(&frame).contains("~~~~~"));
         }
     }
     let mut fixtures = sessions(700);
@@ -361,4 +362,72 @@ fn crowded_homes_never_displace_agents_and_physical_limits_do_not_overlap_target
     }
     let frame = render(24, 120, "atlas", &fixtures, 0, false);
     assert_frame(&frame, 24, 120, &fixtures);
+}
+
+#[test]
+fn meadow_planting_leaves_open_ground_and_keeps_roots_fixed() {
+    for width in [60, 76, 116, 156] {
+        let mut roots = Vec::new();
+        for tick in [0, 4, 12, 23] {
+            let mut canvas = Canvas::new(width, 21);
+            draw_meadow(&mut canvas, "atlas", tick);
+            let rows = canvas.rows();
+            let rows = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>();
+            let planted = rows
+                .iter()
+                .flat_map(|row| row.chars())
+                .filter(|ch| !ch.is_whitespace())
+                .count();
+            assert!(planted > 0 && planted < width * 21 / 10);
+            let occupied = rows
+                .iter()
+                .enumerate()
+                .flat_map(|(y, row)| {
+                    row.chars()
+                        .enumerate()
+                        .filter_map(move |(x, ch)| (!ch.is_whitespace()).then_some((x, y)))
+                })
+                .collect::<Vec<_>>();
+            roots.push(occupied);
+        }
+        assert!(roots.iter().all(|root| *root == roots[0]));
+    }
+}
+
+#[test]
+fn rabbits_pause_more_than_they_walk_and_celebration_keeps_its_hitbox() {
+    let places = roaming_places(
+        Area {
+            x: 0,
+            y: 4,
+            width: 40,
+            height: 12,
+        },
+        (9, 4),
+    );
+    let walking = (0..LIFESTYLE_CYCLE_TICKS)
+        .filter(|tick| lifestyle_motion(places, *tick).activity == Activity::Walking)
+        .count();
+    assert!(walking < usize::try_from(LIFESTYLE_CYCLE_TICKS / 2).unwrap());
+    assert_eq!(
+        lifestyle_motion(places, 0).point,
+        lifestyle_motion(places, 29).point
+    );
+    let mut fixtures = sessions(1);
+    fixtures[0].pr_merged = true;
+    let first = render(24, 120, "atlas", &fixtures, 0, false);
+    let later = render(24, 120, "atlas", &fixtures, 4, false);
+    assert_eq!(first.hitboxes, later.hitboxes);
+    assert_ne!(first.rows, later.rows);
+    assert!(
+        first
+            .rows
+            .iter()
+            .any(|row| row.contains(&GardenTone::Flower.style().paint("  . * .")))
+    );
+    assert_eq!(
+        render(24, 120, "atlas", &fixtures, 0, true),
+        render(24, 120, "atlas", &fixtures, 99, true)
+    );
+    assert_frame(&first, 24, 120, &fixtures);
 }

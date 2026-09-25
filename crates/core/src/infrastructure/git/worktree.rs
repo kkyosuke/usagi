@@ -282,18 +282,33 @@ fn line_enables_checkout_filter(line: &str) -> bool {
     })
 }
 
+/// Whether `stderr` reports that git could not resolve a repository at all.
+///
+/// A path that is not a repository holds neither a worktree registration nor a
+/// branch, so both are already in the desired end state. Teardown reaches this
+/// shape two ways: the worktree's administrative directory
+/// (`.git/worktrees/<name>`) is gone while its tree remains, so the `.git` file
+/// inside resolves to nothing; or the workspace root itself stopped being a
+/// repository. Git then fails the whole command instead of reporting a missing
+/// worktree or branch, and treating that as an error strands the session — the
+/// removal retries forever and no path, forced or not, can ever finish it.
+fn repository_unresolved(stderr: &str) -> bool {
+    stderr.contains("not a git repository")
+}
+
 /// Remove the worktree at `worktree` (with `--force` when `force`).
 ///
 /// A path git does not recognise as a worktree is already in the desired end
 /// state — a session whose worktree was never built, or a repeated removal — so
 /// it is treated as a no-op rather than an error, letting callers finish cleaning
-/// up the rest of a session.
+/// up the rest of a session. A path git cannot resolve a repository from is the
+/// same end state, for the reason [`repository_unresolved`] gives.
 ///
 /// # Errors
 ///
 /// Returns an error when the path is not valid UTF-8, the `git` process cannot be
 /// spawned, or `git worktree remove` fails for any reason other than the path not
-/// being a worktree.
+/// being a worktree of a repository git can resolve.
 pub fn remove_worktree(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -309,7 +324,10 @@ pub fn remove_worktree(
     }
     args.extend(["--", path]);
     let output = runner.run(repo, &args)?;
-    if output.success || output.stderr.contains("is not a working tree") {
+    if output.success
+        || output.stderr.contains("is not a working tree")
+        || repository_unresolved(&output.stderr)
+    {
         return Ok(());
     }
     bail!("git worktree remove failed: {}", output.stderr.trim());
@@ -319,18 +337,23 @@ pub fn remove_worktree(
 ///
 /// A branch git does not know is already in the desired end state — a create
 /// whose worktree add failed before branching, or a repeated deletion — so it is
-/// treated as a no-op. When `force` is false Git refuses to delete a branch with
-/// unmerged commits; compensating teardown passes true only for a branch that
-/// never became user-owned work.
+/// treated as a no-op, as is a repository git cannot resolve, for the reason
+/// [`repository_unresolved`] gives. When `force` is false Git refuses to delete a
+/// branch with unmerged commits; compensating teardown passes true only for a
+/// branch that never became user-owned work.
 ///
 /// # Errors
 ///
 /// Returns an error when the `git` process cannot be spawned, or `git branch -d`
-/// / `git branch -D` fails for any reason other than the branch not existing.
+/// / `git branch -D` fails for any reason other than the branch not existing in a
+/// repository git can resolve.
 pub fn delete_branch(runner: &dyn GitRunner, repo: &Path, branch: &str, force: bool) -> Result<()> {
     let delete_flag = if force { "-D" } else { "-d" };
     let output = runner.run(repo, &["branch", delete_flag, "--", branch])?;
-    if output.success || output.stderr.contains("not found") {
+    if output.success
+        || output.stderr.contains("not found")
+        || repository_unresolved(&output.stderr)
+    {
         return Ok(());
     }
     bail!("git branch delete failed: {}", output.stderr.trim());
@@ -393,7 +416,7 @@ mod tests {
         WorktreeInfo, add_worktree, delete_branch, line_enables_checkout_filter, list_worktrees,
         remove_worktree,
     };
-    use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use crate::infrastructure::git::testkit::{FakeGitRunner, fail, ok};
     use crate::infrastructure::git::{GitOutput, GitRunner};
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
@@ -419,7 +442,7 @@ mod tests {
     #[test]
     fn add_worktree_builds_the_expected_command_with_a_base() {
         let commit = "a".repeat(40);
-        let git = FakeGit::new(vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")]);
+        let git = FakeGitRunner::new(vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")]);
         add_worktree(
             &git,
             Path::new("/repo"),
@@ -451,7 +474,7 @@ mod tests {
     #[test]
     fn add_worktree_omits_the_base_when_none_and_reports_failure() {
         let commit = "b".repeat(40);
-        let git = FakeGit::new(vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")]);
+        let git = FakeGitRunner::new(vec![ok(&commit), ok(""), ok(""), ok(""), ok(""), ok("")]);
         add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None).unwrap();
         assert_eq!(
             git.calls.borrow()[2],
@@ -459,7 +482,7 @@ mod tests {
         );
 
         let failed_commit = "c".repeat(40);
-        let bad = FakeGit::new(vec![
+        let bad = FakeGitRunner::new(vec![
             ok(&failed_commit),
             ok(""),
             fail("branch already exists"),
@@ -475,7 +498,7 @@ mod tests {
     fn add_worktree_compensates_only_an_exact_partial_registration() {
         let commit = "e".repeat(40);
         let listing = format!("worktree /dest\nHEAD {commit}\nbranch refs/heads/b\n\n");
-        let git = FakeGit::new(vec![
+        let git = FakeGitRunner::new(vec![
             ok(&commit),
             ok(""),
             ok(""),
@@ -567,7 +590,7 @@ mod tests {
         std::fs::create_dir(&blocked).unwrap();
         std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o0)).unwrap();
         let result = add_worktree(
-            &FakeGit::new(vec![]),
+            &FakeGitRunner::new(vec![]),
             Path::new("/repo"),
             &blocked.join("dest"),
             "b",
@@ -580,7 +603,7 @@ mod tests {
     #[test]
     fn materialization_disables_every_effective_filter_driver() {
         let commit = "f".repeat(40);
-        let git = FakeGit::new(vec![
+        let git = FakeGitRunner::new(vec![
             ok(&commit),
             ok(""),
             ok(""),
@@ -630,7 +653,7 @@ mod tests {
                 "materialization failed"
             });
             outputs.extend([ok(""), ok("")]);
-            let git = FakeGit::new(outputs);
+            let git = FakeGitRunner::new(outputs);
 
             let error = add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None)
                 .unwrap_err()
@@ -649,7 +672,7 @@ mod tests {
     #[test]
     fn add_worktree_refuses_tracked_checkout_filters_before_materializing() {
         let commit = "d".repeat(40);
-        let git = FakeGit::new(vec![
+        let git = FakeGitRunner::new(vec![
             ok(&commit),
             ok(".gitattributes\0src/.gitattributes\0src/lib.rs\0"),
             ok("*.md text\n"),
@@ -683,7 +706,7 @@ mod tests {
         std::fs::write(&occupied, "owned").unwrap();
         assert!(
             add_worktree(
-                &FakeGit::new(vec![]),
+                &FakeGitRunner::new(vec![]),
                 Path::new("/repo"),
                 &occupied,
                 "b",
@@ -696,16 +719,19 @@ mod tests {
 
         for (git, expected) in [
             (
-                FakeGit::new(vec![fail("unknown revision")]),
+                FakeGitRunner::new(vec![fail("unknown revision")]),
                 "base resolution failed",
             ),
-            (FakeGit::new(vec![ok("not-an-object")]), "invalid object id"),
             (
-                FakeGit::new(vec![ok(&"a".repeat(40)), fail("tree unreadable")]),
+                FakeGitRunner::new(vec![ok("not-an-object")]),
+                "invalid object id",
+            ),
+            (
+                FakeGitRunner::new(vec![ok(&"a".repeat(40)), fail("tree unreadable")]),
                 "attribute scan failed",
             ),
             (
-                FakeGit::new(vec![
+                FakeGitRunner::new(vec![
                     ok(&"b".repeat(40)),
                     ok(".gitattributes\0"),
                     fail("blob unreadable"),
@@ -722,7 +748,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_passes_force_and_succeeds() {
-        let git = FakeGit::new(vec![ok("")]);
+        let git = FakeGitRunner::new(vec![ok("")]);
         remove_worktree(&git, Path::new("/repo"), Path::new("/dest"), true).unwrap();
         assert_eq!(
             git.calls.borrow()[0],
@@ -732,7 +758,7 @@ mod tests {
 
     #[test]
     fn remove_worktree_treats_a_missing_worktree_as_a_noop() {
-        let git = FakeGit::new(vec![fail("fatal: '/dest' is not a working tree")]);
+        let git = FakeGitRunner::new(vec![fail("fatal: '/dest' is not a working tree")]);
         // No `--force` when false, and the "not a working tree" error is swallowed.
         remove_worktree(&git, Path::new("/repo"), Path::new("/dest"), false).unwrap();
         assert_eq!(
@@ -742,8 +768,29 @@ mod tests {
     }
 
     #[test]
+    fn teardown_treats_an_unresolvable_repository_as_already_torn_down() {
+        // The two shapes a stranded session actually produces: the worktree's
+        // administrative directory is gone while its tree remains, and the
+        // workspace root stopped being a repository. Neither holds a worktree
+        // registration or a branch any more, so teardown must be free to finish.
+        let orphan = FakeGitRunner::new(vec![fail(
+            "fatal: not a git repository: /repo/.git/worktrees/agy",
+        )]);
+        remove_worktree(&orphan, Path::new("/dest"), Path::new("/dest"), true).unwrap();
+
+        let gone = FakeGitRunner::new(vec![fail(
+            "fatal: not a git repository (or any of the parent directories): .git",
+        )]);
+        delete_branch(&gone, Path::new("/repo"), "usagi/bug", true).unwrap();
+        assert_eq!(
+            gone.calls.borrow()[0],
+            vec!["branch", "-D", "--", "usagi/bug"]
+        );
+    }
+
+    #[test]
     fn remove_worktree_surfaces_other_failures() {
-        let git = FakeGit::new(vec![fail(
+        let git = FakeGitRunner::new(vec![fail(
             "fatal: '/dest' contains modified or untracked files",
         )]);
         let err = remove_worktree(&git, Path::new("/repo"), Path::new("/dest"), false)
@@ -755,17 +802,17 @@ mod tests {
 
     #[test]
     fn delete_branch_forces_the_deletion_and_swallows_an_unknown_branch() {
-        let git = FakeGit::new(vec![ok("Deleted branch usagi/x")]);
+        let git = FakeGitRunner::new(vec![ok("Deleted branch usagi/x")]);
         delete_branch(&git, Path::new("/repo"), "usagi/x", true).unwrap();
         assert_eq!(git.calls.borrow()[0], vec!["branch", "-D", "--", "usagi/x"]);
 
-        let missing = FakeGit::new(vec![fail("error: branch 'usagi/x' not found.")]);
+        let missing = FakeGitRunner::new(vec![fail("error: branch 'usagi/x' not found.")]);
         delete_branch(&missing, Path::new("/repo"), "usagi/x", true).unwrap();
     }
 
     #[test]
     fn delete_branch_uses_safe_delete_and_surfaces_unmerged_work() {
-        let git = FakeGit::new(vec![fail(
+        let git = FakeGitRunner::new(vec![fail(
             "error: the branch 'usagi/x' is not fully merged",
         )]);
         let err = delete_branch(&git, Path::new("/repo"), "usagi/x", false)
@@ -778,7 +825,7 @@ mod tests {
 
     #[test]
     fn delete_branch_surfaces_other_failures() {
-        let git = FakeGit::new(vec![fail(
+        let git = FakeGitRunner::new(vec![fail(
             "error: cannot delete branch 'usagi/x' used by worktree",
         )]);
         let err = delete_branch(&git, Path::new("/repo"), "usagi/x", true)
@@ -803,7 +850,7 @@ worktree /repo/detached
 HEAD 999aaa
 detached
 ";
-        let git = FakeGit::new(vec![ok(porcelain)]);
+        let git = FakeGitRunner::new(vec![ok(porcelain)]);
         let list = list_worktrees(&git, Path::new("/repo")).unwrap();
         assert_eq!(
             list,
@@ -829,7 +876,7 @@ detached
 
     #[test]
     fn list_worktrees_reports_failure() {
-        let git = FakeGit::new(vec![fail("fatal: not a git repository")]);
+        let git = FakeGitRunner::new(vec![fail("fatal: not a git repository")]);
         assert!(list_worktrees(&git, Path::new("/repo")).is_err());
     }
 }

@@ -121,9 +121,9 @@ fn the_final_observation_happens_after_owner_leases_are_closed_and_drained() {
     assert_eq!(observation.remaining(), 0);
 }
 
-struct FakeConnection(Mutex<Option<std::sync::mpsc::Sender<()>>>);
+struct FakeCollectionConnection(Mutex<Option<std::sync::mpsc::Sender<()>>>);
 
-impl ConnectionShutdown for FakeConnection {
+impl ConnectionShutdown for FakeCollectionConnection {
     fn shutdown(&self) -> io::Result<()> {
         drop(self.0.lock().unwrap().take());
         Ok(())
@@ -137,7 +137,7 @@ fn a_fully_drained_generation_joins_workers_and_records_retirement() {
     let workers = ClientWorkers::new();
     let (sender, receiver) = channel();
     workers.register(
-        Box::new(FakeConnection(Mutex::new(Some(sender)))),
+        Box::new(FakeCollectionConnection(Mutex::new(Some(sender)))),
         std::thread::spawn(move || assert!(receiver.recv().is_err())),
     );
 

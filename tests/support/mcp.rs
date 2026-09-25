@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::{agent::AgentProfileId, settings::Settings};
-use usagi_core::infrastructure::client::{
-    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
-    SessionAction,
-};
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient, IpcClient};
 use usagi_core::infrastructure::ipc::ClientWorkspace;
+use usagi_core::infrastructure::ipc::{
+    AgentLaunchIntent, DaemonReply, DaemonRequest, SessionAction,
+};
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{connect_current, ensure_private_dir_all};
 
@@ -89,7 +89,7 @@ impl McpHarness {
         Self::start_at(Channel::Production, None, false, None, false)
     }
 
-    /// Every shipping Agent grammar, including Sakana AI's `codex-fugu`.
+    /// Every shipping Agent grammar, including Antigravity and Sakana AI.
     #[must_use]
     pub fn start_with_all_agents() -> Self {
         Self::start_at(Channel::Local, None, false, None, true)
@@ -163,9 +163,11 @@ impl McpHarness {
             &fixture_mcp_output,
         );
         if all_agents {
+            // `sakana-ai` runs the `claude` fixture installed above; only the
+            // environment tells the two profiles apart.
             install_fixture_agent(
                 &fixture_bin,
-                "codex-fugu",
+                "agy",
                 &fixture_log,
                 &fixture_argv,
                 &fixture_mcp_input,
@@ -176,7 +178,7 @@ impl McpHarness {
         fs::write(
             workspace.path().join(".usagi/config.toml"),
             if all_agents {
-                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n"
+                "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n[agents.sakana-ai]\nmodels = [\"fixture-sakana\"]\n[agents.agy]\nmodels = [\"fixture-agy\"]\n"
             } else {
                 "[agents.codex]\nmodels = [\"fixture-codex\"]\n[agents.claude]\nmodels = [\"fixture-claude\"]\n"
             },
@@ -232,6 +234,7 @@ impl McpHarness {
                 &["daemon".as_ref(), "start".as_ref()],
             )
             .env("PATH", &path)
+            .env("HOME", home.path())
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -265,6 +268,7 @@ impl McpHarness {
         }
         let mut child = usagi_command(home.path(), channel, &cwd, &["mcp".as_ref()])
             .env("PATH", &path)
+            .env("HOME", home.path())
             .env(SANDBOX_PASSTHROUGH, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -376,9 +380,13 @@ impl McpHarness {
     pub fn write_legacy_local_llm_settings(&self) {
         let data_dir = self.data_dir();
         fs::create_dir_all(&data_dir).unwrap();
+        // The stale field sits beside a live binding, the way an upgraded user's
+        // file does. The Fugu profile's readiness is that binding, so dropping
+        // it here would make this migration fixture fail for an unrelated
+        // reason.
         fs::write(
             data_dir.join("settings.json"),
-            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"}}"#,
+            r#"{"local_llm":{"enabled":true,"model":"qwen2.5-coder:7b"},"env":{"SAKANA_API_KEY":"fixture-sakana-key"}}"#,
         )
         .unwrap();
     }
@@ -647,17 +655,28 @@ impl McpHarness {
 }
 
 fn configure_tool_availability(channel: Channel, home: &Path, availability: Option<(bool, bool)>) {
-    if let Some((issue_enabled, memory_enabled)) = availability {
-        let data_dir = channel.data_dir(home);
-        ensure_private_dir_all(&data_dir).unwrap();
-        Storage::new(data_dir)
-            .save_settings(&Settings {
-                issue_enabled,
-                memory_enabled,
-                ..Settings::default()
-            })
-            .unwrap();
-    }
+    let data_dir = channel.data_dir(home);
+    ensure_private_dir_all(&data_dir).unwrap();
+    let (issue_enabled, memory_enabled) = availability.unwrap_or((
+        Settings::default().issue_enabled,
+        Settings::default().memory_enabled,
+    ));
+    Storage::new(data_dir)
+        .save_settings(&Settings {
+            issue_enabled,
+            memory_enabled,
+            // `sakana-ai` is the Claude CLI pointed at Sakana, and its readiness
+            // is whether that key is configured. Without it the fixture could
+            // not dispatch that runtime at all.
+            env: sakana_fixture_key(),
+            ..Settings::default()
+        })
+        .unwrap();
+}
+
+/// The machine-level binding that makes the Fugu profile launchable in fixtures.
+fn sakana_fixture_key() -> usagi_core::domain::settings::EnvBindings {
+    usagi_core::domain::settings::parse_env_bindings("SAKANA_API_KEY=fixture-sakana-key")
 }
 
 impl Drop for McpHarness {
@@ -721,7 +740,7 @@ fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
             &shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
         );
     let capture = format!(
-        "if ! [ \"$1\" = login ] || ! [ \"$2\" = status ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
+        "if ! {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} && ! {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} && ! [ \"$1\" = models ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
         argv.display()
     );
     script.strip_prefix("#!/bin/sh\n").map_or_else(
@@ -753,8 +772,31 @@ fn install_fixture_agent(
     output: &Path,
 ) {
     let relay_lock = input.with_extension("lock");
+    let agy_plugin_probe = if name == "agy" {
+        r#"plugin_workspace=
+conversation_id="fixture-agy-$$"
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --add-dir ]; then plugin_workspace="$argument"; fi
+  if [ "$previous" = --conversation ]; then conversation_id="$argument"; fi
+  previous="$argument"
+done
+plugin="$plugin_workspace/.agents/plugins/usagi-runtime"
+[ -f "$plugin/plugin.json" ] || exit 10
+[ -f "$plugin/mcp_config.json" ] || exit 11
+[ -f "$plugin/hooks.json" ] || exit 12
+grep -q '"name"[[:space:]]*:[[:space:]]*"usagi-runtime"' "$plugin/plugin.json" || exit 13
+grep -q '"mcpServers"' "$plugin/mcp_config.json" || exit 14
+grep -q '"PreInvocation"' "$plugin/hooks.json" || exit 15
+response=$(printf '{"conversationId":"%s","workspacePaths":["/fixture"]}' "$conversation_id" | "$USAGI_E2E_USAGI" agent-phase running --hook-event PreInvocation) || exit 16
+[ "$response" = '{}' ] || exit 17
+printf 'agy-plugin-ready\n' >> "$USAGI_MCP_FIXTURE_LOG"
+"#
+    } else {
+        ""
+    };
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
+        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n{agy_plugin_probe}\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
         relay_lock.display(),
         input.display(),
         output.display()

@@ -6,7 +6,7 @@ mod support;
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,9 +23,9 @@ use usagi_core::domain::{
     role::RoleId,
     user_decision::UserDecision,
 };
-use usagi_core::infrastructure::client::{
-    DaemonClient, DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent,
-    TuiUserDecisionAction,
+use usagi_core::infrastructure::client::DaemonClient;
+use usagi_core::infrastructure::ipc::{
+    DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent, TuiUserDecisionAction,
 };
 use usagi_core::infrastructure::store::{
     DerivedState, issue::IssueStore, memory::MemoryStore, user_decision::UserDecisionStore,
@@ -105,10 +105,10 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 }
 
 #[test]
-fn production_tools_list_fixes_the_51_tool_schema_contract() {
+fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 51);
+    assert_eq!(tools.len(), 60);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -131,7 +131,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 40);
+    assert_eq!(names.len(), 49);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -183,6 +183,18 @@ fn production_disabled_family_leaves_both_the_registry_and_the_agent_prompt() {
 #[test]
 fn production_session_create_reaches_daemon_and_durable_lifecycle() {
     let mut mcp = McpHarness::start();
+    fs::write(
+        mcp.workspace().join(".usagi/config.toml"),
+        concat!(
+            "[session]\n",
+            "setup_commands = [\"printf ready > setup-marker\"]\n",
+            "[agents.codex]\n",
+            "models = [\"fixture-codex\"]\n",
+            "[agents.claude]\n",
+            "models = [\"fixture-claude\"]\n",
+        ),
+    )
+    .unwrap();
     let response = mcp.tool("session_create", &json!({"name":"mcp-e2e-session"}));
     assert!(response.get("error").is_none(), "{response}");
     assert!(
@@ -195,6 +207,14 @@ fn production_session_create_reaches_daemon_and_durable_lifecycle() {
         mcp.workspace()
             .join(".usagi/sessions/mcp-e2e-session/.git")
             .exists()
+    );
+    assert_eq!(
+        fs::read_to_string(
+            mcp.workspace()
+                .join(".usagi/sessions/mcp-e2e-session/setup-marker")
+        )
+        .unwrap(),
+        "ready"
     );
     let lifecycle =
         fs::read_to_string(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap();
@@ -401,6 +421,258 @@ fn production_session_pr_resolves_the_authenticated_caller_when_name_is_omitted(
     let explicit = mcp.tool("session_pr", &json!({"name":"named-pr-target"}));
     assert_eq!(explicit["error"]["code"], -32603, "{explicit}");
     assert!(has_permission_denied(&explicit));
+}
+
+#[test]
+fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start() {
+    let mut mcp = McpHarness::start();
+    assert!(mcp.tool("session_create", &json!({"name":"workflow-target"}))["error"].is_null());
+
+    // A workflow that has not started reports no run rather than an error, so a
+    // coordinator can poll before and after starting one.
+    let status = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
+    assert!(status.get("error").is_none(), "{status}");
+    let status = tool_text(&status);
+    assert!(status["run"].is_null(), "{status}");
+    assert!(status["agents"]["implementer"].is_string(), "{status}");
+
+    // An unknown session is refused before any workflow record is created.
+    let missing = mcp.tool("workflow_status", &json!({"name":"no-such-session"}));
+    assert!(missing.get("error").is_some(), "{missing}");
+
+    // The control plane belongs to the human: an Agent may drive a session it
+    // created, but never the one it is running inside.
+    drop(mcp.launch_caller());
+    let own = mcp.tool(
+        "workflow_start",
+        &json!({"name":"mcp-caller","goal":"drive myself"}),
+    );
+    assert!(has_permission_denied(&own), "{own}");
+    // The refusal is the caller's own session, not the tool: a session this
+    // Agent did not create is refused by the same ownership rule.
+    let foreign = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
+    assert!(has_permission_denied(&foreign), "{foreign}");
+}
+
+#[test]
+// One run's whole life — launch, instruct, finish, restart — shares a single
+// daemon and fixture Agent. Splitting it would spin up a second heavy E2E, and
+// those are deliberately serialized because contention makes them fail falsely.
+#[allow(clippy::too_many_lines)]
+fn production_workflow_start_launches_the_remembered_participants() {
+    let mut mcp = McpHarness::start();
+    // Claude proves readiness with `auth status`; the implementer then stays
+    // alive so the run has a live participant to bind to.
+    mcp.replace_fixture_agent(
+        "claude",
+        r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
+sleep 30
+"#,
+    );
+    assert!(mcp.tool("session_create", &json!({"name":"workflow-run"}))["error"].is_null());
+
+    // Nobody is named, so the start uses what this workspace remembers. The
+    // default implementer is Codex; remembering Claude is what proves the
+    // workspace answer reached the launch rather than the product default.
+    let defaults = mcp.data_dir().join("daemon/workflows").join(
+        tool_text(&mcp.tool("session_list", &json!({})))["workspace_id"]
+            .as_str()
+            .unwrap(),
+    );
+    fs::create_dir_all(&defaults).unwrap();
+    fs::write(
+        defaults.join("defaults.json"),
+        r#"{"planner":"claude","implementer":"claude","reviewer":"codex"}"#,
+    )
+    .unwrap();
+
+    let started = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a login form"}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let started = tool_text(&started);
+    assert_eq!(started["run"]["goal"], "add a login form");
+    assert_eq!(started["run"]["agents"]["implementer"], "claude");
+    assert_eq!(started["run"]["phase"], "implementing");
+
+    // The same call is one operation: repeating it answers with the same run
+    // instead of starting a second one.
+    let again = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a login form"}),
+    );
+    assert!(again.get("error").is_some(), "{again}");
+
+    // An instruction reaches the run and is remembered durably.
+    let instructed = mcp.tool(
+        "workflow_instruct",
+        &json!({"name":"workflow-run","body":"cover the error path","recipient":"implementer"}),
+    );
+    assert!(instructed.get("error").is_none(), "{instructed}");
+    let instructed = tool_text(&instructed);
+    assert_eq!(
+        instructed["run"]["instructions"][0]["body"],
+        "cover the error path"
+    );
+
+    // An unknown participant spelling is refused rather than silently defaulted.
+    assert!(
+        mcp.tool(
+            "workflow_start",
+            &json!({"name":"workflow-run","goal":"x","reviewer":"nobody"}),
+        )
+        .get("error")
+        .is_some()
+    );
+
+    // Finishing ends the run. It is not `Ready`, so it is recorded as stopped
+    // with the phase it was abandoned in, and the session keeps its worktree.
+    let worktree = mcp.workspace().join(".usagi/sessions/workflow-run");
+    assert!(worktree.join(".git").exists());
+    // `session_status` is the one view of Agent liveness a human caller can
+    // read: `agent_list` needs Agent provenance, which this caller has not got.
+    let status_of = |mcp: &mut McpHarness| {
+        tool_text(&mcp.tool("session_status", &json!({})))["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["name"] == "workflow-run")
+            .map(|session| session["agent_status"].clone())
+    };
+    let before = status_of(&mut mcp).expect("the session is listed while it carries the run");
+    // Comparing before and after would also hold if the fixture's own sleep had
+    // already elapsed — and would then hide the very regression this checks for.
+    // A run that gets this far with a dead Agent is a fixture that is too short
+    // for this machine, and saying so is better than passing vacuously.
+    assert!(
+        before != "exited" && before != "failed" && !before.is_null(),
+        "the fixture Agent has to outlive the run's setup, but was {before}"
+    );
+    let finished = mcp.tool("workflow_finish", &json!({"name":"workflow-run"}));
+    assert!(finished.get("error").is_none(), "{finished}");
+    let finished = tool_text(&finished);
+    assert!(finished["run"].is_null(), "{finished}");
+    assert!(finished["pending_start"].is_null(), "{finished}");
+    assert_eq!(finished["finished"][0]["outcome"], "stopped");
+    assert_eq!(finished["finished"][0]["goal"], "add a login form");
+    assert_eq!(finished["finished"][0]["phase"], "implementing");
+
+    // The run's Agent is untouched and so is the worktree: finishing is a
+    // change to the workflow record and nothing else.
+    // The status has to be *unchanged*, not merely non-terminal: a killed Agent
+    // is still reported, as `exited`, so presence alone would pass through the
+    // regression. Comparing two readings around the one call is true regardless
+    // of how long the run took to reach here.
+    let after = status_of(&mut mcp);
+    assert_eq!(
+        after,
+        Some(before),
+        "finishing a run leaves the Agent that carried it exactly as it was"
+    );
+    assert!(
+        worktree.join(".git").exists(),
+        "finishing a run never removes the session worktree"
+    );
+
+    // Finishing again is refused, and so is instructing a run that is over.
+    assert!(
+        mcp.tool("workflow_finish", &json!({"name":"workflow-run"}))
+            .get("error")
+            .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "workflow_instruct",
+            &json!({"name":"workflow-run","body":"one more thing"}),
+        )
+        .get("error")
+        .is_some()
+    );
+
+    // The workflow record no longer holds the session: a new start gets past
+    // "session already has another workflow" and is stopped only by the
+    // separate, pre-existing rule that one session runs one Agent at a time.
+    // Finishing deliberately leaves that Agent alive, so closing it stays the
+    // person's move — but the run that was wedging the session is gone.
+    let restarted = mcp.tool(
+        "workflow_start",
+        &json!({"name":"workflow-run","goal":"add a logout form"}),
+    );
+    let refusal = restarted["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        refusal.contains("existing Agent"),
+        "the record is free and only the live Agent refuses: {restarted}"
+    );
+    assert!(
+        !refusal.contains("another workflow"),
+        "the finished run must not still own the session: {restarted}"
+    );
+
+    // And the archive is what the session reports while it waits. The refused
+    // start left no trace at all: no pending intent to freeze the pane on, and
+    // no archived row, so retrying cannot push real history out of the bounded
+    // archive.
+    let idle = tool_text(&mcp.tool("workflow_status", &json!({"name":"workflow-run"})));
+    assert!(idle["run"].is_null(), "{idle}");
+    assert!(
+        idle["pending_start"].is_null(),
+        "a refused start must not keep holding the session: {idle}"
+    );
+    assert_eq!(idle["finished"][0]["goal"], "add a login form");
+    assert_eq!(idle["finished"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn production_workflow_start_from_an_issue_renders_the_goal_and_keeps_the_reference() {
+    let mut mcp = McpHarness::start();
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+sleep 30
+"#,
+    );
+    // Issue writes are refused at the workspace root by design, so the backlog
+    // entry is placed the way a merged PR leaves it.
+    let number = 742_u64;
+    let issues = mcp.workspace().join(".usagi/issues");
+    fs::create_dir_all(&issues).unwrap();
+    fs::write(
+        issues.join(format!("{number}-close-the-loop.md")),
+        format!(
+            "---\nnumber: {number}\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n"
+        ),
+    )
+    .unwrap();
+    assert!(mcp.tool("session_create", &json!({"name":"issue-run"}))["error"].is_null());
+
+    let started = mcp.tool(
+        "workflow_start",
+        &json!({"name":"issue-run","issue":number}),
+    );
+    assert!(started.get("error").is_none(), "{started}");
+    let started = tool_text(&started);
+    // The issue body becomes the goal, and the run keeps the reference the PR
+    // will have to name.
+    let goal = started["run"]["goal"].as_str().unwrap();
+    assert!(goal.contains("fix(daemon): close the loop"), "{goal}");
+    assert!(goal.contains("reproduce and fix"), "{goal}");
+    assert_eq!(started["run"]["issue"], json!(number));
+
+    // A goal is required when no issue is named.
+    let neither = mcp.tool("workflow_start", &json!({"name":"issue-run"}));
+    assert!(neither.get("error").is_some(), "{neither}");
+    // An issue that does not exist is refused before a run is created.
+    assert!(
+        mcp.tool(
+            "workflow_start",
+            &json!({"name":"issue-run","issue":number + 1000}),
+        )
+        .get("error")
+        .is_some()
+    );
 }
 
 #[test]
@@ -1180,7 +1452,11 @@ fn wait_for_fixture_argv(
                     .iter()
                     .any(|argument| argument.contains(instruction_marker))
                 && user_prompt.is_none_or(|prompt| {
-                    capture.arguments.iter().any(|argument| argument == prompt)
+                    capture.arguments.iter().any(|argument| {
+                        argument == prompt
+                            || (capture.runtime == "agy"
+                                && argument.ends_with(&format!("\n\nTask:\n{prompt}")))
+                    })
                 })
         }) {
             return capture;
@@ -1213,11 +1489,23 @@ fn shipping_system_prompt(capture: &FixtureArgv) -> String {
             .get(positions[0] + 1)
             .expect("Claude system prompt value is missing")
             .clone()
+    } else if capture.runtime == "agy" {
+        let position = capture
+            .arguments
+            .iter()
+            .position(|argument| argument == "--prompt-interactive")
+            .expect("Antigravity interactive prompt flag is missing");
+        capture
+            .arguments
+            .get(position + 1)
+            .expect("Antigravity launch contract is missing")
+            .split_once("\n\nTask:\n")
+            .map_or_else(
+                || panic!("Antigravity task separator is missing"),
+                |(contract, _)| contract.to_owned(),
+            )
     } else {
-        assert!(
-            matches!(capture.runtime.as_str(), "codex" | "codex-fugu"),
-            "unexpected fixture runtime"
-        );
+        assert_eq!(capture.runtime, "codex", "unexpected fixture runtime");
         let assignments = capture
             .arguments
             .iter()
@@ -1271,6 +1559,15 @@ fn assert_shipping_role_argv(
         "role instruction escaped its single ephemeral system argument"
     );
     if let Some(user_prompt) = user_prompt {
+        if capture.runtime == "agy" {
+            assert!(
+                capture
+                    .arguments
+                    .iter()
+                    .any(|argument| { argument.ends_with(&format!("\n\nTask:\n{user_prompt}")) })
+            );
+            return;
+        }
         assert_eq!(
             capture
                 .arguments
@@ -1284,6 +1581,73 @@ fn assert_shipping_role_argv(
             !user_prompt.contains(instructions),
             "role instruction entered the initial user prompt"
         );
+    }
+}
+
+fn assert_shipping_agy_plugin(mcp: &McpHarness, capture: &FixtureArgv) {
+    assert_eq!(capture.runtime, "agy");
+    let positions = capture
+        .arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| (argument == "--add-dir").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(positions.len(), 1, "managed AGY workspace flag changed");
+    let integration = Path::new(
+        capture
+            .arguments
+            .get(positions[0] + 1)
+            .expect("managed AGY workspace path is missing"),
+    );
+    let relative = integration
+        .strip_prefix(
+            mcp.data_dir()
+                .canonicalize()
+                .unwrap()
+                .join("agent-integrations"),
+        )
+        .expect("AGY plugin workspace must remain in daemon-private data");
+    assert_eq!(relative.components().count(), 2);
+    assert_eq!(
+        relative.file_name().and_then(|name| name.to_str()),
+        Some("agy")
+    );
+    assert!(!integration.starts_with(mcp.workspace()));
+
+    let plugin = integration.join(".agents/plugins/usagi-runtime");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(plugin.join("plugin.json")).unwrap()).unwrap();
+    let mcp_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(plugin.join("mcp_config.json")).unwrap()).unwrap();
+    let hooks: serde_json::Value =
+        serde_json::from_slice(&fs::read(plugin.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "usagi-runtime");
+    assert_eq!(mcp_config["mcpServers"]["usagi"]["args"], json!(["mcp"]));
+    assert!(hooks["usagi-runtime"]["PreInvocation"].is_array());
+    assert!(
+        !mcp.workspace()
+            .join(".agents/plugins/usagi-runtime")
+            .exists()
+    );
+    assert!(
+        !mcp.home()
+            .join(".gemini/config/plugins/usagi-runtime")
+            .exists(),
+        "managed integration must not persist as a global AGY plugin"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if fs::read_to_string(mcp.fixture_log())
+            .is_ok_and(|log| log.lines().any(|line| line == "agy-plugin-ready"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture AGY did not load the plugin and report PreInvocation"
+        );
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1378,12 +1742,8 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
     );
 
     let cases = [
-        (
-            "sakana-ai",
-            "fixture-sakana",
-            "codex-fugu",
-            "check Sakana argv",
-        ),
+        ("agy", "fixture-agy", "agy", "check Antigravity argv"),
+        ("sakana-ai", "fixture-sakana", "claude", "check Sakana argv"),
         ("claude", "fixture-claude", "claude", "check Claude argv"),
         ("codex", "fixture-codex", "codex", "check Codex argv"),
     ];
@@ -1408,6 +1768,9 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         responses.push(response);
         let capture = wait_for_fixture_argv(&mcp, executable, Some(prompt), ROLE_SECRET);
         assert_shipping_role_argv(&capture, "shipping-reviewer", ROLE_SECRET, Some(prompt));
+        if runtime == "agy" {
+            assert_shipping_agy_plugin(&mcp, &capture);
+        }
         captures.push(capture);
     }
 
@@ -1622,7 +1985,7 @@ fi
         .unwrap();
     assert!(matches!(fetched, DaemonReply::Ok(ref body) if body["answer"]["option_id"] == "yes"));
 
-    let mut cancellable = decision.clone();
+    let mut cancellable = decision;
     cancellable.decision_id = UserDecisionId::new();
     cancellable.title = "Cancel me".into();
     cancellable.idempotency_key = None;
@@ -1897,6 +2260,140 @@ exit 0
         .find(|session| session["name"] == "caller-owned")
         .unwrap();
     assert!(durable["creator_agent_id"].is_string());
+}
+
+#[test]
+fn production_peer_review_request_receives_a_correlated_cross_runtime_verdict() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let caller = tool_text(&mcp.tool("agent_peers", &json!({})))["self_agent_id"].clone();
+    let request_id = OperationId::new();
+    let verdict_id = OperationId::new();
+    let review = json!({"base_sha":"a".repeat(40),"head_sha":"b".repeat(40)});
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"peer-reviewer","version":"1"}}});
+    let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+    let read = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_messages","arguments":{"unread_only":true}}});
+    let ack = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_message_ack","arguments":{"message_id":request_id}}});
+    let reply = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_message","arguments":{"message_id":verdict_id,"to_agent_id":caller,"kind":"approved","body":"fixture review passed","in_reply_to":request_id,"review":review}}});
+    // Wait for the actual peer wake before reading; the daemon must commit
+    // the request before notifying this exact runtime. The fixture has no API key.
+    mcp.replace_fixture_agent("claude", &format!(
+        "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nIFS= read -r notice || exit 1\nprintf '%s\\n' '{initialize}' '{initialized}' '{read}' '{ack}' '{reply}' | \"$USAGI_E2E_USAGI\" mcp >> \"$USAGI_MCP_FIXTURE_LOG\"\n"
+    ));
+    let handoff = mcp.tool("agent_handoff", &json!({"agent":{"runtime":"claude","model":"fixture-claude"},"prompt":"await a peer review request"}));
+    assert!(handoff.get("error").is_none(), "{handoff}");
+    let reviewer = tool_text(&handoff)["agent_id"].clone();
+    let request = mcp.tool("agent_message", &json!({"message_id":request_id,"to_agent_id":reviewer,"kind":"review_request","body":"review this diff","review":review}));
+    assert!(request.get("error").is_none(), "{request}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let verdict = loop {
+        let response = mcp.tool("agent_messages", &json!({"unread_only":true}));
+        assert!(response.get("error").is_none(), "{response}");
+        if let Some(verdict) = tool_text(&response)["messages"].as_array().unwrap().first() {
+            break verdict.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer reply missing: {}",
+            fs::read_to_string(mcp.fixture_log()).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(verdict["message_id"], json!(verdict_id));
+    assert_eq!(verdict["from_agent_id"], reviewer);
+    assert_eq!(verdict["kind"], "approved");
+    assert_eq!(verdict["in_reply_to"], json!(request_id));
+    assert_eq!(verdict["review"], review);
+    assert!(
+        mcp.tool("agent_message_ack", &json!({"message_id":verdict_id}))
+            .get("error")
+            .is_none()
+    );
+    let history = tool_text(&mcp.tool("agent_messages", &json!({})));
+    assert!(
+        history["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["acknowledged"] == true)
+    );
+}
+
+#[test]
+fn production_same_session_handoff_and_messages_preserve_creator_authority() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let before = tool_text(&mcp.tool("agent_peers", &json!({})));
+    let self_id = before["self_agent_id"].clone();
+    assert_eq!(before["agents"].as_array().unwrap().len(), 1);
+    let handoff = mcp.tool(
+        "agent_handoff",
+        &json!({
+            "agent":{"runtime":"claude","model":"fixture-claude"},
+            "prompt":"review the committed diff without editing"
+        }),
+    );
+    assert!(handoff.get("error").is_none(), "{handoff}");
+    let admission = tool_text(&handoff);
+    assert_eq!(admission["session"], "mcp-caller");
+    assert_ne!(admission["agent_id"], self_id);
+    let peers = tool_text(&mcp.tool("agent_peers", &json!({})));
+    assert_eq!(peers["agents"].as_array().unwrap().len(), 2);
+    assert!(
+        tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let denied = mcp.tool("session_get", &json!({"name":"mcp-caller"}));
+    assert!(has_permission_denied(&denied), "{denied}");
+    let message_id = OperationId::new();
+    let request = json!({"message_id":message_id,"to_agent_id":admission["agent_id"],"kind":"review_request","body":"Review committed code only","review":{"base_sha":"a".repeat(40),"head_sha":"b".repeat(40)}});
+    let sent = mcp.tool("agent_message", &request);
+    assert!(sent.get("error").is_none(), "{sent}");
+    assert_eq!(tool_text(&sent)["message"]["from_agent_id"], self_id);
+    assert_eq!(
+        tool_text(&mcp.tool("agent_message", &request)),
+        tool_text(&sent)
+    );
+    let history = tool_text(&mcp.tool("agent_messages", &json!({"limit":1})));
+    assert_eq!(history["next_cursor"], json!(message_id));
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    assert!(
+        tool_text(&mcp.tool("agent_messages", &json!({"unread_only":true})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        mcp.tool("agent_message_ack", &json!({"message_id":message_id}))
+            .get("error")
+            .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "agent_handoff",
+            &json!({"agent":{"id":self_id},"prompt":"self"})
+        )
+        .get("error")
+        .is_some()
+    );
+    assert!(
+        mcp.tool(
+            "agent_handoff",
+            &json!({"agent":{"id":admission["agent_id"]},"prompt":"duplicate"})
+        )
+        .get("error")
+        .is_some()
+    );
+    assert!(
+        tool_text(&mcp.tool("agent_inbox", &json!({})))["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

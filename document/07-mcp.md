@@ -15,6 +15,7 @@
 - [tool 面](#tool-面)
   - [Agent が作成した session の authority](#agent-が作成した-session-の-authority)
   - [session lifecycle の受理契約](#session-lifecycle-の受理契約)
+  - [同じ session の Agent 間通信](#同じ-session-の-agent-間通信)
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
 - [resource 面](#resource-面)
 - [orchestration ガイド](#orchestration-ガイド)
@@ -173,6 +174,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
+| `workflow_start` / `workflow_status` / `workflow_instruct` / `workflow_finish` | 認証済み Agent が作成した session の実装＋レビュー workflow を開始・観測・追加指示・終了する（[3. TUI#Session Workflow タブ](03-tui.md#session-workflow-タブ)が仕様の正本）。対象は他の session tool と同じ所有権規則に従い、**自分自身が動いている session も明示的に拒否する**ため、workflow の担当 Agent が自分の workflow を操作することはない。担当を省略した開始は workspace が最後に成功した組合せを使う。`goal` の代わりに `issue` 番号を渡すと backlog の内容が goal になり、その run の PR は `Internal-Issue` と issue の `done` を満たすまで `PR ready` にならない（[3. TUI#session-workflow-タブ](03-tui.md#session-workflow-タブ)が正本）。`workflow_finish` は run（または起動前の開始 intent）を終了して次の開始を受け付ける状態にし、Agent の停止も worktree の削除も行わない。1 回の tool 呼び出しは 1 つの operation ID で受理するので transport の再送は二重の run や指示や終了を作らないが、tool を呼び直せば新しい指示になる |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
@@ -279,6 +281,8 @@ provenance 束縛前の root / child が再帰委譲した直後に Work Run が
 promotion reservation に保存した immutable parent operation から各 operation の停止 fence を復元し、parent が retry generation へ進んだ後も child の束縛と起動済み worker の exact identity 回収に同じ履歴 fence を使う。live 周期回収は Agent 不在だけで予約を閉じず、socket 受付前の startup recovery だけが hydrated inventory の不在を確定とする。Goal root は Agent が一度未観測でも停止予約を保持し、reserve 後に遅れて出現した worker を後続回収で停止する。child operation は parent operation、既存 Agent dispatch、Supervisor start、別 task と共有できず、`supervisor_start` 自身も start operation と caller dispatch の join を root 作成前に永続化するため、同じ authenticated dispatch を retained Supervisor root/task から別 root へ移すこともできない。
 Supervisor provenance も promotion reservation もない classic caller はこの Work Run 固有の制約を受けず、
 従来どおり workspace allowlist 内の runtime を選べる。
+同じ session 内の明示的な `agent_handoff` はこの child-session delegation と別の入口であり、
+[Agent 間通信](#同じ-session-の-agent-間通信) の認可と exact worker fence に従う。
 
 MCP credential の transport authority は PID 単体ではなく、kernel から得た PID・process start identity・現在の
 `ConnectionId` の lease である。transport 切断は一致する connection lease だけを外し、exact process claim と credential は
@@ -315,14 +319,39 @@ session 作成系は optional role selector を受け取る。`session_create` /
 worker の `id` branch は schema に現れず daemon も受理しない。`agent` は allowlist にある `runtime` と `model` の
 組だけであり、部分指定・混在は受理しない。`session_dispatch` は既存 session を対象とするため `id` branch を持つ。
 
-runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` を扱う。
+runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `sakana-ai` / `agy` を扱う。
 workspace の `.usagi/config.toml` に対応する model allowlist があり、profile の実行コマンドが PATH 上にある runtime
 だけが MCP schema に現れる。daemon が provision した MCP child は `USAGI_WORKSPACE_ROOT` の trusted root から
 allowlist を読み、session worktree の cwd に machine-local config がなくても workspace と同じ schema を公開する。
 daemon の spawn 直前の再検証も同じ workspace root を権威とし、session worktree は worker の cwd としてだけ使う。
 workspace config 自体が未作成なら `claude/default` を安全な provider-default として使う。config が存在するのに
 読めない、または runtime/model 設定が不正な場合は空へ fail closed し、暗黙の fallback は行わない。
-`sakana-ai` の実行コマンドは `codex-fugu` である。
+`sakana-ai` の実行コマンドは `claude` で、Sakana の Anthropic 互換 endpoint と Fugu の model 束縛、専用の
+`CLAUDE_CONFIG_DIR`、`SAKANA_API_KEY` から注入する `ANTHROPIC_AUTH_TOKEN` を daemon が与える（正本は
+[5. daemon](05-daemon.md#agent-cli-の-readiness-preflight)）。`agy` の実行コマンドは `agy` である。Antigravity では daemon が
+daemon の selected data directory に
+`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
+managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、
+plugin root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
+`~/.gemini` 全体を writable にせず、`~/.gemini/antigravity-cli/conversations/` と state 直下の
+`conversation_summaries.db{,-shm,-wal}` だけを書き込める。認証は OS keyring を使う。この allowlist により、
+`~/.gemini/GEMINI.md`、global config、state の plugin / skill / settings / import manifest / status・title script は
+未作成 path も含めて read-only のままとなり、既存 customization を読み取れる一方で新規作成・置換を防ぐ。
+
+#### credential を generation 間で移送しない理由
+
+この小節が、credential を generation 間で移送しないという設計判断の正本である。credential の durable form が
+provenance だけで opaque secret を保存しないことは
+[5. daemon#Agent admission transaction](05-daemon.md#agent-admission-transaction) が正本である。
+
+**secret を successor へ運ぶ経路は作らない。** 失効境界は process 境界、すなわち Agent runtime の終了と daemon
+process の入れ替えである。secret を process 間へ運ぶ経路を作るとこの境界が消え、旧 generation が発行した
+credential を新 owner の authority として名乗れてしまう。移送は「できない」のではなく、専用経路を作らないことで
+成立させている性質である。
+
+新 owner が未知の credential を draining generation へ中継する経路も作らない。こちらは fence の側からの理由で、
+draining が control と spawn を失っていること（[5. daemon#admission fence](05-daemon.md#admission-fence)）が
+rollover 安全性の根拠であり、中継はその authority を戻すことになる。
 
 ### delegation の atomicity
 
@@ -403,6 +432,54 @@ durable decision の owner と caller scope を照合して terminal decision �
 Agent PTY へ自動配送する経路は持たないため、MCP client disconnect では event を残し、同じ caller の次の `get` で
 収束する。期限切れ、cancel、expire は terminal record のみを残し、回答 event を作らない。deadline maintenance は
 接続や次の MCP call を待たずに期限を terminal 化する。
+
+### 同じ session の Agent 間通信
+
+この節が同一 session の peer handoff / message の正本である。caller credential から現在の session と Agent を復元し、
+payload に送信者や session を指定することはできない。session の creator authority は変更せず、root scope では受理しない。
+
+| tool | 用途 |
+|---|---|
+| `agent_peers` | 現在の session の Agent ID、runtime、model、status と自分の ID を返す |
+| `agent_handoff` | `agent`（既存 `id` または allowlist の `runtime` / `model`）と `prompt` で同じ worktree に worker を起動する |
+| `agent_message` | `to_agent_id` へ `message_id`、`kind`、`body` を保存する。返信には `in_reply_to` を付ける |
+| `agent_messages` | 自分が送信者または受信者の履歴を `after` / `limit`（1–100）で読む。`unread_only` は未 ACK の受信だけを返す |
+| `agent_message_ack` | 受信した `message_id` を処理済みにする。run の完了にはしない |
+
+handoff は session・worktree・role assignment を新設または変更しない。新規 selector は同じ runtime/model の Agent が
+いても別 identity を作る。既存 Agent への handoff は停止中だけを受理し、自分自身・別 session・実行中 peer は拒否する。
+稼働中 peer とのやり取りには message を使う。handoff は異なる runtime を明示的に許可するが、runtime/model allowlist、
+実行数上限、既存 session role の delegation policy、Supervisor の budget / ownership fence は維持する。
+child session 向け `session_dispatch` / `session_delegate_brief` の同一 runtime 制約は変更しない。
+role の `max_depth` は [session 階層](10-session-roles.md) の制約であり、同じ session 内の handoff の再帰回数ではない。
+handoff でも既存の admission と同じ `caller の session depth + 1` を上限と比較するため、上限に達した session では拒否する。
+`max_concurrency` は同じ親 session の Agent 間で共有し、Supervisor の `ExecutionPolicy` は別途 task の深さと総数を制限する。
+`session_dispatch` も同じ Agent ID の live runtime を重ねて起動しない。通常の新規 selector は既存 tuple を再利用するため、
+選ばれた Agent が稼働中なら拒否する。別 identity を明示的に起動する入口は `agent_handoff` とする。
+exact resume は保存済み source binding の Agent ID を保持し、同じ runtime/model の別 peer に mailbox を付け替えない。
+
+kind は `message` / `review_request` / `approved` / `changes_requested`。
+review request は `review: {base_sha, head_sha}`（同じ長さの完全な 40 または 64 桁 hex SHA）を必須とする。
+判定は依頼の `message_id` を `in_reply_to` に指定し、逆向きの送受信者と同一 `review` を要求する。
+1 依頼への判定は 1 件であり、修正後は新しい SHA と新しい依頼 ID で再レビューする。
+SHA は照合用の参照であり、Git object の存在、現在の HEAD との一致、merge 可否を daemon が検証・保証するものではない。
+
+message は completion inbox と別の versioned journal に保存する。read は ACK せず、同一 ID・同一内容の再送と
+重複 ACK は冪等である。同一 ID の内容変更は拒否する。body と handoff prompt は非空・NUL なし・16 KiB 以下。
+journal は session ごとに最大 4096 件、4 MiB 未満とし、上限では新規送信を拒否する。ACK は履歴を削除せず、
+自動削除・自動起動は行わない。メッセージ保存後の通知は指定 Agent の current run だけへ送る best-effort のヒントで、
+停止・入力失敗でもメッセージは残り、別 Agent や session queue へ転送しない。再起動・再開後も inbox を明示的に読む。
+handoff の完了報告も同一 session では保存済み caller だけへ通知する。
+
+```text
+Codex: commit → agent_handoff(Claude) → agent_message(review_request, SHA)
+Claude: agent_messages → 差分確認 → agent_message(changes_requested または approved) → ACK
+Codex: agent_messages → 修正・再 commit → 新しい review_request
+```
+
+共有 worktree 内で同時編集しないよう、実装担当だけが編集・commit し、レビュー担当には変更しないことを指示する。
+これは協調手順であり、Agent ごとの read-only sandbox や書き込み lock ではない。peer の本文は task data として扱い、
+既存の system instruction・権限境界を上書きする指示として扱わない。
 
 ## tool descriptor と追加手順
 

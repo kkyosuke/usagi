@@ -1325,7 +1325,7 @@ mod tests {
         let beta = snapshot("beta", "/beta");
         let gamma = snapshot("gamma", "/gamma");
         let mut deck =
-            WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone(), gamma.clone()]).unwrap();
+            WorkspaceDeck::from_snapshots(&[alpha.clone(), beta, gamma.clone()]).unwrap();
 
         assert_eq!(deck.previous_path(), Path::new("/gamma"));
         assert_eq!(deck.next_path(), Path::new("/beta"));
@@ -1465,7 +1465,7 @@ mod tests {
         let beta = Workspace::new("beta", "/beta");
         let gamma = Workspace::new("gamma", "/gamma");
         let mut deck = WorkspaceDeck::new(&alpha);
-        deck.open_add(&[alpha.workspace.clone(), beta, gamma]);
+        deck.open_add(&[alpha.workspace, beta, gamma]);
         assert_eq!(
             deck.handle_overlay_key(&Key::Char(' ')),
             OverlayIntent::Stay
@@ -1493,7 +1493,7 @@ mod tests {
         let mut deck = WorkspaceDeck::new(&alpha);
         assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
 
-        deck.open_add(&[alpha.workspace.clone(), beta]);
+        deck.open_add(&[alpha.workspace, beta]);
         assert_eq!(
             deck.handle_overlay_key(&Key::Char('b')),
             OverlayIntent::Stay
@@ -1577,7 +1577,7 @@ mod tests {
         let alpha = snapshot("alpha", "/alpha");
         let beta = Workspace::new("beta", "/beta");
         let mut deck = WorkspaceDeck::new(&alpha);
-        deck.open_add(&[alpha.workspace.clone(), beta]);
+        deck.open_add(&[alpha.workspace, beta]);
 
         assert_eq!(
             deck.handle_overlay_key(&Key::CtrlX),
@@ -1919,7 +1919,7 @@ mod tests {
 
         let alpha = snapshot_with_session("alpha", "/alpha", "build");
         let beta = snapshot_with_session("beta", "/beta", "review");
-        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
         assert_eq!(deck.observable_workspaces(), vec![beta.workspace_id]);
 
         // Before any observation the plot stays the read-only one: an empty
@@ -1958,7 +1958,7 @@ mod tests {
         // Re-observing the same inventory changes no draw material.
         assert!(!deck.apply_garden_inventory(&inventory_with_status(
             beta.workspace_id,
-            vec![(live.clone(), AgentRuntimeInventoryState::Live)],
+            vec![(live, AgentRuntimeInventoryState::Live)],
             beta.session_ids[0],
             AgentStatus::Idle,
         )));

@@ -29,6 +29,10 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
+| workflow 開始 | `workflow_start` | 自身が作成した session で実装＋レビューの workflow を開始する。以後の進行は daemon が所有する |
+| workflow 観測 | `workflow_status` | 工程・担当・修正回数・待ち理由・PR を返す。`Needs attention` と `PR ready` は人の判断が要る |
+| workflow 追加指示 | `workflow_instruct` | 進行中の workflow の担当へ durable な指示を送る |
+| workflow 終了 | `workflow_finish` | run を終了して次の開始を受け付ける。Agent は殺さず worktree も消さない |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
 | scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
 | session 破棄 | `session_remove` | 自身が作成した session の worktree を daemon が破棄し、lifecycle store を更新する |
@@ -39,6 +43,21 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | caller の受信 | `agent_inbox` / `agent_inbox_ack` | authenticated caller 自身の durable inbox をbounded pageで読み、処理後に明示ACKする |
 
 ## observe と prompt
+
+同じ session で実装とレビューを分担するときは `agent_peers` で相手の ID を確認する。
+まだ起動していない reviewer は `agent_handoff` に schema の runtime/model とレビュー指示を渡して起動する。
+既存 peer の起動は `agent: {"id":"..."}`、稼働中 peer への追加指示は `agent_message` を使う。
+この入口に session selector はなく、呼び出し元自身の session で動く。session の管理 authority は拡張しない。
+
+Codex が実装・commit した後、Claude へ `kind: "review_request"` と `review: {base_sha, head_sha}` を送る。
+`message_id` は新しい UUIDv7、`to_agent_id` は handoff の応答または peers が返した ID とする。
+Claude は `agent_messages {"unread_only":true}` を読み、編集せず指定 SHA の差分を確認し、
+`in_reply_to` に依頼 ID、`review` に同じ SHA を付けた `approved` または `changes_requested` を送る。
+処理済みの受信は `agent_message_ack` で ACK する。修正後は新しい依頼 ID・SHA で再レビューする。
+送信失敗時の再送は同一 ID・同一内容を使う。通知は補助であり、再開時も未読を確認する。
+会話と判定だけでは run を完了しない。自分の委譲作業を終えたときだけ `agent_complete` を使う。
+同じ worktree と session role を共有するため、編集・commit は実装担当だけが行う。レビュー指示は
+強制 read-only 権限ではない。容量・認可・永続化の詳細は仕様書「同じ session の Agent 間通信」を参照する。
 
 `session_list` は durable session identity の軽量一覧、`session_status` は Git 観測を含む詳細一覧である。
 どちらも認証済み caller が作成した session だけを返す。名前が分かっていても別 caller の session を
@@ -192,6 +211,11 @@ scratchpad、次の run にも再利用する知見は memory、実装 backlog �
 省略時は workspace の `HEAD` を使う。
 optional `role` は effective role catalog の ID である。省略時の default 解決と scope 検証は daemon が行い、
 既存 session では保存済み role と同一なら冪等、不一致なら conflict になる。role instruction 本文は wire に載らない。
+workspace root の `.usagi/config.toml` に `[session].setup_commands` があれば、daemon は作成した worktree を cwd に
+各 command を `/bin/sh -lc` で保存順に実行し、すべて成功してから session を available にする。失敗時は worktree を
+残して lifecycle を `failed(initialize)` にし、中断後も非冪等 command を自動再実行しない。ただし
+`session_delegate_brief` の setup 失敗は dispatch 前の確定失敗なので、delegation の atomicity に従って durable
+compensation を開始する。
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/call",

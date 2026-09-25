@@ -157,6 +157,8 @@ pub struct PointerEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerKind {
+    /// Motion without a pressed button; never changes terminal selection.
+    Move,
     Down,
     Drag,
     Up,
@@ -347,6 +349,10 @@ impl LiveInputClassifier {
             LiveInput::Text(text) => self.classify_bytes(leader_alive, text.into_bytes()),
             LiveInput::Raw(bytes) => self.classify_bytes(leader_alive, bytes),
             LiveInput::Paste(bytes) => self.forward_non_key(bytes),
+            LiveInput::Pointer(PointerEvent {
+                kind: PointerKind::Move,
+                ..
+            }) => LiveInputOutput::Passthrough(Vec::new()),
             LiveInput::Mouse { .. } | LiveInput::Pointer(_) => {
                 self.leader_at = None;
                 if leader_alive {
@@ -1929,6 +1935,28 @@ mod tests {
             LiveInputOutput::Swallowed
         );
         assert!(!classifier.leader_pending(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn garden_hover_preserves_the_pending_keyboard_leader() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        let now = Duration::from_millis(1);
+        assert_eq!(
+            classifier.classify(
+                now,
+                LiveInput::Pointer(PointerEvent {
+                    kind: PointerKind::Move,
+                    column: 7,
+                    row: 3,
+                })
+            ),
+            LiveInputOutput::Passthrough(Vec::new())
+        );
+        assert!(classifier.leader_pending(now));
     }
 
     #[test]

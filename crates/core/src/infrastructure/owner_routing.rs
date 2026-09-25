@@ -46,8 +46,9 @@ use std::fmt;
 
 use crate::domain::id::{DaemonGeneration, TerminalRef};
 use crate::domain::terminal_launch::{TerminalInventoryEntry, TerminalLaunchScope};
-use crate::infrastructure::client::{
-    ClientError, DaemonReply, DaemonRequest, DaemonSession, TerminalAction, TerminalRequest,
+use crate::infrastructure::client::DaemonSession;
+use crate::infrastructure::ipc::{
+    ClientError, DaemonReply, DaemonRequest, TerminalAction, TerminalRequest,
 };
 use crate::infrastructure::ipc::{ErrorCode, GenerationRole, ProtocolError, SideEffect};
 

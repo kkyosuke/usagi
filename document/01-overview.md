@@ -33,7 +33,7 @@ runtime、PR、terminal stream を daemon の snapshot と event から表示す
 process は継続し、再接続時は durable identity によって同じ resource へ attach する。
 
 Workspace は複数の project tab として同時に開ける。各 workspace は root scope と managed session を持ち、
-session は `.usagi/sessions/<name>/` の隔離 worktree である。Claude、OpenAI Codex、Sakana AI と通常の
+session は `.usagi/sessions/<name>/` の隔離 worktree である。Claude、Google Antigravity CLI（`agy`）、OpenAI Codex、Sakana AI と通常の
 shell を同じ pane model で起動できる。画面、キー操作、設定 UI の正本は [3. TUI](03-tui.md) とする。
 
 ## 入口面

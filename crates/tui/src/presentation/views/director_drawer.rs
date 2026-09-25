@@ -230,16 +230,18 @@ pub fn terminal_point_at(
 ) -> Option<TerminalPoint> {
     let drawer = geometry(raw_height, raw_width);
     let viewport = terminal_viewport(raw_height, raw_width);
-    let column = usize::from(column).checked_sub(drawer.left.saturating_add(2))?;
-    let content_row = usize::from(row).checked_sub(drawer.top.saturating_add(4))?;
-    if column >= viewport.cols || content_row >= viewport.rows {
-        return None;
-    }
-    let start = widgets::live_terminal::window_start(rows_len, viewport.rows, scroll);
-    Some(TerminalPoint {
-        row: start + content_row,
+    widgets::live_terminal::retained_point_at(
+        widgets::live_terminal::ViewportGeometry {
+            left: drawer.left.saturating_add(2),
+            top: drawer.top.saturating_add(4),
+            rows: viewport.rows,
+            cols: viewport.cols,
+        },
+        rows_len,
+        scroll,
         column,
-    })
+        row,
+    )
 }
 
 /// Whether a frame-cell press lands on the drawer's right-aligned `New`
@@ -514,7 +516,7 @@ fn empty_provider_body(width: usize, height: usize, mut rows: Vec<String>) -> Ve
         rows.push(
             Style::new()
                 .dim()
-                .paint("Install claude, codex, or sakana.ai and check Config."),
+                .paint("Install claude, codex, sakana.ai, or agy."),
         );
     }
     rows.truncate(height.saturating_sub(1));
@@ -1825,7 +1827,7 @@ mod tests {
                 selected: Some(run_id),
                 ..WorkRunControlProjection::default()
             },
-            ..base.clone()
+            ..base
         };
         let deletion_text = render(&deletion);
         assert!(deletion_text.contains("Delete this finished Work Run from history?"));
@@ -1922,7 +1924,7 @@ mod tests {
         );
         assert!(
             body.iter()
-                .any(|row| row.contains("Install claude, codex, or sakana.ai"))
+                .any(|row| row.contains("Install claude, codex, sakana.ai, or agy"))
         );
         assert!(body.iter().any(|row| row.contains("Esc: back")));
         assert!(!body.iter().any(|row| row.contains("Loading Work Runs")));
@@ -2232,7 +2234,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("No Agent CLI installed"));
-        assert!(text.contains("Install claude, codex, or sakana.ai"));
+        assert!(text.contains("Install claude, codex, sakana.ai, or agy"));
 
         let launching = DirectorDrawerProjection {
             new: DirectorNewProjection::Launching,

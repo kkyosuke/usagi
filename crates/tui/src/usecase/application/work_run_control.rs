@@ -814,7 +814,7 @@ mod tests {
     fn delete_requires_a_finished_run_and_accepts_only_its_exact_receipt() {
         let active = run(SupervisorRunState::Running);
         let finished = run(SupervisorRunState::Succeeded);
-        let runs = vec![active.clone(), finished.clone()];
+        let runs = vec![active, finished.clone()];
         let mut control = WorkRunControl::default();
         control.open(&runs);
 
@@ -956,7 +956,7 @@ mod tests {
         let mut changed_cancel = WorkRunControl::default();
         let _ = changed_cancel.handle(WorkRunControlAction::Toggle, &runs, true);
         let _ = changed_cancel.handle(WorkRunControlAction::Enter, &runs, true);
-        let mut finished = running.clone();
+        let mut finished = running;
         finished.state = SupervisorRunState::Succeeded;
         let _ = changed_cancel.handle(WorkRunControlAction::Enter, &[finished], true);
         assert_eq!(changed_cancel.mode(), WorkRunControlMode::List);

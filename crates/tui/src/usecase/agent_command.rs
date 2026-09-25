@@ -179,11 +179,11 @@ mod tests {
             ("-m claude", DefaultModel::Claude),
             ("--model codex", DefaultModel::OpenAi),
             ("-m sakana.ai", DefaultModel::SakanaAi),
-            // The vocabulary accepts the profile ID, the executable name, and
-            // separator-insensitive spellings.
+            // The vocabulary accepts the profile ID and separator-insensitive
+            // spellings. It does not accept the executable here: `claude` is
+            // shared with the Claude provider and names that one.
             ("-m sakana-ai", DefaultModel::SakanaAi),
             ("-m sakana_ai", DefaultModel::SakanaAi),
-            ("-m codex-fugu", DefaultModel::SakanaAi),
             ("-m SAKANA.AI", DefaultModel::SakanaAi),
             ("codex", DefaultModel::OpenAi),
             ("  claude  ", DefaultModel::Claude),
@@ -242,14 +242,14 @@ mod tests {
     fn completes_the_flag_then_only_installed_cli_names() {
         assert_eq!(
             completions("", all()),
-            ["-m", "--model", "claude", "codex", "sakana.ai"]
+            ["-m", "--model", "claude", "codex", "sakana.ai", "agy"]
         );
         assert_eq!(completions("-", all()), ["-m", "--model"]);
         assert_eq!(completions("--", all()), ["--model"]);
         assert_eq!(completions("sak", all()), ["sakana.ai"]);
         assert_eq!(
             completions("-m ", all()),
-            ["-m claude", "-m codex", "-m sakana.ai"]
+            ["-m claude", "-m codex", "-m sakana.ai", "-m agy"]
         );
         assert_eq!(completions("-m sak", all()), ["-m sakana.ai"]);
         assert_eq!(
@@ -269,11 +269,11 @@ mod tests {
         let choices = model_choices(all(), DefaultModel::SakanaAi);
         assert_eq!(
             choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["-m claude", "-m codex", "-m sakana.ai  (default)"]
+            ["-m claude", "-m codex", "-m sakana.ai  (default)", "-m agy"]
         );
         assert_eq!(
             choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>(),
-            ["-m claude", "-m codex", "-m sakana.ai"]
+            ["-m claude", "-m codex", "-m sakana.ai", "-m agy"]
         );
         assert!(model_choices(AvailableModels::default(), DefaultModel::OpenAi).is_empty());
         // Exercise the derived vocabulary used by the modal projection.

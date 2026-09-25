@@ -1701,7 +1701,10 @@ fn socket_stat_at(directory: &fs::File, name: &str) -> io::Result<Option<libc::s
     }
 }
 
-// libc's mode_t width differs between supported Unix targets.
+// libc's mode_t width differs between supported Unix targets: the same `as u32`
+// is a widening conversion on one and a no-op on another, so exactly one of these
+// two lints fires per target. Both are allowed so the source reads the same
+// everywhere and CI does not depend on which host ran clippy.
 #[allow(clippy::cast_lossless, clippy::unnecessary_cast)]
 fn verify_owned_socket_stat(
     metadata: &libc::stat,
@@ -1786,6 +1789,7 @@ fn unlink_socket_at(directory: &fs::File, name: &str) -> io::Result<()> {
     }
 }
 
+// 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
 #[allow(clippy::cast_possible_truncation)]
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=restrictive_umask_still_publishes_an_exact_private_regular_locator
 fn set_socket_permissions_at(directory: &fs::File, name: &str, mode: u32) -> io::Result<()> {
@@ -2623,11 +2627,7 @@ mod tests {
     }
 
     fn generation() -> DaemonGeneration {
-        DaemonGeneration(
-            usagi_core::domain::id::DaemonGeneration::new()
-                .as_str()
-                .clone(),
-        )
+        DaemonGeneration(usagi_core::domain::id::DaemonGeneration::new().as_str())
     }
 
     fn locator() -> EndpointLocator {
@@ -3603,11 +3603,7 @@ mod tests {
         assert!(!intermediate.join("local").exists());
 
         ensure_private_dir_all(&target).unwrap();
-        for path in [
-            intermediate.clone(),
-            intermediate.join("local"),
-            target.clone(),
-        ] {
+        for path in [intermediate.clone(), intermediate.join("local"), target] {
             let metadata = fs::metadata(path).unwrap();
             assert!(metadata.is_dir());
             assert_eq!(metadata.uid(), effective_uid());
@@ -3644,7 +3640,6 @@ mod tests {
         let resume = Arc::new(Barrier::new(2));
         let worker = {
             let anchor = anchor.clone();
-            let canonical = canonical.clone();
             let ready = Arc::clone(&ready);
             let resume = Arc::clone(&resume);
             std::thread::spawn(move || {

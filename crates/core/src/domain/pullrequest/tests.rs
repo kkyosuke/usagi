@@ -150,6 +150,6 @@ fn pr_link_round_trips_through_json_with_refresh_state() {
     assert_eq!(back.title.as_deref(), Some("T"));
     assert_eq!(back.state, PrState::Merged);
     // Exercise the derived Clone / Debug.
-    assert_eq!(pr.clone().number, 9);
+    assert_eq!(pr.number, 9);
     assert!(format!("{pr:?}").contains("pull/9"));
 }

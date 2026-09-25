@@ -18,7 +18,7 @@ use super::*;
 use crate::usecase::authority::collection::DrainObservation;
 use crate::usecase::resources::allocator::{ClaimState, OperationOutcome};
 use crate::usecase::resources::fixture::{
-    FakeClock, FileFault, MemoryArchive, MemoryFile, ObservedChildren, SharedBytes, policy,
+    FakeLogicalClock, FileFault, MemoryArchive, MemoryFile, ObservedChildren, SharedBytes, policy,
     terminal, verified,
 };
 use crate::usecase::resources::migration::AdoptionRefusal;
@@ -64,7 +64,7 @@ impl World {
             ResourceAllocator::new(MemoryFile::new(&self.allocator), policy(2, 2)),
             Box::new(self.archive.clone()),
             Box::new(identity),
-            Box::new(FakeClock::at(10)),
+            Box::new(FakeLogicalClock::at(10)),
         )
         .unwrap()
     }
@@ -1100,7 +1100,7 @@ fn hydrate_keeps_a_gone_child_claim_when_releasing_it_cannot_be_saved() {
         ),
         Box::new(world.archive.clone()),
         Box::new(ObservedChildren::new().with_gone(35)),
-        Box::new(FakeClock::at(10)),
+        Box::new(FakeLogicalClock::at(10)),
     )
     .unwrap();
 
@@ -1559,7 +1559,7 @@ fn a_store_failure_is_reported_as_a_refused_save() {
             ),
             Box::new(MemoryArchive::new()),
             Box::new(ObservedChildren::new()),
-            Box::new(FakeClock::at(1)),
+            Box::new(FakeLogicalClock::at(1)),
         )
         .unwrap()
     };
@@ -1659,6 +1659,17 @@ fn a_census_counts_live_runtime_without_touching_anything() {
     let corrupt = World::new();
     corrupt.archive.bytes(old).set("not-json");
     assert!(census(&corrupt.archive).is_err());
+
+    // The per-shard count a refusal uses to explain one generation's wait is the
+    // same one the global census folds together, and it stays out of the legacy
+    // stores, which belong to no generation.
+    assert_eq!(
+        shard_census(&world.shard(old)),
+        LiveCensus {
+            agents: 1,
+            terminals: 1
+        }
+    );
 }
 
 #[test]
@@ -1833,7 +1844,7 @@ fn a_collection_pass_bounds_the_ledger_and_removes_drained_shards() {
         ResourceAllocator::new(MemoryFile::new(&world.allocator), policy(2, 2)),
         Box::new(world.archive.clone()),
         Box::new(ObservedChildren::new()),
-        Box::new(FakeClock::at(limits.max_age * 4)),
+        Box::new(FakeLogicalClock::at(limits.max_age * 4)),
     )
     .unwrap();
     let (ledger, _) = aged.collect(&BTreeSet::new(), &limits).unwrap();
@@ -2167,7 +2178,7 @@ fn a_reclaim_that_cannot_be_saved_leaves_the_leaked_claim_alone() {
         ),
         Box::new(world.archive.clone()),
         Box::new(ObservedChildren::new()),
-        Box::new(FakeClock::at(10)),
+        Box::new(FakeLogicalClock::at(10)),
     )
     .unwrap()
     .with_registered_generations(listing([new]));

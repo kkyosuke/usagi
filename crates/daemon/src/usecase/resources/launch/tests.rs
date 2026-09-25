@@ -9,8 +9,9 @@ use crate::usecase::resources::allocator::{
     ResourceKind,
 };
 use crate::usecase::resources::fixture::{
-    FakeClock, FakeProbe, FakeSpawner, FileFault, MemoryFile, ProbeAnswer, SharedBytes, SpawnPlan,
-    allocator, intent, policy, probe_for, shard as bind_shard, terminal, verified, wide_limits,
+    FakeChildProbe, FakeLogicalClock, FakeResourceSpawner, FileFault, MemoryFile, ProbeAnswer,
+    SharedBytes, SpawnPlan, allocator, intent, policy, probe_for, shard as bind_shard, terminal,
+    verified, wide_limits,
 };
 use crate::usecase::resources::identity::{ChildIdentity, ChildObservation};
 use crate::usecase::resources::shard::{OwnerShard, ResourceState, ShardDocument};
@@ -58,9 +59,9 @@ impl World {
 
     fn launch(
         &self,
-        spawner: &mut FakeSpawner,
-        probe: &FakeProbe,
-        clock: &FakeClock,
+        spawner: &mut FakeResourceSpawner,
+        probe: &FakeChildProbe,
+        clock: &FakeLogicalClock,
     ) -> Result<super::LaunchAccepted, ResourceFailure> {
         execute_launch(
             &self.allocator(),
@@ -74,8 +75,8 @@ impl World {
     }
 }
 
-fn spawner(pid: u32, start: &str) -> FakeSpawner {
-    FakeSpawner::new(SpawnPlan::Child {
+fn spawner(pid: u32, start: &str) -> FakeResourceSpawner {
+    FakeResourceSpawner::new(SpawnPlan::Child {
         pid,
         start: start.to_owned(),
     })
@@ -84,7 +85,7 @@ fn spawner(pid: u32, start: &str) -> FakeSpawner {
 #[test]
 fn a_launch_spawns_once_and_every_later_delivery_replays_the_same_final() {
     let world = World::new();
-    let clock = FakeClock::at(5);
+    let clock = FakeLogicalClock::at(5);
     let probe = probe_for(81, "os:81");
     let mut spawn = spawner(81, "os:81");
 
@@ -121,7 +122,7 @@ fn a_launch_spawns_once_and_every_later_delivery_replays_the_same_final() {
 #[test]
 fn the_same_operation_with_another_intent_conflicts_without_touching_anything() {
     let world = World::new();
-    let clock = FakeClock::at(1);
+    let clock = FakeLogicalClock::at(1);
     let probe = probe_for(82, "os:82");
     let mut spawn = spawner(82, "os:82");
     world.launch(&mut spawn, &probe, &clock).unwrap();
@@ -154,7 +155,7 @@ fn the_same_operation_with_another_intent_conflicts_without_touching_anything() 
 fn a_crash_after_the_claim_or_after_the_reservation_still_spawns_once() {
     // Crash between L1 and L2: only the claim is durable.
     let world = World::new();
-    let clock = FakeClock::at(2);
+    let clock = FakeLogicalClock::at(2);
     let policy = policy(2, 2);
     world
         .allocator()
@@ -214,7 +215,7 @@ fn a_crash_after_the_claim_or_after_the_reservation_still_spawns_once() {
 #[test]
 fn a_crash_after_the_spawn_commits_the_final_without_spawning_again() {
     let world = World::new();
-    let clock = FakeClock::at(3);
+    let clock = FakeLogicalClock::at(3);
     let probe = probe_for(85, "os:85");
     let policy = policy(2, 2);
     world
@@ -243,7 +244,7 @@ fn a_crash_after_the_spawn_commits_the_final_without_spawning_again() {
         })
         .unwrap();
 
-    let mut spawn = FakeSpawner::new(SpawnPlan::Definite);
+    let mut spawn = FakeResourceSpawner::new(SpawnPlan::Definite);
     let accepted = world.launch(&mut spawn, &probe, &clock).unwrap();
     assert_eq!(accepted.outcome, OperationOutcome::Spawned);
     assert!(!accepted.spawned);
@@ -260,9 +261,9 @@ fn a_crash_after_the_spawn_commits_the_final_without_spawning_again() {
 #[test]
 fn a_definite_spawn_failure_releases_the_claim_and_an_ambiguous_one_keeps_it() {
     let world = World::new();
-    let clock = FakeClock::at(4);
-    let probe = FakeProbe::new();
-    let mut definite = FakeSpawner::new(SpawnPlan::Definite);
+    let clock = FakeLogicalClock::at(4);
+    let probe = FakeChildProbe::new();
+    let mut definite = FakeResourceSpawner::new(SpawnPlan::Definite);
     let failed = world.launch(&mut definite, &probe, &clock).unwrap();
     assert_eq!(
         failed.outcome,
@@ -281,7 +282,7 @@ fn a_definite_spawn_failure_releases_the_claim_and_an_ambiguous_one_keeps_it() {
     assert_eq!(definite.spawns, 1);
 
     let ambiguous_world = World::new();
-    let mut ambiguous = FakeSpawner::new(SpawnPlan::Ambiguous);
+    let mut ambiguous = FakeResourceSpawner::new(SpawnPlan::Ambiguous);
     let accepted = ambiguous_world
         .launch(&mut ambiguous, &probe, &clock)
         .unwrap();
@@ -315,7 +316,7 @@ fn an_unprovable_record_reaches_its_ambiguous_final_without_a_second_spawn() {
     // Both sides are durable and the shard already holds a record whose ownership
     // cannot be proved — the state a crash between spawn and record leaves.
     let world = World::new();
-    let clock = FakeClock::at(9);
+    let clock = FakeLogicalClock::at(9);
     let policy = policy(2, 2);
     world
         .allocator()
@@ -344,7 +345,7 @@ fn an_unprovable_record_reaches_its_ambiguous_final_without_a_second_spawn() {
         })
         .unwrap();
 
-    let probe = FakeProbe::new();
+    let probe = FakeChildProbe::new();
     let mut spawn = spawner(95, "os:95");
     let accepted = world.launch(&mut spawn, &probe, &clock).unwrap();
     assert_eq!(accepted.outcome, OperationOutcome::Ambiguous);
@@ -363,8 +364,8 @@ fn an_unprovable_record_reaches_its_ambiguous_final_without_a_second_spawn() {
 #[test]
 fn a_reservation_without_a_claim_fails_closed_instead_of_spawning() {
     let world = World::new();
-    let clock = FakeClock::at(1);
-    let probe = FakeProbe::new();
+    let clock = FakeLogicalClock::at(1);
+    let probe = FakeChildProbe::new();
     world
         .shard()
         .update(|document| {
@@ -387,8 +388,8 @@ fn a_reservation_without_a_claim_fails_closed_instead_of_spawning() {
 #[test]
 fn a_full_pool_and_a_full_ledger_both_refuse_before_anything_is_spawned() {
     let world = World::new();
-    let clock = FakeClock::at(1);
-    let probe = FakeProbe::new();
+    let clock = FakeLogicalClock::at(1);
+    let probe = FakeChildProbe::new();
     let policy = policy(2, 1);
     let allocator = ResourceAllocator::new(MemoryFile::new(&world.allocator_bytes), policy);
     allocator
@@ -440,7 +441,7 @@ fn a_full_pool_and_a_full_ledger_both_refuse_before_anything_is_spawned() {
 #[test]
 fn a_resumed_launch_keeps_the_resource_its_claim_already_names() {
     let world = World::new();
-    let clock = FakeClock::at(1);
+    let clock = FakeLogicalClock::at(1);
     let probe = probe_for(88, "os:88");
     let policy = policy(2, 2);
     world
@@ -665,7 +666,7 @@ fn broken_allocator(world: &World) -> ResourceAllocator {
 
 #[test]
 fn a_store_failure_at_any_boundary_is_unavailable_and_never_a_second_child() {
-    let clock = FakeClock::at(11);
+    let clock = FakeLogicalClock::at(11);
     let probe = probe_for(96, "os:96");
 
     // L1: the claim cannot be written, so nothing is reserved and nothing spawns.
@@ -760,7 +761,7 @@ fn a_store_failure_at_any_boundary_is_unavailable_and_never_a_second_child() {
     // claimed rather than being released against an unwritten record.
     let failing = World::new();
     stage(&failing, false, false);
-    let mut definite = FakeSpawner::new(SpawnPlan::Definite);
+    let mut definite = FakeResourceSpawner::new(SpawnPlan::Definite);
     let failure = execute_launch(
         &broken_allocator(&failing),
         &failing.shard(),
@@ -782,7 +783,7 @@ fn a_store_failure_at_any_boundary_is_unavailable_and_never_a_second_child() {
 #[test]
 fn a_child_that_cannot_be_recorded_becomes_an_ambiguous_final_not_a_retry() {
     let world = World::new();
-    let clock = FakeClock::at(12);
+    let clock = FakeLogicalClock::at(12);
     let probe = probe_for(97, "os:97");
     let policy = policy(2, 2);
     world
@@ -855,8 +856,8 @@ fn a_child_that_cannot_be_recorded_becomes_an_ambiguous_final_not_a_retry() {
 #[test]
 fn a_store_failure_is_reported_as_unavailable_not_as_a_refusal() {
     let world = World::new();
-    let clock = FakeClock::at(1);
-    let probe = FakeProbe::new().with(
+    let clock = FakeLogicalClock::at(1);
+    let probe = FakeChildProbe::new().with(
         90,
         ProbeAnswer::Alive {
             start: "os:90".to_owned(),

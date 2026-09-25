@@ -33,7 +33,10 @@ use crate::infrastructure::unix_transport::{
     ensure_private_dir, lock_private_node, read_private_bytes_if_present, write_private_file,
 };
 use crate::usecase::resources::CasFile;
+use crate::usecase::resources::allocator::AllocatorDocument;
 use crate::usecase::resources::durable::{LegacySnapshots, ShardArchive};
+use crate::usecase::resources::shard::ShardDocument;
+use usagi_core::infrastructure::persistence::json_file;
 
 const ALLOCATOR_FILE: &str = "allocations.json";
 const ALLOCATOR_LOCK: &str = "allocations.lock";
@@ -260,6 +263,71 @@ fn read_legacy(path: &Path) -> io::Result<Option<String>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Largest runtime document this lock-free reader will accept.
+///
+/// The owner's own writes are bounded by the retention limits; this ceiling only
+/// stops an unbounded read of a file that is not what it claims to be.
+const READER_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Every retained shard document, read without creating or locking anything.
+///
+/// A reader must never become a second writer, which is why this does not go
+/// through [`ShardArchiveFiles`]: binding that archive ensures the private shard
+/// directory, and reading the allocator through its compare-and-swap seam takes
+/// the lock node and blocks on it without a deadline. A lifecycle command that
+/// only wants to *explain* a refusal must not be able to wedge behind the daemon
+/// that holds it. Shards are written temp+rename, so a plain read sees one whole
+/// version — the same property [`crate::infrastructure::generation_registry::read_registry_document`]
+/// relies on.
+///
+/// A shard that does not parse is skipped: this read exists to explain a wait,
+/// and losing that explanation because an unrelated shard is unreadable would
+/// trade a useful answer for none. The strict read that fails closed is the
+/// owner's own hydrate.
+///
+/// # Errors
+/// Returns an error only when the shard directory itself cannot be listed.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_shard_state
+pub fn read_shard_documents(data_dir: &Path) -> io::Result<Vec<ShardDocument>> {
+    let shards = data_dir.join("daemon").join(SHARD_DIR);
+    let entries = match std::fs::read_dir(&shards) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut documents = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        if let Ok(Some(document)) =
+            json_file::read_bounded::<ShardDocument>(&path, READER_MAX_BYTES)
+        {
+            documents.push(document);
+        }
+    }
+    Ok(documents)
+}
+
+/// The global allocator document, read without creating or locking anything.
+///
+/// `Ok(None)` means no allocator has been written yet, which is a real answer:
+/// nothing holds a capacity claim. An unreadable or unparsable document is an
+/// error rather than an empty one, because a caller that reports *why* a
+/// generation is still retained would otherwise read a lost claim as "no claim"
+/// and name the wrong cause.
+///
+/// # Errors
+/// Returns an error when the bytes cannot be read or do not parse.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_resources
+pub fn read_allocator_document(data_dir: &Path) -> io::Result<Option<AllocatorDocument>> {
+    let path = data_dir.join("daemon").join(ALLOCATOR_FILE);
+    json_file::read_bounded::<AllocatorDocument>(&path, READER_MAX_BYTES)
+        .map_err(|error| io::Error::other(format!("{error:#}")))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=runtime_resources

@@ -140,12 +140,12 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
 
-    struct FakeResolver {
+    struct FakeEnvSecretResolver {
         reads: RefCell<Vec<String>>,
         failing: &'static str,
     }
 
-    impl FakeResolver {
+    impl FakeEnvSecretResolver {
         fn new(failing: &'static str) -> Self {
             Self {
                 reads: RefCell::new(Vec::new()),
@@ -154,7 +154,7 @@ mod tests {
         }
     }
 
-    impl SecretResolver for FakeResolver {
+    impl SecretResolver for FakeEnvSecretResolver {
         fn read(&self, reference: &str) -> Result<String, String> {
             self.reads.borrow_mut().push(reference.to_owned());
             if reference == self.failing {
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn literals_pass_through_and_only_references_reach_the_resolver() {
-        let reader = FakeResolver::new("");
+        let reader = FakeEnvSecretResolver::new("");
         let resolved = resolve(
             &bindings(&[
                 ("RUST_LOG", "debug"),
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_secret_is_reported_and_the_rest_still_resolves() {
-        let reader = FakeResolver::new("op://Private/Locked/token");
+        let reader = FakeEnvSecretResolver::new("op://Private/Locked/token");
         let resolved = resolve(
             &bindings(&[
                 ("LOCKED", "op://Private/Locked/token"),
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn empty_bindings_resolve_to_an_empty_environment() {
-        let reader = FakeResolver::new("");
+        let reader = FakeEnvSecretResolver::new("");
         assert_eq!(
             resolve(&EnvBindings::new(), &reader),
             ResolvedEnvironment::default()

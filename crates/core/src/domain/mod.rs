@@ -4,6 +4,8 @@
 //! [`document/02-architecture.md`](../../../../document/02-architecture.md) の依存ルール）。
 
 pub mod agent;
+pub mod agent_message;
+pub mod clock;
 pub mod daemon;
 pub mod frontmatter;
 pub mod id;
@@ -24,6 +26,7 @@ pub mod terminal_retention;
 pub mod terminal_visibility;
 pub mod trace;
 pub mod user_decision;
+pub mod workflow;
 pub mod workspace;
 pub mod workspace_layout;
 pub mod workspace_state;

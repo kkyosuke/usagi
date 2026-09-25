@@ -24,12 +24,12 @@ use crate::usecase::{
     terminal::Geometry,
 };
 
-struct FakeProvisioner {
+struct FakeCodexProvisioner {
     result: Option<Result<CodexProvision, CodexProvisionFailure>>,
     calls: Vec<ProvisionContext>,
 }
 
-impl FakeProvisioner {
+impl FakeCodexProvisioner {
     fn ready() -> Self {
         Self {
             result: Some(Ok(CodexProvision {
@@ -70,7 +70,7 @@ impl FakeProvisioner {
     }
 }
 
-impl CodexProvisioner for FakeProvisioner {
+impl CodexProvisioner for FakeCodexProvisioner {
     fn provision(
         &mut self,
         context: &ProvisionContext,
@@ -99,7 +99,7 @@ fn request(mode: LaunchMode) -> LaunchRequest {
 
 #[test]
 fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope() {
-    let provisioner = FakeProvisioner::ready();
+    let provisioner = FakeCodexProvisioner::ready();
     let mut adapter = CodexAdapter::new(provisioner);
     let request = request(LaunchMode::Interactive);
 
@@ -148,7 +148,7 @@ fn root_scope_without_an_outer_launcher_falls_back_to_the_native_read_only_sandb
     for mode in [LaunchMode::Interactive, LaunchMode::Headless] {
         let mut request = request(mode);
         request.scope.session_id = None;
-        let snapshot = CodexAdapter::new(FakeProvisioner::ready())
+        let snapshot = CodexAdapter::new(FakeCodexProvisioner::ready())
             .resolve(&request)
             .unwrap()
             .snapshot;
@@ -182,7 +182,7 @@ fn root_scope_with_an_outer_launcher_avoids_a_nested_platform_sandbox() {
     for mode in [LaunchMode::Interactive, LaunchMode::Headless] {
         let mut request = request(mode);
         request.scope.session_id = None;
-        let resolved = CodexAdapter::new(FakeProvisioner::with_outer_sandbox())
+        let resolved = CodexAdapter::new(FakeCodexProvisioner::with_outer_sandbox())
             .resolve(&request)
             .unwrap();
         assert!(resolved.provision.sandbox_launcher().is_some());
@@ -204,7 +204,7 @@ fn root_scope_with_an_outer_launcher_avoids_a_nested_platform_sandbox() {
 
 #[test]
 fn interactive_session_with_an_outer_launcher_uses_it_for_git_and_network_boundary() {
-    let resolved = CodexAdapter::new(FakeProvisioner::with_outer_sandbox())
+    let resolved = CodexAdapter::new(FakeCodexProvisioner::with_outer_sandbox())
         .resolve(&request(LaunchMode::Interactive))
         .unwrap();
     assert!(resolved.provision.sandbox_launcher().is_some());
@@ -222,68 +222,6 @@ fn interactive_session_with_an_outer_launcher_uses_it_for_git_and_network_bounda
 }
 
 #[test]
-fn sakana_profile_shares_the_codex_grammar_but_launches_its_own_executable() {
-    let mut adapter = CodexAdapter::sakana(FakeProvisioner::ready());
-    assert_eq!(adapter.profile().id.as_str(), "sakana-ai");
-    assert_eq!(adapter.profile().display_name, "sakana.ai");
-    assert!(
-        adapter
-            .profile()
-            .capabilities
-            .contains(&AgentCapability::SystemPrompt)
-    );
-    assert_eq!(
-        adapter.profile().capabilities,
-        CodexAdapter::new(FakeProvisioner::ready())
-            .profile()
-            .capabilities
-    );
-
-    let mut request = request(LaunchMode::Interactive);
-    request.profile_id = AgentProfileId::new("sakana-ai").unwrap();
-    let resolved = adapter.resolve(&request).unwrap();
-
-    // Only the program differs: the argv grammar, model flag, and prompt
-    // handling stay identical to `codex`.
-    assert_eq!(resolved.snapshot.plan.program, "codex-fugu");
-    assert_eq!(resolved.snapshot.plan.profile_id.as_str(), "sakana-ai");
-    assert_eq!(
-        resolved.snapshot.plan.argv,
-        [
-            "--sandbox",
-            "workspace-write",
-            "--ask-for-approval",
-            "never",
-            "-m",
-            "gpt-5-codex",
-            "--",
-            "fix the test",
-        ]
-    );
-
-    // The `codex` profile ID is not accepted by the `sakana-ai` adapter, so a
-    // launch can never be routed to the wrong executable.
-    let mut sakana = CodexAdapter::sakana(FakeProvisioner::ready());
-    assert!(matches!(
-        sakana.resolve(&request_for("codex")),
-        Err(AdapterError::Validation(LaunchValidationError::UnknownProfile {
-            profile_id,
-        })) if profile_id.as_str() == "codex"
-    ));
-    // An explicit revision keeps the same product identity.
-    let pinned = CodexAdapter::sakana_with_revision(FakeProvisioner::ready(), 7);
-    assert_eq!(pinned.profile().revision, 7);
-    assert_eq!(pinned.profile().id.as_str(), "sakana-ai");
-}
-
-fn request_for(profile: &str) -> LaunchRequest {
-    LaunchRequest {
-        profile_id: AgentProfileId::new(profile).unwrap(),
-        ..request(LaunchMode::Interactive)
-    }
-}
-
-#[test]
 fn renders_resume_only_without_an_initial_prompt() {
     let mut request = request(LaunchMode::Interactive);
     request.resume = true;
@@ -297,7 +235,7 @@ fn renders_resume_only_without_an_initial_prompt() {
         last_known_status: ProviderResumeStatus::Interrupted,
         last_known_phase: Some(ProviderResumePhase::Interrupted),
     });
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
 
     let resolved = adapter.resolve(&request).unwrap();
 
@@ -343,7 +281,7 @@ fn rejects_resume_without_exact_structured_metadata() {
     let mut resume = request(LaunchMode::Interactive);
     resume.resume = true;
     resume.initial_prompt = None;
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
     assert!(matches!(
         adapter.resolve(&resume),
         Err(AdapterError::Validation(
@@ -361,7 +299,7 @@ fn rejects_resume_without_exact_structured_metadata() {
         last_known_status: ProviderResumeStatus::Exited,
         last_known_phase: None,
     });
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
     assert!(matches!(
         adapter.resolve(&not_resume),
         Err(AdapterError::Validation(
@@ -372,7 +310,7 @@ fn rejects_resume_without_exact_structured_metadata() {
 
 #[test]
 fn headless_requires_a_prompt_and_does_not_accept_resume() {
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
     let mut missing_prompt = request(LaunchMode::Headless);
     missing_prompt.initial_prompt = None;
     assert!(matches!(
@@ -394,7 +332,7 @@ fn headless_requires_a_prompt_and_does_not_accept_resume() {
 
 #[test]
 fn renders_headless_exec_and_exposes_the_static_profile() {
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
     let snapshot = adapter
         .resolve(&request(LaunchMode::Headless))
         .unwrap()
@@ -418,7 +356,7 @@ fn renders_headless_exec_and_exposes_the_static_profile() {
 fn rejects_unknown_profiles_before_provisioning() {
     let mut unknown = request(LaunchMode::Interactive);
     unknown.profile_id = AgentProfileId::new("other").unwrap();
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
     assert!(matches!(
         adapter.resolve(&unknown),
         Err(AdapterError::Validation(
@@ -440,7 +378,7 @@ fn typed_pre_spawn_provision_failures_do_not_create_a_snapshot() {
             AdapterError::ProvisionFailed,
         ),
     ] {
-        let mut provisioner = FakeProvisioner::ready();
+        let mut provisioner = FakeCodexProvisioner::ready();
         provisioner.result = Some(Err(failure));
         let mut adapter = CodexAdapter::new(provisioner);
         assert_eq!(
@@ -452,7 +390,7 @@ fn typed_pre_spawn_provision_failures_do_not_create_a_snapshot() {
 
 #[test]
 fn durable_snapshot_contains_no_provisioned_values_and_fails_closed_on_revision_drift() {
-    let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
+    let mut adapter = CodexAdapter::new(FakeCodexProvisioner::ready());
     let resolved = adapter.resolve(&request(LaunchMode::Interactive)).unwrap();
     let serialized = serde_json::to_string(&resolved.snapshot).unwrap();
     assert!(!serialized.contains("secret"));
@@ -461,7 +399,7 @@ fn durable_snapshot_contains_no_provisioned_values_and_fails_closed_on_revision_
     assert!(!serialized.contains("ephemeral system prompt"));
     assert!(adapter.validate_snapshot(&resolved.snapshot).is_ok());
 
-    let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), PROFILE_REVISION + 1);
+    let newer = CodexAdapter::with_revision(FakeCodexProvisioner::ready(), PROFILE_REVISION + 1);
     assert_eq!(
         newer.validate_snapshot(&resolved.snapshot),
         Err(LaunchValidationError::ProfileRevisionMismatch {
@@ -491,11 +429,11 @@ impl RuntimeStore for Store {
     }
 }
 
-struct FakeSpawner {
+struct FakeCodexSpawner {
     calls: usize,
 }
 
-impl PtySpawner for FakeSpawner {
+impl PtySpawner for FakeCodexSpawner {
     fn spawn(
         &mut self,
         _: &usagi_core::domain::agent::DurableLaunchSnapshot,
@@ -549,9 +487,9 @@ fn runtime_reservation_uses_the_codex_resolver_before_pty_spawn_and_exits_normal
         expected_revision: 1,
     };
     let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
-    let mut resolver = CodexAdapter::new(FakeProvisioner::ready());
+    let mut resolver = CodexAdapter::new(FakeCodexProvisioner::ready());
     let mut store = Store::default();
-    let mut spawner = FakeSpawner { calls: 0 };
+    let mut spawner = FakeCodexSpawner { calls: 0 };
 
     coordinator
         .launch(

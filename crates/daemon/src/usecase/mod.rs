@@ -14,6 +14,7 @@
 //! 判定を 1 か所に集約し、`stop` → fresh `start` の bypass を残さないためである。
 
 pub mod agent_ipc;
+pub mod agy;
 pub mod authority;
 pub mod claude;
 pub mod codex;
@@ -24,6 +25,7 @@ pub mod generic_terminal;
 pub mod goal_artifact;
 pub mod metrics;
 pub mod orchestration;
+pub mod peer_messages;
 pub mod pr_inventory;
 pub mod pr_projection;
 pub mod replacement;
@@ -48,3 +50,4 @@ pub mod terminal_owner;
 pub mod terminal_profile;
 pub mod terminal_retention_ipc;
 pub mod terminal_visibility_ipc;
+pub mod workflow;

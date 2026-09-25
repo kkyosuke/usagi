@@ -1,8 +1,8 @@
-//! `usagi claude-sandbox --mode <session|root> [--writable-root <path>]… -- <program> <args…>`
-//! — OS sandbox の中で Claude を fail-closed 起動する内部コマンド。
+//! `usagi claude-sandbox --mode <session|root> [--agent <selector>] [--writable-root <path>]… [--read-only-root <path>]… -- <program> <args…>`
+//! — OS sandbox の中で Agent CLI を fail-closed 起動する内部コマンド。
 //!
-//! usagi の Claude provisioner が起動 program をこの launcher で包む（`usagi claude-sandbox … --
-//! claude …`）。人手で叩くものではない（`--help` 非表示）。ここは解析済み引数を typed な
+//! usagi の Agent provisioner が起動 program をこの launcher で包む。人手で叩くものではない
+//! （`--help` 非表示）。ここは解析済み引数を typed な
 //! [`RunOutcome::ClaudeSandbox`] にまとめるだけの薄いシムで、daemon bootstrap が確定した backend / policy
 //! path の再検証と実 exec は合成ルートが束ねる。sandbox 計画の純粋な決定部は
 //! [`usagi_core::usecase::claude_sandbox`] にあり、backend 不在・未対応 platform では起動を拒否する
@@ -20,6 +20,9 @@ use crate::cli::{Run, RunOutcome};
 pub struct ClaudeSandbox {
     /// 起動モード（session / root）。
     pub mode: SandboxMode,
+    /// 起動する agent provider の selector。`claude` executable は Claude と
+    /// `sakana-ai` が共有するため、state grant は program 名では決められない。
+    pub agent: Option<String>,
     /// session workspace の保護対象 root。
     pub protected_root: Option<PathBuf>,
     /// daemon bootstrap が確定した backend。launcher 自身は PATH を探索しない。
@@ -32,6 +35,8 @@ pub struct ClaudeSandbox {
     pub cache_dir: Option<PathBuf>,
     /// sandbox が書き込みを許す起動固有 root。
     pub writable_roots: Vec<PathBuf>,
+    /// writable root 内を再度読み取り専用にする carve-out。
+    pub read_only_roots: Vec<PathBuf>,
     /// sandbox の中で exec する program と引数。
     pub command: Vec<String>,
 }
@@ -40,12 +45,14 @@ impl Run for ClaudeSandbox {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(RunOutcome::ClaudeSandbox {
             mode: self.mode,
+            agent: self.agent.clone(),
             protected_root: self.protected_root.clone(),
             backend: self.backend.clone(),
             tmpdir: self.tmpdir.clone(),
             home: self.home.clone(),
             cache_dir: self.cache_dir.clone(),
             writable_roots: self.writable_roots.clone(),
+            read_only_roots: self.read_only_roots.clone(),
             command: self.command.clone(),
         })
     }
@@ -82,6 +89,10 @@ mod tests {
             "/repo/.usagi/sessions/work",
             "--writable-root",
             "/repo/.git",
+            "--read-only-root",
+            "/home/dev/.gemini/config",
+            "--agent",
+            "sakana-ai",
             "--",
             "claude",
             "--print",
@@ -90,6 +101,9 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
+                // 同じ `claude` を exec する provider が 2 つあるため、どちらの state を
+                // 書けるかは argv ではなくこの selector が決める。
+                agent: Some("sakana-ai".to_owned()),
                 protected_root: None,
                 backend: None,
                 tmpdir: None,
@@ -99,6 +113,7 @@ mod tests {
                     PathBuf::from("/repo/.usagi/sessions/work"),
                     PathBuf::from("/repo/.git"),
                 ],
+                read_only_roots: vec![PathBuf::from("/home/dev/.gemini/config")],
                 command: vec!["claude".to_owned(), "--print".to_owned()],
             }
         );
@@ -123,12 +138,15 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Root,
+                // 省略した launch は program の basename で決まる従来の grant に落ちる。
+                agent: None,
                 protected_root: None,
                 backend: None,
                 tmpdir: None,
                 home: None,
                 cache_dir: Some(PathBuf::from("/private/var/folders/ab/cd/C")),
                 writable_roots: vec![],
+                read_only_roots: vec![],
                 command: vec!["claude".to_owned()],
             }
         );

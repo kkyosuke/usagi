@@ -2,16 +2,18 @@
 
 use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 
+use usagi_core::domain::clock::LogicalClock;
+
 use super::{
-    GcPhase, GcPlan, GcReport, LogicalClock, RetentionLimits, admission_guard, apply_phase,
-    collect_garbage, plan_gc, serialized_bytes,
+    GcPhase, GcPlan, GcReport, RetentionLimits, admission_guard, apply_phase, collect_garbage,
+    plan_gc, serialized_bytes,
 };
 use crate::usecase::resources::allocator::{
     AllocatorDocument, ClaimState, ExpiryClass, LaunchFailure, OperationOutcome, ResourceAllocator,
     ResourceKind,
 };
 use crate::usecase::resources::fixture::{
-    FakeClock, MemoryFile, SharedBytes, allocator, policy, terminal,
+    FakeLogicalClock, MemoryFile, SharedBytes, allocator, policy, terminal,
 };
 use crate::usecase::resources::{CasDocument, ResourceError};
 
@@ -337,7 +339,7 @@ fn a_byte_cap_collects_eligible_records_before_it_refuses() {
 fn a_full_pass_walks_the_phases_and_reports_what_it_did() {
     let bytes = SharedBytes::default();
     let allocator = allocator(&bytes, policy(8, 8));
-    let clock = FakeClock::at(0);
+    let clock = FakeLogicalClock::at(0);
     let limits = limits();
     let owner = DaemonGeneration::new();
     let operation = ordered(0x30);
@@ -412,7 +414,7 @@ impl crate::usecase::resources::CasFile for RacingFile {
 #[test]
 fn a_phase_whose_record_was_reclaimed_between_plan_and_apply_is_dropped() {
     let bytes = SharedBytes::default();
-    let clock = FakeClock::at(100);
+    let clock = FakeLogicalClock::at(100);
     let limits = limits();
     let owner = DaemonGeneration::new();
     let operation = ordered(0x60);
@@ -460,7 +462,7 @@ fn a_phase_whose_record_was_reclaimed_between_plan_and_apply_is_dropped() {
 fn a_phase_that_lost_its_race_is_skipped_rather_than_forced() {
     let bytes = SharedBytes::default();
     let allocator = allocator(&bytes, policy(8, 8));
-    let clock = FakeClock::at(100);
+    let clock = FakeLogicalClock::at(100);
     let limits = limits();
     let owner = DaemonGeneration::new();
     let operation = ordered(0x40);

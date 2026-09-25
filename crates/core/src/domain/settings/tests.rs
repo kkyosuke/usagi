@@ -3,6 +3,7 @@ use super::{
     ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, TerminalConcurrencyLimit, Theme,
     WorkMode,
 };
+use std::time::Duration;
 
 fn bindings(pairs: &[(&str, &str)]) -> EnvBindings {
     pairs
@@ -172,6 +173,7 @@ fn terminal_concurrency_limit_rejects_out_of_range_persisted_values() {
 #[test]
 fn default_model_tokens_select_the_expected_agent_profile() {
     assert_eq!(DefaultModel::Claude.profile_id(), "claude");
+    assert_eq!(DefaultModel::Agy.profile_id(), "agy");
     assert_eq!(DefaultModel::OpenAi.profile_id(), "codex");
     assert_eq!(DefaultModel::SakanaAi.profile_id(), "sakana-ai");
     assert_eq!(
@@ -188,42 +190,94 @@ fn default_model_tokens_select_the_expected_agent_profile() {
 fn every_model_provider_maps_a_selector_profile_and_executable() {
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::selector),
-        ["claude", "codex", "sakana.ai"]
+        ["claude", "codex", "sakana.ai", "agy"]
     );
+    // The executable is not a provider identity: `sakana.ai` serves Fugu through
+    // the same Claude CLI, so two providers name `claude` here.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::command),
-        ["claude", "codex", "codex-fugu"]
+        ["claude", "codex", "claude", "agy"]
     );
-    // `sakana.ai` is presented under its product name but launches `codex-fugu`
-    // through the `sakana-ai` profile.
-    assert_eq!(DefaultModel::SakanaAi.command(), "codex-fugu");
+    assert_eq!(
+        DefaultModel::SakanaAi.command(),
+        DefaultModel::Claude.command()
+    );
     assert_eq!(DefaultModel::SakanaAi.selector(), "sakana.ai");
-    // Each provider's CLI writes its own state directory, so a write-confining
-    // launcher can grant exactly the one it spawns.
+    // Each provider declares the narrow state directory a write-confining
+    // launcher grants. AGY persists conversation DBs without making its
+    // executable global customizations writable. `sakana.ai` cannot share
+    // Claude's `~/.claude` even though it runs Claude's binary: one home would
+    // merge two accounts' conversations, settings and MCP approvals.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::state_directory),
-        [".claude", ".codex", ".codex-fugu"]
+        [
+            ".claude",
+            ".codex",
+            ".claude-sakana",
+            ".gemini/antigravity-cli/conversations"
+        ]
     );
     // Claude keeps its global config (onboarding, folder trust, MCP approvals)
     // beside that directory in `~/.claude.json`, and saves it through sibling
     // lock / temp files, so the launcher grants a prefix rather than one file.
-    // Codex and `codex-fugu` keep their config inside the state directory.
+    // Codex keeps its config inside the state directory, and `sakana.ai` keeps
+    // Claude's config inside the directory `state_directory_env` names.
     assert_eq!(
         DefaultModel::ALL.map(DefaultModel::global_config_prefix),
-        [Some(".claude.json"), None, None]
+        [Some(".claude.json"), None, None, None]
     );
 }
 
 #[test]
+fn the_shared_claude_cli_is_made_into_fugu_by_the_vocabulary_not_the_user() {
+    // Every variable that turns Claude Code into Fugu is declared here, so a
+    // launch cannot lose one and quietly run as Anthropic Claude.
+    let gateway = DefaultModel::SakanaAi.gateway_environment();
+    assert_eq!(
+        gateway,
+        [
+            ("ANTHROPIC_BASE_URL", "https://api.sakana.ai"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "fugu-max[1m]"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "fugu[1m]"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "fugu[1m]"),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", "fugu-ultra[1m]"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "fugu[1m]"),
+        ]
+    );
+    // The state directory is only isolation if the CLI is told to use it.
+    assert_eq!(
+        DefaultModel::SakanaAi.state_directory_env(),
+        Some("CLAUDE_CONFIG_DIR")
+    );
+    // usagi stores the key under the product's own name and hands it to Claude
+    // under Claude's. Storing it as ANTHROPIC_AUTH_TOKEN would give the same
+    // key to the Anthropic Claude profile.
+    assert_eq!(
+        DefaultModel::SakanaAi.credential_binding(),
+        Some(("SAKANA_API_KEY", "ANTHROPIC_AUTH_TOKEN"))
+    );
+    // A product that is its own CLI declares none of this.
+    for model in [
+        DefaultModel::Claude,
+        DefaultModel::OpenAi,
+        DefaultModel::Agy,
+    ] {
+        assert_eq!(model.gateway_environment(), [], "{model:?}");
+        assert_eq!(model.state_directory_env(), None, "{model:?}");
+        assert_eq!(model.credential_binding(), None, "{model:?}");
+    }
+}
+
+#[test]
 fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
-    // Codex and the Codex-compatible `codex-fugu` share the CLI grammar, so both
-    // prove readiness with `login status`; Claude uses `auth status`. Without
-    // `codex-fugu` here an installed sakana.ai stays permanently unavailable
-    // (#609).
+    // Codex proves readiness with `login status`; Claude and the Fugu profile
+    // that runs Claude's CLI use `auth status`. The probe must name the
+    // executable a launch spawns, without which an installed provider stays
+    // permanently unavailable (#609).
     for (model, program, arguments) in [
         (DefaultModel::Claude, "claude", ["auth", "status"]),
         (DefaultModel::OpenAi, "codex", ["login", "status"]),
-        (DefaultModel::SakanaAi, "codex-fugu", ["login", "status"]),
+        (DefaultModel::SakanaAi, "claude", ["auth", "status"]),
     ] {
         let probe = model.readiness_command();
         assert_eq!(probe.program(), program, "{model:?}");
@@ -231,18 +285,59 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
         // The probe cannot drift away from the executable a launch spawns.
         assert_eq!(probe.program(), model.command(), "{model:?}");
     }
+    let agy = DefaultModel::Agy.readiness_command();
+    assert_eq!(agy.program(), "agy");
+    assert_eq!(agy.arguments(), ["models"]);
+    // `sakana-ai` and Claude ask the same executable the same question. What
+    // makes them different probes is the environment a launcher runs them in,
+    // which is why the answer must never be cached across providers.
+    assert_eq!(
+        DefaultModel::SakanaAi.readiness_command(),
+        DefaultModel::Claude.readiness_command()
+    );
     // Exercise the derived traits the launcher relies on to copy and log a probe.
     let probe: AgentReadinessCommand = DefaultModel::SakanaAi.readiness_command();
     assert_eq!(probe, DefaultModel::SakanaAi.readiness_command());
     assert_ne!(probe, DefaultModel::OpenAi.readiness_command());
-    assert!(format!("{probe:?}").contains("codex-fugu"));
+    assert!(format!("{probe:?}").contains("claude"));
+}
+
+#[test]
+fn each_probe_carries_the_bounds_its_own_product_needs() {
+    // A credential read answers immediately and prints almost nothing, so the
+    // providers that only read a token share one small budget.
+    for model in [
+        DefaultModel::Claude,
+        DefaultModel::OpenAi,
+        DefaultModel::SakanaAi,
+    ] {
+        let probe = model.readiness_command();
+        assert_eq!(probe.timeout(), Duration::from_secs(2), "{model:?}");
+        assert_eq!(probe.output_limit(), 16 * 1024, "{model:?}");
+    }
+    // `agy models` starts Antigravity's language server and lists the models of
+    // the signed-in account, which takes seconds and logs to stderr throughout.
+    // Under the shared budget above, an installed and authenticated CLI was
+    // terminated mid-probe and reported unavailable.
+    let agy = DefaultModel::Agy.readiness_command();
+    assert!(
+        agy.timeout() >= Duration::from_secs(10),
+        "{:?}",
+        agy.timeout()
+    );
+    assert!(agy.timeout() > DefaultModel::Claude.readiness_command().timeout());
+    assert!(agy.output_limit() > DefaultModel::Claude.readiness_command().output_limit());
+    // The bounds are part of the probe's identity, so a launcher that copies a
+    // probe cannot drop them.
+    assert_ne!(agy, DefaultModel::Claude.readiness_command());
+    assert_eq!(agy, DefaultModel::readiness_command_for("agy").unwrap());
 }
 
 #[test]
 fn readiness_resolution_accepts_product_tokens_and_otherwise_fails_closed() {
     // A launcher may hold the executable, the daemon profile ID, or the typed
     // selector; all three reach the same probe.
-    for token in ["codex-fugu", "sakana-ai", "sakana.ai", "SAKANA_AI"] {
+    for token in ["sakana-ai", "sakana.ai", "SAKANA_AI"] {
         assert_eq!(
             DefaultModel::readiness_command_for(token),
             Some(DefaultModel::SakanaAi.readiness_command()),
@@ -257,9 +352,14 @@ fn readiness_resolution_accepts_product_tokens_and_otherwise_fails_closed() {
         DefaultModel::readiness_command_for("claude"),
         Some(DefaultModel::Claude.readiness_command())
     );
+    assert_eq!(
+        DefaultModel::readiness_command_for("agy"),
+        Some(DefaultModel::Agy.readiness_command())
+    );
     // An unmodelled product yields no probe, so a launcher refuses it rather
-    // than spawning an unknown executable.
-    for token in ["gemini", "agy", "openai", ""] {
+    // than spawning an unknown executable. `codex-fugu` is now one of those:
+    // the Fugu profile no longer runs Sakana's Codex wrapper.
+    for token in ["gemini", "openai", "", "codex-fugu"] {
         assert_eq!(DefaultModel::readiness_command_for(token), None, "{token}");
     }
 }
@@ -270,11 +370,11 @@ fn selector_resolution_accepts_every_spelling_of_a_provider() {
         ("claude", DefaultModel::Claude),
         ("Claude", DefaultModel::Claude),
         ("codex", DefaultModel::OpenAi),
+        ("agy", DefaultModel::Agy),
+        ("AGY", DefaultModel::Agy),
         ("sakana.ai", DefaultModel::SakanaAi),
         ("sakana_ai", DefaultModel::SakanaAi),
         ("sakana-ai", DefaultModel::SakanaAi),
-        ("codex-fugu", DefaultModel::SakanaAi),
-        ("codex_fugu", DefaultModel::SakanaAi),
         ("  SAKANA.AI  ", DefaultModel::SakanaAi),
     ] {
         assert_eq!(
@@ -283,9 +383,17 @@ fn selector_resolution_accepts_every_spelling_of_a_provider() {
             "{token}"
         );
     }
+    // Two providers share the `claude` executable, so that token is not a
+    // provider identity: it resolves to Claude itself and never to the Fugu
+    // profile that also runs it.
+    assert_eq!(
+        DefaultModel::from_selector("claude"),
+        Some(DefaultModel::Claude)
+    );
     // `openai` is the persisted token, not a launchable CLI name, so the typed
-    // vocabulary rejects it alongside unknown and empty input.
-    for token in ["openai", "gemini", "", "   "] {
+    // vocabulary rejects it alongside unknown and empty input. `codex-fugu` is
+    // no longer part of the vocabulary at all.
+    for token in ["openai", "gemini", "", "   ", "codex-fugu", "codex_fugu"] {
         assert_eq!(DefaultModel::from_selector(token), None, "{token}");
     }
 }
@@ -305,6 +413,15 @@ fn sakana_ai_persists_as_snake_case_and_reads_legacy_tokens() {
     }
     let local: LocalSettings = serde_json::from_str(r#"{"default_model":"sakana.ai"}"#).unwrap();
     assert_eq!(local.default_model, Some(DefaultModel::SakanaAi));
+}
+
+#[test]
+fn agy_persists_as_its_stable_profile_token() {
+    assert_eq!(serde_json::to_value(DefaultModel::Agy).unwrap(), "agy");
+    assert_eq!(
+        serde_json::from_str::<DefaultModel>("\"agy\"").unwrap(),
+        DefaultModel::Agy
+    );
 }
 
 #[test]
@@ -340,7 +457,8 @@ fn availability_offers_only_installed_providers() {
     // choice that is no longer installed.
     assert_eq!(all.next(DefaultModel::Claude), Some(DefaultModel::OpenAi));
     assert_eq!(all.next(DefaultModel::OpenAi), Some(DefaultModel::SakanaAi));
-    assert_eq!(all.next(DefaultModel::SakanaAi), Some(DefaultModel::Claude));
+    assert_eq!(all.next(DefaultModel::SakanaAi), Some(DefaultModel::Agy));
+    assert_eq!(all.next(DefaultModel::Agy), Some(DefaultModel::Claude));
     let only_sakana = AvailableModels::new([DefaultModel::SakanaAi]);
     assert_eq!(
         only_sakana.next(DefaultModel::Claude),

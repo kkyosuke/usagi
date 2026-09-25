@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `done` key from `state.json`.
 // serde's `skip_serializing_if` hands the predicate `&field`, so the reference is
 // required by that contract despite `bool` being trivially copyable.
-#[allow(clippy::trivially_copy_pass_by_ref)]
+#[allow(clippy::trivially_copy_pass_by_ref)] // 同じ trait の他の実装と署名を揃える。
 fn is_false(value: &bool) -> bool {
     !*value
 }

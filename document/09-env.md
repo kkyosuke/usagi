@@ -43,9 +43,19 @@ editor は 1 行 1 binding の `NAME=value` を受け取り、保存時に次の
 | secret 参照 | `op://` で始まり、続くパスが空でない値。それ以外は平文として扱う |
 | 重複 | 同名は後の行が勝ち、map は名前順に正規化される |
 
-workspace binding の `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` /
-`USAGI_CLAUDE_SANDBOX_PASSTHROUGH` は Agent launcher の境界を変更できるため、launch admission で secret 解決前に拒否する。
-global binding は利用者が管理する trusted baseline として扱い、この workspace 固有の拒否対象には含めない。
+### workspace が bind できない変数
+
+次の名前は workspace binding から拒否する。判定は launch admission で secret 解決より前に行う。
+global binding は利用者が管理する trusted baseline として扱い、この拒否対象には含めない。
+
+| 変数 | 拒否する理由 |
+|---|---|
+| `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` | Agent launcher が使う filesystem の境界そのものを差し替えられる |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` | managed launch の宛先・アカウント・model を差し替えられる。`.usagi/settings.json` は repository に入るため、checkout 側が session の prompt・file 内容・credential を別の server へ送れてしまう |
+| `SAKANA_API_KEY` | provider の readiness は「この key が設定されているか」であり、probe は workspace を持たない。workspace scope の key は「admission が見た credential」と「launch が使う credential」を食い違わせる |
+
+usagi 自身が provider を定義するために所有する変数（endpoint、model 束縛、state directory、API key の
+注入先）は [5. daemon#Agent CLI の readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight) を正本とする。
 
 binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
 合成後の launch admission が同じ検証を使う。
@@ -55,6 +65,7 @@ binding と secret reference の resource 上限は domain の env policy が正
 | 1 scope または合成後の binding | 128 | 保存・load または launch admission を拒否 |
 | 1 scope または合成後の secret reference | 32 | 保存・load または launch admission を拒否 |
 | 1 launch で同時実行する `op read` | 4 | 残りを bounded queue で待機 |
+| daemon が保持する解決済み secret | 256 | 最も長く使われていないものから 1 件ずつ evict |
 
 上限超過を launch admission で検出した場合は secret resolver と PTY child を一つも spawn せず、安全な validation / provision
 error を返す。global と workspace がそれぞれ保存上限内でも、合成後に上限を超える組み合わせは同じように拒否する。
@@ -103,8 +114,24 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - TUI の pane launch は background の専用 IPC policy でこの bounded queue の完了を待つ。1Password の承認モーダル中も
   通常操作用の短い deadline では pending pane を失敗にせず、描画・入力・quit は待たせない。policy の値は
   [daemon IPC](04-ipc.md#attempt-deadline-と-reconnect-budget)を正本とする。
-- 解決結果は workspace ごとに**設定内容をキーにキャッシュ**する。設定が変わらなければ次の pane 起動で
-  `op read` を再実行せず、設定または `OP_SERVICE_ACCOUNT_TOKEN` を編集すればキャッシュは無効になる。
+- 解決した secret は daemon の memory だけにキャッシュする。キーは **credential・scope・参照**の組で、
+  scope は binding をどちらが宣言したかで決まる。
+
+  | binding の scope | キャッシュの有効範囲 | 理由 |
+  |---|---|---|
+  | global | この daemon が持つ全 workspace | daemon は data directory ごとに 1 process で複数 workspace を adopt するため（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）、global に置いた参照は workspace をいくつ開いても 1 回しか読まない |
+  | workspace | その workspace だけ | `.usagi/settings.json` は repository に入る。checkout が名指しした参照は、利用者が自分の global binding に与えた承認を流用せず、自分で 1Password の承認を得る |
+
+- credential は `OP_SERVICE_ACCOUNT_TOKEN` の digest をキーにする（token そのものは持たない）。token が
+  異なれば別のキーになるので、別の token で解決した値は配らない。token を使わない `op signin` セッションの
+  アカウントはこのキーに含まれないため、**サインインするアカウントを変えたら daemon を起動し直す**。
+- 参照を編集すればその binding だけ、`OP_SERVICE_ACCOUNT_TOKEN` を**新しい** token に変えれば全参照を
+  次の pane 起動で解決し直す。以前使った token に戻した場合は、その token で読んだ値をそのまま再利用する。
+  参照を変えずに 1Password 側で secret を rotate した場合はキャッシュから判別できないため、
+  daemon の起動し直しで反映する。
+- 解決に失敗した参照はキャッシュせず、次の起動で再試行する。上限に達したキャッシュは**最も長く使われて
+  いないもの**から 1 件ずつ evict する（全体を捨てると、上限を超える working set では毎回すべて読み直す
+  ことになる）。
 
 ## 注入のタイミングと優先順位
 
@@ -118,5 +145,11 @@ PTY を所有するのは daemon なので、**daemon が起動時に自分で 2
 
 - 設定 env は端末特性を上書きできるが、daemon が子を daemon 自身へ結び付けるための値（MCP 配線・
   credential）を置き換えることはできない。
+- 端末特性は明示的な allowlist だけで、親環境を無差別にコピーしない（`GH_TOKEN` などの secret は child へ
+  渡らない）。この allowlist の内容と供給元の優先順は
+  [5. daemon#terminal launch environment](05-daemon.md#terminal-launch-environment) が正本である。
+- allowlist のうち `USER` だけは継承値ではなく、daemon が起動時に自分の effective UID（`geteuid`）から解決した
+  OS ユーザー名を渡す（正本は [5. daemon#`USER` の解決](05-daemon.md#user-の解決)）。設定 env の `USER` は
+  この解決値も上書きする。
 - durable な launch snapshot に載るのは**変数名の allowlist だけ**で、値・secret は載らない。
 - 反映は**新しく開く pane から**。既に動いている pane は起動時の環境を保ち続ける。

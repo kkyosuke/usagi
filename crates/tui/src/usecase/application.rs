@@ -52,6 +52,9 @@ pub mod pane_runtime;
 pub mod pr;
 /// IO-free runtime boundaries used by the controller composition.
 pub mod runtime_ports;
+/// Pure projection of observed role catalogs and repository refs into
+/// create-session choices.
+pub mod session_catalog;
 /// Pure http(s) URL detection and validation over the ANSI-free terminal grid.
 pub mod terminal_link;
 /// Rendering wrapper over the shared core VT parser, projecting the screen into
@@ -63,6 +66,7 @@ pub mod terminal_selection;
 pub mod terminal_session;
 /// Goal-driven Work Run の選択・確認・同一 operation retry を所有する純粋 state machine。
 pub mod work_run_control;
+pub mod workflow;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]

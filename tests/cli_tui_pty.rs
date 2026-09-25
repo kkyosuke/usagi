@@ -20,9 +20,10 @@ use usagi_core::domain::settings::{ModalSelectionMode, Settings};
 use usagi_core::domain::terminal_launch::{
     TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
-use usagi_core::infrastructure::client::{
-    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, IpcClient,
-    SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+use usagi_core::infrastructure::client::{ClientPolicy, DaemonClient, IpcClient};
+use usagi_core::infrastructure::ipc::{
+    AgentLaunchIntent, DaemonReply, DaemonRequest, SessionAction, TerminalAction, TerminalGeometry,
+    TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::infrastructure::unix_transport::{
@@ -317,9 +318,11 @@ fn git(workspace: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-/// provider-native な会話 ID。Codex fixture は #504 の production structured capture
-/// （`SessionStart` フック）でこれを報告し、resume argv にそのまま現れる。画面へ出てはならない。
+/// provider-native な会話 ID。fixture は production の共通 `SessionStart`
+/// phase hook でこれを報告し、resume argv にそのまま現れる。画面へ出てはならない。
 const CODEX_LINEAGE: &str = "tui-codex-lineage";
+const CLAUDE_ROOT_LINEAGE: &str = "tui-claude-root-lineage";
+const CLAUDE_SESSION_LINEAGE: &str = "tui-claude-session-lineage";
 /// capture が申告する transcript / cwd。どちらも provider 由来の sensitive metadata で、
 /// 画面にも log にも出てはならない。
 const CODEX_TRANSCRIPT: &str = "/must/not/be/read.jsonl";
@@ -368,10 +371,10 @@ impl AgentFixtures {
 
     fn write(&self) {
         fs::create_dir_all(&self.bin).unwrap();
-        // resume 起動は `resume <provider session id>` を argv に持つ。initial 起動だけが
-        // production の structured capture を通す（resume で再 capture すると lineage が分岐する）。
+        // resume 起動は `resume <provider session id>` を argv に持つ。すべての
+        // SessionStart が同じ phase hook で現在の lineage を再確認する。
         let codex = format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{argv}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"{lineage}\",\"transcript_path\":\"{transcript}\",\"cwd\":\"{cwd}\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{usagi}\" codex-session-capture || exit 8\nfi\nprintf 'spawn\\n' >> \"{count}\"\nif [ \"$resuming\" = true ]; then printf 'codex-resumed-unique:%s\\n' \"$$\"; else printf 'codex-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'codex-input:%s\\n' \"$line\"; done\n",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s\\n' \"$*\" >> \"{argv}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nprintf '%s' '{{\"session_id\":\"{lineage}\",\"transcript_path\":\"{transcript}\",\"cwd\":\"{cwd}\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | \"{usagi}\" agent-phase ready || exit 8\nprintf 'spawn\\n' >> \"{count}\"\nif [ \"$resuming\" = true ]; then printf 'codex-resumed-unique:%s\\n' \"$$\"; else printf 'codex-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'codex-input:%s\\n' \"$line\"; done\n",
             argv = self.codex_argv.display(),
             lineage = CODEX_LINEAGE,
             transcript = CODEX_TRANSCRIPT,
@@ -380,12 +383,15 @@ impl AgentFixtures {
             count = self.codex_count.display(),
         );
         // 起動 argv も 1 spawn 1 行として記録し、live 配線（`--settings` / system prompt）と、
-        // Claude の daemon-issued ID（initial は `--session-id`、resume は同じ ID の `--resume`）を
-        // 観測する。argv 値に含まれる改行だけを観測ログ上の空白へ正規化する。
+        // hook で得た Claude ID が resume でだけ `--resume` に現れることを観測する。
+        // argv 値に含まれる改行だけを観測ログ上の空白へ正規化する。
         let claude = format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s' \"$*\" | tr '\\n' ' ' >> \"{argv}\"\nprintf '\\n' >> \"{argv}\"\nprintf 'spawn\\n' >> \"{count}\"\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = --resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = true ]; then printf 'claude-resumed-unique:%s\\n' \"$$\"; else printf 'claude-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\nprintf '%s' \"$*\" | tr '\\n' ' ' >> \"{argv}\"\nprintf '\\n' >> \"{argv}\"\nlineage='{root_lineage}'\ncase \"$*\" in *'セッション専用の worktree'*) lineage='{session_lineage}' ;; esac\nresuming=false\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --resume ]; then lineage=\"$argument\"; fi\n  if [ \"$argument\" = --resume ]; then resuming=true; fi\n  previous=\"$argument\"\ndone\nprintf '%s' \"{{\\\"session_id\\\":\\\"$lineage\\\",\\\"transcript_path\\\":\\\"/must/not/be/read-claude.jsonl\\\",\\\"cwd\\\":\\\"/must/not/be/shown-claude\\\",\\\"hook_event_name\\\":\\\"SessionStart\\\",\\\"source\\\":\\\"startup\\\",\\\"model\\\":\\\"fixture\\\"}}\" | \"{usagi}\" agent-phase ready || exit 8\nprintf 'spawn\\n' >> \"{count}\"\nif [ \"$resuming\" = true ]; then printf 'claude-resumed-unique:%s\\n' \"$$\"; else printf 'claude-ready-unique:%s\\n' \"$$\"; fi\nwhile IFS= read line; do printf 'claude-input:%s\\n' \"$line\"; done\n",
             argv = self.claude_argv.display(),
             count = self.claude_count.display(),
+            root_lineage = CLAUDE_ROOT_LINEAGE,
+            session_lineage = CLAUDE_SESSION_LINEAGE,
+            usagi = shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
         );
         for (name, script) in [("codex", codex), ("claude", claude)] {
             let path = self.bin.join(name);
@@ -1309,18 +1315,53 @@ fn assert_no_sensitive_output(output: &Arc<Mutex<Vec<u8>>>, baseline: usize, sec
     }
 }
 
-/// argv 1 行から Claude の daemon-issued provider session ID を取り出す。
-fn claude_session_id(argv: &str, flag: &str) -> String {
-    let mut arguments = argv.split_whitespace();
-    while let Some(argument) = arguments.next() {
-        if argument == flag {
-            return arguments
-                .next()
-                .expect("the Claude flag carries its provider session ID")
-                .to_owned();
-        }
-    }
-    panic!("{flag} was not present in {argv}");
+/// 出荷 binary が実端末へ出した mode 遷移を、生バイト列で確認する。
+///
+/// 入場・退場の対称性（alternate screen・cursor・mouse reporting）に加えて、
+/// **起動前の主画面を隠す**契約もここで押さえる。alternate screen だけでは隠せない:
+/// 端末は alternate screen 表示中も主画面を参照できるため、主画面そのものを空に
+/// してからでないと、スクロールで起動前のコマンドが見えてしまう。
+fn assert_terminal_modes_entered_and_restored(output: &str) {
+    assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1000h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1000l"), "PTY output: {output}");
+    assert!(
+        output.matches("\u{1b}[?1049h").count() >= 2,
+        "both entries must use the alternate screen: {output}"
+    );
+    assert!(
+        output.matches("\u{1b}[?1049l").count() >= 2,
+        "both exits must restore the primary screen: {output}"
+    );
+    // 入場時の主画面消去も `\e[2J` を出すため、renderer の全面再描画だけを数える。
+    // 入場側は必ず `\e[2J\e[3J` と続けて出るので、その分を差し引けば
+    // 「初回描画と resize 再描画」の 2 件という本来の下限が保てる。
+    let entry_clears = output.matches("\u{1b}[2J\u{1b}[3J").count();
+    let renderer_clears = output
+        .matches("\u{1b}[2J")
+        .count()
+        .saturating_sub(entry_clears);
+    assert!(
+        renderer_clears >= 2,
+        "the initial and resized surfaces must both be cleared: {output}"
+    );
+    assert!(
+        entry_clears >= 2,
+        "both entries must purge the primary scrollback: {output}"
+    );
+    let first_purge = output
+        .find("\u{1b}[3J")
+        .unwrap_or_else(|| panic!("the entry must purge the primary scrollback: {output}"));
+    let first_alternate_screen = output
+        .find("\u{1b}[?1049h")
+        .unwrap_or_else(|| panic!("the entry must use the alternate screen: {output}"));
+    assert!(
+        first_purge < first_alternate_screen,
+        "the primary scrollback must be purged before the alternate screen hides it: {output}"
+    );
 }
 
 #[test]
@@ -1421,24 +1462,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert!(output.contains("pty-workspace"), "PTY output: {output}");
     assert!(output.contains("+ new session"), "PTY output: {output}");
     assert!(!output.contains("workspace main"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1000h"), "PTY output: {output}");
-    assert!(output.contains("\u{1b}[?1000l"), "PTY output: {output}");
-    assert!(
-        output.matches("\u{1b}[?1049h").count() >= 2,
-        "both entries must use the alternate screen: {output}"
-    );
-    assert!(
-        output.matches("\u{1b}[?1049l").count() >= 2,
-        "both exits must restore the primary screen: {output}"
-    );
-    assert!(
-        output.matches("\u{1b}[2J").count() >= 2,
-        "the initial and resized surfaces must both be cleared: {output}"
-    );
+    assert_terminal_modes_entered_and_restored(&output);
 
     assert_eq!(attributes_reattached.c_iflag, attributes_before.c_iflag);
     assert_eq!(attributes_reattached.c_oflag, attributes_before.c_oflag);
@@ -3039,32 +3063,23 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     wait_for_file_lines(&fixtures.codex_count, 1);
     wait_for_file_lines(&fixtures.claude_count, 2);
 
-    // Claude's provider-native ID is daemon-issued at launch (`--session-id`) and
-    // an exact resume must reuse that same ID (`--resume`). `guard-workspace` is
-    // wired only for a managed session, so the two argv lines map to their scopes.
+    // Claude's provider-native ID comes from SessionStart and therefore does not
+    // enter initial argv. An exact resume later reuses that ID with `--resume`.
     let launch_argv = fixtures.claude_launch_argv();
     assert_eq!(launch_argv.len(), 2, "{launch_argv:?}");
-    let root_claude_id = claude_session_id(
+    assert!(
         launch_argv
             .iter()
-            .find(|argv| argv.contains("root ディレクトリ（統括環境）"))
-            .expect("the root Claude launch is recorded"),
-        "--session-id",
+            .all(|argv| !argv.contains("--session-id"))
     );
-    let session_claude_id = claude_session_id(
-        launch_argv
-            .iter()
-            .find(|argv| argv.contains("セッション専用の worktree"))
-            .expect("the managed-session Claude launch is recorded"),
-        "--session-id",
-    );
-    assert_ne!(root_claude_id, session_claude_id);
+    let root_claude_id = CLAUDE_ROOT_LINEAGE;
+    let session_claude_id = CLAUDE_SESSION_LINEAGE;
     let secrets = [
         CODEX_LINEAGE,
         CODEX_TRANSCRIPT,
         CODEX_CAPTURED_CWD,
-        root_claude_id.as_str(),
-        session_claude_id.as_str(),
+        root_claude_id,
+        session_claude_id,
         "--session-id",
         "--resume",
         "hook_event_name",

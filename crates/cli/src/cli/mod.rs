@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use usagi_core::infrastructure::client::{DaemonRequest, SessionAction};
+use usagi_core::infrastructure::ipc::{DaemonRequest, SessionAction};
 use usagi_core::usecase::claude_sandbox::SandboxMode;
 
 /// 配布 binary に同梱され、その build identity に束縛された self-update installer。
@@ -112,15 +112,20 @@ pub enum RunOutcome {
     ReportAgentPhase {
         /// フックが引数で渡した phase token（closed vocabulary は core が持つ）。
         phase: String,
+        /// provider payload が event 名を含まない場合に、配線側が固定する event。
+        hook_event: Option<String>,
     },
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
     GuardWorkspace,
-    /// OS sandbox の中で Claude を fail-closed 起動する。合成ルートが platform / backend /
+    /// OS sandbox の中で Agent CLI を fail-closed 起動する。合成ルートが platform / backend /
     /// 環境を解決して sandbox を組み立て、backend 不在・未対応 platform では起動を拒否する。
     ClaudeSandbox {
         /// session（worktree 隔離）か root（コーディネータ）か。
         mode: SandboxMode,
+        /// 起動する agent provider の selector。同じ executable を複数 provider が
+        /// 共有するため、`$HOME` 配下の state grant は program 名ではなくこれで決まる。
+        agent: Option<String>,
         /// session workspace の保護対象 root。
         protected_root: Option<PathBuf>,
         /// daemon bootstrap が確定した canonical sandbox backend。
@@ -133,7 +138,9 @@ pub enum RunOutcome {
         cache_dir: Option<PathBuf>,
         /// sandbox が書き込みを許す起動固有 root（複数指定可）。
         writable_roots: Vec<PathBuf>,
-        /// sandbox の中で exec する program と引数（`claude …`）。
+        /// writable root 内を再度読み取り専用にする carve-out（複数指定可）。
+        read_only_roots: Vec<PathBuf>,
+        /// sandbox の中で exec する program と引数。
         command: Vec<String>,
     },
     /// A managed session mutation to be sent by the composition root through
@@ -245,6 +252,9 @@ pub enum Command {
     AgentPhase {
         /// フックが報告する phase（例: `ended`）
         phase: String,
+        /// payload が event 名を含まない provider 用の配線時 event。
+        #[arg(long)]
+        hook_event: Option<String>,
     },
     /// （ヘルプ非表示・内部）Codex `SessionStart` の session ID を daemon へ渡す。
     #[command(hide = true)]
@@ -252,12 +262,15 @@ pub enum Command {
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
-    /// （ヘルプ非表示・内部）OS sandbox の中で Claude を fail-closed 起動する
+    /// （ヘルプ非表示・内部）OS sandbox の中で Agent CLI を fail-closed 起動する
     #[command(hide = true)]
     ClaudeSandbox {
         /// 起動モード（session / root）
         #[arg(long)]
         mode: SandboxModeArg,
+        /// 起動する agent provider の selector（state grant の決定に使う）
+        #[arg(long)]
+        agent: Option<String>,
         /// session workspace の保護対象 root
         #[arg(long)]
         protected_root: Option<PathBuf>,
@@ -276,7 +289,10 @@ pub enum Command {
         /// sandbox が書き込みを許す起動固有 root（複数指定可）
         #[arg(long = "writable-root")]
         writable_root: Vec<PathBuf>,
-        /// sandbox の中で exec する program と引数（`-- claude …`）
+        /// writable root 内を再度読み取り専用にする carve-out（複数指定可）
+        #[arg(long = "read-only-root")]
+        read_only_root: Vec<PathBuf>,
+        /// sandbox の中で exec する program と引数（`-- <program> …`）
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -436,26 +452,32 @@ impl Command {
             Command::Mcp => Box::new(McpEntry),
             Command::Session { command } => Box::new(Session { command }),
             // エージェント統合フックは commands/ ではなく hooks/ に置く。
-            Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
+            Command::AgentPhase { phase, hook_event } => {
+                Box::new(hooks::AgentPhase { phase, hook_event })
+            }
             Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
             Command::ClaudeSandbox {
                 mode,
+                agent,
                 protected_root,
                 backend,
                 tmpdir,
                 home,
                 cache_dir,
                 writable_root,
+                read_only_root,
                 command,
             } => Box::new(hooks::ClaudeSandbox {
                 mode: mode.into(),
+                agent,
                 protected_root,
                 backend,
                 tmpdir,
                 home,
                 cache_dir,
                 writable_roots: writable_root,
+                read_only_roots: read_only_root,
                 command,
             }),
         }
@@ -609,7 +631,7 @@ pub fn run(
     err: &mut dyn Write,
 ) -> io::Result<RunOutcome> {
     let command = Cli::command().version(version.to_owned());
-    let matches = match command.clone().try_get_matches_from(args) {
+    let matches = match command.try_get_matches_from(args) {
         Ok(matches) => matches,
         Err(e) => {
             // clap の --help / --version は stdout、使い方エラーは stderr に出す慣習に従う。
@@ -735,7 +757,22 @@ mod tests {
         let cli = Cli::try_parse_from(["usagi", "agent-phase", "ended"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::AgentPhase { phase }) if phase == "ended"
+            Some(Command::AgentPhase { phase, hook_event: None }) if phase == "ended"
+        ));
+        let cli = Cli::try_parse_from([
+            "usagi",
+            "agent-phase",
+            "running",
+            "--hook-event",
+            "PreInvocation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::AgentPhase {
+                phase,
+                hook_event: Some(event),
+            }) if phase == "running" && event == "PreInvocation"
         ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "codex-session-capture"])
@@ -976,29 +1013,29 @@ mod tests {
         for (argv, action) in [
             (
                 ["usagi", "session", "create", "a"].as_slice(),
-                usagi_core::infrastructure::client::SessionAction::Create,
+                usagi_core::infrastructure::ipc::SessionAction::Create,
             ),
             (
                 ["usagi", "session", "remove", "a"].as_slice(),
-                usagi_core::infrastructure::client::SessionAction::Remove,
+                usagi_core::infrastructure::ipc::SessionAction::Remove,
             ),
             (
                 ["usagi", "session", "sleep", "a"].as_slice(),
-                usagi_core::infrastructure::client::SessionAction::Sleep,
+                usagi_core::infrastructure::ipc::SessionAction::Sleep,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
-                usagi_core::infrastructure::client::SessionAction::Setup,
+                usagi_core::infrastructure::ipc::SessionAction::Setup,
             ),
             (
                 ["usagi", "session", "prompt", "a", "hi"].as_slice(),
-                usagi_core::infrastructure::client::SessionAction::Prompt,
+                usagi_core::infrastructure::ipc::SessionAction::Prompt,
             ),
         ] {
             let parsed = Cli::try_parse_from(argv).unwrap().command.unwrap();
             let (request, _) = super::execute(parsed);
             assert!(
-                matches!(request, RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session { action: actual, .. }) if actual == action)
+                matches!(request, RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::Session { action: actual, .. }) if actual == action)
             );
         }
         assert!(matches!(
@@ -1026,7 +1063,7 @@ mod tests {
         });
         assert!(matches!(
             exact,
-            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::ResumeAgent { target: actual, .. })
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::ResumeAgent { target: actual, .. })
                 if actual == target
         ));
         let (inventory, _) = super::execute(Command::Session {
@@ -1036,7 +1073,7 @@ mod tests {
         });
         assert!(matches!(
             inventory,
-            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::AgentInventory { workspace, .. })
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::AgentInventory { workspace, .. })
                 if workspace == target.workspace_id
         ));
 
@@ -1071,8 +1108,8 @@ mod tests {
         let (outcome, _) = super::execute(parsed);
         assert!(matches!(
             outcome,
-            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session {
-                action: usagi_core::infrastructure::client::SessionAction::Create,
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::Session {
+                action: usagi_core::infrastructure::ipc::SessionAction::Create,
                 payload,
                 ..
             }) if payload == serde_json::json!({"name":"review-auth", "role":"reviewer"})
@@ -1092,8 +1129,8 @@ mod tests {
         let (outcome, _) = super::execute(parsed);
         assert!(matches!(
             outcome,
-            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session {
-                action: usagi_core::infrastructure::client::SessionAction::Create,
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::Session {
+                action: usagi_core::infrastructure::ipc::SessionAction::Create,
                 payload,
                 ..
             }) if payload == serde_json::json!({
@@ -1121,8 +1158,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            RunOutcome::DaemonRequest(usagi_core::infrastructure::client::DaemonRequest::Session {
-                action: usagi_core::infrastructure::client::SessionAction::Remove,
+            RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::Session {
+                action: usagi_core::infrastructure::ipc::SessionAction::Remove,
                 payload,
                 ..
             }) if payload == serde_json::json!({
