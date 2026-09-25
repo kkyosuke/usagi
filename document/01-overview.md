@@ -60,6 +60,19 @@ shell を同じ pane model で起動できる。画面、キー操作、設定 U
 `usagi mcp` と Agent integration 用 hook command は配布バイナリに含まれるが、人間向け help には表示しない。
 MCP の起動、公開 tool、認証、daemon への反映経路は [7. MCP サーバ](07-mcp.md) が正本である。
 
+### 孤立資源の削除
+
+CLI の `usagi clean` はカレントディレクトリに限らず、data home の登録・lifecycle と Git の状態を照合する。
+`--apply` は安全な候補を削除し、dirty worktree や未マージ branch などの保護対象は `--force` の併用時だけ削除する。
+Git resource の workspace fence を取得できる場合は CLI が直接削除し、稼働中 daemon が保持している場合は
+その daemon へ選択済みの resource だけを依頼する。daemon の停止やロックの無視は行わない。
+接続先が対象を限定する cleanup に対応していなければ、読み取り確認の段階で拒否して daemon の更新・再起動を案内する。
+
+削除対象外の worktree で checkout されている branch は候補に含めない。これには別の場所にある session の
+submodule worktree も含まれる。対象 worktree と branch はこの順に処理し、worktree が残っていれば Git が branch
+削除を拒否する。daemon は削除直前にも lifecycle を再照合し、登録中 session を保護する。
+TUI の cleanup と自動回収は [3. TUI](03-tui.md) を参照する。
+
 ### daemon command
 
 | コマンド | 動作 |

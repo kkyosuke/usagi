@@ -3184,7 +3184,7 @@ impl OrphanCleanupPass for AutomaticOrphanCleanup {
                 tenant,
                 workspaces: Arc::clone(&self.workspaces),
             };
-            if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
+            if let Err(error) = clean_orphan_session_resources(&bound, None, true, false, None) {
                 ErrorLog::record(&format!(
                     "automatic orphan cleanup deferred for {}: {}",
                     root.display(),
@@ -10100,7 +10100,7 @@ fn client_result<T>(result: anyhow::Result<T>) -> Result<T, ClientError> {
 /// `RolloverRequired` before it could send the request that performs the
 /// rollover.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
-fn existing_policy_client(
+pub(crate) fn existing_policy_client(
     policy: ClientPolicy,
     workspace: ClientWorkspace,
 ) -> Result<impl DaemonClient, ClientError> {
@@ -18261,7 +18261,7 @@ instructions = "{instructions}"
         );
 
         for apply in [false, true] {
-            let result = clean_orphan_session_resources(&bound, None, apply, false).unwrap();
+            let result = clean_orphan_session_resources(&bound, None, apply, false, None).unwrap();
             assert!(result["candidates"].as_array().unwrap().is_empty());
             assert_eq!(result["removed"], 0);
             assert_eq!(result["protected"], 0);

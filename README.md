@@ -80,6 +80,9 @@ Session Garden では庭と右側の session 一覧から作業状況を確認�
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 
+不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
+[孤立資源の削除](document/01-overview.md#孤立資源の削除)を参照してください。
+
 ## 基本概念
 
 | 用語 | 意味 |

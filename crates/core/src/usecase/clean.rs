@@ -115,6 +115,27 @@ pub struct CleanInventory {
     pub claims: Vec<ObservedCapacityClaim>,
 }
 
+/// Exact Git resource selected by a cleanup caller within its bound workspace.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CleanTarget {
+    Worktree { path: PathBuf },
+    Branch { name: String },
+}
+
+impl CleanTarget {
+    #[must_use]
+    pub fn matches(&self, candidate: &CleanCandidate) -> bool {
+        match (self, candidate) {
+            (Self::Worktree { path }, CleanCandidate::Worktree { path: found, .. }) => {
+                path == found
+            }
+            (Self::Branch { name }, CleanCandidate::Branch { name: found, .. }) => name == found,
+            _ => false,
+        }
+    }
+}
+
 /// A provably unlinked resource. Ordering is significant: worktrees precede
 /// their branches, and registry entries precede state data only for rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,16 +300,42 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
             let Some(name) = branch.name.strip_prefix("usagi/") else {
                 continue;
             };
-            if !sessions.contains(name) {
-                candidates.push(CleanCandidate::Branch {
-                    root: repository.root.clone(),
-                    name: branch.name.clone(),
-                    requires_force: !branch.merged || unproven,
-                });
+            if !sessions.contains(name)
+                && let Some(candidate) = branch_candidate(repository, branch, &candidates, unproven)
+            {
+                candidates.push(candidate);
             }
         }
     }
     candidates
+}
+
+fn branch_candidate(
+    repository: &RepositoryInventory,
+    branch: &ObservedBranch,
+    candidates: &[CleanCandidate],
+    unproven: bool,
+) -> Option<CleanCandidate> {
+    let mut requires_force = !branch.merged || unproven;
+    for owner in repository
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree.branch.as_deref() == Some(branch.name.as_str()))
+    {
+        if !candidates.iter().any(|candidate| {
+            matches!(candidate,
+            CleanCandidate::Worktree { root, path, .. }
+            if root == &repository.root && path == &owner.path)
+        }) {
+            return None;
+        }
+        requires_force |= owner.dirty;
+    }
+    Some(CleanCandidate::Branch {
+        root: repository.root.clone(),
+        name: branch.name.clone(),
+        requires_force,
+    })
 }
 
 /// Whether a helper process is residue this plan may end.
@@ -326,6 +373,7 @@ fn managed_worktree_name<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::CleanTarget;
     use super::*;
     use crate::infrastructure::git::observe_repository;
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
@@ -390,6 +438,16 @@ mod tests {
             Some(RepositoryInventory {
                 root: "/repo".into(),
                 worktrees: vec![
+                    ObservedWorktree {
+                        path: "/repo".into(),
+                        dirty: true,
+                        branch: Some("main".into()),
+                    },
+                    ObservedWorktree {
+                        path: "/elsewhere".into(),
+                        dirty: true,
+                        branch: Some("usagi/elsewhere".into()),
+                    },
                     ObservedWorktree {
                         path: "/repo/.usagi/sessions/clean".into(),
                         dirty: false,
@@ -792,6 +850,52 @@ mod tests {
                 requires_force: true
             }]
         );
+    }
+
+    #[test]
+    fn preserves_branches_checked_out_outside_removable_worktrees() {
+        let mut inventory = CleanInventory {
+            daemon_data: vec![DaemonWorkspaceData {
+                root: "/repo".into(),
+                dir: "/data".into(),
+                root_exists: true,
+                sessions: Some(BTreeSet::from(["active".into()])),
+            }],
+            repositories: vec![RepositoryInventory {
+                root: "/repo".into(),
+                worktrees: vec![ObservedWorktree {
+                    path: "/parent/.usagi/sessions/remove/submodule".into(),
+                    branch: Some("usagi/remove".into()),
+                    dirty: false,
+                }],
+                branches: vec![ObservedBranch {
+                    name: "usagi/remove".into(),
+                    merged: true,
+                }],
+            }],
+            ..CleanInventory::default()
+        };
+        assert!(plan(&inventory).is_empty());
+        inventory.repositories[0].worktrees[0].path = "/repo/.usagi/sessions/active".into();
+        assert!(
+            plan(&inventory).is_empty(),
+            "active checkout with a different branch name is protected"
+        );
+        inventory.repositories[0].worktrees[0].path = "/repo/.usagi/sessions/remove".into();
+        inventory.repositories[0].worktrees[0].dirty = true;
+        let candidates = plan(&inventory);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(CleanCandidate::requires_force));
+        let worktree = CleanTarget::Worktree {
+            path: "/repo/.usagi/sessions/remove".into(),
+        };
+        let branch = CleanTarget::Branch {
+            name: "usagi/remove".into(),
+        };
+        assert!(worktree.matches(&candidates[0]));
+        assert!(!worktree.matches(&candidates[1]));
+        assert!(branch.matches(&candidates[1]));
+        assert!(!branch.matches(&candidates[0]));
     }
 
     #[test]

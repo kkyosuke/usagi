@@ -1,10 +1,10 @@
 {
   "version": 1,
-  "total": 523,
+  "total": 524,
   "owners": {
     "core": 9,
     "daemon": 366,
-    "root-cli": 40,
+    "root-cli": 41,
     "tui": 108
   },
   "paths": {
@@ -49,7 +49,7 @@
     "src/runtime/agent_tab_intent.rs": 1,
     "src/runtime/bootstrap.rs": 3,
     "src/runtime/cli.rs": 10,
-    "src/runtime/clean.rs": 18,
+    "src/runtime/clean.rs": 19,
     "src/runtime/clipboard.rs": 1,
     "src/runtime/daemon.rs": 203,
     "src/runtime/daemon/agent_provisioning.rs": 25,
