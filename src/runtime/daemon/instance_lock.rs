@@ -14,7 +14,7 @@ use super::{
     BuildRolloverTrigger, CUSTODY_TICK, CliDaemonCommand, ClientError, ClientPolicy,
     ClientWorkspace, ConnectionCleanup, ConnectionId, Custody, CustodyProbe,
     DaemonProcessObservation, DaemonRecord, Duration, ErrorLog, FileExt, FsRecordFile,
-    GenerationRole, InstanceLock, Instant, LivenessProbe, NodeIdentity, Path, PathBuf,
+    GenerationRole, InstanceLock, Instant, LivenessProbe, Mutex, NodeIdentity, Path, PathBuf,
     ProcessIdentitySource, RefCell, ShutdownRequest, SystemClock, WORKSPACE_ADOPTION_PATIENCE,
     WorkspaceFence, WorkspaceFenceFactory, WorkspaceFenceOutcome, Write, build_artifact_decision,
     build_rollover_trigger, connect_client, current_build, deadline_transport, ensure_private_dir,
@@ -501,7 +501,31 @@ pub(super) struct FileWorkspaceFence {
     /// for the previous daemon to exit; an adoption happens inside a client's
     /// handshake, which has its own deadline, so it refuses quickly instead.
     pub(super) patience: Duration,
-    pub(super) held: RefCell<Option<std::fs::File>>,
+    /// The locked descriptor, or `None` before acquisition and after release.
+    ///
+    /// A `Mutex` rather than a `RefCell` because the startup fence outlives the
+    /// thread that took it: the tenant sweep is what gives that workspace back
+    /// once this generation has handed off ([`FileWorkspaceFence::release`]),
+    /// and it runs on its own thread.
+    pub(super) held: Mutex<Option<std::fs::File>>,
+}
+
+impl FileWorkspaceFence {
+    /// Give the workspace back by dropping the locked descriptor.
+    ///
+    /// `flock` is released with the last descriptor naming the node, so this is
+    /// the whole of it. The owner pid line stays behind as the fence node's
+    /// contents; the next owner truncates and rewrites it when it acquires.
+    ///
+    /// Returns whether this call was the one that released it, so a repeated
+    /// sweep neither re-reports nor fails.
+    pub(super) fn release(&self) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_some()
+    }
 }
 
 /// Startup's singleton guard. Distinct nodes use the ordinary data-home lock;
@@ -546,12 +570,28 @@ pub(super) fn lock_paths_alias(left: &Path, right: &Path) -> bool {
     }
 }
 
+impl ProcessInstanceLock<'_> {
+    /// Whether the singleton guard is this process's workspace fence under
+    /// another spelling.
+    ///
+    /// One held descriptor then supplies both invariants, so releasing the
+    /// fence would release the single-instance guard with it and let a second
+    /// daemon start on this data directory. Such a fence is never given back
+    /// while the process lives, whatever this generation's authority is.
+    pub(super) const fn aliases_workspace_fence(&self) -> bool {
+        matches!(self, Self::WorkspaceAlias { .. })
+    }
+}
+
 impl InstanceLockCustody for ProcessInstanceLock<'_> {
     fn locked_inode(&self) -> Option<NodeIdentity> {
         match self {
             Self::Independent(lock) => lock.locked_inode(),
             Self::WorkspaceAlias { workspace, .. } => {
-                let held = workspace.held.borrow();
+                let held = workspace
+                    .held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let metadata = held.as_ref()?.metadata().ok()?;
                 Some(node_identity(&metadata))
             }
@@ -564,7 +604,10 @@ impl InstanceLock for ProcessInstanceLock<'_> {
         match self {
             Self::Independent(lock) => lock.acquire(),
             Self::WorkspaceAlias { path, workspace } => {
-                let held = workspace.held.borrow();
+                let held = workspace
+                    .held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let file = held.as_ref().ok_or_else(|| {
                     std::io::Error::other(
                         "daemon workspace fence must be acquired before its aliased instance lock",
@@ -595,7 +638,7 @@ impl WorkspaceFenceFactory for FileWorkspaceFences {
             workspace: workspace_root.to_path_buf(),
             pid: self.pid,
             patience: WORKSPACE_ADOPTION_PATIENCE,
-            held: RefCell::new(None),
+            held: Mutex::new(None),
         })
     }
 }
@@ -624,7 +667,10 @@ impl WorkspaceFence for FileWorkspaceFence {
                     // refused start could read the previous owner's line is only
                     // as long as this write.
                     write_owner_hint(&file, self.pid)?;
-                    *self.held.borrow_mut() = Some(file);
+                    *self
+                        .held
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(file);
                     return Ok(WorkspaceFenceOutcome::Acquired);
                 }
                 Err(_) if Instant::now() < deadline => std::thread::sleep(POLL),

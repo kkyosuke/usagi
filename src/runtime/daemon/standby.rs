@@ -1097,6 +1097,9 @@ pub(super) fn promote_standby_generation(
         record,
         None,
         RuntimeHydration::AgentResumeHistory,
+        // A standby holds neither the workspace fence nor the instance lock, so
+        // a generation promoted from one has no startup fence to give back.
+        None,
         Arc::clone(&shutdown.process),
     )?;
     *worker

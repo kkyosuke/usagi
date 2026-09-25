@@ -406,6 +406,30 @@ impl AdmissionGate {
         self.state().barred = false;
     }
 
+    /// Whether this generation has durably stopped being the authority.
+    ///
+    /// The role alone does not answer this. [`Self::enter_draining`] closes the
+    /// barrier *before* the registry and locator commit, and
+    /// [`Self::abort_draining`] reopens it for every handoff that never
+    /// committed, so a `draining` gate may still become `active` again. Only a
+    /// barrier that [`Self::confirm_draining`] made permanent — or a `retired`
+    /// generation, which has already given its runtime up — has actually handed
+    /// authority on.
+    ///
+    /// This is the question anything that gives a *durable* resource away has
+    /// to ask, rather than the role: releasing a workspace fence during the
+    /// pre-commit barrier would leave a generation that returns to `active`
+    /// without the workspace it was started in.
+    #[must_use]
+    pub fn handed_off(&self) -> bool {
+        let state = self.state();
+        match state.role {
+            GenerationRole::Draining => !state.barred,
+            GenerationRole::Retired => true,
+            GenerationRole::Active | GenerationRole::Standby => false,
+        }
+    }
+
     /// Move to `retired` once owner-terminal work is closed and drained. The
     /// caller reclaims the endpoint and the process only after this returns.
     ///

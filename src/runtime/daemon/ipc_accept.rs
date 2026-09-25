@@ -20,28 +20,29 @@ use super::{
     DaemonLauncher, DaemonPty, DaemonReady, DaemonRecord, DaemonRecordPort, DaemonRecordStore,
     DaemonRequest, DaemonWorkspaceActivity, DeadlineConnection, DeadlineUnixStream, DispatchStore,
     DispatchToolContext, Duration, ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS, EndpointCleanup,
-    EndpointLocator, ErrorCode, ErrorLog, FencedPrInventory, FileInstanceLock, FileWorkspaceFences,
-    FsCustodyProbe, FsRecordFile, GenerationFence, GenerationRegistry, GenerationRegistryFile,
-    GenerationRole, GenericTerminalRuntime, IdentityAuthority, InstanceLockCustody, Instant,
-    LaunchedStandby, MetricsBroker, MonotonicClock, Mutex, OpCli, Ordering, OutputPrProjector,
-    PRE_HANDSHAKE_CONNECTION_LIMIT, PRE_HANDSHAKE_DEADLINE, Path, PathBuf, PeerProcess,
-    PrInventoryStore, PrProjectionQueue, PreHandshakeAdmission, ProcessIdentity,
-    ProcessObservation, ProcessResourceSampler, PtyObservation, Read, Receiver, RefCell,
-    RegistryDocument, ResponseOutcome, RoutingLedger, RuntimeHydration, SeamlessRefusal,
-    SecureUnixListener, SessionDispatchContext, SharedAgent, SharedAgentRuntime, SharedAgentState,
-    SharedMetricsBroker, SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime,
-    SharedSupervisorRuntime, SharedTerminal, SharedTerminalOwner, SharedTerminalRuntime,
-    SharedVerificationCache, ShutdownOnIpcWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe,
-    ShutdownRequest, SpawnedChildren, StaleCleanup, StaleDaemonCleanup, SupervisorRuntime,
-    SystemClock, SystemTenantOpener, TeardownSignal, TenantRegistry, TenantWorkspaces,
-    TerminalPipelineMetrics, TerminalScopeResolver, TerminalStore, TrustedLoginShell,
-    UnixChildProbe, UserDecisionStore, UserEnvironment, WORKFLOW_LANE_TICK, Workspaces, Write,
-    authenticated_supervisor_caller, bind_ipc_listener, bootstrap_broker_address,
-    client_connection_capacity_available, client_connection_limit, connection_cleanup_channel,
-    connection_workspace, current_build, current_daemon_is_reachable, daemon_request_surface,
-    dispatch_agent, dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
-    dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
-    dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
+    EndpointLocator, ErrorCode, ErrorLog, FencedPrInventory, FileInstanceLock, FileWorkspaceFence,
+    FileWorkspaceFences, FsCustodyProbe, FsRecordFile, GenerationFence, GenerationRegistry,
+    GenerationRegistryFile, GenerationRole, GenericTerminalRuntime, IdentityAuthority,
+    InitialWorkspaceFence, InstanceLockCustody, Instant, LaunchedStandby, MetricsBroker,
+    MonotonicClock, Mutex, OpCli, Ordering, OutputPrProjector, PRE_HANDSHAKE_CONNECTION_LIMIT,
+    PRE_HANDSHAKE_DEADLINE, Path, PathBuf, PeerProcess, PrInventoryStore, PrProjectionQueue,
+    PreHandshakeAdmission, ProcessIdentity, ProcessObservation, ProcessResourceSampler,
+    PtyObservation, Read, Receiver, RefCell, RegistryDocument, ResponseOutcome, RoutingLedger,
+    RuntimeHydration, SeamlessRefusal, SecureUnixListener, SessionDispatchContext, SharedAgent,
+    SharedAgentRuntime, SharedAgentState, SharedMetricsBroker, SharedPrInventory,
+    SharedProcessResourceSampler, SharedSessionRuntime, SharedSupervisorRuntime, SharedTerminal,
+    SharedTerminalOwner, SharedTerminalRuntime, SharedVerificationCache, ShutdownOnIpcWorkerExit,
+    ShutdownOnWorkerPanic, ShutdownPipe, ShutdownRequest, SpawnedChildren, StaleCleanup,
+    StaleDaemonCleanup, SupervisorRuntime, SystemClock, SystemTenantOpener, TeardownSignal,
+    TenantRegistry, TenantWorkspaces, TerminalPipelineMetrics, TerminalScopeResolver,
+    TerminalStore, TrustedLoginShell, UnixChildProbe, UserDecisionStore, UserEnvironment,
+    WORKFLOW_LANE_TICK, Workspaces, Write, authenticated_supervisor_caller, bind_ipc_listener,
+    bootstrap_broker_address, client_connection_capacity_available, client_connection_limit,
+    connection_cleanup_channel, connection_workspace, current_build, current_daemon_is_reachable,
+    daemon_request_surface, dispatch_agent, dispatch_agent_phase_report,
+    dispatch_codex_session_capture, dispatch_dispatch, dispatch_dispatch_tool,
+    dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot, dispatch_rollover,
+    dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
     dispatch_supervisor_tool, dispatch_user_decision, draining_collection, ensure_private_dir,
     ensure_private_dir_all, envelope, expected_client_disconnect, handle_bootstrap_broker_request,
     is_same_child, launch_broker_daemon, live_generation_endpoints, new_terminal_runtime,
@@ -153,6 +154,10 @@ pub(super) fn spawn_ipc_server(
     daemon_process: DaemonRecord,
     custody: Option<FsCustodyProbe>,
     hydration: RuntimeHydration,
+    // The fence `serve` took for `workspace_root`, when this process holds one it
+    // may give back. A promoted standby holds no workspace fence at all, and an
+    // aliased singleton guard shares the descriptor, so both pass `None`.
+    initial_fence: Option<Arc<FileWorkspaceFence>>,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<SecureUnixListener>> {
     let owner = daemon_process.clone();
@@ -174,6 +179,13 @@ pub(super) fn spawn_ipc_server(
     ));
     let initial = tenants.adopt_initial(workspace_root)?;
     let runtime = initial.runtime().clone();
+    // This generation's authority over the connections it serves. It is created
+    // in the `active` role, which is the role `serve` binds and the registry
+    // claim confirms: the gate opens both lease classes, so nothing this build
+    // dispatched before is refused, and the leases it now issues are what a
+    // handoff barrier gets to wait on (#559). The handshake reads it too: only a
+    // generation that has not handed off may open a workspace.
+    let gate = AdmissionGate::new(daemon_generation, GenerationRole::Active);
     // Daemon-wide components (the PTY registry, the Agent runtime and its
     // provisioners) resolve the workspace each request names through this port,
     // rather than capturing the workspace this process started in.
@@ -181,6 +193,7 @@ pub(super) fn spawn_ipc_server(
         tenants: Arc::clone(&tenants),
         daemon_dir: data_dir.join("daemon"),
         initial: initial.root().to_path_buf(),
+        gate: gate.clone(),
     });
     let workspaces: Workspaces = tenants.clone();
     // The inventory is a whole-snapshot document, so exactly one generation may
@@ -190,13 +203,8 @@ pub(super) fn spawn_ipc_server(
         PrInventoryStore::new(data_dir.join("daemon")),
         GenerationRole::Active,
     ))));
-    // This generation's authority over the connections it serves. It is created
-    // in the `active` role, which is the role `serve` binds and the registry
-    // claim confirms: the gate opens both lease classes, so nothing this build
-    // dispatched before is refused, and the leases it now issues are what a
-    // handoff barrier gets to wait on (#559).
     let fence = Arc::new(GenerationFence {
-        gate: AdmissionGate::new(daemon_generation, GenerationRole::Active),
+        gate,
         ledger: Arc::new(RoutingLedger::new()),
     });
     // Every client worker this generation must unblock and join before it may be
@@ -389,6 +397,11 @@ pub(super) fn spawn_ipc_server(
             agent: Arc::clone(&agent),
             supervisor: Arc::clone(&supervisor),
         },
+        initial_fence.map(|fence| InitialWorkspaceFence {
+            root: initial.root().to_path_buf(),
+            fence,
+        }),
+        fence.gate.clone(),
         Arc::clone(&shutdown),
     )?);
     // Before any client can observe them: roll back the sessions a delegation
@@ -1116,6 +1129,10 @@ pub(super) struct IpcReady<'a> {
     /// inode from it so the custody supervisor can prove, on every tick, that
     /// this process is still the singleton for `data_dir`.
     pub(super) instance_lock: &'a dyn InstanceLockCustody,
+    /// The startup workspace's fence, when it is this workspace's to give back.
+    /// `None` when the singleton instance lock aliases the same descriptor, in
+    /// which case releasing it would drop the single-instance guard too.
+    pub(super) initial_fence: Option<Arc<FileWorkspaceFence>>,
     pub(super) build: BuildIdentity,
     pub(super) shutdown: Arc<ShutdownRequest>,
     pub(super) published: AtomicBool,
@@ -1132,11 +1149,13 @@ impl<'a> IpcReady<'a> {
         data_dir: &'a Path,
         workspace_root: &'a Path,
         instance_lock: &'a dyn InstanceLockCustody,
+        initial_fence: Option<Arc<FileWorkspaceFence>>,
     ) -> Self {
         Self {
             data_dir,
             workspace_root,
             instance_lock,
+            initial_fence,
             // The daemon advertises the exact artifact it started as for its
             // whole process lifetime. Atomic replacement of the executable path
             // cannot mutate this startup snapshot.
@@ -1278,6 +1297,7 @@ impl DaemonReady for IpcReady<'_> {
                 process,
                 Some(custody),
                 RuntimeHydration::All,
+                self.initial_fence.clone(),
                 Arc::clone(&self.shutdown),
             )
         })?;

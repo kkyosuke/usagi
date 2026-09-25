@@ -9,17 +9,17 @@ use super::{
     AGENT_READINESS_TERMINATE_GRACE, AcceptedStream, AdmissionGate, AgentPtyObservation,
     AgentReadinessCommand, Arc, BTreeMap, BTreeSet, BackgroundWorker, ClientWorkers, Collection,
     Condvar, ConnectionId, ConnectionWorkspace, DRAINING_COLLECTION_TICK, DaemonRecord,
-    DefaultModel, Duration, ErrorLog, FileWorkspaceFences, GenerationRegistry, GenerationRole,
-    GhProcessPort, MonotonicClock, Mutex, OwnedFd, PR_REFRESH_FRESHNESS_MS, PR_REFRESH_PER_TICK,
-    PathBuf, PendingTeardown, PrProjection, PrProjectionQueue, PtyObservation, RETENTION_GC_TICK,
-    Receiver, RefCell, RefreshWorker, SESSION_TEARDOWN_TICK, ShardedRuntimeState,
-    SharedAgentRuntime, SharedPrInventory, SharedSessionRuntime, SharedSessionTeardown,
-    SharedTerminalRuntime, SharedUserEnvironment, ShutdownRequest, ShutdownSignal, SyncSender,
-    SystemGit, SystemSessionWorktreeIo, SystemTenantOpener, TeardownEffect, TeardownJournal,
-    TeardownSignal, TenantRegistry, Terminator, Workspaces, WorktreeTeardown, active_cleanup_lease,
-    bounded_readiness_command, clean_orphan_session_resources, collect_if_drained,
-    drain_pending_teardowns, known_sessions, shipping_retention_limits, signal_exact_process,
-    start_connection_cleanup_worker_with,
+    DefaultModel, Duration, ErrorLog, FileWorkspaceFence, FileWorkspaceFences, GenerationRegistry,
+    GenerationRole, GhProcessPort, MonotonicClock, Mutex, OwnedFd, PR_REFRESH_FRESHNESS_MS,
+    PR_REFRESH_PER_TICK, PathBuf, PendingTeardown, PrProjection, PrProjectionQueue, PtyObservation,
+    RETENTION_GC_TICK, Receiver, RefCell, RefreshWorker, SESSION_TEARDOWN_TICK,
+    ShardedRuntimeState, SharedAgentRuntime, SharedPrInventory, SharedSessionRuntime,
+    SharedSessionTeardown, SharedTerminalRuntime, SharedUserEnvironment, ShutdownRequest,
+    ShutdownSignal, SyncSender, SystemGit, SystemSessionWorktreeIo, SystemTenantOpener,
+    TeardownEffect, TeardownJournal, TeardownSignal, TenantRegistry, Terminator, Workspaces,
+    WorktreeTeardown, active_cleanup_lease, bounded_readiness_command,
+    clean_orphan_session_resources, collect_if_drained, drain_pending_teardowns, known_sessions,
+    shipping_retention_limits, signal_exact_process, start_connection_cleanup_worker_with,
 };
 
 /// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
@@ -684,10 +684,54 @@ where
         })
 }
 
+/// The workspace `serve` fenced for this process, and the fence that keeps it.
+///
+/// The registry registers the initial tenant without a fence because this one
+/// belongs to the process, which is why the idle sweep leaves it alone. Pairing
+/// the two here is what lets the sweep give that workspace back as well, once
+/// this generation has handed its authority on.
+pub(super) struct InitialWorkspaceFence {
+    pub(super) root: PathBuf,
+    pub(super) fence: Arc<FileWorkspaceFence>,
+}
+
+/// Give the startup workspace back once this generation's handoff is durable.
+///
+/// A planned handoff keeps the old process alive so its PTYs survive the
+/// replacement, but it is no longer anyone's authority: it admits reads and its
+/// own terminals and refuses everything that would start new work. Holding that
+/// workspace's fence for the rest of its life is what refused the new active
+/// generation — and every other daemon — the workspace, with the departed
+/// owner's pid hint.
+///
+/// The condition is [`AdmissionGate::handed_off`], never the bare role. The
+/// pre-commit barrier enters `draining` *before* the registry commit and
+/// reopens to `active` for every handoff that never commits, and that window is
+/// exactly where the guard stops the live Agents — so it is also exactly where
+/// the startup workspace looks idle. Releasing on the role alone would leave a
+/// generation that came back to `active` without the workspace it was started
+/// in, and with the fence possibly taken by someone else.
+///
+/// Returns whether this pass released it, which happens at most once: the
+/// registry entry is gone afterwards, so every later tick answers `false`.
+pub(super) fn release_initial_workspace<A>(
+    tenants: &TenantRegistry<FileWorkspaceFences, SystemTenantOpener>,
+    activity: &A,
+    initial: &InitialWorkspaceFence,
+    gate: &AdmissionGate,
+) -> bool
+where
+    A: usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>,
+{
+    gate.handed_off() && tenants.release_initial(&initial.root, activity) && initial.fence.release()
+}
+
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
 pub(super) fn spawn_tenant_retire_worker<A>(
     tenants: Arc<TenantRegistry<FileWorkspaceFences, SystemTenantOpener>>,
     activity: A,
+    initial: Option<InitialWorkspaceFence>,
+    gate: AdmissionGate,
     shutdown: Arc<ShutdownRequest>,
     tick: Duration,
     idle_for: Duration,
@@ -707,6 +751,14 @@ where
                     ErrorLog::record(&format!(
                         "daemon released the idle workspace {}",
                         root.display()
+                    ));
+                }
+                if let Some(initial) = initial.as_ref()
+                    && release_initial_workspace(&tenants, &activity, initial, &gate)
+                {
+                    ErrorLog::record(&format!(
+                        "replaced daemon generation released its startup workspace {}",
+                        initial.root.display()
                     ));
                 }
                 if shutdown.wait_for_tick(tick) {

@@ -18,6 +18,12 @@
 //! the OS for a lock this very process already holds — and `flock` refuses that
 //! across two descriptors. [`TenantRegistry::adopt_initial`] registers it with
 //! the fence that is already held.
+//!
+//! That fence is the process's, not the registry's, so the idle sweep leaves it
+//! alone. Giving it back has its own verb, [`TenantRegistry::release_initial`],
+//! for the one case where a process outlives its authority: a draining
+//! generation still serves the PTYs it owns, but it is no longer the workspace's
+//! owner and must stop fencing it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -461,6 +467,72 @@ where
         self.lock().remove(workspace_root).is_some()
     }
 
+    /// Give back the workspace `serve` fenced for this process, once this
+    /// generation has stopped being that workspace's authority.
+    ///
+    /// A planned handoff leaves the old process alive and `draining` so its
+    /// PTYs survive the replacement, but such a generation takes no new work:
+    /// it admits reads and its own terminals and nothing else. The
+    /// workspace it happened to be started in is then owned by a process that
+    /// will never serve it again, while the fence `serve` holds for the
+    /// process's whole lifetime keeps every other daemon — the new active
+    /// generation included — from adopting it. Until this existed, opening that
+    /// workspace anywhere was refused with the departed owner's pid hint for as
+    /// long as the draining process lived.
+    ///
+    /// Only the initial entry qualifies: every other tenant owns its fence and
+    /// is given back by [`Self::retire_idle`]. Unlike that sweep this does not
+    /// ask whether anything outside the registry still holds the tenant. The
+    /// initial handle is retained for the process's lifetime — it is what an
+    /// unbound connection is admitted against — so that question has one
+    /// permanent answer and would refuse every release. What decides instead is
+    /// the same fail-closed [`WorkspaceActivity`] observation: no live
+    /// terminal, Agent, supervisor, or unfinished lifecycle work.
+    ///
+    /// Returns whether the entry was removed, which is the caller's signal to
+    /// release the process fence it holds. A `false` is the ordinary answer on
+    /// every tick before a handoff and after the workspace is given back, so a
+    /// caller may keep asking.
+    pub fn release_initial(
+        &self,
+        workspace_root: &Path,
+        activity: &dyn WorkspaceActivity<O::Runtime>,
+    ) -> bool {
+        // The same lane an adoption of this root takes, so a handshake cannot be
+        // between its "already held?" answer and its `adopt` while the entry
+        // disappears underneath it. Unlike [`Self::retire_idle`] this lane is
+        // held across the observation below; nothing inside `has_work` adopts a
+        // workspace, and the registry lock itself stays free.
+        let _adoption = self.adoption_permit(workspace_root);
+        // Identified under the lock, observed without it: `has_work` reaches the
+        // daemon-wide runtimes, which take their own locks before resolving a
+        // workspace through this registry, and holding this lock across the
+        // observation would invert that order ([`Self::retire_idle`]).
+        let Some((workspace, runtime)) = ({
+            let held = self.lock();
+            held.get(workspace_root)
+                .filter(|entry| entry.fence.is_none() && !entry.retiring)
+                .map(|entry| (entry.tenant.workspace_id(), entry.tenant.runtime().clone()))
+        }) else {
+            return false;
+        };
+        if activity.has_work(workspace, &runtime) {
+            return false;
+        }
+        // Re-read under the lock: the entry may have been retired or replaced
+        // while the observation ran. Nothing can have been *given* work in that
+        // window — a generation that has handed off refuses every request that
+        // spawns one — so the observation itself does not need repeating.
+        let mut held = self.lock();
+        if !held
+            .get(workspace_root)
+            .is_some_and(|entry| entry.fence.is_none() && !entry.retiring)
+        {
+            return false;
+        }
+        held.remove(workspace_root).is_some()
+    }
+
     /// Give back every workspace that has had nothing to do for `idle_for`.
     ///
     /// Returns the roots that were released, for the caller to log. A workspace
@@ -597,8 +669,8 @@ where
 
     /// Whether the registry lock is free right now.
     ///
-    /// Used only by the regression test that pins the observation in
-    /// [`Self::retire_idle`] outside the lock.
+    /// Used only by the regression tests that pin the observations in
+    /// [`Self::retire_idle`] and [`Self::release_initial`] outside the lock.
     #[cfg(test)]
     fn is_unlocked(&self) -> bool {
         self.held.try_lock().is_ok()
@@ -1094,6 +1166,167 @@ mod tests {
         assert_eq!(retired, vec![PathBuf::from("/workspace/one")]);
         assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(registry.adopted(), vec![initial]);
+    }
+
+    /// The startup workspace is given back only when this generation stopped
+    /// being its authority *and* nothing is left running in it.
+    ///
+    /// The initial tenant is held for the process's whole lifetime — an unbound
+    /// connection is admitted against it — so the holder count that gates every
+    /// other retirement is permanently true here and cannot be the condition.
+    /// The activity observation is, and it fails closed like the sweep's.
+    #[test]
+    fn the_initial_workspace_is_released_only_when_it_has_nothing_left_to_do() {
+        struct Busy(Cell<bool>);
+        impl WorkspaceActivity<String> for Busy {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                self.0.get()
+            }
+        }
+
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let registry = TenantRegistry::new(
+            daemon.path().to_path_buf(),
+            FakeFences {
+                outcome: WorkspaceFenceOutcome::Acquired,
+                live: std::sync::Arc::new(AtomicUsize::new(0)),
+                failure: None,
+            },
+            FakeOpener {
+                fail: AtomicBool::new(false),
+            },
+            8,
+        );
+        let activity = Busy(Cell::new(true));
+        let initial = registry
+            .adopt_initial(Path::new("/workspace/initial"))
+            .unwrap();
+        registry.adopt(Path::new("/workspace/one")).unwrap();
+
+        // Work of its own keeps the workspace, exactly as it keeps an ordinary
+        // tenant: releasing one that is still working would hand its worktrees
+        // to a second owner.
+        assert!(!registry.release_initial(Path::new("/workspace/initial"), &activity));
+        assert!(registry.tenant(Path::new("/workspace/initial")).is_some());
+
+        // A workspace that owns its own fence is not this: it is the idle
+        // sweep's, and releasing it here would leave that fence held.
+        activity.0.set(false);
+        assert!(!registry.release_initial(Path::new("/workspace/one"), &activity));
+        assert!(registry.tenant(Path::new("/workspace/one")).is_some());
+        // So is a root this daemon never adopted.
+        assert!(!registry.release_initial(Path::new("/workspace/absent"), &activity));
+
+        // Idle: the entry goes, and the handle the caller still holds is what
+        // proves the runtime is not what the fence was keeping.
+        assert!(registry.release_initial(Path::new("/workspace/initial"), &activity));
+        assert!(registry.tenant(Path::new("/workspace/initial")).is_none());
+        assert_eq!(initial.root(), Path::new("/workspace/initial"));
+
+        // Asking again is the ordinary answer, not a second release.
+        assert!(!registry.release_initial(Path::new("/workspace/initial"), &activity));
+    }
+
+    /// The initial release observes the workspace with the registry lock free,
+    /// for the same lock-order reason the idle sweep does.
+    #[test]
+    fn the_initial_release_does_not_hold_the_registry_lock_while_observing() {
+        struct Observer {
+            registry:
+                std::cell::RefCell<Option<std::rc::Weak<TenantRegistry<FakeFences, FakeOpener>>>>,
+            unlocked: Cell<bool>,
+        }
+        impl WorkspaceActivity<String> for Observer {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                let registry = self
+                    .registry
+                    .borrow()
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                    .expect("the registry outlives the observation");
+                self.unlocked.set(registry.is_unlocked());
+                false
+            }
+        }
+
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let registry = std::rc::Rc::new(TenantRegistry::new(
+            daemon.path().to_path_buf(),
+            FakeFences {
+                outcome: WorkspaceFenceOutcome::Acquired,
+                live: std::sync::Arc::new(AtomicUsize::new(0)),
+                failure: None,
+            },
+            FakeOpener {
+                fail: AtomicBool::new(false),
+            },
+            8,
+        ));
+        let observer = Observer {
+            registry: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&registry))),
+            unlocked: Cell::new(false),
+        };
+        registry
+            .adopt_initial(Path::new("/workspace/initial"))
+            .unwrap();
+
+        assert!(registry.release_initial(Path::new("/workspace/initial"), &observer));
+        assert!(
+            observer.unlocked.get(),
+            "the registry lock must be free while the workspace is observed"
+        );
+    }
+
+    /// An entry that disappears while it is being observed is not released.
+    ///
+    /// The observation deliberately runs with the registry lock free, so an
+    /// explicit `daemon retire` — or a second sweep — can take the entry between
+    /// the read that chose it and the commit. The commit re-reads instead of
+    /// trusting that choice, so the caller is told nothing was released and does
+    /// not go on to drop a fence for a workspace this registry no longer holds.
+    #[test]
+    fn an_entry_retired_while_it_is_observed_is_not_released() {
+        struct RetireWhileObserving {
+            registry:
+                std::cell::RefCell<Option<std::rc::Weak<TenantRegistry<FakeFences, FakeOpener>>>>,
+        }
+        impl WorkspaceActivity<String> for RetireWhileObserving {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                let registry = self
+                    .registry
+                    .borrow()
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                    .expect("the registry outlives the observation");
+                // Exactly what an explicit retirement does, at exactly the
+                // moment the commit below has to re-read for.
+                assert!(registry.retire(Path::new("/workspace/initial")));
+                false
+            }
+        }
+
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let registry = std::rc::Rc::new(TenantRegistry::new(
+            daemon.path().to_path_buf(),
+            FakeFences {
+                outcome: WorkspaceFenceOutcome::Acquired,
+                live: std::sync::Arc::new(AtomicUsize::new(0)),
+                failure: None,
+            },
+            FakeOpener {
+                fail: AtomicBool::new(false),
+            },
+            8,
+        ));
+        let observer = RetireWhileObserving {
+            registry: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&registry))),
+        };
+        registry
+            .adopt_initial(Path::new("/workspace/initial"))
+            .unwrap();
+
+        assert!(!registry.release_initial(Path::new("/workspace/initial"), &observer));
+        assert!(registry.adopted().is_empty());
     }
 
     /// The observation must not run under the registry lock.
