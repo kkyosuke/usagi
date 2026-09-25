@@ -9,14 +9,20 @@
 //! ([4. IPC](../../document/04-ipc.md)).
 //!
 //! A literal binding is injected as-is; a `op://…` binding is read through the
-//! 1Password CLI. A resolved secret is cached per **secret reference and
-//! credential** rather than per workspace, because one daemon owns every
-//! workspace it adopted ([5. daemon](../../document/05-daemon.md#tenant-registry)):
-//! a reference configured globally is read once for all of them, so a 1Password
-//! desktop approval is asked once instead of once per workspace. Editing a
-//! reference resolves that binding again, changing the `op read` credential
-//! resolves every reference again, and a pane already running keeps the
-//! environment it started with.
+//! 1Password CLI. A **globally** configured reference is resolved once for every
+//! workspace this daemon serves, because one daemon owns every workspace it
+//! adopted ([5. daemon](../../document/05-daemon.md#tenant-registry)) — so a
+//! 1Password approval is asked once instead of once per workspace. A reference a
+//! *workspace* configured is cached for that workspace alone: `.usagi/settings.json`
+//! travels with a repository, and a checkout naming a reference has to face
+//! 1Password itself rather than collect an approval the user gave for their own
+//! binding.
+//!
+//! Editing a reference resolves that binding again and changing
+//! `OP_SERVICE_ACCOUNT_TOKEN` resolves every reference again, but a secret
+//! *rotated in 1Password* behind an unchanged reference is only picked up by a
+//! new daemon — as is a different `op signin` account, which this cache cannot
+//! see. A pane already running keeps the environment it started with.
 //!
 //! A binding that cannot be resolved is dropped and logged: a locked vault
 //! leaves one variable unset instead of making a pane impossible to open.
@@ -44,12 +50,39 @@ const OP_SERVICE_ACCOUNT_TOKEN: &str = "OP_SERVICE_ACCOUNT_TOKEN";
 
 struct ConfiguredEnvironment {
     bindings: EnvBindings,
+    /// The names the **workspace** bound, which decide the [scope](SecretCacheKey)
+    /// their references are cached under.
+    workspace_scoped: BTreeSet<String>,
     service_account_token: Option<String>,
 }
 
-/// A resolved secret is reusable only for the credential that read it: the
-/// [identity](credential_identity) of that credential, then the reference.
-type SecretCacheKey = (String, String);
+impl ConfiguredEnvironment {
+    /// Where a resolved `reference` may be reused from.
+    ///
+    /// A binding the workspace declared is scoped to that workspace, so a
+    /// checked-in `.usagi/settings.json` cannot read a value the user's own
+    /// global binding already had approved. A global binding is scoped to the
+    /// daemon, which is the whole point of the cache.
+    fn cache_key(
+        &self,
+        credential: &str,
+        workspace_root: &Path,
+        name: &str,
+        reference: &str,
+    ) -> SecretCacheKey {
+        let scope = self
+            .workspace_scoped
+            .contains(name)
+            .then(|| workspace_root.to_path_buf());
+        (credential.to_owned(), scope, reference.to_owned())
+    }
+}
+
+/// What makes two resolutions of the same reference interchangeable: the
+/// [identity](credential_identity) of the credential that read it, the workspace
+/// that configured it (`None` for a global binding, shared by every workspace),
+/// and the reference itself.
+type SecretCacheKey = (String, Option<PathBuf>, String);
 
 /// How many resolved secrets one daemon keeps in memory.
 ///
@@ -57,9 +90,50 @@ type SecretCacheKey = (String, String);
 /// is eight fully loaded configurations' worth. A reference that leaves the
 /// configuration — an edited binding, a rotated credential — is not evicted on
 /// its own, so this bound is what stops superseded values from accumulating for
-/// the life of the daemon. Overflowing clears the cache instead of evicting one
-/// entry: the next launch resolves again, which is correct, only slower.
+/// the life of the daemon.
 const MAX_CACHED_SECRETS: usize = MAX_SECRET_REFERENCES * 8;
+
+/// The resolved secrets of one daemon, evicted least-recently-used first.
+///
+/// Eviction is per entry rather than a wholesale clear: a working set larger
+/// than the bound would otherwise drop everything on every launch and ask
+/// 1Password for each reference again — the very cost this cache exists to
+/// remove, reached silently.
+#[derive(Default)]
+struct SecretCache {
+    /// Per key: when the entry was last used, and the value `op read` returned.
+    entries: BTreeMap<SecretCacheKey, (u64, String)>,
+    /// Monotonic use counter. A launch resolving 32 references every second
+    /// would take more than ten billion years to exhaust it.
+    next_use: u64,
+}
+
+impl SecretCache {
+    /// The cached value for `key`, counted as a use so it survives eviction.
+    fn get(&mut self, key: &SecretCacheKey) -> Option<String> {
+        let use_count = self.next_use;
+        let entry = self.entries.get_mut(key)?;
+        entry.0 = use_count;
+        self.next_use += 1;
+        Some(entry.1.clone())
+    }
+
+    /// Store `value`, evicting the least recently used entry when full.
+    fn insert(&mut self, key: SecretCacheKey, value: String) {
+        if self.entries.len() >= MAX_CACHED_SECRETS {
+            let evicted = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (use_count, _))| *use_count)
+                .map(|(key, _)| key.clone())
+                .expect("a cache at its bound holds at least one entry");
+            self.entries.remove(&evicted);
+        }
+        let use_count = self.next_use;
+        self.next_use += 1;
+        self.entries.insert(key, (use_count, value));
+    }
+}
 
 /// Admission failures raised before any configured secret is resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,17 +187,15 @@ const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
 pub struct UserEnvironment<R = OpCli> {
     global: Storage,
     resolver: R,
-    /// Per `(credential identity, secret reference)`: the value `op read`
-    /// returned. Keyed by the reference rather than by the workspace, so a
-    /// reference configured globally costs one read no matter how many
-    /// workspaces bind it. A failed read is not stored, so a locked vault is
-    /// retried on the next launch instead of being fixed for the life of the
-    /// daemon.
+    /// The secrets already read, keyed by [`SecretCacheKey`] so a global
+    /// reference costs one read no matter how many workspaces this daemon
+    /// serves. A failed read is not stored, so a locked vault is retried on the
+    /// next launch instead of being fixed for the life of the daemon.
     ///
     /// The lock is held across resolution deliberately: two launches racing on
     /// the same reference then wait for one `op read` instead of asking
     /// 1Password for two approvals.
-    secrets: Mutex<BTreeMap<SecretCacheKey, String>>,
+    secrets: Mutex<SecretCache>,
 }
 
 impl<R: SecretResolver + Sync> UserEnvironment<R> {
@@ -132,7 +204,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         Self {
             global: Storage::new(data_dir),
             resolver,
-            secrets: Mutex::new(BTreeMap::new()),
+            secrets: Mutex::new(SecretCache::default()),
         }
     }
 
@@ -172,11 +244,17 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         {
             return Err(UserEnvironmentError::ReservedLauncherVariable);
         }
+        let workspace_scoped = local
+            .env
+            .keys()
+            .map(|name| name.trim().to_owned())
+            .collect();
         let mut bindings = global.with_local(&local).env;
         validate_env_limits(&bindings)?;
         let service_account_token = bindings.remove(OP_SERVICE_ACCOUNT_TOKEN);
         Ok(ConfiguredEnvironment {
             bindings,
+            workspace_scoped,
             service_account_token,
         })
     }
@@ -196,10 +274,12 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         let mut pending = EnvBindings::new();
         for (name, value) in valid_bindings(&configured.bindings) {
             let cached = is_secret_reference(value)
-                .then(|| secrets.get(&(credential.clone(), value.to_owned())))
+                .then(|| {
+                    secrets.get(&configured.cache_key(&credential, workspace_root, name, value))
+                })
                 .flatten();
             if let Some(secret) = cached {
-                values.insert(name.to_owned(), secret.clone());
+                values.insert(name.to_owned(), secret);
             } else {
                 pending.insert(name.to_owned(), value.to_owned());
             }
@@ -221,10 +301,8 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
                 .get(&name)
                 .filter(|reference| is_secret_reference(reference))
             {
-                if secrets.len() >= MAX_CACHED_SECRETS {
-                    secrets.clear();
-                }
-                secrets.insert((credential.clone(), reference.clone()), value.clone());
+                let key = configured.cache_key(&credential, workspace_root, &name, reference);
+                secrets.insert(key, value.clone());
             }
             values.insert(name, value);
         }
@@ -286,7 +364,7 @@ pub fn typed(values: &BTreeMap<String, String>) -> Vec<(EnvironmentVariableName,
 mod tests {
     use super::{
         MAX_CACHED_SECRETS, MAX_SECRET_REFERENCES, UserEnvironment, UserEnvironmentError,
-        WORKSPACE_AGENT_CONTROL_VARIABLES, allowlist, typed,
+        WORKSPACE_AGENT_CONTROL_VARIABLES, allowlist, credential_identity, typed,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -331,10 +409,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(service_account_token.map(str::to_owned));
-            if reference.contains("Locked") {
-                Err("op is locked".to_owned())
-            } else {
-                Ok(format!("secret:{reference}"))
+            match (reference.contains("Locked"), service_account_token) {
+                (true, _) => Err("op is locked".to_owned()),
+                // The credential is part of the value so a test can tell which
+                // one a cached secret was read with.
+                (false, Some(token)) => Ok(format!("secret:{token}:{reference}")),
+                (false, None) => Ok(format!("secret:{reference}")),
             }
         }
     }
@@ -455,7 +535,10 @@ mod tests {
         let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
 
         let values = environment.resolved(workspace.path()).unwrap();
-        assert_eq!(values["GH_TOKEN"], "secret:op://Private/GitHub/token");
+        assert_eq!(
+            values["GH_TOKEN"],
+            "secret:global-token:op://Private/GitHub/token"
+        );
         assert!(!values.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
         assert_eq!(
             environment.resolver.service_account_tokens(),
@@ -466,7 +549,11 @@ mod tests {
             workspace.path(),
             bindings(&[("OP_SERVICE_ACCOUNT_TOKEN", "workspace-token")]),
         );
-        environment.resolved(workspace.path()).unwrap();
+        assert_eq!(
+            environment.resolved(workspace.path()).unwrap()["GH_TOKEN"],
+            "secret:workspace-token:op://Private/GitHub/token",
+            "a value read under another credential must not be reused"
+        );
         assert_eq!(
             environment.resolver.service_account_tokens(),
             [
@@ -489,6 +576,66 @@ mod tests {
             ],
             "changing only the credential must invalidate the resolution cache"
         );
+
+        // Going back to a credential that already read this reference reuses
+        // that credential's value rather than the newer one.
+        write_global(
+            data.path(),
+            bindings(&[
+                ("GH_TOKEN", "op://Private/GitHub/token"),
+                ("OP_SERVICE_ACCOUNT_TOKEN", "global-token"),
+            ]),
+        );
+        write_workspace(workspace.path(), EnvBindings::new());
+        assert_eq!(
+            environment.resolved(workspace.path()).unwrap()["GH_TOKEN"],
+            "secret:global-token:op://Private/GitHub/token"
+        );
+        assert_eq!(
+            environment.resolver.service_account_tokens().len(),
+            3,
+            "the first credential's value is still cached"
+        );
+    }
+
+    /// `.usagi/settings.json` travels with a repository, so a reference the
+    /// *workspace* names must face 1Password itself instead of collecting an
+    /// approval the user gave for their own global binding.
+    #[test]
+    fn a_workspace_scoped_reference_does_not_read_the_global_cache() {
+        let data = tempfile::tempdir().unwrap();
+        let mine = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        write_global(
+            data.path(),
+            bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
+        );
+        write_workspace(
+            checkout.path(),
+            bindings(&[("EXFIL", "op://Private/GitHub/token")]),
+        );
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+
+        environment.resolved(mine.path()).unwrap();
+        environment.resolved(checkout.path()).unwrap();
+        assert_eq!(
+            environment.resolver.reads(),
+            ["op://Private/GitHub/token", "op://Private/GitHub/token"],
+            "the checkout's own binding must still be read"
+        );
+
+        // It is cached for that workspace, though, so relaunching it is free.
+        environment.resolved(checkout.path()).unwrap();
+        assert_eq!(environment.resolver.reads().len(), 2);
+
+        // And another workspace naming it in its own settings reads again.
+        let other = tempfile::tempdir().unwrap();
+        write_workspace(
+            other.path(),
+            bindings(&[("EXFIL", "op://Private/GitHub/token")]),
+        );
+        environment.resolved(other.path()).unwrap();
+        assert_eq!(environment.resolver.reads().len(), 3);
     }
 
     /// The reason this cache is keyed by the reference rather than by the
@@ -550,16 +697,19 @@ mod tests {
         );
     }
 
-    /// A superseded reference is never evicted on its own, so this bound is the
-    /// only thing keeping a long-lived daemon's cache from growing with every
-    /// edit.
+    /// A superseded reference is never evicted on its own, so the bound is what
+    /// keeps a long-lived daemon's cache from growing with every edit. It has to
+    /// evict rather than clear: a working set larger than the bound would
+    /// otherwise drop everything on every launch and re-ask 1Password for every
+    /// reference — worse than not caching at all.
     #[test]
-    fn the_secret_cache_is_bounded() {
+    fn a_full_secret_cache_evicts_the_least_recently_used_entry() {
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        let generations = MAX_CACHED_SECRETS / MAX_SECRET_REFERENCES;
 
-        for generation in 0..MAX_CACHED_SECRETS / MAX_SECRET_REFERENCES {
+        for generation in 0..generations {
             write_global(
                 data.path(),
                 (0..MAX_SECRET_REFERENCES)
@@ -573,20 +723,44 @@ mod tests {
             );
             environment.resolved(workspace.path()).unwrap();
         }
+        let filled = environment.resolver.reads().len();
         assert_eq!(
-            environment.secrets.lock().unwrap().len(),
+            environment.secrets.lock().unwrap().entries.len(),
             MAX_CACHED_SECRETS
         );
+
+        // Relaunching the current configuration reads nothing and counts every
+        // one of its references as used.
+        environment.resolved(workspace.path()).unwrap();
+        assert_eq!(environment.resolver.reads().len(), filled);
 
         write_global(
             data.path(),
             bindings(&[("EXTRA", "op://Private/extra/token")]),
         );
         environment.resolved(workspace.path()).unwrap();
+        let secrets = environment.secrets.lock().unwrap();
         assert_eq!(
-            environment.secrets.lock().unwrap().len(),
-            1,
-            "overflowing starts over rather than growing without bound"
+            secrets.entries.len(),
+            MAX_CACHED_SECRETS,
+            "the cache stays at its bound"
+        );
+        let credential = credential_identity(None);
+        assert!(
+            !secrets.entries.contains_key(&(
+                credential.clone(),
+                None,
+                "op://Private/0/0".to_owned()
+            )),
+            "the oldest entry is the one evicted"
+        );
+        assert!(
+            secrets.entries.contains_key(&(
+                credential,
+                None,
+                format!("op://Private/{}/0", generations - 1)
+            )),
+            "a reference the last launch used stays cached"
         );
     }
 

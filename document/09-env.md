@@ -65,6 +65,7 @@ binding と secret reference の resource 上限は domain の env policy が正
 | 1 scope または合成後の binding | 128 | 保存・load または launch admission を拒否 |
 | 1 scope または合成後の secret reference | 32 | 保存・load または launch admission を拒否 |
 | 1 launch で同時実行する `op read` | 4 | 残りを bounded queue で待機 |
+| daemon が保持する解決済み secret | 256 | 最後に使われたものから 1 件ずつ evict |
 
 上限超過を launch admission で検出した場合は secret resolver と PTY child を一つも spawn せず、安全な validation / provision
 error を返す。global と workspace がそれぞれ保存上限内でも、合成後に上限を超える組み合わせは同じように拒否する。
@@ -113,14 +114,22 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - TUI の pane launch は background の専用 IPC policy でこの bounded queue の完了を待つ。1Password の承認モーダル中も
   通常操作用の短い deadline では pending pane を失敗にせず、描画・入力・quit は待たせない。policy の値は
   [daemon IPC](04-ipc.md#attempt-deadline-と-reconnect-budget)を正本とする。
-- 解決した secret は **`op read` の credential と参照の組をキーに daemon 全体でキャッシュ**する
-  （workspace ごとではない）。daemon は data directory ごとに 1 process で複数 workspace を adopt するため
-  （[5. daemon#tenant registry](05-daemon.md#tenant-registry)）、global に置いた同じ参照は workspace を
-  いくつ開いても 1 回しか読まない。credential は token そのものではなく digest をキーにし、別の credential で
-  解決した値を配らない。
+- 解決した secret は daemon の memory だけにキャッシュする。キーは **credential・scope・参照**の組で、
+  scope は binding をどちらが宣言したかで決まる。
+
+  | binding の scope | キャッシュの有効範囲 | 理由 |
+  |---|---|---|
+  | global | この daemon が持つ全 workspace | daemon は data directory ごとに 1 process で複数 workspace を adopt するため（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）、global に置いた参照は workspace をいくつ開いても 1 回しか読まない |
+  | workspace | その workspace だけ | `.usagi/settings.json` は repository に入る。checkout が名指しした参照は、利用者が自分の global binding に与えた承認を流用せず、自分で 1Password の承認を得る |
+
+- credential は `OP_SERVICE_ACCOUNT_TOKEN` の digest をキーにする（token そのものは持たない）。token が
+  異なれば別のキーになるので、別の token で解決した値は配らない。token を使わない `op signin` セッションの
+  アカウントはこのキーに含まれないため、**サインインするアカウントを変えたら daemon を起動し直す**。
 - 参照を編集すればその binding だけ、`OP_SERVICE_ACCOUNT_TOKEN` を編集すれば全参照を次の pane 起動で
-  解決し直す。解決に失敗した参照はキャッシュせず、次の起動で再試行する。キャッシュは daemon の memory だけに
-  持ち、件数の上限を超えたら全体を捨てて解決し直す。
+  解決し直す。参照を変えずに 1Password 側で secret を rotate した場合はキャッシュから判別できないため、
+  これも daemon の起動し直しで反映する。
+- 解決に失敗した参照はキャッシュせず、次の起動で再試行する。上限に達したキャッシュは最後に使われたものから
+  1 件ずつ evict する（全体を捨てると、上限を超える working set では毎回すべて読み直すことになる）。
 
 ## 注入のタイミングと優先順位
 
