@@ -500,7 +500,9 @@ where
     ) -> bool {
         // The same lane an adoption of this root takes, so a handshake cannot be
         // between its "already held?" answer and its `adopt` while the entry
-        // disappears underneath it.
+        // disappears underneath it. Unlike [`Self::retire_idle`] this lane is
+        // held across the observation below; nothing inside `has_work` adopts a
+        // workspace, and the registry lock itself stays free.
         let _adoption = self.adoption_permit(workspace_root);
         // Identified under the lock, observed without it: `has_work` reaches the
         // daemon-wide runtimes, which take their own locks before resolving a
@@ -1273,6 +1275,58 @@ mod tests {
             observer.unlocked.get(),
             "the registry lock must be free while the workspace is observed"
         );
+    }
+
+    /// An entry that disappears while it is being observed is not released.
+    ///
+    /// The observation deliberately runs with the registry lock free, so an
+    /// explicit `daemon retire` — or a second sweep — can take the entry between
+    /// the read that chose it and the commit. The commit re-reads instead of
+    /// trusting that choice, so the caller is told nothing was released and does
+    /// not go on to drop a fence for a workspace this registry no longer holds.
+    #[test]
+    fn an_entry_retired_while_it_is_observed_is_not_released() {
+        struct RetireWhileObserving {
+            registry:
+                std::cell::RefCell<Option<std::rc::Weak<TenantRegistry<FakeFences, FakeOpener>>>>,
+        }
+        impl WorkspaceActivity<String> for RetireWhileObserving {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                let registry = self
+                    .registry
+                    .borrow()
+                    .as_ref()
+                    .and_then(std::rc::Weak::upgrade)
+                    .expect("the registry outlives the observation");
+                // Exactly what an explicit retirement does, at exactly the
+                // moment the commit below has to re-read for.
+                assert!(registry.retire(Path::new("/workspace/initial")));
+                false
+            }
+        }
+
+        let daemon = tempfile::tempdir_in("/tmp").unwrap();
+        let registry = std::rc::Rc::new(TenantRegistry::new(
+            daemon.path().to_path_buf(),
+            FakeFences {
+                outcome: WorkspaceFenceOutcome::Acquired,
+                live: std::sync::Arc::new(AtomicUsize::new(0)),
+                failure: None,
+            },
+            FakeOpener {
+                fail: AtomicBool::new(false),
+            },
+            8,
+        ));
+        let observer = RetireWhileObserving {
+            registry: std::cell::RefCell::new(Some(std::rc::Rc::downgrade(&registry))),
+        };
+        registry
+            .adopt_initial(Path::new("/workspace/initial"))
+            .unwrap();
+
+        assert!(!registry.release_initial(Path::new("/workspace/initial"), &observer));
+        assert!(registry.adopted().is_empty());
     }
 
     /// The observation must not run under the registry lock.

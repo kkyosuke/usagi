@@ -225,7 +225,8 @@ repository に**立っている**ことは、どの workspace を指している
 adopt になると、二度と serve しない process がその workspace を fence してしまう。handoff が durable になった世代は
 **すでに保持している workspace と、返したばかりの起動 workspace には従来どおり答え**、それ以外は
 `workspace-mismatch` で拒否する。これは
-[`draining` 世代が起動 workspace を返す](05-daemon.md#draining-世代は起動-workspace-を返す)契約と対になっている。
+[置き換えられた世代が起動 workspace を返す](05-daemon.md#置き換えられた世代は起動-workspace-を返す)契約と対に
+なっている。
 
 いったん adopt されれば、その配下はすべて最長一致で同じ workspace に解決される（この 2 段が触るのは「保持して
 いない workspace をどう解決するか」だけである）。session worktree（`<root>/.usagi/sessions/<name>`）は自身の
@@ -244,7 +245,8 @@ child、workspace fence、project-local `.usagi` を作らない。`selected` �
 lifecycle probe は ambient cwd に同じ implicit rule を適用する。これにより、同じ `bound` command の可否は daemon の
 生死に依存しない。
 
-`selected` の adopt が失敗する理由は 3 つある。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
+adopt が失敗する理由は 4 つある。上 3 つは `selected` と `bound` の後段に共通し、4 つ目はこの generation が
+authority を手放したときに両方へ掛かる。いずれも **その workspace だけ**の拒否であり、同じ daemon が保持する
 他の workspace の接続には影響しない。
 
 | 理由 | 例 |

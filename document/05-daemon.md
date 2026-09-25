@@ -804,7 +804,7 @@ daemon process（machine あたり 1 つ）
 | adopt | client が `selected` で申告した workspace を、その handshake の中で adopt する。canonical 化 → workspace fence 取得 → state subtree 解決 → lifecycle document open → 登録の順で、`serve` の取得順と同じである |
 | 拒否 | fence を別 process が持つ、root が解決できない、tenant 上限（既定 32）に達した場合は **その workspace だけ**を typed refusal にする。保持中の tenant の接続は影響を受けない |
 | retire | 何もすることが無い状態が 10 分続いた workspace を自動的に返す（[遊休 workspace の retire](#遊休-workspace-の-retire)）。または `daemon retire <path>` が参照中でない 1 tenant を即時に返す。live runtime は `--force` でその workspace のものだけを terminate / reap し、起動 workspace と未完了 lifecycle work は force でも返さない |
-| 起動 workspace を返す | この generation の handoff が durable になり、その workspace に仕事が残っていなければ、同じ sweep が起動 workspace の tenant と `serve` の fence を返す（[draining 世代は起動 workspace を返す](#draining-世代は起動-workspace-を返す)） |
+| 起動 workspace を返す | この generation の handoff が durable になり、その workspace に仕事が残っていなければ、同じ sweep が起動 workspace の tenant と `serve` の fence を返す（[置き換えられた世代は起動 workspace を返す](#置き換えられた世代は起動-workspace-を返す)） |
 | 停止 | shutdown は全 tenant を閉じ、fence を返す |
 
 adopt は client の handshake の中で走るため、fence の待ち時間は起動時（departing owner を待つ 2 秒）より短い
@@ -817,7 +817,7 @@ adopt した workspace を保持し続けると、一度開いただけの works
 
 | 条件 | 理由 |
 |---|---|
-| `serve` が fence した起動 workspace ではない | その fence は process のものなので、tenant を落としても workspace は返らない。この workspace を返す経路は [draining 世代は起動 workspace を返す](#draining-世代は起動-workspace-を返す)だけである |
+| `serve` が fence した起動 workspace ではない | その fence は process のものなので、tenant を落としても workspace は返らない。この workspace を返す経路は [置き換えられた世代は起動 workspace を返す](#置き換えられた世代は起動-workspace-を返す)だけである |
 | registry の外に保持者が居ない | 接続中の client が次の request を送れる workspace は返さない |
 | 自分の仕事が無い | 稼働中の generic terminal・Agent runtime、`creating` / `initializing` / `deleting` の session、未決着の operation のいずれも無い（`failed` の行は人を待つものなので保持理由にしない） |
 | その状態が 10 分続いた | 離れて戻るたびに fence を churn させない |
@@ -846,7 +846,7 @@ ownership を別の durable fence として持つが、どちらも workspace �
 記録（利用者が付けた pin / dismiss を含む）を消してしまう。判定材料は各 state subtree の lifecycle document で、
 1 つでも読めなければ prune しない。
 
-#### draining 世代は起動 workspace を返す
+#### 置き換えられた世代は起動 workspace を返す
 
 planned replacement は旧 process を `draining` のまま生かして、所有している PTY を置き換えの向こう側まで serve させる
 （[planned replacement](#planned-replacement)）。その process はもう誰の authority でもない: read と自分の terminal だけを
@@ -878,6 +878,10 @@ handshake が `workspace-mismatch` になると、まさにこの generation が
 `bound` / `selected` 申告はその handle に解決する。新しい workspace を開かないことと合わせて、この generation は
 **自分が知っている workspace にだけ答え、どの workspace も新たに fence しない**状態になる
 （[4. daemon IPC#workspace fence](04-ipc.md#workspace-fence)）。
+
+返した workspace は `tenant` の inventory から消えるため、`daemon status` にも handshake の拒否メッセージが並べる
+serve 中 workspace にも現れない。その generation はまだそこの terminal を serve しているので、「一覧に無い」は
+「到達できない」ではない。
 
 standby から昇格した generation は workspace fence も単一インスタンス lock も持たない（[planned replacement](#planned-replacement)）。
 返すものが無い一方、その generation の起動 workspace は旧 owner が fence を返した後どの process にも fence されない。

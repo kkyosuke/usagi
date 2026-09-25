@@ -3441,7 +3441,6 @@ fn a_replaced_generation_keeps_a_startup_workspace_that_is_still_working() {
         }
     );
 
-    // Settled: nothing is running, so the workspace goes back.
     activity
         .supervisor
         .lock()
@@ -3452,10 +3451,26 @@ fn a_replaced_generation_keeps_a_startup_workspace_that_is_still_working() {
             chrono::Utc::now(),
         )
         .unwrap();
-    assert!(release_initial_workspace(
+
+    // An observation that cannot be made is work too: a lifecycle runtime whose
+    // lock is poisoned keeps the workspace rather than releasing it on an
+    // unknown state.
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = tenant.runtime().lock().unwrap();
+        panic!("a reader panicked while holding the lifecycle runtime");
+    }));
+    assert!(poisoned.is_err());
+    assert!(!release_initial_workspace(
         &tenants, &activity, &initial, &gate
     ));
-    assert!(held.held.lock().unwrap().is_none());
+    assert!(held.held.lock().unwrap().is_some());
+    assert_eq!(
+        workspace_fence(&root, 5252).acquire().unwrap(),
+        WorkspaceFenceOutcome::Held {
+            workspace: root.display().to_string(),
+            owner: Some(4242),
+        }
+    );
 }
 
 /// A generation that has handed off answers for the workspaces it knows and

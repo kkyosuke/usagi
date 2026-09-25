@@ -1,6 +1,6 @@
 ---
 number: 770
-title: "fix(daemon): draining 世代が起動 workspace の fence を返さない"
+title: "fix(daemon): 置き換えられた世代が起動 workspace の fence を返さない"
 status: done
 priority: high
 labels: [v2, daemon, lifecycle, workspace, correctness]
@@ -74,5 +74,7 @@ workspace を同じ process が fence し直してしまう。
 
 ## 残る穴
 
-昇格した standby は workspace fence を持たないまま起動 workspace を serve する。本 issue の解放はその穴が開く
-時刻を早めるだけで作り出してはいないが、窓は広がる。#771 で扱う。
+- 昇格した standby は workspace fence を持たないまま起動 workspace を serve する。本 issue の解放はその穴が
+  開く時刻を早めるだけで作り出してはいないが、窓は広がる。#771 で扱う。
+- PR inventory の writer role が構築時の `Active` 固定で live gate に追従しない。data directory 側の document で
+  workspace fence の内側ではないため本 issue とは独立している。#772 で扱う。
