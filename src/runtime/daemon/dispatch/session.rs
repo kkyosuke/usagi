@@ -634,11 +634,19 @@ pub(super) fn dispatch_session_action(
             if force && !apply {
                 return Err(SessionRuntimeError::InvalidRequest);
             }
+            let target = payload
+                .get("target")
+                .map(|value| {
+                    serde_json::from_value::<usagi_core::usecase::clean::CleanTarget>(value.clone())
+                        .map_err(|_| SessionRuntimeError::InvalidRequest)
+                })
+                .transpose()?;
             reply(clean_orphan_session_resources(
                 bound,
                 Some(agent),
                 apply,
                 force,
+                target.as_ref(),
             )?)
         }
         SessionAction::Setup => {

@@ -3454,7 +3454,7 @@ fn client_result<T>(result: anyhow::Result<T>) -> Result<T, ClientError> {
 /// `RolloverRequired` before it could send the request that performs the
 /// rollover.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
-fn existing_policy_client(
+pub(crate) fn existing_policy_client(
     policy: ClientPolicy,
     workspace: ClientWorkspace,
 ) -> Result<impl DaemonClient, ClientError> {

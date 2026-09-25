@@ -222,7 +222,13 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
             remove_daemon_data(&daemon_dir.join(paths::WORKSPACE_STATE_DIR), dir)
         }
         CleanCandidate::Worktree { root, path, .. } => {
-            let _fence = acquire_workspace_fence(root)?;
+            let _fence = match acquire_workspace_fence(root) {
+                Ok(fence) => fence,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return apply_via_daemon(candidate, root, force);
+                }
+                Err(error) => return Err(error),
+            };
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -232,7 +238,13 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
             remove_worktree(&SystemGit, root, path, force).map_err(io::Error::other)
         }
         CleanCandidate::Branch { root, name, .. } => {
-            let _fence = acquire_workspace_fence(root)?;
+            let _fence = match acquire_workspace_fence(root) {
+                Ok(fence) => fence,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return apply_via_daemon(candidate, root, force);
+                }
+                Err(error) => return Err(error),
+            };
             let session = name
                 .strip_prefix("usagi/")
                 .ok_or_else(|| io::Error::other("branch is outside the usagi namespace"))?;
@@ -248,6 +260,59 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
             ..
         } => reap_helper_process(*pid, start_identity),
     }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=cli_clean_removes_orphan_branches_while_daemon_is_running
+fn apply_via_daemon(candidate: &CleanCandidate, root: &Path, force: bool) -> io::Result<()> {
+    use usagi_core::infrastructure::ipc::ClientWorkspace;
+    use usagi_core::usecase::clean::CleanTarget;
+
+    let target = match candidate {
+        CleanCandidate::Worktree { path, .. } => CleanTarget::Worktree { path: path.clone() },
+        CleanCandidate::Branch { name, .. } => CleanTarget::Branch { name: name.clone() },
+        _ => return Err(io::Error::other("only Git cleanup can be delegated")),
+    };
+    let mut client = crate::runtime::daemon::existing_policy_client(
+        usagi_core::infrastructure::client::ClientPolicy::cli(),
+        ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(root),
+        },
+    )
+    .map_err(|error| io::Error::other(format!("could not attach to cleanup owner: {error}")))?;
+    apply_selected_resource(&mut client, &target, force)
+}
+
+fn apply_selected_resource(
+    client: &mut dyn usagi_core::infrastructure::client::DaemonClient,
+    target: &usagi_core::usecase::clean::CleanTarget,
+    force: bool,
+) -> io::Result<()> {
+    use usagi_core::infrastructure::ipc::{DaemonReply, DaemonRequest, SessionAction};
+
+    let selected = serde_json::to_value(target).map_err(io::Error::other)?;
+    for apply in [false, true] {
+        let reply = client.request(DaemonRequest::Session {
+            action: SessionAction::Clean,
+            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+            payload: serde_json::json!({"apply": apply, "force": apply && force, "target": selected}),
+        }).map_err(|error| io::Error::other(format!("daemon cleanup failed: {error}")))?;
+        let body = match reply {
+            DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+        };
+        // Older daemons ignore unknown payload fields. Require an exact-target
+        // acknowledgement on a read-only request before authorizing any deletion.
+        if body.get("target") != Some(&selected) {
+            return Err(io::Error::other(
+                "running daemon does not support targeted cleanup; update/restart it and retry",
+            ));
+        }
+        if apply && body.get("removed").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(io::Error::other(
+                "daemon did not remove the selected resource",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Read the shared allocator, every owner shard, and the generation registry,
@@ -529,7 +594,7 @@ fn acquire_exclusive_fence(path: &Path, contention: &str) -> io::Result<File> {
     let file = options.open(path)?;
     verify_fence_node(path, &file)?;
     file.try_lock_exclusive()
-        .map_err(|_| io::Error::other(contention))?;
+        .map_err(|error| io::Error::new(error.kind(), contention))?;
     // A pathname replacement after `open` would put this process and the
     // daemon on different inodes. Verify again after flock, while the held fd
     // still identifies the node whose lock we actually own.
@@ -997,6 +1062,62 @@ not a process line
         }));
     }
 
+    #[test]
+    fn targeted_cleanup_requires_support_before_mutating_and_checks_completion() {
+        use std::collections::VecDeque;
+        use usagi_core::infrastructure::client::DaemonClient;
+        use usagi_core::infrastructure::ipc::{ClientError, DaemonReply, DaemonRequest};
+        use usagi_core::usecase::clean::CleanTarget;
+
+        struct Client {
+            replies: VecDeque<Result<DaemonReply, ClientError>>,
+            requests: Vec<DaemonRequest>,
+        }
+        impl DaemonClient for Client {
+            fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
+                self.requests.push(request);
+                self.replies.pop_front().unwrap()
+            }
+        }
+        let target = CleanTarget::Branch {
+            name: "usagi/orphan".into(),
+        };
+        let dry = serde_json::json!({"target": target, "removed": 0});
+        let applied = serde_json::json!({"target": target, "removed": 1});
+        for force in [false, true] {
+            let mut client = Client {
+                replies: VecDeque::from([
+                    Ok(DaemonReply::Ok(dry.clone())),
+                    Ok(DaemonReply::Ok(applied.clone())),
+                ]),
+                requests: Vec::new(),
+            };
+            super::apply_selected_resource(&mut client, &target, force).unwrap();
+            for (index, request) in client.requests.iter().enumerate() {
+                assert!(
+                    matches!(request, DaemonRequest::Session { payload, .. }
+                    if payload["target"] == serde_json::to_value(&target).unwrap()
+                        && payload["apply"] == (index == 1)
+                        && payload["force"] == (index == 1 && force)),
+                    "{request:?}"
+                );
+            }
+        }
+        for replies in [
+            vec![Ok(DaemonReply::Ok(serde_json::json!({"removed": 0})))],
+            vec![Err(ClientError::Unavailable("offline".into()))],
+            vec![Ok(DaemonReply::Ok(dry.clone())), Ok(DaemonReply::Ok(dry))],
+        ] {
+            let expected = replies.len();
+            let mut client = Client {
+                replies: replies.into(),
+                requests: Vec::new(),
+            };
+            assert!(super::apply_selected_resource(&mut client, &target, true).is_err());
+            assert_eq!(client.requests.len(), expected);
+        }
+    }
+
     #[derive(Clone)]
     struct FakeCleanGit(GitOutput);
 
@@ -1291,7 +1412,10 @@ not a process line
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("private/daemon.lock");
         let held = acquire_exclusive_fence(&path, "busy").unwrap();
-        assert!(acquire_exclusive_fence(&path, "busy").is_err());
+        assert_eq!(
+            acquire_exclusive_fence(&path, "busy").unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+        );
         drop(held);
         assert!(acquire_exclusive_fence(&path, "busy").is_ok());
 

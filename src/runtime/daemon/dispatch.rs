@@ -3234,6 +3234,7 @@ pub(super) fn clean_orphan_session_resources(
     agent: Option<&SharedAgentRuntime>,
     apply: bool,
     force: bool,
+    target: Option<&usagi_core::usecase::clean::CleanTarget>,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     use usagi_core::infrastructure::git::{delete_branch, remove_worktree};
     use usagi_core::usecase::clean::{CleanCandidate, CleanInventory, DaemonWorkspaceData, plan};
@@ -3283,6 +3284,7 @@ pub(super) fn clean_orphan_session_resources(
     });
     let git_candidates = candidates
         .into_iter()
+        .filter(|candidate| target.is_none_or(|target| target.matches(candidate)))
         .filter(|candidate| {
             matches!(
                 candidate,
@@ -3290,6 +3292,12 @@ pub(super) fn clean_orphan_session_resources(
             )
         })
         .collect::<Vec<_>>();
+    if target.is_some() && git_candidates.len() != 1 {
+        return Err(SessionRuntimeError::DurableFailure(
+            "selected resource is no longer an orphan cleanup candidate".into(),
+        ));
+    }
+    let agent = agent.filter(|_| target.is_none());
     let failed_reservations = agent.map_or_else(
         || Ok(Vec::new()),
         |agent| {
@@ -3335,6 +3343,7 @@ pub(super) fn clean_orphan_session_resources(
     if !apply {
         return Ok(serde_json::json!({
             "mode": "dry_run",
+            "target": target,
             "candidates": described,
             "removed": 0,
             "protected": git_candidates.iter().filter(|item| item.requires_force()).count()
@@ -3400,6 +3409,7 @@ pub(super) fn clean_orphan_session_resources(
     }
     Ok(serde_json::json!({
         "mode": "apply",
+        "target": target,
         "candidates": described,
         "removed": removed,
         "protected": protected,

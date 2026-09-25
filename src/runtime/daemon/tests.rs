@@ -7765,7 +7765,7 @@ fn non_git_tenant_has_no_orphan_git_candidates() {
     );
 
     for apply in [false, true] {
-        let result = clean_orphan_session_resources(&bound, None, apply, false).unwrap();
+        let result = clean_orphan_session_resources(&bound, None, apply, false, None).unwrap();
         assert!(result["candidates"].as_array().unwrap().is_empty());
         assert_eq!(result["removed"], 0);
         assert_eq!(result["protected"], 0);

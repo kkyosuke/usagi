@@ -26,13 +26,17 @@ pub fn observe_repository(git: &dyn GitRunner, root: &Path) -> Result<Option<Rep
     let expected_parent = root.join(STATE_DIR).join(SESSIONS_DIR);
     let mut worktrees = Vec::new();
     for worktree in list_worktrees(git, root)? {
-        if worktree.path.parent() != Some(expected_parent.as_path()) {
-            continue;
-        }
-        let status = git.run(&worktree.path, &["status", "--porcelain"])?;
+        // Keep every checkout as branch-ownership evidence, without inspecting
+        // files outside the managed session directory.
+        let dirty = if worktree.path.parent() == Some(expected_parent.as_path()) {
+            let status = git.run(&worktree.path, &["status", "--porcelain"])?;
+            !status.success || !status.stdout.trim().is_empty() || worktree.branch.is_none()
+        } else {
+            true
+        };
         worktrees.push(ObservedWorktree {
             path: worktree.path,
-            dirty: !status.success || !status.stdout.trim().is_empty() || worktree.branch.is_none(),
+            dirty,
             branch: worktree.branch,
         });
     }

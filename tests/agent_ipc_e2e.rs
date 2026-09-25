@@ -644,6 +644,135 @@ fn running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
     );
 }
 
+#[test]
+fn cli_clean_removes_orphan_branches_while_daemon_is_running() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-clean-cli-");
+    let outside = short_dir("usagi-clean-cwd-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let mut daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let _ = available_scope(&mut client);
+    // Keep the orphan unmerged so the automatic non-force pass cannot race it.
+    git(repo.path(), &["checkout", "-qb", "usagi/orphan"]);
+    git(
+        repo.path(),
+        &["commit", "--allow-empty", "-qm", "unmerged orphan"],
+    );
+    git(repo.path(), &["checkout", "-"]);
+    let foreign = outside.path().join("nested-session/submodule");
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "usagi/foreign",
+            foreign.to_str().unwrap(),
+        ],
+    );
+    let run = |args: &[&str]| {
+        usagi_command(
+            home.path(),
+            Channel::Local,
+            outside.path(),
+            &args.iter().map(OsStr::new).collect::<Vec<_>>(),
+        )
+        .output()
+        .unwrap()
+    };
+    let dry = run(&["clean", "--dry-run"]);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let output = String::from_utf8_lossy(&dry.stdout);
+    assert!(output.contains("branch usagi/orphan"), "{output}");
+    assert!(!output.contains("branch usagi/foreign"), "{output}");
+    let protected = run(&["clean", "--apply"]);
+    assert!(
+        protected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&protected.stderr)
+    );
+    assert!(String::from_utf8_lossy(&protected.stdout).contains("removed 0, protected 1"));
+    let applied = run(&["clean", "--apply", "--force"]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(String::from_utf8_lossy(&applied.stdout).contains("removed 1, protected 0, failed 0"));
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "clean must not stop the daemon"
+    );
+    let refs = Command::new("git")
+        .current_dir(repo.path())
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/usagi/",
+        ])
+        .output()
+        .unwrap();
+    let refs = String::from_utf8_lossy(&refs.stdout);
+    assert!(!refs.contains("usagi/orphan"));
+    assert!(refs.contains("usagi/agent-e2e"));
+    assert!(refs.contains("usagi/foreign"));
+    drop(client);
+    daemon_fixture::reap(home.path());
+}
+
+#[test]
+fn targeted_daemon_cleanup_does_not_expand_to_other_orphans() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-clean-target-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let mut client = client(&channel_data_dir(home.path()));
+    let _ = available_scope(&mut client);
+    git(repo.path(), &["checkout", "-qb", "usagi/selected"]);
+    git(repo.path(), &["commit", "--allow-empty", "-qm", "unmerged"]);
+    git(repo.path(), &["branch", "usagi/other"]);
+    git(repo.path(), &["checkout", "-"]);
+    let target = serde_json::json!({"kind": "branch", "name": "usagi/selected"});
+    let request = |client: &mut dyn DaemonClient, target: serde_json::Value| {
+        client.request(DaemonRequest::Session {
+            action: SessionAction::Clean,
+            operation_id: OperationId::new().to_string(),
+            payload: serde_json::json!({"apply": true, "force": true, "target": target}),
+        })
+    };
+    let DaemonReply::Ok(result) = request(&mut client, target.clone()).unwrap() else {
+        panic!("synchronous result")
+    };
+    assert_eq!(result["target"], target);
+    assert_eq!(result["removed"], 1);
+    assert_eq!(result["candidates"].as_array().unwrap().len(), 1);
+    assert!(request(&mut client, target).is_err());
+    assert!(
+        request(
+            &mut client,
+            serde_json::json!({"kind":"branch", "name":"usagi/agent-e2e"})
+        )
+        .is_err()
+    );
+    assert!(request(&mut client, serde_json::json!({"kind":"unknown"})).is_err());
+    git(
+        repo.path(),
+        &["show-ref", "--verify", "refs/heads/usagi/other"],
+    );
+    drop(client);
+    daemon_fixture::reap(home.path());
+}
+
 fn launch_intent(
     workspace: WorkspaceId,
     session: SessionId,

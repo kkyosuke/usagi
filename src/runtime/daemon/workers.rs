@@ -652,7 +652,7 @@ impl OrphanCleanupPass for AutomaticOrphanCleanup {
                 tenant,
                 workspaces: Arc::clone(&self.workspaces),
             };
-            if let Err(error) = clean_orphan_session_resources(&bound, None, true, false) {
+            if let Err(error) = clean_orphan_session_resources(&bound, None, true, false, None) {
                 ErrorLog::record(&format!(
                     "automatic orphan cleanup deferred for {}: {}",
                     root.display(),
