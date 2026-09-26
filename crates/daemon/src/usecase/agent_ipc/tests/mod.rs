@@ -3332,6 +3332,10 @@ fn helper_error_routes_and_durable_replay_outcomes_are_total() {
         ),
         (RuntimeError::UnknownRuntime, ErrorCode::StaleTarget),
         (
+            RuntimeError::Terminal(RegistryError::ScreenBudgetExceeded),
+            ErrorCode::ResourceExhausted,
+        ),
+        (
             RuntimeError::TerminalGenerationMismatch,
             ErrorCode::StaleTarget,
         ),

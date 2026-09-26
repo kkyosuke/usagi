@@ -914,7 +914,7 @@ daemon 側の bound は次のとおりで、いずれも既定 1 MiB frame と p
 |---|---|
 | geometry の上限（`ROWS_MAX` / `COLS_MAX`） | 範囲外の geometry は `invalid_argument` で PTY effect も grid 確保も行わない |
 | per-terminal cell budget | screen が超えたら古い scrollback から trim する（trim 行数を counter に計上） |
-| process-local aggregate cell budget | 直前に増えた terminal を、他 terminal の現在の retention が残す範囲まで trim する |
+| process-local aggregate cell budget | 直前に増えた terminal を、他 terminal の現在の retention が残す範囲まで trim する。新規登録の可視 grid が収まらないときは既存 screen の scrollback を回収してから判定し、それでも収まらなければ `resource_exhausted` とする |
 | serialized checkpoint budget | checkpoint payload の古い scrollback を落として frame 内に収める。可視 grid だけでも収まらない場合は `resource_exhausted` で fail closed とし、部分的な screen を返さない |
 
 `stale_target`、`ownership_unknown`、partial write を含む安全に証明
