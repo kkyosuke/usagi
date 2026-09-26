@@ -1732,7 +1732,6 @@ fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
         state: Mutex::new(ReadinessState::default()),
         completed: Condvar::new(),
         terminate_grace: Duration::from_millis(50),
-        ..SystemAgentReadiness::default()
     });
     let bounds = ReadinessBounds {
         timeout: Duration::from_millis(150),
@@ -1741,9 +1740,7 @@ fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
     let first = {
         let readiness = Arc::clone(&readiness);
         let script = script.clone();
-        std::thread::spawn(move || {
-            readiness.ready_command("codex", "/bin/sh", &[&script], bounds, &[])
-        })
+        std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script], bounds))
     };
     let started = Instant::now();
     while !pid_file.is_file() && started.elapsed() < Duration::from_secs(1) {
@@ -1752,9 +1749,7 @@ fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
     assert!(pid_file.is_file(), "fixture readiness child started");
     let second = {
         let readiness = Arc::clone(&readiness);
-        std::thread::spawn(move || {
-            readiness.ready_command("codex", "/bin/sh", &[&script], bounds, &[])
-        })
+        std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script], bounds))
     };
     assert_eq!(first.join().unwrap(), AgentReadiness::Unavailable);
     assert_eq!(second.join().unwrap(), AgentReadiness::Unavailable);
@@ -1770,78 +1765,6 @@ fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
         Some(libc::ESRCH),
         "timed-out readiness child was reaped"
     );
-}
-
-#[test]
-fn a_gateway_provider_is_made_of_environment_and_fails_closed_without_it() {
-    let home = PathBuf::from("/home/dev");
-    let user = BTreeMap::from([
-        ("SAKANA_API_KEY".to_owned(), "fish-secret".to_owned()),
-        ("UNRELATED".to_owned(), "value".to_owned()),
-    ]);
-    let environment = provider_gateway_environment(DefaultModel::SakanaAi, Some(&home), &user)
-        .expect("a configured key and a home are all this provider needs");
-    let pairs = environment
-        .iter()
-        .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    // The endpoint and every model slot come from the vocabulary, so a
-    // launch cannot lose one and quietly run as Anthropic Claude.
-    assert_eq!(
-        pairs.get("ANTHROPIC_BASE_URL").map(String::as_str),
-        Some("https://api.sakana.ai")
-    );
-    assert_eq!(
-        pairs
-            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
-            .map(String::as_str),
-        Some("fugu-max[1m]")
-    );
-    // The CLI is pointed at this provider's own state, not the home the
-    // Claude profile uses.
-    assert_eq!(
-        pairs.get("CLAUDE_CONFIG_DIR").map(String::as_str),
-        Some("/home/dev/.claude-sakana")
-    );
-    // The key is stored under the product's name and delivered under
-    // Claude's, so the Claude profile never receives it.
-    assert_eq!(
-        pairs.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
-        Some("fish-secret")
-    );
-    assert!(!pairs.contains_key("SAKANA_API_KEY"));
-    assert!(!pairs.contains_key("UNRELATED"));
-
-    // Without a home there is no isolated config directory to name, and the
-    // CLI would fall back to the Claude profile's `~/.claude`.
-    assert_eq!(
-        provider_gateway_environment(DefaultModel::SakanaAi, None, &user),
-        Err(())
-    );
-    // A missing key is not a provisioning failure: readiness refuses the
-    // launch first, with a reason the user can act on. The rest of the
-    // gateway is still assembled.
-    let without_key =
-        provider_gateway_environment(DefaultModel::SakanaAi, Some(&home), &BTreeMap::new())
-            .expect("a missing credential does not fail provisioning");
-    assert!(
-        !without_key
-            .iter()
-            .any(|(name, _)| name.as_str() == "ANTHROPIC_AUTH_TOKEN")
-    );
-    assert_eq!(without_key.len(), environment.len() - 1);
-    // A product that is its own CLI carries no gateway at all.
-    for agent in [
-        DefaultModel::Claude,
-        DefaultModel::OpenAi,
-        DefaultModel::Agy,
-    ] {
-        assert_eq!(
-            provider_gateway_environment(agent, Some(&home), &user),
-            Ok(Vec::new()),
-            "{agent:?}"
-        );
-    }
 }
 
 #[test]
@@ -1894,7 +1817,6 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
         bounded_readiness_command(
             &program,
             &[],
-            &[],
             ReadinessBounds {
                 timeout: Duration::from_secs(10),
                 output_limit: 256 * 1024,
@@ -1909,7 +1831,6 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
         bounded_readiness_command(
             &program,
             &[],
-            &[],
             ReadinessBounds {
                 timeout: Duration::from_millis(50),
                 output_limit: 256 * 1024,
@@ -1922,7 +1843,6 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
     assert_eq!(
         bounded_readiness_command(
             &program,
-            &[],
             &[],
             ReadinessBounds {
                 timeout: Duration::from_secs(10),
@@ -7870,16 +7790,9 @@ fn root_agent_writable_roots_include_only_provider_state() {
     assert_eq!(roots, [home.join(".codex").canonicalize().unwrap()]);
     assert!(!roots.contains(&fixture.path().canonicalize().unwrap()));
 
-    // Two providers exec the same `claude`, and each still gets only its own
-    // state: the grant is keyed by provider, never by that shared program.
+    // Each provider gets only its own state: the grant is keyed by provider.
     let claude = root_agent_writable_roots(Some(&home), DefaultModel::Claude).unwrap();
-    let sakana = root_agent_writable_roots(Some(&home), DefaultModel::SakanaAi).unwrap();
     assert_eq!(claude, [home.join(".claude").canonicalize().unwrap()]);
-    assert_eq!(
-        sakana,
-        [home.join(".claude-sakana").canonicalize().unwrap()]
-    );
-    assert_ne!(claude, sakana);
 
     let roots = root_agent_writable_roots(Some(&home), DefaultModel::Agy).unwrap();
     assert_eq!(
@@ -8733,9 +8646,7 @@ fn root_git_common_dir_must_not_overlap_sandbox_writable_state() {
 
     // The `$HOME` state root covered by this check is the launched agent's own
     // (`~/.codex` for Codex), so a Git common directory under it is refused for
-    // that provider while every other provider's own root is unaffected —
-    // including `sakana-ai`, which execs the same `claude` as Claude but is
-    // checked against its own `~/.claude-sakana`.
+    // that provider while every other provider's own root is unaffected.
     let home = tempfile::tempdir_in("target").unwrap();
     let state = home.path().join(".codex");
     std::fs::create_dir_all(state.join("worktrees/linked")).unwrap();
@@ -8749,7 +8660,6 @@ fn root_git_common_dir_must_not_overlap_sandbox_writable_state() {
     for (agent, allowed) in [
         (DefaultModel::OpenAi, false),
         (DefaultModel::Claude, true),
-        (DefaultModel::SakanaAi, true),
         (DefaultModel::Agy, true),
     ] {
         assert_eq!(
@@ -8932,8 +8842,8 @@ fn a_session_claude_is_confined_to_its_worktree_and_gets_the_guard_hook() {
             "claude-sandbox",
             "--mode",
             "session",
-            // Which provider's `$HOME` state the launcher grants cannot be
-            // read off the program: Claude and `sakana-ai` share `claude`.
+            // Which provider's `$HOME` state the launcher grants is decided by
+            // the provider, not read off the program.
             "--agent",
             "claude",
             "--protected-root",
@@ -9184,9 +9094,6 @@ fn root_sandbox_policy_checks_the_state_root_of_the_agent_it_launches() {
             Err(ClaudeSandboxPolicyError::ProtectedWorkspaceAncestor),
         ),
         (DefaultModel::Claude, Ok(())),
-        // `sakana-ai` execs the same `claude`, and is still judged against
-        // its own `~/.claude-sakana` rather than that shared program.
-        (DefaultModel::SakanaAi, Ok(())),
         (DefaultModel::Agy, Ok(())),
     ] {
         assert_eq!(
@@ -9208,17 +9115,15 @@ fn root_sandbox_policy_checks_the_state_root_of_the_agent_it_launches() {
     }
 
     // This gate exists to mirror the grant the launcher will actually hand
-    // out, and that grant is keyed by provider. Both launches below name the
-    // same `claude` program, so a gate that read the state root off the argv
-    // would accept a workspace sitting inside the very directory it is about
-    // to make writable — and refuse the harmless one.
+    // out, and that grant is keyed by provider: each provider is refused only
+    // for a workspace inside the directory it is about to make writable.
     for (state, refused) in [
         (".claude", DefaultModel::Claude),
-        (".claude-sakana", DefaultModel::SakanaAi),
+        (".codex", DefaultModel::OpenAi),
     ] {
         let shared_workspace = home.join(state).join("repo");
         std::fs::create_dir_all(shared_workspace.join(".git")).unwrap();
-        for agent in [DefaultModel::Claude, DefaultModel::SakanaAi] {
+        for agent in [DefaultModel::Claude, DefaultModel::OpenAi] {
             assert_eq!(
                 validate_claude_sandbox_policy(&SandboxPolicyInputs {
                     mode: SandboxMode::Root,

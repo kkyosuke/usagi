@@ -505,22 +505,10 @@ pub(super) fn open_agent_runtime(
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
-    // The `$HOME` a managed launch resolves. The readiness probe takes the same
-    // value rather than resolving it again: a provider whose config directory is
-    // named relative to a *different* home would be probed somewhere it will
-    // never run.
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::default());
     let sandbox_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());
-    // The readiness probe needs the same home and configured credential the
-    // launch will use; a probe that lacks them answers about a different
-    // provider or a missing key it would in fact have had.
-    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness {
-        home: sandbox_home.clone(),
-        environment: Some(Arc::clone(&environment)),
-        workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
-        ..SystemAgentReadiness::default()
-    });
     // Agent MCP children receive the mode-neutral base. They apply the same
     // selected runtime mode themselves, so every mode reaches the daemon's
     // already-selected directory without adding that child twice. Production
@@ -546,7 +534,7 @@ pub(super) fn open_agent_runtime(
             .as_deref(),
     );
     repair_agent_codex_arg0_permissions(sandbox_home.as_deref());
-    // Duplicate registration cannot happen for the two literal profiles; a
+    // Duplicate registration cannot happen for the literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
     let _ = registry.register_supported(
@@ -560,22 +548,6 @@ pub(super) fn open_agent_runtime(
             sandbox_tmpdir: sandbox_tmpdir.clone(),
             sandbox_home: sandbox_home.clone(),
             sandbox_cache_dir: sandbox_cache_dir.clone(),
-            sandbox_passthrough,
-        }),
-        // Fugu is the same Claude CLI pointed at Sakana's Anthropic-compatible
-        // endpoint, so it reuses this adapter and differs only in the provider
-        // its provisioner carries: gateway variables, its own config directory,
-        // and its own API key.
-        ClaudeAdapter::sakana(RootClaudeProvisioner {
-            workspaces: Arc::clone(&workspaces),
-            mcp_command: mcp_command.clone(),
-            data_home: data_home.clone(),
-            agent: DefaultModel::SakanaAi,
-            sandbox_backend: sandbox_backend.clone(),
-            sandbox_tmpdir: sandbox_tmpdir.clone(),
-            sandbox_home: sandbox_home.clone(),
-            sandbox_cache_dir: sandbox_cache_dir.clone(),
-            environment: Some(Arc::clone(&environment)),
             sandbox_passthrough,
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
@@ -1123,10 +1095,6 @@ pub(super) fn current_agent_integrations() -> Vec<AgentIntegrationRevision> {
         ),
         (
             DefaultModel::OpenAi,
-            usagi_daemon::usecase::codex::PROFILE_REVISION,
-        ),
-        (
-            DefaultModel::SakanaAi,
             usagi_daemon::usecase::codex::PROFILE_REVISION,
         ),
         (

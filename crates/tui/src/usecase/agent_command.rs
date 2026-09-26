@@ -178,13 +178,9 @@ mod tests {
         for (input, expected) in [
             ("-m claude", DefaultModel::Claude),
             ("--model codex", DefaultModel::OpenAi),
-            ("-m sakana.ai", DefaultModel::SakanaAi),
-            // The vocabulary accepts the profile ID and separator-insensitive
-            // spellings. It does not accept the executable here: `claude` is
-            // shared with the Claude provider and names that one.
-            ("-m sakana-ai", DefaultModel::SakanaAi),
-            ("-m sakana_ai", DefaultModel::SakanaAi),
-            ("-m SAKANA.AI", DefaultModel::SakanaAi),
+            ("-m agy", DefaultModel::Agy),
+            // The vocabulary accepts case-insensitive spellings.
+            ("-m AGY", DefaultModel::Agy),
             ("codex", DefaultModel::OpenAi),
             ("  claude  ", DefaultModel::Claude),
         ] {
@@ -223,7 +219,7 @@ mod tests {
             Err("that agent CLI is not installed")
         );
         assert_eq!(
-            parse("-m sakana.ai", DefaultModel::OpenAi, only_codex),
+            parse("-m agy", DefaultModel::OpenAi, only_codex),
             Err("that agent CLI is not installed")
         );
         // A configured default that is no longer installed is reported as a
@@ -242,38 +238,38 @@ mod tests {
     fn completes_the_flag_then_only_installed_cli_names() {
         assert_eq!(
             completions("", all()),
-            ["-m", "--model", "claude", "codex", "sakana.ai", "agy"]
+            ["-m", "--model", "claude", "codex", "agy"]
         );
         assert_eq!(completions("-", all()), ["-m", "--model"]);
         assert_eq!(completions("--", all()), ["--model"]);
-        assert_eq!(completions("sak", all()), ["sakana.ai"]);
+        assert_eq!(completions("a", all()), ["agy"]);
         assert_eq!(
             completions("-m ", all()),
-            ["-m claude", "-m codex", "-m sakana.ai", "-m agy"]
+            ["-m claude", "-m codex", "-m agy"]
         );
-        assert_eq!(completions("-m sak", all()), ["-m sakana.ai"]);
+        assert_eq!(completions("-m a", all()), ["-m agy"]);
         assert_eq!(
             completions("--model c", all()),
             ["--model claude", "--model codex"]
         );
         // Absent CLIs are neither offered nor completed.
-        let only_sakana = AvailableModels::new([DefaultModel::SakanaAi]);
-        assert_eq!(completions("-m ", only_sakana), ["-m sakana.ai"]);
-        assert_eq!(completions("-m c", only_sakana), Vec::<String>::new());
+        let only_agy = AvailableModels::new([DefaultModel::Agy]);
+        assert_eq!(completions("-m ", only_agy), ["-m agy"]);
+        assert_eq!(completions("-m c", only_agy), Vec::<String>::new());
         assert!(completions("-m codex ", all()).is_empty());
         assert!(completions("-m codex extra", all()).is_empty());
     }
 
     #[test]
     fn picker_choices_mark_the_configured_default() {
-        let choices = model_choices(all(), DefaultModel::SakanaAi);
+        let choices = model_choices(all(), DefaultModel::Agy);
         assert_eq!(
             choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["-m claude", "-m codex", "-m sakana.ai  (default)", "-m agy"]
+            ["-m claude", "-m codex", "-m agy  (default)"]
         );
         assert_eq!(
             choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>(),
-            ["-m claude", "-m codex", "-m sakana.ai", "-m agy"]
+            ["-m claude", "-m codex", "-m agy"]
         );
         assert!(model_choices(AvailableModels::default(), DefaultModel::OpenAi).is_empty());
         // Exercise the derived vocabulary used by the modal projection.
