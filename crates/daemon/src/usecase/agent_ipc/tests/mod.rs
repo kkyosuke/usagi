@@ -2481,18 +2481,13 @@ fn legacy_run_without_admission_metadata_is_not_spawned() {
 
 #[test]
 fn provider_metadata_matches_only_its_compatible_profiles() {
-    // `sakana-ai` runs the Claude CLI, so the Claude adapter is what
-    // captures and resumes its conversations: its retained metadata is
-    // `ProviderKind::Claude`. Codex metadata — including a record written
-    // while this profile still ran Sakana's Codex wrapper — must never
-    // authorize it, or the daemon would hand Codex resume data to a Claude
-    // adapter.
+    // Metadata from another provider must never authorize a profile, or the
+    // daemon would hand one adapter's resume data to another.
     for (provider, profile, expected) in [
         (ProviderKind::Claude, "claude", true),
         (ProviderKind::Codex, "codex", true),
-        (ProviderKind::Claude, "sakana-ai", true),
         (ProviderKind::Agy, "agy", true),
-        (ProviderKind::Codex, "sakana-ai", false),
+        (ProviderKind::Claude, "retired-profile", false),
         (ProviderKind::Claude, "codex", false),
         (ProviderKind::Codex, "claude", false),
         (ProviderKind::Agy, "codex", false),

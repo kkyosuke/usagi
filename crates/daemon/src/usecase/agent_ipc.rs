@@ -2396,20 +2396,13 @@ const fn runtime_inventory_state(
 }
 
 /// The provider metadata a profile's retained conversations carry.
-///
-/// `sakana-ai` is the **Claude** CLI pointed at Sakana's Anthropic-compatible
-/// endpoint, so its conversations are captured and resumed through Claude's
-/// provider metadata — the adapter that serves the profile is what decides this,
-/// never the product name. It was Codex-shaped while the profile ran Sakana's
-/// Codex wrapper; records from that era carry the old adapter revision and stop
-/// matching on the revision check instead of replaying Codex argv.
 fn provider_matches_profile(provider: ProviderKind, profile: &AgentProfileId) -> bool {
     provider_for_profile(profile) == Some(provider)
 }
 
 fn provider_for_profile(profile: &AgentProfileId) -> Option<ProviderKind> {
     match profile.as_str() {
-        "claude" | "sakana-ai" => Some(ProviderKind::Claude),
+        "claude" => Some(ProviderKind::Claude),
         "codex" => Some(ProviderKind::Codex),
         "agy" => Some(ProviderKind::Agy),
         _ => None,

@@ -130,11 +130,11 @@ use agent_provisioning::{
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
     lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
-    mcp_environment_allowlist, prompt_scope, provider_gateway_environment,
-    repair_codex_arg0_permissions, repair_codex_arg0_permissions_with_limit,
-    root_agent_writable_roots, root_memory_store_root, sandbox_mode, session_git_common_dir,
-    session_git_policy, shell_quote, toml_basic_string, validate_claude_sandbox_policy,
-    validate_isolated_sandbox_root, validate_root_git_common_dir_policy,
+    mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
+    repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
+    sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
+    validate_claude_sandbox_policy, validate_isolated_sandbox_root,
+    validate_root_git_common_dir_policy,
 };
 use agent_provisioning::{
     DiscardJournal, RootClaudeProvisioner, RootCodexProvisioner,
@@ -174,9 +174,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
-use usagi_core::infrastructure::bounded_process::{
-    ChildObservation, ChildPolicy, observe, observe_with_environment,
-};
+use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
 use usagi_core::infrastructure::client::{
     ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient, PolicyClient,
     TerminalLaneBudget,
@@ -591,14 +589,12 @@ const AGENT_READINESS_TERMINATE_GRACE: Duration = Duration::from_millis(250);
 fn bounded_readiness_command(
     program: &str,
     arguments: &[&str],
-    environment: &[(String, String)],
     bounds: ReadinessBounds,
     terminate_grace: Duration,
 ) -> AgentReadiness {
-    readiness_from_observation(&observe_with_environment(
+    readiness_from_observation(&observe(
         program,
         arguments,
-        environment,
         ChildPolicy {
             timeout: bounds.timeout,
             terminate_grace,

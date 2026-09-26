@@ -1509,7 +1509,6 @@ fn default_model_name(model: DefaultModel) -> &'static str {
         DefaultModel::Claude => "Claude",
         DefaultModel::Agy => "Antigravity",
         DefaultModel::OpenAi => "OpenAI",
-        DefaultModel::SakanaAi => "sakana.ai",
     }
 }
 
@@ -2419,9 +2418,6 @@ mod tests {
         assert_eq!(config.field(), Field::DefaultModel);
         // The row cycles through every installed provider and wraps.
         config.cycle_selected(true);
-        assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
-        assert!(render(24, 80, &config).join("\n").contains("sakana.ai"));
-        config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Agy);
         assert!(render(24, 80, &config).join("\n").contains("Antigravity"));
         config.cycle_selected(true);
@@ -2429,8 +2425,6 @@ mod tests {
         assert!(render(24, 80, &config).join("\n").contains("Claude"));
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
-        config.cycle_selected(true);
-        assert_eq!(config.settings().default_model, DefaultModel::SakanaAi);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Agy);
         config.cycle_selected(true);

@@ -83,28 +83,8 @@ struct Capture {
 /// limited to `output_limit` bytes per stream.
 #[must_use]
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
-    observe_with_environment(program, arguments, &[], policy)
-}
-
-/// Runs the same probe with `environment` set on the child.
-///
-/// A probe only answers for the product a launch would actually start. When two
-/// providers share one executable and differ by environment — endpoint, config
-/// directory, credential — a probe run without that environment answers for the
-/// other provider. The values are the caller's to choose and never appear in the
-/// returned observation.
-#[must_use]
-pub fn observe_with_environment(
-    program: &str,
-    arguments: &[&str],
-    environment: &[(String, String)],
-    policy: ChildPolicy,
-) -> ChildObservation {
     let mut command = Command::new(program);
     command.args(arguments);
-    for (name, value) in environment {
-        command.env(name, value);
-    }
     normalize_observation(observe_command_output(command, policy))
 }
 

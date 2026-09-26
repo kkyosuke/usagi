@@ -191,7 +191,7 @@ code-defined scope safety prompt
 role より前に置くため role instruction で絞り込める。scope safety prompt は tool 名を 1 つも書かないので、
 tool 系統の可用性は `<tools>` だけが述べる。
 
-Claude adapter は合成済み文字列を単一 `--append-system-prompt` 値、Codex / Sakana AI
+Claude adapter は合成済み文字列を単一 `--append-system-prompt` 値、Codex
 adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral provision に渡す。initial user prompt へ連結しない。
 
 ### `<tools>` fragment

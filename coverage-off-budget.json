@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 553,
+  "total": 552,
   "owners": {
     "core": 10,
-    "daemon": 374,
+    "daemon": 373,
     "root-cli": 41,
     "tui": 128
   },
@@ -88,7 +88,7 @@
     "src/runtime/daemon/standby.rs": 18,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/daemon/tests.rs": 1,
-    "src/runtime/daemon/workers.rs": 24,
+    "src/runtime/daemon/workers.rs": 23,
     "src/runtime/inventory_pump.rs": 1,
     "src/runtime/launchd.rs": 1,
     "src/runtime/platform_child_reaper.rs": 3,

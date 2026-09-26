@@ -74,11 +74,7 @@ struct ToolSpec {
     required: bool,
 }
 
-/// Doctor reports the **CLIs** a machine has, not the providers usagi can
-/// select. `sakana.ai` deliberately has no row: it is the Claude CLI pointed at
-/// another endpoint, so a second row would probe the same executable and report
-/// the same version twice — and an absent Sakana key would still read as a
-/// healthy "Sakana AI CLI".
+/// Doctor reports the **CLIs** a machine has, one row per executable.
 const TOOLS: [ToolSpec; 4] = [
     ToolSpec {
         name: "Git",
@@ -217,8 +213,7 @@ mod tests {
         let report = diagnose(&mut port);
 
         assert!(report.is_healthy());
-        // One row per CLI. `sakana.ai` is the Claude CLI with another endpoint,
-        // so probing `claude` twice would only report the same version twice.
+        // One row per CLI.
         assert_eq!(
             port.calls,
             ["git", "claude", "codex", "agy", "settings", "daemon"]

@@ -16,14 +16,12 @@ use super::{
 };
 
 mod agy;
-mod gateway;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
 pub(super) use agy::{
     agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
     materialize_agy_plugin,
 };
-pub(in crate::runtime) use gateway::provider_gateway_environment;
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -138,8 +136,7 @@ pub(super) struct RootCodexProvisioner {
     pub(super) workspaces: Workspaces,
     pub(super) mcp_command: PathBuf,
     pub(super) data_home: paths::DataHome,
-    /// The provider this profile launches. Codex is the only one left on this
-    /// grammar: `sakana-ai` now serves Fugu through the Claude CLI.
+    /// The provider this profile launches.
     pub(super) agent: DefaultModel,
     /// The configured environment injected into the Agent child. `None` in tests
     /// that exercise only the MCP wiring.
@@ -421,9 +418,7 @@ pub(super) struct RootClaudeProvisioner {
     pub(super) workspaces: Workspaces,
     pub(super) mcp_command: PathBuf,
     pub(super) data_home: paths::DataHome,
-    /// この provisioner が起動する provider。`claude` executable は Claude と
-    /// `sakana-ai`（Sakana の Anthropic 互換 endpoint 上の Fugu）が共有するため、
-    /// state grant と gateway environment はこの値から決まる。
+    /// この provisioner が起動する provider。state grant はこの値から決まる。
     pub(super) agent: DefaultModel,
     /// daemon bootstrap の trusted environment から一度だけ確定した backend。
     pub(super) sandbox_backend: Option<PathBuf>,
@@ -543,14 +538,14 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         ));
         let user = configured_environment(self.environment.as_ref(), &workspace_root)
             .map_err(|_| ClaudeProvisionFailure::MaterializationFailed)?;
-        let gateway = provider_gateway_environment(self.agent, self.sandbox_home.as_deref(), &user)
-            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
-        let mut environment = launch_environment(&user, gateway.clone());
-        environment.extend(
-            mcp_environment(context, &self.data_home, &workspace_root)
-                .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+        let mut spawn = SpawnProvision::new(
+            launch_environment(
+                &user,
+                mcp_environment(context, &self.data_home, &workspace_root)
+                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?,
+            ),
+            arguments,
         );
-        let mut spawn = SpawnProvision::new(environment, arguments);
         spawn.set_sandbox_launcher(sandbox_launcher);
         if mode == SandboxMode::Root {
             insert_root_git_environment(&mut spawn);
@@ -562,11 +557,9 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
                 "1".to_owned(),
             );
         }
-        let mut environment_allowlist = launch_allowlist(context, &user);
-        environment_allowlist.extend(gateway.into_iter().map(|(name, _)| name));
         Ok(ClaudeProvision {
             working_directory,
-            environment_allowlist,
+            environment_allowlist: launch_allowlist(context, &user),
             spawn,
         })
     }
@@ -827,8 +820,8 @@ impl From<InvalidOwnedDirectory> for ClaudeSandboxPolicyError {
 pub(super) struct SandboxPolicyInputs<'a> {
     pub(super) mode: SandboxMode,
     /// 起動する provider。root mode で launcher が足す `$HOME` 配下の state root
-    /// （`~/.claude` / `~/.codex` / `~/.claude-sakana` / …）はこれで決まる。`claude` を
-    /// 2 provider が共有するため、program だけでは検証対象が一意に決まらない。
+    /// （`~/.claude` / `~/.codex` / …）はこれで決まる。executable は provider の identity では
+    /// ないため、program を根拠にしない。
     pub(super) agent: DefaultModel,
     pub(super) workspace_root: &'a Path,
     pub(super) launch_roots: &'a [PathBuf],
@@ -903,10 +896,8 @@ pub(super) fn validate_claude_sandbox_policy(
         // family (`~/.claude.json*`). Keep those overlap rules distinct.
         //
         // Both are resolved from the **provider**, exactly as the launcher
-        // resolves the grant it will hand out. Reading them off `program` would
-        // judge `sakana-ai` against Claude's `~/.claude` while the launcher
-        // grants `~/.claude-sakana`, so a workspace inside the directory that is
-        // actually made writable would pass this gate.
+        // resolves the grant it will hand out, so this gate always checks the
+        // directory that is actually made writable.
         {
             let granted = home.join(agent.state_directory());
             let granted = granted.canonicalize().unwrap_or(granted);
@@ -1104,8 +1095,8 @@ pub(super) fn claude_sandbox_launcher(
         "claude-sandbox".to_owned(),
         "--mode".to_owned(),
         mode.as_str().to_owned(),
-        // Which `$HOME` state the launcher grants cannot be read off the argv:
-        // Claude and `sakana-ai` exec the same program. The provider says it.
+        // Which `$HOME` state the launcher grants is decided by the provider,
+        // not read off the argv.
         "--agent".to_owned(),
         agent.profile_id().to_owned(),
         "--protected-root".to_owned(),

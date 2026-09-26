@@ -3,8 +3,6 @@
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::panic::{self, AssertUnwindSafe};
 
-use super::agent_provisioning;
-
 use super::{
     AGENT_READINESS_TERMINATE_GRACE, AcceptedStream, AdmissionGate, AgentPtyObservation,
     AgentReadinessCommand, Arc, BTreeMap, BTreeSet, BackgroundWorker, ClientWorkers, Collection,
@@ -14,12 +12,12 @@ use super::{
     PR_REFRESH_PER_TICK, PathBuf, PendingTeardown, PrProjection, PrProjectionQueue, PtyObservation,
     RETENTION_GC_TICK, Receiver, RefCell, RefreshWorker, SESSION_TEARDOWN_TICK,
     ShardedRuntimeState, SharedAgentRuntime, SharedPrInventory, SharedSessionRuntime,
-    SharedSessionTeardown, SharedTerminalRuntime, SharedUserEnvironment, ShutdownRequest,
-    ShutdownSignal, SyncSender, SystemGit, SystemSessionWorktreeIo, SystemTenantOpener,
-    TeardownEffect, TeardownJournal, TeardownSignal, TenantRegistry, Terminator, Workspaces,
-    WorktreeTeardown, active_cleanup_lease, bounded_readiness_command,
-    clean_orphan_session_resources, collect_if_drained, drain_pending_teardowns, known_sessions,
-    shipping_retention_limits, signal_exact_process, start_connection_cleanup_worker_with,
+    SharedSessionTeardown, SharedTerminalRuntime, ShutdownRequest, ShutdownSignal, SyncSender,
+    SystemGit, SystemSessionWorktreeIo, SystemTenantOpener, TeardownEffect, TeardownJournal,
+    TeardownSignal, TenantRegistry, Terminator, Workspaces, WorktreeTeardown, active_cleanup_lease,
+    bounded_readiness_command, clean_orphan_session_resources, collect_if_drained,
+    drain_pending_teardowns, known_sessions, shipping_retention_limits, signal_exact_process,
+    start_connection_cleanup_worker_with,
 };
 
 /// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
@@ -80,21 +78,6 @@ pub(super) struct SystemAgentReadiness {
     pub(super) state: Mutex<ReadinessState>,
     pub(super) completed: Condvar,
     pub(super) terminate_grace: Duration,
-    /// `$HOME`, for the provider state directory a gateway provider's CLI must
-    /// be pointed at. A provider that needs one and has no home is unavailable:
-    /// probing it in the shared CLI's default home would answer for the other
-    /// provider that lives there.
-    pub(super) home: Option<PathBuf>,
-    /// Where a provider's configured API key comes from. The probe resolves it
-    /// the same way a launch does, because "is this provider usable" is mostly
-    /// "is its credential configured" — and a probe run without the key refuses
-    /// a provider that would have launched.
-    pub(super) environment: Option<Arc<SharedUserEnvironment>>,
-    /// The workspace whose settings the credential is read from. Gateway and
-    /// credential names are reserved from workspace bindings, so this resolves
-    /// the same value for every workspace; the daemon's own root is simply the
-    /// one that always exists.
-    pub(super) workspace: PathBuf,
 }
 
 impl Default for SystemAgentReadiness {
@@ -103,9 +86,6 @@ impl Default for SystemAgentReadiness {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
-            home: None,
-            environment: None,
-            workspace: PathBuf::new(),
         }
     }
 }
@@ -121,14 +101,7 @@ impl AgentReadinessProbe for SystemAgentReadiness {
         // `agy models` may take is a fact about Antigravity, not about this
         // root, and a single shared deadline reported an installed and
         // authenticated CLI as unavailable.
-        let Some(agent) = DefaultModel::from_selector(product) else {
-            return AgentReadiness::Unavailable;
-        };
-        let probe = agent.readiness_command();
-        // A provider that is a shared CLI plus an environment is only probed
-        // honestly under that environment: `claude auth status` run bare answers
-        // for the user's own Anthropic account, not for this profile.
-        let Ok(environment) = self.provider_environment(agent) else {
+        let Some(probe) = DefaultModel::readiness_command_for(product) else {
             return AgentReadiness::Unavailable;
         };
         self.ready_command(
@@ -136,65 +109,11 @@ impl AgentReadinessProbe for SystemAgentReadiness {
             probe.program(),
             probe.arguments(),
             ReadinessBounds::for_probe(probe),
-            &environment,
         )
     }
 }
 
 impl SystemAgentReadiness {
-    /// The environment that makes this probe answer for `agent` rather than for
-    /// whichever provider shares its executable. `Err` means the provider cannot
-    /// be probed honestly — a missing home for a provider that needs its own
-    /// config directory, or a credential it declares but nothing supplies — and
-    /// the caller reports it unavailable rather than asking a question whose
-    /// answer would be about something else.
-    ///
-    /// The gateway itself is assembled by the **same** function the launch uses
-    /// (`agent_provisioning::provider_gateway_environment`), so "the probe
-    /// answers for the product that would launch" is structural rather than two
-    /// separate tables kept in step by hand. Only the credential rule differs,
-    /// and in the stricter direction: provisioning tolerates a missing key
-    /// because this probe is what refuses the launch first, with a reason an
-    /// operator can act on.
-    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
-    pub(super) fn provider_environment(
-        &self,
-        agent: DefaultModel,
-    ) -> Result<Vec<(String, String)>, ()> {
-        let user = match agent.credential_binding() {
-            Some(_) => self
-                .environment
-                .as_ref()
-                .ok_or(())?
-                .resolved(&self.workspace)
-                .map_err(|_| ())?,
-            None => BTreeMap::new(),
-        };
-        let environment =
-            agent_provisioning::provider_gateway_environment(agent, self.home.as_deref(), &user)
-                .map_err(|()| {
-                    ErrorLog::record(&format!(
-                        "agent readiness: {} cannot be probed without a resolved $HOME",
-                        agent.selector()
-                    ));
-                })?;
-        if let Some((source, target)) = agent.credential_binding()
-            && !environment.iter().any(|(name, _)| name.as_str() == target)
-        {
-            // The recovery a user needs, named once where an operator can
-            // find it. The wire answer stays the generic safe refusal.
-            ErrorLog::record(&format!(
-                "agent readiness: {} is unavailable because {source} is not configured",
-                agent.selector()
-            ));
-            return Err(());
-        }
-        Ok(environment
-            .into_iter()
-            .map(|(name, value)| (name.as_str().to_owned(), value))
-            .collect())
-    }
-
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
     pub(super) fn ready_command(
         &self,
@@ -202,7 +121,6 @@ impl SystemAgentReadiness {
         program: &str,
         arguments: &[&str],
         bounds: ReadinessBounds,
-        environment: &[(String, String)],
     ) -> AgentReadiness {
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
@@ -234,13 +152,7 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result = bounded_readiness_command(
-            program,
-            arguments,
-            environment,
-            bounds,
-            self.terminate_grace,
-        );
+        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };

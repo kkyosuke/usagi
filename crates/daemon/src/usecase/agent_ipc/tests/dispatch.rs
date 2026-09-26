@@ -1379,43 +1379,29 @@ fn the_dispatch_preflight_refuses_before_anything_is_created() {
 }
 
 #[test]
-fn sakana_dispatch_preflight_checks_the_executable_it_launches() {
+fn dispatch_preflight_checks_the_executable_it_launches() {
     let fixture = tempfile::tempdir().unwrap();
-    // Fugu runs the Claude CLI, so that is the executable whose absence
-    // makes this runtime unavailable.
-    let executable = fixture.path().join("claude");
+    let executable = fixture.path().join("codex");
     std::fs::write(&executable, "fixture").unwrap();
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
     std::fs::write(
         workspace.path().join(".usagi/config.toml"),
-        "[agents.sakana-ai]\nmodels = [\"fixture\"]\n",
+        "[agents.codex]\nmodels = [\"fixture\"]\n",
     )
     .unwrap();
     let runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
     let operation = OperationId::new().to_string();
-    let sakana = AgentProfileId::new("sakana-ai").unwrap();
+    let codex = AgentProfileId::new("codex").unwrap();
     let model = ModelSelector::new("fixture").unwrap();
 
     runtime
-        .preflight_dispatch(
-            &operation,
-            "inspect argv",
-            &sakana,
-            &model,
-            workspace.path(),
-        )
+        .preflight_dispatch(&operation, "inspect argv", &codex, &model, workspace.path())
         .unwrap();
     std::fs::remove_file(executable).unwrap();
     assert_eq!(
         runtime
-            .preflight_dispatch(
-                &operation,
-                "inspect argv",
-                &sakana,
-                &model,
-                workspace.path()
-            )
+            .preflight_dispatch(&operation, "inspect argv", &codex, &model, workspace.path())
             .unwrap_err()
             .code,
         ErrorCode::Unavailable

@@ -25,15 +25,6 @@ use super::runtime::{
 /// instead of assigning `--session-id` before spawn.
 pub const PROFILE_REVISION: u32 = 5;
 
-/// The `sakana-ai` profile's revision, deliberately distinct from
-/// [`PROFILE_REVISION`].
-///
-/// Until this revision the same profile ID was launched by the Codex adapter at
-/// *its* revision 5. A durable snapshot from that era describes Codex argv and a
-/// Codex provider resume, so it must not validate against this Claude-shaped
-/// profile — and it would, byte for byte, if both carried revision 5.
-pub const SAKANA_PROFILE_REVISION: u32 = 6;
-
 /// Claude's product-private provisioning result.
 ///
 /// Only the public plan inputs and common ephemeral [`SpawnProvision`] cross
@@ -96,26 +87,7 @@ pub struct ClaudeAdapter<P> {
 impl<P> ClaudeAdapter<P> {
     #[must_use]
     pub fn new(provisioner: P) -> Self {
-        Self::build(
-            provisioner,
-            PROFILE_REVISION,
-            DefaultModel::Claude.profile_id(),
-            "Claude",
-        )
-    }
-
-    /// The `sakana-ai` profile: the same Claude CLI grammar, pointed at Sakana's
-    /// Anthropic-compatible endpoint by the provisioner's launch environment.
-    /// Only the identity differs here; the argv, hooks, and resume contract are
-    /// Claude's, which is exactly why it reuses this adapter.
-    #[must_use]
-    pub fn sakana(provisioner: P) -> Self {
-        Self::build(
-            provisioner,
-            SAKANA_PROFILE_REVISION,
-            DefaultModel::SakanaAi.profile_id(),
-            "sakana.ai",
-        )
+        Self::with_revision(provisioner, PROFILE_REVISION)
     }
 
     /// # Panics
@@ -124,25 +96,12 @@ impl<P> ClaudeAdapter<P> {
     /// core canonical-ID contract.
     #[must_use]
     pub fn with_revision(provisioner: P, revision: u32) -> Self {
-        Self::build(
-            provisioner,
-            revision,
-            DefaultModel::Claude.profile_id(),
-            "Claude",
-        )
-    }
-
-    /// # Panics
-    ///
-    /// Panics only if a hard-coded catalog profile ID stops satisfying the core
-    /// canonical-ID contract.
-    #[must_use]
-    fn build(provisioner: P, revision: u32, profile_id: &str, display_name: &str) -> Self {
         Self {
             provisioner,
             profile: AgentProfile::new(
-                AgentProfileId::new(profile_id).expect("catalog profile ID is canonical"),
-                display_name,
+                AgentProfileId::new(DefaultModel::Claude.profile_id())
+                    .expect("catalog profile ID is canonical"),
+                "Claude",
                 revision,
                 [
                     AgentCapability::Resume,
@@ -338,45 +297,6 @@ mod tests {
             },
             required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
         }
-    }
-
-    #[test]
-    fn the_fugu_profile_is_a_separate_identity_over_the_same_claude_grammar() {
-        let sakana = ClaudeAdapter::sakana(FakeClaudeProvisioner(None));
-        let claude = ClaudeAdapter::new(FakeClaudeProvisioner(None));
-        assert_eq!(sakana.profile().id.as_str(), "sakana-ai");
-        assert_eq!(sakana.profile().display_name, "sakana.ai");
-        // Same grammar, same capabilities: only the environment a provisioner
-        // gives it makes one Fugu and the other Anthropic Claude.
-        assert_eq!(sakana.profile().capabilities, claude.profile().capabilities);
-        assert_eq!(
-            sakana.profile().allowed_modes,
-            claude.profile().allowed_modes
-        );
-        // The revision must differ from Claude's. Until this change the same
-        // `sakana-ai` ID was launched by the Codex adapter, which also carried
-        // revision 5: a durable snapshot from that era describes Codex argv, and
-        // a shared revision would let it validate against this profile.
-        assert_ne!(sakana.profile().revision, claude.profile().revision);
-        assert_eq!(sakana.profile().revision, SAKANA_PROFILE_REVISION);
-        // The snapshots that must not validate are the Codex adapter's, so the
-        // revision has to differ from *that* constant too. A resume reference
-        // is admitted on `adapter_revision` equality, and this is the whole
-        // fence that keeps a Codex-era `sakana-ai` record from being replayed.
-        assert_ne!(
-            SAKANA_PROFILE_REVISION,
-            crate::usecase::codex::PROFILE_REVISION
-        );
-
-        // A launch for the other profile is refused rather than answered with
-        // the wrong identity.
-        let mut sakana = ClaudeAdapter::sakana(FakeClaudeProvisioner(Some(Ok(provision()))));
-        assert!(matches!(
-            sakana.resolve(&request()),
-            Err(AdapterError::Validation(LaunchValidationError::UnknownProfile {
-                profile_id,
-            })) if profile_id.as_str() == "claude"
-        ));
     }
 
     fn provision() -> ClaudeProvision {

@@ -820,8 +820,7 @@ slot を解放する。generic Terminal Launch は producer `OperationId` を wi
 
 ### Agent orchestration の fence
 
-`usecase::orchestration::AdapterRegistry` は Antigravity、Claude、Codex、Codex grammar を使う Sakana AI を同じ typed
-orchestration port に登録する。
+`usecase::orchestration::AdapterRegistry` は Antigravity、Claude、Codex を同じ typed orchestration port に登録する。
 daemon は profile ID によって registry を引くだけで、product 名による lifecycle・authorization 分岐を持たない。
 MCP wiring は profile の `McpWiring` capability と、別個の workspace/session authorization の両方が通った launch
 だけで adapter の scoped provisioner に要求する。provision failure は spawn 前に typed error として止まり、secret・
@@ -1116,14 +1115,11 @@ launcher は、**起動する provider 自身の state directory** を `$HOME` �
 |---|---|
 | `claude`（`claude`） | `~/.claude` |
 | `codex`（`codex`） | `~/.codex` |
-| `sakana-ai`（`claude`） | `~/.claude-sakana`（`CLAUDE_CONFIG_DIR` で CLI に指示する） |
 | `agy`（`agy`。Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（加えて同じ state 直下の conversation summary DB 3 ファイルだけ） |
 
 - 判定の正本は `usagi-core` の `domain::settings::DefaultModel::state_directory` である（provider と state の
   置き場所を 1 つの事実として持つ）。**根拠は exec する program ではなく provider** で、daemon は launcher へ
-  `--agent <selector>` を渡す。`claude` executable は Claude と `sakana-ai`（Sakana の Anthropic 互換 endpoint 上の
-  Fugu）が共有するため、argv だけでは両者を区別できず、片方の launch がもう片方の home を書けてしまう。
-  `--agent` を伴わない launch は従来どおり program の basename から決め、usagi が launch しない未知 program には
+  `--agent <selector>` を渡す。`--agent` を伴わない launch は従来どおり program の basename から決め、usagi が launch しない未知 program には
   state root を与えない（fail-closed）。
 - daemon 側の policy 検証も同じ provider から state root と config prefix を決め、保護対象 workspace（および
   linked worktree の Git common dir）と重なる構成を拒否する。検証が program を根拠にすると、launcher が実際に
@@ -1146,7 +1142,6 @@ MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き�
 |---|---|---|
 | `claude`（`claude`） | `~/.claude.json` | `~/.claude.json` 本体 / `~/.claude.json.lock` / `~/.claude.json.tmp.<pid>.<random>` / `~/.claude.json.backup.<ms>` |
 | `codex`（`codex`） | なし（config は state directory の中） | — |
-| `sakana-ai`（`claude`） | なし（config は `CLAUDE_CONFIG_DIR` が指す state directory の中） | — |
 | `agy`（`agy`） | なし | — |
 
 - **1 ファイルの grant では足りない**。Claude は `~/.claude.json.lock` を取り、
@@ -1225,8 +1220,8 @@ store と caller inbox を一つの durable 経路として compose する。cre
 一致しない完了報告は fail-closed で拒否し、payload の caller identity は信用しない。
 
 `session_dispatch` の新規 agent は workspace の `.usagi/config.toml` にある
-`[agents.claude].models` / `[agents.codex].models` / `[agents.sakana-ai].models` / `[agents.agy].models` allowlist だけから選ぶ。MCP server は起動時に
-allowlist と PATH 上の executable（`claude` / `codex` / `agy`。`sakana-ai` は Claude CLI を使うため `claude`）の存在を snapshot し、非空 allowlist と executable の
+`[agents.claude].models` / `[agents.codex].models` / `[agents.agy].models` allowlist だけから選ぶ。MCP server は起動時に
+allowlist と PATH 上の executable（`claude` / `codex` / `agy`）の存在を snapshot し、非空 allowlist と executable の
 両方を持つ runtime だけを `tools/list` の `agent.runtime` / `agent.model` enum に載せる。既存 agent は
 `agent.id` branch を使い、runtime/model branch とは JSON Schema `oneOf` で排他的である。snapshot は
 server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の

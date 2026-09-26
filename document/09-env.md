@@ -52,10 +52,6 @@ global binding は利用者が管理する trusted baseline として扱い、�
 |---|---|
 | `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` | Agent launcher が使う filesystem の境界そのものを差し替えられる |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` | managed launch の宛先・アカウント・model を差し替えられる。`.usagi/settings.json` は repository に入るため、checkout 側が session の prompt・file 内容・credential を別の server へ送れてしまう |
-| `SAKANA_API_KEY` | provider の readiness は「この key が設定されているか」であり、probe は workspace を持たない。workspace scope の key は「admission が見た credential」と「launch が使う credential」を食い違わせる |
-
-usagi 自身が provider を定義するために所有する変数（endpoint、model 束縛、state directory、API key の
-注入先）は [5. daemon#Agent CLI の readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight) を正本とする。
 
 binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
 合成後の launch admission が同じ検証を使う。

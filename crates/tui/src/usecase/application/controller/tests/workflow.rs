@@ -537,8 +537,7 @@ fn workflow_offers_and_submits_only_providers_this_machine_can_launch() {
     let mut state = AppState::home(workspace, vec![session]);
     state.active = Some(session);
     state.route = Route::Home(HomeMode::Closeup);
-    // Claude Code is installed; Fugu shares its executable but has no key, and
-    // neither Codex nor AGY is installed.
+    // Claude Code is installed, and neither Codex nor AGY is installed.
     state.set_agent_models(
         AvailableModels::new([DefaultModel::Claude]),
         DefaultModel::Claude,
@@ -566,7 +565,7 @@ fn workflow_offers_and_submits_only_providers_this_machine_can_launch() {
                 agents: WorkflowAgents {
                     planner: DefaultModel::Agy,
                     implementer: DefaultModel::OpenAi,
-                    reviewer: DefaultModel::SakanaAi,
+                    reviewer: DefaultModel::Agy,
                 },
                 session,
                 run: None,

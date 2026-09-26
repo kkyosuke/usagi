@@ -727,15 +727,15 @@ fn director_projection_covers_picker_empty_and_launching_states() {
     let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
     runtime.set_agent_models(
-        AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
-        DefaultModel::SakanaAi,
+        AvailableModels::new([DefaultModel::Claude, DefaultModel::Agy]),
+        DefaultModel::Agy,
     );
     let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
     let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
     assert_eq!(
         crate::presentation::director_drawer_projection(&ui, &runtime, None).new,
         crate::presentation::DirectorNewProjection::Choosing {
-            candidates: vec!["claude".to_owned(), "sakana.ai".to_owned()],
+            candidates: vec!["claude".to_owned(), "agy".to_owned()],
             selected: 1,
         }
     );

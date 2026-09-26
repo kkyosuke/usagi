@@ -55,26 +55,18 @@ impl AdapterRegistry {
     /// Registers the supported product adapters with the same orchestration
     /// port. Product-specific behavior remains behind each adapter; callers
     /// select it solely by the typed profile ID in a launch request.
-    ///
-    /// `sakana` is a second **Claude**-grammar profile (`sakana-ai`): Fugu is the
-    /// Claude CLI pointed at Sakana's Anthropic-compatible endpoint by its
-    /// provisioner's environment, so it registers through that adapter type and
-    /// differs from `claude` only in identity and revision.
     pub fn register_supported<
         C: CodexProvisioner + Send + 'static,
-        S: ClaudeProvisioner + Send + 'static,
         L: ClaudeProvisioner + Send + 'static,
         A: AgyProvisioner + Send + 'static,
     >(
         &mut self,
         codex: CodexAdapter<C>,
-        sakana: ClaudeAdapter<S>,
         claude: ClaudeAdapter<L>,
         agy: AgyAdapter<A>,
     ) -> Result<(), RegistryError> {
         self.register(claude.profile().clone(), Box::new(claude))?;
         self.register(codex.profile().clone(), Box::new(codex))?;
-        self.register(sakana.profile().clone(), Box::new(sakana))?;
         self.register(agy.profile().clone(), Box::new(agy))?;
         let matches_catalog = self
             .profile_ids()
@@ -660,7 +652,6 @@ mod tests {
         registry
             .register_supported(
                 CodexAdapter::new(CodexNever),
-                ClaudeAdapter::sakana(ClaudeNever),
                 ClaudeAdapter::new(ClaudeNever),
                 AgyAdapter::new(AgyNever),
             )
@@ -676,7 +667,6 @@ mod tests {
         assert_eq!(
             registry_with_extra_profile.register_supported(
                 CodexAdapter::new(CodexNever),
-                ClaudeAdapter::sakana(ClaudeNever),
                 ClaudeAdapter::new(ClaudeNever),
                 AgyAdapter::new(AgyNever),
             ),

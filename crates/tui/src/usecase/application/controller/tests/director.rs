@@ -350,7 +350,7 @@ fn director_new_picker_has_deterministic_candidates_and_cancel() {
     let workspace = WorkspaceId::new();
     let mut state = AppState::home(workspace, Vec::new());
     state.set_agent_models(
-        AvailableModels::new([DefaultModel::Claude, DefaultModel::SakanaAi]),
+        AvailableModels::new([DefaultModel::Claude, DefaultModel::Agy]),
         DefaultModel::OpenAi,
     );
     let background = (state.selected(), state.active(), state.route());
@@ -371,7 +371,7 @@ fn director_new_picker_has_deterministic_candidates_and_cancel() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     assert_eq!(
         state.director_new(),
-        DirectorNew::Choosing(DefaultModel::SakanaAi)
+        DirectorNew::Choosing(DefaultModel::Agy)
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     assert_eq!(
@@ -381,7 +381,7 @@ fn director_new_picker_has_deterministic_candidates_and_cancel() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Up));
     assert_eq!(
         state.director_new(),
-        DirectorNew::Choosing(DefaultModel::SakanaAi)
+        DirectorNew::Choosing(DefaultModel::Agy)
     );
 
     // Escape cancels only the chooser; the drawer and every background
@@ -538,11 +538,11 @@ fn director_new_picker_covers_default_single_and_empty_availability() {
     let mut state = AppState::home(workspace, Vec::new());
     let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
 
-    state.set_agent_models(AvailableModels::all(), DefaultModel::SakanaAi);
+    state.set_agent_models(AvailableModels::all(), DefaultModel::Agy);
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
     assert_eq!(
         state.director_new(),
-        DirectorNew::Choosing(DefaultModel::SakanaAi)
+        DirectorNew::Choosing(DefaultModel::Agy)
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
 
@@ -581,10 +581,7 @@ fn director_new_picker_covers_default_single_and_empty_availability() {
 fn director_picker_submits_one_explicit_root_launch_until_matching_finish() {
     let workspace = WorkspaceId::new();
     let mut state = AppState::home(workspace, Vec::new());
-    state.set_agent_models(
-        AvailableModels::new([DefaultModel::SakanaAi]),
-        DefaultModel::SakanaAi,
-    );
+    state.set_agent_models(AvailableModels::new([DefaultModel::Agy]), DefaultModel::Agy);
     let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
     let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
@@ -601,10 +598,7 @@ fn director_picker_submits_one_explicit_root_launch_until_matching_finish() {
     };
     assert_eq!(*launched_workspace, workspace);
     assert_eq!(*session, None);
-    assert_eq!(
-        profile.as_ref().map(AgentProfileId::as_str),
-        Some("sakana-ai")
-    );
+    assert_eq!(profile.as_ref().map(AgentProfileId::as_str), Some("agy"));
     assert_eq!(state.director_launching(), Some(*operation_id));
 
     // Reopening New, double Enter, and a stale completion cannot cross the
@@ -709,7 +703,7 @@ fn director_picker_maps_each_cli_fixture_to_one_explicit_profile() {
     for (model, expected) in [
         (DefaultModel::Claude, "claude"),
         (DefaultModel::OpenAi, "codex"),
-        (DefaultModel::SakanaAi, "sakana-ai"),
+        (DefaultModel::Agy, "agy"),
     ] {
         let mut state = AppState::home(workspace, Vec::new());
         state.set_agent_models(AvailableModels::new([model]), model);

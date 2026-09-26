@@ -20,8 +20,8 @@ use crate::cli::{Run, RunOutcome};
 pub struct ClaudeSandbox {
     /// 起動モード（session / root）。
     pub mode: SandboxMode,
-    /// 起動する agent provider の selector。`claude` executable は Claude と
-    /// `sakana-ai` が共有するため、state grant は program 名では決められない。
+    /// 起動する agent provider の selector。executable は provider の identity ではないため、
+    /// state grant は program 名ではなくこれで決める。
     pub agent: Option<String>,
     /// session workspace の保護対象 root。
     pub protected_root: Option<PathBuf>,
@@ -92,7 +92,7 @@ mod tests {
             "--read-only-root",
             "/home/dev/.gemini/config",
             "--agent",
-            "sakana-ai",
+            "claude",
             "--",
             "claude",
             "--print",
@@ -101,9 +101,8 @@ mod tests {
             outcome,
             RunOutcome::ClaudeSandbox {
                 mode: SandboxMode::Session,
-                // 同じ `claude` を exec する provider が 2 つあるため、どちらの state を
-                // 書けるかは argv ではなくこの selector が決める。
-                agent: Some("sakana-ai".to_owned()),
+                // どの provider の state を書けるかは argv ではなくこの selector が決める。
+                agent: Some("claude".to_owned()),
                 protected_root: None,
                 backend: None,
                 tmpdir: None,

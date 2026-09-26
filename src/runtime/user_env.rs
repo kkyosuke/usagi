@@ -153,14 +153,11 @@ impl From<EnvLimitError> for UserEnvironmentError {
 ///
 /// `.usagi/settings.json` travels with a repository, so a binding here would let
 /// a checkout redirect an agent CLI: `PATH`/`HOME`/`TMPDIR`/`CODEX_HOME` at the
-/// filesystem it uses, and the gateway variables at the endpoint it talks to.
-/// The latter matter even for providers usagi does not point anywhere: binding
-/// `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` would send the user's Claude
-/// session — prompts, file contents, credentials in flight — to a server the
-/// repository chose. usagi owns them per provider
-/// ([`DefaultModel::gateway_environment`]), so a workspace binding could only
-/// ever be an override of that decision.
-const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
+/// filesystem it uses, and the gateway variables at the endpoint it talks to:
+/// binding `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` would send the user's
+/// Claude session — prompts, file contents, credentials in flight — to a server
+/// the repository chose.
+const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 14] = [
     "PATH",
     "TMPDIR",
     "HOME",
@@ -174,11 +171,6 @@ const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
-    // The provider API key usagi injects. Reserving it keeps one machine-level
-    // value behind the readiness probe and the launch: the probe has no
-    // workspace, so a workspace-scoped key would let a launch be admitted — or
-    // refused — on a credential that is not the one it would use.
-    "SAKANA_API_KEY",
     usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
 ];
 
@@ -364,7 +356,7 @@ pub fn typed(values: &BTreeMap<String, String>) -> Vec<(EnvironmentVariableName,
 mod tests {
     use super::{
         MAX_CACHED_SECRETS, MAX_SECRET_REFERENCES, UserEnvironment, UserEnvironmentError,
-        WORKSPACE_AGENT_CONTROL_VARIABLES, allowlist, credential_identity, typed,
+        allowlist, credential_identity, typed,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -844,9 +836,6 @@ mod tests {
             ("CLAUDE_CODE_SUBAGENT_MODEL", "attacker-model"),
             // Nor at another provider's state directory.
             ("CLAUDE_CONFIG_DIR", "/workspace/.claude"),
-            // The provider key is machine-level so the probe and the launch
-            // cannot disagree about which credential is configured.
-            ("SAKANA_API_KEY", "workspace-key"),
         ];
         for (name, value) in cases {
             let data = tempfile::tempdir().unwrap();
@@ -871,35 +860,6 @@ mod tests {
         }
         #[cfg(unix)]
         std::fs::remove_file(symlink).unwrap();
-    }
-
-    /// Every name usagi itself injects to *define* a provider has to be reserved
-    /// from workspace bindings, and the set is derived from the vocabulary
-    /// rather than retyped here: adding a gateway variable without reserving it
-    /// would otherwise ship a name a checked-in `.usagi/settings.json` can
-    /// override, silently changing which model — or which account — a managed
-    /// launch uses.
-    #[test]
-    fn every_variable_usagi_injects_for_a_provider_is_reserved_from_workspaces() {
-        for model in usagi_core::domain::settings::DefaultModel::ALL {
-            let injected = model
-                .gateway_environment()
-                .iter()
-                .map(|(name, _)| *name)
-                .chain(model.state_directory_env())
-                .chain(
-                    model
-                        .credential_binding()
-                        .into_iter()
-                        .flat_map(|(source, target)| [source, target]),
-                );
-            for name in injected {
-                assert!(
-                    WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&name),
-                    "{model:?} injects {name}, so a workspace must not be able to bind it"
-                );
-            }
-        }
     }
 
     #[test]
