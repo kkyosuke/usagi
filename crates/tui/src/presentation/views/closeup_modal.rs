@@ -730,7 +730,7 @@ mod tests {
             all.insert_char(character);
         }
         let mut seen = Vec::new();
-        for _ in 0..6 {
+        for _ in 0..5 {
             all.complete_selected();
             seen.push(all.submission());
         }

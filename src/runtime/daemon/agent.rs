@@ -534,7 +534,7 @@ pub(super) fn open_agent_runtime(
             .as_deref(),
     );
     repair_agent_codex_arg0_permissions(sandbox_home.as_deref());
-    // Duplicate registration cannot happen for the two literal profiles; a
+    // Duplicate registration cannot happen for the literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
     let _ = registry.register_supported(

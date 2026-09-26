@@ -129,8 +129,18 @@ fn fixture_goal_repo() -> tempfile::TempDir {
     repo
 }
 
+/// Install a fixture Codex CLI: the `login status` readiness contract, the
+/// session capture, and a one-line conversation.
 fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
-    write_codex_cli(bin, "codex", count, ready_status);
+    fs::create_dir_all(bin).unwrap();
+    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        count.display(),
+    );
+    let path = bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// Fixture whose resumed conversation remains live without waiting for test
@@ -214,20 +224,6 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
     let path = bin.join("codex");
     fs::write(&path, script).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// Install a fixture Codex-grammar CLI under `program`: the `login status`
-/// readiness contract, the session capture, and a one-line conversation.
-fn write_codex_cli(bin: &Path, program: &str, count: &Path, ready_status: i32) {
-    fs::create_dir_all(bin).unwrap();
-    let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
-    let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit {ready_status}; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf '%s\\n' spawn >> \"{}\"\nprintf 'ready\\n'\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
-        count.display(),
-    );
-    let path = bin.join(program);
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]

@@ -340,8 +340,7 @@ impl DefaultModel {
     /// The executable this provider runs. Its presence on `PATH` is what makes
     /// the provider selectable (see [`AvailableModels`]). It is deliberately
     /// distinct from [`profile_id`](Self::profile_id): the writable state grant
-    /// and the launch environment are keyed by the provider, never by the
-    /// program it execs.
+    /// is keyed by the provider, never by the program it execs.
     #[must_use]
     pub const fn command(self) -> &'static str {
         match self {
