@@ -253,7 +253,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Garden | マウス移動 | うさぎに重ねると右一覧の対応行を強調する。画面は閉じない |
 | Garden | その他のキー / paste | wakeして閉じる |
 | Session Workflow | 文字 / paste / `Enter` / `←` / `→` / `Home` / `End` / `Delete` / `Backspace` | 依頼・追加指示の入力編集 |
-| Session Workflow | `Tab` | 開始前は依頼入力と担当欄、開始後は宛先を切り替え |
+| Session Workflow | `Tab` | 開始前は Goal・担当欄・修正回数の欄を順に移動、開始後は宛先を切り替え |
 | Session Workflow | `←` / `→` | 担当欄にいる間は候補を選ぶ（開始前のみ） |
 | Session Workflow | `PgUp` / `PgDn` | 履歴をスクロール。履歴の先頭で止まり、空にはならない |
 | Session Workflow | `Shift-End` | 履歴を最新位置へ戻す |
