@@ -764,8 +764,14 @@ impl TerminalRegistry {
             return Err(RegistryError::StaleTarget);
         }
         let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
-        ensure_screen_geometry_fits(geometry, self.screen_budgets(), 0)?;
         let (rows, cols) = screen_dimensions(geometry);
+        let budgets = self.screen_budgets();
+        let visible = counted(rows.saturating_mul(cols));
+        let available = counted(budgets.process_aggregate).saturating_sub(budgets.retained_cells);
+        if visible > available && visible <= counted(budgets.per_terminal) {
+            self.reclaim_screen_cells(visible - available);
+        }
+        ensure_screen_geometry_fits(geometry, self.screen_budgets(), 0)?;
         let screen = VtScreen::new(rows, cols);
         let screen_cells = screen.retained_cells();
         reserve_screen_cells(screen_cells);
@@ -1427,6 +1433,48 @@ impl TerminalRegistry {
             .values()
             .map(|entry| counted(entry.screen_cells))
             .sum()
+    }
+
+    /// Frees up to `needed` cells of scrollback from this registry's screens so
+    /// a new visible grid can be admitted.
+    ///
+    /// A growing screen takes whatever the process ceiling leaves, and nothing
+    /// hands it back until that screen is forgotten. Exited screens are kept
+    /// until retention evicts them, so a session that keeps launching Agents —
+    /// a workflow's planner and reviewer turns — filled the ceiling with
+    /// history nobody is reading, and every later launch was refused. Exited
+    /// screens give up their history first, then the largest live ones; no
+    /// visible grid is touched, so a screen stays drawable.
+    fn reclaim_screen_cells(&mut self, needed: u64) {
+        let mut order = self
+            .entries
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    entry.exited.is_none(),
+                    std::cmp::Reverse(entry.screen_cells),
+                    key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        order.sort();
+        let mut remaining = needed;
+        for (_, _, key) in order {
+            if remaining == 0 {
+                break;
+            }
+            // The keys were read from this map under the same `&mut self`.
+            let entry = self
+                .entries
+                .get_mut(&key)
+                .expect("reclaim order lists this registry's own entries");
+            let before = entry.screen_cells;
+            let target = usize::try_from(counted(before).saturating_sub(remaining)).unwrap_or(0);
+            let dropped = entry.screen.trim_to_cells(target);
+            SCREEN_TRIMMED_ROWS.fetch_add(counted(dropped), Ordering::Relaxed);
+            let after = account_screen(entry);
+            remaining = remaining.saturating_sub(counted(before.saturating_sub(after)));
+        }
     }
 
     fn screen_budgets(&self) -> ScreenBudgets {

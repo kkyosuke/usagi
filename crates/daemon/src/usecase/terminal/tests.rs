@@ -522,6 +522,51 @@ fn registration_refuses_a_visible_grid_beyond_the_remaining_process_budget() {
 }
 
 #[test]
+fn registration_reclaims_history_before_refusing_a_grid() {
+    // Busy screens fill the whole ceiling with history and nothing handed it
+    // back, so every later launch was refused until the daemon restarted.
+    let ceiling = 96;
+    let mut registry = TerminalRegistry::new(MAX_RETAINED_OUTPUT_BYTES, 2)
+        .with_screen_cell_budgets(usize::MAX, ceiling);
+    let exited = reference();
+    let live = reference();
+    let grid = Geometry { cols: 4, rows: 4 };
+    let lines = |count: usize| {
+        (0..count)
+            .flat_map(|line| format!("{line}\r\n").into_bytes())
+            .collect::<Vec<_>>()
+    };
+    registry.register(exited.clone(), grid).unwrap();
+    registry.register(live.clone(), grid).unwrap();
+    registry.append_output(&live, lines(8)).unwrap();
+    // The later screen takes everything the ceiling still leaves.
+    registry.append_output(&exited, lines(40)).unwrap();
+    registry.exited(&exited, 0).unwrap();
+    let held = |registry: &TerminalRegistry, terminal: &TerminalRef| {
+        registry.entries[&key(terminal)].screen_cells
+    };
+    let (exited_before, live_before) = (held(&registry, &exited), held(&registry, &live));
+    assert!(exited_before > 16 && live_before > 16);
+    assert_eq!(registry.retained_screen_cells(), counted(ceiling));
+
+    // The finished screen pays first.
+    registry.register(reference(), grid).unwrap();
+    assert!(held(&registry, &exited) < exited_before);
+    assert_eq!(held(&registry, &live), live_before);
+    // Once it is down to its grid the live screen pays, and when only
+    // visible grids are left the registration is refused.
+    let refused = loop {
+        if let Err(error) = registry.register(reference(), grid) {
+            break error;
+        }
+        assert!(registry.retained_screen_cells() <= counted(ceiling));
+    };
+    assert_eq!(refused, RegistryError::ScreenBudgetExceeded);
+    assert_eq!(held(&registry, &exited), 16);
+    assert_eq!(held(&registry, &live), 16);
+}
+
+#[test]
 fn retention_reads_what_a_terminal_holds_and_forgets_it_exactly_once() {
     let r = reference();
     let mut registry = registry(r.clone());

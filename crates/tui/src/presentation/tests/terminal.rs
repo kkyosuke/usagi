@@ -2608,6 +2608,50 @@ fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
 }
 
 #[test]
+fn a_press_on_the_workflow_tab_beside_a_live_agent_is_not_a_terminal_press() {
+    // Starting a workflow launches an Agent tab in the same session, so the
+    // session holds a live tab while the person still reads the Workflow tab.
+    // A press there used to find live input wanted but no terminal selected,
+    // and the TUI panicked out of the raw-mode screen.
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let terminal = live_terminal_ref(workspace, session);
+    let (ui, mut runtime) = focused_live_pane(
+        workspace,
+        session,
+        terminal.clone(),
+        Box::new(ScriptedAgentPort {
+            terminal,
+            subscription: 9,
+            replay: b"hello".to_vec(),
+            poll_error: None,
+            detaches: Arc::new(Mutex::new(Vec::new())),
+        }),
+    );
+    runtime.on_effect(&Effect::OpenWorkflow { session });
+    assert!(runtime.wants_live_input());
+    assert!(runtime.focused_terminal().is_none());
+    let mut controls = LiveTerminalControls::default();
+    assert!(!handle_terminal_pointer(
+        &ui,
+        &runtime,
+        &mut controls,
+        &mut FakeTerminal::default(),
+        &mut RecordingBrowser::default(),
+        20,
+        80,
+        1,
+        0,
+        PointerEvent {
+            kind: PointerKind::Down,
+            column: 37,
+            row: 5,
+        },
+    ));
+    assert!(!controls.has_selection());
+}
+
+#[test]
 fn a_live_terminal_drag_selects_and_release_copies_to_the_clipboard() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();

@@ -2735,6 +2735,13 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
             ErrorCode::SequenceGap,
             "terminal input sequence is ahead of the daemon ledger",
         ),
+        // The new screen's visible grid did not fit even after the registry
+        // reclaimed history. Reporting it as a stale reference sent people
+        // retrying a launch that could only succeed once something closed.
+        RuntimeError::Terminal(RegistryError::ScreenBudgetExceeded) => (
+            ErrorCode::ResourceExhausted,
+            "daemon terminal screen budget is exhausted; close a finished Agent or Terminal and retry",
+        ),
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
         | RuntimeError::TerminalGenerationMismatch

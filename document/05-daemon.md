@@ -1383,7 +1383,11 @@ process-local 2,097,152 cell（概算 64 MiB）の実使用量 budget で bound 
 80×24 の新規 terminal が最初に保持するのは可視 grid の 1,920 cell で、出力により scrollback が生じた分だけ増える。
 新規登録と resize は可視 grid がいずれかの予算を
 超える geometry を cell 確保と PTY effect の前に拒否し、出力で増えた超過分は古い scrollback から trim して
-trim 行数を counter に計上する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
+trim 行数を counter に計上する。新規登録の可視 grid が process-local の残りに収まらないときは、拒否する前に
+同じ registry の screen から古い scrollback を回収する。回収は終了済み terminal を先に、次に保持量の大きい
+live terminal の順で行い、可視 grid は回収しない。終了済み terminal の screen は retention が回収するまで残るため、
+回収が無いと Agent を繰り返し起動する session（Workflow の計画・レビュー担当など）が上限を履歴で埋め、以降の
+起動がすべて拒否される。回収しても収まらない Agent 起動は `resource_exhausted` として報告し、stale な参照とは区別する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
 
 daemon-owned PTY では registry の VT screen が terminal endpoint でもある。child が `CSI 6n` で現在の

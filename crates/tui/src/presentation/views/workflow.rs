@@ -56,7 +56,7 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
     if height == 0 || width == 0 {
         return vec![String::new(); height];
     }
-    let header = header(panel);
+    let header = header(panel, width);
     let composer = composer(panel, width);
 
     // Even a short terminal keeps one status row and the end of the composer.
@@ -96,13 +96,20 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
 
 /// The fixed bottom block: what the draft is addressed to, the draft itself,
 /// and the one line that says what a key does right now.
+///
+/// Before a run starts the goal is a field of the start form instead, next to
+/// the agents it will be given to, so the block shrinks to the key hint.
 fn composer(panel: &WorkflowPanel, width: usize) -> Vec<String> {
-    let mut composer = vec![Role::Accent.style().bold().paint(&if panel.run.is_some() {
-        format!("Instruction to: {}", panel.recipient_label())
-    } else {
-        "Goal".to_owned()
-    })];
-    composer.extend(input_rows(panel, width));
+    let mut composer = Vec::new();
+    if panel.run.is_some() {
+        composer.push(
+            Role::Accent
+                .style()
+                .bold()
+                .paint(&format!("Instruction to: {}", panel.recipient_label())),
+        );
+        composer.extend(input_rows(panel, width));
+    }
     composer.push(if panel.submitting {
         Role::Warning
             .style()
@@ -117,7 +124,7 @@ fn composer(panel: &WorkflowPanel, width: usize) -> Vec<String> {
         )
     } else {
         muted().paint(
-            "Tab: goal/agents | Left/Right: choose | Ctrl+S: start | PgUp/PgDn+Shift+End: history",
+            "Tab: next field | Left/Right: choose | Enter: newline | Ctrl+S: start | PgUp/PgDn+Shift+End: history",
         )
     });
     composer
@@ -186,49 +193,83 @@ fn history(panel: &WorkflowPanel) -> Vec<String> {
     history
 }
 
-/// The start form: the three provider choices and the revision limit, each
-/// opening its `< value >` in the same column so the longest label cannot push
-/// its own value out of line.
-fn agent_rows(panel: &WorkflowPanel) -> Vec<String> {
-    let limit = panel.revision_limit.to_string();
-    [
-        (0, "Planner", provider_name(panel.agents.planner)),
-        (1, "Implementer", provider_name(panel.agents.implementer)),
-        (2, "Reviewer", provider_name(panel.agents.reviewer)),
-        (
-            crate::usecase::application::workflow::REVISION_LIMIT_FIELD,
-            "Revisions",
-            limit.as_str(),
-        ),
-    ]
-    .into_iter()
-    .map(|(index, label, name)| {
-        let focused = panel.agent_field == Some(index);
-        let marker = if focused {
-            Role::Danger.style().bold().paint(">")
-        } else {
-            " ".to_owned()
-        };
-        let value = if focused {
-            Role::Accent.style().bold()
-        } else {
-            Role::Accent.style()
-        };
-        let arrow = if focused {
-            Role::Accent.style().bold()
-        } else {
-            muted()
-        };
+/// Mark of the focused start-form row, and the label it names.
+///
+/// The focused label is drawn reversed so the one row that takes the arrow keys
+/// — or the typed goal — reads at a glance, instead of hanging on a one-cell
+/// marker.
+fn form_label(focused: bool, label: &str) -> String {
+    let label = format!("{label}:");
+    let pad = " ".repeat(AGENT_LABEL_WIDTH.saturating_sub(label.len()));
+    if focused {
         format!(
-            "{marker} {:<width$} {} {} {}",
-            format!("{label}:"),
-            arrow.paint("<"),
-            value.paint(name),
-            arrow.paint(">"),
-            width = AGENT_LABEL_WIDTH,
+            "{} {}{pad}",
+            Role::Accent.style().bold().paint(">"),
+            Role::Accent.style().bold().reverse().paint(&label),
         )
-    })
-    .collect()
+    } else {
+        format!("  {label}{pad}")
+    }
+}
+
+/// The start form: the goal, the three provider choices and the revision
+/// limit, each opening its value in the same column so the longest label
+/// cannot push its own value out of line.
+///
+/// The goal is the first field. It used to be a separate composer at the foot
+/// of the pane, which left the person unable to tell whether their keys were
+/// going to the goal or to a selector.
+fn form_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
+    let goal_focused = panel.agent_field.is_none();
+    let indent = " ".repeat(2 + AGENT_LABEL_WIDTH);
+    let room = width.saturating_sub(indent.len() + 1);
+    let mut rows = Vec::new();
+    let lines = draft_lines(panel, room, goal_focused);
+    if !goal_focused && panel.draft.value().is_empty() {
+        rows.push(format!(
+            "{} {}",
+            form_label(false, "Goal"),
+            muted().paint("(Tab to type what to build)")
+        ));
+    } else {
+        for (index, line) in lines.into_iter().enumerate() {
+            rows.push(if index == 0 {
+                format!("{} {line}", form_label(goal_focused, "Goal"))
+            } else {
+                format!("{indent} {line}")
+            });
+        }
+    }
+    let limit = panel.revision_limit.to_string();
+    rows.extend(
+        [
+            (0, "Planner", provider_name(panel.agents.planner)),
+            (1, "Implementer", provider_name(panel.agents.implementer)),
+            (2, "Reviewer", provider_name(panel.agents.reviewer)),
+            (
+                crate::usecase::application::workflow::REVISION_LIMIT_FIELD,
+                "Revisions",
+                limit.as_str(),
+            ),
+        ]
+        .into_iter()
+        .map(|(index, label, name)| {
+            let focused = panel.agent_field == Some(index);
+            let (value, arrow) = if focused {
+                (Role::Accent.style().bold(), Role::Accent.style().bold())
+            } else {
+                (Role::Accent.style(), muted())
+            };
+            format!(
+                "{} {} {} {}",
+                form_label(focused, label),
+                arrow.paint("<"),
+                value.paint(name),
+                arrow.paint(">"),
+            )
+        }),
+    );
+    rows
 }
 
 /// What a started run is doing, who is on it, and what it is waiting on.
@@ -285,7 +326,7 @@ fn run_rows(run: &usagi_core::domain::workflow::WorkflowRun) -> Vec<String> {
     rows
 }
 
-fn header(panel: &WorkflowPanel) -> Vec<String> {
+fn header(panel: &WorkflowPanel, width: usize) -> Vec<String> {
     // Only the very first read announces itself. The pane re-reads the daemon
     // on a steady cadence, and replacing the status it just fetched with
     // "Loading" on every one of those made the header flicker between two
@@ -321,7 +362,7 @@ fn header(panel: &WorkflowPanel) -> Vec<String> {
     if let Some(run) = &panel.run {
         header.extend(run_rows(run));
     } else {
-        header.extend(agent_rows(panel));
+        header.extend(form_rows(panel, width));
     }
     // Offered in every phase, not only the two that are already the person's
     // turn: the run that most needs ending is the one still insisting it is
@@ -357,7 +398,19 @@ fn safe_line(line: &str) -> String {
     usagi_core::domain::presentation_text::sanitize_presentation_line(&line)
 }
 
+/// The instruction composer's draft, one `>` gutter per line.
 fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
+    draft_lines(panel, width.saturating_sub(2), true)
+        .into_iter()
+        .map(|line| format!("{} {line}", muted().paint(">")))
+        .collect()
+}
+
+/// Up to three draft lines around the caret, each fitting `room` columns.
+///
+/// `caret` is false while the draft is on screen but not focused: drawing the
+/// block there would say the goal takes the next key when a selector does.
+fn draft_lines(panel: &WorkflowPanel, room: usize, caret: bool) -> Vec<String> {
     let value = panel.draft.value();
     let cursor = panel.draft.cursor();
     let current = value[..cursor]
@@ -372,26 +425,18 @@ fn input_rows(panel: &WorkflowPanel, width: usize) -> Vec<String> {
         .take(3)
         .map(|(index, line)| {
             let safe = safe_line(line);
-            let marker = muted().paint(">");
-            if index != current {
-                return format!("{marker} {safe}");
+            if index != current || !caret {
+                return safe;
             }
             let caret = safe_line(&line[..cursor - line_start]).len();
             let mut start = 0;
             while start < caret
                 && crate::presentation::widgets::display_width(&safe[start..caret])
-                    >= width.saturating_sub(3)
+                    >= room.saturating_sub(1)
             {
                 start += safe[start..].chars().next().map_or(0, char::len_utf8);
             }
-            format!(
-                "{marker} {}",
-                crate::presentation::widgets::block_caret(
-                    &safe[start..],
-                    caret - start,
-                    &Style::new()
-                )
-            )
+            crate::presentation::widgets::block_caret(&safe[start..], caret - start, &Style::new())
         })
         .collect()
 }
@@ -1081,6 +1126,52 @@ mod tests {
             usagi_core::domain::id::SessionId::new(),
         ));
         assert!(!plain(&render(20, 100, &panel)).contains("Revisions:"));
+    }
+
+    #[test]
+    fn the_goal_is_the_first_field_of_the_start_form_and_shows_its_focus() {
+        let caret = crate::presentation::frame::INPUT_CURSOR_MARKER;
+        let mut panel = WorkflowPanel::default();
+        panel.draft.replace("Ship login\nwith tests");
+        let rows = render(20, 100, &panel);
+        let position = |needle: &str| {
+            rows.iter()
+                .position(|row| strip(row).contains(needle))
+                .expect("the form row is drawn")
+        };
+        // The goal sits in the form, above the agents it will be handed to,
+        // and opens its text in the selectors' column.
+        let goal = position("Goal:");
+        assert!(goal < position("Planner:"));
+        assert_eq!(position("with tests"), goal + 1);
+        let opens_at = |index: usize, needle: &str| strip(&rows[index]).find(needle).unwrap();
+        assert_eq!(
+            opens_at(goal, "Ship login"),
+            opens_at(position("Planner:"), "<")
+        );
+        // Focused, it carries the marker, a reversed label and the caret; the
+        // foot of the pane keeps only the key hint.
+        assert!(strip(&rows[goal]).starts_with('>'));
+        assert!(rows[goal].contains("\u{1b}[1;7;36m"));
+        assert!(rows.iter().any(|row| row.contains(caret)));
+        assert!(!rows.iter().any(|row| strip(row).trim() == "Goal"));
+        assert!(strip(rows.last().unwrap()).contains("Tab: next field"));
+
+        // A selector owns the keys: the goal loses the marker and the caret.
+        panel.agent_field = Some(0);
+        let rows = render(20, 100, &panel);
+        let goal = rows
+            .iter()
+            .find(|row| strip(row).contains("Goal:"))
+            .unwrap();
+        assert!(strip(goal).starts_with(' '));
+        assert!(!rows.iter().any(|row| row.contains(caret)));
+
+        // An empty goal off focus still says where it is typed.
+        panel.draft.replace("");
+        assert!(
+            plain(&render(20, 100, &panel)).contains("Goal:        (Tab to type what to build)")
+        );
     }
 
     #[test]

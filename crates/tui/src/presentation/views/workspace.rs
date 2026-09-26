@@ -1216,15 +1216,18 @@ impl HomeProjection {
 
     /// Whether the right pane owns keyboard input on this frame.
     ///
-    /// Only a Closeup route whose selected tab is a live terminal, with no
-    /// foreground surface over it, receives input. Every other frame leaves the
-    /// pane's scroll, tab, selection, and copy controls inert, so the pane is
-    /// drawn dim to say so: Switch (the sidebar navigates), a pending or
-    /// interrupted tab (no live terminal), an open overlay or action modal, and
-    /// an open Director drawer (its root conversation owns input).
+    /// Only a Closeup route whose selected tab is a live terminal or the
+    /// Workflow form, with no foreground surface over it, receives input. Every
+    /// other frame leaves the pane's scroll, tab, selection, and copy controls
+    /// inert, so the pane is drawn dim to say so: Switch (the sidebar
+    /// navigates), a pending or interrupted tab (no live terminal), an open
+    /// overlay or action modal, and an open Director drawer (its root
+    /// conversation owns input). The Workflow tab has no terminal, but its goal
+    /// and instruction composer take every key, so dimming it drew the one
+    /// surface the person is typing into as if it were inactive.
     fn right_pane_focused(&self) -> bool {
         self.mode == HomeMode::Closeup
-            && self.terminal_view.is_some()
+            && (self.terminal_view.is_some() || self.workflow_selected)
             && self.director_drawer.is_none()
             && self.root_terminal_drawer.is_none()
             && !self.closeup_action_visible
@@ -8433,6 +8436,12 @@ mod tests {
         )
         .with_pane(&pane);
         assert!(home.workflow_selected);
+        // The form takes every key in Closeup, so it is drawn at full
+        // brightness there; Switch still dims the preview it navigates past.
+        home.mode = HomeMode::Switch;
+        assert!(!home.right_pane_focused());
+        home.mode = HomeMode::Closeup;
+        assert!(home.right_pane_focused());
         let empty = super::home_right_pane(20, 80, &home);
         assert_eq!(empty.len(), 20);
         assert!(empty.iter().any(|row| strip(row).contains("Not started")));
