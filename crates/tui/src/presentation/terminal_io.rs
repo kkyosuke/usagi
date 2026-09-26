@@ -796,12 +796,17 @@ pub(super) fn handle_terminal_pointer(
     match pointer.kind {
         PointerKind::Move => return true,
         PointerKind::Down => {
-            if !runtime.wants_live_input() {
+            // Live input is a session-wide level: a non-terminal tab such as
+            // Workflow can be selected while another tab of the same session is
+            // live. That frame has no terminal to select text in, so the press
+            // belongs to the pane's own controls rather than to a PTY.
+            let Some(terminal) = runtime
+                .wants_live_input()
+                .then(|| runtime.focused_terminal())
+                .flatten()
+            else {
                 return false;
-            }
-            let terminal = runtime
-                .focused_terminal()
-                .expect("live input ownership requires a selected live terminal");
+            };
             let Some(point) = point_at(pointer.column, pointer.row) else {
                 return false;
             };
