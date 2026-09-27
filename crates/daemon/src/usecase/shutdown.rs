@@ -13,6 +13,12 @@
 //! writes it straight from a signal handler. A handler cannot notify a condvar,
 //! so whoever turns a delivered signal into a *request* must call
 //! [`ShutdownRequest::request`] from ordinary code.
+//!
+//! The edge is an optimization, never the only way a waiter learns about a
+//! request: every wait re-reads the flag within a bounded interval. A daemon
+//! once kept its lifecycle owner parked forever after macOS's condvar returned
+//! `EINVAL` to a tick worker and stopped delivering the shutdown notification,
+//! while serving had already stopped and `daemon.lock` stayed held.
 
 use std::{
     sync::{
@@ -21,6 +27,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+/// How long an unbounded wait trusts the condvar edge before re-reading the
+/// flag itself. One wakeup per second per parked owner is negligible next to
+/// the tick workers, and it bounds how long a lost notification can delay
+/// shutdown.
+const LOST_WAKEUP_BACKSTOP: Duration = Duration::from_secs(1);
 
 /// A shared "please stop" flag with edge notification.
 #[derive(Debug, Default)]
@@ -128,16 +140,26 @@ impl ShutdownRequest {
 
     /// Parks until shutdown is requested.
     ///
-    /// A caller that also needs to observe a flag written by a signal handler
-    /// must arrange for that signal to reach [`request`](Self::request); this
-    /// wait is edge-driven and does not poll.
+    /// The notification from [`request`](Self::request) is the prompt path. The
+    /// flag is also re-read every [`LOST_WAKEUP_BACKSTOP`], so a request whose
+    /// notification never reaches this waiter — a flag written straight from a
+    /// signal handler, or a platform condvar that stopped delivering wakeups —
+    /// is still observed. The lifecycle owner parks here while holding
+    /// `daemon.lock`; an edge it never sees would otherwise keep a daemon whose
+    /// serving has already stopped alive, refusing every connection, with no
+    /// client able to recover the singleton.
     pub fn wait_until_requested(&self) {
+        self.wait_until_requested_rechecking(LOST_WAKEUP_BACKSTOP);
+    }
+
+    fn wait_until_requested_rechecking(&self, backstop: Duration) {
         let mut locked = self.guard.lock().unwrap_or_else(PoisonError::into_inner);
         while !self.is_requested() {
             locked = self
                 .changed
-                .wait(locked)
-                .unwrap_or_else(PoisonError::into_inner);
+                .wait_timeout(locked, backstop)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
 }
@@ -274,6 +296,21 @@ mod tests {
         while !handle.is_finished() {
             shutdown.request();
         }
+        handle.join().unwrap();
+        assert!(shutdown.is_requested());
+    }
+
+    #[test]
+    fn an_unbounded_wait_observes_a_request_whose_notification_was_lost() {
+        // Writing the raw flag sets the authority without notifying, exactly
+        // like a signal handler or a condvar that no longer delivers wakeups.
+        let flag = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(ShutdownRequest::with_flag(Arc::clone(&flag)));
+        let waiter = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            waiter.wait_until_requested_rechecking(Duration::from_millis(5));
+        });
+        flag.store(true, Ordering::Release);
         handle.join().unwrap();
         assert!(shutdown.is_requested());
     }
