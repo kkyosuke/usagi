@@ -1213,6 +1213,8 @@ tick を持たない待ち（lifecycle owner と、shutdown 要求を descriptor
 shutdown は 1 秒以内に観測される。lifecycle owner は `daemon.lock` を持ったまま park しているため、要求を
 見逃すと serving が止まった daemon が singleton を握ったまま残る。そうなると全 client の接続は拒否され、
 stale recovery も singleton が生きているので owner を回収できない。1 秒の backstop はこの状態を防ぐ。
+この読み直しは idle の間も 1 秒に 1 回の timer wakeup として残るため、上の「意図した tick の回数」には
+この 2 つの待ち手の backstop も含まれる。
 
 ## workflow lane
 
