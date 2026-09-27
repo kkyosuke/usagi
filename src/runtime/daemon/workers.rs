@@ -1173,10 +1173,11 @@ impl ShutdownSignal for SignalShutdown {
                 "daemon shutdown delivery was not prepared",
             ));
         }
-        // Both delivery paths converge on one request, so this parks instead of
-        // polling: `prepare` runs a thread that turns a delivered signal into a
-        // request, and the accept-worker exit guard requests directly. A worker
-        // panic therefore still releases an owner that would otherwise hold
+        // Both delivery paths converge on one request, so this parks on its
+        // edge: `prepare` runs a thread that turns a delivered signal into a
+        // request, and the accept-worker exit guard requests directly. The wait
+        // also re-reads the flag on a bounded backstop, so a notification that
+        // never arrives still releases an owner that would otherwise hold
         // daemon.lock and a stale lifecycle record.
         self.shutdown.wait_until_requested();
         Ok(())

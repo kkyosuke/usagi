@@ -1208,6 +1208,12 @@ IPC accept は tick を持たない。listener の readiness descriptor と、sh
 flag を直接書くだけ（async-signal-safe だが condvar を notify できない）なので、delivery を要求へ変換する
 専用の待ち手が signal を blocking で受ける。
 
+tick を持たない待ち（lifecycle owner と、shutdown 要求を descriptor へ写す待ち手）も、condvar の edge だけには
+頼らない。edge は即応のための経路で、flag は 1 秒ごとに読み直す。notify が待ち手に届かなかった場合でも、
+shutdown は 1 秒以内に観測される。lifecycle owner は `daemon.lock` を持ったまま park しているため、要求を
+見逃すと serving が止まった daemon が singleton を握ったまま残る。そうなると全 client の接続は拒否され、
+stale recovery も singleton が生きているので owner を回収できない。1 秒の backstop はこの状態を防ぐ。
+
 ## workflow lane
 
 session workflow の進行を所有するのはこの常駐 lane である。client の要求は進行の条件ではない。
