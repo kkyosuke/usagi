@@ -1891,6 +1891,9 @@ fn user_decision_round_trip(multiple: bool) {
     if multiple {
         request_args["selection_mode"] = json!("multiple");
         request_args["context"] = context.clone();
+        request_args["selection_limits"] = json!({"min":2, "max":2});
+        request_args["recommendation"] =
+            json!({"option_ids":["yes", "later"], "reason":"Cover both paths"});
     }
     let executable_placeholder = "$USAGI_E2E_USAGI";
     mcp.replace_fixture_agent(
@@ -1995,6 +1998,23 @@ fi
     assert!(
         matches!(listed, DaemonReply::Ok(ref body) if body["decisions"][0]["decision_id"] == json!(decision_id))
     );
+    if multiple {
+        assert_eq!(
+            serde_json::to_value(decision.selection_limits).unwrap(),
+            request_args["selection_limits"]
+        );
+        assert_eq!(
+            serde_json::to_value(&decision.recommendation).unwrap(),
+            request_args["recommendation"]
+        );
+        let rejected = client.request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Resolve,
+            payload: json!({"decision_id":decision_id,"answer":{"kind":"options","option_ids":["yes"]}}),
+        });
+        assert!(matches!(rejected,
+            Err(usagi_core::infrastructure::ipc::request::ClientError::Protocol(error))
+                if error.code == usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument));
+    }
     let resolved = client
         .request(DaemonRequest::UserDecision {
             action: TuiUserDecisionAction::Resolve,

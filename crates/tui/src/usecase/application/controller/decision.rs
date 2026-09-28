@@ -146,14 +146,7 @@ pub(super) fn update_decision_editor(
             editor.error = None;
         }
         AppKey::Char(' ') if multiple && !editor.input_freeform => {
-            if let Some(option) = editor.decision.options.get(editor.selected_option) {
-                if !editor.checked_options.remove(&option.id) {
-                    editor.checked_options.insert(option.id.clone());
-                }
-                editor.scroll_offset = None;
-                editor.follow_freeform = false;
-                editor.error = None;
-            }
+            toggle_decision_option(editor);
         }
         AppKey::DecisionPrevious | AppKey::Up => {
             editor.selected_option = editor.selected_option.saturating_sub(1);
@@ -227,6 +220,7 @@ fn submit_decision(
     multiple: bool,
 ) -> Vec<Effect> {
     editor.scroll_offset = None;
+    editor.error = None;
     let answer = if editor.decision.allow_freeform
         && (if multiple {
             editor.input_freeform
@@ -257,6 +251,21 @@ fn submit_decision(
         });
         return Vec::new();
     };
+    if editor.decision.selection_limits.is_some()
+        && let UserDecisionAnswer::Options { option_ids } = &answer
+    {
+        let (min, max) = editor.decision.selection_bounds();
+        if !(min..=max).contains(&option_ids.len()) {
+            editor.error = Some(SafeError {
+                message: SafeMessage::new(format!(
+                    "Choose {min}-{max} options ({} selected).",
+                    option_ids.len()
+                )),
+                error_id: "decision-selection-limit".into(),
+            });
+            return Vec::new();
+        }
+    }
     if editor
         .decision
         .validate_answer(&answer, chrono::Utc::now())
@@ -273,4 +282,25 @@ fn submit_decision(
         decision_id: editor.decision.decision_id,
         answer,
     }]
+}
+
+fn toggle_decision_option(editor: &mut DecisionEditor) {
+    if let Some(option) = editor.decision.options.get(editor.selected_option) {
+        editor.scroll_offset = None;
+        editor.follow_freeform = false;
+        editor.error = None;
+        if !editor.checked_options.remove(&option.id) {
+            let (min, max) = editor.decision.selection_bounds();
+            if editor.checked_options.len() >= max {
+                editor.error = Some(SafeError {
+                    message: SafeMessage::new(format!(
+                        "Choose {min}-{max} options; uncheck one before adding another."
+                    )),
+                    error_id: "decision-selection-limit".into(),
+                });
+            } else {
+                editor.checked_options.insert(option.id.clone());
+            }
+        }
+    }
 }

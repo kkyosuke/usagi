@@ -316,7 +316,10 @@ mod tests {
 
         let rich = serde_json::json!({
             "title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}],
-            "selection_mode":"multiple", "context":[
+            "selection_mode":"multiple",
+            "selection_limits":{"min":1,"max":1},
+            "recommendation":{"option_ids":["a"],"reason":"Safer"},
+            "context":[
                 {"kind":"table", "title":"Cost", "columns":["Plan"], "rows":[["A"]]},
                 {"kind":"diagram", "title":"Flow", "text":"A -> B"}
             ]
@@ -326,6 +329,10 @@ mod tests {
             properties["context"]["maxItems"],
             UserDecisionPolicy::CONTEXT_COUNT_MAX
         );
+        let mut invalid_reason = rich.clone();
+        invalid_reason["recommendation"]["reason"] =
+            serde_json::json!("界".repeat(UserDecisionPolicy::RECOMMENDATION_REASON_MAX_BYTES));
+        assert!(request.validate(&invalid_reason, &schema).is_err());
         let mut invalid = rich.clone();
         invalid["selection_mode"] = serde_json::json!("unknown");
         assert!(request.validate(&invalid, &schema).is_err());

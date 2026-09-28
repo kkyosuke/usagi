@@ -217,6 +217,8 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
 | field | 内容 |
 |---|---|
 | `selection_mode` | `single`（既定）または `multiple`。複数選択では1件以上の option が必要 |
+| `recommendation` | `option_ids` と `reason`。推奨する既知 ID と理由（最大2048 UTF-8 bytes）。単一選択では1件、複数選択では選択件数の範囲内。重複 ID・空白のみの理由・改行以外の制御文字・bidi 制御文字を拒否 |
+| `selection_limits` | 複数選択の `min` / `max`（両方必須）。`1 ≤ min ≤ max ≤ option 数`。省略時は1件以上、全 option 数まで。単一選択には指定できない |
 | `context` | 順序付きの説明 block 配列（最大4件） |
 | `context[].kind = table` | `title`、`columns`（1〜6列）、`rows`（1〜16行）。各行のセル数は列数と一致する |
 | `context[].kind = diagram` | `title` と `text`。ASCII / Unicode の整形済みテキスト図。Mermaid、HTML、画像は描画しない |
@@ -224,7 +226,9 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
 複数選択の回答は `{"kind":"options","option_ids":["a","b"]}`。1件以上の既知 ID を重複なしで指定する。
 単一選択の `option` と複数選択の `options` は request の mode と一致しなければ拒否する。
 許可された `freeform` はどちらの mode でも選択回答の代わりに使え、選択 ID と同時送信はしない。
-補足 block と selection mode も idempotency 比較に含め、同じ key で説明・選択方法を変えた request は conflict になる。
+`selection_limits` は選択 ID の件数にだけ適用し、許可された freeform は件数制約の対象外とする。
+推奨案は説明であり、選択・送信を自動では行わず、推奨以外の有効な回答も受け付ける。
+補足 block、selection mode、recommendation、selection limits も idempotency 比較に含め、同じ key で説明・推奨・選択方法を変えた request は conflict になる。
 
 補足の title は256 UTF-8 bytes、列見出しとセルは各512 bytes、図の text は4096 bytesまで。
 補足には改行以外の制御文字と bidi 制御文字を許可しない。空のセルは許可するが、title・列見出し・図は空白のみでは作れない。
@@ -235,6 +239,8 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
   "title": "実施する検証",
   "prompt": "今回追加する検証を選んでください。複数選択できます。",
   "selection_mode": "multiple",
+  "selection_limits": {"min": 1, "max": 2},
+  "recommendation": {"option_ids": ["unit", "e2e"], "reason": "境界条件とユーザー操作の両方を確認できます。"},
   "options": [
     {"id": "unit", "label": "ユニットテスト", "description": "境界条件を確認"},
     {"id": "e2e", "label": "E2E", "description": "操作全体を確認"}

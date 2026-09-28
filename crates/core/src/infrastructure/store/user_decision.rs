@@ -549,6 +549,8 @@ fn same_request(a: &UserDecision, b: &UserDecision) -> bool {
         && a.prompt == b.prompt
         && a.options == b.options
         && a.allow_freeform == b.allow_freeform
+        && a.recommendation == b.recommendation
+        && a.selection_limits == b.selection_limits
         && a.selection_mode == b.selection_mode
         && a.context == b.context
         && a.expires_at == b.expires_at
@@ -582,6 +584,8 @@ mod tests {
                 description: None,
             }],
             allow_freeform: false,
+            recommendation: None,
+            selection_limits: None,
             selection_mode: crate::domain::user_decision::UserDecisionSelectionMode::Single,
             context: Vec::new(),
             expires_at: None,
@@ -1479,5 +1483,52 @@ mod tests {
             .unwrap();
         assert_eq!(restored.answer, Some(answer));
         assert_eq!(restored.context, request.context);
+    }
+    #[test]
+    fn decision_guidance_is_durable_and_changes_conflict_with_the_same_key() {
+        use crate::domain::user_decision::{
+            UserDecisionRecommendation, UserDecisionSelectionLimits, UserDecisionSelectionMode,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(dir.path());
+        let mut request = item();
+        request.selection_mode = UserDecisionSelectionMode::Multiple;
+        request.selection_limits = Some(UserDecisionSelectionLimits { min: 1, max: 1 });
+        request.recommendation = Some(UserDecisionRecommendation {
+            option_ids: vec![request.options[0].id.clone()],
+            reason: "Safer".into(),
+        });
+        request.idempotency_key = Some("guidance".into());
+        store.create(request.clone()).unwrap().unwrap();
+        assert_eq!(store.create(request.clone()).unwrap().unwrap(), request);
+        for changed in [
+            {
+                let mut next = request.clone();
+                next.selection_limits = None;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.recommendation = None;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.recommendation.as_mut().unwrap().reason = "Faster".into();
+                next
+            },
+        ] {
+            assert_eq!(
+                store.create(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+        }
+        let reopened = UserDecisionStore::new(dir.path());
+        assert_eq!(
+            reopened
+                .get(request.owner.workspace_id, request.decision_id)
+                .unwrap(),
+            Some(request)
+        );
     }
 }

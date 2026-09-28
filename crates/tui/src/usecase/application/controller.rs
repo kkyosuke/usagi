@@ -563,7 +563,8 @@ pub struct DecisionEditor {
 
 impl DecisionEditor {
     fn new(decision: UserDecision) -> Self {
-        let scroll_offset = (!decision.context.is_empty()).then_some(0);
+        let scroll_offset =
+            (!decision.context.is_empty() || decision.recommendation.is_some()).then_some(0);
         Self {
             decision,
             selected_option: 0,
