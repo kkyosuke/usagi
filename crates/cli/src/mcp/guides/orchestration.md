@@ -198,6 +198,11 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 `cancelled`、`expired` のいずれかになったら処理を続ける。同じ idempotency key の request は同じ decision に
 収束するため、接続をまたぐ retry に使える。
 
+比較が必要なら `context` に `kind: "table"`（`title` / `columns` / `rows`）を添える。関係や手順は
+`kind: "diagram"`（`title` / `text`）の ASCII / Unicode テキスト図で示す。複数案を同時に選べる質問は
+`selection_mode: "multiple"` にし、回答の `kind: "options"` / `option_ids` を読む。
+単一選択は既定の `single` / `option` を使う。詳細な上限と引数は `tools/list` を参照する。
+
 ## 運用知見を残す
 
 `memory_save` で残した判断・制約・再発防止策は、daemon data home の workspace 専用 store に保存される。

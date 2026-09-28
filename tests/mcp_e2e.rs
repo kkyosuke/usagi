@@ -1871,9 +1871,27 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // One process-spanning round trip keeps every last-mile assertion visible.
 fn production_user_decision_round_trip_reaches_the_original_caller() {
+    user_decision_round_trip(false);
+}
+
+#[test]
+fn production_rich_multiple_user_decision_round_trip() {
+    user_decision_round_trip(true);
+}
+
+#[allow(clippy::too_many_lines)] // One process-spanning round trip keeps every last-mile assertion visible.
+fn user_decision_round_trip(multiple: bool) {
     let mcp = McpHarness::start();
+    let context = json!([
+        {"kind":"table", "title":"Compare", "columns":["Choice", "Cost"], "rows":[["Yes", "Low"], ["Later", "High"]]},
+        {"kind":"diagram", "title":"Flow", "text":"Choose -> Deploy\n       -> Wait"}
+    ]);
+    let mut request_args = json!({"title":"Deploy?", "prompt":"Choose", "options":[{"id":"yes","label":"Yes"}, {"id":"later","label":"Later"}]});
+    if multiple {
+        request_args["selection_mode"] = json!("multiple");
+        request_args["context"] = context.clone();
+    }
     let executable_placeholder = "$USAGI_E2E_USAGI";
     mcp.replace_fixture_agent(
         "codex",
@@ -1902,7 +1920,7 @@ fi
 {{
   printf '%s\n' '{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","clientInfo":{{"name":"decision-agent","version":"1"}}}}}}'
   printf '%s\n' '{{"jsonrpc":"2.0","method":"notifications/initialized"}}'
-  printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{{"title":"Deploy?","prompt":"Choose","options":[{{"id":"yes","label":"Yes"}}]}}}}}}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"user_decision_request","arguments":{request_args}}}}}'
   printf '%s\n' '{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"user_decision_list","arguments":{{}}}}}}'
 }} | env -i PATH="$PATH" USAGI_HOME="$USAGI_HOME" USAGI_RUNTIME_MODE="$USAGI_RUNTIME_MODE" USAGI_WORKSPACE_ROOT="$USAGI_WORKSPACE_ROOT" "{executable_placeholder}" mcp >> "$USAGI_MCP_FIXTURE_LOG" 2>&1
 "#,
@@ -1958,6 +1976,15 @@ fi
         serde_json::from_slice(&fs::read(&decision_path).unwrap()).unwrap();
     let decision: UserDecision = serde_json::from_value(state["decisions"][0].clone()).unwrap();
     let decision_id: UserDecisionId = decision.decision_id;
+    assert_eq!(
+        serde_json::to_value(&decision.context).unwrap(),
+        if multiple { context } else { json!([]) }
+    );
+    let answer = if multiple {
+        json!({"kind":"options", "option_ids":["yes", "later"]})
+    } else {
+        json!({"kind":"option", "option_id":"yes"})
+    };
 
     let listed = client
         .request(DaemonRequest::UserDecision {
@@ -1971,7 +1998,7 @@ fi
     let resolved = client
         .request(DaemonRequest::UserDecision {
             action: TuiUserDecisionAction::Resolve,
-            payload: json!({"decision_id": decision_id, "answer": {"kind":"option", "option_id":"yes"}}),
+            payload: json!({"decision_id": decision_id, "answer": answer}),
         })
         .unwrap();
     assert!(matches!(resolved, DaemonReply::Ok(ref body) if body["status"] == "resolved"));
@@ -1982,7 +2009,7 @@ fi
             payload: json!({"decision_id": decision_id}),
         })
         .unwrap();
-    assert!(matches!(fetched, DaemonReply::Ok(ref body) if body["answer"]["option_id"] == "yes"));
+    assert!(matches!(fetched, DaemonReply::Ok(ref body) if body["answer"] == answer));
 
     let mut cancellable = decision;
     cancellable.decision_id = UserDecisionId::new();

@@ -126,7 +126,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。回答は user_decision_get で取得する"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。回答は user_decision_get で取得する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -152,6 +152,34 @@ impl Tool for UserDecisionRequest {
                             "required": ["id", "label"],
                             "additionalProperties": false,
                         },
+                    },
+                    "selection_mode": {"enum": ["single", "multiple"], "default": "single"},
+                    "context": {
+                        "type": "array", "maxItems": UserDecisionPolicy::CONTEXT_COUNT_MAX,
+                        "items": {"oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "table"},
+                                    "title": bounded_string_schema(UserDecisionPolicy::TITLE_MAX_BYTES, true),
+                                    "columns": {"type": "array", "minItems": 1, "maxItems": UserDecisionPolicy::TABLE_COLUMNS_MAX,
+                                        "items": bounded_string_schema(UserDecisionPolicy::CONTEXT_CELL_MAX_BYTES, true)},
+                                    "rows": {"type": "array", "minItems": 1, "maxItems": UserDecisionPolicy::TABLE_ROWS_MAX,
+                                        "items": {"type": "array", "minItems": 1, "maxItems": UserDecisionPolicy::TABLE_COLUMNS_MAX,
+                                            "items": bounded_string_schema(UserDecisionPolicy::CONTEXT_CELL_MAX_BYTES, false)}},
+                                },
+                                "required": ["kind", "title", "columns", "rows"], "additionalProperties": false,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "diagram"},
+                                    "title": bounded_string_schema(UserDecisionPolicy::TITLE_MAX_BYTES, true),
+                                    "text": bounded_string_schema(UserDecisionPolicy::DIAGRAM_MAX_BYTES, true),
+                                },
+                                "required": ["kind", "title", "text"], "additionalProperties": false,
+                            },
+                        ]},
                     },
                     "allow_freeform": {"type": "boolean"},
                     "expires_at": {"type": "string"},
@@ -197,7 +225,7 @@ impl Tool for UserDecisionResolve {
         "user_decision_resolve"
     }
     fn description(&self) -> &'static str {
-        "pending decision に option または許可された freeform を一度だけ記録する"
+        "pending decision に単一 option、複数 options、または許可された freeform を一度だけ記録する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -219,6 +247,16 @@ impl Tool for UserDecisionResolve {
                                 },
                                 "required": ["kind", "option_id"],
                                 "additionalProperties": false,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "options"},
+                                    "option_ids": {"type": "array", "minItems": 1,
+                                        "maxItems": UserDecisionPolicy::OPTION_COUNT_MAX,
+                                        "items": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true)},
+                                },
+                                "required": ["kind", "option_ids"], "additionalProperties": false,
                             },
                             {
                                 "type": "object",

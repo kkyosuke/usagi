@@ -212,6 +212,41 @@ caller は同じ credential で get / list を polling し、terminal decision �
 同じ idempotency key の request は同じ decision に収束する。これにより人間の応答時間が MCP connection や caller
 credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。
 
+質問の補足と選択方法は次の optional field で指定する。省略した既存 request / 保存済み record は単一選択・補足なしとして読む。
+
+| field | 内容 |
+|---|---|
+| `selection_mode` | `single`（既定）または `multiple`。複数選択では1件以上の option が必要 |
+| `context` | 順序付きの説明 block 配列（最大4件） |
+| `context[].kind = table` | `title`、`columns`（1〜6列）、`rows`（1〜16行）。各行のセル数は列数と一致する |
+| `context[].kind = diagram` | `title` と `text`。ASCII / Unicode の整形済みテキスト図。Mermaid、HTML、画像は描画しない |
+
+複数選択の回答は `{"kind":"options","option_ids":["a","b"]}`。1件以上の既知 ID を重複なしで指定する。
+単一選択の `option` と複数選択の `options` は request の mode と一致しなければ拒否する。
+許可された `freeform` はどちらの mode でも選択回答の代わりに使え、選択 ID と同時送信はしない。
+補足 block と selection mode も idempotency 比較に含め、同じ key で説明・選択方法を変えた request は conflict になる。
+
+補足の title は256 UTF-8 bytes、列見出しとセルは各512 bytes、図の text は4096 bytesまで。
+補足には改行以外の制御文字と bidi 制御文字を許可しない。空のセルは許可するが、title・列見出し・図は空白のみでは作れない。
+表示と操作は [TUI](03-tui.md) を参照する。
+
+```json
+{
+  "title": "実施する検証",
+  "prompt": "今回追加する検証を選んでください。複数選択できます。",
+  "selection_mode": "multiple",
+  "options": [
+    {"id": "unit", "label": "ユニットテスト", "description": "境界条件を確認"},
+    {"id": "e2e", "label": "E2E", "description": "操作全体を確認"}
+  ],
+  "context": [
+    {"kind": "table", "title": "比較", "columns": ["検証", "範囲"],
+      "rows": [["ユニットテスト", "個別の関数"], ["E2E", "ユーザー操作全体"]]},
+    {"kind": "diagram", "title": "検証経路", "text": "入力 -> 処理 -> 保存 -> 表示"}
+  ]
+}
+```
+
 decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
 2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
 NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
