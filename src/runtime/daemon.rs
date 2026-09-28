@@ -2689,21 +2689,25 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
         &location,
         std::thread::current().name(),
         &Backtrace::force_capture().to_string(),
+        std::process::id(),
+        &current_build(),
     )
 }
 
-/// The one line-and-block shape a recorded panic takes.
-///
-/// The thread name is part of it because a shipped daemon's backtrace is not.
-/// Every long-lived worker is spawned with a name, and when a panic in one of
-/// them takes the process down, that name is the only thing in the record that
-/// says *which* worker — the frames of a stripped release binary all resolve to
-/// the same executable symbol. A thread without a name is still reported, as
-/// such, rather than silently omitted.
-fn panic_report(payload: &str, location: &str, thread: Option<&str>, backtrace: &str) -> String {
+/// Correlates a panic with its worker and exact running daemon, even when a
+/// newer executable has already replaced that daemon's binary on disk.
+fn panic_report(
+    payload: &str,
+    location: &str,
+    thread: Option<&str>,
+    backtrace: &str,
+    pid: u32,
+    build: &BuildIdentity,
+) -> String {
     let thread = thread.unwrap_or("<unnamed>");
     format!(
-        "daemon panicked: {payload}\nthread: {thread}\nlocation: {location}\nbacktrace:\n{backtrace}"
+        "daemon panicked: {payload}\nthread: {thread}\nlocation: {location}\npid: {pid}\nbuild: version={} commit={} target={} artifact={}\nbacktrace:\n{backtrace}",
+        build.version, build.commit, build.target, build.artifact,
     )
 }
 /// The service supervisor this build provisions, named in the command's output.
