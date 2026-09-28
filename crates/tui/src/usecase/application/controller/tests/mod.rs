@@ -1694,6 +1694,8 @@ fn pending_decision(workspace: WorkspaceId) -> UserDecision {
             description: Some("Keeps current state".into()),
         }],
         allow_freeform: false,
+        selection_mode: UserDecisionSelectionMode::Single,
+        context: Vec::new(),
         expires_at: None,
         idempotency_key: None,
         status: UserDecisionStatus::Pending,
@@ -2518,4 +2520,83 @@ fn coverage_contract_executes_guarded_reducer_success_paths() {
     ] {
         let _ = update_editor_key(&mut state, &key);
     }
+}
+
+#[test]
+fn multiple_decision_checks_survive_snapshots_and_submit_only_the_active_answer_mode() {
+    let workspace = WorkspaceId::new();
+    let mut request = pending_decision(workspace);
+    request.selection_mode = UserDecisionSelectionMode::Multiple;
+    request.allow_freeform = true;
+    let mut second = request.options[0].clone();
+    second.id = "fast".into();
+    request.options.push(second);
+    let mut state = AppState::home(workspace, Vec::new());
+    let snapshot = BackendEvent::Decisions {
+        workspace,
+        decisions: vec![request.clone()],
+    };
+    let _ = update(&mut state, AppEvent::Backend(snapshot.clone()));
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    for key in [
+        AppKey::Char(' '),
+        AppKey::Down,
+        AppKey::Char(' '),
+        AppKey::Char(' '),
+        AppKey::Char(' '),
+    ] {
+        let _ = update(&mut state, AppEvent::Key(key));
+    }
+    let _ = update(&mut state, AppEvent::Backend(snapshot));
+    assert!(
+        matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+        [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids == &["safe", "fast"])
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    for key in [
+        AppKey::Char('a'),
+        AppKey::Char(' '),
+        AppKey::Paste("b".into()),
+        AppKey::Backspace,
+    ] {
+        let _ = update(&mut state, AppEvent::Key(key));
+    }
+    assert!(
+        matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+        [Effect::ResolveDecision { answer: UserDecisionAnswer::Freeform { text }, .. }] if text == "a")
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+    assert!(
+        matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+        [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids.len() == 2)
+    );
+    for key in [AppKey::Left, AppKey::Right, AppKey::Up, AppKey::Down] {
+        let _ = update(&mut state, AppEvent::Key(key));
+    }
+    let editor = state.decision_overlay().unwrap().editor().unwrap();
+    assert_eq!(editor.context_column(), 8);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionResolved {
+            workspace,
+            decision_id: request.decision_id,
+        }),
+    );
+    assert!(state.decision_overlay().is_none());
+}
+
+#[test]
+fn malformed_multiple_decision_without_options_cannot_toggle_or_submit() {
+    // The daemon rejects this request, but the UI must also stay inert if an
+    // incomplete or malformed snapshot reaches its projection boundary.
+    let workspace = WorkspaceId::new();
+    let mut request = pending_decision(workspace);
+    request.selection_mode = UserDecisionSelectionMode::Multiple;
+    request.options.clear();
+    let mut editor = DecisionEditor::new(request);
+    assert!(update_decision_editor(workspace, &mut editor, AppKey::Char(' ')).is_empty());
+    assert!(editor.checked_options.is_empty());
+    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert!(editor.error().is_some());
 }

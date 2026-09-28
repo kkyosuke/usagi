@@ -314,11 +314,36 @@ mod tests {
         });
         assert!(request.validate(&multibyte, &schema).is_err());
 
+        let rich = serde_json::json!({
+            "title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}],
+            "selection_mode":"multiple", "context":[
+                {"kind":"table", "title":"Cost", "columns":["Plan"], "rows":[["A"]]},
+                {"kind":"diagram", "title":"Flow", "text":"A -> B"}
+            ]
+        });
+        assert!(request.validate(&rich, &schema).is_ok());
+        assert_eq!(
+            properties["context"]["maxItems"],
+            UserDecisionPolicy::CONTEXT_COUNT_MAX
+        );
+        let mut invalid = rich.clone();
+        invalid["selection_mode"] = serde_json::json!("unknown");
+        assert!(request.validate(&invalid, &schema).is_err());
+        invalid = rich;
+        invalid["context"][1]["text"] =
+            serde_json::json!("x".repeat(UserDecisionPolicy::DIAGRAM_MAX_BYTES + 1));
+        assert!(request.validate(&invalid, &schema).is_err());
+
         let resolve = registry
             .iter()
             .find(|tool| tool.name() == "user_decision_resolve")
             .unwrap();
         let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let multiple = serde_json::json!({
+            "decision_id":"00000000-0000-0000-0000-000000000000",
+            "answer":{"kind":"options", "option_ids":["a", "b"]}
+        });
+        assert!(resolve.validate(&multiple, &schema).is_ok());
         let overlong = serde_json::json!({
             "decision_id": "00000000-0000-0000-0000-000000000000",
             "answer": {

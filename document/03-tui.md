@@ -465,6 +465,15 @@ decision の title、prompt、option label/description、freeform は modal 幅�
 内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
 freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
 
+比較表・テキスト図がある質問は、最初に説明の先頭を表示する。表はセルを折り返して列を揃え、狭い画面では
+列見出し付きの項目表示に切り替えて内容を残す。図は空白と改行を保持し、`←` / `→` で横方向へ読み進める。
+説明全体の縦移動には `PageUp` / `PageDown` を使う。補足の入力形式と上限は [MCP](07-mcp.md#tool-面) を正本とする。
+
+複数選択では `↑` / `↓` で移動、`Space` でチェックの追加・解除、`Enter` で送信する。初期状態は未選択で、
+チェック数と `[ ]` / `[x]` を表示し、未選択では送信しない。自由入力も許可される場合は `Tab` で選択欄と
+自由入力欄を切り替え、現在の欄の回答だけを送信する。両方の入力内容は切り替えや同じ質問の snapshot 更新で保持する。
+送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
+
 新しい pending decision を resync で観測すると、Home header の右上に Icons 設定に応じた bell または `!` indicator と
 `N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。indicatorをクリックすると existing decision modal を
 開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
