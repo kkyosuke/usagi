@@ -2585,3 +2585,18 @@ fn multiple_decision_checks_survive_snapshots_and_submit_only_the_active_answer_
     );
     assert!(state.decision_overlay().is_none());
 }
+
+#[test]
+fn malformed_multiple_decision_without_options_cannot_toggle_or_submit() {
+    // The daemon rejects this request, but the UI must also stay inert if an
+    // incomplete or malformed snapshot reaches its projection boundary.
+    let workspace = WorkspaceId::new();
+    let mut request = pending_decision(workspace);
+    request.selection_mode = UserDecisionSelectionMode::Multiple;
+    request.options.clear();
+    let mut editor = DecisionEditor::new(request);
+    assert!(update_decision_editor(workspace, &mut editor, AppKey::Char(' ')).is_empty());
+    assert!(editor.checked_options.is_empty());
+    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert!(editor.error().is_some());
+}
