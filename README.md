@@ -49,7 +49,7 @@ Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](docu
 進捗の確認と追加指示も同じタブで行えます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
-質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定にも対応しています。
+質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール

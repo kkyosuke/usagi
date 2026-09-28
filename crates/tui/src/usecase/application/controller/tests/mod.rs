@@ -1689,6 +1689,8 @@ fn pending_decision(workspace: WorkspaceId) -> UserDecision {
         title: "Choose a path".into(),
         prompt: "Which path?".into(),
         options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+            pros: Vec::new(),
+            cons: Vec::new(),
             id: "safe".into(),
             label: "Safe".into(),
             description: Some("Keeps current state".into()),

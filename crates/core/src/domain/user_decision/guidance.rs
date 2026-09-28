@@ -1,4 +1,4 @@
-//! Optional recommendations and enforceable multiple-choice cardinality.
+//! Optional decision guidance and enforceable multiple-choice cardinality.
 
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,25 @@ impl UserDecision {
                     .option_ids
                     .iter()
                     .all(|id| self.options.iter().any(|option| option.id == *id))
+            {
+                return Err(UserDecisionError::InvalidRequest);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl super::UserDecisionOption {
+    pub(super) fn validate_tradeoffs(&self) -> Result<(), UserDecisionError> {
+        for points in [&self.pros, &self.cons] {
+            if points.len() > UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX
+                || points.iter().any(|point| {
+                    point.trim().is_empty()
+                        || point.len() > UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES
+                        || !point
+                            .chars()
+                            .all(|ch| ch == '\n' || presentation_character_is_safe(ch))
+                })
             {
                 return Err(UserDecisionError::InvalidRequest);
             }

@@ -579,6 +579,8 @@ mod tests {
             title: "t".into(),
             prompt: "p".into(),
             options: vec![UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "a".into(),
                 label: "A".into(),
                 description: None,
@@ -1499,9 +1501,21 @@ mod tests {
             reason: "Safer".into(),
         });
         request.idempotency_key = Some("guidance".into());
+        request.options[0].pros = vec!["Less work".into()];
+        request.options[0].cons = vec!["Limited scope".into()];
         store.create(request.clone()).unwrap().unwrap();
         assert_eq!(store.create(request.clone()).unwrap().unwrap(), request);
         for changed in [
+            {
+                let mut next = request.clone();
+                next.options[0].pros = vec!["Other benefit".into()];
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.options[0].cons.clear();
+                next
+            },
             {
                 let mut next = request.clone();
                 next.selection_limits = None;

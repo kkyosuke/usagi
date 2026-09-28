@@ -1889,6 +1889,8 @@ fn user_decision_round_trip(multiple: bool) {
     ]);
     let mut request_args = json!({"title":"Deploy?", "prompt":"Choose", "options":[{"id":"yes","label":"Yes"}, {"id":"later","label":"Later"}]});
     if multiple {
+        request_args["options"][0]["pros"] = json!(["Fast feedback"]);
+        request_args["options"][0]["cons"] = json!(["Needs follow-up"]);
         request_args["selection_mode"] = json!("multiple");
         request_args["context"] = context.clone();
         request_args["selection_limits"] = json!({"min":2, "max":2});
@@ -1982,6 +1984,22 @@ fi
     assert_eq!(
         serde_json::to_value(&decision.context).unwrap(),
         if multiple { context } else { json!([]) }
+    );
+    assert_eq!(
+        decision.options[0].pros,
+        if multiple {
+            vec!["Fast feedback"]
+        } else {
+            vec![]
+        }
+    );
+    assert_eq!(
+        decision.options[0].cons,
+        if multiple {
+            vec!["Needs follow-up"]
+        } else {
+            vec![]
+        }
     );
     let answer = if multiple {
         json!({"kind":"options", "option_ids":["yes", "later"]})
