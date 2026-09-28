@@ -847,6 +847,16 @@ pub enum DaemonReply {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientError {
     Protocol(ProtocolError),
+    /// The transport failed. The payload is whatever the OS or the client said,
+    /// so surfaces render a fixed line instead of it.
+    ///
+    /// An explanation written *for* the operator therefore does not belong
+    /// here — it would be replaced by that fixed line and never reach them.
+    /// [`Self::Lifecycle`] is the variant that carries one; the two are
+    /// identical in [`retry_mode`](Self::retry_mode),
+    /// [`side_effect`](Self::side_effect), [`code`](Self::code), and
+    /// [`is_transport_failure`](Self::is_transport_failure), so the choice
+    /// between them decides only whether the message is shown.
     Unavailable(String),
     /// The connected daemon is a different known executable artifact. This is
     /// an effect-free trigger: the old daemon and its terminals remain alive
@@ -857,6 +867,9 @@ pub enum ClientError {
     BuildIdentityUnavailable,
     /// A daemon lifecycle transition could not safely establish a verified
     /// endpoint. Callers must not replace it with a local implementation.
+    ///
+    /// The payload is an explanation this codebase wrote, so surfaces render it
+    /// verbatim (see [`Self::Unavailable`] for the distinction).
     Lifecycle(String),
     /// Another process held the cross-process bootstrap section for longer than
     /// this surface's bounded wait, so no connection was ever attempted.

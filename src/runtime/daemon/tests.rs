@@ -14786,3 +14786,141 @@ fn inbox_query_errors_preserve_client_faults_and_hide_store_failures() {
     assert_eq!(unavailable.code, ErrorCode::Unavailable);
     assert_eq!(unavailable.message, "dispatch inbox is unavailable");
 }
+
+/// The probe is a connection to a running daemon, so only the verbs that make a
+/// claim about one may issue it. `serve` above all must not: the endpoint it
+/// would reach is the one this very process is about to publish.
+#[test]
+fn only_a_verb_that_claims_a_running_daemon_pays_for_an_endpoint_probe() {
+    use usagi_core::domain::daemon::{DaemonState, StaleReason};
+
+    let claiming = [
+        PresentationDaemonCommand::Status,
+        PresentationDaemonCommand::Replace {
+            operation: None,
+            mode: TransitionMode::Planned,
+        },
+    ];
+    for command in &claiming {
+        assert!(
+            endpoint_probe_is_needed(command, DaemonState::Alive),
+            "{command:?} reports on a running daemon and must observe its endpoint"
+        );
+    }
+
+    let silent = [
+        PresentationDaemonCommand::Serve(usagi_daemon::presentation::ServeRole::Active),
+        PresentationDaemonCommand::Serve(usagi_daemon::presentation::ServeRole::Standby),
+        PresentationDaemonCommand::Start,
+        PresentationDaemonCommand::Stop(TransitionMode::Planned),
+        PresentationDaemonCommand::Stop(TransitionMode::Cold),
+        // The remedy an unreachable daemon is told to run. It signals the owner
+        // instead of asking it anything, and the refusal is never consulted, so
+        // paying the probe here would only delay the one way out.
+        PresentationDaemonCommand::Replace {
+            operation: None,
+            mode: TransitionMode::Cold,
+        },
+    ];
+    for command in &silent {
+        assert!(
+            !endpoint_probe_is_needed(command, DaemonState::Alive),
+            "{command:?} must not connect to a daemon it is not asking anything"
+        );
+    }
+
+    // Without a live recorded owner there is nothing to reach, and a probe would
+    // spend its whole ceiling proving the absence the record already proves.
+    for state in [
+        DaemonState::Absent,
+        DaemonState::Unverified,
+        DaemonState::Stale(StaleReason::OwnerGone),
+        DaemonState::Stale(StaleReason::PidReused),
+    ] {
+        for command in &claiming {
+            assert!(
+                !endpoint_probe_is_needed(command, state),
+                "{command:?} probed a {state:?} owner"
+            );
+        }
+    }
+}
+
+/// A daemon that is merely busy answers on a later attempt, and reporting the
+/// first refusal as silence would call it unreachable — which every reader of
+/// this observation turns into "unusable".
+#[test]
+fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
+    // Answers immediately: one attempt, and nothing is waited for.
+    let slept = Cell::new(0_u32);
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            true
+        }),
+        EndpointObservation::Answering
+    );
+    assert_eq!((attempts, slept.get()), (1, 0));
+
+    // Refuses twice, then answers: the earlier refusals were not proof. This is
+    // the loaded-daemon case the whole retry exists for.
+    let slept = Cell::new(0_u32);
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            attempts > 2
+        }),
+        EndpointObservation::Answering
+    );
+    assert_eq!((attempts, slept.get()), (3, 2));
+
+    // Never answers: every attempt is spent, and the loop waits *between*
+    // attempts only — a trailing sleep would delay the verdict for nothing.
+    let slept = Cell::new(0_u32);
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            false
+        }),
+        EndpointObservation::Silent
+    );
+    assert_eq!((attempts, slept.get()), (4, 3));
+
+    // The count is the bound, and the shipping one is more than the two a
+    // wall-clock ceiling would have bought against a stalled hello.
+    const { assert!(ENDPOINT_PROBE_ATTEMPTS > 2) }
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(ENDPOINT_PROBE_ATTEMPTS, &|_| (), &mut || {
+            attempts += 1;
+            false
+        }),
+        EndpointObservation::Silent
+    );
+    assert_eq!(attempts, ENDPOINT_PROBE_ATTEMPTS);
+}
+
+/// The record is the only place a stripped release binary says which worker
+/// panicked, so the thread has to be in it — named or not.
+#[test]
+fn a_recorded_panic_names_the_thread_it_happened_on() {
+    let named = panic_report(
+        "assertion failed",
+        "condvar.rs:130:9",
+        Some("usagi-pr-refresh"),
+        "0: frame",
+    );
+    assert!(
+        named.contains("daemon panicked: assertion failed"),
+        "{named}"
+    );
+    assert!(named.contains("\nthread: usagi-pr-refresh\n"), "{named}");
+    assert!(named.contains("\nlocation: condvar.rs:130:9\n"), "{named}");
+    assert!(named.ends_with("backtrace:\n0: frame"), "{named}");
+
+    let anonymous = panic_report("boom", "somewhere", None, "");
+    assert!(anonymous.contains("\nthread: <unnamed>\n"), "{anonymous}");
+}

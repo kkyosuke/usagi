@@ -20,29 +20,29 @@ use super::{
     DaemonLauncher, DaemonPty, DaemonReady, DaemonRecord, DaemonRecordPort, DaemonRecordStore,
     DaemonRequest, DaemonWorkspaceActivity, DeadlineConnection, DeadlineUnixStream, DispatchStore,
     DispatchToolContext, Duration, ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS, EndpointCleanup,
-    EndpointLocator, ErrorCode, ErrorLog, FencedPrInventory, FileInstanceLock, FileWorkspaceFence,
-    FileWorkspaceFences, FsCustodyProbe, FsRecordFile, GenerationFence, GenerationRegistry,
-    GenerationRegistryFile, GenerationRole, GenericTerminalRuntime, IdentityAuthority,
-    InitialWorkspaceFence, InstanceLockCustody, Instant, LaunchedStandby, MetricsBroker,
-    MonotonicClock, Mutex, OpCli, Ordering, OutputPrProjector, PRE_HANDSHAKE_CONNECTION_LIMIT,
-    PRE_HANDSHAKE_DEADLINE, Path, PathBuf, PeerProcess, PrInventoryStore, PrProjectionQueue,
-    PreHandshakeAdmission, ProcessIdentity, ProcessObservation, ProcessResourceSampler,
-    PtyObservation, Read, Receiver, RefCell, RegistryDocument, ResponseOutcome, RoutingLedger,
-    RuntimeHydration, SeamlessRefusal, SecureUnixListener, SessionDispatchContext, SharedAgent,
-    SharedAgentRuntime, SharedAgentState, SharedMetricsBroker, SharedPrInventory,
-    SharedProcessResourceSampler, SharedSessionRuntime, SharedSupervisorRuntime, SharedTerminal,
-    SharedTerminalOwner, SharedTerminalRuntime, SharedVerificationCache, ShutdownOnIpcWorkerExit,
-    ShutdownOnWorkerPanic, ShutdownPipe, ShutdownRequest, SpawnedChildren, StaleCleanup,
-    StaleDaemonCleanup, SupervisorRuntime, SystemClock, SystemTenantOpener, TeardownSignal,
-    TenantRegistry, TenantWorkspaces, TerminalPipelineMetrics, TerminalScopeResolver,
-    TerminalStore, TrustedLoginShell, UnixChildProbe, UserDecisionStore, UserEnvironment,
-    WORKFLOW_LANE_TICK, Workspaces, Write, authenticated_supervisor_caller, bind_ipc_listener,
-    bootstrap_broker_address, client_connection_capacity_available, client_connection_limit,
-    connection_cleanup_channel, connection_workspace, current_build, current_daemon_is_reachable,
-    daemon_request_surface, dispatch_agent, dispatch_agent_phase_report,
-    dispatch_codex_session_capture, dispatch_dispatch, dispatch_dispatch_tool,
-    dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot, dispatch_rollover,
-    dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
+    EndpointLocator, EndpointObservation, ErrorCode, ErrorLog, FencedPrInventory, FileInstanceLock,
+    FileWorkspaceFence, FileWorkspaceFences, FsCustodyProbe, FsRecordFile, GenerationFence,
+    GenerationRegistry, GenerationRegistryFile, GenerationRole, GenericTerminalRuntime,
+    IdentityAuthority, InitialWorkspaceFence, InstanceLockCustody, Instant, LaunchedStandby,
+    MetricsBroker, MonotonicClock, Mutex, OpCli, Ordering, OutputPrProjector,
+    PRE_HANDSHAKE_CONNECTION_LIMIT, PRE_HANDSHAKE_DEADLINE, Path, PathBuf, PeerProcess,
+    PrInventoryStore, PrProjectionQueue, PreHandshakeAdmission, ProcessIdentity,
+    ProcessObservation, ProcessResourceSampler, PtyObservation, Read, Receiver, RefCell,
+    RegistryDocument, ResponseOutcome, RoutingLedger, RuntimeHydration, SeamlessRefusal,
+    SecureUnixListener, SessionDispatchContext, SharedAgent, SharedAgentRuntime, SharedAgentState,
+    SharedMetricsBroker, SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime,
+    SharedSupervisorRuntime, SharedTerminal, SharedTerminalOwner, SharedTerminalRuntime,
+    SharedVerificationCache, ShutdownOnIpcWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe,
+    ShutdownRequest, SpawnedChildren, StaleCleanup, StaleDaemonCleanup, SupervisorRuntime,
+    SystemClock, SystemTenantOpener, TeardownSignal, TenantRegistry, TenantWorkspaces,
+    TerminalPipelineMetrics, TerminalScopeResolver, TerminalStore, TrustedLoginShell,
+    UnixChildProbe, UserDecisionStore, UserEnvironment, WORKFLOW_LANE_TICK, Workspaces, Write,
+    authenticated_supervisor_caller, bind_ipc_listener, bootstrap_broker_address,
+    client_connection_capacity_available, client_connection_limit, connection_cleanup_channel,
+    connection_workspace, current_build, current_daemon_is_reachable, daemon_request_surface,
+    dispatch_agent, dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
+    dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
+    dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
     dispatch_supervisor_tool, dispatch_user_decision, draining_collection, ensure_private_dir,
     ensure_private_dir_all, envelope, expected_client_disconnect, handle_bootstrap_broker_request,
     is_same_child, launch_broker_daemon, live_generation_endpoints, new_terminal_runtime,
@@ -87,7 +87,8 @@ impl IdentityAuthority for ObservedChildren {
 }
 
 /// Why this build cannot hand authority to a live successor, read from the
-/// durable generation registry.
+/// durable generation registry and the caller's observation of the active
+/// generation's endpoint.
 ///
 /// An unreadable or unparsable registry is reported as such rather than treated
 /// as absent, so an operator sees the difference between "no daemon ever
@@ -97,8 +98,15 @@ impl IdentityAuthority for ObservedChildren {
 /// so a refusal about a wait can name what that wait is. Both reads are best
 /// effort: an unobservable wait leaves the refusal without a cause rather than
 /// with a guessed one.
+///
+/// `endpoint` is passed in rather than probed here: only a replacement needs the
+/// answer, and a probe issued from `serve` would connect to the endpoint this
+/// process is about to publish.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
-pub(super) fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefusal> {
+pub(super) fn observed_seamless_refusal(
+    data_dir: &Path,
+    endpoint: EndpointObservation,
+) -> Option<SeamlessRefusal> {
     match usagi_daemon::infrastructure::generation_registry::read_registry_document(data_dir) {
         Ok(document) => {
             let active_is_alive = document
@@ -111,6 +119,7 @@ pub(super) fn observed_seamless_refusal(data_dir: &Path) -> Option<SeamlessRefus
             let refusal = seamless_refusal(
                 document.as_ref(),
                 active_is_alive,
+                endpoint,
                 DEFAULT_GENERATION_LIMIT,
                 None,
             );
