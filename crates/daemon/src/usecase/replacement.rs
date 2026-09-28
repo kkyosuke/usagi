@@ -46,6 +46,7 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_rollover_trigger};
 
 use crate::usecase::authority::registry::{REGISTRY_SCHEMA, RegistryDocument};
+use crate::usecase::endpoint::EndpointObservation;
 use crate::usecase::generation::GenerationRole;
 use crate::usecase::resources::CasDocument as _;
 use crate::usecase::resources::allocator::AllocatorDocument;
@@ -267,8 +268,10 @@ pub fn draining_collection(
 
 /// Why this build cannot hand authority to a live successor.
 ///
-/// Every variant is a statement about the durable generation registry, so the
-/// message an operator sees names the prerequisite that is actually missing.
+/// Every variant names one missing prerequisite, so the message an operator
+/// sees is the thing that is actually absent. All but one are statements about
+/// the durable generation registry; [`Self::ActiveUnreachable`] is the
+/// exception, and is about the live active generation's endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeamlessRefusal {
     /// No durable registry exists: this daemon has never registered a
@@ -281,6 +284,16 @@ pub enum SeamlessRefusal {
     RegistryUnreadable(String),
     /// The registry does not name a live registered active generation.
     NoLiveRegisteredActive,
+    /// The active generation's process is alive, but its endpoint does not
+    /// answer. A rollover is driven *by* that daemon — the successor is staged
+    /// and then asked, over IPC, to run its own gated handoff — so a daemon
+    /// nobody can reach has nothing to hand over.
+    ///
+    /// This is deliberately a refusal rather than a silent fall back to a cold
+    /// transition. An unreachable daemon may still own the PTYs its census
+    /// counts, and destroying them is the one thing a planned transition
+    /// promises not to do. The operator is told which command does give them up.
+    ActiveUnreachable,
     /// No additional retained generation can be staged.
     GenerationLimit,
     /// The retained-generation limit is occupied by a predecessor that is
@@ -292,6 +305,24 @@ pub enum SeamlessRefusal {
     /// could not: the limit is still reached, but this build will not name a
     /// cause it did not read.
     DrainingCollectionPending(Option<DrainingCollection>),
+}
+
+impl SeamlessRefusal {
+    /// What the operator can do about this refusal.
+    ///
+    /// Only the path that actually clears *this* refusal is offered
+    /// (see [`refuse_live`]).
+    fn remedy(&self) -> &'static str {
+        match self {
+            Self::ActiveUnreachable => UNREACHABLE_COLD_ONLY,
+            Self::NoGenerationRegistry
+            | Self::RegistrySchemaUnsupported
+            | Self::RegistryUnreadable(_)
+            | Self::NoLiveRegisteredActive
+            | Self::GenerationLimit
+            | Self::DrainingCollectionPending(_) => CLOSE_OR_FORCE,
+        }
+    }
 }
 
 impl fmt::Display for SeamlessRefusal {
@@ -309,6 +340,9 @@ impl fmt::Display for SeamlessRefusal {
             Self::NoLiveRegisteredActive => {
                 f.write_str("no live registered active generation exists")
             }
+            Self::ActiveUnreachable => f.write_str(
+                "the running daemon does not answer on its endpoint, so it cannot hand anything over",
+            ),
             Self::GenerationLimit => f.write_str("the generation limit is already reached"),
             // "awaiting collection" alone leaves the operator with nothing to
             // act on: the wait ends when the predecessor's last condition
@@ -329,10 +363,17 @@ impl fmt::Display for SeamlessRefusal {
 /// that is about that wait.
 /// A free generation slot is required because the synthesis root stages the
 /// successor after this preflight.
+///
+/// `endpoint` is the separate question of whether the live active generation
+/// still *answers* ([`EndpointObservation`]). Process liveness alone cannot
+/// decide a rollover, because the rollover is a request sent to that process.
+/// An unprobed endpoint keeps the registry-only verdict this function gave
+/// before the observation existed.
 #[must_use]
 pub fn seamless_refusal(
     registry: Option<&RegistryDocument>,
     active_is_alive: bool,
+    endpoint: EndpointObservation,
     generation_limit: usize,
     draining: Option<DrainingCollection>,
 ) -> Option<SeamlessRefusal> {
@@ -344,6 +385,11 @@ pub fn seamless_refusal(
     }
     if !active_is_alive || document.active().is_none() {
         return Some(SeamlessRefusal::NoLiveRegisteredActive);
+    }
+    // Ordered after liveness on purpose: a probe of an owner that is already
+    // proven gone would report silence and hide the more specific refusal.
+    if endpoint.is_silent() {
+        return Some(SeamlessRefusal::ActiveUnreachable);
     }
     if document.retained() < generation_limit {
         return None;
@@ -465,11 +511,26 @@ fn refuse_live(action: &str, live: LiveResources, why: Option<&SeamlessRefusal>)
     io::Error::new(
         io::ErrorKind::WouldBlock,
         format!(
-            "refusing to {action}: the daemon still owns {live}{reason}. \
-             Close them, or ask for an explicit cold transition with --force"
+            "refusing to {action}: the daemon still owns {live}{reason}. {}",
+            why.map_or(CLOSE_OR_FORCE, SeamlessRefusal::remedy)
         ),
     )
 }
+
+/// The way out of every refusal that a reachable daemon can still be asked to
+/// clear: close the runtime, or give it up explicitly.
+const CLOSE_OR_FORCE: &str = "Close them, or ask for an explicit cold transition with --force";
+/// The way out of a refusal that nothing can ask the daemon to clear.
+///
+/// `--restart-agents` is deliberately excluded and named as excluded. It keeps
+/// the transition *planned* (its whole point is that the successor resumes the
+/// conversations), so it needs the same endpoint this refusal is about: an
+/// operator who reaches for `restart --restart-agents --force` — which is what
+/// an unreachable daemon invites — meets this very refusal again. Saying which
+/// flag combination works is the difference between a remedy and a loop.
+const UNREACHABLE_COLD_ONLY: &str = "Nothing can be closed through a daemon that does not answer: \
+     replace it with `usagi daemon restart --force`, without --restart-agents \
+     (that flag keeps the transition planned and needs the same endpoint)";
 
 /// What every exactly-live retained generation owns right now.
 ///

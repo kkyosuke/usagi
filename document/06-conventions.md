@@ -472,6 +472,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | archive | `usagi-<os>-<arch>.tar.gz`。中身は唯一の top-level entry `usagi`（installer の `verify_archive` が要求する） |
 | verification artifact | 各 archive と同名の `.sha256` と `.version`。installer は両方を必須とし、存在しない旧 release へ無検証 fallback しない |
 | version 出力 | `usagi <version>`（installer の `read_version` が要求する。`release-build-check.yml` が host target でこの契約を検証する） |
+| symbol | `[profile.release]` は `strip = "debuginfo"`。debuginfo は落とすが symbol table は残す。daemon の panic backtrace は[異常終了の唯一の証拠](#daemon-e2e-の-transient-と-product-失敗を混同しない)であり、全 symbol を落とした artifact ではその backtrace が 1 つの実行ファイル symbol へ潰れて、どの worker が落ちたのかを判定できない |
 
 ### 手順
 

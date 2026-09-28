@@ -10,7 +10,7 @@
 # 手順の正本は document/06-conventions.md#リリース。
 [package]
 name = "usagi"
-version = "4.8.5"
+version = "4.8.6"
 edition.workspace = true
 repository.workspace = true
 license.workspace = true
@@ -137,9 +137,12 @@ portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "f78f72f2
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
-# リリースバイナリはクロス crate の inline 最適化とサイズを優先し、strip する。
+# リリースバイナリはクロス crate の inline 最適化とサイズを優先する。
 # panic は既定の unwind のまま。
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+# debuginfo だけを落とし、symbol table は残す。理由の正本は
+# document/06-conventions.md#出荷-artifact-の要件（記録する内容は
+# document/05-daemon.md#failure-logging）。
+strip = "debuginfo"

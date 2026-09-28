@@ -1390,6 +1390,44 @@ mod tests {
         );
     }
 
+    /// The two `[unavailable]` variants differ only here, and that difference is
+    /// the whole reason a lifecycle failure carries its own words: a transport
+    /// payload is whatever the OS said, while a `Lifecycle` message was written
+    /// for the operator and has to survive to the terminal. `usagi update`
+    /// reported "daemon transport is unavailable" for a daemon that was there
+    /// and not answering, because its explanation travelled as the wrong one.
+    #[test]
+    fn a_lifecycle_failure_reaches_the_terminal_with_its_own_words() {
+        let mut lifecycle = Vec::new();
+        write_client_error(
+            &mut lifecycle,
+            "daemon synchronization refused",
+            &ClientError::Lifecycle(
+                "daemon owner is active but its endpoint is not ready; check `usagi daemon status`"
+                    .to_owned(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(lifecycle).unwrap(),
+            "daemon synchronization refused [unavailable]: daemon owner is active but its endpoint is not ready; check `usagi daemon status`\n"
+        );
+
+        // The transport arm keeps its fixed line: its payload is an OS string,
+        // not an explanation.
+        let mut transport = Vec::new();
+        write_client_error(
+            &mut transport,
+            "daemon synchronization refused",
+            &ClientError::Unavailable("Connection refused (os error 61)".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(transport).unwrap(),
+            "daemon synchronization refused [unavailable]: daemon transport is unavailable\n"
+        );
+    }
+
     /// The message the failing path wrote is what reaches the terminal. The
     /// `io::Error` carrying it — its `Debug` spelling, its `ErrorKind`, the
     /// escaping `Debug` adds — must not appear.

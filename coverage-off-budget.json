@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 552,
+  "total": 553,
   "owners": {
     "core": 10,
-    "daemon": 373,
+    "daemon": 374,
     "root-cli": 41,
     "tui": 128
   },
@@ -73,7 +73,7 @@
     "src/runtime/clean.rs": 19,
     "src/runtime/cli.rs": 10,
     "src/runtime/clipboard.rs": 1,
-    "src/runtime/daemon.rs": 87,
+    "src/runtime/daemon.rs": 88,
     "src/runtime/daemon/agent.rs": 20,
     "src/runtime/daemon/agent_provisioning.rs": 25,
     "src/runtime/daemon/agent_provisioning/agy.rs": 2,
