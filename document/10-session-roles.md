@@ -197,8 +197,11 @@ adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral 
 ### `<tools>` fragment
 
 `<tools>` は 1 系統 1 行で、有効な系統だけを列挙する。無効な系統は「無い」とも書かず行そのものを落とす。
-tool 名と引数を列挙せず、`tools/list` のスキーマが正本であることと、手順が resource
-`usagi://guides/orchestration` にあることだけを述べる（正本は [7. MCP サーバ#tool 面](07-mcp.md#tool-面)）。
+引数の詳細は列挙せず、`tools/list` のスキーマを正本とし、手順は resource
+`usagi://guides/orchestration` を参照させる（正本は [7. MCP サーバ#tool 面](07-mcp.md#tool-面)）。
+人への質問・確認・選択には `user_decision_request` を使って TUI で回答できるよう促し、返された
+`decision_id` を `user_decision_get` で確認させる。pending 中は回答に依存しない作業だけを進め、
+cancelled / expired を承認とみなさず、人の回答を代理送信しないよう指示する。
 
 各行は launch scope に依存せず真である文にする。行が述べるのは「どこで何が受理されるか」で、
 「この agent が何をしてよいか」ではない。例えば issue の書き込みは session worktree でだけ受理されるので、
@@ -207,6 +210,7 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 | 行 | 条件 |
 |---|---|
 | `- session:` | MCP を配線する launch では常に載る（session 系統は無効化できない） |
+| `- user decision:` | MCP を配線する launch では常に載る |
 | `- issue:` | effective `issue_enabled` |
 | `- memory:` | effective `memory_enabled` |
 
