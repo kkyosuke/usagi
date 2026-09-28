@@ -4,6 +4,8 @@
 //! modal editor. Keeping their convergence rules here prevents the workspace
 //! controller's top-level router from also becoming the feature reducer.
 
+mod composition;
+
 use super::{
     AppKey, AppState, DecisionEditor, DecisionOverlayState, Effect, Overlay, SafeError,
     SafeMessage, UserDecision, UserDecisionAnswer, UserDecisionId, UserDecisionSelectionMode,
@@ -117,6 +119,7 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                     .filter(|editor| editor.decision.decision_id == decision_id)
             {
                 editor.error = Some(error);
+                editor.scroll_offset = None;
             }
         }
     }
@@ -128,6 +131,12 @@ pub(super) fn update_decision_editor(
     editor: &mut DecisionEditor,
     key: AppKey,
 ) -> Vec<Effect> {
+    if editor.confirmation.is_some() {
+        return composition::update_confirmation(workspace, editor, &key);
+    }
+    if editor.input_comment && composition::edit_comment(editor, &key) {
+        return Vec::new();
+    }
     let multiple = editor.decision.selection_mode == UserDecisionSelectionMode::Multiple;
     match key {
         AppKey::Left => {
@@ -139,13 +148,16 @@ pub(super) fn update_decision_editor(
                 .saturating_add(8)
                 .min(usagi_core::domain::user_decision::UserDecisionPolicy::DIAGRAM_MAX_BYTES);
         }
+        AppKey::Tab if editor.decision.allow_comment => {
+            composition::cycle_input(editor);
+        }
         AppKey::Tab if multiple && editor.decision.allow_freeform => {
             editor.input_freeform = !editor.input_freeform;
             editor.follow_freeform = editor.input_freeform;
             editor.scroll_offset = None;
             editor.error = None;
         }
-        AppKey::Char(' ') if multiple && !editor.input_freeform => {
+        AppKey::Char(' ') if multiple && !editor.input_freeform && !editor.input_comment => {
             toggle_decision_option(editor);
         }
         AppKey::DecisionPrevious | AppKey::Up => {
@@ -153,6 +165,7 @@ pub(super) fn update_decision_editor(
             editor.scroll_offset = None;
             editor.follow_freeform = false;
             editor.input_freeform = false;
+            editor.input_comment = false;
             editor.error = None;
         }
         AppKey::DecisionNext | AppKey::Down => {
@@ -161,6 +174,7 @@ pub(super) fn update_decision_editor(
             editor.scroll_offset = None;
             editor.follow_freeform = false;
             editor.input_freeform = false;
+            editor.input_comment = false;
             editor.error = None;
         }
         AppKey::PageUp => {
@@ -178,19 +192,22 @@ pub(super) fn update_decision_editor(
             }
         }
         AppKey::Char(ch)
-            if editor.decision.allow_freeform && (!multiple || editor.input_freeform) =>
+            if editor.decision.allow_freeform
+                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
         {
             editor.freeform.push(ch);
             follow_decision_freeform(editor);
         }
         AppKey::Backspace
-            if editor.decision.allow_freeform && (!multiple || editor.input_freeform) =>
+            if editor.decision.allow_freeform
+                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
         {
             editor.freeform.pop();
             follow_decision_freeform(editor);
         }
         AppKey::Paste(text)
-            if editor.decision.allow_freeform && (!multiple || editor.input_freeform) =>
+            if editor.decision.allow_freeform
+                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
         {
             paste_decision_freeform(editor, &text);
         }
@@ -203,6 +220,7 @@ pub(super) fn update_decision_editor(
 }
 
 fn follow_decision_freeform(editor: &mut DecisionEditor) {
+    editor.input_comment = false;
     editor.scroll_offset = None;
     editor.follow_freeform = true;
     editor.input_freeform = true;
@@ -222,7 +240,7 @@ fn submit_decision(
     editor.scroll_offset = None;
     editor.error = None;
     let answer = if editor.decision.allow_freeform
-        && (if multiple {
+        && (if multiple || editor.decision.allow_comment {
             editor.input_freeform
         } else {
             !editor.freeform.trim().is_empty()
@@ -232,6 +250,7 @@ fn submit_decision(
         }
     } else if multiple {
         UserDecisionAnswer::Options {
+            comment: composition::answer_comment(editor),
             option_ids: editor
                 .decision
                 .options
@@ -242,6 +261,7 @@ fn submit_decision(
         }
     } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
         UserDecisionAnswer::Option {
+            comment: composition::answer_comment(editor),
             option_id: option.id.clone(),
         }
     } else {
@@ -252,7 +272,7 @@ fn submit_decision(
         return Vec::new();
     };
     if editor.decision.selection_limits.is_some()
-        && let UserDecisionAnswer::Options { option_ids } = &answer
+        && let UserDecisionAnswer::Options { option_ids, .. } = &answer
     {
         let (min, max) = editor.decision.selection_bounds();
         if !(min..=max).contains(&option_ids.len()) {
@@ -266,22 +286,7 @@ fn submit_decision(
             return Vec::new();
         }
     }
-    if editor
-        .decision
-        .validate_answer(&answer, chrono::Utc::now())
-        .is_err()
-    {
-        editor.error = Some(SafeError {
-            message: SafeMessage::new("select a valid answer"),
-            error_id: "decision-invalid-answer".to_owned(),
-        });
-        return Vec::new();
-    }
-    vec![Effect::ResolveDecision {
-        workspace,
-        decision_id: editor.decision.decision_id,
-        answer,
-    }]
+    composition::prepare_answer(workspace, editor, answer)
 }
 
 fn toggle_decision_option(editor: &mut DecisionEditor) {

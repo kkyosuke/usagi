@@ -553,6 +553,9 @@ pub struct DecisionEditor {
     checked_options: BTreeSet<String>,
     context_column: usize,
     input_freeform: bool,
+    input_comment: bool,
+    comment: String,
+    confirmation: Option<UserDecisionAnswer>,
     /// Explicit text viewport offset. `None` follows the active automatic anchor.
     scroll_offset: Option<usize>,
     /// Whether automatic scrolling follows the freeform draft instead.
@@ -571,6 +574,9 @@ impl DecisionEditor {
             checked_options: BTreeSet::new(),
             context_column: 0,
             input_freeform: false,
+            input_comment: false,
+            comment: String::new(),
+            confirmation: None,
             scroll_offset,
             follow_freeform: false,
             freeform: String::new(),
@@ -588,6 +594,18 @@ impl DecisionEditor {
     #[must_use]
     pub const fn input_freeform(&self) -> bool {
         self.input_freeform
+    }
+    #[must_use]
+    pub fn comment(&self) -> &str {
+        &self.comment
+    }
+    #[must_use]
+    pub const fn input_comment(&self) -> bool {
+        self.input_comment
+    }
+    #[must_use]
+    pub fn confirmation(&self) -> Option<&UserDecisionAnswer> {
+        self.confirmation.as_ref()
     }
     #[must_use]
     pub fn decision(&self) -> &UserDecision {
@@ -4880,7 +4898,12 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
-    if overlay.editor.is_some() && matches!(&key, AppKey::Escape) {
+    if overlay
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.confirmation.is_none())
+        && matches!(&key, AppKey::Escape)
+    {
         overlay.editor = None;
         return Vec::new();
     }

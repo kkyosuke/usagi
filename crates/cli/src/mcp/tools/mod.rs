@@ -259,6 +259,38 @@ mod tests {
     }
 
     #[test]
+    fn user_decision_comment_schema_accepts_opt_in_and_bounded_choice_notes() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        assert!(request.validate(&serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}], "allow_comment":true, "require_confirmation":true}), &schema).is_ok());
+        let resolve = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_resolve")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        for choice in [
+            serde_json::json!({"kind":"option", "option_id":"a"}),
+            serde_json::json!({"kind":"options", "option_ids":["a"]}),
+        ] {
+            let mut args = serde_json::json!({"decision_id":"id", "answer":choice});
+            args["answer"]["comment"] = serde_json::json!("Only staging");
+            assert!(resolve.validate(&args, &schema).is_ok());
+            for invalid in [
+                String::new(),
+                "界".repeat(UserDecisionPolicy::COMMENT_MAX_BYTES / 3 + 1),
+            ] {
+                args["answer"]["comment"] = serde_json::json!(invalid);
+                assert!(resolve.validate(&args, &schema).is_err());
+            }
+        }
+        assert!(resolve.validate(&serde_json::json!({"decision_id":"id", "answer":{"kind":"freeform", "text":"Other", "comment":"Ignored?"}}), &schema).is_err());
+    }
+
+    #[test]
     fn user_decision_tradeoff_schema_bounds_each_list_and_utf8_point() {
         let registry = registry();
         let request = registry

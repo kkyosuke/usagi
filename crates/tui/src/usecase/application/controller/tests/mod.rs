@@ -1696,6 +1696,8 @@ fn pending_decision(workspace: WorkspaceId) -> UserDecision {
             description: Some("Keeps current state".into()),
         }],
         allow_freeform: false,
+        allow_comment: false,
+        require_confirmation: false,
         recommendation: None,
         selection_limits: None,
         selection_mode: UserDecisionSelectionMode::Single,
@@ -2554,7 +2556,7 @@ fn multiple_decision_checks_survive_snapshots_and_submit_only_the_active_answer_
     let _ = update(&mut state, AppEvent::Backend(snapshot));
     assert!(
         matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
-        [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids == &["safe", "fast"])
+        [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids, .. }, .. }] if option_ids == &["safe", "fast"])
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
     assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
@@ -2573,7 +2575,7 @@ fn multiple_decision_checks_survive_snapshots_and_submit_only_the_active_answer_
     let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
     assert!(
         matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
-        [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids.len() == 2)
+        [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids, .. }, .. }] if option_ids.len() == 2)
     );
     for key in [AppKey::Left, AppKey::Right, AppKey::Up, AppKey::Down] {
         let _ = update(&mut state, AppEvent::Key(key));
@@ -2603,4 +2605,18 @@ fn malformed_multiple_decision_without_options_cannot_toggle_or_submit() {
     assert!(editor.checked_options.is_empty());
     assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
     assert!(editor.error().is_some());
+}
+
+#[test]
+fn decision_confirmation_revalidates_expiry_before_sending() {
+    let workspace = WorkspaceId::new();
+    let mut request = pending_decision(workspace);
+    request.require_confirmation = true;
+    let mut editor = DecisionEditor::new(request);
+    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert!(editor.confirmation().is_some());
+    editor.decision.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert!(editor.error().is_some());
+    assert!(editor.confirmation().is_some());
 }

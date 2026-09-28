@@ -1457,6 +1457,7 @@ fn decisions_are_workspace_fenced_retryable_and_removed_only_on_confirmation() {
             workspace,
             decision_id: decision.decision_id,
             answer: UserDecisionAnswer::Option {
+                comment: None,
                 option_id: "safe".into()
             }
         }]

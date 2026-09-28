@@ -32,6 +32,7 @@ pub const USER_DECISION_MAX_LIFETIME_HOURS: i64 = 7 * 24;
 pub struct UserDecisionPolicy;
 
 impl UserDecisionPolicy {
+    pub const COMMENT_MAX_BYTES: usize = 2048;
     pub const RECOMMENDATION_REASON_MAX_BYTES: usize = 2048;
     pub const OPTION_TRADEOFF_COUNT_MAX: usize = 4;
     pub const OPTION_TRADEOFF_MAX_BYTES: usize = 512;
@@ -87,9 +88,19 @@ pub enum UserDecisionSelectionMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UserDecisionAnswer {
-    Option { option_id: String },
-    Options { option_ids: Vec<String> },
-    Freeform { text: String },
+    Option {
+        option_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+    },
+    Options {
+        option_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+    },
+    Freeform {
+        text: String,
+    },
 }
 
 /// Terminal and non-terminal decision states.
@@ -111,6 +122,10 @@ pub struct UserDecision {
     pub prompt: String,
     pub options: Vec<UserDecisionOption>,
     pub allow_freeform: bool,
+    #[serde(default)]
+    pub allow_comment: bool,
+    #[serde(default)]
+    pub require_confirmation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<UserDecisionRecommendation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,14 +245,17 @@ impl UserDecision {
         if self.expires_at.is_some_and(|deadline| deadline <= now) {
             return Err(UserDecisionError::Expired);
         }
+        if answer.comment().is_some() && !self.allow_comment {
+            return Err(UserDecisionError::InvalidOption);
+        }
         match answer {
-            UserDecisionAnswer::Option { option_id }
+            UserDecisionAnswer::Option { option_id, .. }
                 if self.selection_mode == UserDecisionSelectionMode::Single
                     && self.options.iter().any(|option| option.id == *option_id) =>
             {
                 Ok(())
             }
-            UserDecisionAnswer::Options { option_ids }
+            UserDecisionAnswer::Options { option_ids, .. }
                 if self.selection_mode == UserDecisionSelectionMode::Multiple
                     && (self.selection_bounds().0..=self.selection_bounds().1)
                         .contains(&option_ids.len())
@@ -264,16 +282,32 @@ impl UserDecision {
 }
 
 impl UserDecisionAnswer {
+    #[must_use]
+    pub fn comment(&self) -> Option<&str> {
+        match self {
+            Self::Option { comment, .. } | Self::Options { comment, .. } => comment.as_deref(),
+            Self::Freeform { .. } => None,
+        }
+    }
+
     /// Enforces the resource half of answer validation without mutating state.
     pub fn validate_resource_policy(&self) -> Result<(), UserDecisionError> {
         let bounded_nonempty = |value: &str, max: usize| {
             !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
         };
+        if self.comment().is_some_and(|comment| {
+            !bounded_nonempty(comment, UserDecisionPolicy::COMMENT_MAX_BYTES)
+                || !comment.chars().all(|ch| {
+                    ch == '\n' || super::presentation_text::presentation_character_is_safe(ch)
+                })
+        }) {
+            return Err(UserDecisionError::InvalidRequest);
+        }
         let valid = match self {
-            Self::Option { option_id } => {
+            Self::Option { option_id, .. } => {
                 bounded_nonempty(option_id, USER_DECISION_OPTION_ID_MAX_BYTES)
             }
-            Self::Options { option_ids } => {
+            Self::Options { option_ids, .. } => {
                 !option_ids.is_empty()
                     && option_ids.len() <= USER_DECISION_OPTION_MAX_COUNT
                     && option_ids
@@ -316,6 +350,8 @@ mod tests {
                 description: None,
             }],
             allow_freeform: false,
+            allow_comment: false,
+            require_confirmation: false,
             recommendation: None,
             selection_limits: None,
             selection_mode: crate::domain::user_decision::UserDecisionSelectionMode::Single,
@@ -335,6 +371,7 @@ mod tests {
         assert!(
             item.validate_answer(
                 &UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "yes".into()
                 },
                 now
@@ -344,6 +381,7 @@ mod tests {
         assert_eq!(
             item.validate_answer(
                 &UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "no".into()
                 },
                 now
@@ -358,6 +396,7 @@ mod tests {
         assert_eq!(
             item.validate_answer(
                 &UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "yes".into()
                 },
                 now
@@ -474,6 +513,7 @@ mod tests {
         assert_eq!(
             item.validate_answer(
                 &UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "yes".into()
                 },
                 now
@@ -496,6 +536,7 @@ mod tests {
     fn multiple_answers_require_distinct_known_options_and_explicit_mode() {
         let mut item = decision();
         let answer = UserDecisionAnswer::Options {
+            comment: None,
             option_ids: vec!["yes".into()],
         };
         assert_eq!(
@@ -507,6 +548,7 @@ mod tests {
         assert_eq!(
             item.validate_answer(
                 &UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "yes".into()
                 },
                 Utc::now()
@@ -520,13 +562,20 @@ mod tests {
             vec!["yes".into(); USER_DECISION_OPTION_MAX_COUNT + 1],
         ] {
             assert_eq!(
-                item.validate_answer(&UserDecisionAnswer::Options { option_ids: ids }, Utc::now()),
+                item.validate_answer(
+                    &UserDecisionAnswer::Options {
+                        comment: None,
+                        option_ids: ids
+                    },
+                    Utc::now()
+                ),
                 Err(UserDecisionError::InvalidRequest)
             );
         }
         assert_eq!(
             item.validate_answer(
                 &UserDecisionAnswer::Options {
+                    comment: None,
                     option_ids: vec!["unknown".into()]
                 },
                 Utc::now()
@@ -704,6 +753,7 @@ mod tests {
         assert_eq!(item.selection_bounds(), (2, 2));
         assert!(item.validate_request().is_ok());
         let answer = |ids: &[&str]| UserDecisionAnswer::Options {
+            comment: None,
             option_ids: ids.iter().map(|id| (*id).into()).collect(),
         };
         assert_eq!(
@@ -803,11 +853,83 @@ mod tests {
         assert_eq!(
             item.validate_answer(
                 &UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "yes".into()
                 },
                 Utc::now()
             ),
             Ok(())
         );
+    }
+    #[test]
+    fn decision_comments_are_opt_in_bounded_and_backward_compatible() {
+        let mut item = decision();
+        let mut wire = serde_json::to_value(&item).unwrap();
+        wire.as_object_mut().unwrap().remove("allow_comment");
+        wire.as_object_mut().unwrap().remove("require_confirmation");
+        assert_eq!(serde_json::from_value::<UserDecision>(wire).unwrap(), item);
+        let legacy: UserDecisionAnswer =
+            serde_json::from_value(serde_json::json!({"kind":"option", "option_id":"yes"}))
+                .unwrap();
+        assert!(legacy.comment().is_none());
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("comment")
+                .is_none()
+        );
+        for multiple in [false, true] {
+            item.selection_mode = if multiple {
+                UserDecisionSelectionMode::Multiple
+            } else {
+                UserDecisionSelectionMode::Single
+            };
+            let answer = |comment| {
+                if multiple {
+                    UserDecisionAnswer::Options {
+                        option_ids: vec!["yes".into()],
+                        comment: Some(comment),
+                    }
+                } else {
+                    UserDecisionAnswer::Option {
+                        option_id: "yes".into(),
+                        comment: Some(comment),
+                    }
+                }
+            };
+            item.allow_comment = false;
+            assert_eq!(
+                item.validate_answer(&answer("Only staging".into()), Utc::now()),
+                Err(UserDecisionError::InvalidOption)
+            );
+            item.allow_comment = true;
+            for comment in [
+                "Only staging\nExclude production".into(),
+                "x".repeat(UserDecisionPolicy::COMMENT_MAX_BYTES),
+            ] {
+                let valid = answer(comment);
+                assert_eq!(item.validate_answer(&valid, Utc::now()), Ok(()));
+                assert_eq!(
+                    serde_json::from_value::<UserDecisionAnswer>(
+                        serde_json::to_value(&valid).unwrap()
+                    )
+                    .unwrap(),
+                    valid
+                );
+            }
+            for comment in [
+                " ".into(),
+                "x".repeat(UserDecisionPolicy::COMMENT_MAX_BYTES + 1),
+                "界".repeat(UserDecisionPolicy::COMMENT_MAX_BYTES / 3 + 1),
+                "bad\0".into(),
+                "bad\x1b".into(),
+                "bad\u{202e}".into(),
+            ] {
+                assert_eq!(
+                    answer(comment).validate_resource_policy(),
+                    Err(UserDecisionError::InvalidRequest)
+                );
+            }
+        }
     }
 }
