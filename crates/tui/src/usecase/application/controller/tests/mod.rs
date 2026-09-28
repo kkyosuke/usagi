@@ -1694,6 +1694,8 @@ fn pending_decision(workspace: WorkspaceId) -> UserDecision {
             description: Some("Keeps current state".into()),
         }],
         allow_freeform: false,
+        recommendation: None,
+        selection_limits: None,
         selection_mode: UserDecisionSelectionMode::Single,
         context: Vec::new(),
         expires_at: None,

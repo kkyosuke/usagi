@@ -126,7 +126,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。回答は user_decision_get で取得する"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。回答は user_decision_get で取得する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -152,6 +152,22 @@ impl Tool for UserDecisionRequest {
                             "required": ["id", "label"],
                             "additionalProperties": false,
                         },
+                    },
+                    "recommendation": {
+                        "type": "object",
+                        "properties": {
+                            "option_ids": {"type":"array", "minItems":1, "maxItems": UserDecisionPolicy::OPTION_COUNT_MAX,
+                                "items": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true)},
+                            "reason": bounded_string_schema(UserDecisionPolicy::RECOMMENDATION_REASON_MAX_BYTES, true),
+                        },
+                        "required":["option_ids", "reason"], "additionalProperties":false,
+                    },
+                    "selection_limits": {
+                        "type":"object", "properties": {
+                            "min": {"type":"integer", "minimum":1, "maximum":UserDecisionPolicy::OPTION_COUNT_MAX},
+                            "max": {"type":"integer", "minimum":1, "maximum":UserDecisionPolicy::OPTION_COUNT_MAX},
+                        },
+                        "required":["min", "max"], "additionalProperties":false,
                     },
                     "selection_mode": {"enum": ["single", "multiple"], "default": "single"},
                     "context": {

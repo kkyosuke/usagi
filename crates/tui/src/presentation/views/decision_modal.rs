@@ -76,7 +76,16 @@ fn editor_body(
                 modal::selection_marker(index == editor.selected_option())
             )
         };
-        rows.extend(wrapped_content_lines(&option.label, &marker, inner_width));
+        let label = if decision
+            .recommendation
+            .as_ref()
+            .is_some_and(|rec| rec.option_ids.contains(&option.id))
+        {
+            format!("{} [recommended]", option.label)
+        } else {
+            option.label.clone()
+        };
+        rows.extend(wrapped_content_lines(&label, &marker, inner_width));
         if let Some(description) = &option.description {
             rows.extend(wrapped_dim_lines(description, "     ", inner_width));
         }
@@ -118,6 +127,16 @@ fn editor_body(
         },
     );
     let mut body = modal::scroll_window(&rows, start, end);
+    body.extend(editor_footer(editor, multiple));
+    body
+}
+
+fn editor_footer(
+    editor: &crate::usecase::application::controller::DecisionEditor,
+    multiple: bool,
+) -> Vec<String> {
+    let decision = editor.decision();
+    let mut body = Vec::new();
     if multiple {
         let count = decision
             .options
@@ -127,8 +146,9 @@ fn editor_body(
         body.push(modal::footer(
             "↑↓: move  Space: check  Enter: submit  Esc: back",
         ));
+        let (min, max) = decision.selection_bounds();
         body.push(modal::footer(&format!(
-            "{count} selected  {}PgUp/PgDn: scroll",
+            "{count} selected ({min}-{max})  {}PgUp/PgDn: scroll",
             if decision.allow_freeform {
                 "Tab: choices/freeform  "
             } else {
@@ -164,6 +184,26 @@ fn editor_intro(
     }
     rows.push(String::new());
 
+    if let Some(recommendation) = &decision.recommendation {
+        let labels = decision
+            .options
+            .iter()
+            .filter(|option| recommendation.option_ids.contains(&option.id))
+            .map(|option| option.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.extend(wrapped_content_lines(
+            &format!("Agent recommendation: {labels}"),
+            "",
+            inner_width,
+        ));
+        rows.extend(wrapped_content_lines(
+            &recommendation.reason,
+            "",
+            inner_width,
+        ));
+        rows.push(String::new());
+    }
     for block in &decision.context {
         rows.extend(context::render(block, inner_width, editor.context_column()));
         rows.push(String::new());
@@ -174,8 +214,9 @@ fn editor_intro(
             .iter()
             .filter(|option| editor.option_checked(&option.id))
             .count();
+        let (min, max) = decision.selection_bounds();
         rows.extend(wrapped_content_lines(
-            &format!("Select one or more ({count} selected)"),
+            &format!("Choose {min}-{max} options ({count} selected)"),
             "",
             inner_width,
         ));
@@ -277,6 +318,8 @@ mod tests {
                 description: Some("keep state".to_owned()),
             }],
             allow_freeform: true,
+            recommendation: None,
+            selection_limits: None,
             selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode::Single,
             context: Vec::new(),
             expires_at: Some(chrono::Utc::now()),
@@ -531,6 +574,92 @@ mod tests {
             editor_body(editor, 70)
                 .join("\n")
                 .contains("Choice number 0")
+        );
+    }
+    #[test]
+    fn decision_guidance_shows_reasons_without_preselecting_and_enforces_limits() {
+        use usagi_core::domain::user_decision::{
+            UserDecisionAnswer, UserDecisionRecommendation, UserDecisionSelectionLimits,
+        };
+        let workspace = WorkspaceId::new();
+        let mut request = decision(workspace, None);
+        request.expires_at = None;
+        request.selection_mode = UserDecisionSelectionMode::Multiple;
+        request.selection_limits = Some(UserDecisionSelectionLimits { min: 2, max: 2 });
+        request.options = ["A", "B", "C"]
+            .map(|id| UserDecisionOption {
+                id: id.into(),
+                label: id.into(),
+                description: None,
+            })
+            .to_vec();
+        request.recommendation = Some(UserDecisionRecommendation {
+            option_ids: vec!["B".into(), "C".into()],
+            reason: "Lower effort".into(),
+        });
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![request],
+            }),
+        );
+        let body = |state: &AppState| {
+            editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n")
+        };
+        assert!(body(&state).contains("Lower effort"));
+        assert!(body(&state).contains("B [recommended]"));
+        assert!(body(&state).contains("0 selected (2-2)"));
+        assert!(!body(&state).contains("[x]"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert!(body(&state).contains("Choose 2-2 options (1 selected)"));
+        for key in [
+            AppKey::Down,
+            AppKey::Char(' '),
+            AppKey::Down,
+            AppKey::Char(' '),
+        ] {
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        }
+        let editor = state.decision_overlay().unwrap().editor().unwrap();
+        assert!(!editor.option_checked("C"));
+        assert!(body(&state).contains("uncheck one"));
+        assert!(body(&state).contains("2 selected (2-2)"));
+        assert!(
+            matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids == &["A", "B"])
+        );
+        assert!(
+            state
+                .decision_overlay()
+                .unwrap()
+                .editor()
+                .unwrap()
+                .error()
+                .is_none()
+        );
+        for key in [
+            AppKey::Up,
+            AppKey::Char(' '),
+            AppKey::Down,
+            AppKey::Char(' '),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(key));
+        }
+        assert!(
+            matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids == &["A", "C"])
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::Paste("Alternative".into())),
+        );
+        assert!(
+            matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Freeform { text }, .. }] if text == "Alternative")
         );
     }
 }

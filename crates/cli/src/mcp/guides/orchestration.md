@@ -201,7 +201,10 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 比較が必要なら `context` に `kind: "table"`（`title` / `columns` / `rows`）を添える。関係や手順は
 `kind: "diagram"`（`title` / `text`）の ASCII / Unicode テキスト図で示す。複数案を同時に選べる質問は
 `selection_mode: "multiple"` にし、回答の `kind: "options"` / `option_ids` を読む。
-単一選択は既定の `single` / `option` を使う。詳細な上限と引数は `tools/list` を参照する。
+単一選択は既定の `single` / `option` を使う。判断材料がある場合は `recommendation` の `option_ids` と `reason` に
+推奨案と理由を添える。人の選択を代理入力しない。複数回答の数に制約がある場合は `selection_limits` の `min` / `max` を
+指定する。たとえば両方2なら「ちょうど2件」、1と3なら「1〜3件」を選べる。許可した freeform は件数制約の対象外である。
+詳細な上限と引数は `tools/list` を参照する。
 
 ## 運用知見を残す
 

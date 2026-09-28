@@ -2178,6 +2178,10 @@ pub(super) fn dispatch_user_decision(
         #[serde(default)]
         allow_freeform: bool,
         #[serde(default)]
+        recommendation: Option<usagi_core::domain::user_decision::UserDecisionRecommendation>,
+        #[serde(default)]
+        selection_limits: Option<usagi_core::domain::user_decision::UserDecisionSelectionLimits>,
+        #[serde(default)]
         selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode,
         #[serde(default)]
         context: Vec<usagi_core::domain::user_decision::UserDecisionContext>,
@@ -2360,6 +2364,8 @@ pub(super) fn dispatch_user_decision(
                             prompt: input.prompt,
                             options: input.options,
                             allow_freeform: input.allow_freeform,
+                            recommendation: input.recommendation,
+                            selection_limits: input.selection_limits,
                             selection_mode: input.selection_mode,
                             context: input.context,
                             // An omitted deadline is finite by default so an

@@ -3,7 +3,9 @@
 #![allow(clippy::missing_errors_doc)] // Typed validation errors are documented by UserDecisionError.
 
 mod context;
+mod guidance;
 pub use context::UserDecisionContext;
+pub use guidance::{UserDecisionRecommendation, UserDecisionSelectionLimits};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,7 @@ pub const USER_DECISION_MAX_LIFETIME_HOURS: i64 = 7 * 24;
 pub struct UserDecisionPolicy;
 
 impl UserDecisionPolicy {
+    pub const RECOMMENDATION_REASON_MAX_BYTES: usize = 2048;
     pub const CONTEXT_COUNT_MAX: usize = 4;
     pub const TABLE_COLUMNS_MAX: usize = 6;
     pub const TABLE_ROWS_MAX: usize = 16;
@@ -100,6 +103,10 @@ pub struct UserDecision {
     pub prompt: String,
     pub options: Vec<UserDecisionOption>,
     pub allow_freeform: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<UserDecisionRecommendation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_limits: Option<UserDecisionSelectionLimits>,
     #[serde(default)]
     pub selection_mode: UserDecisionSelectionMode,
     #[serde(default)]
@@ -172,6 +179,7 @@ impl UserDecision {
         {
             return Err(UserDecisionError::InvalidRequest);
         }
+        self.validate_guidance()?;
         for block in &self.context {
             block.validate()?;
         }
@@ -222,6 +230,8 @@ impl UserDecision {
             }
             UserDecisionAnswer::Options { option_ids }
                 if self.selection_mode == UserDecisionSelectionMode::Multiple
+                    && (self.selection_bounds().0..=self.selection_bounds().1)
+                        .contains(&option_ids.len())
                     && option_ids
                         .iter()
                         .all(|id| self.options.iter().any(|option| option.id == *id)) =>
@@ -295,6 +305,8 @@ mod tests {
                 description: None,
             }],
             allow_freeform: false,
+            recommendation: None,
+            selection_limits: None,
             selection_mode: crate::domain::user_decision::UserDecisionSelectionMode::Single,
             context: Vec::new(),
             expires_at: None,
@@ -601,5 +613,124 @@ mod tests {
                 Err(UserDecisionError::InvalidRequest)
             );
         }
+    }
+    #[test]
+    fn decision_recommendations_require_valid_choices_and_bounded_safe_reasons() {
+        let mut item = decision();
+        item.recommendation = Some(UserDecisionRecommendation {
+            option_ids: vec!["yes".into()],
+            reason: "Keeps the current state".into(),
+        });
+        assert!(item.validate_resource_policy().is_ok());
+        let encoded = serde_json::to_value(&item).unwrap();
+        assert_eq!(
+            serde_json::from_value::<UserDecision>(encoded).unwrap(),
+            item
+        );
+        for reason in [
+            String::new(),
+            " ".into(),
+            "界".repeat(UserDecisionPolicy::RECOMMENDATION_REASON_MAX_BYTES),
+            "bad\u{1b}[31m".into(),
+            "bad\u{202e}".into(),
+        ] {
+            item.recommendation.as_mut().unwrap().reason = reason;
+            assert_eq!(
+                item.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+        }
+        item.recommendation.as_mut().unwrap().reason = "First line\nSecond line".into();
+        assert!(item.validate_request().is_ok());
+        item.options.push(UserDecisionOption {
+            id: "no".into(),
+            label: "No".into(),
+            description: None,
+        });
+        item.recommendation.as_mut().unwrap().option_ids = vec!["yes".into(), "no".into()];
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.selection_mode = UserDecisionSelectionMode::Multiple;
+        assert!(item.validate_request().is_ok());
+        for ids in [
+            vec![],
+            vec!["unknown".into()],
+            vec!["yes".into(), "yes".into()],
+        ] {
+            item.recommendation.as_mut().unwrap().option_ids = ids;
+            assert_eq!(
+                item.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn decision_selection_limits_enforce_counts_without_constraining_freeform() {
+        let mut item = decision();
+        item.options
+            .extend(["no", "later"].map(|id| UserDecisionOption {
+                id: id.into(),
+                label: id.into(),
+                description: None,
+            }));
+        item.selection_limits = Some(UserDecisionSelectionLimits { min: 2, max: 2 });
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.selection_mode = UserDecisionSelectionMode::Multiple;
+        assert_eq!(item.selection_bounds(), (2, 2));
+        assert!(item.validate_request().is_ok());
+        let answer = |ids: &[&str]| UserDecisionAnswer::Options {
+            option_ids: ids.iter().map(|id| (*id).into()).collect(),
+        };
+        assert_eq!(
+            item.validate_answer(&answer(&["yes"]), Utc::now()),
+            Err(UserDecisionError::InvalidOption)
+        );
+        assert!(
+            item.validate_answer(&answer(&["yes", "no"]), Utc::now())
+                .is_ok()
+        );
+        assert_eq!(
+            item.validate_answer(&answer(&["yes", "no", "later"]), Utc::now()),
+            Err(UserDecisionError::InvalidOption)
+        );
+        item.allow_freeform = true;
+        assert!(
+            item.validate_answer(
+                &UserDecisionAnswer::Freeform {
+                    text: "other".into()
+                },
+                Utc::now()
+            )
+            .is_ok()
+        );
+        for (min, max) in [(0, 2), (3, 2), (1, 4)] {
+            item.selection_limits = Some(UserDecisionSelectionLimits { min, max });
+            assert_eq!(
+                item.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+        }
+        item.selection_limits = Some(UserDecisionSelectionLimits { min: 2, max: 2 });
+        item.recommendation = Some(UserDecisionRecommendation {
+            option_ids: vec!["yes".into()],
+            reason: "Reason".into(),
+        });
+        assert_eq!(
+            item.validate_request(),
+            Err(UserDecisionError::InvalidRequest)
+        );
+        item.recommendation = None;
+        item.selection_limits = None;
+        assert_eq!(item.selection_bounds(), (1, 3));
+        let wire = serde_json::to_value(&item).unwrap();
+        assert!(wire.get("recommendation").is_none());
+        assert!(wire.get("selection_limits").is_none());
+        assert_eq!(serde_json::from_value::<UserDecision>(wire).unwrap(), item);
     }
 }
