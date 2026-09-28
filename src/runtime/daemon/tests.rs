@@ -28,6 +28,72 @@ use usagi_daemon::usecase::terminal_ipc::{
 };
 use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
 
+#[test]
+fn daemon_panic_log_identifies_the_worker_and_build() {
+    const FIXTURE: &str = "USAGI_TEST_PANIC_LOG_IDENTITY";
+    if std::env::var_os(FIXTURE).is_some() {
+        // Install the process-wide hook only in an isolated test process.
+        install_panic_logger();
+        assert!(
+            std::thread::Builder::new()
+                .name("usagi-panic-fixture".to_owned())
+                .spawn(|| panic!("named worker failure"))
+                .unwrap()
+                .join()
+                .is_err()
+        );
+        assert!(
+            std::thread::spawn(|| panic::panic_any(42_u32))
+                .join()
+                .is_err()
+        );
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "runtime::daemon::tests::daemon_panic_log_identifies_the_worker_and_build",
+        ])
+        .env(FIXTURE, "1")
+        .env("USAGI_HOME", directory.path())
+        .env("USAGI_RUNTIME_MODE", "local")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    assert!(child.wait().unwrap().success());
+    let log = std::fs::read_dir(directory.path().join("local/logs"))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(
+        log.contains("daemon panicked: named worker failure"),
+        "{log}"
+    );
+    assert!(
+        log.contains("daemon panicked: non-string panic payload"),
+        "{log}"
+    );
+    assert!(log.contains("thread: usagi-panic-fixture\n"), "{log}");
+    assert!(log.contains("thread: <unnamed>\n"), "{log}");
+    assert!(log.contains(&format!("pid: {pid}")), "{log}");
+    let build = current_build();
+    assert!(
+        log.contains(&format!(
+            "build: version={} commit={} target={} artifact={}",
+            build.version, build.commit, build.target, build.artifact,
+        )),
+        "{log}"
+    );
+    assert!(log.contains("src/runtime/daemon/tests.rs:"), "{log}");
+    // Also run this test under the shipping release profile: stripping symbols
+    // used to turn every macOS frame into __mh_execute_header.
+    assert!(log.contains("usagi::runtime::daemon::"), "{log}");
+}
+
 fn protocol_response(code: ErrorCode) -> Envelope {
     Envelope {
         protocol: usagi_core::infrastructure::ipc::ProtocolVersion {
@@ -14912,6 +14978,8 @@ fn a_recorded_panic_names_the_thread_it_happened_on() {
         "condvar.rs:130:9",
         Some("usagi-pr-refresh"),
         "0: frame",
+        123,
+        &current_build(),
     );
     assert!(
         named.contains("daemon panicked: assertion failed"),
@@ -14921,6 +14989,6 @@ fn a_recorded_panic_names_the_thread_it_happened_on() {
     assert!(named.contains("\nlocation: condvar.rs:130:9\n"), "{named}");
     assert!(named.ends_with("backtrace:\n0: frame"), "{named}");
 
-    let anonymous = panic_report("boom", "somewhere", None, "");
+    let anonymous = panic_report("boom", "somewhere", None, "", 123, &current_build());
     assert!(anonymous.contains("\nthread: <unnamed>\n"), "{anonymous}");
 }
