@@ -1191,9 +1191,10 @@ daemon は想定外の失敗を検出した境界で `<data-dir>/logs/error-YYYY
   最外周へ返る IO error を記録する。Agent / terminal child の spawn 失敗は PTY stage、resource identity、OS の error reason
   を保持するため、`agent process could not be started` のような安全な client message だけで原因が失われない。
 - IPC、PTY、observer など daemon worker thread の panic は process-wide panic hook が payload、**thread 名**、発生位置、
-  backtrace とともに記録する。main thread の panic はこの hook で記録した後に最外周で通常の process error に変換して
-  終了する。thread 名を残すのは、配布 binary の backtrace が frame 名を持たない場合でも
-  「どの worker が落ちたか」を残すためである（長命 worker はすべて名前付きで spawn する）。配布 profile が
+  PID、build identity（version・commit・target・artifact）、backtrace とともに記録する。build identity は実行中の binary に
+  埋め込まれた値で、更新後に旧 daemon が残っている場合も区別できる。main thread の panic はこの hook で記録した後に
+  最外周で通常の process error に変換して終了する。thread 名を残すのは、配布 binary の backtrace が frame 名を持たない
+  場合でも「どの worker が落ちたか」を残すためである（長命 worker はすべて名前付きで spawn する）。配布 profile が
   symbol table を残す理由は [6. 開発規約](06-conventions.md#リリース)を参照する。
 - 周期的な Supervisor recovery は lane ごとに同じ safe error が続く間は最初の 1 件だけを記録する。成功を一度観測した後の
   再発、または error 内容が変化した場合は新しい transition として記録する。

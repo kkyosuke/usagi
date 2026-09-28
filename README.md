@@ -96,6 +96,8 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
 [孤立資源の削除](document/01-overview.md#孤立資源の削除)を参照してください。
 
+起動失敗や daemon の異常終了を調べる際は、[failure log](document/05-daemon.md#failure-logging)を確認してください。
+
 ## 基本概念
 
 | 用語 | 意味 |
