@@ -549,6 +549,8 @@ fn same_request(a: &UserDecision, b: &UserDecision) -> bool {
         && a.prompt == b.prompt
         && a.options == b.options
         && a.allow_freeform == b.allow_freeform
+        && a.selection_mode == b.selection_mode
+        && a.context == b.context
         && a.expires_at == b.expires_at
 }
 
@@ -580,6 +582,8 @@ mod tests {
                 description: None,
             }],
             allow_freeform: false,
+            selection_mode: crate::domain::user_decision::UserDecisionSelectionMode::Single,
+            context: Vec::new(),
             expires_at: None,
             idempotency_key: Some("k".into()),
             status: UserDecisionStatus::Pending,
@@ -1428,5 +1432,52 @@ mod tests {
         let error = store.events().unwrap_err();
         std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(mode)).unwrap();
         assert!(format!("{error:#}").contains("failed to read"));
+    }
+    #[test]
+    fn rich_decisions_persist_and_idempotency_includes_context_and_selection_mode() {
+        use crate::domain::user_decision::{UserDecisionContext, UserDecisionSelectionMode};
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(dir.path());
+        let mut request = item();
+        request.selection_mode = UserDecisionSelectionMode::Multiple;
+        request.context = vec![UserDecisionContext::Diagram {
+            title: "Flow".into(),
+            text: "A -> B".into(),
+        }];
+        request.idempotency_key = Some("rich".into());
+        store.create(request.clone()).unwrap().unwrap();
+        assert_eq!(store.create(request.clone()).unwrap().unwrap(), request);
+        for changed in [
+            {
+                let mut next = request.clone();
+                next.selection_mode = UserDecisionSelectionMode::Single;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.context.clear();
+                next
+            },
+        ] {
+            assert_eq!(
+                store.create(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+        }
+        let workspace = request.owner.workspace_id;
+        let answer = UserDecisionAnswer::Options {
+            option_ids: vec![request.options[0].id.clone()],
+        };
+        store
+            .resolve(workspace, request.decision_id, answer.clone(), Utc::now())
+            .unwrap()
+            .unwrap();
+        let reopened = UserDecisionStore::new(dir.path());
+        let restored = reopened
+            .get(workspace, request.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.answer, Some(answer));
+        assert_eq!(restored.context, request.context);
     }
 }
