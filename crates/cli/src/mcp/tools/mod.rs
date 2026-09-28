@@ -259,6 +259,39 @@ mod tests {
     }
 
     #[test]
+    fn user_decision_tradeoff_schema_bounds_each_list_and_utf8_point() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let option = &schema["properties"]["options"]["items"]["properties"];
+        let rich = serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A", "pros":["Fast"],"cons":["Limited scope"]}]});
+        assert!(request.validate(&rich, &schema).is_ok());
+        for field in ["pros", "cons"] {
+            assert_eq!(
+                option[field]["maxItems"],
+                UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX
+            );
+            for value in [
+                serde_json::json!([""]),
+                serde_json::json!([
+                    "界".repeat(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES / 3 + 1)
+                ]),
+                serde_json::json!(vec![
+                    "valid";
+                    UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX + 1
+                ]),
+            ] {
+                let mut invalid = rich.clone();
+                invalid["options"][0][field] = value;
+                assert!(request.validate(&invalid, &schema).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn user_decision_schemas_publish_and_enforce_the_domain_policy_ceilings() {
         let registry = registry();
         let request = registry
@@ -315,7 +348,7 @@ mod tests {
         assert!(request.validate(&multibyte, &schema).is_err());
 
         let rich = serde_json::json!({
-            "title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}],
+            "title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A","pros":["Fast"],"cons":["Limited scope"]}],
             "selection_mode":"multiple",
             "selection_limits":{"min":1,"max":1},
             "recommendation":{"option_ids":["a"],"reason":"Safer"},

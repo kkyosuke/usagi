@@ -4875,6 +4875,8 @@ mod tests {
             title: "confirm".to_owned(),
             prompt: String::new(),
             options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "ok".to_owned(),
                 label: "ok".to_owned(),
                 description: None,
@@ -4979,6 +4981,8 @@ mod tests {
             title: "confirm".to_owned(),
             prompt: "continue?".to_owned(),
             options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "ok".to_owned(),
                 label: "OK".to_owned(),
                 description: None,
@@ -6619,6 +6623,8 @@ mod tests {
             title: "confirm".to_owned(),
             prompt: "continue the deploy?".to_owned(),
             options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "ok".to_owned(),
                 label: "OK".to_owned(),
                 description: None,

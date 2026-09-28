@@ -33,6 +33,8 @@ pub struct UserDecisionPolicy;
 
 impl UserDecisionPolicy {
     pub const RECOMMENDATION_REASON_MAX_BYTES: usize = 2048;
+    pub const OPTION_TRADEOFF_COUNT_MAX: usize = 4;
+    pub const OPTION_TRADEOFF_MAX_BYTES: usize = 512;
     pub const CONTEXT_COUNT_MAX: usize = 4;
     pub const TABLE_COLUMNS_MAX: usize = 6;
     pub const TABLE_ROWS_MAX: usize = 16;
@@ -61,6 +63,12 @@ pub struct UserDecisionOwner {
 /// One stable machine-selectable choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionOption {
+    /// Concise benefits displayed under this choice, never part of the answer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pros: Vec<String>,
+    /// Concise drawbacks or caveats displayed under this choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cons: Vec<String>,
     pub id: String,
     pub label: String,
     pub description: Option<String>,
@@ -185,6 +193,7 @@ impl UserDecision {
         }
         let mut ids = std::collections::BTreeSet::new();
         for option in &self.options {
+            option.validate_tradeoffs()?;
             if !bounded_nonempty(&option.id, USER_DECISION_OPTION_ID_MAX_BYTES)
                 || !bounded_nonempty(&option.label, USER_DECISION_OPTION_LABEL_MAX_BYTES)
                 || option.description.as_ref().is_some_and(|description| {
@@ -300,6 +309,8 @@ mod tests {
             title: "title".into(),
             prompt: "prompt".into(),
             options: vec![UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "yes".into(),
                 label: "Yes".into(),
                 description: None,
@@ -368,11 +379,15 @@ mod tests {
         assert!(item.validate_request().is_ok());
         item.options = vec![
             UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "same".into(),
                 label: "A".into(),
                 description: None,
             },
             UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "same".into(),
                 label: "B".into(),
                 description: None,
@@ -643,6 +658,8 @@ mod tests {
         item.recommendation.as_mut().unwrap().reason = "First line\nSecond line".into();
         assert!(item.validate_request().is_ok());
         item.options.push(UserDecisionOption {
+            pros: Vec::new(),
+            cons: Vec::new(),
             id: "no".into(),
             label: "No".into(),
             description: None,
@@ -672,6 +689,8 @@ mod tests {
         let mut item = decision();
         item.options
             .extend(["no", "later"].map(|id| UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: id.into(),
                 label: id.into(),
                 description: None,
@@ -732,5 +751,63 @@ mod tests {
         assert!(wire.get("recommendation").is_none());
         assert!(wire.get("selection_limits").is_none());
         assert_eq!(serde_json::from_value::<UserDecision>(wire).unwrap(), item);
+    }
+    #[test]
+    fn decision_tradeoffs_validate_both_lists_and_preserve_legacy_options() {
+        let mut item = decision();
+        let wire = serde_json::to_value(&item.options[0]).unwrap();
+        assert!(wire.get("pros").is_none());
+        assert!(wire.get("cons").is_none());
+        assert_eq!(
+            serde_json::from_value::<UserDecisionOption>(wire).unwrap(),
+            item.options[0]
+        );
+        for is_pro in [true, false] {
+            for points in [
+                vec![" ".into()],
+                vec!["x".repeat(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES + 1)],
+                vec!["界".repeat(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES / 3 + 1)],
+                vec!["valid".into(); UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX + 1],
+                vec!["bad\0text".into()],
+                vec!["bad\x1btext".into()],
+                vec!["bad\u{202e}text".into()],
+            ] {
+                item.options[0].pros.clear();
+                item.options[0].cons.clear();
+                if is_pro {
+                    item.options[0].pros = points;
+                } else {
+                    item.options[0].cons = points;
+                }
+                assert_eq!(
+                    item.validate_request(),
+                    Err(UserDecisionError::InvalidRequest)
+                );
+                assert_eq!(
+                    item.validate_resource_policy(),
+                    Err(UserDecisionError::InvalidRequest)
+                );
+            }
+        }
+        item.options[0].pros = vec![
+            "x".repeat(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES);
+            UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX
+        ];
+        item.options[0].cons =
+            vec!["注意点\n補足".into(); UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX];
+        assert_eq!(item.validate_request(), Ok(()));
+        assert_eq!(
+            serde_json::from_value::<UserDecision>(serde_json::to_value(&item).unwrap()).unwrap(),
+            item
+        );
+        assert_eq!(
+            item.validate_answer(
+                &UserDecisionAnswer::Option {
+                    option_id: "yes".into()
+                },
+                Utc::now()
+            ),
+            Ok(())
+        );
     }
 }

@@ -89,6 +89,11 @@ fn editor_body(
         if let Some(description) = &option.description {
             rows.extend(wrapped_dim_lines(description, "     ", inner_width));
         }
+        for (prefix, points) in [("  Pro: ", &option.pros), ("  Con: ", &option.cons)] {
+            for point in points {
+                rows.extend(wrapped_content_lines(point, prefix, inner_width));
+            }
+        }
     }
     if decision.allow_freeform {
         rows.push(String::new());
@@ -313,6 +318,8 @@ mod tests {
             title: "Choose".to_owned(),
             prompt: "Pick one\n\ncarefully".to_owned(),
             options: vec![UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "safe".to_owned(),
                 label: "Safe".to_owned(),
                 description: Some("keep state".to_owned()),
@@ -546,6 +553,8 @@ mod tests {
         request.selection_mode = UserDecisionSelectionMode::Multiple;
         request.options = (0..32)
             .map(|index| UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: format!("choice-{index}"),
                 label: format!("Choice number {index}"),
                 description: None,
@@ -588,6 +597,8 @@ mod tests {
         request.selection_limits = Some(UserDecisionSelectionLimits { min: 2, max: 2 });
         request.options = ["A", "B", "C"]
             .map(|id| UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: id.into(),
                 label: id.into(),
                 description: None,
@@ -661,5 +672,61 @@ mod tests {
             matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
             [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Freeform { text }, .. }] if text == "Alternative")
         );
+    }
+    #[test]
+    fn decision_tradeoffs_wrap_scroll_and_keep_answers_bound_to_option_ids() {
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+        for mode in [
+            UserDecisionSelectionMode::Single,
+            UserDecisionSelectionMode::Multiple,
+        ] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            request.selection_mode = mode;
+            request.options[0].pros = vec![
+                "Useful benefit".into(),
+                "長いメリットを確認する ".repeat(12),
+            ];
+            request.options[0].cons = vec!["TRADEOFF_END".into()];
+            let mut state = AppState::home(workspace, Vec::new());
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![request],
+                }),
+            );
+            let mut seen = String::new();
+            for _ in 0..12 {
+                let editor = state.decision_overlay().unwrap().editor().unwrap();
+                seen.push_str(&editor_body(editor, 32).join("\n"));
+                let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+            }
+            assert!(seen.contains("Pro: Useful benefit"));
+            assert!(seen.contains("Con: TRADEOFF_END"));
+            if mode == UserDecisionSelectionMode::Multiple {
+                let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+            }
+            let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+            let expected = if mode == UserDecisionSelectionMode::Single {
+                UserDecisionAnswer::Option {
+                    option_id: "safe".into(),
+                }
+            } else {
+                UserDecisionAnswer::Options {
+                    option_ids: vec!["safe".into()],
+                }
+            };
+            assert!(
+                matches!(effects.as_slice(), [crate::usecase::application::controller::Effect::ResolveDecision { answer, .. }] if answer == &expected)
+            );
+        }
+        for width in [0, 1, 16, 32, 70] {
+            for line in wrapped_content_lines("注意点を確認する長い文\nnext line", "  Con: ", width)
+            {
+                assert!(widgets::display_width(&line) <= width);
+            }
+        }
     }
 }

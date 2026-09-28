@@ -126,7 +126,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。回答は user_decision_get で取得する"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。options の pros / cons で案ごとのメリット・注意点を表示できる。回答は user_decision_get で取得する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -144,6 +144,10 @@ impl Tool for UserDecisionRequest {
                             "properties": {
                                 "id": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true),
                                 "label": bounded_string_schema(UserDecisionPolicy::OPTION_LABEL_MAX_BYTES, true),
+                                "pros": {"type":"array", "maxItems": UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX,
+                                    "items": bounded_string_schema(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES, true)},
+                                "cons": {"type":"array", "maxItems": UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX,
+                                    "items": bounded_string_schema(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES, true)},
                                 "description": bounded_string_schema(
                                     UserDecisionPolicy::OPTION_DESCRIPTION_MAX_BYTES,
                                     false,
