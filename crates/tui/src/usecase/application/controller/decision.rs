@@ -160,6 +160,7 @@ pub(super) fn update_decision_editor(
             editor.scroll_offset = None;
             editor.follow_freeform = false;
             editor.input_freeform = false;
+            editor.error = None;
         }
         AppKey::DecisionNext | AppKey::Down => {
             editor.selected_option =
@@ -167,6 +168,7 @@ pub(super) fn update_decision_editor(
             editor.scroll_offset = None;
             editor.follow_freeform = false;
             editor.input_freeform = false;
+            editor.error = None;
         }
         AppKey::PageUp => {
             editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));

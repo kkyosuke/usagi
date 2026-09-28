@@ -494,4 +494,43 @@ mod tests {
         assert!(body.contains("PgUp/PgDn"));
         assert!(body.contains("0 selected"));
     }
+    #[test]
+    fn multiselect_navigation_returns_to_choices_after_validation_error() {
+        let workspace = WorkspaceId::new();
+        let mut request = decision(workspace, None);
+        request.expires_at = None;
+        request.allow_freeform = false;
+        request.selection_mode = UserDecisionSelectionMode::Multiple;
+        request.options = (0..32)
+            .map(|index| UserDecisionOption {
+                id: format!("choice-{index}"),
+                label: format!("Choice number {index}"),
+                description: None,
+            })
+            .collect();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![request],
+            }),
+        );
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let editor = state.decision_overlay().unwrap().editor().unwrap();
+        assert!(editor.error().is_none());
+        let body = editor_body(editor, 70).join("\n");
+        assert!(body.contains("Choice number 1"));
+        assert!(!body.contains("Choice number 31"));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let editor = state.decision_overlay().unwrap().editor().unwrap();
+        assert!(editor.error().is_none());
+        assert!(
+            editor_body(editor, 70)
+                .join("\n")
+                .contains("Choice number 0")
+        );
+    }
 }
