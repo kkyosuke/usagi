@@ -59,9 +59,14 @@ panic 自体の特定も妨げられている。`format_panic` は panic した 
 | `ClientError` | managed update が自分で書いた説明は `Unavailable` ではなく `Lifecycle` で返す。両者は `retry_mode` / `side_effect` / `code` / `is_transport_failure` が同一で、違うのは message が利用者に届くかどうかだけ |
 | panic 診断 | `format_panic` が thread 名を記録し、release profile を `strip = "debuginfo"` にして backtrace が frame 名を持つ |
 
-probe は replacement と status だけが払う。`serve` は自分が publish する前の endpoint へ接続しにいくことになるため
-絶対に probe しない。probe の予算は bootstrap の readiness 上限と揃え、accept backlog の一時的な混雑を
-「沈黙」と読み違えない。
+probe は **planned な** replacement と status だけが払う。cold な replacement（`--force`）は recorded owner に
+何も尋ねずに signal するため、refusal を読まない経路に probe 代を払わせない。`serve` は自分が publish する前の
+endpoint へ接続しにいくことになるため絶対に probe しない。
+
+probe の上限は **attempt 数**で置く。1 attempt は `TerminalLaneBudget::CONNECT_MS` を自分で持つので、
+wall clock の上限にすると「socket が無くて即失敗する」場合と「accept はされるが hello が止まる」場合とで
+attempt 数が桁で変わり、後者では 2 回しか試さない。accept backlog の一時的な混雑を「沈黙」と読み違えないことが
+この観測の唯一守るべき性質なので、試行回数は見えている数でなければならない。
 
 live runtime を持つ unreachable な daemon を自動で cold 置換はしない。到達できない daemon が PTY を
 まだ所有している可能性は残り、planned transition の契約（live runtime を壊さない）を破るため。利用者へは
@@ -74,5 +79,12 @@ live runtime を持つ unreachable な daemon を自動で cold 置換はしな�
   ✅ `usecase::replacement` の unit test
 - live runtime が無ければ従来どおり cold transition で restart できる（probe の有無で変わらない）。✅ 同 unit test
 - `Answering` / `NotObserved` は現行の判定を一切変えない。✅ 同 unit test
-- managed update の「endpoint が ready でない」説明が stderr に出る。✅ `write_client_error` の contract test
-- panic log が thread 名を含む。✅ `format_panic` の unit test
+- managed update の「endpoint が ready でない」説明が stderr に出る。
+  ✅ `runtime::cli::tests::a_lifecycle_failure_reaches_the_terminal_with_its_own_words`
+- panic log が thread 名を含む。✅ `runtime::daemon::tests::a_recorded_panic_names_the_thread_it_happened_on`
+  （`format_panic` から抽出した `panic_report` を検証する。`format_panic` 自身は実 hook の束ね）
+- 拒否は、その拒否を実際に解く経路だけを提示する。`--restart-agents` は planned のまま同じ endpoint を
+  必要とするので `ActiveUnreachable` では名指さない。
+  ✅ `usecase::replacement::tests::every_refusal_offers_only_the_path_that_clears_it`
+- probe の上限は attempt 数で、1 attempt あたりの budget に左右されない。
+  ✅ `runtime::daemon::tests::an_endpoint_probe_asks_every_attempt_before_reporting_silence`

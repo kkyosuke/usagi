@@ -166,10 +166,19 @@ fn stop_daemon(home: &DaemonHome) {
     );
 }
 
+/// A running daemon reports as running *and* as answering.
+///
+/// This is the shipping witness for the composed endpoint observation: the real
+/// `daemon status` loads the record, classifies the owner, and probes the
+/// published endpoint against a live daemon. A daemon that stopped serving
+/// would reach the "but not answering" line instead, so asserting its absence
+/// is what proves the probe reached this one rather than silently failing.
 fn assert_daemon_running(home: &DaemonHome) {
     let output = home.run(&[OsStr::new("daemon"), OsStr::new("status")]);
     assert!(output.status.success());
-    assert!(stdout(&output).contains("daemon running"));
+    let rendered = stdout(&output);
+    assert!(rendered.contains("daemon running"), "{rendered}");
+    assert!(!rendered.contains("not answering"), "{rendered}");
 }
 
 fn run_with_home(args: &[&OsStr], home: &DaemonHome) -> Output {

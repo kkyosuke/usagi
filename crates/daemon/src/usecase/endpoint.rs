@@ -19,32 +19,19 @@
 //! answer it cannot use, and must not have its absence read as a failure.
 
 /// What a bounded probe of the recorded owner's endpoint proved.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EndpointObservation {
     /// No probe was made. Carries no claim either way.
-    #[default]
     NotObserved,
-    /// The endpoint answered within the probe's budget.
+    /// The endpoint answered. A framed refusal counts: a daemon that refuses a
+    /// request has answered. Only a transport failure — no listener, a
+    /// connection closed before any reply — fails to count.
     Answering,
-    /// The endpoint did not answer within the probe's budget.
+    /// Every attempt the probe made failed at the transport.
     Silent,
 }
 
 impl EndpointObservation {
-    /// The observation a completed probe proves.
-    ///
-    /// `answered` is true for a completed handshake *and* for a typed refusal:
-    /// a daemon that refuses a request has answered. Only a transport failure —
-    /// no listener, a connection closed before any reply — proves silence.
-    #[must_use]
-    pub const fn probed(answered: bool) -> Self {
-        if answered {
-            Self::Answering
-        } else {
-            Self::Silent
-        }
-    }
-
     /// Whether this observation proves the recorded owner cannot be reached.
     ///
     /// Only [`Self::Silent`] does. An unprobed endpoint proves nothing, so every
@@ -60,32 +47,12 @@ impl EndpointObservation {
 mod tests {
     use super::EndpointObservation;
 
+    /// Silence is the only observation that proves anything against the daemon,
+    /// and an unprobed endpoint must never be mistaken for a failed one.
     #[test]
-    fn a_probe_that_got_an_answer_is_not_silent() {
-        assert_eq!(
-            EndpointObservation::probed(true),
-            EndpointObservation::Answering
-        );
-        assert!(!EndpointObservation::probed(true).is_silent());
-    }
-
-    #[test]
-    fn a_probe_that_got_no_answer_is_silent() {
-        assert_eq!(
-            EndpointObservation::probed(false),
-            EndpointObservation::Silent
-        );
-        assert!(EndpointObservation::probed(false).is_silent());
-    }
-
-    /// An unprobed endpoint must never be read as a failed one: the default is
-    /// what every verb that pays for no probe carries.
-    #[test]
-    fn an_unobserved_endpoint_proves_nothing() {
-        assert_eq!(
-            EndpointObservation::default(),
-            EndpointObservation::NotObserved
-        );
+    fn only_a_probe_that_got_no_answer_proves_the_owner_is_unreachable() {
+        assert!(EndpointObservation::Silent.is_silent());
+        assert!(!EndpointObservation::Answering.is_silent());
         assert!(!EndpointObservation::NotObserved.is_silent());
     }
 }

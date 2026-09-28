@@ -243,12 +243,20 @@ record を回収していない — は pid も `daemon.lock` も保ったまま
 | 沈黙 | probe 予算の内に応答しなかった |
 
 probe を払うのは、稼働中 daemon について主張する verb だけである。`status`（報告する）と
-`replace`（planned path がその daemon への request である）の 2 つで、いずれも record が Alive のときだけ払う。
+**planned な** `replace`（その transition が当の daemon への request である）の 2 つで、いずれも record が
+Alive のときだけ払う。cold な `replace`（`--force`）は recorded owner へ何も尋ねずに signal し、refusal を
+読まないため probe しない — 到達できない daemon に残された唯一の経路を遅らせないためでもある。
 `serve` は決して probe しない（自分がこれから publish する endpoint へ接続しにいくことになる）。
 
-probe 予算は cold start の readiness 上限と同じで、その間は再試行する。混雑している daemon — accept backlog が
-一時的に埋まっている、handshake が他の仕事の後ろに並んでいる — は予算の内に応答する。**沈黙と読み違えないこと**が
-この観測の唯一守るべき性質である。読み手はいずれも「この daemon は使えない」と報告するためである。
+**上限は attempt 数で置き、wall clock では置かない。** 1 attempt は connect と hello 全体に
+`TerminalLaneBudget::CONNECT_MS` を自分で持つので、wall clock の上限では attempt 数が「どう失敗したか」に
+左右される。socket が消えていれば即座に失敗して何十回も試せるが、accept はされて hello が止まる daemon では
+1 回に満額かかり、同じ上限が 2 回しか買えない。混雑している daemon — accept backlog が一時的に埋まっている、
+handshake が他の仕事の後ろに並んでいる — を**沈黙と読み違えないこと**がこの観測の唯一守るべき性質であり
+（読み手はいずれも「この daemon は使えない」と報告する）、試行回数は見えている数でなければならない。
+
+待ち時間の最悪値は `attempt 数 × (CONNECT_MS + attempt 間の間隔)` で、record が Alive かつ何も応答しない
+daemon に対してだけ発生する。
 
 ### 起動窓
 
@@ -641,6 +649,7 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
 | `no live registered active` | registry の active と exact process identity の生存を一致させられない |
 | `active unreachable` | active generation の process は生存しているが、endpoint が応答しない。rollover は **その daemon が駆動する** handoff（standby を stage し、old active へ IPC verb を送る）なので、到達できない daemon には渡すものが無い |
+
 | `generation limit` | retained generation が上限に達しており、standby を追加できない |
 | `draining collection pending` | retained generation 上限を、まだ resource / lease / outbox / capacity claim のいずれかを持つ draining predecessor が占有している。PTY を落として slot を空けず fail closed。その predecessor が何を待っているかを併記する（[generation collection](#generation-collection)） |
 
@@ -672,12 +681,17 @@ seamless に保てなかった理由を示す。**守った数は live な種類
 
 | 拒否 | 提示する経路 |
 |---|---|
-| live runtime を守った seamless refusal（上表） | close するか、`--force` の cold transition |
+| live runtime を守った seamless refusal（上表のうち `active unreachable` 以外） | close するか、`--force` の cold transition |
+| `active unreachable` | `usagi daemon restart --force` だけ。close は提示しない（応答しない daemon を通して閉じられるものは無い）。`--restart-agents` は**名指しで除外する**（下記） |
 | `mcp_authority_retained`（[rollover の routing 前提条件](#rollover-の-routing-前提条件)） | `daemon restart --restart-agents`。同じ provider conversation を resume する |
 | `mcp_authority_retained` で、その rollover が既に `--restart-agents` を要求済み | 提示しない。credential が残った事実だけを述べる |
 
 seamless refusal の側が `--restart-agents` を提示しないのは、**その flag も同じ seamless 前提を必要とする**ためである。
-前提が欠けている状態で案内すると、利用者は同じ拒否へ戻るだけになる。逆に `mcp_authority_retained` は
+前提が欠けている状態で案内すると、利用者は同じ拒否へ戻るだけになる。`active unreachable` だけは
+その除外を明文で書く。`--restart-agents` は `--force` を付けても transition を planned に保つ（successor が
+会話を resume することがその flag の目的である）ので、`restart --restart-agents --force` は同じ endpoint を
+要求して同じ拒否に戻る。応答しない daemon を前にした利用者がまさに手を伸ばす組み合わせなので、
+どの組み合わせなら通るのかを拒否自身が述べる。逆に `mcp_authority_retained` は
 `--restart-agents` が credential を 0 にして解ける拒否なので、そこでは名指す。守った会話を破棄する `--force` だけを
 提示して唯一の破壊的な経路へ送ることも、解けない flag を案内して空振りさせることも避ける。
 

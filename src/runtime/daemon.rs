@@ -2930,8 +2930,11 @@ fn run_inner(
     });
     // Observed once, before anything is locked or launched, and only by the
     // verbs entitled to it. Both readers below — the status line and the
-    // seamless preflight — must see the same answer, or the report and the
-    // refusal could disagree about the same daemon.
+    // seamless preflight — must see the same *endpoint* answer, or the report
+    // and the refusal could disagree about the same daemon. Process liveness is
+    // deliberately not shared: each reader classifies the record itself, so an
+    // owner that dies during the probe is reported as the stale record it has
+    // become rather than as a live one that went quiet.
     let endpoint = observed_daemon_endpoint(&command, &data_dir, &store);
     let launcher = ServeLauncher {
         exe: std::env::current_exe()?,
@@ -3345,62 +3348,80 @@ fn daemon_probe_result_is_reachable<T>(result: &Result<T, ClientError>) -> bool 
     matches!(result, Ok(_) | Err(ClientError::Protocol(_)))
 }
 
-/// How long a lifecycle verb waits for the recorded owner to answer before it
-/// reports the endpoint as silent.
+/// How many times a lifecycle verb asks the recorded owner before it reports
+/// the endpoint as silent.
 ///
-/// Sized against the cold-start readiness ceiling: a daemon that is merely busy
-/// — an accept backlog momentarily full, a handshake queued behind other work —
-/// answers well inside it, while one whose accept loop is gone never will. The
-/// wait is what keeps a loaded daemon from being called unreachable, which is
-/// the one mistake this observation must not make: everything that reads it
-/// reports the daemon as unusable.
-const ENDPOINT_PROBE_CEILING: Duration = bootstrap::READINESS_CEILING;
-/// How long the probe pauses between attempts inside that ceiling.
+/// The bound is attempts, not wall clock, because each attempt already carries
+/// its own budget: `current_daemon_is_reachable` gives one connect-and-hello
+/// [`TerminalLaneBudget::CONNECT_MS`]. A wall-clock ceiling would make the
+/// attempt count depend on how each attempt fails — a vanished socket fails
+/// instantly, while a daemon that accepts the connection and then stalls the
+/// hello burns the whole per-attempt budget — so a ceiling that buys forty
+/// tries against the first would buy two against the second. Silence is the
+/// verdict everything downstream turns into "this daemon is unusable", and it
+/// must not be reached by arithmetic nobody can see.
+///
+/// The worst case an operator waits is therefore
+/// `ENDPOINT_PROBE_ATTEMPTS * (CONNECT_MS + ENDPOINT_PROBE_DELAY)`, and only
+/// against a recorded owner that is alive and answering nothing.
+const ENDPOINT_PROBE_ATTEMPTS: u32 = 4;
+/// How long the probe pauses between attempts.
 const ENDPOINT_PROBE_DELAY: Duration = Duration::from_millis(100);
 
 /// Whether this verb makes a claim about a *running* daemon, and therefore has
 /// to know whether the recorded owner still answers.
 ///
-/// Only `status` (which reports it) and `replace` (whose planned path is a
-/// request *to* that daemon) do. `serve` above all must not: it would probe the
-/// endpoint this very process is about to publish. A verb that is not asking,
-/// and any state other than a live owner, leaves the observation unmade — which
-/// is a statement that nothing was proven, not that the endpoint failed.
+/// Only `status` (which reports it) and a **planned** `replace` (whose
+/// transition is a request *to* that daemon) do. A cold `replace` is excluded
+/// on the same reasoning: it terminates the recorded owner without asking it
+/// anything, [`plan_replacement`](usagi_daemon::usecase::replacement::plan_replacement)
+/// never consults the refusal, and connecting to a process this command is
+/// about to signal would only delay the one remedy an unreachable daemon has.
+/// `serve` above all must not probe: it would reach the endpoint this very
+/// process is about to publish.
+///
+/// A verb that is not asking, and any state other than a live owner, leaves the
+/// observation unmade — which is a statement that nothing was proven, not that
+/// the endpoint failed.
 fn endpoint_probe_is_needed(
     command: &PresentationDaemonCommand,
     state: usagi_core::domain::daemon::DaemonState,
 ) -> bool {
     matches!(
         command,
-        PresentationDaemonCommand::Status | PresentationDaemonCommand::Replace { .. }
+        PresentationDaemonCommand::Status
+            | PresentationDaemonCommand::Replace {
+                mode: TransitionMode::Planned,
+                ..
+            }
     ) && state == usagi_core::domain::daemon::DaemonState::Alive
 }
 
-/// Probe until the endpoint answers or `deadline` passes.
+/// Ask up to `attempts` times, and report silence only after all of them.
 ///
-/// Time and the probe itself are injected so the retry contract — answer early,
-/// give up only at the ceiling, never treat the first refusal as proof — is
+/// The sleep and the probe are injected so the retry contract — answer as soon
+/// as one attempt succeeds, never treat a single refusal as proof, and pause
+/// between attempts so a momentarily full accept backlog is asked again — is
 /// decided here rather than inside the real client.
 fn endpoint_observation_within(
-    deadline: Instant,
-    now: &dyn Fn() -> Instant,
+    attempts: u32,
     sleep: &dyn Fn(Duration),
     probe: &mut dyn FnMut() -> bool,
 ) -> EndpointObservation {
-    loop {
+    for remaining in (0..attempts).rev() {
         if probe() {
             return EndpointObservation::Answering;
         }
-        if now() >= deadline {
-            return EndpointObservation::Silent;
+        if remaining != 0 {
+            sleep(ENDPOINT_PROBE_DELAY);
         }
-        sleep(ENDPOINT_PROBE_DELAY);
     }
+    EndpointObservation::Silent
 }
 
 /// The endpoint observation this command is entitled to, against the recorded
 /// owner this data directory names.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=runtime::daemon::tests::only_a_verb_that_claims_a_running_daemon_pays_for_an_endpoint_probe
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bare_daemon_is_idempotent_after_forced_restart
 fn observed_daemon_endpoint(
     command: &PresentationDaemonCommand,
     data_dir: &Path,
@@ -3417,12 +3438,9 @@ fn observed_daemon_endpoint(
     ) {
         return EndpointObservation::NotObserved;
     }
-    endpoint_observation_within(
-        Instant::now() + ENDPOINT_PROBE_CEILING,
-        &Instant::now,
-        &std::thread::sleep,
-        &mut || current_daemon_is_reachable(data_dir),
-    )
+    endpoint_observation_within(ENDPOINT_PROBE_ATTEMPTS, &std::thread::sleep, &mut || {
+        current_daemon_is_reachable(data_dir)
+    })
 }
 
 /// Completes the mandatory hello against the published endpoint without

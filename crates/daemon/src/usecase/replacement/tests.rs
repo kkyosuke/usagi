@@ -613,12 +613,67 @@ fn every_refusal_names_the_prerequisite_it_is_missing() {
             SeamlessRefusal::DrainingCollectionPending(None),
             "draining generation is still awaiting collection",
         ),
+        (
+            SeamlessRefusal::ActiveUnreachable,
+            "does not answer on its endpoint",
+        ),
     ] {
         assert!(
             refusal.to_string().contains(expected),
             "{refusal:?} does not mention {expected}"
         );
     }
+}
+
+/// A refusal offers only the path that clears *it*. An unreachable daemon
+/// cannot be asked to close anything, and `--restart-agents` keeps the
+/// transition planned — so naming either would send the operator round a loop
+/// back to this same refusal.
+#[test]
+fn every_refusal_offers_only_the_path_that_clears_it() {
+    let reachable = [
+        SeamlessRefusal::NoGenerationRegistry,
+        SeamlessRefusal::RegistrySchemaUnsupported,
+        SeamlessRefusal::RegistryUnreadable("corrupt".into()),
+        SeamlessRefusal::NoLiveRegisteredActive,
+        SeamlessRefusal::GenerationLimit,
+        SeamlessRefusal::DrainingCollectionPending(None),
+    ];
+    let live = LiveResources {
+        agents: 1,
+        terminals: 0,
+    };
+    for refusal in &reachable {
+        let message = super::refuse_live("replace the daemon", live, Some(refusal)).to_string();
+        assert!(message.contains("Close them"), "{refusal:?}: {message}");
+        assert!(
+            !message.contains("--restart-agents"),
+            "{refusal:?}: {message}"
+        );
+    }
+
+    let unreachable = super::refuse_live(
+        "replace the daemon",
+        live,
+        Some(&SeamlessRefusal::ActiveUnreachable),
+    )
+    .to_string();
+    assert!(
+        !unreachable.contains("Close them"),
+        "nothing can be closed through a daemon that does not answer: {unreachable}"
+    );
+    assert!(
+        unreachable.contains("usagi daemon restart --force"),
+        "{unreachable}"
+    );
+    assert!(
+        unreachable.contains("without --restart-agents"),
+        "the flag an operator reaches for here must be named as excluded: {unreachable}"
+    );
+
+    // A refusal with no seamless reason at all keeps the original wording.
+    let bare = super::refuse_live("stop the daemon", live, None).to_string();
+    assert!(bare.contains("Close them"), "{bare}");
 }
 
 #[test]

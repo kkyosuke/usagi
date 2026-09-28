@@ -14814,6 +14814,13 @@ fn only_a_verb_that_claims_a_running_daemon_pays_for_an_endpoint_probe() {
         PresentationDaemonCommand::Start,
         PresentationDaemonCommand::Stop(TransitionMode::Planned),
         PresentationDaemonCommand::Stop(TransitionMode::Cold),
+        // The remedy an unreachable daemon is told to run. It signals the owner
+        // instead of asking it anything, and the refusal is never consulted, so
+        // paying the probe here would only delay the one way out.
+        PresentationDaemonCommand::Replace {
+            operation: None,
+            mode: TransitionMode::Cold,
+        },
     ];
     for command in &silent {
         assert!(
@@ -14843,61 +14850,57 @@ fn only_a_verb_that_claims_a_running_daemon_pays_for_an_endpoint_probe() {
 /// first refusal as silence would call it unreachable — which every reader of
 /// this observation turns into "unusable".
 #[test]
-fn an_endpoint_probe_gives_up_only_at_its_ceiling() {
-    let start = Instant::now();
-    let deadline = start + Duration::from_millis(500);
-
-    // Answers immediately: no wait, no sleep.
+fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
+    // Answers immediately: one attempt, and nothing is waited for.
     let slept = Cell::new(0_u32);
     let mut attempts = 0_u32;
     assert_eq!(
-        endpoint_observation_within(
-            deadline,
-            &Instant::now,
-            &|_| slept.set(slept.get() + 1),
-            &mut || {
-                attempts += 1;
-                true
-            },
-        ),
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            true
+        }),
         EndpointObservation::Answering
     );
     assert_eq!((attempts, slept.get()), (1, 0));
 
-    // Refuses twice, then answers: the earlier refusals are not proof.
+    // Refuses twice, then answers: the earlier refusals were not proof. This is
+    // the loaded-daemon case the whole retry exists for.
     let slept = Cell::new(0_u32);
     let mut attempts = 0_u32;
     assert_eq!(
-        endpoint_observation_within(
-            deadline,
-            &Instant::now,
-            &|_| slept.set(slept.get() + 1),
-            &mut || {
-                attempts += 1;
-                attempts > 2
-            },
-        ),
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            attempts > 2
+        }),
         EndpointObservation::Answering
     );
     assert_eq!((attempts, slept.get()), (3, 2));
 
-    // Never answers, and the clock is already past the deadline: one attempt,
-    // then silence — the loop cannot run on past its ceiling.
+    // Never answers: every attempt is spent, and the loop waits *between*
+    // attempts only — a trailing sleep would delay the verdict for nothing.
     let slept = Cell::new(0_u32);
     let mut attempts = 0_u32;
     assert_eq!(
-        endpoint_observation_within(
-            start,
-            &Instant::now,
-            &|_| slept.set(slept.get() + 1),
-            &mut || {
-                attempts += 1;
-                false
-            },
-        ),
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            false
+        }),
         EndpointObservation::Silent
     );
-    assert_eq!((attempts, slept.get()), (1, 0));
+    assert_eq!((attempts, slept.get()), (4, 3));
+
+    // The count is the bound, and the shipping one is more than the two a
+    // wall-clock ceiling would have bought against a stalled hello.
+    const { assert!(ENDPOINT_PROBE_ATTEMPTS > 2) }
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(ENDPOINT_PROBE_ATTEMPTS, &|_| (), &mut || {
+            attempts += 1;
+            false
+        }),
+        EndpointObservation::Silent
+    );
+    assert_eq!(attempts, ENDPOINT_PROBE_ATTEMPTS);
 }
 
 /// The record is the only place a stripped release binary says which worker

@@ -305,6 +305,24 @@ pub enum SeamlessRefusal {
     DrainingCollectionPending(Option<DrainingCollection>),
 }
 
+impl SeamlessRefusal {
+    /// What the operator can do about this refusal.
+    ///
+    /// Only the path that actually clears *this* refusal is offered
+    /// (see [`refuse_live`]).
+    fn remedy(&self) -> &'static str {
+        match self {
+            Self::ActiveUnreachable => UNREACHABLE_COLD_ONLY,
+            Self::NoGenerationRegistry
+            | Self::RegistrySchemaUnsupported
+            | Self::RegistryUnreadable(_)
+            | Self::NoLiveRegisteredActive
+            | Self::GenerationLimit
+            | Self::DrainingCollectionPending(_) => CLOSE_OR_FORCE,
+        }
+    }
+}
+
 impl fmt::Display for SeamlessRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -491,11 +509,26 @@ fn refuse_live(action: &str, live: LiveResources, why: Option<&SeamlessRefusal>)
     io::Error::new(
         io::ErrorKind::WouldBlock,
         format!(
-            "refusing to {action}: the daemon still owns {live}{reason}. \
-             Close them, or ask for an explicit cold transition with --force"
+            "refusing to {action}: the daemon still owns {live}{reason}. {}",
+            why.map_or(CLOSE_OR_FORCE, SeamlessRefusal::remedy)
         ),
     )
 }
+
+/// The way out of every refusal that a reachable daemon can still be asked to
+/// clear: close the runtime, or give it up explicitly.
+const CLOSE_OR_FORCE: &str = "Close them, or ask for an explicit cold transition with --force";
+/// The way out of a refusal that nothing can ask the daemon to clear.
+///
+/// `--restart-agents` is deliberately excluded and named as excluded. It keeps
+/// the transition *planned* (its whole point is that the successor resumes the
+/// conversations), so it needs the same endpoint this refusal is about: an
+/// operator who reaches for `restart --restart-agents --force` — which is what
+/// an unreachable daemon invites — meets this very refusal again. Saying which
+/// flag combination works is the difference between a remedy and a loop.
+const UNREACHABLE_COLD_ONLY: &str = "Nothing can be closed through a daemon that does not answer: \
+     replace it with `usagi daemon restart --force`, without --restart-agents \
+     (that flag keeps the transition planned and needs the same endpoint)";
 
 /// What every exactly-live retained generation owns right now.
 ///
