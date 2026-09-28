@@ -215,7 +215,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | コマンド | 動作 |
 |---|---|
 | `usagi daemon` / `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで最大 30 秒待つ（[起動窓](#起動窓)）。すでに稼働中なら成功としてその pid を表示し、新しい process を起動しない |
-| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
+| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示し、running の場合はさらに [endpoint 観測](#endpoint-が応答するかは-process-の生存とは別の観測である)で応答するかを区別する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は同一 workspace の全 live Agent を durable transaction から exact stop/resume し、`--restart-agents --force` は Running 中の Agent の中断も許可する。複数 workspace は停止前に拒否し、`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
@@ -224,6 +224,31 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
 | `usagi daemon install-service` | platform の supervisor（macOS は LaunchAgent、Linux は systemd user unit）を明示的に install し、前景 `serve` を login と異常終了後に supervise する（[service supervision](#service-supervision)） |
 | `usagi daemon uninstall-service` | install 済みの supervisor 定義を停止・無効化して remove する |
+
+### endpoint が応答するかは process の生存とは別の観測である
+
+lifecycle の他の観測はすべて **process** を証明する（`daemon.json` の pid が記録どおりの
+process-start identity を保っているか）。これは serve しているかを何も言わない。accept loop を失った
+daemon — background worker の panic が process を落としかけたが終了しきっていない、listener を retire したが
+record を回収していない — は pid も `daemon.lock` も保ったまま、何にも応答しない。
+
+この状態を「running」と読むと、`status` は誰も到達できない daemon を running と報告し、planned replacement は
+到達できない endpoint を必要とする唯一の transition を選ぶ。そこで「記録された owner が endpoint に応答するか」を
+独立した観測として持つ。
+
+| 観測 | 意味 |
+|---|---|
+| 未観測 | probe していない。どちらの主張もしない |
+| 応答 | probe 予算の内に応答した。framed な拒否も応答である（daemon が答えている） |
+| 沈黙 | probe 予算の内に応答しなかった |
+
+probe を払うのは、稼働中 daemon について主張する verb だけである。`status`（報告する）と
+`replace`（planned path がその daemon への request である）の 2 つで、いずれも record が Alive のときだけ払う。
+`serve` は決して probe しない（自分がこれから publish する endpoint へ接続しにいくことになる）。
+
+probe 予算は cold start の readiness 上限と同じで、その間は再試行する。混雑している daemon — accept backlog が
+一時的に埋まっている、handshake が他の仕事の後ろに並んでいる — は予算の内に応答する。**沈黙と読み違えないこと**が
+この観測の唯一守るべき性質である。読み手はいずれも「この daemon は使えない」と報告するためである。
 
 ### 起動窓
 
@@ -592,7 +617,7 @@ replacement は 2 つの観測から決まる。どちらも仮定ではなく�
 | 観測 | 内容 |
 |---|---|
 | live runtime | exact owner が生存している daemon について、全 retained generation の shard（および未移行の legacy store）の `reserved` / `running` レコード数。reconcile 待ちのレコードは owner が既に居ないので数えない。census は読むだけで、reconcile / migration / collection を行わない。daemon が稼働していなければ census 自体を取らない |
-| seamless refusal | durable な [generation registry](#durable-registry) から導く、live successor へ authority を渡せない理由 |
+| seamless refusal | durable な [generation registry](#durable-registry) と [endpoint 観測](#endpoint-が応答するかは-process-の生存とは別の観測である)から導く、live successor へ authority を渡せない理由 |
 
 seamless rollover は old process を draining generation として生かしたまま authority を渡し、その PTY を
 replacement 後も維持する。2 process を安全に運用する authority は
@@ -615,6 +640,7 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `registry schema unsupported` | registry がこの build の書く schema ではない |
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
 | `no live registered active` | registry の active と exact process identity の生存を一致させられない |
+| `active unreachable` | active generation の process は生存しているが、endpoint が応答しない。rollover は **その daemon が駆動する** handoff（standby を stage し、old active へ IPC verb を送る）なので、到達できない daemon には渡すものが無い |
 | `generation limit` | retained generation が上限に達しており、standby を追加できない |
 | `draining collection pending` | retained generation 上限を、まだ resource / lease / outbox / capacity claim のいずれかを持つ draining predecessor が占有している。PTY を落として slot を空けず fail closed。その predecessor が何を待っているかを併記する（[generation collection](#generation-collection)） |
 
@@ -632,6 +658,7 @@ generation なので、seamless の successor 候補にはならない。
 | 1 以上、Agent credential あり | planned replacement | typed refusal。old active / current / Agent PTY / credential は維持 |
 | 1 以上、Agent credential あり | `restart --restart-agents`、plan が全件成立 | 同じ barrier 内で live Agent を停止してから seamless rollover。successor が exact resume する |
 | 1 以上 | planned replacement、seamless refusal あり | typed refusal。old active / current / PTY は維持 |
+| 1 以上 | planned replacement、endpoint が沈黙 | typed refusal（`active unreachable`）。rollover IPC には到達しない。到達できない daemon がまだ PTY を所有している可能性は残るため、cold transition へ自動で落とさない |
 | 1 以上 | replacement `--force`（`--restart-agents` なし） | 明示的な cold transition |
 | 1 以上 | `stop` | 拒否。signal を送らず、`current` も PTY も registry も変更しない |
 | 1 以上 | `stop --force` | cold transition |
@@ -1150,8 +1177,11 @@ daemon は想定外の失敗を検出した境界で `<data-dir>/logs/error-YYYY
 - accepted socket / handshake / connection worker の異常、PTY allocation 後の child spawn・PID 観測・reader 作成の失敗、
   最外周へ返る IO error を記録する。Agent / terminal child の spawn 失敗は PTY stage、resource identity、OS の error reason
   を保持するため、`agent process could not be started` のような安全な client message だけで原因が失われない。
-- IPC、PTY、observer など daemon worker thread の panic は process-wide panic hook が payload、発生位置、backtrace とともに
-  記録する。main thread の panic はこの hook で記録した後に最外周で通常の process error に変換して終了する。
+- IPC、PTY、observer など daemon worker thread の panic は process-wide panic hook が payload、**thread 名**、発生位置、
+  backtrace とともに記録する。main thread の panic はこの hook で記録した後に最外周で通常の process error に変換して
+  終了する。thread 名を残すのは、配布 binary の backtrace が frame 名を持たない場合でも
+  「どの worker が落ちたか」を残すためである（長命 worker はすべて名前付きで spawn する）。配布 profile が
+  symbol table を残す理由は [6. 開発規約](06-conventions.md#リリース)を参照する。
 - 周期的な Supervisor recovery は lane ごとに同じ safe error が続く間は最初の 1 件だけを記録する。成功を一度観測した後の
   再発、または error 内容が変化した場合は新しい transition として記録する。
 

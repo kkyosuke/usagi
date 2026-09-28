@@ -29,6 +29,7 @@ use usagi_daemon::infrastructure::unix_transport::{
     read_locator,
 };
 use usagi_daemon::usecase::authority::registry::RegistryDocument;
+use usagi_daemon::usecase::endpoint::EndpointObservation;
 use usagi_daemon::usecase::replacement::{SeamlessRefusal, seamless_refusal};
 
 /// 起動する usagi プロセスはすべてこの fixture 経由にする。daemon の workspace root は
@@ -804,6 +805,10 @@ fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator
                     .expect("the shipping daemon writes a registry this build understands")
             ),
             true,
+            // This E2E is about what the registry says, not about reaching the
+            // daemon: the endpoint stays unobserved so the verdict is the
+            // registry's alone.
+            EndpointObservation::NotObserved,
             2,
             // A standby, not a draining predecessor: there is no collection
             // wait to observe, and the refusal must not invent one.

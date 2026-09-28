@@ -1,11 +1,16 @@
 //! The `usagi daemon status` usecase: report the daemon's lifecycle state.
 //!
 //! Composes the daemon record store (loading `daemon.json`), the process identity probe
-//! (does the recorded PID still have the exact process-start identity?), and the domain
+//! (does the recorded PID still have the exact process-start identity?), the
+//! [`EndpointObservation`] of whether that process still answers, and the domain
 //! [`classify`](usagi_core::domain::daemon::classify) decision into a single
-//! human-readable line. Both the store's file seam and the probe are injected,
-//! so this stays pure and fully testable; the synthesis root binds the real
-//! filesystem and process probe.
+//! human-readable line. Every seam is injected, so this stays pure and fully
+//! testable; the synthesis root binds the real filesystem, process probe, and
+//! endpoint probe.
+//!
+//! The endpoint is a separate question from the process, and this report is the
+//! one place an operator goes to ask it: `usagi update` sends them here by name
+//! when its own synchronization cannot reach the daemon.
 
 use std::io;
 
@@ -13,7 +18,15 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonState, StaleReason, classify};
 use usagi_core::infrastructure::daemon::LivenessProbe;
 
+use crate::usecase::endpoint::EndpointObservation;
 use crate::usecase::serve::DaemonRecordPort;
+
+/// What an operator must run to replace a daemon that answers nothing.
+///
+/// A planned replacement refuses it
+/// ([`SeamlessRefusal::ActiveUnreachable`](crate::usecase::replacement::SeamlessRefusal::ActiveUnreachable)),
+/// so the report and the refusal name the same command.
+const UNREACHABLE_REMEDY: &str = "it cannot serve requests; replace it with `usagi daemon restart --force`, which gives up whatever runtime it still holds";
 
 /// Build the `status` report line: load the record, probe whether its process is
 /// alive, and classify the two into running / stale / unverified / not-running.
@@ -22,6 +35,12 @@ use crate::usecase::serve::DaemonRecordPort;
 /// owner that simply vanished and an owner whose PID has been handed to an
 /// unrelated process are different events, and only the second explains why an
 /// unrelated live process holds the recorded PID.
+///
+/// A live owner is reported as running only while `endpoint` does not prove the
+/// opposite. "Running" is a claim about serving, and a process that answers
+/// nothing is not serving — reporting it as running once sent an operator
+/// looking for the fault everywhere except at the daemon. An unprobed endpoint
+/// makes no claim, so the line is the one this report always gave.
 ///
 /// # Errors
 ///
@@ -34,6 +53,7 @@ use crate::usecase::serve::DaemonRecordPort;
 pub fn report(
     store: &dyn DaemonRecordPort,
     probe: &dyn LivenessProbe,
+    endpoint: EndpointObservation,
     info: &AppInfo,
 ) -> io::Result<String> {
     let record = store.load()?;
@@ -45,6 +65,10 @@ pub fn report(
     let recorded_pid = record.as_ref().map(|record| record.pid);
     let pid = || recorded_pid.expect("classify names a pid only for a present record");
     Ok(match classify(record.as_ref(), observation) {
+        DaemonState::Alive if endpoint.is_silent() => format!(
+            "{describe}: daemon running but not answering (pid {}); {UNREACHABLE_REMEDY}",
+            pid()
+        ),
         DaemonState::Alive => format!("{describe}: daemon running (pid {})", pid()),
         DaemonState::Stale(StaleReason::OwnerGone) => format!(
             "{describe}: daemon not running (stale record, pid {} is gone; reclaimable)",
@@ -63,7 +87,7 @@ pub fn report(
 
 #[cfg(test)]
 mod tests {
-    use super::report;
+    use super::{EndpointObservation, report};
     use crate::test_support::{FixedProbe, InMemoryRecordFile, ObservedAs};
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
@@ -80,7 +104,13 @@ mod tests {
     fn reports_not_running_when_no_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         assert_eq!(
-            report(&store, &FixedProbe(false), &info()).unwrap(),
+            report(
+                &store,
+                &FixedProbe(false),
+                EndpointObservation::NotObserved,
+                &info()
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon not running"
         );
     }
@@ -90,8 +120,86 @@ mod tests {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(4321)).unwrap();
         assert_eq!(
-            report(&store, &FixedProbe(true), &info()).unwrap(),
+            report(
+                &store,
+                &FixedProbe(true),
+                EndpointObservation::NotObserved,
+                &info()
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon running (pid 4321)"
+        );
+    }
+
+    /// `usagi update` names this command when its own synchronization cannot
+    /// reach the daemon. Reporting a silent owner as plainly "running" answered
+    /// that question wrongly, and left the operator with nothing to act on.
+    #[test]
+    fn names_a_live_owner_that_answers_nothing_apart_from_a_serving_one() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        let line = report(
+            &store,
+            &FixedProbe(true),
+            EndpointObservation::Silent,
+            &info(),
+        )
+        .unwrap();
+        assert!(
+            line.contains("daemon running but not answering (pid 4321)"),
+            "{line}"
+        );
+        assert!(line.contains("usagi daemon restart --force"), "{line}");
+        // An endpoint that answered is the ordinary running report, and so is one
+        // nobody probed.
+        assert_eq!(
+            report(
+                &store,
+                &FixedProbe(true),
+                EndpointObservation::Answering,
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon running (pid 4321)"
+        );
+        assert_eq!(
+            report(
+                &store,
+                &FixedProbe(true),
+                EndpointObservation::NotObserved,
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon running (pid 4321)"
+        );
+    }
+
+    /// Silence is only ever read against a live owner: a record whose process is
+    /// gone is stale, and saying "not answering" there would hide the reclaim.
+    #[test]
+    fn a_silent_endpoint_does_not_disturb_a_record_whose_owner_is_gone() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        assert_eq!(
+            report(
+                &store,
+                &FixedProbe(false),
+                EndpointObservation::Silent,
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon not running (stale record, pid 4321 is gone; reclaimable)"
+        );
+        let empty = DaemonRecordStore::new(InMemoryRecordFile::default());
+        assert_eq!(
+            report(
+                &empty,
+                &FixedProbe(true),
+                EndpointObservation::Silent,
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon not running"
         );
     }
 
@@ -100,7 +208,13 @@ mod tests {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(4321)).unwrap();
         assert_eq!(
-            report(&store, &FixedProbe(false), &info()).unwrap(),
+            report(
+                &store,
+                &FixedProbe(false),
+                EndpointObservation::NotObserved,
+                &info()
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon not running (stale record, pid 4321 is gone; reclaimable)"
         );
     }
@@ -118,6 +232,7 @@ mod tests {
             report(
                 &store,
                 &ObservedAs(DaemonProcessObservation::IdentityMismatch),
+                EndpointObservation::NotObserved,
                 &info()
             )
             .unwrap(),
@@ -134,6 +249,7 @@ mod tests {
             report(
                 &store,
                 &ObservedAs(DaemonProcessObservation::Unknown),
+                EndpointObservation::NotObserved,
                 &info()
             )
             .unwrap(),
@@ -149,7 +265,13 @@ mod tests {
         let record = store.load().unwrap().unwrap();
         assert!(store.clear_if(&record).unwrap());
         assert_eq!(
-            report(&store, &FixedProbe(true), &info()).unwrap(),
+            report(
+                &store,
+                &FixedProbe(true),
+                EndpointObservation::NotObserved,
+                &info()
+            )
+            .unwrap(),
             "usagi v0.1.0: daemon not running"
         );
     }
@@ -157,6 +279,14 @@ mod tests {
     #[test]
     fn propagates_malformed_record_as_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
-        assert!(report(&store, &FixedProbe(true), &info()).is_err());
+        assert!(
+            report(
+                &store,
+                &FixedProbe(true),
+                EndpointObservation::NotObserved,
+                &info()
+            )
+            .is_err()
+        );
     }
 }

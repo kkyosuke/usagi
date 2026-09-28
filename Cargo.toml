@@ -137,9 +137,14 @@ portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "f78f72f2
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 
-# リリースバイナリはクロス crate の inline 最適化とサイズを優先し、strip する。
+# リリースバイナリはクロス crate の inline 最適化とサイズを優先する。
 # panic は既定の unwind のまま。
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+# debuginfo だけを落とし、symbol table は残す。daemon の panic は error log の
+# backtrace が唯一の証拠（正本は document/06-conventions.md#daemon-e2e-の-transient-と-product-失敗を混同しない）
+# だが、`strip = true` の配布 binary ではその backtrace が全 frame `__mh_execute_header` に
+# 潰れ、どの worker が落ちたのかを誰も言えなくなる。実際 macOS の condvar が worker へ
+# EINVAL を返して daemon が落ちた事故で、原因の特定をこれが妨げた。
+strip = "debuginfo"

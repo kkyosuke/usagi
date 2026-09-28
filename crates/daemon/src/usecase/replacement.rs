@@ -46,6 +46,7 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::ipc::{BuildIdentity, OperationId, build_rollover_trigger};
 
 use crate::usecase::authority::registry::{REGISTRY_SCHEMA, RegistryDocument};
+use crate::usecase::endpoint::EndpointObservation;
 use crate::usecase::generation::GenerationRole;
 use crate::usecase::resources::CasDocument as _;
 use crate::usecase::resources::allocator::AllocatorDocument;
@@ -281,6 +282,16 @@ pub enum SeamlessRefusal {
     RegistryUnreadable(String),
     /// The registry does not name a live registered active generation.
     NoLiveRegisteredActive,
+    /// The active generation's process is alive, but its endpoint does not
+    /// answer. A rollover is driven *by* that daemon — the successor is staged
+    /// and then asked, over IPC, to run its own gated handoff — so a daemon
+    /// nobody can reach has nothing to hand over.
+    ///
+    /// This is deliberately a refusal rather than a silent fall back to a cold
+    /// transition. An unreachable daemon may still own the PTYs its census
+    /// counts, and destroying them is the one thing a planned transition
+    /// promises not to do. The operator is told which command does give them up.
+    ActiveUnreachable,
     /// No additional retained generation can be staged.
     GenerationLimit,
     /// The retained-generation limit is occupied by a predecessor that is
@@ -309,6 +320,9 @@ impl fmt::Display for SeamlessRefusal {
             Self::NoLiveRegisteredActive => {
                 f.write_str("no live registered active generation exists")
             }
+            Self::ActiveUnreachable => f.write_str(
+                "the running daemon does not answer on its endpoint, so it cannot hand anything over",
+            ),
             Self::GenerationLimit => f.write_str("the generation limit is already reached"),
             // "awaiting collection" alone leaves the operator with nothing to
             // act on: the wait ends when the predecessor's last condition
@@ -329,10 +343,17 @@ impl fmt::Display for SeamlessRefusal {
 /// that is about that wait.
 /// A free generation slot is required because the synthesis root stages the
 /// successor after this preflight.
+///
+/// `endpoint` is the separate question of whether the live active generation
+/// still *answers* ([`EndpointObservation`]). Process liveness alone cannot
+/// decide a rollover, because the rollover is a request sent to that process.
+/// An unprobed endpoint keeps the registry-only verdict this function gave
+/// before the observation existed.
 #[must_use]
 pub fn seamless_refusal(
     registry: Option<&RegistryDocument>,
     active_is_alive: bool,
+    endpoint: EndpointObservation,
     generation_limit: usize,
     draining: Option<DrainingCollection>,
 ) -> Option<SeamlessRefusal> {
@@ -344,6 +365,11 @@ pub fn seamless_refusal(
     }
     if !active_is_alive || document.active().is_none() {
         return Some(SeamlessRefusal::NoLiveRegisteredActive);
+    }
+    // Ordered after liveness on purpose: a probe of an owner that is already
+    // proven gone would report silence and hide the more specific refusal.
+    if endpoint.is_silent() {
+        return Some(SeamlessRefusal::ActiveUnreachable);
     }
     if document.retained() < generation_limit {
         return None;

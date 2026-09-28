@@ -20,6 +20,7 @@ use crate::test_support::{
     FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, RecordingTerminator, TestLauncher,
 };
 use crate::usecase::authority::registry::{GenerationEntry, RegistryDocument};
+use crate::usecase::endpoint::EndpointObservation;
 use crate::usecase::generation::{GenerationRole, ProcessIdentity};
 use crate::usecase::resources::CasDocument as _;
 use crate::usecase::resources::allocator::{AllocatorDocument, ResourceKind};
@@ -255,7 +256,7 @@ fn only_states_that_still_hold_a_pty_master_are_counted_as_live() {
 #[test]
 fn an_absent_registry_has_no_successor_to_hand_authority_to() {
     assert_eq!(
-        seamless_refusal(None, false, 2, None),
+        seamless_refusal(None, false, EndpointObservation::NotObserved, 2, None),
         Some(SeamlessRefusal::NoGenerationRegistry)
     );
 }
@@ -270,7 +271,13 @@ fn a_foreign_registry_schema_is_refused_before_it_is_interpreted() {
         ..RegistryDocument::default()
     };
     assert_eq!(
-        seamless_refusal(Some(&foreign), true, 2, None),
+        seamless_refusal(
+            Some(&foreign),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            None
+        ),
         Some(SeamlessRefusal::RegistrySchemaUnsupported)
     );
 }
@@ -281,14 +288,35 @@ fn a_live_active_and_one_free_generation_slot_enable_rollover() {
     let current = active.generation;
     let mut ready = document(vec![active]);
     ready.current = Some(current);
-    assert_eq!(seamless_refusal(Some(&ready), true, 2, None), None);
     assert_eq!(
-        seamless_refusal(Some(&ready), false, 2, None),
+        seamless_refusal(
+            Some(&ready),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            None
+        ),
+        None
+    );
+    assert_eq!(
+        seamless_refusal(
+            Some(&ready),
+            false,
+            EndpointObservation::NotObserved,
+            2,
+            None
+        ),
         Some(SeamlessRefusal::NoLiveRegisteredActive)
     );
     ready.generations.push(entry(GenerationRole::Standby, true));
     assert_eq!(
-        seamless_refusal(Some(&ready), true, 2, None),
+        seamless_refusal(
+            Some(&ready),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            None
+        ),
         Some(SeamlessRefusal::GenerationLimit)
     );
 
@@ -306,17 +334,126 @@ fn a_live_active_and_one_free_generation_slot_enable_rollover() {
         },
     };
     assert_eq!(
-        seamless_refusal(Some(&waiting), true, 2, Some(observed)),
+        seamless_refusal(
+            Some(&waiting),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            Some(observed)
+        ),
         Some(SeamlessRefusal::DrainingCollectionPending(Some(observed)))
     );
     assert_eq!(
-        seamless_refusal(Some(&waiting), true, 2, None),
+        seamless_refusal(
+            Some(&waiting),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            None
+        ),
         Some(SeamlessRefusal::DrainingCollectionPending(None))
     );
     // A wait is only reported by the refusal that is about it.
     assert_eq!(
-        seamless_refusal(Some(&ready), true, 2, Some(observed)),
+        seamless_refusal(
+            Some(&ready),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            Some(observed)
+        ),
         Some(SeamlessRefusal::GenerationLimit)
+    );
+}
+
+/// The rollover is a request sent to the live active generation, so its process
+/// being alive is not enough: an owner that answers nothing has nothing to hand
+/// over, and saying so is what keeps the operator out of a raw transport error.
+#[test]
+fn a_live_active_that_answers_nothing_cannot_hand_authority_over() {
+    let active = entry(GenerationRole::Active, true);
+    let current = active.generation;
+    let mut ready = document(vec![active]);
+    ready.current = Some(current);
+
+    assert_eq!(
+        seamless_refusal(Some(&ready), true, EndpointObservation::Silent, 2, None),
+        Some(SeamlessRefusal::ActiveUnreachable)
+    );
+    // An endpoint that answered, and one that was never probed, both leave the
+    // registry-only verdict exactly as it was.
+    assert_eq!(
+        seamless_refusal(Some(&ready), true, EndpointObservation::Answering, 2, None),
+        None
+    );
+    assert_eq!(
+        seamless_refusal(
+            Some(&ready),
+            true,
+            EndpointObservation::NotObserved,
+            2,
+            None
+        ),
+        None
+    );
+    // A silent endpoint never overwrites the more specific refusal that the
+    // owner is already proven gone.
+    assert_eq!(
+        seamless_refusal(Some(&ready), false, EndpointObservation::Silent, 2, None),
+        Some(SeamlessRefusal::NoLiveRegisteredActive)
+    );
+}
+
+/// The refusal an operator reads has to name the command that does work, or the
+/// only way out of an unreachable daemon stays undiscoverable.
+#[test]
+fn an_unreachable_active_refuses_a_planned_replacement_and_names_the_cold_remedy() {
+    let live = LiveResources {
+        agents: 7,
+        terminals: 0,
+    };
+    let plan = plan_replacement(
+        TransitionMode::Planned,
+        Some(&SeamlessRefusal::ActiveUnreachable),
+        live,
+    );
+    assert_eq!(
+        plan,
+        ReplacementPlan::Refused {
+            seamless: SeamlessRefusal::ActiveUnreachable,
+            live
+        }
+    );
+    let message = super::refuse_live(
+        "replace the daemon",
+        live,
+        Some(&SeamlessRefusal::ActiveUnreachable),
+    )
+    .to_string();
+    assert!(
+        message.contains("does not answer on its endpoint"),
+        "{message}"
+    );
+    assert!(message.contains("--force"), "{message}");
+    // Giving the runtime up explicitly still works: the cold transition needs
+    // nothing from the daemon it is replacing.
+    assert_eq!(
+        plan_replacement(
+            TransitionMode::Cold,
+            Some(&SeamlessRefusal::ActiveUnreachable),
+            live
+        ),
+        ReplacementPlan::ColdTransition
+    );
+    // And a daemon that owns nothing is replaced without ever asking the
+    // unreachable endpoint for anything.
+    assert_eq!(
+        plan_replacement(
+            TransitionMode::Planned,
+            Some(&SeamlessRefusal::ActiveUnreachable),
+            LiveResources::default()
+        ),
+        ReplacementPlan::ColdTransition
     );
 }
 
