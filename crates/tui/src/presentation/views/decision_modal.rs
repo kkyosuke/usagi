@@ -1,5 +1,6 @@
 //! Durable user-decision list and answer editor overlays.
 
+mod composition;
 mod context;
 
 use usagi_core::domain::presentation_text::sanitize_presentation_line;
@@ -50,6 +51,9 @@ fn editor_body(
     editor: &crate::usecase::application::controller::DecisionEditor,
     inner_width: usize,
 ) -> Vec<String> {
+    if let Some(answer) = editor.confirmation() {
+        return composition::confirmation_body(editor, answer, inner_width);
+    }
     let decision = editor.decision();
     let multiple = decision.selection_mode == UserDecisionSelectionMode::Multiple;
     let mut rows = editor_intro(editor, inner_width, multiple);
@@ -62,7 +66,9 @@ fn editor_body(
             format!(
                 "{} [{}] ",
                 modal::selection_marker(
-                    index == editor.selected_option() && !editor.input_freeform()
+                    index == editor.selected_option()
+                        && !editor.input_freeform()
+                        && !editor.input_comment()
                 ),
                 if editor.option_checked(&option.id) {
                     "x"
@@ -73,7 +79,11 @@ fn editor_body(
         } else {
             format!(
                 "{} ",
-                modal::selection_marker(index == editor.selected_option())
+                modal::selection_marker(
+                    index == editor.selected_option()
+                        && !editor.input_comment()
+                        && (!decision.allow_comment || !editor.input_freeform())
+                )
             )
         };
         let label = if decision
@@ -95,12 +105,18 @@ fn editor_body(
             }
         }
     }
+    if decision.allow_comment {
+        rows.extend(composition::comment_rows(editor, inner_width));
+        if editor.input_comment() {
+            selected_row = rows.len().saturating_sub(1);
+        }
+    }
     if decision.allow_freeform {
         rows.push(String::new());
         rows.extend(wrapped_content_lines(
             &format!(
                 "{}freeform: {}",
-                if multiple && editor.input_freeform() {
+                if (multiple || decision.allow_comment) && editor.input_freeform() {
                     "> "
                 } else {
                     ""
@@ -142,6 +158,9 @@ fn editor_footer(
 ) -> Vec<String> {
     let decision = editor.decision();
     let mut body = Vec::new();
+    if decision.allow_comment || decision.require_confirmation {
+        return composition::editor_footer(editor, multiple);
+    }
     if multiple {
         let count = decision
             .options
@@ -325,6 +344,8 @@ mod tests {
                 description: Some("keep state".to_owned()),
             }],
             allow_freeform: true,
+            allow_comment: false,
+            require_confirmation: false,
             recommendation: None,
             selection_limits: None,
             selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode::Single,
@@ -640,7 +661,7 @@ mod tests {
         assert!(body(&state).contains("2 selected (2-2)"));
         assert!(
             matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
-            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids == &["A", "B"])
+            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids, .. }, .. }] if option_ids == &["A", "B"])
         );
         assert!(
             state
@@ -661,7 +682,7 @@ mod tests {
         }
         assert!(
             matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
-            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids }, .. }] if option_ids == &["A", "C"])
+            [crate::usecase::application::controller::Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids, .. }, .. }] if option_ids == &["A", "C"])
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         let _ = update(
@@ -711,10 +732,12 @@ mod tests {
             let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
             let expected = if mode == UserDecisionSelectionMode::Single {
                 UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "safe".into(),
                 }
             } else {
                 UserDecisionAnswer::Options {
+                    comment: None,
                     option_ids: vec!["safe".into()],
                 }
             };
@@ -727,6 +750,192 @@ mod tests {
             {
                 assert!(widgets::display_width(&line) <= width);
             }
+        }
+    }
+    #[test]
+    fn decision_comment_review_preserves_edits_and_retries_without_early_delivery() {
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+        for mode in [
+            UserDecisionSelectionMode::Single,
+            UserDecisionSelectionMode::Multiple,
+        ] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            request.allow_comment = true;
+            request.require_confirmation = true;
+            request.selection_mode = mode;
+            let id = request.decision_id;
+            let mut state = AppState::home(workspace, Vec::new());
+            let snapshot = AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![request],
+            });
+            let _ = update(&mut state, snapshot.clone());
+            if mode == UserDecisionSelectionMode::Multiple {
+                assert!(update(&mut state, AppEvent::Key(AppKey::Char(' '))).is_empty());
+            }
+            for key in [
+                AppKey::Tab,
+                AppKey::Paste("Only staging?".into()),
+                AppKey::Backspace,
+                AppKey::Char('!'),
+            ] {
+                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            }
+            let body = |state: &AppState| {
+                editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n")
+            };
+            assert!(body(&state).contains("comment (optional): Only staging!"));
+            assert!(body(&state).contains("Enter: review"));
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert!(body(&state).contains("Review answer"));
+            assert!(body(&state).contains("Choice: Safe [safe]"));
+            assert!(body(&state).contains("Comment: Only staging!"));
+            for key in [
+                AppKey::Char('x'),
+                AppKey::PageDown,
+                AppKey::PageUp,
+                AppKey::Escape,
+            ] {
+                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            }
+            assert!(!body(&state).contains("Review answer"));
+            assert!(body(&state).contains("Only staging!"));
+            for key in [AppKey::Backspace, AppKey::Char('.'), AppKey::Enter] {
+                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            }
+            let _ = update(&mut state, snapshot);
+            assert!(body(&state).contains("Comment: Only staging."));
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::DecisionError {
+                    workspace,
+                    decision_id: id,
+                    error: SafeError {
+                        message: SafeMessage::new("Try again"),
+                        error_id: "retry".into(),
+                    },
+                }),
+            );
+            assert!(body(&state).contains("Try again"));
+            let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+            let expected = if mode == UserDecisionSelectionMode::Single {
+                UserDecisionAnswer::Option {
+                    option_id: "safe".into(),
+                    comment: Some("Only staging.".into()),
+                }
+            } else {
+                UserDecisionAnswer::Options {
+                    option_ids: vec!["safe".into()],
+                    comment: Some("Only staging.".into()),
+                }
+            };
+            assert!(
+                matches!(effects.as_slice(), [crate::usecase::application::controller::Effect::ResolveDecision {answer, ..}] if answer == &expected)
+            );
+            assert!(!body(&state).contains("Try again"));
+        }
+    }
+
+    #[test]
+    fn decision_freeform_review_and_comment_focus_are_independent() {
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+        for allow_comment in [false, true] {
+            for mode in [
+                UserDecisionSelectionMode::Single,
+                UserDecisionSelectionMode::Multiple,
+            ] {
+                let workspace = WorkspaceId::new();
+                let mut request = decision(workspace, None);
+                request.expires_at = None;
+                request.allow_comment = allow_comment;
+                request.require_confirmation = true;
+                request.selection_mode = mode;
+                let mut state = AppState::home(workspace, Vec::new());
+                let _ = update(
+                    &mut state,
+                    AppEvent::Backend(BackendEvent::Decisions {
+                        workspace,
+                        decisions: vec![request],
+                    }),
+                );
+                if allow_comment {
+                    for key in [
+                        AppKey::Tab,
+                        AppKey::Paste("Choice-only note".into()),
+                        AppKey::Tab,
+                        AppKey::Tab,
+                        AppKey::Tab,
+                    ] {
+                        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                    }
+                }
+                let text = "Alternative\n".repeat(25);
+                let _ = update(
+                    &mut state,
+                    AppEvent::Key(AppKey::SetDecisionFreeform(text.clone())),
+                );
+                let body =
+                    editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
+                assert!(body.contains("Enter: review"));
+                assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                let body =
+                    editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
+                assert!(body.contains("Answer: Alternative"));
+                assert!(!body.contains("Choice-only note"));
+                let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+                let effects = update(&mut state, AppEvent::Key(AppKey::SubmitDecision));
+                assert!(
+                    matches!(effects.as_slice(), [crate::usecase::application::controller::Effect::ResolveDecision {answer: UserDecisionAnswer::Freeform {text: answer}, ..}] if answer == text.trim())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decision_comment_without_confirmation_is_optional_and_validated() {
+        for mode in [
+            UserDecisionSelectionMode::Single,
+            UserDecisionSelectionMode::Multiple,
+        ] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            request.allow_freeform = false;
+            request.allow_comment = true;
+            request.selection_mode = mode;
+            let mut state = AppState::home(workspace, Vec::new());
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![request],
+                }),
+            );
+            if mode == UserDecisionSelectionMode::Multiple {
+                let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+            }
+            assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
+            for key in [AppKey::Tab, AppKey::Char(' '), AppKey::Tab, AppKey::Tab] {
+                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            }
+            let body =
+                editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
+            assert!(body.contains("Tab: choices/comment"));
+            assert!(body.contains("Enter: submit"));
+            assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
+            let _ = update(&mut state, AppEvent::Key(AppKey::Paste("x".repeat(2049))));
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert!(
+                state
+                    .decision_overlay()
+                    .unwrap()
+                    .editor()
+                    .unwrap()
+                    .error()
+                    .is_some()
+            );
         }
     }
 }

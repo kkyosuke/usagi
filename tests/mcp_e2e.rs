@@ -1892,6 +1892,8 @@ fn user_decision_round_trip(multiple: bool) {
         request_args["options"][0]["pros"] = json!(["Fast feedback"]);
         request_args["options"][0]["cons"] = json!(["Needs follow-up"]);
         request_args["selection_mode"] = json!("multiple");
+        request_args["allow_comment"] = json!(true);
+        request_args["require_confirmation"] = json!(true);
         request_args["context"] = context.clone();
         request_args["selection_limits"] = json!({"min":2, "max":2});
         request_args["recommendation"] =
@@ -2001,8 +2003,10 @@ fi
             vec![]
         }
     );
+    assert_eq!(decision.allow_comment, multiple);
+    assert_eq!(decision.require_confirmation, multiple);
     let answer = if multiple {
-        json!({"kind":"options", "option_ids":["yes", "later"]})
+        json!({"kind":"options", "option_ids":["yes", "later"], "comment":"Only staging"})
     } else {
         json!({"kind":"option", "option_id":"yes"})
     };

@@ -2178,6 +2178,10 @@ pub(super) fn dispatch_user_decision(
         #[serde(default)]
         allow_freeform: bool,
         #[serde(default)]
+        allow_comment: bool,
+        #[serde(default)]
+        require_confirmation: bool,
+        #[serde(default)]
         recommendation: Option<usagi_core::domain::user_decision::UserDecisionRecommendation>,
         #[serde(default)]
         selection_limits: Option<usagi_core::domain::user_decision::UserDecisionSelectionLimits>,
@@ -2364,6 +2368,8 @@ pub(super) fn dispatch_user_decision(
                             prompt: input.prompt,
                             options: input.options,
                             allow_freeform: input.allow_freeform,
+                            allow_comment: input.allow_comment,
+                            require_confirmation: input.require_confirmation,
                             recommendation: input.recommendation,
                             selection_limits: input.selection_limits,
                             selection_mode: input.selection_mode,

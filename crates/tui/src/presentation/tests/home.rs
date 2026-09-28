@@ -670,6 +670,7 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
             workspace_id,
             decision_id,
             UserDecisionAnswer::Option {
+                comment: None,
                 option_id: "safe".to_owned(),
             },
         ),

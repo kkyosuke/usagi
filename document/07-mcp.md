@@ -217,6 +217,8 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
 | field | 内容 |
 |---|---|
 | `options[].pros` / `options[].cons` | 案ごとのメリット / 注意点の文字列配列。各配列は最大4件、各項目は512 UTF-8 bytesまで。省略・空配列は表示なし。空白のみ・改行以外の制御文字・bidi 制御文字を拒否 |
+| `allow_comment` | `true` で選択回答に任意の `comment` を添えられる（既定 `false`）。最大2048 UTF-8 bytes、空白のみ・改行以外の制御文字・bidi 制御文字を拒否。コメントなしの選択も有効 |
+| `require_confirmation` | `true` で TUI の送信前確認を有効化（既定 `false`）。選択・コメント・自由入力の回答を確認してから送信する。MCP / daemon resolve 自体に追加の確認トークンを要求するものではない |
 | `selection_mode` | `single`（既定）または `multiple`。複数選択では1件以上の option が必要 |
 | `recommendation` | `option_ids` と `reason`。推奨する既知 ID と理由（最大2048 UTF-8 bytes）。単一選択では1件、複数選択では選択件数の範囲内。重複 ID・空白のみの理由・改行以外の制御文字・bidi 制御文字を拒否 |
 | `selection_limits` | 複数選択の `min` / `max`（両方必須）。`1 ≤ min ≤ max ≤ option 数`。省略時は1件以上、全 option 数まで。単一選択には指定できない |
@@ -227,9 +229,11 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
 複数選択の回答は `{"kind":"options","option_ids":["a","b"]}`。1件以上の既知 ID を重複なしで指定する。
 単一選択の `option` と複数選択の `options` は request の mode と一致しなければ拒否する。
 許可された `freeform` はどちらの mode でも選択回答の代わりに使え、選択 ID と同時送信はしない。
+`allow_comment: true` なら `option` / `options` の回答に `"comment":"ただし今回はステージングのみ"` を添えられる。
+コメントは回答の一部として永続化・配送される。省略時は従来の回答形式のまま。自由入力には comment を付けない。
 `selection_limits` は選択 ID の件数にだけ適用し、許可された freeform は件数制約の対象外とする。
 推奨案は説明であり、選択・送信を自動では行わず、推奨以外の有効な回答も受け付ける。
-選択肢の pros / cons、補足 block、selection mode、recommendation、selection limits も idempotency 比較に含め、同じ key で説明・推奨・選択方法を変えた request は conflict になる。
+選択肢の pros / cons、補足 block、selection mode、recommendation、selection limits、allow_comment、require_confirmation も idempotency 比較に含め、同じ key で説明・推奨・選択方法を変えた request は conflict になる。
 
 補足の title は256 UTF-8 bytes、列見出しとセルは各512 bytes、図の text は4096 bytesまで。
 補足には改行以外の制御文字と bidi 制御文字を許可しない。空のセルは許可するが、title・列見出し・図は空白のみでは作れない。
@@ -240,6 +244,8 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
   "title": "実施する検証",
   "prompt": "今回追加する検証を選んでください。複数選択できます。",
   "selection_mode": "multiple",
+  "allow_comment": true,
+  "require_confirmation": true,
   "selection_limits": {"min": 1, "max": 2},
   "recommendation": {"option_ids": ["unit", "e2e"], "reason": "境界条件とユーザー操作の両方を確認できます。"},
   "options": [
