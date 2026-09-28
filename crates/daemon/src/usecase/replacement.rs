@@ -268,8 +268,10 @@ pub fn draining_collection(
 
 /// Why this build cannot hand authority to a live successor.
 ///
-/// Every variant is a statement about the durable generation registry, so the
-/// message an operator sees names the prerequisite that is actually missing.
+/// Every variant names one missing prerequisite, so the message an operator
+/// sees is the thing that is actually absent. All but one are statements about
+/// the durable generation registry; [`Self::ActiveUnreachable`] is the
+/// exception, and is about the live active generation's endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeamlessRefusal {
     /// No durable registry exists: this daemon has never registered a

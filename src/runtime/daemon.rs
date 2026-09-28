@@ -3354,16 +3354,17 @@ fn daemon_probe_result_is_reachable<T>(result: &Result<T, ClientError>) -> bool 
 /// The bound is attempts, not wall clock, because each attempt already carries
 /// its own budget: `current_daemon_is_reachable` gives one connect-and-hello
 /// [`TerminalLaneBudget::CONNECT_MS`]. A wall-clock ceiling would make the
-/// attempt count depend on how each attempt fails — a vanished socket fails
+/// attempt count depend on how each attempt *fails* — a vanished socket fails
 /// instantly, while a daemon that accepts the connection and then stalls the
-/// hello burns the whole per-attempt budget — so a ceiling that buys forty
-/// tries against the first would buy two against the second. Silence is the
-/// verdict everything downstream turns into "this daemon is unusable", and it
-/// must not be reached by arithmetic nobody can see.
+/// hello burns the whole per-attempt budget — so one ceiling buys many tries
+/// against the first failure and two against the second. Silence is the verdict
+/// everything downstream turns into "this daemon is unusable", and it must not
+/// be reached by arithmetic nobody can see.
 ///
-/// The worst case an operator waits is therefore
-/// `ENDPOINT_PROBE_ATTEMPTS * (CONNECT_MS + ENDPOINT_PROBE_DELAY)`, and only
-/// against a recorded owner that is alive and answering nothing.
+/// The wait is therefore bounded by
+/// `ATTEMPTS * CONNECT_MS + (ATTEMPTS - 1) * ENDPOINT_PROBE_DELAY` — the pause
+/// falls between attempts, never after the last — and is paid only against a
+/// recorded owner that is alive and answering nothing.
 const ENDPOINT_PROBE_ATTEMPTS: u32 = 4;
 /// How long the probe pauses between attempts.
 const ENDPOINT_PROBE_DELAY: Duration = Duration::from_millis(100);

@@ -255,8 +255,8 @@ Alive のときだけ払う。cold な `replace`（`--force`）は recorded owne
 handshake が他の仕事の後ろに並んでいる — を**沈黙と読み違えないこと**がこの観測の唯一守るべき性質であり
 （読み手はいずれも「この daemon は使えない」と報告する）、試行回数は見えている数でなければならない。
 
-待ち時間の最悪値は `attempt 数 × (CONNECT_MS + attempt 間の間隔)` で、record が Alive かつ何も応答しない
-daemon に対してだけ発生する。
+待ちは `attempt 数 × CONNECT_MS + (attempt 数 - 1) × 間隔` を超えず（間隔は attempt の**間**にだけ置く）、
+record が Alive かつ何も応答しない daemon に対してだけ発生する。
 
 ### 起動窓
 
@@ -649,7 +649,6 @@ seamless refusal は registry を読み、欠けている前提を名前で示�
 | `registry unreadable` | registry を読めない / parse できない。fail closed |
 | `no live registered active` | registry の active と exact process identity の生存を一致させられない |
 | `active unreachable` | active generation の process は生存しているが、endpoint が応答しない。rollover は **その daemon が駆動する** handoff（standby を stage し、old active へ IPC verb を送る）なので、到達できない daemon には渡すものが無い |
-
 | `generation limit` | retained generation が上限に達しており、standby を追加できない |
 | `draining collection pending` | retained generation 上限を、まだ resource / lease / outbox / capacity claim のいずれかを持つ draining predecessor が占有している。PTY を落として slot を空けず fail closed。その predecessor が何を待っているかを併記する（[generation collection](#generation-collection)） |
 
