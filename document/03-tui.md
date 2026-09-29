@@ -455,12 +455,13 @@ Director と root shell が同時に開いていれば、入力を持たない r
 最大 3 本の terminal が同時に更新され、drawer を開いたことでは選択 session の Agent content を閉じたり静止させたりしない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
-一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
+一覧を owner（session 名。root は `workspace root`、session 一覧に無い場合は `session <ID 先頭 8 桁>`）と title で表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
 editor を表示する。Esc は editor から一覧へ戻り、一覧では overlay を閉じるだけで durable decision を変更しない。
 submit は stable option ID または空でない許可済み freeform を送る。row は daemon の resolve confirmation まで
 残り、resolve error・disconnect・resync 後も snapshot で再試行可能な pending state に収束する。modal が開いて
 いる間は Home、Closeup、terminal の背景入力を dispatch しない。
 
+modal は端末の幅・高さの 4/5 に広がる（内幅 70〜120 桁、本文 18〜40 行。本文は上下 1 行ずつ背景を残す高さまで縮む）。
 decision の title、prompt、option label/description、freeform は modal 幅で折り返す。表示域を超える editor の
 内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
 freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
@@ -486,9 +487,10 @@ freeform を入力・削除・paste した場合は入力欄へ表示を移し�
 自由入力欄を切り替え、現在の欄の回答だけを送信する。両方の入力内容は切り替えや同じ質問の snapshot 更新で保持する。
 送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
 
-新しい pending decision を resync で観測すると、Home header の右上に Icons 設定に応じた bell または `!` indicator と
-`N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。indicatorをクリックすると existing decision modal を
-開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
+pending decision がある間、Home header の右上に Icons 設定に応じた bell または `!` indicator と
+`N notice`（N は pending 件数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
+観測すると、その直下の banner に owner（一覧と同じ表記）と decision の title（summary）を warning 色で表示する。
+indicatorをクリックすると existing decision modal を開き、未読表示を既読にする。既読にしても pending の間は badge を残す。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
 resolve/cancel/expire で pending snapshot から消えると未読も消える。
 

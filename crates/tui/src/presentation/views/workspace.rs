@@ -1248,6 +1248,14 @@ impl HomeProjection {
         self.session_label(self.preview)
     }
 
+    /// Session display names keyed by ID, used to label decision owners.
+    fn session_names(&self) -> BTreeMap<SessionId, String> {
+        self.sessions
+            .iter()
+            .map(|session| (session.id, session.label.clone()))
+            .collect()
+    }
+
     fn session_label(&self, session: Option<SessionId>) -> &str {
         match session {
             Some(id) => self
@@ -1637,12 +1645,20 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .dim()
             .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
-    let notice = (!home.unread_decision_ids.is_empty()).then(|| {
-        format!(
+    // The badge stays while any decision is pending, so a decision that was
+    // seen in the list but not answered is still discoverable. Unread
+    // decisions are emphasized in bold.
+    let notice = (!home.decisions.is_empty()).then(|| {
+        let style = if home.unread_decision_ids.is_empty() {
+            Role::Warning.style()
+        } else {
+            Role::Warning.style().bold()
+        };
+        style.paint(&format!(
             "{} {} notice",
             icons.decision,
-            home.unread_decision_ids.len()
-        )
+            home.decisions.len()
+        ))
     });
     let root_terminal = if home.root_terminal_drawer.is_some() {
         Role::Accent
@@ -2528,7 +2544,14 @@ fn render_home_modals(
     } else if let Some(overlay) = &home.preview_overlay {
         render_preview_overlay(height, width, &frame, overlay)
     } else if let Some(overlay) = &home.decision_overlay {
-        decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
+        decision_modal::render_over(
+            height,
+            width,
+            &frame,
+            overlay,
+            &home.decisions,
+            &home.session_names(),
+        )
     } else if home.closeup_action_visible {
         // Prefer the runtime's persisted action modal (its caret and selection),
         // titled with the active target. Fall back to a fresh modal only for the
@@ -2615,16 +2638,12 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
             IconMode::Text => "indicator",
         };
         return widgets::clip_to_width(
-            &format!(
+            &Role::Warning.style().paint(&format!(
                 "  {} {}: {}  (click {control} to review)",
                 icon_set(home.icon_mode).decision,
-                decision
-                    .owner
-                    .session_id
-                    .as_ref()
-                    .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
+                decision_modal::owner_label(decision, &home.session_names()),
                 decision.title
-            ),
+            )),
             width,
         );
     }
@@ -4855,13 +4874,10 @@ mod tests {
         assert!(!clipped.contains("36"));
     }
 
-    #[test]
-    fn home_header_layout_and_hit_test_share_notice_and_drawer_geometry() {
-        let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
-        // A pending decision makes the notice badge unread; closing its
-        // auto-opened overlay leaves the badge on the header without an overlay.
-        let decision = usagi_core::domain::user_decision::UserDecision {
+    fn pending_confirm_decision(
+        workspace: WorkspaceId,
+    ) -> usagi_core::domain::user_decision::UserDecision {
+        usagi_core::domain::user_decision::UserDecision {
             decision_id: UserDecisionId::new(),
             owner: usagi_core::domain::user_decision::UserDecisionOwner {
                 workspace_id: workspace,
@@ -4894,7 +4910,16 @@ mod tests {
             answer: None,
             created_at: now(),
             resolved_at: None,
-        };
+        }
+    }
+
+    #[test]
+    fn home_header_layout_and_hit_test_share_notice_and_drawer_geometry() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        // A pending decision makes the notice badge unread; closing its
+        // auto-opened overlay leaves the badge on the header without an overlay.
+        let decision = pending_confirm_decision(workspace);
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::Decisions {
@@ -4912,6 +4937,8 @@ mod tests {
             &home.clone().with_icon_mode(IconMode::Text),
         ));
         assert!(text_banner.contains("click indicator to review"));
+        // The decision notice is highlighted in the warning color (yellow).
+        assert!(home_notice_banner(100, &home).contains("\u{1b}[33m"));
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
@@ -4922,6 +4949,7 @@ mod tests {
         assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
         assert!(strip(&layout.line).contains("notice"));
+        assert!(layout.line.contains("\u{1b}[1;33m"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
             .collect::<Vec<_>>();
@@ -4962,6 +4990,34 @@ mod tests {
         let open_line = home_header_layout(100, &home).line;
         assert_ne!(open_line, closed_line);
         assert!(open_line.contains("1;7"));
+    }
+
+    #[test]
+    fn read_pending_decisions_keep_a_plain_warning_badge() {
+        // Reading the list clears the unread emphasis but keeps the pending
+        // badge, so an unanswered decision stays discoverable.
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![pending_confirm_decision(workspace)],
+            }),
+        );
+        // Dismiss the auto-opened editor and list, then read the list.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.unread_decision_ids().len(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        assert!(state.unread_decision_ids().is_empty());
+        let home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
+        let read_line = home_header_layout(100, &home).line;
+        assert!(strip(&read_line).contains("1 notice"));
+        assert!(read_line.contains("\u{1b}[33m"));
+        assert!(!read_line.contains("\u{1b}[1;33m"));
     }
 
     #[test]
