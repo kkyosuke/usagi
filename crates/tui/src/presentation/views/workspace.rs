@@ -1638,11 +1638,11 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
     let notice = (!home.unread_decision_ids.is_empty()).then(|| {
-        format!(
+        Role::Warning.style().bold().paint(&format!(
             "{} {} notice",
             icons.decision,
             home.unread_decision_ids.len()
-        )
+        ))
     });
     let root_terminal = if home.root_terminal_drawer.is_some() {
         Role::Accent
@@ -2615,7 +2615,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
             IconMode::Text => "indicator",
         };
         return widgets::clip_to_width(
-            &format!(
+            &Role::Warning.style().paint(&format!(
                 "  {} {}: {}  (click {control} to review)",
                 icon_set(home.icon_mode).decision,
                 decision
@@ -2624,7 +2624,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
                     .as_ref()
                     .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
                 decision.title
-            ),
+            )),
             width,
         );
     }
@@ -4912,6 +4912,8 @@ mod tests {
             &home.clone().with_icon_mode(IconMode::Text),
         ));
         assert!(text_banner.contains("click indicator to review"));
+        // The decision notice is highlighted in the warning color (yellow).
+        assert!(home_notice_banner(100, &home).contains("\u{1b}[33m"));
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
@@ -4922,6 +4924,7 @@ mod tests {
         assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
         assert!(strip(&layout.line).contains("notice"));
+        assert!(layout.line.contains("\u{1b}[1;33m"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
             .collect::<Vec<_>>();

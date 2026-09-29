@@ -487,7 +487,7 @@ freeform を入力・削除・paste した場合は入力欄へ表示を移し�
 送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
 
 新しい pending decision を resync で観測すると、Home header の右上に Icons 設定に応じた bell または `!` indicator と
-`N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。indicatorをクリックすると existing decision modal を
+`N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。badge と banner は warning 色（黄）で描画し、他の header 要素と区別する。indicatorをクリックすると existing decision modal を
 開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
 resolve/cancel/expire で pending snapshot から消えると未読も消える。
