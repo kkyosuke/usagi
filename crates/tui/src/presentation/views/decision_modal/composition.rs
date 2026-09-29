@@ -1,5 +1,5 @@
 //! Comment entry and answer review rendering.
-use super::{CONTENT_CAPACITY, modal, wrapped_content_lines};
+use super::{modal, wrapped_content_lines};
 use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
@@ -56,6 +56,7 @@ pub(super) fn confirmation_body(
     editor: &DecisionEditor,
     answer: &UserDecisionAnswer,
     width: usize,
+    capacity: usize,
 ) -> Vec<String> {
     let mut rows = wrapped_content_lines("Review answer", "", width);
     rows.extend(wrapped_content_lines(&editor.decision().title, "", width));
@@ -85,8 +86,8 @@ pub(super) fn confirmation_body(
             0
         }
     });
-    let start = offset.min(rows.len().saturating_sub(CONTENT_CAPACITY));
-    let end = (start + CONTENT_CAPACITY).min(rows.len());
+    let start = offset.min(rows.len().saturating_sub(capacity));
+    let end = (start + capacity).min(rows.len());
     let mut body = modal::scroll_window(&rows, start, end);
     body.push(modal::footer("Enter: send  Esc: edit  PgUp/PgDn: scroll"));
     body

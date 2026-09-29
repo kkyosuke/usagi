@@ -9,13 +9,34 @@ use usagi_core::domain::user_decision::UserDecisionSelectionMode;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::DecisionOverlayState;
+use std::collections::BTreeMap;
+use usagi_core::domain::id::SessionId;
 
-const INNER_WIDTH: usize = 70;
-const BODY_HEIGHT: usize = 18;
+// The modal grows with the terminal so comparison tables, diagrams, and long
+// option lists stay readable, while the minimum keeps the historical 70x18
+// frame on an ordinary 80x24 terminal.
+const MIN_INNER_WIDTH: usize = 70;
+const MAX_INNER_WIDTH: usize = 120;
+const MIN_BODY_HEIGHT: usize = 18;
+const MAX_BODY_HEIGHT: usize = 40;
 // Leave room for the persistent footer and for a scroll indicator above and
 // below the viewport.  This keeps every decision field reachable even when a
 // prompt, option label, or description spans many rows.
-const CONTENT_CAPACITY: usize = BODY_HEIGHT - 4;
+const CHROME_ROWS: usize = 4;
+#[cfg(test)]
+const CONTENT_CAPACITY: usize = MIN_BODY_HEIGHT - CHROME_ROWS;
+
+/// Four fifths of `available`, bounded to the modal's readable range.
+const fn scaled(available: usize, min: usize, max: usize) -> usize {
+    let desired = available.saturating_mul(4) / 5;
+    if desired < min {
+        min
+    } else if desired > max {
+        max
+    } else {
+        desired
+    }
+}
 
 fn wrapped_content_lines(text: &str, prefix: &str, inner_width: usize) -> Vec<String> {
     let width = inner_width.saturating_sub(modal::BODY_INDENT_WIDTH);
@@ -47,12 +68,13 @@ fn wrapped_dim_lines(text: &str, prefix: &str, inner_width: usize) -> Vec<String
         .collect()
 }
 
-fn editor_body(
+fn editor_rows(
     editor: &crate::usecase::application::controller::DecisionEditor,
     inner_width: usize,
+    capacity: usize,
 ) -> Vec<String> {
     if let Some(answer) = editor.confirmation() {
-        return composition::confirmation_body(editor, answer, inner_width);
+        return composition::confirmation_body(editor, answer, inner_width, capacity);
     }
     let decision = editor.decision();
     let multiple = decision.selection_mode == UserDecisionSelectionMode::Multiple;
@@ -140,10 +162,10 @@ fn editor_body(
     }
 
     let (start, end) = editor.scroll_offset().map_or_else(
-        || modal::list_window(rows.len(), selected_row, CONTENT_CAPACITY),
+        || modal::list_window(rows.len(), selected_row, capacity),
         |offset| {
-            let start = offset.min(rows.len().saturating_sub(CONTENT_CAPACITY));
-            let end = start.saturating_add(CONTENT_CAPACITY).min(rows.len());
+            let start = offset.min(rows.len().saturating_sub(capacity));
+            let end = start.saturating_add(capacity).min(rows.len());
             (start, end)
         },
     );
@@ -251,7 +273,9 @@ fn editor_intro(
 fn list_body(
     overlay: &DecisionOverlayState,
     decisions: &[usagi_core::domain::user_decision::UserDecision],
+    session_names: &BTreeMap<SessionId, String>,
     inner_width: usize,
+    capacity: usize,
 ) -> Vec<String> {
     let mut rows = vec![modal::caption("Pending decisions for this workspace")];
     if decisions.is_empty() {
@@ -263,22 +287,39 @@ fn list_body(
             selected_row = rows.len();
         }
         let marker = format!("{} ", modal::selection_marker(index == overlay.selected()));
-        let session = decision
-            .owner
-            .session_id
-            .as_ref()
-            .map_or_else(|| "workspace root".to_owned(), ToString::to_string);
         rows.extend(wrapped_content_lines(
-            &format!("{session}: {}", decision.title),
+            &format!(
+                "{}: {}",
+                owner_label(decision, session_names),
+                decision.title
+            ),
             &marker,
             inner_width,
         ));
     }
-    let (start, end) = modal::list_window(rows.len(), selected_row, CONTENT_CAPACITY);
+    let (start, end) = modal::list_window(rows.len(), selected_row, capacity);
     let mut body = modal::scroll_window(&rows, start, end);
     body.push(String::new());
     body.push(modal::footer("↑↓: select   Enter: open   Esc: close"));
     body
+}
+
+/// Human-readable owner of a decision: the session name, `workspace root`, or
+/// a short ID when the session is not (yet) in the projected session list.
+#[must_use]
+pub fn owner_label(
+    decision: &usagi_core::domain::user_decision::UserDecision,
+    session_names: &BTreeMap<SessionId, String>,
+) -> String {
+    decision.owner.session_id.map_or_else(
+        || "workspace root".to_owned(),
+        |session| {
+            session_names.get(&session).cloned().unwrap_or_else(|| {
+                let id = session.to_string();
+                format!("session {}", id.get(..8).unwrap_or(&id))
+            })
+        },
+    )
 }
 
 /// Render either the workspace pending list or the selected decision editor.
@@ -289,14 +330,22 @@ pub fn render_over(
     base: &[String],
     overlay: &DecisionOverlayState,
     decisions: &[usagi_core::domain::user_decision::UserDecision],
+    session_names: &BTreeMap<SessionId, String>,
 ) -> Vec<String> {
-    let inner_width = modal::modal_inner_width(width, INNER_WIDTH);
+    let inner_width =
+        modal::modal_inner_width(width, scaled(width, MIN_INNER_WIDTH, MAX_INNER_WIDTH));
+    let body_height = modal::reserved_body_height(
+        height,
+        width,
+        scaled(height, MIN_BODY_HEIGHT, MAX_BODY_HEIGHT),
+    );
+    let capacity = body_height.saturating_sub(CHROME_ROWS).max(1);
     let (title, body) = if let Some(editor) = overlay.editor() {
-        ("User decision", editor_body(editor, inner_width))
+        ("User decision", editor_rows(editor, inner_width, capacity))
     } else {
         (
             "Pending decisions",
-            list_body(overlay, decisions, inner_width),
+            list_body(overlay, decisions, session_names, inner_width, capacity),
         )
     };
     modal::render_over(
@@ -305,7 +354,7 @@ pub fn render_over(
         base,
         title,
         inner_width,
-        &modal::fixed_body(body, BODY_HEIGHT),
+        &modal::fixed_body(body, body_height),
     )
 }
 
@@ -313,6 +362,13 @@ pub fn render_over(
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
+
+    fn editor_body(
+        editor: &crate::usecase::application::controller::DecisionEditor,
+        inner_width: usize,
+    ) -> Vec<String> {
+        editor_rows(editor, inner_width, CONTENT_CAPACITY)
+    }
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, update,
     };
@@ -371,6 +427,7 @@ mod tests {
             &["base".to_owned()],
             state.decision_overlay().unwrap(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(empty.join("\n").contains("(none)"));
 
@@ -389,14 +446,19 @@ mod tests {
                 decisions: vec![root.clone(), scoped.clone()],
             }),
         );
+        let names = BTreeMap::from([(session, "issue-42".to_owned())]);
         let list = render_over(
             24,
             80,
             &[],
             state.decision_overlay().unwrap(),
             &[root.clone(), scoped.clone()],
+            &names,
         );
-        assert!(list.join("\n").contains("workspace root"));
+        let list = list.join("\n");
+        assert!(list.contains("workspace root"));
+        assert!(list.contains("issue-42: Choose"));
+        assert!(!list.contains(&session.to_string()));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let fixed_options = render_over(
@@ -405,6 +467,7 @@ mod tests {
             &[],
             state.decision_overlay().unwrap(),
             &[root, scoped.clone()],
+            &BTreeMap::new(),
         );
         assert!(!fixed_options.join("\n").contains("freeform:"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
@@ -417,6 +480,7 @@ mod tests {
             &[],
             state.decision_overlay().unwrap(),
             &[scoped.clone()],
+            &BTreeMap::new(),
         );
         assert!(scrolled.join("\n").contains("context line"));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
@@ -435,12 +499,75 @@ mod tests {
                 },
             }),
         );
-        let editor = render_over(24, 80, &[], state.decision_overlay().unwrap(), &[scoped]);
+        let editor = render_over(
+            24,
+            80,
+            &[],
+            state.decision_overlay().unwrap(),
+            &[scoped],
+            &BTreeMap::new(),
+        );
         let text = editor.join("\n");
         assert!(text.contains("freeform: custom"));
         assert!(text.contains("expires:"));
         assert!(text.contains("retry"));
     }
+    #[test]
+    fn owner_label_falls_back_to_a_short_session_id() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let names = BTreeMap::new();
+        let label = owner_label(&decision(workspace, Some(session)), &names);
+        let id = session.to_string();
+        assert_eq!(label, format!("session {}", &id[..8]));
+        assert_eq!(
+            owner_label(&decision(workspace, None), &names),
+            "workspace root"
+        );
+    }
+
+    #[test]
+    fn modal_scales_with_the_terminal_within_its_bounds() {
+        assert_eq!(
+            scaled(80, MIN_INNER_WIDTH, MAX_INNER_WIDTH),
+            MIN_INNER_WIDTH
+        );
+        assert_eq!(scaled(125, MIN_INNER_WIDTH, MAX_INNER_WIDTH), 100);
+        assert_eq!(
+            scaled(300, MIN_INNER_WIDTH, MAX_INNER_WIDTH),
+            MAX_INNER_WIDTH
+        );
+
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        let rendered = |height, width| {
+            render_over(
+                height,
+                width,
+                &[],
+                state.decision_overlay().unwrap(),
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        let border_width = |lines: &[String]| {
+            lines
+                .iter()
+                .map(|line| widgets::display_width(line.trim_end()))
+                .max()
+                .unwrap_or_default()
+        };
+        let border_rows =
+            |lines: &[String]| lines.iter().filter(|line| !line.trim().is_empty()).count();
+        let small = rendered(24, 80);
+        let large = rendered(50, 160);
+        assert!(border_width(&large) > border_width(&small));
+        assert!(border_rows(&large) > border_rows(&small));
+        // A short terminal shrinks the body instead of clipping the footer.
+        assert!(rendered(12, 80).join("\n").contains("Esc: close"));
+    }
+
     #[test]
     fn context_tables_wrap_or_stack_and_diagrams_preserve_spacing_when_panned() {
         use usagi_core::domain::user_decision::UserDecisionContext;
@@ -512,6 +639,7 @@ mod tests {
                 &[],
                 state.decision_overlay().unwrap(),
                 &[request.clone()],
+                &BTreeMap::new(),
             )
             .join("\n")
         };
