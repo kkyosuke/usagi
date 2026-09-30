@@ -1096,8 +1096,8 @@ modal に安全な error を表示する。
 Overview の `daemon` は workspace の daemon status modal を開く。modal は最新の metrics observation と
 daemon-authoritative な session projection を使い、health、CPU / memory、接続 client 数、managed session の
 running / waiting / failed 件数、Agent concurrency の使用中 / 上限、workspace 全体の Agent runtime inventory を
-一画面に表示する。health の次の行は daemon process の build（`daemon v<version> (<commit>)`）で、metrics の `build` を
-正本にする。この TUI の build と異なれば warning 色で `≠ client v<version> (<commit>)` を続け、更新後に旧 daemon が
+一画面に表示する。health の次の行は daemon process の build（`daemon v<version> (<commit>)`。commit を持たない build は
+`daemon v<version>`、version を持たない build は `daemon unknown build`）で、metrics の `build` を正本にする。この TUI の build と異なれば warning 色で `≠ client v<version> (<commit>)` を続け、更新後に旧 daemon が
 残っていることを示す。build を報告しない daemon と metrics 未取得のときは `daemon build —` と表示する
 （比較規則は [5. daemon](05-daemon.md#行頭の-version-は-client-の-build-である)）。runtime は root または stable `SessionId` で結合した session label、状態、表示専用の短縮 runtime ID を持つ。
 modal を開くたびに既存の coalesced restore lane へ新しい coherent inventory を要求し、取得までは待機表示にする。
