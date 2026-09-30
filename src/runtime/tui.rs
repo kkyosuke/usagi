@@ -1170,6 +1170,10 @@ type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
 type OverlaySessions = Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>;
 
 impl ControllerBackendFactory for ProductionBackendFactory {
+    fn client_build(&self) -> Option<usagi_core::infrastructure::ipc::BuildIdentity> {
+        Some(crate::runtime::daemon::current_build())
+    }
+
     fn garden_reduced_motion(&self) -> bool {
         self.garden_reduced_motion
     }
@@ -9071,6 +9075,11 @@ mod tests {
         let (host, actions) = ControllerHost::channel();
         let mut factory = ProductionBackendFactory::default();
         let mut composition = factory.create(&snapshot, host);
+        // The Daemon modal compares the daemon's build with this client's own.
+        assert_eq!(
+            factory.client_build(),
+            Some(crate::runtime::daemon::current_build())
+        );
         let operation_id = OperationId::new();
 
         composition.backend.dispatch(Effect::OpenTerminal {

@@ -179,6 +179,13 @@ fn assert_daemon_running(home: &DaemonHome) {
     let rendered = stdout(&output);
     assert!(rendered.contains("daemon running"), "{rendered}");
     assert!(!rendered.contains("not answering"), "{rendered}");
+    // The hello that proved the endpoint also named the daemon's build: this
+    // same binary, so it is reported without a mismatch.
+    assert!(
+        rendered.contains(&format!("; daemon build v{}", env!("CARGO_PKG_VERSION"))),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("differs"), "{rendered}");
 }
 
 fn run_with_home(args: &[&OsStr], home: &DaemonHome) -> Output {
@@ -633,14 +640,18 @@ fn bare_daemon_is_idempotent_after_forced_restart() {
     let restarted = daemon_record(&data_dir).expect("restart registers a daemon record");
     let repeated = home.run(&[OsStr::new("daemon")]);
     assert!(repeated.status.success(), "{}", stderr(&repeated));
-    assert_eq!(
-        stdout(&repeated),
-        format!(
-            "usagi v{}: daemon already running (pid {})\n",
-            env!("CARGO_PKG_VERSION"),
-            restarted.pid
-        )
+    // The prefix is this client's version; the clause names the daemon's own
+    // build, which is this same binary and therefore does not differ.
+    let repeated = stdout(&repeated);
+    assert!(
+        repeated.starts_with(&format!(
+            "usagi v{version}: daemon already running (pid {}); daemon build v{version}",
+            restarted.pid,
+            version = env!("CARGO_PKG_VERSION"),
+        )),
+        "{repeated}"
     );
+    assert!(!repeated.contains("differs"), "{repeated}");
     assert_eq!(daemon_record(&data_dir), Some(restarted));
 
     stop_daemon(&home);

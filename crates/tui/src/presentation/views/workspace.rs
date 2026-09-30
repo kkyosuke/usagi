@@ -29,7 +29,7 @@ use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
-use usagi_core::infrastructure::ipc::{AgentConcurrency, DaemonMetrics};
+use usagi_core::infrastructure::ipc::{AgentConcurrency, BuildIdentity, DaemonMetrics};
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
@@ -333,6 +333,9 @@ pub struct HomeProjection {
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,
+    /// この client process の build。Daemon modal が daemon の報告する build と比べる。
+    /// `None` なら比較せず daemon の build だけを表示する。
+    client_build: Option<BuildIdentity>,
     /// daemon health の観測器。**診断専用の描画素材**で、reducer state にも操作の
     /// 権威にもならない。既定値（一度も観測していない）は indicator を出さないため、
     /// 正常時の frame は health 導入前と同一である。
@@ -696,6 +699,7 @@ impl HomeProjection {
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
             metrics: None,
+            client_build: None,
             health: DaemonHealthTracker::default(),
             git_diffs: Arc::new(BTreeMap::new()),
             terminal_view: None,
@@ -932,6 +936,14 @@ impl HomeProjection {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Attach this client's build so the Daemon modal can say whether the
+    /// daemon it reports on runs a different build.
+    #[must_use]
+    pub fn with_client_build(mut self, build: Option<BuildIdentity>) -> Self {
+        self.client_build = build;
         self
     }
 
@@ -2532,6 +2544,7 @@ fn render_home_modals(
             &frame,
             daemon_modal::DaemonProjection {
                 metrics: home.metrics.as_ref(),
+                client_build: home.client_build.as_ref(),
                 health: home.health.evaluate(now.timestamp_millis()),
                 sessions: home.session_states,
                 session_total: home.sessions.len(),
@@ -4103,6 +4116,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         }
     }
 
@@ -6612,6 +6626,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         };
         let runtime_item = |session_id| {
             let runtime_id = AgentRuntimeId::new();
@@ -6648,8 +6663,11 @@ mod tests {
         let home = HomeProjection::from_state(&state, "work", &sessions)
             .with_metrics(Some(metrics))
             .with_agent_inventory(Some(&inventory));
-        let frame = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        // 25 rows: the fixed body (status, build, metrics, sessions, actions,
+        // capacity) leaves exactly three runtime rows.
+        let frame = strip(&render_home_at(25, 100, &home, now()).join("\n"));
         assert!(frame.contains("Daemon"));
+        assert!(frame.contains("daemon build —"));
         assert!(frame.contains("16/16  saturated"));
         assert!(frame.contains(&format!(
             "root  live  #{}",
@@ -7007,6 +7025,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         };
         let sidecar = super::mascot_metrics(Some(&metrics), 0);
         let with_metrics = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &sidecar)
@@ -7443,6 +7462,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         };
 
         // The daemon observation flows through `with_metrics` into the sidecar row
@@ -7532,6 +7552,7 @@ mod tests {
             pr_projection_gaps: 0,
             agent_concurrency: None,
             failed_background_workers: 0,
+            build: None,
         };
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let render = |metrics: &usagi_core::infrastructure::ipc::DaemonMetrics| {
@@ -7644,6 +7665,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         }
     }
 

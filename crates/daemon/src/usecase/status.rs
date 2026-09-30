@@ -18,6 +18,7 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonState, StaleReason, classify};
 use usagi_core::infrastructure::daemon::LivenessProbe;
 
+use crate::usecase::build_report::{self, BuildObservation};
 use crate::usecase::endpoint::EndpointObservation;
 use crate::usecase::serve::DaemonRecordPort;
 
@@ -56,6 +57,31 @@ pub fn report(
     endpoint: EndpointObservation,
     info: &AppInfo,
 ) -> io::Result<String> {
+    report_observed(store, probe, endpoint, None, info)
+}
+
+/// [`report`], naming the build the daemon's handshake advertised.
+///
+/// The prefix names the binary that ran this report, so without this clause a
+/// freshly updated client reports its own new version beside a daemon that is
+/// still the old one. The clause is added only to a daemon reported as running:
+/// a build observed from an owner that has since gone stale describes nothing
+/// that is still there.
+///
+/// # Errors
+///
+/// Returns the store's load error, as [`report`] does.
+///
+/// # Panics
+///
+/// As [`report`].
+pub fn report_observed(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    endpoint: EndpointObservation,
+    build: Option<&BuildObservation>,
+    info: &AppInfo,
+) -> io::Result<String> {
     let record = store.load()?;
     let observation = record.as_ref().map_or(
         usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
@@ -69,7 +95,11 @@ pub fn report(
             "{describe}: daemon running but not answering (pid {}); {UNREACHABLE_REMEDY}",
             pid()
         ),
-        DaemonState::Alive => format!("{describe}: daemon running (pid {})", pid()),
+        DaemonState::Alive => format!(
+            "{describe}: daemon running (pid {}){}",
+            pid(),
+            build_report::clause(build)
+        ),
         DaemonState::Stale(StaleReason::OwnerGone) => format!(
             "{describe}: daemon not running (stale record, pid {} is gone; reclaimable)",
             pid()
@@ -87,11 +117,12 @@ pub fn report(
 
 #[cfg(test)]
 mod tests {
-    use super::{EndpointObservation, report};
+    use super::{BuildObservation, EndpointObservation, report, report_observed};
     use crate::test_support::{FixedProbe, InMemoryRecordFile, ObservedAs};
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
+    use usagi_core::infrastructure::ipc::BuildIdentity;
 
     fn info() -> AppInfo {
         AppInfo {
@@ -129,6 +160,55 @@ mod tests {
             .unwrap(),
             "usagi v0.1.0: daemon running (pid 4321)"
         );
+    }
+
+    fn observation(daemon: &str, client: &str) -> BuildObservation {
+        let build = |version: &str| BuildIdentity {
+            version: version.to_owned(),
+            commit: format!("{version}commit"),
+            target: "test".to_owned(),
+            artifact: String::new(),
+        };
+        BuildObservation {
+            daemon: build(daemon),
+            client: build(client),
+        }
+    }
+
+    /// The prefix is this client's version. After an update, a daemon that is
+    /// still the old build must not read as updated.
+    #[test]
+    fn names_the_running_daemon_build_and_a_mismatch_with_this_client() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        assert_eq!(
+            report_observed(
+                &store,
+                &FixedProbe(true),
+                EndpointObservation::Answering,
+                Some(&observation("4.8.5", "4.8.8")),
+                &info()
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon running (pid 4321); daemon build v4.8.5 (4.8.5co) differs from this client v4.8.8 (4.8.8co)"
+        );
+    }
+
+    /// A build observed from an owner that is no longer running describes
+    /// nothing that is still there, so only a running daemon carries it.
+    #[test]
+    fn a_stale_record_does_not_carry_an_observed_build() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(4321)).unwrap();
+        let line = report_observed(
+            &store,
+            &FixedProbe(false),
+            EndpointObservation::NotObserved,
+            Some(&observation("4.8.8", "4.8.8")),
+            &info(),
+        )
+        .unwrap();
+        assert!(!line.contains("daemon build"), "{line}");
     }
 
     /// `usagi update` names this command when its own synchronization cannot

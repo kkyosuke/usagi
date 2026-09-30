@@ -6937,7 +6937,7 @@ fn production_metrics_report_agent_concurrency_without_taking_the_agent_lock() {
         MetricsAction::Subscribe,
     );
     assert_eq!(unknown.agent_concurrency, None);
-    assert_eq!(unknown.schema_version, 4);
+    assert_eq!(unknown.schema_version, 5);
 
     // What the authority publishes is what the reply reports, on the very next
     // request and without another sample being pushed.
@@ -14520,6 +14520,76 @@ fn endpoint_probe_accepts_a_framed_refusal_but_not_transport_failure() {
     )));
 }
 
+/// A hello names the daemon's build; a refusal answers without one; only a
+/// transport failure is silence.
+#[test]
+fn an_endpoint_answer_keeps_the_build_only_from_a_completed_hello() {
+    use usagi_core::infrastructure::ipc::ProtocolError;
+
+    assert_eq!(
+        endpoint_answer(Ok(current_build())),
+        EndpointAnswer::Hello(current_build())
+    );
+    let refused = endpoint_answer(Err(ClientError::Protocol(ProtocolError::new(
+        ErrorCode::ProtocolMismatch,
+        "older daemon",
+    ))));
+    assert_eq!(refused, EndpointAnswer::Refused);
+    assert!(refused.is_reachable());
+    assert_eq!(refused.into_build(), None);
+    let silent = endpoint_answer(Err(ClientError::Unavailable("socket closed".into())));
+    assert!(!silent.is_reachable());
+    assert_eq!(silent.into_build(), None);
+}
+
+/// A data directory that publishes no endpoint is unreachable, and the report
+/// names this client's build beside any daemon build it observed.
+#[test]
+fn an_unpublished_endpoint_is_unreachable_and_an_observed_build_is_paired_with_this_client() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!current_daemon_is_reachable(dir.path()));
+
+    assert_eq!(build_observation(None), None);
+    let mut daemon = current_build();
+    daemon.version = "0.0.1".to_owned();
+    assert_eq!(
+        build_observation(Some(daemon.clone())),
+        Some(BuildObservation {
+            daemon,
+            client: current_build(),
+        })
+    );
+}
+
+/// Only `start` against a live owner names the daemon's build without claiming
+/// anything about the endpoint.
+#[test]
+fn only_start_against_a_live_owner_asks_for_the_daemon_build() {
+    use usagi_core::domain::daemon::{DaemonState, StaleReason};
+
+    assert!(build_probe_is_needed(
+        &PresentationDaemonCommand::Start,
+        DaemonState::Alive
+    ));
+    for state in [
+        DaemonState::Absent,
+        DaemonState::Unverified,
+        DaemonState::Stale(StaleReason::OwnerGone),
+    ] {
+        assert!(!build_probe_is_needed(
+            &PresentationDaemonCommand::Start,
+            state
+        ));
+    }
+    for command in [
+        PresentationDaemonCommand::Status,
+        PresentationDaemonCommand::Stop(TransitionMode::Planned),
+        PresentationDaemonCommand::Serve(usagi_daemon::presentation::ServeRole::Active),
+    ] {
+        assert!(!build_probe_is_needed(&command, DaemonState::Alive));
+    }
+}
+
 #[derive(Clone)]
 struct ResponseDeadlineTestClock(Arc<AtomicU64>);
 
@@ -14923,9 +14993,9 @@ fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
     assert_eq!(
         endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
             attempts += 1;
-            true
+            EndpointAnswer::Hello(current_build())
         }),
-        EndpointObservation::Answering
+        (EndpointObservation::Answering, Some(current_build()))
     );
     assert_eq!((attempts, slept.get()), (1, 0));
 
@@ -14936,9 +15006,14 @@ fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
     assert_eq!(
         endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
             attempts += 1;
-            attempts > 2
+            if attempts > 2 {
+                EndpointAnswer::Refused
+            } else {
+                EndpointAnswer::Silent
+            }
         }),
-        EndpointObservation::Answering
+        // A refusal is an answer, but it names no build to report.
+        (EndpointObservation::Answering, None)
     );
     assert_eq!((attempts, slept.get()), (3, 2));
 
@@ -14949,9 +15024,9 @@ fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
     assert_eq!(
         endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
             attempts += 1;
-            false
+            EndpointAnswer::Silent
         }),
-        EndpointObservation::Silent
+        (EndpointObservation::Silent, None)
     );
     assert_eq!((attempts, slept.get()), (4, 3));
 
@@ -14962,9 +15037,9 @@ fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
     assert_eq!(
         endpoint_observation_within(ENDPOINT_PROBE_ATTEMPTS, &|_| (), &mut || {
             attempts += 1;
-            false
+            EndpointAnswer::Silent
         }),
-        EndpointObservation::Silent
+        (EndpointObservation::Silent, None)
     );
     assert_eq!(attempts, ENDPOINT_PROBE_ATTEMPTS);
 }

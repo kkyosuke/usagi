@@ -247,6 +247,39 @@ impl BuildIdentity {
             && self.target == other.target
             && self.artifact == other.artifact
     }
+
+    /// The operator-facing label of this build: `v4.8.5 (abc1234)`, with the
+    /// commit abbreviated and a `-dirty` marker kept. An identity without a
+    /// version reads as unknown rather than as an empty `v`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.version.is_empty() {
+            return "unknown build".to_owned();
+        }
+        let (hash, dirty) = self
+            .commit
+            .strip_suffix("-dirty")
+            .map_or((self.commit.as_str(), ""), |hash| (hash, "-dirty"));
+        let short: String = hash.chars().take(7).collect();
+        if short.is_empty() {
+            format!("v{}", self.version)
+        } else {
+            format!("v{} ({short}{dirty})", self.version)
+        }
+    }
+
+    /// Whether an operator should be told that this build differs from
+    /// `other`. Two known identities compare as artifacts. When either cannot
+    /// identify its artifact, the displayed version and commit decide, so an
+    /// unidentifiable build is not reported as different from itself.
+    #[must_use]
+    pub fn differs_from(&self, other: &Self) -> bool {
+        if self.is_known() && other.is_known() {
+            !self.same_artifact(other)
+        } else {
+            self.version != other.version || self.commit != other.commit
+        }
+    }
 }
 
 fn canonical_artifact(artifact: &str) -> Option<(&str, &str, &str)> {

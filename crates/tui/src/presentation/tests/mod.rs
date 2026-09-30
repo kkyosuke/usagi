@@ -2627,6 +2627,7 @@ impl MetricsPort for StaticMetrics {
             pr_projection_gaps: 0,
             agent_concurrency: None,
             failed_background_workers: 0,
+            build: None,
         })
     }
 }

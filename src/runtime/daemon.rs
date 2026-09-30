@@ -248,6 +248,7 @@ use usagi_daemon::usecase::authority::standby::{
     ActiveOwner, StandbyCustody, StandbyProbe, admissible_active, evaluate_custody, prepare_standby,
 };
 use usagi_daemon::usecase::authority::workers::{ClientWorkers, ConnectionShutdown};
+use usagi_daemon::usecase::build_report::BuildObservation;
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
     mcp_arguments as claude_product_mcp_arguments, scoped_settings_json,
@@ -2939,7 +2940,7 @@ fn run_inner(
     // deliberately not shared: each reader classifies the record itself, so an
     // owner that dies during the probe is reported as the stale record it has
     // become rather than as a live one that went quiet.
-    let endpoint = observed_daemon_endpoint(&command, &data_dir, &store);
+    let (endpoint, daemon_build) = observed_daemon_endpoint(&command, &data_dir, &store);
     let launcher = ServeLauncher {
         exe: std::env::current_exe()?,
         launched: RefCell::new(None),
@@ -3007,6 +3008,7 @@ fn run_inner(
         generations: &generations,
         seamless: observed_seamless_refusal(&data_dir, endpoint),
         endpoint,
+        build: build_observation(daemon_build),
         rollover: &rollover,
     };
     // A stop that leaves the broker running leaves a usagi process the operator
@@ -3352,6 +3354,38 @@ fn daemon_probe_result_is_reachable<T>(result: &Result<T, ClientError>) -> bool 
     matches!(result, Ok(_) | Err(ClientError::Protocol(_)))
 }
 
+/// What one hello against the published endpoint proved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EndpointAnswer {
+    /// The daemon completed the hello and advertised the build it runs.
+    Hello(BuildIdentity),
+    /// The daemon answered with a framed refusal: reachable, but it named no
+    /// build this client may report.
+    Refused,
+    /// The attempt failed at the transport.
+    Silent,
+}
+
+impl EndpointAnswer {
+    fn is_reachable(&self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+
+    fn into_build(self) -> Option<BuildIdentity> {
+        match self {
+            Self::Hello(build) => Some(build),
+            Self::Refused | Self::Silent => None,
+        }
+    }
+}
+
+fn endpoint_answer(result: Result<BuildIdentity, ClientError>) -> EndpointAnswer {
+    if !daemon_probe_result_is_reachable(&result) {
+        return EndpointAnswer::Silent;
+    }
+    result.map_or(EndpointAnswer::Refused, EndpointAnswer::Hello)
+}
+
 /// How many times a lifecycle verb asks the recorded owner before it reports
 /// the endpoint as silent.
 ///
@@ -3408,51 +3442,90 @@ fn endpoint_probe_is_needed(
 /// as one attempt succeeds, never treat a single refusal as proof, and pause
 /// between attempts so a momentarily full accept backlog is asked again — is
 /// decided here rather than inside the real client.
+///
+/// The answering attempt's hello also names the daemon's build, which the
+/// report carries beside the observation.
 fn endpoint_observation_within(
     attempts: u32,
     sleep: &dyn Fn(Duration),
-    probe: &mut dyn FnMut() -> bool,
-) -> EndpointObservation {
+    probe: &mut dyn FnMut() -> EndpointAnswer,
+) -> (EndpointObservation, Option<BuildIdentity>) {
     for remaining in (0..attempts).rev() {
-        if probe() {
-            return EndpointObservation::Answering;
+        let answer = probe();
+        if answer.is_reachable() {
+            return (EndpointObservation::Answering, answer.into_build());
         }
         if remaining != 0 {
             sleep(ENDPOINT_PROBE_DELAY);
         }
     }
-    EndpointObservation::Silent
+    (EndpointObservation::Silent, None)
+}
+
+/// Whether this verb, without claiming anything about the endpoint, names the
+/// build of a daemon it found running.
+///
+/// `start` against a live owner reports "already running" under this client's
+/// version, which after an update is not the daemon's. One hello names the
+/// daemon's build. It is a single attempt and never a claim of silence: `start`
+/// is not asking whether the daemon serves, so a failed hello only leaves the
+/// build unnamed.
+fn build_probe_is_needed(
+    command: &PresentationDaemonCommand,
+    state: usagi_core::domain::daemon::DaemonState,
+) -> bool {
+    matches!(command, PresentationDaemonCommand::Start)
+        && state == usagi_core::domain::daemon::DaemonState::Alive
 }
 
 /// The endpoint observation this command is entitled to, against the recorded
-/// owner this data directory names.
+/// owner this data directory names, and the daemon build its hello advertised.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bare_daemon_is_idempotent_after_forced_restart
 fn observed_daemon_endpoint(
     command: &PresentationDaemonCommand,
     data_dir: &Path,
     store: &DaemonRecordStore<FsRecordFile>,
-) -> EndpointObservation {
+) -> (EndpointObservation, Option<BuildIdentity>) {
     let record = store.load().ok().flatten();
     let observation = record.as_ref().map_or(
         usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
         |record| ExactProcessControl.observe(record),
     );
-    if !endpoint_probe_is_needed(
-        command,
-        usagi_core::domain::daemon::classify(record.as_ref(), observation),
-    ) {
-        return EndpointObservation::NotObserved;
+    let state = usagi_core::domain::daemon::classify(record.as_ref(), observation);
+    if endpoint_probe_is_needed(command, state) {
+        return endpoint_observation_within(
+            ENDPOINT_PROBE_ATTEMPTS,
+            &std::thread::sleep,
+            &mut || current_daemon_answer(data_dir),
+        );
     }
-    endpoint_observation_within(ENDPOINT_PROBE_ATTEMPTS, &std::thread::sleep, &mut || {
-        current_daemon_is_reachable(data_dir)
+    let build = if build_probe_is_needed(command, state) {
+        current_daemon_answer(data_dir).into_build()
+    } else {
+        None
+    };
+    (EndpointObservation::NotObserved, build)
+}
+
+/// The daemon build a lifecycle report names, beside this client's own.
+fn build_observation(daemon: Option<BuildIdentity>) -> Option<BuildObservation> {
+    Some(BuildObservation {
+        daemon: daemon?,
+        client: current_build(),
     })
 }
 
-/// Completes the mandatory hello against the published endpoint without
-/// sending a request. A framed protocol refusal still proves the endpoint is
-/// reachable; only a transport failure means a broker may start another daemon.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
+/// Whether the published endpoint completes the mandatory hello. A framed
+/// protocol refusal still proves the endpoint is reachable; only a transport
+/// failure means a broker may start another daemon.
 pub(crate) fn current_daemon_is_reachable(data_dir: &Path) -> bool {
+    current_daemon_answer(data_dir).is_reachable()
+}
+
+/// Completes the mandatory hello against the published endpoint without
+/// sending a request, keeping the build the daemon advertised.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
+fn current_daemon_answer(data_dir: &Path) -> EndpointAnswer {
     let policy = ClientPolicy::tui();
     let clock = SystemClock::new();
     let result = (|| {
@@ -3468,7 +3541,7 @@ pub(crate) fn current_daemon_is_reachable(data_dir: &Path) -> bool {
             ClientWorkspace::Unbound,
         )
     })();
-    daemon_probe_result_is_reachable(&result)
+    endpoint_answer(result.map(|client| client.server_build().clone()))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e

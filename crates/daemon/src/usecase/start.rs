@@ -22,6 +22,7 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::{DaemonState, classify};
 use usagi_core::infrastructure::daemon::{DaemonLauncher, LivenessProbe, Sleeper};
 
+use crate::usecase::build_report::{self, BuildObservation};
 use crate::usecase::serve::DaemonRecordPort;
 use crate::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
 
@@ -58,6 +59,31 @@ pub fn start(
     stale_cleanup: &dyn StaleDaemonCleanup,
     info: &AppInfo,
 ) -> io::Result<String> {
+    start_observed(store, probe, launcher, sleeper, stale_cleanup, None, info)
+}
+
+/// [`start`], naming the build of a daemon that is already running.
+///
+/// "Already running" is prefixed with this client's version, which after an
+/// update is not the version of the daemon it found. The observed build says
+/// which daemon that is, and whether it differs from this client.
+///
+/// # Errors
+///
+/// As [`start`].
+///
+/// # Panics
+///
+/// As [`start`].
+pub fn start_observed(
+    store: &dyn DaemonRecordPort,
+    probe: &dyn LivenessProbe,
+    launcher: &dyn DaemonLauncher,
+    sleeper: &dyn Sleeper,
+    stale_cleanup: &dyn StaleDaemonCleanup,
+    build: Option<&BuildObservation>,
+    info: &AppInfo,
+) -> io::Result<String> {
     let existing = store.load()?;
     let observation = existing.as_ref().map_or(
         usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
@@ -71,7 +97,8 @@ pub fn start(
                 .expect("classify reports Alive only for a present record")
                 .pid;
             return Ok(format!(
-                "{describe}: daemon already running (pid {running})"
+                "{describe}: daemon already running (pid {running}){}",
+                build_report::clause(build)
             ));
         }
         // Process identity is signal authority, not reclaim authority.  Stale
@@ -216,9 +243,11 @@ fn startup_failure_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_POLLS, launch_and_confirm, start, startup_failure_message, startup_timeout_message,
+        BuildObservation, MAX_POLLS, launch_and_confirm, start, start_observed,
+        startup_failure_message, startup_timeout_message,
     };
     use std::cell::Cell;
+    use usagi_core::infrastructure::ipc::BuildIdentity;
 
     use crate::test_support::{
         FixedProbe, InMemoryRecordFile, NoopReady, NoopSleeper, TestLauncher,
@@ -547,6 +576,35 @@ mod tests {
         );
         // The launcher was not invoked — the record is untouched.
         assert_eq!(store.load().unwrap(), Some(existing));
+    }
+
+    #[test]
+    fn names_the_build_of_a_daemon_that_already_runs() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        store.save(&DaemonRecord::new(1111)).unwrap();
+        let launcher = TestLauncher::registering(&store, 5555);
+        let build = |version: &str| BuildIdentity {
+            version: version.to_owned(),
+            commit: String::new(),
+            target: "test".to_owned(),
+            artifact: String::new(),
+        };
+        assert_eq!(
+            start_observed(
+                &store,
+                &FixedProbe(true),
+                &launcher,
+                &NoopSleeper,
+                &NoopReady,
+                Some(&BuildObservation {
+                    daemon: build("4.8.5"),
+                    client: build("4.8.8"),
+                }),
+                &info(),
+            )
+            .unwrap(),
+            "usagi v0.1.0: daemon already running (pid 1111); daemon build v4.8.5 differs from this client v4.8.8"
+        );
     }
 
     #[test]
