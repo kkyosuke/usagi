@@ -1714,16 +1714,18 @@ launch 時の hook、sandbox writable roots、argv、private config の変更は
 順序は restart plan の effect-free 検証、sole workspace を initial tenant にした standby の起動、active-control admission の
 close / drain、最初の停止より前の durable recovery transaction、old owner での exact Agent 停止、daemon build の rollover、active generation
 による provider-native session ID の exact resume である。requester が W2 後に終了しても daemon worker が item ごとの同じ
-operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。
-exact runtime record が既に存在しない item（利用者が session を再起動した後に prune / evict された runtime）は resume できる
-source が残っていないため、stale として再試行し続けず完了扱いにする。transaction が残っている間の `daemon stop` / `daemon restart` は
-拒否され、`--force` を付けた場合だけ残りの resume を放棄して transaction を削除してから進む。これにより old owner の
+operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。これにより old owner の
 PTY handle を successor が推測して signal することも、old adapter が新設定を
 materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が
 control admission を close / drain した barrier 内で exact runtime 集合を再検証し、Agent 停止と durable handoff write の間へ
 新しい Agent admission を挟ませない。停止後に scope が stale、current adapter が resume 非対応と判明しても、別 conversation は推測しない。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
+
+transaction の item が指す exact runtime record が既に存在しない場合（session teardown、source retention を超えた GC、
+retire 済み shard の消費などで削除された runtime）は resume できる source が残っていない。worker はその item を stale として
+再試行し続けず完了扱いにし、transaction を削除する。transaction が残っている間の `daemon stop` / `daemon restart` は拒否され、
+`--force` を付けた場合だけ残りの resume を放棄して transaction を削除してから、その command の通常の `--force` の意味で進む。
 
 daemon-wide restart plan vocabulary 導入前の daemon は barrier 内の全 Agent 集合を証明できないため、
 `--restart-agents` を effect-zero で拒否する。導入直後の一度だけは live Agent を終了して通常の `daemon restart` を行う。

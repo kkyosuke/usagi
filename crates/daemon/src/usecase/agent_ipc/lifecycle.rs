@@ -422,9 +422,11 @@ impl AgentRuntime {
     /// exact-resume path. An entry whose exact runtime record no longer exists
     /// (pruned or evicted after an operator relaunched the session) can never
     /// be resumed either; reporting it as stale would retry the transaction
-    /// forever and block every later daemon stop/restart. (The exact record
-    /// lookup fails only for such a missing record.) Every other state is left
-    /// to that path's full fences.
+    /// forever and block every later daemon stop/restart. The exact record
+    /// lookup fails only for such a missing record: plan items are cloned from
+    /// `record.runtime`, which never changes after launch, so a same-id fence
+    /// mismatch cannot hide a resumable source. Every other state is left to
+    /// that path's full fences.
     #[must_use]
     pub fn daemon_restart_restore_needed(&self, runtime: &AgentRuntimeRef) -> bool {
         self.coordinator.record_for(runtime).is_ok_and(|record| {

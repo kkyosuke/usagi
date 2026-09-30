@@ -2808,7 +2808,8 @@ fn run_inner(
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "an earlier daemon Agent restart is still recovering; wait for it to finish, \
-                     or pass --force to abandon its remaining Agent resumes",
+                     or pass --force to abandon its remaining Agent resumes (with the usual \
+                     --force effect of this command on live runtimes)",
                 ));
             }
             _ => {}
