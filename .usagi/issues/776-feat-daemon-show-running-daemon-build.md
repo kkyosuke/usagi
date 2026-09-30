@@ -1,7 +1,7 @@
 ---
 number: 776
 title: "feat(daemon): 動いている daemon の build を status と TUI の Daemon modal に表示する"
-status: in-progress
+status: done
 priority: medium
 labels: [v2, daemon, tui, cli, observability]
 dependson: []
