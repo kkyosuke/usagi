@@ -425,17 +425,36 @@ impl AgentRuntime {
     /// forever and block every later daemon stop/restart. The exact record
     /// lookup fails only for such a missing record: plan items are cloned from
     /// `record.runtime`, which never changes after launch, so a same-id fence
-    /// mismatch cannot hide a resumable source. Every other state is left to
-    /// that path's full fences.
+    /// mismatch cannot hide a resumable source. Likewise, once the source's
+    /// Agent already has another live run (the operator relaunched or resumed
+    /// it, or an earlier recovery attempt spawned the replacement before
+    /// committing its progress), exact resume would refuse with "peer runtime
+    /// already exists" forever; that Agent is already recovered. Every other
+    /// state is left to that path's full fences.
     #[must_use]
     pub fn daemon_restart_restore_needed(&self, runtime: &AgentRuntimeRef) -> bool {
-        self.coordinator.record_for(runtime).is_ok_and(|record| {
-            !matches!(
-                record.state,
-                crate::usecase::runtime::RuntimeState::Reserved
-                    | crate::usecase::runtime::RuntimeState::Running
-            )
-        })
+        let Ok(record) = self.coordinator.record_for(runtime) else {
+            return false;
+        };
+        if matches!(
+            record.state,
+            crate::usecase::runtime::RuntimeState::Reserved
+                | crate::usecase::runtime::RuntimeState::Running
+        ) {
+            return false;
+        }
+        let source = record.operation.operation_id;
+        // A storage failure is not proof of a live peer: leave the entry to the
+        // resume path, which reports that failure and retries.
+        !self
+            .dispatch
+            .binding(source)
+            .ok()
+            .flatten()
+            .is_some_and(|binding| {
+                self.peer_is_stopped_except(binding.worker.agent_id, Some(source))
+                    .is_ok_and(|stopped| !stopped)
+            })
     }
 
     pub(super) fn clear_daemon_restart_authority(&mut self, runtime_ids: &BTreeSet<String>) {

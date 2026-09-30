@@ -171,6 +171,8 @@ fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
             .code,
         ErrorCode::Unavailable
     );
+    let source_runtime = diagnosis.outdated[0].runtime.clone();
+    assert!(agent.daemon_restart_restore_needed(&source_runtime));
     let repair_operation = OperationId::new().to_string();
     let replacement = agent
         .resume_with_current_integration(
@@ -180,6 +182,10 @@ fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
             &FakeScope(Ok(resolved)),
         )
         .unwrap();
+    assert!(
+        !agent.daemon_restart_restore_needed(&source_runtime),
+        "once the source's Agent runs again, a pending restart has nothing left to resume"
+    );
     assert!(
         agent
             .prepare_current_integration_resume_readiness(
