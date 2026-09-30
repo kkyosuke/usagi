@@ -1723,7 +1723,11 @@ fn concurrent_drawers_keep_root_surfaces_and_selected_session_agent_visible() {
         79
     );
 
-    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+    // Director is already open, so its toggle would close it; refocus it the
+    // way a click on the drawer does.
+    let _ = runtime.apply_event(AppEvent::WorkspaceDrawerFocused(
+        WorkspaceDrawerFocus::Director,
+    ));
     assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
     let visible = crate::presentation::workspace_terminal_attachments(&runtime, 30, 160)
         .into_iter()

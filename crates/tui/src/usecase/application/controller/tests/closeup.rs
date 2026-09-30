@@ -287,7 +287,15 @@ fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
         background
     );
 
+    // From Director the Shell toggle closes the open Shell; a second toggle
+    // reopens and focuses it.
+    assert!(update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer)).is_empty());
+    assert!(!state.root_terminal_drawer_open());
     let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
     assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
     assert!(state.root_terminal_drawer_open());
     assert!(state.director_drawer_open());

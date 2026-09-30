@@ -2471,7 +2471,7 @@ pub fn render_home_at(
     if let Some(frame) = garden_frame(raw_height, raw_width, home, now) {
         return frame.frame.rows;
     }
-    let full_body_height = height.saturating_sub(CHROME_ROWS);
+    let body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
     frame.push(home_notice_banner(width, home));
@@ -2481,14 +2481,9 @@ pub fn render_home_at(
         .map(|_| director_drawer::geometry(height, width));
     let root_terminal_width =
         root_terminal_available_width(height, width, director_geometry.is_some());
-    let body_height = home
-        .root_terminal_drawer
-        .as_ref()
-        .map_or(full_body_height, |_| {
-            root_terminal_drawer::geometry_for(height, width, root_terminal_width)
-                .top
-                .saturating_sub(CHROME_ROWS)
-        });
+    // The Shell drawer is an overlay like Director: Home keeps its full body
+    // height underneath, so opening it neither reflows the sidebar (the mascot
+    // stays on its row) nor looks like a terminal resize.
     let split = panes::split(width, LEFT_WIDTH);
     let right = dim_inactive_right_pane(
         !home.right_pane_focused(),
@@ -5269,6 +5264,47 @@ mod tests {
             !narrow_text.contains("workspace shell output"),
             "a full-width Director overlay occludes the Shell at the narrow breakpoint"
         );
+    }
+
+    #[test]
+    fn shell_drawer_overlays_home_without_reflowing_the_sidebar() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let sessions = [projected_session(
+            session,
+            "visible-session",
+            "/work/session",
+        )];
+        let closed_state = AppState::home(workspace, vec![session]);
+        let closed = HomeProjection::from_state(&closed_state, "atlas", &sessions);
+
+        let mut open_state = closed_state;
+        let _ = update(
+            &mut open_state,
+            AppEvent::Key(AppKey::ToggleRootTerminalDrawer),
+        );
+        let open = HomeProjection::from_state(&open_state, "atlas", &sessions)
+            .with_root_terminal_drawer(RootTerminalDrawerProjection::default());
+
+        let (height, width) = (30, 100);
+        let closed_frame = render_home(height, width, &closed);
+        let open_frame = render_home(height, width, &open);
+        let drawer_top = root_terminal_drawer::geometry_for(
+            height,
+            width,
+            root_terminal_available_width(height, width, false),
+        )
+        .top;
+        assert!(drawer_top > CHROME_ROWS);
+        // Row 0 is the header whose Shell button highlights; every Home row the
+        // drawer leaves visible must be the unchanged full-height layout.
+        for row in 1..drawer_top {
+            assert_eq!(
+                strip(&open_frame[row]),
+                strip(&closed_frame[row]),
+                "Home row {row} moved when the Shell drawer opened"
+            );
+        }
     }
 
     #[test]

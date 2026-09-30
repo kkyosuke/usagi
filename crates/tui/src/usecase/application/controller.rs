@@ -4182,6 +4182,14 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
 }
 
 fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> {
+    // Each drawer toggles independently: an already-open Shell closes from
+    // Director exactly as an open Director closes from the Shell, leaving
+    // Director focused instead of stealing focus back to the Shell.
+    if matches!(key, AppKey::ToggleRootTerminalDrawer) && state.root_terminal_drawer_open {
+        state.root_terminal_drawer_open = false;
+        state.root_terminal_full_height = false;
+        return Some(Vec::new());
+    }
     if matches!(key, AppKey::ToggleRootTerminalDrawer) {
         state.root_terminal_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Terminal);
@@ -5134,6 +5142,21 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
 }
 
+/// Toggle Director while the Shell owns input. An already-open Director closes
+/// without taking focus from the Shell, mirroring the Shell toggle inside
+/// Director; a closed one opens and takes focus.
+fn toggle_director_from_root_terminal(state: &mut AppState) {
+    state.director_new = DirectorNew::Idle;
+    if state.director_drawer_open {
+        state.director_drawer_open = false;
+        state.director_goal.clear();
+        return;
+    }
+    state.root_terminal_full_height = false;
+    state.director_drawer_open = true;
+    state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
+}
+
 fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
     match key {
         AppKey::ToggleRootTerminalDrawer => {
@@ -5149,10 +5172,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             Vec::new()
         }
         AppKey::ToggleDirectorDrawer => {
-            state.root_terminal_full_height = false;
-            state.director_drawer_open = true;
-            state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
-            state.director_new = DirectorNew::Idle;
+            toggle_director_from_root_terminal(state);
             Vec::new()
         }
         AppKey::OpenDirectorNew => {
