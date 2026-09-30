@@ -426,11 +426,10 @@ impl AgentRuntime {
     /// lookup fails only for such a missing record: plan items are cloned from
     /// `record.runtime`, which never changes after launch, so a same-id fence
     /// mismatch cannot hide a resumable source. Likewise, once the source's
-    /// Agent already has another live run (the operator relaunched or resumed
-    /// it, or an earlier recovery attempt spawned the replacement before
-    /// committing its progress), exact resume would refuse with "peer runtime
-    /// already exists" forever; that Agent is already recovered. Every other
-    /// state is left to that path's full fences.
+    /// Agent identity already has another non-terminal run (the operator
+    /// relaunched or resumed it by hand), exact resume would refuse with "peer
+    /// runtime already exists" forever; that Agent is already running again.
+    /// Every other state is left to that path's full fences.
     #[must_use]
     pub fn daemon_restart_restore_needed(&self, runtime: &AgentRuntimeRef) -> bool {
         let Ok(record) = self.coordinator.record_for(runtime) else {

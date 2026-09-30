@@ -1790,9 +1790,9 @@ control admission を close / drain した barrier 内で exact runtime 集合�
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
 transaction の item が指す exact runtime record が既に存在しない場合（session teardown、source retention を超えた GC、
-retire 済み shard の消費などで削除された runtime）は resume できる source が残っていない。source の Agent が既に別の live run を
-持つ場合（利用者が relaunch / resume した、または前回の recovery が replacement を spawn した直後に進捗を書く前に落ちた）は、
-exact resume が peer の存在で拒否され続けるが、その Agent は既に復旧している。worker はどちらの item も再試行し続けず完了扱いにし、
+retire 済み shard の消費などで削除された runtime）は resume できる source が残っていない。source の Agent identity が既に終了していない
+別の run を持つ場合（利用者が手動で relaunch / resume した）は、exact resume が peer の存在で拒否され続けるが、
+その Agent は既に再び動いている。worker はどちらの item も再試行し続けず完了扱いにし、
 全 item の完了後に transaction を削除する。transaction が残っている間の `daemon stop` / `daemon restart` は拒否され、
 `--force` を付けた場合だけ残りの resume を放棄して transaction を削除してから、その command の通常の `--force` の意味で進む。
 

@@ -184,7 +184,7 @@ fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
         .unwrap();
     assert!(
         !agent.daemon_restart_restore_needed(&source_runtime),
-        "once the source's Agent runs again, a pending restart has nothing left to resume"
+        "a superseded source has nothing left to resume"
     );
     assert!(
         agent
@@ -305,6 +305,23 @@ fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
             .iter()
             .all(|item| item.state == AgentRuntimeInventoryState::Exited)
     );
+    // The operator relaunches the stopped Agent by hand: an ordinary launch
+    // reuses the stopped Agent identity, so exact resume of the planned source
+    // would refuse with a live peer forever. That Agent is already running
+    // again, so a pending restart plan completes the item instead.
+    let relaunch = agent
+        .launch(
+            &OperationId::new().to_string(),
+            &AgentLaunchIntent {
+                workspace,
+                session: None,
+                profile: Some(AgentProfileId::new("claude").unwrap()),
+            },
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    assert_ne!(relaunch.terminal, admission.terminal);
+    assert!(!agent.daemon_restart_restore_needed(&stopped.agents[0].runtime));
 }
 
 #[test]
