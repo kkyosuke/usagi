@@ -2495,8 +2495,9 @@ pub fn render_home_at(
         &right,
         split,
     ));
+    // Header, notice, and the full-height body always fill `height` exactly;
+    // truncation only guards terminals shorter than the chrome.
     frame.truncate(height);
-    frame.resize_with(height, || " ".repeat(width));
     // Side-by-side drawers are peers: paint Director's dimmed Home background
     // first, then restore the Shell in its left-hand band. At the narrow
     // full-width breakpoint they overlap, so Director remains foreground.
