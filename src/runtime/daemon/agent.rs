@@ -829,10 +829,7 @@ pub(super) fn restore_pending_daemon_agents(
         let owner = agent
             .lock()
             .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
-        if !owner
-            .daemon_restart_restore_needed(&item.agent.runtime)
-            .map_err(|error| std::io::Error::other(error.message))?
-        {
+        if !owner.daemon_restart_restore_needed(&item.agent.runtime) {
             drop(owner);
             pending.agents[index].completed = true;
             write_pending_daemon_agent_restart(data_dir, pending)?;

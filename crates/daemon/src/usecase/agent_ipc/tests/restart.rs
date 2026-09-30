@@ -171,6 +171,8 @@ fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
             .code,
         ErrorCode::Unavailable
     );
+    let source_runtime = diagnosis.outdated[0].runtime.clone();
+    assert!(agent.daemon_restart_restore_needed(&source_runtime));
     let repair_operation = OperationId::new().to_string();
     let replacement = agent
         .resume_with_current_integration(
@@ -180,6 +182,10 @@ fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
             &FakeScope(Ok(resolved)),
         )
         .unwrap();
+    assert!(
+        !agent.daemon_restart_restore_needed(&source_runtime),
+        "a superseded source has nothing left to resume"
+    );
     assert!(
         agent
             .prepare_current_integration_resume_readiness(
@@ -257,11 +263,7 @@ fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
     assert_eq!(plan.agents.len(), 1);
     assert_eq!(plan.agents[0].runtime.terminal, admission.terminal);
     assert_eq!(plan.agents[0].phase, AgentPhase::Waiting);
-    assert!(
-        !agent
-            .daemon_restart_restore_needed(&plan.agents[0].runtime)
-            .unwrap()
-    );
+    assert!(!agent.daemon_restart_restore_needed(&plan.agents[0].runtime));
 
     let mut stale = plan.agents[0].runtime.clone();
     stale.agent_runtime_id = AgentRuntimeId::new();
@@ -288,11 +290,13 @@ fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
         )
         .unwrap();
     assert_eq!(stopped, current);
-    assert!(
-        agent
-            .daemon_restart_restore_needed(&stopped.agents[0].runtime)
-            .unwrap()
-    );
+    assert!(agent.daemon_restart_restore_needed(&stopped.agents[0].runtime));
+    // A runtime whose exact record is gone (pruned after the session was
+    // relaunched) has nothing left to resume, so recovery completes it instead
+    // of retrying a stale reference forever.
+    let mut pruned = stopped.agents[0].runtime.clone();
+    pruned.agent_runtime_id = AgentRuntimeId::new();
+    assert!(!agent.daemon_restart_restore_needed(&pruned));
     assert_eq!(agent.provisioned_mcp_callers(), 0);
     assert!(
         agent
@@ -301,6 +305,23 @@ fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
             .iter()
             .all(|item| item.state == AgentRuntimeInventoryState::Exited)
     );
+    // The operator relaunches the stopped Agent by hand: an ordinary launch
+    // reuses the stopped Agent identity, so exact resume of the planned source
+    // would refuse with a live peer forever. That Agent is already running
+    // again, so a pending restart plan completes the item instead.
+    let relaunch = agent
+        .launch(
+            &OperationId::new().to_string(),
+            &AgentLaunchIntent {
+                workspace,
+                session: None,
+                profile: Some(AgentProfileId::new("claude").unwrap()),
+            },
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    assert_ne!(relaunch.terminal, admission.terminal);
+    assert!(!agent.daemon_restart_restore_needed(&stopped.agents[0].runtime));
 }
 
 #[test]

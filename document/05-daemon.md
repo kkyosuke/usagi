@@ -1789,6 +1789,13 @@ control admission を close / drain した barrier 内で exact runtime 集合�
 新しい Agent admission を挟ませない。停止後に scope が stale、current adapter が resume 非対応と判明しても、別 conversation は推測しない。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
+transaction の item が指す exact runtime record が既に存在しない場合（session teardown、source retention を超えた GC、
+retire 済み shard の消費などで削除された runtime）は resume できる source が残っていない。source の Agent identity が既に終了していない
+別の run を持つ場合（利用者が手動で relaunch / resume した）は、exact resume が peer の存在で拒否され続けるが、
+その Agent は既に再び動いている。worker はどちらの item も再試行し続けず完了扱いにし、
+全 item の完了後に transaction を削除する。transaction が残っている間の `daemon stop` / `daemon restart` は拒否され、
+`--force` を付けた場合だけ残りの resume を放棄して transaction を削除してから、その command の通常の `--force` の意味で進む。
+
 daemon-wide restart plan vocabulary 導入前の daemon は barrier 内の全 Agent 集合を証明できないため、
 `--restart-agents` を effect-zero で拒否する。導入直後の一度だけは live Agent を終了して通常の `daemon restart` を行う。
 `--force` の cold restart は互換経路として残るが Agent と generic Terminal を破棄するため、自動 exact resume の代替にはしない。
