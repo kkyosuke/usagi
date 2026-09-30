@@ -628,7 +628,7 @@ Director の左端に合わせ、Shell と Director を左右に並べる。Shel
 Director を閉じると単独時の全幅へ戻す。選択 session の Agent pane は drawer 背景として通常の Home geometry を維持する。
 Director が全幅へ縮退する狭幅では Shell をゼロ幅に resize せず、従来の全幅 geometry のまま背面に維持して Director を前面に描く。
 最後に開いた drawer が入力を所有し、もう一方の見えている panel をクリックすると、drawer を閉じずに入力を移す。
-2 つの drawer の toggle（`Ctrl-O t` / `Ctrl-O g` と header button）は入力の所有と無関係に独立しており、開いている drawer は
+2 つの drawer の toggle（`Ctrl-O Ctrl-T` / `Ctrl-O t`、`Ctrl-O Ctrl-G` / `Ctrl-O g` と header button）は入力の所有と無関係に独立しており、開いている drawer は
 閉じ、閉じている drawer は開いて入力を所有させる。入力を所有する drawer を閉じた場合は、残った drawer へ入力を戻す。
 Shell drawer も Director と同じく Home の上に重ねる overlay であり、開閉で背景 Home の sidebar・pane を再 layout しない。
 managed Closeup と root Agent/Terminal の各選択状態はこの切替で保持し、workspace terminal へ再びフォーカスしたときは
