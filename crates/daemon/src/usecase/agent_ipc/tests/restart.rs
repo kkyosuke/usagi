@@ -257,11 +257,7 @@ fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
     assert_eq!(plan.agents.len(), 1);
     assert_eq!(plan.agents[0].runtime.terminal, admission.terminal);
     assert_eq!(plan.agents[0].phase, AgentPhase::Waiting);
-    assert!(
-        !agent
-            .daemon_restart_restore_needed(&plan.agents[0].runtime)
-            .unwrap()
-    );
+    assert!(!agent.daemon_restart_restore_needed(&plan.agents[0].runtime));
 
     let mut stale = plan.agents[0].runtime.clone();
     stale.agent_runtime_id = AgentRuntimeId::new();
@@ -288,11 +284,13 @@ fn daemon_restart_plan_revalidates_every_live_agent_before_interrupting() {
         )
         .unwrap();
     assert_eq!(stopped, current);
-    assert!(
-        agent
-            .daemon_restart_restore_needed(&stopped.agents[0].runtime)
-            .unwrap()
-    );
+    assert!(agent.daemon_restart_restore_needed(&stopped.agents[0].runtime));
+    // A runtime whose exact record is gone (pruned after the session was
+    // relaunched) has nothing left to resume, so recovery completes it instead
+    // of retrying a stale reference forever.
+    let mut pruned = stopped.agents[0].runtime.clone();
+    pruned.agent_runtime_id = AgentRuntimeId::new();
+    assert!(!agent.daemon_restart_restore_needed(&pruned));
     assert_eq!(agent.provisioned_mcp_callers(), 0);
     assert!(
         agent

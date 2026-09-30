@@ -1714,7 +1714,10 @@ launch 時の hook、sandbox writable roots、argv、private config の変更は
 順序は restart plan の effect-free 検証、sole workspace を initial tenant にした standby の起動、active-control admission の
 close / drain、最初の停止より前の durable recovery transaction、old owner での exact Agent 停止、daemon build の rollover、active generation
 による provider-native session ID の exact resume である。requester が W2 後に終了しても daemon worker が item ごとの同じ
-operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。これにより old owner の
+operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。
+exact runtime record が既に存在しない item（利用者が session を再起動した後に prune / evict された runtime）は resume できる
+source が残っていないため、stale として再試行し続けず完了扱いにする。transaction が残っている間の `daemon stop` / `daemon restart` は
+拒否され、`--force` を付けた場合だけ残りの resume を放棄して transaction を削除してから進む。これにより old owner の
 PTY handle を successor が推測して signal することも、old adapter が新設定を
 materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が

@@ -2794,16 +2794,21 @@ fn run_inner(
     };
     if let Some(pending) = read_pending_daemon_agent_restart(&data_dir)? {
         match &command {
-            CliDaemonCommand::Stop { force: true } => {
-                // The explicit cold stop gives up every recoverable runtime as
-                // well as every live one; do not revive this plan on a later
-                // start after the operator made that choice.
+            CliDaemonCommand::Stop { force: true }
+            | CliDaemonCommand::Restart { force: true, .. } => {
+                // An explicit forced stop or restart gives up every recoverable
+                // runtime as well as every live one; do not revive this plan on
+                // a later start after the operator made that choice. This is
+                // also the escape hatch for a plan whose Agents can no longer
+                // be resumed, which would otherwise block lifecycle forever.
                 clear_pending_daemon_agent_restart(&data_dir, &pending.operation_id)?;
             }
-            CliDaemonCommand::Stop { force: false } | CliDaemonCommand::Restart { .. } => {
+            CliDaemonCommand::Stop { force: false }
+            | CliDaemonCommand::Restart { force: false, .. } => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
-                    "an earlier daemon Agent restart is still recovering; wait for it to finish",
+                    "an earlier daemon Agent restart is still recovering; wait for it to finish, \
+                     or pass --force to abandon its remaining Agent resumes",
                 ));
             }
             _ => {}

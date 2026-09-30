@@ -419,21 +419,21 @@ impl AgentRuntime {
     /// A transaction is persisted before interruption, so a pre-effect crash
     /// can leave entries whose exact original runtime is still live. Those
     /// entries are already recovered and must not be sent through the non-live
-    /// exact-resume path. Every other state is left to that path's full fences.
-    pub fn daemon_restart_restore_needed(
-        &self,
-        runtime: &AgentRuntimeRef,
-    ) -> Result<bool, ProtocolError> {
-        self.coordinator
-            .record_for(runtime)
-            .map(|record| {
-                !matches!(
-                    record.state,
-                    crate::usecase::runtime::RuntimeState::Reserved
-                        | crate::usecase::runtime::RuntimeState::Running
-                )
-            })
-            .map_err(map_runtime_error)
+    /// exact-resume path. An entry whose exact runtime record no longer exists
+    /// (pruned or evicted after an operator relaunched the session) can never
+    /// be resumed either; reporting it as stale would retry the transaction
+    /// forever and block every later daemon stop/restart. (The exact record
+    /// lookup fails only for such a missing record.) Every other state is left
+    /// to that path's full fences.
+    #[must_use]
+    pub fn daemon_restart_restore_needed(&self, runtime: &AgentRuntimeRef) -> bool {
+        self.coordinator.record_for(runtime).is_ok_and(|record| {
+            !matches!(
+                record.state,
+                crate::usecase::runtime::RuntimeState::Reserved
+                    | crate::usecase::runtime::RuntimeState::Running
+            )
+        })
     }
 
     pub(super) fn clear_daemon_restart_authority(&mut self, runtime_ids: &BTreeSet<String>) {
