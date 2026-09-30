@@ -472,10 +472,13 @@ pub(super) fn spawn_ipc_server(
             verification_clock,
             projection,
             decisions,
-            metrics: Arc::new(Mutex::new(MetricsBroker::with_runtime_health(
-                agent_concurrency,
-                shutdown.background_worker_health(),
-            ))),
+            metrics: Arc::new(Mutex::new(
+                MetricsBroker::with_runtime_health(
+                    agent_concurrency,
+                    shutdown.background_worker_health(),
+                )
+                .with_build(current_build()),
+            )),
             process_metrics: Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
             pipeline_metrics,
             supervisor,

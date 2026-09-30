@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
 
-use usagi_core::infrastructure::ipc::{AgentConcurrency, DaemonMetrics};
+use usagi_core::infrastructure::ipc::{AgentConcurrency, BuildIdentity, DaemonMetrics};
 
 use super::shutdown::BackgroundWorkerHealth;
 
@@ -122,6 +122,7 @@ pub struct MetricsBroker {
     latest: MetricsSample,
     agent_concurrency: AgentConcurrencyGauge,
     background_workers: BackgroundWorkerHealth,
+    build: Option<BuildIdentity>,
 }
 
 impl MetricsBroker {
@@ -153,6 +154,15 @@ impl MetricsBroker {
         }
     }
 
+    /// Reports the build this daemon process was started from on every
+    /// snapshot. The composition root fixes it once at startup, like the
+    /// handshake's build, so a replaced executable on disk never changes it.
+    #[must_use]
+    pub fn with_build(mut self, build: BuildIdentity) -> Self {
+        self.build = Some(build);
+        self
+    }
+
     #[must_use]
     pub fn subscribe(&mut self) -> MetricsObserver {
         self.next = self.next.saturating_add(1);
@@ -178,7 +188,7 @@ impl MetricsBroker {
     #[must_use]
     pub fn snapshot(&self) -> DaemonMetrics {
         DaemonMetrics {
-            schema_version: 4,
+            schema_version: 5,
             sampled_at_ms: self.latest.sampled_at_ms,
             cpu_percent_hundredths: self.latest.cpu_percent_hundredths,
             resident_memory_bytes: self.latest.resident_memory_bytes,
@@ -192,6 +202,7 @@ impl MetricsBroker {
             pr_projection_gaps: self.latest.pr_projection_gaps,
             agent_concurrency: self.agent_concurrency.observe(),
             failed_background_workers: self.background_workers.failed_count(),
+            build: self.build.clone(),
         }
     }
 
@@ -284,8 +295,24 @@ mod tests {
         let mut broker = MetricsBroker::default();
         assert_eq!(broker.snapshot().agent_concurrency, None);
         assert_eq!(broker.publish(sample(1)).agent_concurrency, None);
-        // Schema 4 carries both runtime health projections.
-        assert_eq!(broker.snapshot().schema_version, 4);
+        // Schema 5 carries both runtime health projections and the build.
+        assert_eq!(broker.snapshot().schema_version, 5);
+        assert_eq!(broker.snapshot().build, None);
+    }
+
+    #[test]
+    fn a_bound_build_is_reported_on_every_snapshot_and_published_tick() {
+        let build = BuildIdentity {
+            version: "4.8.5".to_owned(),
+            commit: "abc".to_owned(),
+            target: "test".to_owned(),
+            artifact: String::new(),
+        };
+        let mut broker = MetricsBroker::default().with_build(build.clone());
+        let observer = broker.subscribe();
+        assert_eq!(broker.snapshot().build.as_ref(), Some(&build));
+        assert_eq!(broker.publish(sample(1)).build.as_ref(), Some(&build));
+        assert_eq!(observer.try_recv().unwrap().build, Some(build));
     }
 
     #[test]

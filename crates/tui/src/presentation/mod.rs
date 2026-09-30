@@ -530,6 +530,13 @@ pub trait ControllerBackendFactory {
         false
     }
 
+    /// The build of this client process, which the Daemon modal compares with
+    /// the build the daemon reports. Fakes report none, so the modal shows the
+    /// daemon's build without a comparison.
+    fn client_build(&self) -> Option<usagi_core::infrastructure::ipc::BuildIdentity> {
+        None
+    }
+
     fn create(
         &mut self,
         snapshot: &WorkspaceSnapshot,

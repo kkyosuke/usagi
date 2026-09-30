@@ -340,6 +340,7 @@ mod tests {
             // health は Agent concurrency を読まない（診断は counter と freshness だけ）。
             agent_concurrency: None,
             failed_background_workers: 0,
+            build: None,
         }
     }
 

@@ -509,6 +509,14 @@ mod metrics_schema_tests {
         // Absent Agent concurrency is unknown, never an implied zero.
         assert_eq!(legacy_snapshot.agent_concurrency, None);
         assert_eq!(snapshot.agent_concurrency, None);
+        // A peer older than schema 5 names no build; it is unknown, never this client's.
+        assert_eq!(legacy_snapshot.build, None);
+        assert!(
+            serde_json::to_value(&legacy_snapshot)
+                .unwrap()
+                .get("build")
+                .is_none()
+        );
     }
 
     /// The Agent concurrency projection is additive in both directions: a peer

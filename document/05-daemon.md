@@ -214,8 +214,8 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 
 | コマンド | 動作 |
 |---|---|
-| `usagi daemon` / `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで最大 30 秒待つ（[起動窓](#起動窓)）。すでに稼働中なら成功としてその pid を表示し、新しい process を起動しない |
-| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示し、running の場合はさらに [endpoint 観測](#endpoint-が応答するかは-process-の生存とは別の観測である)で応答するかを区別する。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
+| `usagi daemon` / `usagi daemon start` | detached `serve` を起動し、`daemon.json` に稼働中の pid が登録されるまで最大 30 秒待つ（[起動窓](#起動窓)）。すでに稼働中なら成功としてその pid を表示し、新しい process を起動しない。稼働中の場合は endpoint へ hello を 1 回だけ送り、[daemon の build](#行頭の-version-は-client-の-build-である)を行末に添える |
+| `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示し、running の場合はさらに [endpoint 観測](#endpoint-が応答するかは-process-の生存とは別の観測である)で応答するかを区別し、応答した hello が名乗る [daemon の build](#行頭の-version-は-client-の-build-である)を行末に添える。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
 | `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は同一 workspace の全 live Agent を durable transaction から exact stop/resume し、`--restart-agents --force` は Running 中の Agent の中断も許可する。複数 workspace は停止前に拒否し、`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
@@ -257,6 +257,29 @@ handshake が他の仕事の後ろに並んでいる — を**沈黙と読み違
 
 待ちは `attempt 数 × CONNECT_MS + (attempt 数 - 1) × 間隔` を超えず（間隔は attempt の**間**にだけ置く）、
 record が Alive かつ何も応答しない daemon に対してだけ発生する。
+
+### 行頭の version は client の build である
+
+lifecycle verb の出力行は `usagi v<version>:` で始まる。この version は**コマンドを実行した client binary の
+version** であり、稼働中 daemon の version ではない。更新直後、rollover 前の旧 daemon が動いていても行頭は新しい
+version になるため、daemon 自身の build を別に添える。
+
+daemon の build の正本は、daemon が process 起動時に固定し mandatory handshake の server hello で名乗る
+build identity である。`daemon.json` には version を複製しない。
+
+| verb | 観測 | 添える句 |
+|---|---|---|
+| `status` | [endpoint 観測](#endpoint-が応答するかは-process-の生存とは別の観測である)で応答した hello | `; daemon build v<version> (<commit>)` |
+| `start`（稼働中） | hello 1 回。endpoint については何も主張しない | 同上 |
+
+- client と build が異なれば `differs from this client v<version> (<commit>)` を続ける。両者が artifact を識別できる
+  場合は artifact で、どちらかが識別できない場合は version と commit で比べる。
+- commit は 7 桁に短縮し、未 commit の変更を含む build の `-dirty` は残す。
+- framed な拒否で応答した daemon、hello が失敗した daemon、running と報告しない daemon には句を添えない
+  （観測していない build を名乗らない）。
+
+daemon の build は [daemon metrics](04-ipc.md#daemon-metrics) の `build` でも運ばれ、TUI の Daemon modal が表示する
+（[3. TUI](03-tui.md#overview-と-modal)）。
 
 ### 起動窓
 

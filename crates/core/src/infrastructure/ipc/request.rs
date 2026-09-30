@@ -22,7 +22,7 @@ use crate::domain::pr_inventory::{PrEntry, PrInventory};
 use crate::domain::session_lifecycle::AgentPhase;
 use crate::domain::terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope};
 
-use super::{ErrorCode, ProtocolError, RetryMode, SideEffect};
+use super::{BuildIdentity, ErrorCode, ProtocolError, RetryMode, SideEffect};
 
 /// A daemon request understood by every presentation surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -497,6 +497,11 @@ pub struct DaemonMetrics {
     /// Long-lived daemon workers that exited unexpectedly in this process.
     #[serde(default)]
     pub failed_background_workers: u8,
+    /// The build this daemon process was started from, fixed at startup. `None`
+    /// when the daemon does not report it (a peer older than schema 5), which a
+    /// client must show as unknown rather than as its own build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
 }
 
 /// Product-neutral Agent launch intent sent by a TUI client.

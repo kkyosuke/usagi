@@ -19,7 +19,7 @@ use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
 use usagi_core::domain::id::AgentContinuationRef;
 use usagi_core::domain::id::{AgentRuntimeId, OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
-use usagi_core::infrastructure::ipc::DaemonMetrics;
+use usagi_core::infrastructure::ipc::{BuildIdentity, DaemonMetrics};
 
 /// Daemon capacity refusal and the action-oriented copy shown in Closeup.
 /// The daemon owns the resource fact; the TUI owns the recovery vocabulary.
@@ -132,6 +132,10 @@ pub struct WorkspaceRuntime {
     root_terminal_selection: Option<TabSelection>,
     material_revision: u64,
     material_size: Option<(u16, u16)>,
+    /// The build of this client process, resolved by the composition root. The
+    /// Daemon modal compares it with the build the daemon reports; `None` shows
+    /// the daemon's build without a comparison.
+    client_build: Option<BuildIdentity>,
 }
 
 impl WorkspaceRuntime {
@@ -182,6 +186,7 @@ impl WorkspaceRuntime {
             root_terminal_selection: None,
             material_revision: 0,
             material_size: None,
+            client_build: None,
         }
     }
 
@@ -407,6 +412,17 @@ impl WorkspaceRuntime {
     /// palettes without rebuilding the workspace runtime or its live panes.
     pub fn set_modal_selection_mode(&mut self, mode: ModalSelectionMode) {
         self.modal_selection_mode = mode;
+    }
+
+    /// Record this client's build for the Daemon modal's comparison.
+    pub fn set_client_build(&mut self, build: Option<BuildIdentity>) {
+        self.client_build = build;
+    }
+
+    /// This client's build, when the composition root resolved one.
+    #[must_use]
+    pub const fn client_build(&self) -> Option<&BuildIdentity> {
+        self.client_build.as_ref()
     }
 
     pub fn set_pr_auto_open(&mut self, mode: usagi_core::domain::settings::PrAutoOpen) {
