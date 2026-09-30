@@ -6,6 +6,7 @@
 //! backend の command log と event queue を使う。
 
 mod decision;
+use decision::update_decision_editor;
 mod entry;
 mod new;
 mod preview;
@@ -42,7 +43,9 @@ use usagi_core::domain::settings::{
     AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, WorkMode, format_env_bindings,
 };
 use usagi_core::domain::supervisor::SupervisorRunId;
-use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
+use usagi_core::domain::user_decision::{
+    UserDecision, UserDecisionAnswer, UserDecisionSelectionMode, UserDecisionStatus,
+};
 use usagi_core::usecase::agent_phase::AgentPhaseAggregation;
 use usagi_core::usecase::env::EnvScope;
 
@@ -547,6 +550,12 @@ pub struct EnvironmentEditor {
 pub struct DecisionEditor {
     decision: UserDecision,
     selected_option: usize,
+    checked_options: BTreeSet<String>,
+    context_column: usize,
+    input_freeform: bool,
+    input_comment: bool,
+    comment: String,
+    confirmation: Option<UserDecisionAnswer>,
     /// Explicit text viewport offset. `None` follows the active automatic anchor.
     scroll_offset: Option<usize>,
     /// Whether automatic scrolling follows the freeform draft instead.
@@ -557,14 +566,46 @@ pub struct DecisionEditor {
 
 impl DecisionEditor {
     fn new(decision: UserDecision) -> Self {
+        let scroll_offset =
+            (!decision.context.is_empty() || decision.recommendation.is_some()).then_some(0);
         Self {
             decision,
             selected_option: 0,
-            scroll_offset: None,
+            checked_options: BTreeSet::new(),
+            context_column: 0,
+            input_freeform: false,
+            input_comment: false,
+            comment: String::new(),
+            confirmation: None,
+            scroll_offset,
             follow_freeform: false,
             freeform: String::new(),
             error: None,
         }
+    }
+    #[must_use]
+    pub fn option_checked(&self, id: &str) -> bool {
+        self.checked_options.contains(id)
+    }
+    #[must_use]
+    pub const fn context_column(&self) -> usize {
+        self.context_column
+    }
+    #[must_use]
+    pub const fn input_freeform(&self) -> bool {
+        self.input_freeform
+    }
+    #[must_use]
+    pub fn comment(&self) -> &str {
+        &self.comment
+    }
+    #[must_use]
+    pub const fn input_comment(&self) -> bool {
+        self.input_comment
+    }
+    #[must_use]
+    pub fn confirmation(&self) -> Option<&UserDecisionAnswer> {
+        self.confirmation.as_ref()
     }
     #[must_use]
     pub fn decision(&self) -> &UserDecision {
@@ -4857,7 +4898,12 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
-    if overlay.editor.is_some() && matches!(&key, AppKey::Escape) {
+    if overlay
+        .editor
+        .as_ref()
+        .is_some_and(|editor| editor.confirmation.is_none())
+        && matches!(&key, AppKey::Escape)
+    {
         overlay.editor = None;
         return Vec::new();
     }
@@ -4883,97 +4929,6 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         _ => {}
     }
     Vec::new()
-}
-
-fn update_decision_editor(
-    workspace: WorkspaceId,
-    editor: &mut DecisionEditor,
-    key: AppKey,
-) -> Vec<Effect> {
-    match key {
-        AppKey::DecisionPrevious | AppKey::Up => {
-            editor.selected_option = editor.selected_option.saturating_sub(1);
-            editor.scroll_offset = None;
-            editor.follow_freeform = false;
-        }
-        AppKey::DecisionNext | AppKey::Down => {
-            editor.selected_option =
-                (editor.selected_option + 1).min(editor.decision.options.len().saturating_sub(1));
-            editor.scroll_offset = None;
-            editor.follow_freeform = false;
-        }
-        AppKey::PageUp => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
-            editor.follow_freeform = false;
-        }
-        AppKey::PageDown => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
-            editor.follow_freeform = false;
-        }
-        AppKey::SetDecisionFreeform(text) => {
-            if editor.decision.allow_freeform {
-                editor.freeform = text;
-                follow_decision_freeform(editor);
-            }
-        }
-        AppKey::Char(ch) if editor.decision.allow_freeform => {
-            editor.freeform.push(ch);
-            follow_decision_freeform(editor);
-        }
-        AppKey::Backspace if editor.decision.allow_freeform => {
-            editor.freeform.pop();
-            follow_decision_freeform(editor);
-        }
-        AppKey::Paste(text) if editor.decision.allow_freeform => {
-            paste_decision_freeform(editor, &text);
-        }
-        AppKey::SubmitDecision | AppKey::Enter => {
-            let answer = if editor.decision.allow_freeform && !editor.freeform.trim().is_empty() {
-                UserDecisionAnswer::Freeform {
-                    text: editor.freeform.trim().to_owned(),
-                }
-            } else if let Some(option) = editor.decision.options.get(editor.selected_option) {
-                UserDecisionAnswer::Option {
-                    option_id: option.id.clone(),
-                }
-            } else {
-                editor.error = Some(SafeError {
-                    message: SafeMessage::new("select a valid answer"),
-                    error_id: "decision-invalid-answer".to_owned(),
-                });
-                return Vec::new();
-            };
-            if editor
-                .decision
-                .validate_answer(&answer, chrono::Utc::now())
-                .is_err()
-            {
-                editor.error = Some(SafeError {
-                    message: SafeMessage::new("select a valid answer"),
-                    error_id: "decision-invalid-answer".to_owned(),
-                });
-                return Vec::new();
-            }
-            return vec![Effect::ResolveDecision {
-                workspace,
-                decision_id: editor.decision.decision_id,
-                answer,
-            }];
-        }
-        _ => {}
-    }
-    Vec::new()
-}
-
-fn follow_decision_freeform(editor: &mut DecisionEditor) {
-    editor.scroll_offset = None;
-    editor.follow_freeform = true;
-    editor.error = None;
-}
-
-fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
-    editor.freeform.push_str(text);
-    follow_decision_freeform(editor);
 }
 
 /// Move between usable managed sessions without exposing the synthetic create

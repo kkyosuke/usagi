@@ -92,8 +92,16 @@ pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M, W> {
     /// retained generation の exact liveness と cold shutdown。
     pub generations: &'a dyn usecase::replacement::RetainedGenerationControl,
     /// この build が live successor へ authority を渡せない理由。durable な
-    /// generation registry の観測から導く。
+    /// generation registry の観測と、記録された owner が endpoint に応答するか
+    /// （[`usecase::endpoint::EndpointObservation`]）から導く。
     pub seamless: Option<usecase::replacement::SeamlessRefusal>,
+    /// 記録された owner が endpoint に応答するか。probe を払う verb だけが実測し、
+    /// それ以外は [`usecase::endpoint::EndpointObservation::NotObserved`] のまま
+    /// （`serve` は自分が publish する前の endpoint を probe してはならない）。
+    pub endpoint: usecase::endpoint::EndpointObservation,
+    /// endpoint の handshake が名乗った daemon の build と、この client の build。
+    /// `status` と `start`（稼働中）が行末に添える。観測しなかった verb は `None`。
+    pub build: Option<usecase::build_report::BuildObservation>,
     /// standby の staging と old active への rollover IPC 要求。
     pub rollover: &'a dyn usecase::replacement::RolloverRequester,
 }
@@ -154,18 +162,25 @@ pub fn run<
             info,
         ),
         DaemonCommand::Start => {
-            let line = usecase::start::start(
+            let line = usecase::start::start_observed(
                 env.store,
                 env.probe,
                 env.launcher,
                 env.sleeper,
                 env.ready,
+                env.build.as_ref(),
                 info,
             )?;
             writeln!(out, "{line}")
         }
         DaemonCommand::Status => {
-            let line = usecase::status::report(env.store, env.probe, info)?;
+            let line = usecase::status::report_observed(
+                env.store,
+                env.probe,
+                env.endpoint,
+                env.build.as_ref(),
+                info,
+            )?;
             writeln!(out, "{line}")
         }
         DaemonCommand::Stop(mode) => {
@@ -211,6 +226,7 @@ mod tests {
         ImmediateShutdown, InMemoryRecordFile, NoopReady, NoopSleeper, NoopStandbyEndpoint,
         RecordingTerminator, TestLauncher,
     };
+    use crate::usecase::endpoint::EndpointObservation;
     use crate::usecase::replacement::{
         LiveResources, ResourceCensus, RetainedGenerationControl, RolloverRequester,
         SeamlessRefusal, TransitionMode,
@@ -296,6 +312,8 @@ mod tests {
             pid: 4321,
             census: &Owning(0),
             generations: &NoGenerations,
+            endpoint: EndpointObservation::NotObserved,
+            build: None,
             seamless: Some(SeamlessRefusal::NoGenerationRegistry),
             rollover: &NoopRollover,
         };
@@ -349,6 +367,8 @@ mod tests {
             pid: 4321,
             census: &Owning(0),
             generations: &NoGenerations,
+            endpoint: EndpointObservation::NotObserved,
+            build: None,
             seamless: Some(SeamlessRefusal::NoLiveRegisteredActive),
             rollover: &NoopRollover,
         };
@@ -403,6 +423,8 @@ mod tests {
                 pid: 4321,
                 census: &Owning(0),
                 generations: &NoGenerations,
+                endpoint: EndpointObservation::NotObserved,
+                build: None,
                 seamless: Some(SeamlessRefusal::NoGenerationRegistry),
                 rollover: &NoopRollover,
             };
@@ -440,6 +462,8 @@ mod tests {
             pid: 4321,
             census: &Owning(1),
             generations: &NoGenerations,
+            endpoint: EndpointObservation::NotObserved,
+            build: None,
             seamless: None,
             rollover: &NoopRollover,
         };
@@ -504,6 +528,8 @@ mod tests {
             pid: 4321,
             census: &Owning(1),
             generations: &NoGenerations,
+            endpoint: EndpointObservation::NotObserved,
+            build: None,
             seamless: Some(SeamlessRefusal::NoGenerationRegistry),
             rollover: &NoopRollover,
         };
@@ -567,6 +593,8 @@ mod tests {
                 pid: 4321,
                 census: &Owning(0),
                 generations: &NoGenerations,
+                endpoint: EndpointObservation::NotObserved,
+                build: None,
                 seamless: Some(SeamlessRefusal::NoGenerationRegistry),
                 rollover: &NoopRollover,
             };

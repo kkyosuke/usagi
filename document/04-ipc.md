@@ -452,7 +452,7 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 
 | field | type | meaning |
 |---|---|---|
-| `schema_version` | `u16` | metrics payload schema version。現在は `4` |
+| `schema_version` | `u16` | metrics payload schema version。現在は `5` |
 | `sampled_at_ms` | `u64` | daemon が sample を作成した monotonic timestamp |
 | `cpu_percent_hundredths` | `u32` | 前回 sample からの daemon process CPU 使用率（百分率の 1/100 単位） |
 | `resident_memory_bytes` | `u64` | daemon process の peak resident memory（byte） |
@@ -466,6 +466,7 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 | `pr_projection_gaps` | `u64` | 落ちた byte を跨いで PR 走査を連結しないために記録した discontinuity 数 |
 | `agent_concurrency` | `object?` | Agent concurrency の使用中/上限。報告しない daemon では欠落する（下記） |
 | `failed_background_workers` | `u8` | この daemon process で異常終了し、graceful shutdown を要求した長寿命 worker の種類数 |
+| `build` | `object?` | この daemon process が起動時に固定した build identity（`version` / `commit` / `target` / `artifact`）。handshake の server hello と同じ値で、schema 5 より前の peer では欠落する。client は欠落を自分の build と読み替えず不明として表示する |
 
 各 subscriber は容量 1 の queue を持つ。daemon は tick で block せず、queue が埋まった
 observer の中間 sample を落として count する。切断された observer は次の publish で取り除く。

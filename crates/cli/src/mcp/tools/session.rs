@@ -126,7 +126,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。回答は user_decision_get で取得する"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。options の pros / cons で案ごとのメリット・注意点を表示できる。allow_comment で選択に補足コメント、require_confirmation で TUI の送信前確認を有効化できる。回答は user_decision_get で取得する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -144,6 +144,10 @@ impl Tool for UserDecisionRequest {
                             "properties": {
                                 "id": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true),
                                 "label": bounded_string_schema(UserDecisionPolicy::OPTION_LABEL_MAX_BYTES, true),
+                                "pros": {"type":"array", "maxItems": UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX,
+                                    "items": bounded_string_schema(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES, true)},
+                                "cons": {"type":"array", "maxItems": UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX,
+                                    "items": bounded_string_schema(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES, true)},
                                 "description": bounded_string_schema(
                                     UserDecisionPolicy::OPTION_DESCRIPTION_MAX_BYTES,
                                     false,
@@ -153,7 +157,53 @@ impl Tool for UserDecisionRequest {
                             "additionalProperties": false,
                         },
                     },
+                    "recommendation": {
+                        "type": "object",
+                        "properties": {
+                            "option_ids": {"type":"array", "minItems":1, "maxItems": UserDecisionPolicy::OPTION_COUNT_MAX,
+                                "items": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true)},
+                            "reason": bounded_string_schema(UserDecisionPolicy::RECOMMENDATION_REASON_MAX_BYTES, true),
+                        },
+                        "required":["option_ids", "reason"], "additionalProperties":false,
+                    },
+                    "selection_limits": {
+                        "type":"object", "properties": {
+                            "min": {"type":"integer", "minimum":1, "maximum":UserDecisionPolicy::OPTION_COUNT_MAX},
+                            "max": {"type":"integer", "minimum":1, "maximum":UserDecisionPolicy::OPTION_COUNT_MAX},
+                        },
+                        "required":["min", "max"], "additionalProperties":false,
+                    },
+                    "selection_mode": {"enum": ["single", "multiple"], "default": "single"},
+                    "context": {
+                        "type": "array", "maxItems": UserDecisionPolicy::CONTEXT_COUNT_MAX,
+                        "items": {"oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "table"},
+                                    "title": bounded_string_schema(UserDecisionPolicy::TITLE_MAX_BYTES, true),
+                                    "columns": {"type": "array", "minItems": 1, "maxItems": UserDecisionPolicy::TABLE_COLUMNS_MAX,
+                                        "items": bounded_string_schema(UserDecisionPolicy::CONTEXT_CELL_MAX_BYTES, true)},
+                                    "rows": {"type": "array", "minItems": 1, "maxItems": UserDecisionPolicy::TABLE_ROWS_MAX,
+                                        "items": {"type": "array", "minItems": 1, "maxItems": UserDecisionPolicy::TABLE_COLUMNS_MAX,
+                                            "items": bounded_string_schema(UserDecisionPolicy::CONTEXT_CELL_MAX_BYTES, false)}},
+                                },
+                                "required": ["kind", "title", "columns", "rows"], "additionalProperties": false,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "diagram"},
+                                    "title": bounded_string_schema(UserDecisionPolicy::TITLE_MAX_BYTES, true),
+                                    "text": bounded_string_schema(UserDecisionPolicy::DIAGRAM_MAX_BYTES, true),
+                                },
+                                "required": ["kind", "title", "text"], "additionalProperties": false,
+                            },
+                        ]},
+                    },
                     "allow_freeform": {"type": "boolean"},
+                    "allow_comment": {"type": "boolean"},
+                    "require_confirmation": {"type": "boolean"},
                     "expires_at": {"type": "string"},
                     "idempotency_key": bounded_string_schema(
                         UserDecisionPolicy::IDEMPOTENCY_KEY_MAX_BYTES,
@@ -197,7 +247,7 @@ impl Tool for UserDecisionResolve {
         "user_decision_resolve"
     }
     fn description(&self) -> &'static str {
-        "pending decision に option または許可された freeform を一度だけ記録する"
+        "pending decision に単一 option、複数 options、または許可された freeform を一度だけ記録する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -212,6 +262,7 @@ impl Tool for UserDecisionResolve {
                                 "type": "object",
                                 "properties": {
                                     "kind": {"const": "option"},
+                                    "comment": bounded_string_schema(UserDecisionPolicy::COMMENT_MAX_BYTES, true),
                                     "option_id": bounded_string_schema(
                                         UserDecisionPolicy::OPTION_ID_MAX_BYTES,
                                         true,
@@ -219,6 +270,17 @@ impl Tool for UserDecisionResolve {
                                 },
                                 "required": ["kind", "option_id"],
                                 "additionalProperties": false,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "kind": {"const": "options"},
+                                    "comment": bounded_string_schema(UserDecisionPolicy::COMMENT_MAX_BYTES, true),
+                                    "option_ids": {"type": "array", "minItems": 1,
+                                        "maxItems": UserDecisionPolicy::OPTION_COUNT_MAX,
+                                        "items": bounded_string_schema(UserDecisionPolicy::OPTION_ID_MAX_BYTES, true)},
+                                },
+                                "required": ["kind", "option_ids"], "additionalProperties": false,
                             },
                             {
                                 "type": "object",

@@ -248,6 +248,7 @@ use usagi_daemon::usecase::authority::standby::{
     ActiveOwner, StandbyCustody, StandbyProbe, admissible_active, evaluate_custody, prepare_standby,
 };
 use usagi_daemon::usecase::authority::workers::{ClientWorkers, ConnectionShutdown};
+use usagi_daemon::usecase::build_report::BuildObservation;
 use usagi_daemon::usecase::claude::{
     ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
     mcp_arguments as claude_product_mcp_arguments, scoped_settings_json,
@@ -257,6 +258,7 @@ use usagi_daemon::usecase::codex::{
     mcp_arguments as codex_product_mcp_arguments,
 };
 use usagi_daemon::usecase::custody::{Custody, CustodyProbe, NodeIdentity};
+use usagi_daemon::usecase::endpoint::EndpointObservation;
 use usagi_daemon::usecase::generation::{GenerationRole, ProcessIdentity, ProcessObservation};
 use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
@@ -2683,9 +2685,30 @@ fn format_panic(info: &PanicHookInfo<'_>) -> String {
     let location = info
         .location()
         .map_or_else(|| "unknown location".to_owned(), ToString::to_string);
+    panic_report(
+        &payload,
+        &location,
+        std::thread::current().name(),
+        &Backtrace::force_capture().to_string(),
+        std::process::id(),
+        &current_build(),
+    )
+}
+
+/// Correlates a panic with its worker and exact running daemon, even when a
+/// newer executable has already replaced that daemon's binary on disk.
+fn panic_report(
+    payload: &str,
+    location: &str,
+    thread: Option<&str>,
+    backtrace: &str,
+    pid: u32,
+    build: &BuildIdentity,
+) -> String {
+    let thread = thread.unwrap_or("<unnamed>");
     format!(
-        "daemon panicked: {payload}\nlocation: {location}\nbacktrace:\n{}",
-        Backtrace::force_capture()
+        "daemon panicked: {payload}\nthread: {thread}\nlocation: {location}\npid: {pid}\nbuild: version={} commit={} target={} artifact={}\nbacktrace:\n{backtrace}",
+        build.version, build.commit, build.target, build.artifact,
     )
 }
 /// The service supervisor this build provisions, named in the command's output.
@@ -2916,6 +2939,14 @@ fn run_inner(
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),
     });
+    // Observed once, before anything is locked or launched, and only by the
+    // verbs entitled to it. Both readers below — the status line and the
+    // seamless preflight — must see the same *endpoint* answer, or the report
+    // and the refusal could disagree about the same daemon. Process liveness is
+    // deliberately not shared: each reader classifies the record itself, so an
+    // owner that dies during the probe is reported as the stale record it has
+    // become rather than as a live one that went quiet.
+    let (endpoint, daemon_build) = observed_daemon_endpoint(&command, &data_dir, &store);
     let launcher = ServeLauncher {
         exe: std::env::current_exe()?,
         launched: RefCell::new(None),
@@ -2981,7 +3012,9 @@ fn run_inner(
         pid,
         census: &census,
         generations: &generations,
-        seamless: observed_seamless_refusal(&data_dir),
+        seamless: observed_seamless_refusal(&data_dir, endpoint),
+        endpoint,
+        build: build_observation(daemon_build),
         rollover: &rollover,
     };
     // A stop that leaves the broker running leaves a usagi process the operator
@@ -3327,11 +3360,178 @@ fn daemon_probe_result_is_reachable<T>(result: &Result<T, ClientError>) -> bool 
     matches!(result, Ok(_) | Err(ClientError::Protocol(_)))
 }
 
-/// Completes the mandatory hello against the published endpoint without
-/// sending a request. A framed protocol refusal still proves the endpoint is
-/// reachable; only a transport failure means a broker may start another daemon.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
+/// What one hello against the published endpoint proved.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EndpointAnswer {
+    /// The daemon completed the hello and advertised the build it runs.
+    Hello(BuildIdentity),
+    /// The daemon answered with a framed refusal: reachable, but it named no
+    /// build this client may report.
+    Refused,
+    /// The attempt failed at the transport.
+    Silent,
+}
+
+impl EndpointAnswer {
+    fn is_reachable(&self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+
+    fn into_build(self) -> Option<BuildIdentity> {
+        match self {
+            Self::Hello(build) => Some(build),
+            Self::Refused | Self::Silent => None,
+        }
+    }
+}
+
+fn endpoint_answer(result: Result<BuildIdentity, ClientError>) -> EndpointAnswer {
+    if !daemon_probe_result_is_reachable(&result) {
+        return EndpointAnswer::Silent;
+    }
+    result.map_or(EndpointAnswer::Refused, EndpointAnswer::Hello)
+}
+
+/// How many times a lifecycle verb asks the recorded owner before it reports
+/// the endpoint as silent.
+///
+/// The bound is attempts, not wall clock, because each attempt already carries
+/// its own budget: `current_daemon_is_reachable` gives one connect-and-hello
+/// [`TerminalLaneBudget::CONNECT_MS`]. A wall-clock ceiling would make the
+/// attempt count depend on how each attempt *fails* — a vanished socket fails
+/// instantly, while a daemon that accepts the connection and then stalls the
+/// hello burns the whole per-attempt budget — so one ceiling buys many tries
+/// against the first failure and two against the second. Silence is the verdict
+/// everything downstream turns into "this daemon is unusable", and it must not
+/// be reached by arithmetic nobody can see.
+///
+/// The wait is therefore bounded by
+/// `ATTEMPTS * CONNECT_MS + (ATTEMPTS - 1) * ENDPOINT_PROBE_DELAY` — the pause
+/// falls between attempts, never after the last — and is paid only against a
+/// recorded owner that is alive and answering nothing.
+const ENDPOINT_PROBE_ATTEMPTS: u32 = 4;
+/// How long the probe pauses between attempts.
+const ENDPOINT_PROBE_DELAY: Duration = Duration::from_millis(100);
+
+/// Whether this verb makes a claim about a *running* daemon, and therefore has
+/// to know whether the recorded owner still answers.
+///
+/// Only `status` (which reports it) and a **planned** `replace` (whose
+/// transition is a request *to* that daemon) do. A cold `replace` is excluded
+/// on the same reasoning: it terminates the recorded owner without asking it
+/// anything, [`plan_replacement`](usagi_daemon::usecase::replacement::plan_replacement)
+/// never consults the refusal, and connecting to a process this command is
+/// about to signal would only delay the one remedy an unreachable daemon has.
+/// `serve` above all must not probe: it would reach the endpoint this very
+/// process is about to publish.
+///
+/// A verb that is not asking, and any state other than a live owner, leaves the
+/// observation unmade — which is a statement that nothing was proven, not that
+/// the endpoint failed.
+fn endpoint_probe_is_needed(
+    command: &PresentationDaemonCommand,
+    state: usagi_core::domain::daemon::DaemonState,
+) -> bool {
+    matches!(
+        command,
+        PresentationDaemonCommand::Status
+            | PresentationDaemonCommand::Replace {
+                mode: TransitionMode::Planned,
+                ..
+            }
+    ) && state == usagi_core::domain::daemon::DaemonState::Alive
+}
+
+/// Ask up to `attempts` times, and report silence only after all of them.
+///
+/// The sleep and the probe are injected so the retry contract — answer as soon
+/// as one attempt succeeds, never treat a single refusal as proof, and pause
+/// between attempts so a momentarily full accept backlog is asked again — is
+/// decided here rather than inside the real client.
+///
+/// The answering attempt's hello also names the daemon's build, which the
+/// report carries beside the observation.
+fn endpoint_observation_within(
+    attempts: u32,
+    sleep: &dyn Fn(Duration),
+    probe: &mut dyn FnMut() -> EndpointAnswer,
+) -> (EndpointObservation, Option<BuildIdentity>) {
+    for remaining in (0..attempts).rev() {
+        let answer = probe();
+        if answer.is_reachable() {
+            return (EndpointObservation::Answering, answer.into_build());
+        }
+        if remaining != 0 {
+            sleep(ENDPOINT_PROBE_DELAY);
+        }
+    }
+    (EndpointObservation::Silent, None)
+}
+
+/// Whether this verb, without claiming anything about the endpoint, names the
+/// build of a daemon it found running.
+///
+/// `start` against a live owner reports "already running" under this client's
+/// version, which after an update is not the daemon's. One hello names the
+/// daemon's build. It is a single attempt and never a claim of silence: `start`
+/// is not asking whether the daemon serves, so a failed hello only leaves the
+/// build unnamed.
+fn build_probe_is_needed(
+    command: &PresentationDaemonCommand,
+    state: usagi_core::domain::daemon::DaemonState,
+) -> bool {
+    matches!(command, PresentationDaemonCommand::Start)
+        && state == usagi_core::domain::daemon::DaemonState::Alive
+}
+
+/// The endpoint observation this command is entitled to, against the recorded
+/// owner this data directory names, and the daemon build its hello advertised.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=bare_daemon_is_idempotent_after_forced_restart
+fn observed_daemon_endpoint(
+    command: &PresentationDaemonCommand,
+    data_dir: &Path,
+    store: &DaemonRecordStore<FsRecordFile>,
+) -> (EndpointObservation, Option<BuildIdentity>) {
+    let record = store.load().ok().flatten();
+    let observation = record.as_ref().map_or(
+        usagi_core::domain::daemon::DaemonProcessObservation::Unknown,
+        |record| ExactProcessControl.observe(record),
+    );
+    let state = usagi_core::domain::daemon::classify(record.as_ref(), observation);
+    if endpoint_probe_is_needed(command, state) {
+        return endpoint_observation_within(
+            ENDPOINT_PROBE_ATTEMPTS,
+            &std::thread::sleep,
+            &mut || current_daemon_answer(data_dir),
+        );
+    }
+    let build = if build_probe_is_needed(command, state) {
+        current_daemon_answer(data_dir).into_build()
+    } else {
+        None
+    };
+    (EndpointObservation::NotObserved, build)
+}
+
+/// The daemon build a lifecycle report names, beside this client's own.
+fn build_observation(daemon: Option<BuildIdentity>) -> Option<BuildObservation> {
+    Some(BuildObservation {
+        daemon: daemon?,
+        client: current_build(),
+    })
+}
+
+/// Whether the published endpoint completes the mandatory hello. A framed
+/// protocol refusal still proves the endpoint is reachable; only a transport
+/// failure means a broker may start another daemon.
 pub(crate) fn current_daemon_is_reachable(data_dir: &Path) -> bool {
+    current_daemon_answer(data_dir).is_reachable()
+}
+
+/// Completes the mandatory hello against the published endpoint without
+/// sending a request, keeping the build the daemon advertised.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=passive_restore_socket_eof_emits_one_reconnect_epoch_and_drop_cancels_watchers
+fn current_daemon_answer(data_dir: &Path) -> EndpointAnswer {
     let policy = ClientPolicy::tui();
     let clock = SystemClock::new();
     let result = (|| {
@@ -3347,7 +3547,7 @@ pub(crate) fn current_daemon_is_reachable(data_dir: &Path) -> bool {
             ClientWorkspace::Unbound,
         )
     })();
-    daemon_probe_result_is_reachable(&result)
+    endpoint_answer(result.map(|client| client.server_build().clone()))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=mcp_e2e
@@ -3601,8 +3801,14 @@ pub(crate) fn managed_update_diagnostic_client(
                 .map_err(|error| ClientError::Unavailable(error.to_string()))?
             {
                 bootstrap::StaleRecovery::OwnerActive => {
-                    return Err(ClientError::Unavailable(
-                        "daemon owner is active but its endpoint is not ready".into(),
+                    // Authored for the operator, so it travels as a lifecycle
+                    // failure: the transport arm renders a fixed line and this
+                    // explanation — the one that says the daemon is there but
+                    // not answering — would never reach them.
+                    return Err(ClientError::Lifecycle(
+                        "daemon owner is active but its endpoint is not ready; \
+                         check `usagi daemon status`"
+                            .into(),
                     ));
                 }
                 bootstrap::StaleRecovery::Recovered | bootstrap::StaleRecovery::NotProven => {}
@@ -3615,7 +3821,7 @@ pub(crate) fn managed_update_diagnostic_client(
                 .acquire()
                 .map_err(|error| ClientError::Unavailable(error.to_string()))?
             {
-                return Err(ClientError::Unavailable(
+                return Err(ClientError::Lifecycle(
                     "daemon owner became active during managed update synchronization".into(),
                 ));
             }
@@ -3627,7 +3833,7 @@ pub(crate) fn managed_update_diagnostic_client(
                 .map_err(|error| ClientError::Unavailable(error.to_string()))?;
             let current = data_dir.join("daemon").join("current.json").is_file();
             if record.is_some() || current {
-                return Err(ClientError::Unavailable(format!(
+                return Err(ClientError::Lifecycle(format!(
                     "daemon absence could not be proved after endpoint failure: {connect_error}"
                 )));
             }
@@ -3678,7 +3884,7 @@ pub(crate) fn sync_after_update(
                     | usagi_core::infrastructure::ipc::DaemonReply::Accepted { body, .. } => body,
                 };
                 serde_json::from_value::<WorkspaceId>(body["workspace_id"].clone()).map_err(|_| {
-                    ClientError::Unavailable(
+                    ClientError::Lifecycle(
                         "daemon returned an invalid workspace identity".to_owned(),
                     )
                 })

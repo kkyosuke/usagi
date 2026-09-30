@@ -6,7 +6,7 @@
 
 use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
 use usagi_core::domain::agent::AgentRuntimeInventoryState;
-use usagi_core::infrastructure::ipc::DaemonMetrics;
+use usagi_core::infrastructure::ipc::{BuildIdentity, DaemonMetrics};
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::theme::{Role, Style};
@@ -15,7 +15,7 @@ use crate::usecase::application::controller::{DaemonAction, DaemonControlState};
 
 const INNER_WIDTH: usize = 60;
 const MAX_BODY_HEIGHT: usize = 30;
-const FIXED_RUNTIME_BODY_ROWS: usize = 15;
+const FIXED_RUNTIME_BODY_ROWS: usize = 16;
 const MEBIBYTE: u64 = 1_048_576;
 
 /// Presentation-safe row derived from the daemon-authoritative Agent inventory.
@@ -29,6 +29,8 @@ pub(crate) struct AgentRuntimeRow {
 #[derive(Clone, Copy)]
 pub(crate) struct DaemonProjection<'a> {
     pub(crate) metrics: Option<&'a DaemonMetrics>,
+    /// This client's build, compared with the build the daemon reports.
+    pub(crate) client_build: Option<&'a BuildIdentity>,
     pub(crate) health: DaemonHealth,
     pub(crate) sessions: SessionStateCounts,
     pub(crate) session_total: usize,
@@ -55,29 +57,23 @@ pub(crate) fn render_over(
         base,
         "Daemon",
         INNER_WIDTH,
-        &body(
-            projection.metrics,
-            projection.health,
-            projection.sessions,
-            projection.session_total,
-            projection.runtimes,
-            projection.control,
-            body_height,
-        ),
+        &body(projection, body_height),
     )
 }
 
-fn body(
-    metrics: Option<&DaemonMetrics>,
-    health: DaemonHealth,
-    sessions: SessionStateCounts,
-    session_total: usize,
-    runtimes: Option<&[AgentRuntimeRow]>,
-    control: &DaemonControlState,
-    body_height: usize,
-) -> Vec<String> {
+fn body(projection: DaemonProjection<'_>, body_height: usize) -> Vec<String> {
+    let DaemonProjection {
+        metrics,
+        client_build,
+        health,
+        sessions,
+        session_total,
+        runtimes,
+        control,
+    } = projection;
     let mut lines = vec![modal::heading("Status")];
     lines.push(status_line(metrics, health));
+    lines.push(build_line(metrics, client_build));
     lines.push(metric_line(metrics));
     lines.push(session_line(sessions, session_total));
     lines.push(String::new());
@@ -201,6 +197,23 @@ fn status_line(metrics: Option<&DaemonMetrics>, health: DaemonHealth) -> String 
     }
 }
 
+/// The build the daemon process runs. The CLI prefix and the startup banner
+/// name this client's version, which after an update is not the daemon's, so a
+/// daemon still on another build is called out beside this client's.
+fn build_line(metrics: Option<&DaemonMetrics>, client: Option<&BuildIdentity>) -> String {
+    let Some(daemon) = metrics.and_then(|metrics| metrics.build.as_ref()) else {
+        return modal::content_line(&Style::new().dim().paint("daemon build —"), INNER_WIDTH);
+    };
+    let text = format!("daemon {}", daemon.label());
+    let styled = match client {
+        Some(client) if daemon.differs_from(client) => Role::Warning
+            .style()
+            .paint(&format!("{text}  ≠ client {}", client.label())),
+        _ => Style::new().dim().paint(&text),
+    };
+    modal::content_line(&styled, INNER_WIDTH)
+}
+
 fn metric_line(metrics: Option<&DaemonMetrics>) -> String {
     let text = metrics.map_or_else(
         || "CPU —   memory —   clients —".to_owned(),
@@ -256,7 +269,8 @@ const fn health_reason(reason: HealthReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentRuntimeRow, DaemonProjection, action_result_line, render_over, runtime_lines,
+        AgentRuntimeRow, DaemonProjection, action_result_line, build_line, render_over,
+        runtime_lines,
     };
     use crate::presentation::widgets::display_width;
     use crate::usecase::application::controller::{
@@ -266,7 +280,7 @@ mod tests {
     use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
     use usagi_core::domain::agent::AgentRuntimeInventoryState;
     use usagi_core::domain::id::WorkspaceId;
-    use usagi_core::infrastructure::ipc::{AgentConcurrency, DaemonMetrics};
+    use usagi_core::infrastructure::ipc::{AgentConcurrency, BuildIdentity, DaemonMetrics};
     use usagi_core::usecase::session_state::SessionStateCounts;
 
     fn metrics(in_use: u32) -> DaemonMetrics {
@@ -285,6 +299,7 @@ mod tests {
             pr_projection_gaps: 0,
             agent_concurrency: Some(AgentConcurrency { in_use, limit: 16 }),
             failed_background_workers: 0,
+            build: None,
         }
     }
 
@@ -298,6 +313,7 @@ mod tests {
     ) -> DaemonProjection<'a> {
         DaemonProjection {
             metrics,
+            client_build: None,
             health,
             sessions,
             session_total,
@@ -360,6 +376,64 @@ mod tests {
             }),
         );
         assert!(strip(&action_result_line(state.daemon_control())).contains("stop refused"));
+    }
+
+    fn build(version: &str, commit: &str) -> BuildIdentity {
+        BuildIdentity {
+            version: version.to_owned(),
+            commit: commit.to_owned(),
+            target: "test".to_owned(),
+            artifact: String::new(),
+        }
+    }
+
+    /// After an update the client is the new build while the daemon may still
+    /// be the old one; the modal must name the daemon's build and the mismatch.
+    #[test]
+    fn the_daemon_build_is_named_and_a_mismatch_with_this_client_is_called_out() {
+        let mut observed = metrics(1);
+        observed.build = Some(build("4.8.5", "1111111111"));
+        let client = build("4.8.8", "2222222222");
+        let differing = build_line(Some(&observed), Some(&client));
+        assert!(
+            strip(&differing).contains("daemon v4.8.5 (1111111)  ≠ client v4.8.8 (2222222)"),
+            "{differing}"
+        );
+        assert_ne!(strip(&differing), differing, "a mismatch is styled");
+
+        let same = strip(&build_line(
+            Some(&observed),
+            Some(&observed.build.clone().unwrap()),
+        ));
+        assert!(same.contains("daemon v4.8.5 (1111111)"), "{same}");
+        assert!(!same.contains("client"), "{same}");
+        // Without this client's build there is nothing to compare against.
+        assert!(!strip(&build_line(Some(&observed), None)).contains("client"));
+
+        // An older daemon that reports no build, or no observation at all.
+        assert!(strip(&build_line(Some(&metrics(1)), Some(&client))).contains("daemon build —"));
+        assert!(strip(&build_line(None, None)).contains("daemon build —"));
+
+        let frame = strip(
+            &render_over(
+                24,
+                100,
+                &vec!["background".to_owned(); 24],
+                DaemonProjection {
+                    client_build: Some(&client),
+                    ..projection(
+                        Some(&observed),
+                        DaemonHealth::Ok,
+                        SessionStateCounts::default(),
+                        0,
+                        None,
+                        &DaemonControlState::default(),
+                    )
+                },
+            )
+            .join("\n"),
+        );
+        assert!(frame.contains("≠ client v4.8.8"), "{frame}");
     }
 
     #[test]

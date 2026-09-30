@@ -48,6 +48,8 @@ Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](docu
 計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
 進捗の確認と追加指示も同じタブで行えます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
+MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
+質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。選択への補足コメントや、送信前の確認画面も利用できます。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール
@@ -94,6 +96,8 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 
 不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
 [孤立資源の削除](document/01-overview.md#孤立資源の削除)を参照してください。
+
+起動失敗や daemon の異常終了を調べる際は、[failure log](document/05-daemon.md#failure-logging)を確認してください。
 
 ## 基本概念
 

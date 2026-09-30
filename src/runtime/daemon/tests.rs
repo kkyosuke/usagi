@@ -28,6 +28,72 @@ use usagi_daemon::usecase::terminal_ipc::{
 };
 use usagi_daemon::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext};
 
+#[test]
+fn daemon_panic_log_identifies_the_worker_and_build() {
+    const FIXTURE: &str = "USAGI_TEST_PANIC_LOG_IDENTITY";
+    if std::env::var_os(FIXTURE).is_some() {
+        // Install the process-wide hook only in an isolated test process.
+        install_panic_logger();
+        assert!(
+            std::thread::Builder::new()
+                .name("usagi-panic-fixture".to_owned())
+                .spawn(|| panic!("named worker failure"))
+                .unwrap()
+                .join()
+                .is_err()
+        );
+        assert!(
+            std::thread::spawn(|| panic::panic_any(42_u32))
+                .join()
+                .is_err()
+        );
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "runtime::daemon::tests::daemon_panic_log_identifies_the_worker_and_build",
+        ])
+        .env(FIXTURE, "1")
+        .env("USAGI_HOME", directory.path())
+        .env("USAGI_RUNTIME_MODE", "local")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    assert!(child.wait().unwrap().success());
+    let log = std::fs::read_dir(directory.path().join("local/logs"))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<String>();
+    assert!(
+        log.contains("daemon panicked: named worker failure"),
+        "{log}"
+    );
+    assert!(
+        log.contains("daemon panicked: non-string panic payload"),
+        "{log}"
+    );
+    assert!(log.contains("thread: usagi-panic-fixture\n"), "{log}");
+    assert!(log.contains("thread: <unnamed>\n"), "{log}");
+    assert!(log.contains(&format!("pid: {pid}")), "{log}");
+    let build = current_build();
+    assert!(
+        log.contains(&format!(
+            "build: version={} commit={} target={} artifact={}",
+            build.version, build.commit, build.target, build.artifact,
+        )),
+        "{log}"
+    );
+    assert!(log.contains("src/runtime/daemon/tests.rs:"), "{log}");
+    // Also run this test under the shipping release profile: stripping symbols
+    // used to turn every macOS frame into __mh_execute_header.
+    assert!(log.contains("usagi::runtime::daemon::"), "{log}");
+}
+
 fn protocol_response(code: ErrorCode) -> Envelope {
     Envelope {
         protocol: usagi_core::infrastructure::ipc::ProtocolVersion {
@@ -6871,7 +6937,7 @@ fn production_metrics_report_agent_concurrency_without_taking_the_agent_lock() {
         MetricsAction::Subscribe,
     );
     assert_eq!(unknown.agent_concurrency, None);
-    assert_eq!(unknown.schema_version, 4);
+    assert_eq!(unknown.schema_version, 5);
 
     // What the authority publishes is what the reply reports, on the very next
     // request and without another sample being pushed.
@@ -14454,6 +14520,76 @@ fn endpoint_probe_accepts_a_framed_refusal_but_not_transport_failure() {
     )));
 }
 
+/// A hello names the daemon's build; a refusal answers without one; only a
+/// transport failure is silence.
+#[test]
+fn an_endpoint_answer_keeps_the_build_only_from_a_completed_hello() {
+    use usagi_core::infrastructure::ipc::ProtocolError;
+
+    assert_eq!(
+        endpoint_answer(Ok(current_build())),
+        EndpointAnswer::Hello(current_build())
+    );
+    let refused = endpoint_answer(Err(ClientError::Protocol(ProtocolError::new(
+        ErrorCode::ProtocolMismatch,
+        "older daemon",
+    ))));
+    assert_eq!(refused, EndpointAnswer::Refused);
+    assert!(refused.is_reachable());
+    assert_eq!(refused.into_build(), None);
+    let silent = endpoint_answer(Err(ClientError::Unavailable("socket closed".into())));
+    assert!(!silent.is_reachable());
+    assert_eq!(silent.into_build(), None);
+}
+
+/// A data directory that publishes no endpoint is unreachable, and the report
+/// names this client's build beside any daemon build it observed.
+#[test]
+fn an_unpublished_endpoint_is_unreachable_and_an_observed_build_is_paired_with_this_client() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!current_daemon_is_reachable(dir.path()));
+
+    assert_eq!(build_observation(None), None);
+    let mut daemon = current_build();
+    daemon.version = "0.0.1".to_owned();
+    assert_eq!(
+        build_observation(Some(daemon.clone())),
+        Some(BuildObservation {
+            daemon,
+            client: current_build(),
+        })
+    );
+}
+
+/// Only `start` against a live owner names the daemon's build without claiming
+/// anything about the endpoint.
+#[test]
+fn only_start_against_a_live_owner_asks_for_the_daemon_build() {
+    use usagi_core::domain::daemon::{DaemonState, StaleReason};
+
+    assert!(build_probe_is_needed(
+        &PresentationDaemonCommand::Start,
+        DaemonState::Alive
+    ));
+    for state in [
+        DaemonState::Absent,
+        DaemonState::Unverified,
+        DaemonState::Stale(StaleReason::OwnerGone),
+    ] {
+        assert!(!build_probe_is_needed(
+            &PresentationDaemonCommand::Start,
+            state
+        ));
+    }
+    for command in [
+        PresentationDaemonCommand::Status,
+        PresentationDaemonCommand::Stop(TransitionMode::Planned),
+        PresentationDaemonCommand::Serve(usagi_daemon::presentation::ServeRole::Active),
+    ] {
+        assert!(!build_probe_is_needed(&command, DaemonState::Alive));
+    }
+}
+
 #[derive(Clone)]
 struct ResponseDeadlineTestClock(Arc<AtomicU64>);
 
@@ -14785,4 +14921,149 @@ fn inbox_query_errors_preserve_client_faults_and_hide_store_failures() {
     let unavailable = map_inbox_query_error(&anyhow::anyhow!("disk secret"));
     assert_eq!(unavailable.code, ErrorCode::Unavailable);
     assert_eq!(unavailable.message, "dispatch inbox is unavailable");
+}
+
+/// The probe is a connection to a running daemon, so only the verbs that make a
+/// claim about one may issue it. `serve` above all must not: the endpoint it
+/// would reach is the one this very process is about to publish.
+#[test]
+fn only_a_verb_that_claims_a_running_daemon_pays_for_an_endpoint_probe() {
+    use usagi_core::domain::daemon::{DaemonState, StaleReason};
+
+    let claiming = [
+        PresentationDaemonCommand::Status,
+        PresentationDaemonCommand::Replace {
+            operation: None,
+            mode: TransitionMode::Planned,
+        },
+    ];
+    for command in &claiming {
+        assert!(
+            endpoint_probe_is_needed(command, DaemonState::Alive),
+            "{command:?} reports on a running daemon and must observe its endpoint"
+        );
+    }
+
+    let silent = [
+        PresentationDaemonCommand::Serve(usagi_daemon::presentation::ServeRole::Active),
+        PresentationDaemonCommand::Serve(usagi_daemon::presentation::ServeRole::Standby),
+        PresentationDaemonCommand::Start,
+        PresentationDaemonCommand::Stop(TransitionMode::Planned),
+        PresentationDaemonCommand::Stop(TransitionMode::Cold),
+        // The remedy an unreachable daemon is told to run. It signals the owner
+        // instead of asking it anything, and the refusal is never consulted, so
+        // paying the probe here would only delay the one way out.
+        PresentationDaemonCommand::Replace {
+            operation: None,
+            mode: TransitionMode::Cold,
+        },
+    ];
+    for command in &silent {
+        assert!(
+            !endpoint_probe_is_needed(command, DaemonState::Alive),
+            "{command:?} must not connect to a daemon it is not asking anything"
+        );
+    }
+
+    // Without a live recorded owner there is nothing to reach, and a probe would
+    // spend its whole ceiling proving the absence the record already proves.
+    for state in [
+        DaemonState::Absent,
+        DaemonState::Unverified,
+        DaemonState::Stale(StaleReason::OwnerGone),
+        DaemonState::Stale(StaleReason::PidReused),
+    ] {
+        for command in &claiming {
+            assert!(
+                !endpoint_probe_is_needed(command, state),
+                "{command:?} probed a {state:?} owner"
+            );
+        }
+    }
+}
+
+/// A daemon that is merely busy answers on a later attempt, and reporting the
+/// first refusal as silence would call it unreachable — which every reader of
+/// this observation turns into "unusable".
+#[test]
+fn an_endpoint_probe_asks_every_attempt_before_reporting_silence() {
+    // Answers immediately: one attempt, and nothing is waited for.
+    let slept = Cell::new(0_u32);
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            EndpointAnswer::Hello(current_build())
+        }),
+        (EndpointObservation::Answering, Some(current_build()))
+    );
+    assert_eq!((attempts, slept.get()), (1, 0));
+
+    // Refuses twice, then answers: the earlier refusals were not proof. This is
+    // the loaded-daemon case the whole retry exists for.
+    let slept = Cell::new(0_u32);
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            if attempts > 2 {
+                EndpointAnswer::Refused
+            } else {
+                EndpointAnswer::Silent
+            }
+        }),
+        // A refusal is an answer, but it names no build to report.
+        (EndpointObservation::Answering, None)
+    );
+    assert_eq!((attempts, slept.get()), (3, 2));
+
+    // Never answers: every attempt is spent, and the loop waits *between*
+    // attempts only — a trailing sleep would delay the verdict for nothing.
+    let slept = Cell::new(0_u32);
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(4, &|_| slept.set(slept.get() + 1), &mut || {
+            attempts += 1;
+            EndpointAnswer::Silent
+        }),
+        (EndpointObservation::Silent, None)
+    );
+    assert_eq!((attempts, slept.get()), (4, 3));
+
+    // The count is the bound, and the shipping one is more than the two a
+    // wall-clock ceiling would have bought against a stalled hello.
+    const { assert!(ENDPOINT_PROBE_ATTEMPTS > 2) }
+    let mut attempts = 0_u32;
+    assert_eq!(
+        endpoint_observation_within(ENDPOINT_PROBE_ATTEMPTS, &|_| (), &mut || {
+            attempts += 1;
+            EndpointAnswer::Silent
+        }),
+        (EndpointObservation::Silent, None)
+    );
+    assert_eq!(attempts, ENDPOINT_PROBE_ATTEMPTS);
+}
+
+/// The record is the only place a stripped release binary says which worker
+/// panicked, so the thread has to be in it — named or not.
+#[test]
+fn a_recorded_panic_names_the_thread_it_happened_on() {
+    let named = panic_report(
+        "assertion failed",
+        "condvar.rs:130:9",
+        Some("usagi-pr-refresh"),
+        "0: frame",
+        123,
+        &current_build(),
+    );
+    assert!(
+        named.contains("daemon panicked: assertion failed"),
+        "{named}"
+    );
+    assert!(named.contains("\nthread: usagi-pr-refresh\n"), "{named}");
+    assert!(named.contains("\nlocation: condvar.rs:130:9\n"), "{named}");
+    assert!(named.ends_with("backtrace:\n0: frame"), "{named}");
+
+    let anonymous = panic_report("boom", "somewhere", None, "", 123, &current_build());
+    assert!(anonymous.contains("\nthread: <unnamed>\n"), "{anonymous}");
 }

@@ -29,6 +29,7 @@ use usagi_daemon::infrastructure::unix_transport::{
     read_locator,
 };
 use usagi_daemon::usecase::authority::registry::RegistryDocument;
+use usagi_daemon::usecase::endpoint::EndpointObservation;
 use usagi_daemon::usecase::replacement::{SeamlessRefusal, seamless_refusal};
 
 /// 起動する usagi プロセスはすべてこの fixture 経由にする。daemon の workspace root は
@@ -165,10 +166,26 @@ fn stop_daemon(home: &DaemonHome) {
     );
 }
 
+/// A running daemon reports as running *and* as answering.
+///
+/// This is the shipping witness for the composed endpoint observation: the real
+/// `daemon status` loads the record, classifies the owner, and probes the
+/// published endpoint against a live daemon. A daemon that stopped serving
+/// would reach the "but not answering" line instead, so asserting its absence
+/// is what proves the probe reached this one rather than silently failing.
 fn assert_daemon_running(home: &DaemonHome) {
     let output = home.run(&[OsStr::new("daemon"), OsStr::new("status")]);
     assert!(output.status.success());
-    assert!(stdout(&output).contains("daemon running"));
+    let rendered = stdout(&output);
+    assert!(rendered.contains("daemon running"), "{rendered}");
+    assert!(!rendered.contains("not answering"), "{rendered}");
+    // The hello that proved the endpoint also named the daemon's build: this
+    // same binary, so it is reported without a mismatch.
+    assert!(
+        rendered.contains(&format!("; daemon build v{}", env!("CARGO_PKG_VERSION"))),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("differs"), "{rendered}");
 }
 
 fn run_with_home(args: &[&OsStr], home: &DaemonHome) -> Output {
@@ -623,14 +640,18 @@ fn bare_daemon_is_idempotent_after_forced_restart() {
     let restarted = daemon_record(&data_dir).expect("restart registers a daemon record");
     let repeated = home.run(&[OsStr::new("daemon")]);
     assert!(repeated.status.success(), "{}", stderr(&repeated));
-    assert_eq!(
-        stdout(&repeated),
-        format!(
-            "usagi v{}: daemon already running (pid {})\n",
-            env!("CARGO_PKG_VERSION"),
-            restarted.pid
-        )
+    // The prefix is this client's version; the clause names the daemon's own
+    // build, which is this same binary and therefore does not differ.
+    let repeated = stdout(&repeated);
+    assert!(
+        repeated.starts_with(&format!(
+            "usagi v{version}: daemon already running (pid {}); daemon build v{version}",
+            restarted.pid,
+            version = env!("CARGO_PKG_VERSION"),
+        )),
+        "{repeated}"
     );
+    assert!(!repeated.contains("differs"), "{repeated}");
     assert_eq!(daemon_record(&data_dir), Some(restarted));
 
     stop_daemon(&home);
@@ -804,6 +825,10 @@ fn a_standby_registers_beside_the_active_generation_without_publishing_a_locator
                     .expect("the shipping daemon writes a registry this build understands")
             ),
             true,
+            // This E2E is about what the registry says, not about reaching the
+            // daemon: the endpoint stays unobserved so the verdict is the
+            // registry's alone.
+            EndpointObservation::NotObserved,
             2,
             // A standby, not a draining predecessor: there is no collection
             // wait to observe, and the refusal must not invent one.

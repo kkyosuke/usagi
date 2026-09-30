@@ -621,6 +621,44 @@ fn artifact_identity_requires_a_canonical_artifact_and_compares_exactly() {
 }
 
 #[test]
+fn build_label_abbreviates_the_commit_and_keeps_the_dirty_marker() {
+    let mut identity = build_identity("4.8.5", "0123456789abcdef", "test", "debug", "");
+    assert_eq!(identity.label(), "v4.8.5 (0123456)");
+    identity.commit = "0123456789abcdef-dirty".to_owned();
+    assert_eq!(identity.label(), "v4.8.5 (0123456-dirty)");
+    identity.commit = String::new();
+    assert_eq!(identity.label(), "v4.8.5");
+    identity.version = String::new();
+    assert_eq!(identity.label(), "unknown build");
+}
+
+#[test]
+fn a_displayed_build_differs_by_artifact_when_known_and_by_version_or_commit_otherwise() {
+    let known = build();
+    assert!(!known.differs_from(&known));
+    let mut rebuilt = known.clone();
+    rebuilt.artifact = format!("usagi-artifact-v1:debug:test:{}", "b".repeat(64));
+    assert!(known.differs_from(&rebuilt));
+
+    let unknown = BuildIdentity {
+        artifact: String::new(),
+        ..known.clone()
+    };
+    assert!(!unknown.differs_from(&known));
+    assert!(!known.differs_from(&unknown));
+    let older = BuildIdentity {
+        version: "0".to_owned(),
+        ..unknown.clone()
+    };
+    assert!(older.differs_from(&known));
+    let other_commit = BuildIdentity {
+        commit: "def".to_owned(),
+        ..unknown
+    };
+    assert!(other_commit.differs_from(&known));
+}
+
+#[test]
 fn canonical_build_identity_includes_profile_target_and_source_or_is_unknown() {
     let source_a = "a".repeat(64);
     let source_b = "b".repeat(64);

@@ -29,7 +29,7 @@ use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
-use usagi_core::infrastructure::ipc::{AgentConcurrency, DaemonMetrics};
+use usagi_core::infrastructure::ipc::{AgentConcurrency, BuildIdentity, DaemonMetrics};
 use usagi_core::usecase::session_state::SessionStateCounts;
 
 use crate::presentation::frame::TERMINAL_CURSOR_MARKER;
@@ -333,6 +333,9 @@ pub struct HomeProjection {
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,
+    /// この client process の build。Daemon modal が daemon の報告する build と比べる。
+    /// `None` なら比較せず daemon の build だけを表示する。
+    client_build: Option<BuildIdentity>,
     /// daemon health の観測器。**診断専用の描画素材**で、reducer state にも操作の
     /// 権威にもならない。既定値（一度も観測していない）は indicator を出さないため、
     /// 正常時の frame は health 導入前と同一である。
@@ -696,6 +699,7 @@ impl HomeProjection {
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
             metrics: None,
+            client_build: None,
             health: DaemonHealthTracker::default(),
             git_diffs: Arc::new(BTreeMap::new()),
             terminal_view: None,
@@ -932,6 +936,14 @@ impl HomeProjection {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Attach this client's build so the Daemon modal can say whether the
+    /// daemon it reports on runs a different build.
+    #[must_use]
+    pub fn with_client_build(mut self, build: Option<BuildIdentity>) -> Self {
+        self.client_build = build;
         self
     }
 
@@ -1246,6 +1258,14 @@ impl HomeProjection {
     /// the cursor; Closeup names the target it operates on.
     fn preview_label(&self) -> &str {
         self.session_label(self.preview)
+    }
+
+    /// Session display names keyed by ID, used to label decision owners.
+    fn session_names(&self) -> BTreeMap<SessionId, String> {
+        self.sessions
+            .iter()
+            .map(|session| (session.id, session.label.clone()))
+            .collect()
     }
 
     fn session_label(&self, session: Option<SessionId>) -> &str {
@@ -1637,12 +1657,20 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             .dim()
             .paint(&format!("[ {DIRECTOR_ICON} Director ]"))
     };
-    let notice = (!home.unread_decision_ids.is_empty()).then(|| {
-        format!(
+    // The badge stays while any decision is pending, so a decision that was
+    // seen in the list but not answered is still discoverable. Unread
+    // decisions are emphasized in bold.
+    let notice = (!home.decisions.is_empty()).then(|| {
+        let style = if home.unread_decision_ids.is_empty() {
+            Role::Warning.style()
+        } else {
+            Role::Warning.style().bold()
+        };
+        style.paint(&format!(
             "{} {} notice",
             icons.decision,
-            home.unread_decision_ids.len()
-        )
+            home.decisions.len()
+        ))
     });
     let root_terminal = if home.root_terminal_drawer.is_some() {
         Role::Accent
@@ -2516,6 +2544,7 @@ fn render_home_modals(
             &frame,
             daemon_modal::DaemonProjection {
                 metrics: home.metrics.as_ref(),
+                client_build: home.client_build.as_ref(),
                 health: home.health.evaluate(now.timestamp_millis()),
                 sessions: home.session_states,
                 session_total: home.sessions.len(),
@@ -2528,7 +2557,14 @@ fn render_home_modals(
     } else if let Some(overlay) = &home.preview_overlay {
         render_preview_overlay(height, width, &frame, overlay)
     } else if let Some(overlay) = &home.decision_overlay {
-        decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
+        decision_modal::render_over(
+            height,
+            width,
+            &frame,
+            overlay,
+            &home.decisions,
+            &home.session_names(),
+        )
     } else if home.closeup_action_visible {
         // Prefer the runtime's persisted action modal (its caret and selection),
         // titled with the active target. Fall back to a fresh modal only for the
@@ -2615,16 +2651,12 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
             IconMode::Text => "indicator",
         };
         return widgets::clip_to_width(
-            &format!(
+            &Role::Warning.style().paint(&format!(
                 "  {} {}: {}  (click {control} to review)",
                 icon_set(home.icon_mode).decision,
-                decision
-                    .owner
-                    .session_id
-                    .as_ref()
-                    .map_or_else(|| "workspace root".to_owned(), ToString::to_string),
+                decision_modal::owner_label(decision, &home.session_names()),
                 decision.title
-            ),
+            )),
             width,
         );
     }
@@ -4084,6 +4116,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         }
     }
 
@@ -4855,13 +4888,10 @@ mod tests {
         assert!(!clipped.contains("36"));
     }
 
-    #[test]
-    fn home_header_layout_and_hit_test_share_notice_and_drawer_geometry() {
-        let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
-        // A pending decision makes the notice badge unread; closing its
-        // auto-opened overlay leaves the badge on the header without an overlay.
-        let decision = usagi_core::domain::user_decision::UserDecision {
+    fn pending_confirm_decision(
+        workspace: WorkspaceId,
+    ) -> usagi_core::domain::user_decision::UserDecision {
+        usagi_core::domain::user_decision::UserDecision {
             decision_id: UserDecisionId::new(),
             owner: usagi_core::domain::user_decision::UserDecisionOwner {
                 workspace_id: workspace,
@@ -4875,18 +4905,35 @@ mod tests {
             title: "confirm".to_owned(),
             prompt: String::new(),
             options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "ok".to_owned(),
                 label: "ok".to_owned(),
                 description: None,
             }],
             allow_freeform: false,
+            allow_comment: false,
+            require_confirmation: false,
+            recommendation: None,
+            selection_limits: None,
+            selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode::Single,
+            context: Vec::new(),
             expires_at: None,
             idempotency_key: None,
             status: usagi_core::domain::user_decision::UserDecisionStatus::Pending,
             answer: None,
             created_at: now(),
             resolved_at: None,
-        };
+        }
+    }
+
+    #[test]
+    fn home_header_layout_and_hit_test_share_notice_and_drawer_geometry() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        // A pending decision makes the notice badge unread; closing its
+        // auto-opened overlay leaves the badge on the header without an overlay.
+        let decision = pending_confirm_decision(workspace);
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::Decisions {
@@ -4904,6 +4951,8 @@ mod tests {
             &home.clone().with_icon_mode(IconMode::Text),
         ));
         assert!(text_banner.contains("click indicator to review"));
+        // The decision notice is highlighted in the warning color (yellow).
+        assert!(home_notice_banner(100, &home).contains("\u{1b}[33m"));
 
         let layout = home_header_layout(100, &home);
         assert_eq!(display_width(&layout.line), 100);
@@ -4914,6 +4963,7 @@ mod tests {
         assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
         assert!(strip(&layout.line).contains("notice"));
+        assert!(layout.line.contains("\u{1b}[1;33m"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
             .collect::<Vec<_>>();
@@ -4957,6 +5007,34 @@ mod tests {
     }
 
     #[test]
+    fn read_pending_decisions_keep_a_plain_warning_badge() {
+        // Reading the list clears the unread emphasis but keeps the pending
+        // badge, so an unanswered decision stays discoverable.
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![pending_confirm_decision(workspace)],
+            }),
+        );
+        // Dismiss the auto-opened editor and list, then read the list.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.unread_decision_ids().len(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        assert!(state.unread_decision_ids().is_empty());
+        let home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
+        let read_line = home_header_layout(100, &home).line;
+        assert!(strip(&read_line).contains("1 notice"));
+        assert!(read_line.contains("\u{1b}[33m"));
+        assert!(!read_line.contains("\u{1b}[1;33m"));
+    }
+
+    #[test]
     fn garden_projects_pending_decisions_to_their_owned_session() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -4975,11 +5053,19 @@ mod tests {
             title: "confirm".to_owned(),
             prompt: "continue?".to_owned(),
             options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "ok".to_owned(),
                 label: "OK".to_owned(),
                 description: None,
             }],
             allow_freeform: false,
+            allow_comment: false,
+            require_confirmation: false,
+            recommendation: None,
+            selection_limits: None,
+            selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode::Single,
+            context: Vec::new(),
             expires_at: None,
             idempotency_key: None,
             status: usagi_core::domain::user_decision::UserDecisionStatus::Pending,
@@ -6540,6 +6626,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         };
         let runtime_item = |session_id| {
             let runtime_id = AgentRuntimeId::new();
@@ -6576,8 +6663,11 @@ mod tests {
         let home = HomeProjection::from_state(&state, "work", &sessions)
             .with_metrics(Some(metrics))
             .with_agent_inventory(Some(&inventory));
-        let frame = strip(&render_home_at(24, 100, &home, now()).join("\n"));
+        // 25 rows: the fixed body (status, build, metrics, sessions, actions,
+        // capacity) leaves exactly three runtime rows.
+        let frame = strip(&render_home_at(25, 100, &home, now()).join("\n"));
         assert!(frame.contains("Daemon"));
+        assert!(frame.contains("daemon build —"));
         assert!(frame.contains("16/16  saturated"));
         assert!(frame.contains(&format!(
             "root  live  #{}",
@@ -6611,11 +6701,19 @@ mod tests {
             title: "confirm".to_owned(),
             prompt: "continue the deploy?".to_owned(),
             options: vec![usagi_core::domain::user_decision::UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "ok".to_owned(),
                 label: "OK".to_owned(),
                 description: None,
             }],
             allow_freeform: false,
+            allow_comment: false,
+            require_confirmation: false,
+            recommendation: None,
+            selection_limits: None,
+            selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode::Single,
+            context: Vec::new(),
             expires_at: None,
             idempotency_key: None,
             status: usagi_core::domain::user_decision::UserDecisionStatus::Pending,
@@ -6927,6 +7025,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         };
         let sidecar = super::mascot_metrics(Some(&metrics), 0);
         let with_metrics = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &sidecar)
@@ -7363,6 +7462,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         };
 
         // The daemon observation flows through `with_metrics` into the sidecar row
@@ -7452,6 +7552,7 @@ mod tests {
             pr_projection_gaps: 0,
             agent_concurrency: None,
             failed_background_workers: 0,
+            build: None,
         };
         let state = AppState::home(WorkspaceId::new(), Vec::new());
         let render = |metrics: &usagi_core::infrastructure::ipc::DaemonMetrics| {
@@ -7564,6 +7665,7 @@ mod tests {
                 limit: 16,
             }),
             failed_background_workers: 0,
+            build: None,
         }
     }
 
@@ -8811,6 +8913,12 @@ mod tests {
             prompt: "Proceed?".into(),
             options: Vec::new(),
             allow_freeform: true,
+            allow_comment: false,
+            require_confirmation: false,
+            recommendation: None,
+            selection_limits: None,
+            selection_mode: usagi_core::domain::user_decision::UserDecisionSelectionMode::Single,
+            context: Vec::new(),
             expires_at: None,
             idempotency_key: None,
             status: UserDecisionStatus::Pending,

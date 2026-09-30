@@ -259,6 +259,71 @@ mod tests {
     }
 
     #[test]
+    fn user_decision_comment_schema_accepts_opt_in_and_bounded_choice_notes() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        assert!(request.validate(&serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}], "allow_comment":true, "require_confirmation":true}), &schema).is_ok());
+        let resolve = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_resolve")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        for choice in [
+            serde_json::json!({"kind":"option", "option_id":"a"}),
+            serde_json::json!({"kind":"options", "option_ids":["a"]}),
+        ] {
+            let mut args = serde_json::json!({"decision_id":"id", "answer":choice});
+            args["answer"]["comment"] = serde_json::json!("Only staging");
+            assert!(resolve.validate(&args, &schema).is_ok());
+            for invalid in [
+                String::new(),
+                "界".repeat(UserDecisionPolicy::COMMENT_MAX_BYTES / 3 + 1),
+            ] {
+                args["answer"]["comment"] = serde_json::json!(invalid);
+                assert!(resolve.validate(&args, &schema).is_err());
+            }
+        }
+        assert!(resolve.validate(&serde_json::json!({"decision_id":"id", "answer":{"kind":"freeform", "text":"Other", "comment":"Ignored?"}}), &schema).is_err());
+    }
+
+    #[test]
+    fn user_decision_tradeoff_schema_bounds_each_list_and_utf8_point() {
+        let registry = registry();
+        let request = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_request")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let option = &schema["properties"]["options"]["items"]["properties"];
+        let rich = serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A", "pros":["Fast"],"cons":["Limited scope"]}]});
+        assert!(request.validate(&rich, &schema).is_ok());
+        for field in ["pros", "cons"] {
+            assert_eq!(
+                option[field]["maxItems"],
+                UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX
+            );
+            for value in [
+                serde_json::json!([""]),
+                serde_json::json!([
+                    "界".repeat(UserDecisionPolicy::OPTION_TRADEOFF_MAX_BYTES / 3 + 1)
+                ]),
+                serde_json::json!(vec![
+                    "valid";
+                    UserDecisionPolicy::OPTION_TRADEOFF_COUNT_MAX + 1
+                ]),
+            ] {
+                let mut invalid = rich.clone();
+                invalid["options"][0][field] = value;
+                assert!(request.validate(&invalid, &schema).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn user_decision_schemas_publish_and_enforce_the_domain_policy_ceilings() {
         let registry = registry();
         let request = registry
@@ -314,11 +379,43 @@ mod tests {
         });
         assert!(request.validate(&multibyte, &schema).is_err());
 
+        let rich = serde_json::json!({
+            "title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A","pros":["Fast"],"cons":["Limited scope"]}],
+            "selection_mode":"multiple",
+            "selection_limits":{"min":1,"max":1},
+            "recommendation":{"option_ids":["a"],"reason":"Safer"},
+            "context":[
+                {"kind":"table", "title":"Cost", "columns":["Plan"], "rows":[["A"]]},
+                {"kind":"diagram", "title":"Flow", "text":"A -> B"}
+            ]
+        });
+        assert!(request.validate(&rich, &schema).is_ok());
+        assert_eq!(
+            properties["context"]["maxItems"],
+            UserDecisionPolicy::CONTEXT_COUNT_MAX
+        );
+        let mut invalid_reason = rich.clone();
+        invalid_reason["recommendation"]["reason"] =
+            serde_json::json!("界".repeat(UserDecisionPolicy::RECOMMENDATION_REASON_MAX_BYTES));
+        assert!(request.validate(&invalid_reason, &schema).is_err());
+        let mut invalid = rich.clone();
+        invalid["selection_mode"] = serde_json::json!("unknown");
+        assert!(request.validate(&invalid, &schema).is_err());
+        invalid = rich;
+        invalid["context"][1]["text"] =
+            serde_json::json!("x".repeat(UserDecisionPolicy::DIAGRAM_MAX_BYTES + 1));
+        assert!(request.validate(&invalid, &schema).is_err());
+
         let resolve = registry
             .iter()
             .find(|tool| tool.name() == "user_decision_resolve")
             .unwrap();
         let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let multiple = serde_json::json!({
+            "decision_id":"00000000-0000-0000-0000-000000000000",
+            "answer":{"kind":"options", "option_ids":["a", "b"]}
+        });
+        assert!(resolve.validate(&multiple, &schema).is_ok());
         let overlong = serde_json::json!({
             "decision_id": "00000000-0000-0000-0000-000000000000",
             "answer": {

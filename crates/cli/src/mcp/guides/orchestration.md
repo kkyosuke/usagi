@@ -198,6 +198,19 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 `cancelled`、`expired` のいずれかになったら処理を続ける。同じ idempotency key の request は同じ decision に
 収束するため、接続をまたぐ retry に使える。
 
+比較が必要なら `context` に `kind: "table"`（`title` / `columns` / `rows`）を添える。関係や手順は
+`kind: "diagram"`（`title` / `text`）の ASCII / Unicode テキスト図で示す。複数案を同時に選べる質問は
+`selection_mode: "multiple"` にし、回答の `kind: "options"` / `option_ids` を読む。
+単一選択は既定の `single` / `option` を使う。判断材料がある場合は `recommendation` の `option_ids` と `reason` に
+推奨案と理由を添える。人の選択を代理入力しない。複数回答の数に制約がある場合は `selection_limits` の `min` / `max` を
+指定する。たとえば両方2なら「ちょうど2件」、1と3なら「1〜3件」を選べる。許可した freeform は件数制約の対象外である。
+案ごとのトレードオフは各 option の `pros`（メリット）/ `cons`（注意点）に短い箇条書きとして添える。
+それぞれ最大4件・1件512 UTF-8 bytesまで。推奨案だけでなく、比較する各案の判断材料を示す。
+条件付きの回答を受け付けるなら `allow_comment: true` にし、選択回答の任意 `comment` も判断内容として読む。
+複数案や長い回答を送信前に見直してほしい場合は `require_confirmation: true` を指定する。TUI は確認画面で
+明示送信するまで回答を保留する。確認画面から編集に戻っても選択とコメントの下書きは保持される。
+詳細な上限と引数は `tools/list` を参照する。
+
 ## 運用知見を残す
 
 `memory_save` で残した判断・制約・再発防止策は、daemon data home の workspace 専用 store に保存される。

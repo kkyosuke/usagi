@@ -455,19 +455,42 @@ Director と root shell が同時に開いていれば、入力を持たない r
 最大 3 本の terminal が同時に更新され、drawer を開いたことでは選択 session の Agent content を閉じたり静止させたりしない。
 
 Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
-一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
+一覧を owner（session 名。root は `workspace root`、session 一覧に無い場合は `session <ID 先頭 8 桁>`）と title で表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
 editor を表示する。Esc は editor から一覧へ戻り、一覧では overlay を閉じるだけで durable decision を変更しない。
 submit は stable option ID または空でない許可済み freeform を送る。row は daemon の resolve confirmation まで
 残り、resolve error・disconnect・resync 後も snapshot で再試行可能な pending state に収束する。modal が開いて
 いる間は Home、Closeup、terminal の背景入力を dispatch しない。
 
+modal は端末の幅・高さの 4/5 に広がる（内幅 70〜120 桁、本文 18〜40 行。本文は上下 1 行ずつ背景を残す高さまで縮む）。
 decision の title、prompt、option label/description、freeform は modal 幅で折り返す。表示域を超える editor の
 内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
 freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
 
-新しい pending decision を resync で観測すると、Home header の右上に Icons 設定に応じた bell または `!` indicator と
-`N notice` を表示し、その直下の banner に session identity（root は `workspace root`）と decision の title（summary）を表示する。indicatorをクリックすると existing decision modal を
-開き、未読表示を既読にする。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
+比較表・テキスト図がある質問は、最初に説明の先頭を表示する。表はセルを折り返して列を揃え、狭い画面では
+列見出し付きの項目表示に切り替えて内容を残す。図は空白と改行を保持し、`←` / `→` で横方向へ読み進める。
+説明全体の縦移動には `PageUp` / `PageDown` を使う。補足の入力形式と上限は [MCP](07-mcp.md#tool-面) を正本とする。
+
+`allow_comment` が有効な質問では Tab で選択肢 → 補足コメント → 自由入力（許可時）を切り替える。
+コメントは任意で、選択 ID と一緒に送信する。自由入力を選んだときはコメント下書きを送らない。
+`require_confirmation` が有効なら Enter は送信前の確認画面を開く。選択名・ID・補足コメント、または自由入力を
+表示し、Enter で送信、Esc で下書きを保持して編集に戻る。PgUp/PgDn で長い回答も確認できる。
+確認中の通常文字入力は回答を変更せず、送信時には期限などを再検証する。両 flag の省略時は従来の操作を保つ。
+選択肢にメリット・注意点がある場合は、その案の説明の下に `Pro:` / `Con:` として表示する。
+長文と改行は端末幅で折り返し、PgUp/PgDn で全項目を読める。メリット・注意点は比較用の説明であり、それ自体は回答に含めない。
+推奨案がある質問は、最初に対象の名前と推奨理由を表示し、選択肢にも `[recommended]` を付ける。
+推奨案によってカーソル位置やチェックを変更しない。選択件数が指定された質問では、footer に現在の件数と
+最小・最大件数を表示する。上限で別項目をチェックすると入力を保持したまま解除を案内し、件数不足の送信では
+必要な件数をエラーとして表示する。推奨・件数の request 形式は [MCP](07-mcp.md#tool-面) を参照する。
+
+複数選択では `↑` / `↓` で移動、`Space` でチェックの追加・解除、`Enter` で送信する。初期状態は未選択で、
+チェック数と `[ ]` / `[x]` を表示し、未選択では送信しない。自由入力も許可される場合は `Tab` で選択欄と
+自由入力欄を切り替え、現在の欄の回答だけを送信する。両方の入力内容は切り替えや同じ質問の snapshot 更新で保持する。
+送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
+
+pending decision がある間、Home header の右上に Icons 設定に応じた bell または `!` indicator と
+`N notice`（N は pending 件数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
+観測すると、その直下の banner に owner（一覧と同じ表記）と decision の title（summary）を warning 色で表示する。
+indicatorをクリックすると existing decision modal を開き、未読表示を既読にする。既読にしても pending の間は badge を残す。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
 resolve/cancel/expire で pending snapshot から消えると未読も消える。
 
@@ -1073,7 +1096,10 @@ modal に安全な error を表示する。
 Overview の `daemon` は workspace の daemon status modal を開く。modal は最新の metrics observation と
 daemon-authoritative な session projection を使い、health、CPU / memory、接続 client 数、managed session の
 running / waiting / failed 件数、Agent concurrency の使用中 / 上限、workspace 全体の Agent runtime inventory を
-一画面に表示する。runtime は root または stable `SessionId` で結合した session label、状態、表示専用の短縮 runtime ID を持つ。
+一画面に表示する。health の次の行は daemon process の build（`daemon v<version> (<commit>)`。commit を持たない build は
+`daemon v<version>`、version を持たない build は `daemon unknown build`）で、metrics の `build` を正本にする。この TUI の build と異なれば warning 色で `≠ client v<version> (<commit>)` を続け、更新後に旧 daemon が
+残っていることを示す。build を報告しない daemon と metrics 未取得のときは `daemon build —` と表示する
+（比較規則は [5. daemon](05-daemon.md#行頭の-version-は-client-の-build-である)）。runtime は root または stable `SessionId` で結合した session label、状態、表示専用の短縮 runtime ID を持つ。
 modal を開くたびに既存の coalesced restore lane へ新しい coherent inventory を要求し、取得までは待機表示にする。
 一覧が表示域を超える場合は収まる先頭行と残件数を表示する。値は診断専用であり、
 launch admission や ownership の判断には使わない。metrics 未取得と Agent concurrency 未報告はそれぞれ

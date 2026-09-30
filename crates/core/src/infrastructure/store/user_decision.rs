@@ -549,6 +549,12 @@ fn same_request(a: &UserDecision, b: &UserDecision) -> bool {
         && a.prompt == b.prompt
         && a.options == b.options
         && a.allow_freeform == b.allow_freeform
+        && a.allow_comment == b.allow_comment
+        && a.require_confirmation == b.require_confirmation
+        && a.recommendation == b.recommendation
+        && a.selection_limits == b.selection_limits
+        && a.selection_mode == b.selection_mode
+        && a.context == b.context
         && a.expires_at == b.expires_at
 }
 
@@ -575,11 +581,19 @@ mod tests {
             title: "t".into(),
             prompt: "p".into(),
             options: vec![UserDecisionOption {
+                pros: Vec::new(),
+                cons: Vec::new(),
                 id: "a".into(),
                 label: "A".into(),
                 description: None,
             }],
             allow_freeform: false,
+            allow_comment: false,
+            require_confirmation: false,
+            recommendation: None,
+            selection_limits: None,
+            selection_mode: crate::domain::user_decision::UserDecisionSelectionMode::Single,
+            context: Vec::new(),
             expires_at: None,
             idempotency_key: Some("k".into()),
             status: UserDecisionStatus::Pending,
@@ -621,6 +635,7 @@ mod tests {
                 workspace,
                 decision.decision_id,
                 UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "a".into(),
                 },
                 Utc::now(),
@@ -641,6 +656,7 @@ mod tests {
                     workspace,
                     decision.decision_id,
                     UserDecisionAnswer::Option {
+                        comment: None,
                         option_id: "a".into()
                     },
                     Utc::now()
@@ -669,6 +685,7 @@ mod tests {
                 decision.owner.workspace_id,
                 decision.decision_id,
                 UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "a".into(),
                 },
                 Utc::now(),
@@ -758,6 +775,7 @@ mod tests {
                     WorkspaceId::new(),
                     decision.decision_id,
                     UserDecisionAnswer::Option {
+                        comment: None,
                         option_id: "a".into()
                     },
                     Utc::now()
@@ -996,6 +1014,7 @@ mod tests {
                 workspace,
                 awaited_id,
                 UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "a".into(),
                 },
                 now,
@@ -1092,6 +1111,7 @@ mod tests {
                     decision.owner.workspace_id,
                     decision.decision_id,
                     UserDecisionAnswer::Option {
+                        comment: None,
                         option_id: "a".into(),
                     },
                     fixed_now(),
@@ -1272,6 +1292,7 @@ mod tests {
                             workspace,
                             id,
                             UserDecisionAnswer::Option {
+                                comment: None,
                                 option_id: "a".into(),
                             },
                             now,
@@ -1428,5 +1449,125 @@ mod tests {
         let error = store.events().unwrap_err();
         std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(mode)).unwrap();
         assert!(format!("{error:#}").contains("failed to read"));
+    }
+    #[test]
+    fn rich_decisions_persist_and_idempotency_includes_context_and_selection_mode() {
+        use crate::domain::user_decision::{UserDecisionContext, UserDecisionSelectionMode};
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(dir.path());
+        let mut request = item();
+        request.allow_comment = true;
+        request.selection_mode = UserDecisionSelectionMode::Multiple;
+        request.context = vec![UserDecisionContext::Diagram {
+            title: "Flow".into(),
+            text: "A -> B".into(),
+        }];
+        request.idempotency_key = Some("rich".into());
+        store.create(request.clone()).unwrap().unwrap();
+        assert_eq!(store.create(request.clone()).unwrap().unwrap(), request);
+        for changed in [
+            {
+                let mut next = request.clone();
+                next.selection_mode = UserDecisionSelectionMode::Single;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.context.clear();
+                next
+            },
+        ] {
+            assert_eq!(
+                store.create(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+        }
+        let workspace = request.owner.workspace_id;
+        let answer = UserDecisionAnswer::Options {
+            comment: Some("Only staging".into()),
+            option_ids: vec![request.options[0].id.clone()],
+        };
+        store
+            .resolve(workspace, request.decision_id, answer.clone(), Utc::now())
+            .unwrap()
+            .unwrap();
+        let reopened = UserDecisionStore::new(dir.path());
+        let restored = reopened
+            .get(workspace, request.decision_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.answer, Some(answer));
+        assert_eq!(restored.context, request.context);
+    }
+    #[test]
+    fn decision_guidance_is_durable_and_changes_conflict_with_the_same_key() {
+        use crate::domain::user_decision::{
+            UserDecisionRecommendation, UserDecisionSelectionLimits, UserDecisionSelectionMode,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(dir.path());
+        let mut request = item();
+        request.selection_mode = UserDecisionSelectionMode::Multiple;
+        request.selection_limits = Some(UserDecisionSelectionLimits { min: 1, max: 1 });
+        request.recommendation = Some(UserDecisionRecommendation {
+            option_ids: vec![request.options[0].id.clone()],
+            reason: "Safer".into(),
+        });
+        request.idempotency_key = Some("guidance".into());
+        request.allow_comment = true;
+        request.require_confirmation = true;
+        request.options[0].pros = vec!["Less work".into()];
+        request.options[0].cons = vec!["Limited scope".into()];
+        store.create(request.clone()).unwrap().unwrap();
+        assert_eq!(store.create(request.clone()).unwrap().unwrap(), request);
+        for changed in [
+            {
+                let mut next = request.clone();
+                next.allow_comment = false;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.require_confirmation = false;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.options[0].pros = vec!["Other benefit".into()];
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.options[0].cons.clear();
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.selection_limits = None;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.recommendation = None;
+                next
+            },
+            {
+                let mut next = request.clone();
+                next.recommendation.as_mut().unwrap().reason = "Faster".into();
+                next
+            },
+        ] {
+            assert_eq!(
+                store.create(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+        }
+        let reopened = UserDecisionStore::new(dir.path());
+        assert_eq!(
+            reopened
+                .get(request.owner.workspace_id, request.decision_id)
+                .unwrap(),
+            Some(request)
+        );
     }
 }

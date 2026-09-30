@@ -217,6 +217,7 @@ pub(super) fn home_frame_material_shared(
         .with_icon_mode(icon_mode)
         .with_pane(runtime.preview_pane())
         .with_metrics(metrics)
+        .with_client_build(runtime.client_build().cloned())
         // Diagnostic-only material. It rides the frame material like every
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
@@ -781,6 +782,7 @@ pub(super) fn drive_workspace_controller(
             );
         });
     runtime.set_agent_models(available_models, default_model);
+    runtime.set_client_build(backend_factory.client_build());
     runtime.set_work_mode(work_mode);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);

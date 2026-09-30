@@ -1499,6 +1499,7 @@ mod tests {
                 workspace,
                 decision_id: UserDecisionId::new(),
                 answer: UserDecisionAnswer::Option {
+                    comment: None,
                     option_id: "safe".to_owned(),
                 },
             },
