@@ -4059,6 +4059,12 @@ mod tests {
         assert!(runtime.state().director_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
 
+        // Each drawer toggles independently: Director closes from the Shell
+        // and reopens with focus, without closing the Shell.
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        assert!(!runtime.state().director_drawer_open());
+        assert!(runtime.state().root_terminal_drawer_open());
+        assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert!(runtime.state().director_drawer_open());
         assert!(runtime.state().root_terminal_drawer_open());
@@ -4142,11 +4148,9 @@ mod tests {
         // focus moves back from Director.
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
         assert_eq!(runtime.focused_terminal(), Some(root_agent));
-        assert!(
-            runtime
-                .handle_key(Key::Live(LiveTerminalAction::RootTerminal))
-                .is_empty()
-        );
+        let _ = runtime.apply_event(AppEvent::WorkspaceDrawerFocused(
+            WorkspaceDrawerFocus::Terminal,
+        ));
         assert_eq!(runtime.focused_terminal(), Some(second_terminal));
     }
 
@@ -4684,7 +4688,9 @@ mod tests {
         assert!(runtime.state().director_drawer_open());
         assert!(runtime.focused_interrupted().is_none());
 
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+        let _ = runtime.apply_event(AppEvent::WorkspaceDrawerFocused(
+            WorkspaceDrawerFocus::Director,
+        ));
         assert!(runtime.state().root_terminal_drawer_open());
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),

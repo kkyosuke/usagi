@@ -445,6 +445,61 @@ fn empty_director_closes_and_returns_focus_to_an_open_workspace_terminal() {
 }
 
 #[test]
+fn shell_and_director_toggle_independently_from_either_focused_drawer() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+
+    // Director first: the Shell opens and then closes from Director's side.
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+    let effects = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::OpenTerminal { arguments, .. }] if arguments == "open"
+    ));
+    assert!(state.root_terminal_drawer_open());
+    // Refocus Director while the Shell stays open, as a click on it would.
+    let _ = update(
+        &mut state,
+        AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Director),
+    );
+    assert!(
+        update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer)).is_empty(),
+        "closing an open Shell from Director must not reopen the root terminal"
+    );
+    assert!(!state.root_terminal_drawer_open());
+    assert!(state.director_drawer_open());
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Director)
+    );
+
+    // Shell focused with Director open: the Director toggle closes Director
+    // instead of only moving focus onto it.
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+    state.director_goal = "discard me".into();
+    assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+    assert!(!state.director_drawer_open());
+    assert!(state.director_goal().is_empty());
+    assert!(state.root_terminal_drawer_open());
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+
+    // And Director reopens from the Shell, taking focus.
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+    assert!(state.director_drawer_open());
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Director)
+    );
+}
+
+#[test]
 fn director_frontmost_transition_table_keeps_modal_and_background_ownership_unique() {
     struct Case {
         name: &'static str,
