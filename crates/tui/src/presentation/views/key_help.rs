@@ -184,6 +184,7 @@ impl Context {
             ],
             Self::Switch => &[
                 ("↑ / ↓", "select session"),
+                ("p / n", "move session up / down"),
                 ("← / →", "previous / next project"),
                 ("Ctrl+Option+↑ / ↓", "previous / next session"),
                 ("Ctrl+Option+← / →", "previous / next project"),

@@ -1889,6 +1889,9 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
 /// Only stable session rows are remembered; transient action rows remain local
 /// to the controller that owns them.
 fn remember_workspace_session_focus(deck: &mut WorkspaceDeck, state: &AppState) {
+    if state.session_order_revision() != 0 {
+        deck.remember_session_order(state.workspace(), state.sessions());
+    }
     if let crate::usecase::application::controller::Selection::Target(Target::Session(session)) =
         state.selected()
     {
