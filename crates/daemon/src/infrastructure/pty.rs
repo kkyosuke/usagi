@@ -109,7 +109,12 @@ impl<W: Write, R: Readiness> PtyWriter for StallBoundedWriter<W, R> {
         while applied_prefix < bytes.len() {
             match self.inner.write(&bytes[applied_prefix..]) {
                 Ok(0) => return Err(PtyWriteError { applied_prefix }),
-                Ok(written) => applied_prefix += written,
+                Ok(written) => {
+                    // Progress proves the child is reading again, so a later
+                    // full queue deserves the bounded wait once more.
+                    self.stalled = false;
+                    applied_prefix += written;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if self.stalled {
@@ -128,12 +133,14 @@ impl<W: Write, R: Readiness> PtyWriter for StallBoundedWriter<W, R> {
                 Err(_) => return Err(PtyWriteError { applied_prefix }),
             }
         }
-        self.stalled = false;
         Ok(())
     }
 }
 
 /// Restores blocking reads on the non-blocking master description.
+///
+/// Linux reports a closed slave as `EIO` on the master; like the
+/// `portable-pty` reader this replaces, that is the end of output.
 struct ReadinessReader<I, R> {
     inner: I,
     readiness: R,
@@ -150,6 +157,7 @@ impl<I: Read, R: Readiness> Read for ReadinessReader<I, R> {
                         Err(error) => return Err(error),
                     }
                 }
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(0),
                 outcome => return outcome,
             }
         }
@@ -692,8 +700,6 @@ mod tests {
                 WriteStep::Bytes(2),
                 WriteStep::WouldBlock,
                 WriteStep::WouldBlock,
-                WriteStep::Bytes(1),
-                WriteStep::WouldBlock,
             ],
             ScriptedReadiness::new([Ok(false)]),
         );
@@ -706,15 +712,11 @@ mod tests {
             writer.write_all(b"x"),
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 0 })
         );
-        assert_eq!(
-            writer.write_all(b"yz"),
-            Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 1 })
-        );
         assert_eq!(writer.readiness.waits, vec![(libc::POLLOUT, Some(STALL))]);
     }
 
     #[test]
-    fn a_completed_write_clears_the_stall() {
+    fn progress_clears_the_stall_so_a_later_full_queue_waits_again() {
         let mut writer = scripted(
             [
                 WriteStep::WouldBlock,
@@ -726,8 +728,11 @@ mod tests {
         );
 
         assert!(writer.write_all(b"a").is_err());
-        assert_eq!(writer.write_all(b"b"), Ok(()));
-        assert_eq!(writer.write_all(b"c"), Ok(()));
+        assert!(writer.stalled);
+        // A partial write that then meets a full queue waits again instead of
+        // dropping the rest of a paste the child has started consuming.
+        assert_eq!(writer.write_all(b"bc"), Ok(()));
+        assert!(!writer.stalled);
         assert_eq!(writer.inner.written, b"bc");
         assert_eq!(writer.readiness.waits.len(), 2);
     }
@@ -759,6 +764,7 @@ mod tests {
     enum ReadStep {
         Data(&'static [u8]),
         WouldBlock,
+        Hangup,
         Error,
     }
 
@@ -772,6 +778,7 @@ mod tests {
                     Ok(bytes.len())
                 }
                 ReadStep::WouldBlock => Err(Error::from(ErrorKind::WouldBlock)),
+                ReadStep::Hangup => Err(Error::from_raw_os_error(libc::EIO)),
                 ReadStep::Error => Err(Error::other("scripted read failure")),
             }
         }
@@ -805,6 +812,13 @@ mod tests {
             reader.readiness.waits,
             vec![(libc::POLLIN, None), (libc::POLLIN, None)]
         );
+    }
+
+    #[test]
+    fn a_closed_slave_ends_the_output_instead_of_failing_the_read() {
+        let mut reader = reader([ReadStep::Hangup], ScriptedReadiness::ready());
+
+        assert_eq!(reader.read(&mut [0; 4]).unwrap(), 0);
     }
 
     #[test]
