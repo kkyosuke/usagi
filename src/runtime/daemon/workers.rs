@@ -696,8 +696,11 @@ pub(super) fn start_lock_watchdog(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let threads = usagi_daemon::usecase::lock_watch::start_lock_watch(
         vec![
-            LockTarget::new("agent runtime", AgentOwnerLock(Arc::downgrade(agent))),
-            LockTarget::new("terminal runtime", Arc::downgrade(terminal)),
+            LockTarget::new(
+                "agent runtime",
+                Box::new(AgentOwnerLock(Arc::downgrade(agent))),
+            ),
+            LockTarget::new("terminal runtime", Box::new(Arc::downgrade(terminal))),
         ],
         workers,
         shutdown,

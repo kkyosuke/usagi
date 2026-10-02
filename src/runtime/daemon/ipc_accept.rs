@@ -756,7 +756,7 @@ pub(super) fn start_ipc_accept_loop(
                         }
                         let capacity_available =
                             client_connection_capacity_available(&workers, connection_limit);
-                        capacity_watch.observe(workers.outstanding(), ErrorLog::record);
+                        capacity_watch.observe(workers.outstanding(), &ErrorLog::record);
                         if capacity_log.should_record(capacity_available) {
                             ErrorLog::record(
                                 "daemon connection refused: client capacity exhausted",

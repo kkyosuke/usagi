@@ -31,6 +31,7 @@ pub trait ProbeTarget: Send {
 /// A lock owned through a weak reference. A probe must not keep a runtime
 /// alive past the shutdown that drops its last strong reference.
 impl<T: Send> ProbeTarget for Weak<Mutex<T>> {
+    #[coverage(off)] // coverage: reason=generic_monomorphization owner=daemon expires=2027-01-31 tests=a_weak_lock_is_acquired_while_its_owner_lives_and_reports_when_it_is_gone
     fn acquire(&self) -> bool {
         let Some(lock) = self.upgrade() else {
             return false;
@@ -49,11 +50,8 @@ pub struct LockTarget {
 
 impl LockTarget {
     #[must_use]
-    pub fn new(name: &'static str, target: impl ProbeTarget + 'static) -> Self {
-        Self {
-            name,
-            target: Box::new(target),
-        }
+    pub fn new(name: &'static str, target: Box<dyn ProbeTarget>) -> Self {
+        Self { name, target }
     }
 }
 
@@ -74,11 +72,11 @@ impl LockProbe {
     }
 
     /// Runs one acquisition, publishing its start until it returns.
-    pub fn measure<T>(&self, acquire: impl FnOnce() -> T) -> T {
+    pub fn measure(&self, target: &dyn ProbeTarget) -> bool {
         self.publish(Some(Instant::now()));
-        let outcome = acquire();
+        let acquired = target.acquire();
         self.publish(None);
-        outcome
+        acquired
     }
 
     fn publish(&self, waiting_since: Option<Instant>) {
@@ -229,7 +227,7 @@ impl CapacityWatch {
     }
 
     /// Passes a report to `report` when usage crossed a threshold.
-    pub fn observe(&mut self, outstanding: usize, report: impl FnOnce(&str)) {
+    pub fn observe(&mut self, outstanding: usize, report: &dyn Fn(&str)) {
         let event = if !self.high && outstanding.saturating_mul(4) >= self.limit.saturating_mul(3) {
             CapacityEvent::High {
                 outstanding,
@@ -331,10 +329,7 @@ fn run_lock_probe(
 ) {
     // One condition, so how the loop ends (shutdown before or after the
     // acquisition, or the owner gone) never decides which lines run.
-    while !shutdown.is_requested()
-        && probe.measure(|| target.acquire())
-        && !shutdown.wait_for_tick(tick)
-    {}
+    while !shutdown.is_requested() && probe.measure(target) && !shutdown.wait_for_tick(tick) {}
 }
 
 /// Reports every lock change once per tick until shutdown.

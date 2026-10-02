@@ -25,14 +25,33 @@ fn a_weak_lock_is_acquired_while_its_owner_lives_and_reports_when_it_is_gone() {
     assert!(!target.acquire());
 }
 
+/// Records what the probe published while it was being acquired.
+struct ObservingTarget {
+    probe: Arc<LockProbe>,
+    seen: Mutex<Vec<Option<Instant>>>,
+}
+
+impl ProbeTarget for ObservingTarget {
+    fn acquire(&self) -> bool {
+        self.seen.lock().unwrap().push(self.probe.waiting_since());
+        true
+    }
+}
+
 #[test]
 fn measure_publishes_the_start_only_while_the_acquisition_runs() {
-    let probe = LockProbe::new("agent runtime");
+    let probe = Arc::new(LockProbe::new("agent runtime"));
     assert_eq!(probe.waiting_since(), None);
+    let target = ObservingTarget {
+        probe: Arc::clone(&probe),
+        seen: Mutex::new(Vec::new()),
+    };
 
-    let inside = probe.measure(|| probe.waiting_since());
+    assert!(probe.measure(&target));
 
-    assert!(inside.is_some());
+    let seen = target.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].is_some());
     assert_eq!(probe.waiting_since(), None);
 }
 
@@ -111,13 +130,15 @@ fn lock_events_name_the_lock_and_the_duration() {
 #[test]
 fn capacity_is_reported_at_three_quarters_and_cleared_at_half() {
     let mut watch = CapacityWatch::new(256);
-    let mut reports = Vec::new();
+    let reports = Mutex::new(Vec::new());
     for outstanding in [10, 191, 192, 250, 129, 128, 100, 192] {
-        watch.observe(outstanding, |line| reports.push(line.to_owned()));
+        watch.observe(outstanding, &|line| {
+            reports.lock().unwrap().push(line.to_owned());
+        });
     }
 
     assert_eq!(
-        reports,
+        reports.into_inner().unwrap(),
         vec![
             "daemon client workers reached 192/256 of capacity; new connections are refused at the limit",
             "daemon client workers are back to 128/256 of capacity",
@@ -183,7 +204,10 @@ fn the_watchdog_reports_a_held_lock_and_its_release_then_stops_on_shutdown() {
     let held = owner.lock().unwrap();
 
     let threads = start_lock_watch(
-        vec![LockTarget::new("agent runtime", Arc::downgrade(&owner))],
+        vec![LockTarget::new(
+            "agent runtime",
+            Box::new(Arc::downgrade(&owner)),
+        )],
         Arc::new(ClientWorkers::new()),
         &shutdown,
         LockWatchTiming {
