@@ -1014,6 +1014,35 @@ installer や service が意図した data home と、plain shell で起動し�
 選ぶ。feature 無しの既定は local であり、**危険な向き（本番 state を書く）に明示的な build 時の指定を要求する**
 非対称を保つ。`USAGI_RUNTIME_MODE` は artifact の既定を両方向へ上書きできるため、開発・調査の経路は塞がない。
 
+### private directory の検査起点
+
+通常は private directory までの全親 directory を検査し、root または実行ユーザーの所有、他ユーザーからの
+書き込み不可を要求する（root-owned `01777` の一時 directory は許可する）。クラウド環境で `/` の所有者が
+別 UID に見える場合は、起動元の shell で `USAGI_TRUST_ROOT` を設定し、検査の起点を明示できる。
+
+```bash
+export USAGI_TRUST_ROOT=/workspace
+export USAGI_HOME=/workspace/usagi-state
+export USAGI_RUNTIME_MODE=local
+usagi daemon start
+usagi doctor
+```
+
+| 条件 | 動作 |
+|---|---|
+| 未設定 | 従来の全親 directory の検査を使う |
+| 起点 | 既存の絶対 path。実行ユーザーが所有し、owner の読み書き・検索を許可し、group/world 書き込みと特殊 permission bit が無い directory に限る |
+| 起点より上 | 所有者の検査を環境提供側へ委ねる。親から起点を差し替えられない環境でだけ指定する |
+| symlink / `..` | 起点までの symlink と `..`、起点以下の symlink を拒否する |
+| 管理領域 | すべての private directory は起点以下に限る。起点自体は作成・chmod せず、setup 前後に同じ inode と権限を確認する |
+| private directory / socket | 従来どおり実行ユーザー所有と `0700` / `0600` を要求する |
+
+`USAGI_HOME` は保存先、`USAGI_TRUST_ROOT` は検査境界であり、役割が異なる。workspace fence も検査対象なので、
+adopt する workspace と data home の両方を含む起点を選ぶ。設定が空・不正・起点外の場合は起動を拒否する。
+daemon、client、MCP child で同じ設定を使う。managed Agent の MCP 環境へ daemon が転送し、
+`daemon install-service` は設定時の値を systemd / launchd 定義へ保存する。
+workspace の env binding から検査境界を上書きすることはできない。
+
 ### Agent child の data home
 
 daemon が起動する Agent child には、mode を適用する**前**の base（`$USAGI_HOME`）と選択中の mode の両方を渡す。child は同じ mode を base に再適用するので、daemon が使っている directory そのものに戻る。base と selected directory の対応は下表のとおりで、production は selected directory が base 自体である。
