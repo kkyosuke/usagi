@@ -2247,7 +2247,8 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.route = Route::Home(HomeMode::Closeup);
     assert!(update_key(&mut state, AppKey::CtrlC).is_empty());
     state.ctrl_c_grace = false;
-    assert_eq!(update_key(&mut state, AppKey::CtrlC), vec![Effect::Detach]);
+    assert!(update_key(&mut state, AppKey::CtrlC).is_empty());
+    assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
 
     state.overlay = Some(Overlay::QuitConfirmation);
     let _ = update_overlay(&mut state, Overlay::QuitConfirmation, AppKey::Home);
