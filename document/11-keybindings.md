@@ -107,13 +107,12 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 |---|---|---|
 | Welcome | `↑` / `k`、`↓` / `j` | 前 / 次の項目 |
 | Welcome | `Enter` | 選択項目を開く |
-| Welcome | `o` / `e` / `c` / `q` | Open / New / Config / Quit |
-| Welcome | `1` … `3` | Recent cardを開く |
+| Welcome | `r` / `o` / `e` / `c` / `q` | 前回の project / Open・追加 / Clone / Config / Quit |
 | Welcome | `Esc` / `Ctrl-C` / `Ctrl-Q` | Quit |
 | Open | `↑` / `↓` | workspace選択（端末に収まらない分は窓がscrollし、残り件数を一覧下に出す） |
-| Open | 文字 / paste / `Backspace` / `Delete` | filter編集 |
-| Open | `Tab` | Single / Unite |
-| Open | `Space` | Unite対象をmark |
+| Open | 文字 / paste / `Backspace` / `Delete` | filter または Directory の path 編集 |
+| Open | `Tab` | Projects / Recent / Directory |
+| Open | `Space` | Projects で複数 project を mark |
 | Open | `Enter` | open |
 | Open | `Ctrl-X` | 選択workspaceの登録解除確認 |
 | Open | `C` | 存在しない登録のcleanup確認 |

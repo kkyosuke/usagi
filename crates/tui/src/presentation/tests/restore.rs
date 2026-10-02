@@ -1885,16 +1885,16 @@ fn workspace_switch_restores_each_projects_last_session_cursor() {
 fn cancelling_recent_and_open_list_restores_the_originating_screen() {
     let cases = [
         (
-            vec![Key::Char('1'), Key::Quit],
+            vec![Key::Char('r'), Key::Quit],
             Vec::new(),
             vec![recent("recent")],
-            "Menu",
+            "Clone repository",
         ),
         (
             vec![Key::Char('o'), Key::Enter, Key::Quit],
             vec![ws("open")],
             Vec::new(),
-            "Open Workspace",
+            "Open / add projects",
         ),
     ];
 

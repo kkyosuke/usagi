@@ -3029,8 +3029,8 @@ fn open_selection_loads_and_runs_workspace_on_the_same_terminal() {
     );
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
     assert_eq!(term.frames.len(), 4);
-    assert!(term.frames[0].join("\n").contains("Menu"));
-    assert!(term.frames[1].join("\n").contains("Open Workspace"));
+    assert!(term.frames[0].join("\n").contains("Clone repository"));
+    assert!(term.frames[1].join("\n").contains("Open / add projects"));
     assert!(term.frames[2].join("\n").contains("alpha-session"));
 }
 

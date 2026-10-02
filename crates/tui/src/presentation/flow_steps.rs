@@ -27,7 +27,7 @@ pub(super) enum WelcomeStep {
     Quit,
     OpenList,
     /// Recent の単体 workspace を開く。
-    OpenRecent(usize),
+    Resume,
     /// New（新規 workspace 作成フォーム）へ進む。
     NewForm,
     /// Config（設定画面）へ進む。
@@ -114,7 +114,7 @@ pub(super) fn welcome_action(action: MenuAction) -> WelcomeStep {
     match action {
         MenuAction::Quit => WelcomeStep::Quit,
         MenuAction::Open => WelcomeStep::OpenList,
-        MenuAction::OpenRecent(index) => WelcomeStep::OpenRecent(index),
+        MenuAction::Resume => WelcomeStep::Resume,
         MenuAction::New => WelcomeStep::NewForm,
         MenuAction::Config => WelcomeStep::ConfigScreen,
     }
@@ -495,13 +495,7 @@ pub(super) fn step_open(open: &mut Open, key: Key) -> OpenStep {
         Key::Escape => OpenStep::Back,
         Key::Quit | Key::CtrlQ => OpenStep::Quit,
         Key::Enter => {
-            let paths = if open.is_unite() {
-                open.unite_paths()
-            } else {
-                open.selected()
-                    .map(|workspace| vec![workspace.path.clone()])
-                    .unwrap_or_default()
-            };
+            let paths = open.chosen_paths();
             if paths.is_empty() {
                 OpenStep::Stay
             } else {
@@ -509,14 +503,14 @@ pub(super) fn step_open(open: &mut Open, key: Key) -> OpenStep {
             }
         }
         Key::Tab => {
-            open.toggle_unite();
+            open.cycle_view();
             OpenStep::Stay
         }
-        Key::Char(' ') if open.is_unite() => {
+        Key::Char(' ') if open.view() == super::views::open::OpenView::Projects => {
             open.toggle_unite_member();
             OpenStep::Stay
         }
-        Key::Char('C') => {
+        Key::Char('C') if open.view() == super::views::open::OpenView::Projects => {
             open.request_cleanup();
             OpenStep::Stay
         }

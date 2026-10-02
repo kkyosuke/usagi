@@ -382,7 +382,9 @@ fn user_interactions() -> Vec<Key> {
 }
 
 fn ws(name: &str) -> Workspace {
-    Workspace::new(name, format!("/tmp/{name}"))
+    let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
+    workspace.updated_at = now();
+    workspace
 }
 
 fn ws_minutes_ago(name: &str, minutes: i64) -> Workspace {
@@ -2683,6 +2685,7 @@ enum FakeRegistryRefresh {
 
 #[derive(Default)]
 struct FakeLoader {
+    last_projects: Option<usagi_core::domain::recent::LastProjectSet>,
     operation_mode: FakeOperationMode,
     opened: Vec<PathBuf>,
     refreshed: Vec<PathBuf>,
@@ -2781,6 +2784,18 @@ impl WorkspaceLoader for FakeLoader {
         } else {
             Ok(self.directory_entries.clone())
         }
+    }
+
+    fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>> {
+        Ok(self.last_projects.clone())
+    }
+
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> io::Result<()> {
+        self.last_projects = Some(projects.clone());
+        Ok(())
     }
 
     fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {

@@ -3945,6 +3945,24 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         result
     }
 
+    fn last_projects(
+        &mut self,
+    ) -> std::io::Result<Option<usagi_core::domain::recent::LastProjectSet>> {
+        let mut projects = self.storage.load_last_projects().map_err(io_error)?;
+        let registered = self.storage.load_workspaces().map_err(io_error)?;
+        if let Some(last) = projects.as_mut() {
+            last.retain_paths(|path| registered.iter().any(|workspace| workspace.path == path));
+        }
+        Ok(projects)
+    }
+
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> std::io::Result<()> {
+        self.storage.save_last_projects(projects).map_err(io_error)
+    }
+
     fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
         workspace_usecase::touch_unite(&self.storage, paths, Utc::now()).map_err(io_error)
     }

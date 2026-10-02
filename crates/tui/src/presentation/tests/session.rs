@@ -1923,7 +1923,7 @@ fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
         calls,
         created: created.clone(),
     };
-    let keys = [Key::Char('1'), Key::CtrlQ, Key::Char('y')];
+    let keys = [Key::Char('r'), Key::CtrlQ, Key::Char('y')];
     let mut term = FakeTerminal::with_keys(&keys);
     let mut loader = FakeLoader::default();
     let mut settings = DefaultSettingsPort;
