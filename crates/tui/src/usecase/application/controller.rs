@@ -3950,12 +3950,10 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             if std::mem::take(&mut state.ctrl_c_grace) {
                 state.notice = Some(Notice::new("Ctrl-C ignored after leaving live pane"));
                 Vec::new()
-            } else if state.has_live_pane {
+            } else {
                 state.exit_choice = ExitChoice::Quit;
                 state.overlay = Some(Overlay::QuitConfirmation);
                 Vec::new()
-            } else {
-                vec![Effect::Detach]
             }
         }
         AppKey::CtrlQ | AppKey::OpenQuitConfirmation => {

@@ -5252,6 +5252,37 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn interrupted_closeup_ctrl_c_requires_explicit_quit_confirmation() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let history = interrupted_tab(workspace, session, true);
+        with_history(
+            &mut runtime,
+            Target::Session(session),
+            vec![history.clone()],
+        );
+        let _ = runtime.handle_key(Key::Enter);
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
+        assert!(!runtime.state().has_live_pane());
+        assert_eq!(runtime.state().overlay(), None);
+
+        for _ in 0..3 {
+            assert!(runtime.handle_key(Key::Quit).is_empty());
+            let _ = runtime.apply_event(AppEvent::Tick);
+            assert_eq!(runtime.state().overlay(), Some(Overlay::QuitConfirmation));
+        }
+        assert!(runtime.handle_key(Key::Char('n')).is_empty());
+        assert_eq!(runtime.state().overlay(), None);
+        assert_eq!(
+            runtime.focused_interrupted().map(|tab| tab.continuation),
+            Some(history.continuation),
+        );
+        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert_eq!(runtime.handle_key(Key::Enter), vec![Effect::Detach]);
+    }
+
     /// #544: a target whose only tabs are interrupted history must open Closeup
     /// on its tab strip, not behind the action launcher.
     ///
