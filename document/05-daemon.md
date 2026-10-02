@@ -1226,7 +1226,10 @@ daemon は想定外の失敗を検出した境界で `<data-dir>/logs/error-YYYY
 | 観測 | 記録する時点 | 記録しない時点 |
 |---|---|---|
 | daemon-wide な runtime lock（`agent runtime` / `terminal runtime`） | 1 回の取得待ちが 10 秒に達したとき（lock 名、待ち時間、残っている client worker 数）と、その lock が再び取れたとき | 停止が続いている間 |
-| client worker 数 | 接続上限の 3/4 に達したとき | 1/2 以下へ戻るまで（戻った時点で 1 件記録する） |
+| client worker 数（接続を受け付けるたびに判定する） | 接続上限の 3/4 に達したとき | 1/2 以下へ戻るまで（戻ったと判定した時点で 1 件記録する） |
+
+client worker 数は accept のたびに数えるため、接続が来ない間は判定も記録も進まない。lock の停止の記録に添える
+client worker 数は、終了したがまだ回収されていない worker も含む。回収は次の accept で行われる。
 
 lock の取得待ちは、5 秒ごとに各 lock を取得する probe thread と、それを 2 秒ごとに観測する watch thread の組で測る。
 probe thread は停止した lock でいっしょに止まるので、報告するのは別の thread である。probe は lock の持ち主への弱参照

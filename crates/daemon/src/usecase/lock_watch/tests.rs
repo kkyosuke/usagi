@@ -197,7 +197,7 @@ fn the_watchdog_reports_a_held_lock_and_its_release_then_stops_on_shutdown() {
 
     wait_for(&reports, "has not been available");
     assert!(
-        reports.lock().unwrap()[0].ends_with("(0 client workers outstanding)"),
+        reports.lock().unwrap()[0].ends_with("(0 client workers not yet reaped)"),
         "{:?}",
         reports.lock().unwrap()
     );

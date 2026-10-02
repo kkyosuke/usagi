@@ -348,7 +348,7 @@ fn run_lock_watch(
     while !shutdown.wait_for_tick(tick) {
         for event in watch.observe(Instant::now()) {
             report(&format!(
-                "{event} ({} client workers outstanding)",
+                "{event} ({} client workers not yet reaped)",
                 workers.outstanding()
             ));
         }
