@@ -188,6 +188,7 @@ impl Context {
                 ("Ctrl+Option+↑ / ↓", "previous / next session"),
                 ("Ctrl+Option+← / →", "previous / next project"),
                 ("Enter / t", "open Closeup"),
+                ("f", "toggle session favorite"),
                 ("Ctrl-A / Home", "new session"),
                 (":", "Overview commands"),
                 ("?", "keyboard shortcuts"),

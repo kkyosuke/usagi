@@ -1870,3 +1870,65 @@ fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
         assert_eq!(state.active(), None);
     }
 }
+
+#[test]
+fn session_favorites_follow_hover_and_change_only_after_successful_save() {
+    let workspace = WorkspaceId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let mut state = AppState::home(workspace, vec![first, second]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    assert_eq!(state.active(), Some(first));
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('f'))),
+        vec![Effect::ToggleSessionFavorite { session: second }]
+    );
+    assert!(!state.is_favorite(second));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([second]),
+        )),
+    );
+    assert!(state.is_favorite(second));
+    assert!(!state.is_favorite(first));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Notice(Notice::new("save failed"))),
+    );
+    assert!(state.is_favorite(second));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::new(),
+        )),
+    );
+    assert!(!state.is_favorite(second));
+    assert_eq!(state.sessions(), &[first, second]);
+}
+
+#[test]
+fn session_favorite_shortcut_is_owned_only_by_switch_session_rows() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    for selected in [
+        Selection::Idle,
+        Selection::NewSession,
+        Selection::Target(Target::Root(workspace)),
+        Selection::Target(Target::Session(SessionId::new())),
+    ] {
+        state.selected = selected;
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('f'))).is_empty());
+    }
+    state.selected = Selection::Target(Target::Session(session));
+    state.route = Route::Home(HomeMode::Closeup);
+    assert!(update(&mut state, AppEvent::Key(AppKey::Char('f'))).is_empty());
+    state.route = Route::Home(HomeMode::Switch);
+    state.overlay = Some(Overlay::Overview);
+    assert!(
+        !update(&mut state, AppEvent::Key(AppKey::Char('f')))
+            .iter()
+            .any(|effect| matches!(effect, Effect::ToggleSessionFavorite { .. }))
+    );
+}

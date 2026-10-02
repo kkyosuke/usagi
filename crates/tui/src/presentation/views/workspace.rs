@@ -192,6 +192,8 @@ pub struct ProjectedSession {
     /// Number of visible session ancestors in the sidebar. Direct reports to the
     /// implicit Director use zero because the Director is not rendered there.
     pub organization_depth: usize,
+    /// User-owned favorite marker; independent of lifecycle and role.
+    pub favorite: bool,
 }
 
 /// Keep the common one-digit badge column stable even before a PR is detected.
@@ -222,18 +224,24 @@ impl ProjectedSession {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         }
     }
 }
 
 fn organization_label(session: &ProjectedSession) -> String {
+    let label = if session.favorite {
+        format!("★ {}", session.label)
+    } else {
+        session.label.clone()
+    };
     if session.organization_depth == 0 {
-        return session.label.clone();
+        return label;
     }
     format!(
         "{}└─ {}",
         "  ".repeat(session.organization_depth.saturating_sub(1)),
-        session.label
+        label
     )
 }
 
@@ -609,6 +617,7 @@ pub(crate) fn project_sessions(
         .iter()
         .filter_map(|id| {
             let mut session = (*snapshot_by_id.get(id)?).clone();
+            session.favorite = state.is_favorite(*id);
             if let Some(prs) = state.session_prs(*id) {
                 session.pr_count = visible_pr_entries(prs);
             }
@@ -4050,6 +4059,7 @@ mod tests {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         }
     }
 
@@ -4068,8 +4078,27 @@ mod tests {
         .expect("a session owns its own terminal")
     }
 
-    /// Build a Home projection whose rows carry the given daemon-authoritative
-    /// lifecycle and, when present, one Agent runtime reporting that phase.
+    #[test]
+    fn session_favorites_project_a_star_without_changing_labels_or_hierarchy() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let row = projected_session(session, "builder", "/work/builder");
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionFavorites(BTreeSet::from([session]))),
+        );
+        let home = HomeProjection::from_state(&state, "work", &[row]);
+        assert_eq!(home.sessions[0].label, "builder");
+        assert_eq!(super::organization_label(&home.sessions[0]), "★ builder");
+        let mut nested = home.sessions[0].clone();
+        nested.organization_depth = 2;
+        assert_eq!(super::organization_label(&nested), "  └─ ★ builder");
+        let rendered = render_home_at(30, 100, &home, Utc::now()).join("\n");
+        assert!(rendered.contains("★ builder"));
+    }
+
+    /// Build a Home projection with the given lifecycle and Agent phase.
     fn home_with_session_states(rows: &[(SessionLifecycle, Option<AgentPhase>)]) -> HomeProjection {
         let workspace = WorkspaceId::new();
         let ids = rows.iter().map(|_| SessionId::new()).collect::<Vec<_>>();

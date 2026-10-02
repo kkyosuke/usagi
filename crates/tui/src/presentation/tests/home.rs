@@ -751,6 +751,7 @@ fn closeup_environment_editor_is_composited_over_home() {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     }];
     let frame = render_controller_frame(
         20,

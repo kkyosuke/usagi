@@ -3331,6 +3331,21 @@ mod tests {
     }
 
     #[test]
+    fn session_favorite_key_targets_hover_while_a_live_pane_is_visible() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let (mut runtime, terminal) = switch_with_a_live_first_session(workspace, first, second);
+        let _ = runtime.handle_key(Key::Down);
+        assert_eq!(
+            runtime.handle_key(Key::Char('f')),
+            vec![Effect::ToggleSessionFavorite { session: second }]
+        );
+        assert_eq!(runtime.state().active(), Some(first));
+        assert_eq!(runtime.focused_terminal(), Some(terminal));
+    }
+
+    #[test]
     fn switch_previews_the_hovered_session_instead_of_the_command_target() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
@@ -4813,6 +4828,7 @@ mod tests {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         };
         let frame = runtime.render(
             20,

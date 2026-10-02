@@ -324,6 +324,19 @@ impl RepoEnvironmentStore {
     }
 }
 
+fn emit_session_favorites(
+    result: anyhow::Result<std::collections::BTreeSet<usagi_core::domain::id::SessionId>>,
+    completions: &Completions,
+) {
+    let event = match result {
+        Ok(favorites) => BackendEvent::SessionFavorites(favorites),
+        Err(_) => BackendEvent::Notice(Notice::new(
+            "Session favorites could not be loaded or saved.",
+        )),
+    };
+    completions.emit(AppEvent::Backend(event));
+}
+
 fn environment_entries(map: BTreeMap<String, String>) -> Vec<EnvironmentEntry> {
     map.into_iter()
         .map(|(name, value)| EnvironmentEntry { name, value })
@@ -426,6 +439,28 @@ impl EnvironmentStorePort for SettingsEnvironmentStore {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=repo_environment_store_persistence_contract
 impl BackendTargetStorePort for RepoEnvironmentStore {
+    fn load_session_favorites(&mut self, completions: Completions) {
+        let result =
+            usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore::new(
+                &self.role_workspace,
+            )
+            .load();
+        emit_session_favorites(result, &completions);
+    }
+
+    fn toggle_session_favorite(
+        &mut self,
+        session: usagi_core::domain::id::SessionId,
+        completions: Completions,
+    ) {
+        let result =
+            usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore::new(
+                &self.role_workspace,
+            )
+            .toggle(session);
+        emit_session_favorites(result, &completions);
+    }
+
     fn load_notes(&mut self, target: Target, completions: Completions) {
         let event = match self.resolve(target) {
             Some(scope) => match usagi_core::usecase::note::note(&self.store, scope) {
@@ -1194,7 +1229,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         );
         let pr_sessions = Arc::new(Mutex::new(snapshot.session_ids.clone()));
         let pr_pump = spawn_pr_pump(Arc::clone(&pr_sessions));
-        let backend = DaemonBackend::new(
+        let mut backend = DaemonBackend::new(
             Box::new(host.clone()),
             Box::new(host),
             Box::new(store),
@@ -1230,6 +1265,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             },
             clipboard: PlatformClipboard,
         }));
+        backend.dispatch(usagi_tui::usecase::application::controller::Effect::LoadSessionFavorites);
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let (restore_connection, restore_publisher) =
@@ -8361,6 +8397,52 @@ mod tests {
     }
 
     #[test]
+    fn session_favorites_adapter_loads_toggles_and_reports_storage_errors() {
+        let workspace = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            Vec::new(),
+            SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
+            data.path().to_path_buf(),
+        );
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        assert_eq!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::new()
+            ))
+        );
+        // Sessions created after the initial snapshot also have valid identities.
+        let session = usagi_core::domain::id::SessionId::new();
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::toggle_session_favorite(&mut store, session, completions);
+        let expected = AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([session]),
+        ));
+        assert_eq!(receiver.recv().unwrap(), expected);
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        assert_eq!(receiver.recv().unwrap(), expected);
+        let path = usagi_core::infrastructure::paths::project_data_dir(workspace.path())
+            .join("session-favorites.json");
+        std::fs::write(path, "broken").unwrap();
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::toggle_session_favorite(&mut store, session, completions);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+    }
+
+    #[test]
     fn repo_store_resolves_targets_and_reports_a_stale_session() {
         let workspace = tempfile::tempdir().unwrap();
         let alpha = SessionId::new();
@@ -9281,6 +9363,7 @@ mod tests {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         };
         let frame = runtime.render(
             24,
