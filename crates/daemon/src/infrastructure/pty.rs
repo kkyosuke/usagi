@@ -5,7 +5,7 @@
 //! resizing and child waiting without exposing a local terminal to clients.
 
 use std::io::{Read, Write};
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -17,8 +17,9 @@ use crate::usecase::terminal::{Geometry, PtyWriteError, PtyWriter};
 /// A spawned daemon-owned shell terminal.
 pub struct PtyTerminal {
     master: Box<dyn MasterPty + Send>,
+    master_fd: RawFd,
     child: Mutex<Box<dyn Child + Send + Sync>>,
-    writer: Mutex<AppliedPrefixWriter<Box<dyn Write + Send>, PollWritable>>,
+    writer: Mutex<StallBoundedWriter<Box<dyn Write + Send>, PollReadiness>>,
 }
 
 /// How long PTY input may make no progress before the write fails.
@@ -29,29 +30,27 @@ pub struct PtyTerminal {
 /// the writer forever and every other connection behind it.
 const PTY_INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Waits until the PTY input side accepts at least one byte.
-trait WriteReadiness {
-    /// Returns `Ok(true)` once one byte can be written without blocking (or
-    /// the descriptor reports a condition the write itself will surface), and
-    /// `Ok(false)` when `timeout` elapsed first.
-    fn wait_writable(&mut self, timeout: Duration) -> std::io::Result<bool>;
+/// Waits for `poll(2)` readiness of one descriptor.
+trait Readiness {
+    /// Returns `Ok(true)` once `events` is ready (or the descriptor reports a
+    /// condition the next read or write will surface), and `Ok(false)` when
+    /// `timeout` elapsed first. `None` waits without a bound.
+    fn wait(&mut self, events: libc::c_short, timeout: Option<Duration>) -> std::io::Result<bool>;
 }
 
-/// `poll(2)` readiness of the PTY master shared with the writer.
-///
-/// `O_NONBLOCK` cannot bound the write instead: the writer and the output
-/// reader share one open file description, so the flag would also turn the
-/// reader's blocking reads into spurious `EAGAIN` failures.
-struct PollWritable {
+/// `poll(2)` on one descriptor the caller keeps open for every wait.
+struct PollReadiness {
     fd: RawFd,
 }
 
-impl WriteReadiness for PollWritable {
-    fn wait_writable(&mut self, timeout: Duration) -> std::io::Result<bool> {
-        let timeout = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+impl Readiness for PollReadiness {
+    fn wait(&mut self, events: libc::c_short, timeout: Option<Duration>) -> std::io::Result<bool> {
+        let timeout = timeout.map_or(-1, |timeout| {
+            libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX)
+        });
         let mut descriptor = libc::pollfd {
             fd: self.fd,
-            events: libc::POLLOUT,
+            events,
             revents: 0,
         };
         // SAFETY: `descriptor` is one valid, writable `pollfd` for the call.
@@ -68,32 +67,92 @@ fn poll_outcome(ready: libc::c_int, error: std::io::Error) -> std::io::Result<bo
     }
 }
 
-struct AppliedPrefixWriter<W, R> {
+/// Puts the master's open file description in non-blocking mode.
+///
+/// The writer and every reader share that description, so the flag applies to
+/// all of them: writes return what fit instead of parking (see
+/// [`StallBoundedWriter`]) and reads are restored to blocking behavior by
+/// [`ReadinessReader`].
+fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+    // SAFETY: `fcntl` only inspects and updates the status flags of `fd`.
+    let flags = fcntl_outcome(unsafe { libc::fcntl(fd, libc::F_GETFL) })?;
+    // SAFETY: as above; the new flags keep every existing status bit.
+    fcntl_outcome(unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) })?;
+    Ok(())
+}
+
+fn fcntl_outcome(result: libc::c_int) -> std::io::Result<libc::c_int> {
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(result)
+}
+
+/// Writes PTY input without ever parking while the input queue is full.
+///
+/// Each write offers the whole remaining input, so a key sequence or a paste
+/// marker reaches the child in one piece whenever the queue has room for it.
+/// When the queue is full the writer waits up to `stall_timeout` for room.
+/// A terminal that stalled once is then failed at once until a write completes
+/// again, so a child that stopped reading costs one bounded wait instead of
+/// one per keystroke while the caller's lock is held.
+struct StallBoundedWriter<W, R> {
     inner: W,
     readiness: R,
     stall_timeout: Duration,
+    stalled: bool,
 }
 
-impl<W: Write, R: WriteReadiness> PtyWriter for AppliedPrefixWriter<W, R> {
+impl<W: Write, R: Readiness> PtyWriter for StallBoundedWriter<W, R> {
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         let mut applied_prefix = 0;
         while applied_prefix < bytes.len() {
-            match self.readiness.wait_writable(self.stall_timeout) {
-                Ok(true) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Ok(false) | Err(_) => return Err(PtyWriteError { applied_prefix }),
-            }
-            // Readiness guarantees room for one byte only. A longer blocking
-            // write would park on whatever does not fit, so the stall bound
-            // holds only while each write is limited to that byte.
-            match self.inner.write(&bytes[applied_prefix..=applied_prefix]) {
+            match self.inner.write(&bytes[applied_prefix..]) {
                 Ok(0) => return Err(PtyWriteError { applied_prefix }),
                 Ok(written) => applied_prefix += written,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if self.stalled {
+                        return Err(PtyWriteError { applied_prefix });
+                    }
+                    match self.readiness.wait(libc::POLLOUT, Some(self.stall_timeout)) {
+                        Ok(true) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Ok(false) => {
+                            self.stalled = true;
+                            return Err(PtyWriteError { applied_prefix });
+                        }
+                        Err(_) => return Err(PtyWriteError { applied_prefix }),
+                    }
+                }
                 Err(_) => return Err(PtyWriteError { applied_prefix }),
             }
         }
+        self.stalled = false;
         Ok(())
+    }
+}
+
+/// Restores blocking reads on the non-blocking master description.
+struct ReadinessReader<I, R> {
+    inner: I,
+    readiness: R,
+}
+
+impl<I: Read, R: Readiness> Read for ReadinessReader<I, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.inner.read(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    match self.readiness.wait(libc::POLLIN, None) {
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                outcome => return outcome,
+            }
+        }
     }
 }
 
@@ -142,6 +201,13 @@ impl PtyTerminal {
         environment: &[(String, String)],
         directory: &Path,
     ) -> std::io::Result<Self> {
+        // The descriptor is made non-blocking before the child exists, so a
+        // failure here leaves no process to reap.
+        let master_fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or(std::io::Error::other("PTY master has no descriptor"))?;
+        set_nonblocking(master_fd)?;
         let mut command = CommandBuilder::new(program);
         command.args(args);
         // CommandBuilder starts with a snapshot of the daemon environment.
@@ -158,19 +224,16 @@ impl PtyTerminal {
             .map_err(|error| io_error_with_context("PTY child spawn failed", error))?;
         drop(pair.slave);
         let writer = pair.master.take_writer().map_err(io_error)?;
-        // A master without a descriptor cannot become writable; `poll(2)`
-        // ignores a negative descriptor, so its writes fail after the stall
-        // timeout instead of blocking.
-        let readiness = PollWritable {
-            fd: pair.master.as_raw_fd().unwrap_or(-1),
-        };
         Ok(Self {
             master: pair.master,
+            master_fd,
             child: Mutex::new(child),
-            writer: Mutex::new(AppliedPrefixWriter {
+            // The writer lives beside the master, which keeps `master_fd` open.
+            writer: Mutex::new(StallBoundedWriter {
                 inner: writer,
-                readiness,
+                readiness: PollReadiness { fd: master_fd },
                 stall_timeout: PTY_INPUT_STALL_TIMEOUT,
+                stalled: false,
             }),
         })
     }
@@ -183,7 +246,17 @@ impl PtyTerminal {
     /// Returns an error if the operating system cannot duplicate the PTY
     /// reader.
     pub fn reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
-        self.master.try_clone_reader().map_err(io_error)
+        // The reader can outlive this terminal, so it waits on a descriptor it
+        // owns rather than on `master_fd`, which may be closed and reused.
+        // SAFETY: `self.master` keeps `master_fd` open for this borrow.
+        let owned = unsafe { BorrowedFd::borrow_raw(self.master_fd) }.try_clone_to_owned()?;
+        let reader = std::fs::File::from(owned);
+        Ok(Box::new(ReadinessReader {
+            readiness: PollReadiness {
+                fd: reader.as_raw_fd(),
+            },
+            inner: reader,
+        }))
     }
 
     /// Returns the child PID observed directly from the freshly spawned PTY.
@@ -264,9 +337,11 @@ fn io_error_with_context(context: &str, error: impl std::fmt::Display) -> std::i
 
 #[cfg(test)]
 mod tests {
-    use super::{AppliedPrefixWriter, PollWritable, PtyTerminal, WriteReadiness, poll_outcome};
+    use super::{
+        PollReadiness, PtyTerminal, Readiness, ReadinessReader, StallBoundedWriter, fcntl_outcome,
+        poll_outcome, set_nonblocking,
+    };
     use crate::usecase::terminal::{Geometry, InputAck, InputRequest, PtyWriter, TerminalRegistry};
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::collections::VecDeque;
     use std::io::{Error, ErrorKind, Read, Write};
     use std::time::Duration;
@@ -278,6 +353,7 @@ mod tests {
     enum WriteStep {
         Bytes(usize),
         Interrupted,
+        WouldBlock,
         Error,
         Zero,
     }
@@ -308,6 +384,7 @@ mod tests {
                     Ok(count)
                 }
                 WriteStep::Interrupted => Err(Error::from(ErrorKind::Interrupted)),
+                WriteStep::WouldBlock => Err(Error::from(ErrorKind::WouldBlock)),
                 WriteStep::Error => Err(Error::other("scripted failure")),
                 WriteStep::Zero => Ok(0),
             }
@@ -496,7 +573,7 @@ mod tests {
     /// Readiness answers consumed in order; once exhausted it stays ready.
     struct ScriptedReadiness {
         answers: VecDeque<std::io::Result<bool>>,
-        timeouts: Vec<Duration>,
+        waits: Vec<(libc::c_short, Option<Duration>)>,
     }
 
     impl ScriptedReadiness {
@@ -507,38 +584,51 @@ mod tests {
         fn new(answers: impl IntoIterator<Item = std::io::Result<bool>>) -> Self {
             Self {
                 answers: answers.into_iter().collect(),
-                timeouts: Vec::new(),
+                waits: Vec::new(),
             }
         }
     }
 
-    impl WriteReadiness for ScriptedReadiness {
-        fn wait_writable(&mut self, timeout: Duration) -> std::io::Result<bool> {
-            self.timeouts.push(timeout);
+    impl Readiness for ScriptedReadiness {
+        fn wait(
+            &mut self,
+            events: libc::c_short,
+            timeout: Option<Duration>,
+        ) -> std::io::Result<bool> {
+            self.waits.push((events, timeout));
             self.answers.pop_front().unwrap_or(Ok(true))
         }
     }
 
+    const STALL: Duration = Duration::from_millis(7);
+
     fn scripted(
         steps: impl IntoIterator<Item = WriteStep>,
         readiness: ScriptedReadiness,
-    ) -> AppliedPrefixWriter<ScriptedWriter, ScriptedReadiness> {
-        AppliedPrefixWriter {
+    ) -> StallBoundedWriter<ScriptedWriter, ScriptedReadiness> {
+        StallBoundedWriter {
             inner: ScriptedWriter::new(steps),
             readiness,
-            stall_timeout: Duration::from_millis(7),
+            stall_timeout: STALL,
+            stalled: false,
         }
+    }
+
+    #[test]
+    fn input_is_offered_whole_so_key_sequences_stay_in_one_write() {
+        let mut writer = scripted([WriteStep::Bytes(3)], ScriptedReadiness::ready());
+
+        assert_eq!(writer.write_all(b"\x1b[A"), Ok(()));
+        assert_eq!(writer.inner.written, b"\x1b[A");
+        assert_eq!(writer.inner.calls, 1);
+        assert!(writer.readiness.waits.is_empty());
+        assert!(writer.inner.flush().is_ok());
     }
 
     #[test]
     fn partial_writes_report_the_exact_applied_prefix() {
         let mut writer = scripted(
-            [
-                WriteStep::Bytes(1),
-                WriteStep::Bytes(1),
-                WriteStep::Bytes(1),
-                WriteStep::Error,
-            ],
+            [WriteStep::Bytes(2), WriteStep::Bytes(1), WriteStep::Error],
             ScriptedReadiness::ready(),
         );
 
@@ -553,25 +643,22 @@ mod tests {
     fn interrupted_write_retries_without_losing_progress() {
         let mut writer = scripted(
             [
-                WriteStep::Bytes(1),
-                WriteStep::Bytes(1),
+                WriteStep::Bytes(2),
                 WriteStep::Interrupted,
-                WriteStep::Bytes(1),
-                WriteStep::Bytes(1),
-                WriteStep::Bytes(1),
+                WriteStep::Bytes(3),
             ],
             ScriptedReadiness::ready(),
         );
 
         assert_eq!(writer.write_all(b"hello"), Ok(()));
         assert_eq!(writer.inner.written, b"hello");
-        assert_eq!(writer.inner.calls, 6);
+        assert_eq!(writer.inner.calls, 3);
     }
 
     #[test]
     fn write_zero_reports_the_prefix_already_applied() {
         let mut writer = scripted(
-            [WriteStep::Bytes(1), WriteStep::Bytes(1), WriteStep::Zero],
+            [WriteStep::Bytes(2), WriteStep::Zero],
             ScriptedReadiness::ready(),
         );
 
@@ -583,53 +670,164 @@ mod tests {
     }
 
     #[test]
-    fn each_write_is_limited_to_the_byte_readiness_guarantees() {
+    fn a_full_queue_waits_for_room_and_then_writes_the_rest() {
         let mut writer = scripted(
-            (0..5).map(|_| WriteStep::Bytes(1)),
+            [
+                WriteStep::Bytes(2),
+                WriteStep::WouldBlock,
+                WriteStep::Bytes(3),
+            ],
             ScriptedReadiness::ready(),
         );
 
         assert_eq!(writer.write_all(b"hello"), Ok(()));
         assert_eq!(writer.inner.written, b"hello");
-        assert_eq!(writer.inner.calls, 5);
-        assert_eq!(writer.readiness.timeouts, vec![Duration::from_millis(7); 5]);
-        assert!(writer.inner.flush().is_ok());
+        assert_eq!(writer.readiness.waits, vec![(libc::POLLOUT, Some(STALL))]);
     }
 
     #[test]
-    fn a_stalled_input_fails_with_the_prefix_applied_before_the_stall() {
+    fn a_stall_fails_with_its_prefix_and_later_writes_fail_without_waiting() {
         let mut writer = scripted(
-            [WriteStep::Bytes(1), WriteStep::Bytes(1)],
-            ScriptedReadiness::new([Ok(true), Ok(true), Ok(false)]),
+            [
+                WriteStep::Bytes(2),
+                WriteStep::WouldBlock,
+                WriteStep::WouldBlock,
+                WriteStep::Bytes(1),
+                WriteStep::WouldBlock,
+            ],
+            ScriptedReadiness::new([Ok(false)]),
         );
 
         assert_eq!(
             writer.write_all(b"hello"),
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 2 })
         );
-        assert_eq!(writer.inner.written, b"he");
-        assert_eq!(writer.inner.calls, 2);
+        assert_eq!(
+            writer.write_all(b"x"),
+            Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 0 })
+        );
+        assert_eq!(
+            writer.write_all(b"yz"),
+            Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 1 })
+        );
+        assert_eq!(writer.readiness.waits, vec![(libc::POLLOUT, Some(STALL))]);
+    }
+
+    #[test]
+    fn a_completed_write_clears_the_stall() {
+        let mut writer = scripted(
+            [
+                WriteStep::WouldBlock,
+                WriteStep::Bytes(1),
+                WriteStep::WouldBlock,
+                WriteStep::Bytes(1),
+            ],
+            ScriptedReadiness::new([Ok(false)]),
+        );
+
+        assert!(writer.write_all(b"a").is_err());
+        assert_eq!(writer.write_all(b"b"), Ok(()));
+        assert_eq!(writer.write_all(b"c"), Ok(()));
+        assert_eq!(writer.inner.written, b"bc");
+        assert_eq!(writer.readiness.waits.len(), 2);
     }
 
     #[test]
     fn interrupted_readiness_waits_again_and_other_failures_fail_closed() {
         let mut interrupted = scripted(
-            [WriteStep::Bytes(1)],
+            [
+                WriteStep::WouldBlock,
+                WriteStep::WouldBlock,
+                WriteStep::Bytes(1),
+            ],
             ScriptedReadiness::new([Err(Error::from(ErrorKind::Interrupted))]),
         );
         assert_eq!(interrupted.write_all(b"h"), Ok(()));
-        assert_eq!(interrupted.readiness.timeouts.len(), 2);
+        assert_eq!(interrupted.readiness.waits.len(), 2);
 
-        let mut failed = scripted([], ScriptedReadiness::new([Err(Error::other("poll"))]));
+        let mut failed = scripted(
+            [WriteStep::WouldBlock],
+            ScriptedReadiness::new([Err(Error::other("poll"))]),
+        );
         assert_eq!(
             failed.write_all(b"h"),
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 0 })
         );
-        assert_eq!(failed.inner.calls, 0);
+        assert!(!failed.stalled);
+    }
+
+    enum ReadStep {
+        Data(&'static [u8]),
+        WouldBlock,
+        Error,
+    }
+
+    struct ScriptedReader(VecDeque<ReadStep>);
+
+    impl Read for ScriptedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front().expect("scripted read step") {
+                ReadStep::Data(bytes) => {
+                    buffer[..bytes.len()].copy_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                ReadStep::WouldBlock => Err(Error::from(ErrorKind::WouldBlock)),
+                ReadStep::Error => Err(Error::other("scripted read failure")),
+            }
+        }
+    }
+
+    fn reader(
+        steps: impl IntoIterator<Item = ReadStep>,
+        readiness: ScriptedReadiness,
+    ) -> ReadinessReader<ScriptedReader, ScriptedReadiness> {
+        ReadinessReader {
+            inner: ScriptedReader(steps.into_iter().collect()),
+            readiness,
+        }
     }
 
     #[test]
-    fn poll_outcome_maps_failure_timeout_and_readiness() {
+    fn reads_wait_without_a_bound_instead_of_reporting_would_block() {
+        let mut reader = reader(
+            [
+                ReadStep::WouldBlock,
+                ReadStep::WouldBlock,
+                ReadStep::Data(b"ok"),
+            ],
+            ScriptedReadiness::new([Err(Error::from(ErrorKind::Interrupted))]),
+        );
+        let mut buffer = [0; 4];
+
+        assert_eq!(reader.read(&mut buffer).unwrap(), 2);
+        assert_eq!(&buffer[..2], b"ok");
+        assert_eq!(
+            reader.readiness.waits,
+            vec![(libc::POLLIN, None), (libc::POLLIN, None)]
+        );
+    }
+
+    #[test]
+    fn read_and_readiness_failures_reach_the_reader_caller() {
+        let mut buffer = [0; 4];
+        let mut failed_read = reader([ReadStep::Error], ScriptedReadiness::ready());
+        assert_eq!(
+            failed_read.read(&mut buffer).unwrap_err().to_string(),
+            "scripted read failure"
+        );
+
+        let mut failed_wait = reader(
+            [ReadStep::WouldBlock],
+            ScriptedReadiness::new([Err(Error::other("poll"))]),
+        );
+        assert_eq!(
+            failed_wait.read(&mut buffer).unwrap_err().to_string(),
+            "poll"
+        );
+    }
+
+    #[test]
+    fn poll_and_fcntl_outcomes_map_failures() {
         assert_eq!(
             poll_outcome(-1, Error::other("poll failed"))
                 .unwrap_err()
@@ -638,41 +836,86 @@ mod tests {
         );
         assert!(!poll_outcome(0, Error::other("unused")).unwrap());
         assert!(poll_outcome(1, Error::other("unused")).unwrap());
+        assert!(fcntl_outcome(-1).is_err());
+        assert_eq!(fcntl_outcome(3).unwrap(), 3);
+        assert!(set_nonblocking(-1).is_err());
+    }
+
+    #[test]
+    fn real_poll_readiness_times_out_and_reports_ready() {
+        let (read, write) = std::io::pipe().unwrap();
+        let mut readable = PollReadiness {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&read),
+        };
+        assert!(
+            !readable
+                .wait(libc::POLLIN, Some(Duration::from_millis(1)))
+                .unwrap()
+        );
+        let mut writable = PollReadiness {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&write),
+        };
+        assert!(writable.wait(libc::POLLOUT, None).unwrap());
     }
 
     #[test]
     fn real_pty_input_to_a_child_that_never_reads_fails_instead_of_blocking() {
         // The deadlock this bounds: an Agent stops reading input while the
-        // daemon writes to it under a runtime lock. Without the stall bound
-        // this write parks forever once the PTY input queue is full.
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let mut command = CommandBuilder::new("/bin/sleep");
-        command.arg("30");
-        let mut child = pair.slave.spawn_command(command).unwrap();
-        drop(pair.slave);
-        let mut writer = AppliedPrefixWriter {
-            inner: pair.master.take_writer().unwrap(),
-            readiness: PollWritable {
-                fd: pair.master.as_raw_fd().unwrap(),
-            },
-            stall_timeout: Duration::from_millis(200),
-        };
+        // daemon writes to it under a runtime lock. A blocking write parks
+        // forever once the PTY input queue is full, even after the child dies.
+        let mut terminal = PtyTerminal::spawn_with(
+            "/bin/sleep",
+            &["30".to_owned()],
+            &[],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+        terminal.writer.lock().unwrap().stall_timeout = Duration::from_millis(200);
         let input = b"usagi\n".repeat(64 * 1024);
 
         let started = std::time::Instant::now();
-        let error = writer.write_all(&input).unwrap_err();
-
+        let error = terminal.write_all(&input).unwrap_err();
+        let first = started.elapsed();
+        assert!(error.applied_prefix > 0);
         assert!(error.applied_prefix < input.len());
-        assert!(started.elapsed() < Duration::from_secs(20));
-        child.kill().unwrap();
-        child.wait().unwrap();
+        assert!(first >= Duration::from_millis(200));
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            terminal.write_all(b"x").unwrap_err().applied_prefix,
+            0,
+            "a stalled terminal fails later input without waiting again"
+        );
+        assert!(started.elapsed() < Duration::from_millis(200));
+        terminal.terminate_reap().unwrap();
+    }
+
+    #[test]
+    fn real_pty_round_trips_input_through_the_non_blocking_master() {
+        let mut terminal = PtyTerminal::spawn_with(
+            "/bin/sh",
+            &[
+                "-c".to_owned(),
+                "read line; printf '<%s>' \"$line\"".to_owned(),
+            ],
+            &[],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+        let mut reader = terminal.reader().unwrap();
+        terminal.write_all(b"usagi\n").unwrap();
+        let mut output = Vec::new();
+        let mut buffer = [0; 256];
+        while !String::from_utf8_lossy(&output).contains("<usagi>") {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => output.extend_from_slice(&buffer[..read]),
+            }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("<usagi>"));
+        assert_eq!(terminal.wait().unwrap(), 0);
     }
 
     #[test]
@@ -689,7 +932,7 @@ mod tests {
         let ambiguous_request = RequestId::new();
         let ambiguous_input = input(subscription, connection, client, ambiguous_request);
         let mut partial = scripted(
-            [WriteStep::Bytes(1), WriteStep::Bytes(1), WriteStep::Error],
+            [WriteStep::Bytes(2), WriteStep::Error],
             ScriptedReadiness::ready(),
         );
         assert_eq!(
