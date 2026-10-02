@@ -547,7 +547,7 @@ plain `x` / `X` は session を削除しない。`+ new session`
 `purge_orphan: true` も加えた exact-target remove を送る。その他の lifecycle / failure stage、または overlay
 表示中は purge を送らない。
 `Ctrl-Q` は exit prompt を開く（離脱と終了の区別は
-[workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。Closeup の generic terminal では、leader が
+[workspace の離脱と終了](#workspace-の離脱と終了)）。Switch の `Ctrl-C` は何もしない。中断 Agent など入力先の live pane がない Closeup の `Ctrl-C` は終了確認を開き、連打では終了しない。live pane から離れた直後の最初の `Ctrl-C` は無視する。Closeup の generic terminal では、leader が
 待機していない `Ctrl-C` は foreground command を割り込んで画面をクリアし、prompt を先頭へ戻す。Agent pane の `Ctrl-C` は Agent CLI へ通常の SIGINT として渡す。`Ctrl-Q` / `Ctrl-D` / `Ctrl-X` は global control chord として入力 owner に渡す。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。Closeup action modal が前面にある間の `Esc` /
 `Ctrl-C` は modal だけを閉じて背面の Closeup へ戻る（live pane の有無に依らない）。overlay を開いて

@@ -93,6 +93,7 @@ Clone は `e`、全体の Config は `c` から開きます。
 [Session Garden](document/assets/session-garden.gif) では、ゆったり動くうさぎと庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。
+中断 Agent の Closeup でも、Ctrl+C は[終了確認](document/03-tui.md)を通します。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 

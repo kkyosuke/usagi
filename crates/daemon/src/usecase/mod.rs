@@ -25,6 +25,7 @@ pub mod endpoint;
 pub mod generation;
 pub mod generic_terminal;
 pub mod goal_artifact;
+pub mod lock_watch;
 pub mod metrics;
 pub mod orchestration;
 pub mod peer_messages;
