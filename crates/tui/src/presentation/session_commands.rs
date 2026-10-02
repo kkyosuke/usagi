@@ -673,7 +673,8 @@ pub(super) fn sync_runtime_sessions(
     worktree_names: &[String],
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
-    let ids = ui.workspace.session_ids().to_vec();
+    let mut ids = ui.workspace.session_ids().to_vec();
+    runtime.state().order_session_snapshot(&mut ids);
     if runtime.state().sessions() != ids.as_slice() {
         // The reducer answers a changed session set with the effects that keep
         // daemon-backed observation aimed at it — the resident PR lane above

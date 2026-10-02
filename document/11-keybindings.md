@@ -159,6 +159,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | surface | 入力 | 動作 |
 |---|---|---|
 | Switch | `↑` / `↓` | session row選択 |
+| Switch | `p` / `n` | 選択中のsessionを1行上 / 下へ並べ替え（端では停止） |
 | Switch | `←` / `→` | 前 / 次のproject tab |
 | Switch | `Enter` / `t` | session Closeup、または選択したnew session |
 | Switch | `Ctrl-A` / `Home` | new session form |

@@ -2064,3 +2064,31 @@ fn interrupted_history_joins_its_own_scope_in_the_restore_projection() {
         .unwrap();
     assert!(empty.interrupted.is_empty());
 }
+
+#[test]
+fn workspace_switch_restores_manual_session_order_with_fresh_membership() {
+    let snapshot = snapshot_with_sessions("ordered", &["first", "second", "third"]);
+    let [a, b, c] = snapshot.session_ids.clone().try_into().unwrap();
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    assert!(
+        deck.session_order_for_path(&snapshot.workspace.path)
+            .is_none()
+    );
+    assert!(deck.session_order_for_path(Path::new("/missing")).is_none());
+    deck.remember_session_order(WorkspaceId::new(), &[a]);
+    let mut previous = WorkspaceRuntime::new(snapshot.workspace_id, vec![a, b, c]);
+    let _ = previous.handle_key(Key::Char('n'));
+    remember_workspace_session_focus(&mut deck, previous.state());
+    deck.activate_snapshot(&snapshot);
+    assert_eq!(
+        deck.session_order_for_path(&snapshot.workspace.path),
+        Some([b, a, c].as_slice())
+    );
+    let new = SessionId::new();
+    let mut restored = WorkspaceRuntime::new(snapshot.workspace_id, vec![new, c, b]);
+    restore_workspace_session_focus(&deck, &snapshot.workspace.path, &mut restored);
+    assert_eq!(restored.state().sessions(), &[b, c, new]);
+    let _ = restored.apply_event(AppEvent::Backend(BackendEvent::Sessions(vec![new, c, b])));
+    assert_eq!(restored.state().sessions(), &[b, c, new]);
+    assert_eq!(restored.state().session_order_revision(), 1);
+}

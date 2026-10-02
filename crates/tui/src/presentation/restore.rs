@@ -600,6 +600,9 @@ pub(super) fn restore_workspace_session_focus(
     path: &Path,
     runtime: &mut WorkspaceRuntime,
 ) {
+    if let Some(order) = deck.session_order_for_path(path) {
+        let _ = runtime.apply_event(AppEvent::RestoreSessionOrder(order.to_vec()));
+    }
     if let Some(session) = deck.focused_session_for_path(path) {
         let _ = runtime.apply_event(AppEvent::FocusSession(session));
     }

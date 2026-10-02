@@ -1954,3 +1954,34 @@ fn session_command_result_message_carries_no_projection() {
     assert!(result.sessions.is_none());
     assert!(result.session_ids.is_none());
 }
+
+#[test]
+fn switch_session_reorder_invalidates_row_cache_and_redraws_immediately() {
+    reset_projection_build_counts();
+    let mut term = CacheInvalidationTerminal::scripted([
+        Key::Char('n'),
+        Key::Other,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    let mut factory = FixedBackendFactory {
+        sessions: Some(Box::new(UnavailableSessionCommandPort)),
+        agent: Some(Box::new(UnavailableAgentCommandPort)),
+        launch: None,
+        restore: None,
+        metrics: Some(Box::new(NoMetrics)),
+        browser: Some(Box::new(UnavailableBrowserOpener)),
+        session_refresh: None,
+        decisions: None,
+        session_worktrees: None,
+    };
+    let snapshot = snapshot_with_sessions("reorder", &["first-row", "second-row"]);
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+        Exit::Quit
+    );
+    assert_eq!(projection_build_counts(), (2, 1));
+    assert!(term.builds_at_draw.contains(&(2, 1)));
+    let frame = strip_ansi(&term.frames[1].join("\n"));
+    assert!(frame.find("second-row").unwrap() < frame.find("first-row").unwrap());
+}

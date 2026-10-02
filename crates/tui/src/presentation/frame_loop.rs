@@ -110,7 +110,7 @@ pub(super) struct FrameMaterialKey {
     pub(super) height: usize,
     pub(super) width: usize,
     pub(super) controller: (u64, u64),
-    pub(super) sessions: (u64, Option<SessionId>, u64),
+    pub(super) sessions: (u64, Option<SessionId>, u64, u64),
     pub(super) shell: u64,
     pub(super) metrics: u64,
     pub(super) terminal: (u64, u64, u64, u64),
@@ -840,7 +840,7 @@ pub(super) fn drive_workspace_controller(
     let mut drawn_material: Option<HomeFrameMaterial> = None;
     // Owned daemon row/path material is rebuilt only when its authoritative
     // inputs change. The cache never feeds commands back into the controller.
-    let mut session_material_key: Option<(u64, Option<SessionId>, u64)> = None;
+    let mut session_material_key: Option<(u64, Option<SessionId>, u64, u64)> = None;
     let mut sessions: Arc<[ProjectedSession]> = Arc::from([]);
     let mut metrics_sessions = Vec::new();
     let mut terminal_material_key: Option<(Option<TerminalRef>, u64, u64, Geometry)> = None;
@@ -1237,6 +1237,7 @@ pub(super) fn drive_workspace_controller(
             ui.workspace.material_revision(),
             ui.removing_session,
             runtime.state().session_pr_revision(),
+            runtime.state().session_order_revision(),
         );
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {
