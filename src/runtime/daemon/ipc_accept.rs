@@ -7,6 +7,7 @@ use usagi_core::infrastructure::daemon::InstanceLock as _;
 
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
+use usagi_daemon::usecase::lock_watch::CapacityWatch;
 
 use super::{tenant_control, workflow};
 
@@ -54,10 +55,10 @@ use super::{
     retire_stale_current_preserving, seamless_refusal, spawn_bootstrap_broker,
     spawn_broker_idle_watch, spawn_critical_worker, start_connection_cleanup_worker,
     start_custody_worker, start_daemon_agent_restart_recovery, start_decision_maintenance,
-    start_draining_collection_worker, start_orphan_cleanup_worker, start_pr_projection_worker,
-    start_pr_refresh_worker, start_retention_gc_worker, start_session_teardown_worker,
-    start_supervisor_recovery, start_tenant_retire_worker, start_workflow_lane,
-    terminal_capacity_limit, terminal_environment, trusted_repository_root,
+    start_draining_collection_worker, start_lock_watchdog, start_orphan_cleanup_worker,
+    start_pr_projection_worker, start_pr_refresh_worker, start_retention_gc_worker,
+    start_session_teardown_worker, start_supervisor_recovery, start_tenant_retire_worker,
+    start_workflow_lane, terminal_capacity_limit, terminal_environment, trusted_repository_root,
     unexpected_daemon_response_entry,
 };
 
@@ -434,6 +435,12 @@ pub(super) fn spawn_ipc_server(
         open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
         Arc::clone(&shutdown),
     )?);
+    background_workers.push(start_lock_watchdog(
+        &agent,
+        &terminal,
+        Arc::clone(&workers),
+        &shutdown,
+    )?);
     background_workers.push(start_draining_collection_worker(
         open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
         GenerationRegistry::new(
@@ -719,6 +726,9 @@ pub(super) fn start_ipc_accept_loop(
             let pre_handshake =
                 PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let mut capacity_log = CapacityRefusalLog::default();
+            // Warns while connections are still admitted, so a growing backlog of
+            // parked workers is visible before the first refusal.
+            let mut capacity_watch = CapacityWatch::new(connection_limit);
             // Waiting on the listening descriptor replaces a non-blocking accept
             // that retried every 10 ms. The wake pipe is what lets one wait cover
             // both a new connection and a shutdown request.
@@ -746,6 +756,7 @@ pub(super) fn start_ipc_accept_loop(
                         }
                         let capacity_available =
                             client_connection_capacity_available(&workers, connection_limit);
+                        capacity_watch.observe(workers.outstanding(), &ErrorLog::record);
                         if capacity_log.should_record(capacity_available) {
                             ErrorLog::record(
                                 "daemon connection refused: client capacity exhausted",
