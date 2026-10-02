@@ -54,13 +54,23 @@ lifecycle は [5. daemon](05-daemon.md) を参照する。全画面を横断し�
 
 ## 画面と入力
 
-Welcome は Open / Recent / New / Config の入口である。Open は登録済み workspace を名前の
-大文字・小文字を区別しない alphabet 順に並べる。常時表示する Filter 欄は編集位置に cursor を
-示し、入力した文字で即座に名前を絞り込み、↑↓ で絞り込み結果を選ぶ。各 workspace は名前と、session 数・未完了 issue 数・
-最終更新の相対時刻を 2 行で表示する。`Tab` で Single / Unite を切り替え、Unite では `Space` で複数 workspace を
-選んで `Enter` を押すと、その順序の project tab deck を開く。Recent は上下の内側余白を持たない compact card で表示し、
-単体 workspace または保存済み Unite deck を直接開く。New と Config は
-それぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
+Welcome はマスコットとロゴの下に `Open last projects`、`+ Open / add projects`、`Clone repository` を
+1 列で置き、画面下部に Config / Quit を表示する。Recent のカードと番号ショートカットは置かない。
+前回の作業があれば再開を初期選択にし、なければ Open を選ぶ。Config / Quit も上下移動で選択できる。
+
+Open / add projects は `Tab` で Projects / Recent / Directory を切り替える。Projects は最終利用時刻の降順、
+同時刻は名前の大文字・小文字を区別しない順に登録済み workspace を表示する。常時表示する Filter 欄は入力に合わせて
+絞り込み、↑↓ で選択する。`Space` で複数選択し、`Enter` で開く。mark がなければ選択中の 1 件を開く。
+Recent は単体 workspace と保存済み Unite deck の履歴を検索して開く。Directory は既存ディレクトリを入力し、
+共通の open 経路で canonicalize・登録して開く。入力エラーは画面上に表示し、入力を保持する。
+project を離れて Welcome に戻ると保存済み履歴を読み直すため、同じ起動中に追加した project やグループも Recent に現れる。
+登録解除ではグループの残存 member を保持し、空になった履歴だけを除く。
+New と Config はそれぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
+
+前回の作業は user-data scope の `last-projects.json` に project の順序と active path を versioned/atomic に保存する。
+Recent の timestamp とは独立し、再開で同じタブ順と active project を復元する。登録解除された member は復元対象から除き、
+active が除かれた場合は残った先頭へ戻す。保存のない既存環境は最新の Recent を最初の再開候補にする。
+再開は project を開く操作であり、停止中の Agent の自動起動は行わない。
 
 New は Clone（リポジトリを新しいディレクトリへ clone）と Existing（既存ディレクトリを登録）の
 2 モードを持ち、`←→` でモードを切り替え、`↑↓`/Tab でフィールドを移動する。必須項目が揃った状態で
@@ -179,7 +189,7 @@ subscription をすべて drop してから次の factory を呼ぶ。drop は d
 workspace overview と read-time join して `Recent::Unite` を組み立てる。unregister / missing member は読み取り時に除外し、0 件は表示しない。
 破損または future version の Unite store は single-workspace Recent を壊さず、保存済み Unite card の選択は同じ tab 順を再構築する。
 
-Home を開く入口は direct workspace、Welcome の Recent、Open の選択、New の作成成功で共通である。
+Home を開く入口は direct workspace、Welcome の再開、Open の選択、New の作成成功で共通である。
 いずれも workspace snapshot を同じ production backend factory に渡し、factory が生成した
 `DaemonBackend` と同一の port set を使う。Home controller が発行した Effect は
 `DaemonBackend::dispatch` だけが解釈し、session / Agent / terminal、notes / environment、workspace command、
@@ -234,11 +244,8 @@ daemon](#workspace-の選択と-daemon)）。多くの場合その接続先は�
 曖昧にしないため、接続そのものは 1 本に保つ。戻った Welcome から別 workspace を選んだときの fence 拒否も、
 起動直後と同じく**その画面に留まって notice に出す**。無言で前の workspace へ戻ることはしない。
 
-戻り先の Welcome は**開いた時点の Recent 順序を保つ**。workspace を開いた時点で `record_opened` 済みなので
-離れた workspace は先頭にあり、entry 画面が daemon も store も読み直さない原則（[workspace の選択と
-daemon](#workspace-の選択と-daemon)）をそのまま守る。ただし `usagi open <path>` のように
-workspace を直接開いた入口には背後に Welcome が無いため、離脱時に合成ルートが Recent を読み直して
-entry 画面へ入る。
+Home から戻った Welcome は保存済みの前回のタブ構成を読み直し、再開を選択する。
+`usagi open <path>` の直接起動も同じ保存経路を使い、離脱時は合成ルートが registry と Recent を読み直して entry 画面へ入る。
 
 ## settings scope と workspace entry
 
@@ -290,7 +297,7 @@ settings 形式へ temp file、fsync、rename の順で atomic write する。�
 上書きしない。Home entry は workspace local の読み取り失敗時に Global、Global も読めない場合は core の既定値へ
 縮退し、設定ファイルの破損だけで workspace を開けなくしない。
 
-direct workspace、Welcome の Open / Recent、New の作成成功は、snapshot の workspace path を identity として
+direct workspace、Welcome の Open / 再開、New の作成成功は、snapshot の workspace path を identity として
 settings port を毎回束縛し直す。次に Global とその workspace の Local を解決し、effective な Icons と Modal mode を
 Overview / Closeup を生成する Home runtime へ渡す。この束縛は workspace entry ごとの lifecycle であり、直前に
 開いた workspace の port や modal state を次の workspace へ持ち越さない。Config へ入るたびにも現在の束縛から
@@ -300,7 +307,7 @@ Overview / Closeup を生成する Home runtime へ渡す。この束縛は work
 
 session 一覧・scope・PR inventory は daemon が権威である。daemon は起動した workspace に加えて、**client が選んだ
 workspace を adopt して同時に serve する**（[5. daemon#tenant registry](05-daemon.md#tenant-registry)）。一方 TUI が開く workspace は、起動した
-directory ではなく利用者の選択（`usagi open <path>`、Welcome の Recent、Open 一覧、New の作成
+directory ではなく利用者の選択（`usagi open <path>`、Welcome の再開、Open 一覧、New の作成
 成功）で決まる。この節はその 2 つを一致させる契約の正本であり、wire の申告と admit 条件は
 [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence) が正本である。
 
@@ -320,7 +327,7 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 
 | 入口 | 提示 |
 |---|---|
-| Welcome の Recent、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
+| Welcome の再開、Open 一覧 | その画面に留まり notice に出す。折り返して全文を表示するので理由と手順が切れない。続けて serve されている workspace を選べる |
 | New の作成成功後の open | draft を保ったまま同画面の notice に出す |
 | `usagi open <path>` | 端末があれば **Welcome（切り替え画面）を開き、その 1 フレーム目に notice として出す**。端末が無ければ TUI を開かず stderr へ 1 行で出す |
 
@@ -332,14 +339,14 @@ canonical 化して `selected` として申告するため、daemon は「serve 
 従来どおり伝播する。
 
 entry 画面（Welcome・Open・New・Config）は **daemon を必要としない**。表示に使うのは registry と Recent という
-local store だけであり、workspace 切り替え画面はどの directory からでも開ける必要がある。ここで daemon の readiness を
+local store と前回のタブ構成だけであり、workspace 切り替え画面はどの directory からでも開ける必要がある。ここで daemon の readiness を
 確かめると、起動 directory に束縛された daemon を作ってしまい、その後のどの workspace の open も拒否されることに
 なるため、daemon 接続は workspace を開く時点まで遅らせる。表示専用の daemon metrics も同じ理由で daemon を起動せず、
 daemon が居なければ metrics 無しで動作する。
 
 ## Production screen graph harness
 
-TUI の production wiring は、direct Workspace、Welcome の Recent、Open の選択、New の作成成功を
+TUI の production wiring は、direct Workspace、Welcome の再開、Open の選択、New の作成成功を
 `run_screen_graph_with_backend` の同じ deterministic harness で検証する。harness は terminal、workspace loader、
 settings、controller backend factory、Agent/terminal port を注入し、実端末や daemon socket を開かずに、各入口が
 同じ settings と production port set を受け取ること、全 Effect route、成功・失敗 completion、`Ctrl-O` を含む
@@ -1095,7 +1102,7 @@ MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、
 
 `session create <name>`、`session list`、`session overview`、`session resume <name>`、`session sleep <name>`、`session remove <name> [--force]` は
 Overview の実行 port を通じて daemon IPC request になる。この実行 port は起動経路に依存せず、
-Welcome→Open・Welcome の Recent・direct な Workspace entry のいずれで開いた workspace でも同じ
+Welcome→Open・Welcome の再開・direct な Workspace entry のいずれで開いた workspace でも同じ
 daemon-authoritative な port を通る。screen graph は workspace 起動ごとに port を新しく生成し、
 daemon の snapshot revision を workspace 間で持ち越さない。remove の target は command の name に限定し、
 現在選択中の session record や root を暗黙に使わない。daemon が request を受理できない場合は、

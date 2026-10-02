@@ -3,6 +3,7 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::{Welcome, remember_project_deck};
 
 /// うさぎの click は session を訪問したうえで、その agent 自身の tab を開く。
 /// 区画（nameplate や余白）の click は従来どおり session の Closeup までで、
@@ -1111,7 +1112,7 @@ fn run_quits_from_welcome_and_handles_menu_navigation() {
             .unwrap(),
             Exit::Quit
         );
-        assert!(term.frames[0].join("\n").contains("Menu"));
+        assert!(term.frames[0].join("\n").contains("Clone repository"));
     }
 }
 
@@ -1160,7 +1161,7 @@ fn run_ignores_unknown_welcome_keys() {
     assert!(
         term.frames
             .iter()
-            .all(|frame| frame.join("\n").contains("Menu"))
+            .all(|frame| frame.join("\n").contains("Clone repository"))
     );
 }
 
@@ -1189,17 +1190,17 @@ fn entry_help_is_contextual_and_exclusively_owns_input_until_closed() {
             .join("\n")
             .contains("Keyboard help · Welcome")
     );
-    assert!(term.frames[1].join("\n").contains("open Recent card"));
+    assert!(term.frames[1].join("\n").contains("Last projects / Open"));
     assert!(
         term.frames[2]
             .join("\n")
             .contains("Keyboard help · Welcome")
     );
-    assert!(term.frames[3].join("\n").contains("Menu"));
+    assert!(term.frames[3].join("\n").contains("Clone repository"));
     assert!(
         term.frames
             .iter()
-            .all(|frame| !frame.join("\n").contains("Open Workspace"))
+            .all(|frame| !frame.join("\n").contains("[Projects]"))
     );
 }
 
@@ -1283,8 +1284,8 @@ fn welcome_action_maps_every_destination() {
         WelcomeStep::OpenList
     ));
     assert!(matches!(
-        welcome_action(MenuAction::OpenRecent(2)),
-        WelcomeStep::OpenRecent(2)
+        welcome_action(MenuAction::Resume),
+        WelcomeStep::Resume
     ));
     assert!(matches!(
         welcome_action(MenuAction::New),
@@ -1308,9 +1309,17 @@ fn config_can_be_opened_from_welcome_or_used_as_the_start() {
         &mut FakeLoader::default(),
     )
     .unwrap();
-    assert!(from_welcome.frames[0].join("\n").contains("Menu"));
+    assert!(
+        from_welcome.frames[0]
+            .join("\n")
+            .contains("Clone repository")
+    );
     assert!(from_welcome.frames[1].join("\n").contains("Config"));
-    assert!(from_welcome.frames[2].join("\n").contains("Menu"));
+    assert!(
+        from_welcome.frames[2]
+            .join("\n")
+            .contains("Clone repository")
+    );
 
     let mut direct = FakeTerminal::with_keys(&[Key::Char('x'), Key::Quit]);
     run_from_start(
@@ -1579,7 +1588,7 @@ fn screen_graph_binds_settings_for_open_recent_and_new_entries() {
             PathBuf::from("/tmp/open"),
         ),
         (
-            vec![Key::Char('1'), Key::CtrlQ, Key::Char('y')],
+            vec![Key::Char('r'), Key::CtrlQ, Key::Char('y')],
             Vec::new(),
             vec![recent("recent")],
             PathBuf::from("/tmp/recent"),
@@ -1980,7 +1989,7 @@ fn config_save_waves_then_shows_done_and_returns_home_on_its_own() {
     assert!(wave.windows(2).all(|frames| frames[0] != frames[1]));
     let menu = joined
         .iter()
-        .rposition(|frame| frame.contains("Menu"))
+        .rposition(|frame| frame.contains("Clone repository"))
         .expect("the Welcome menu is drawn after returning home");
     assert!(done < menu);
 }
@@ -2047,13 +2056,13 @@ fn new_form_opens_edits_and_returns_to_welcome() {
         &mut FakeLoader::default(),
     )
     .unwrap();
-    assert!(term.frames[0].join("\n").contains("Menu"));
+    assert!(term.frames[0].join("\n").contains("Clone repository"));
     assert!(
         term.frames[1..5]
             .iter()
             .all(|frame| frame.join("\n").contains("New Project"))
     );
-    assert!(term.frames[5].join("\n").contains("Menu"));
+    assert!(term.frames[5].join("\n").contains("Clone repository"));
 }
 
 #[test]
@@ -2259,7 +2268,13 @@ fn hung_new_create_keeps_ticks_resize_escape_and_quit_responsive() {
     assert!(loading_frames.len() >= 3, "{loading_frames:?}");
     assert_ne!(loading_frames[0], loading_frames[1]);
     // Escape left the hung operation behind and Welcome processed Quit.
-    assert!(term.frames.last().unwrap().join("\n").contains("Menu"));
+    assert!(
+        term.frames
+            .last()
+            .unwrap()
+            .join("\n")
+            .contains("Clone repository")
+    );
 }
 
 #[test]
@@ -2408,7 +2423,7 @@ fn a_refused_workspace_keeps_the_switcher_open_with_the_reason() {
 
     // Welcome's Recent entry: the refusal shows on Welcome, and no workspace
     // screen is drawn for the workspace that was refused.
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Quit]);
     let mut loader = FakeLoader {
         refuse: Some(REFUSAL.to_owned()),
         ..FakeLoader::default()
@@ -2433,7 +2448,7 @@ fn a_refused_workspace_keeps_the_switcher_open_with_the_reason() {
     let welcome = frames
         .iter()
         .rev()
-        .find(|frame| frame.contains("Menu"))
+        .find(|frame| frame.contains("Clone repository"))
         .expect("the switcher stays on screen");
     // Wrapped over several lines, so the reason and the recovery step are both
     // present rather than clipped at the terminal width.
@@ -2463,7 +2478,7 @@ fn a_refused_workspace_keeps_the_switcher_open_with_the_reason() {
         .iter()
         .map(|frame| frame.join("\n"))
         .rev()
-        .find(|frame| frame.contains("Open Workspace"))
+        .find(|frame| frame.contains("[Projects]"))
         .expect("the Open list stays on screen");
     assert!(contains_wrapped(&open_list, REFUSAL), "{open_list}");
 }
@@ -2472,7 +2487,7 @@ fn a_refused_workspace_keeps_the_switcher_open_with_the_reason() {
 fn only_a_refusal_keeps_the_switcher_open() {
     // Every other failure still propagates: staying on the list would not
     // help, and the caller reports it.
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Quit]);
     let mut loader = FakeLoader {
         fail: true,
         ..FakeLoader::default()
@@ -2686,11 +2701,7 @@ fn missing_open_selection_confirms_registry_only_removal() {
     assert_eq!(loader.opened, Vec::<PathBuf>::new());
     assert_eq!(loader.cleanup_calls, 1);
     assert_eq!(loader.cleanup_candidates, vec![vec![alpha.path]]);
-    assert!(
-        frames
-            .iter()
-            .any(|frame| frame.contains("No workspaces yet"))
-    );
+    assert!(frames.iter().any(|frame| frame.contains("No projects yet")));
 }
 
 #[test]
@@ -2699,7 +2710,6 @@ fn missing_unite_member_is_preflighted_before_any_workspace_opens() {
     let beta = ws("beta");
     let mut term = FakeTerminal::with_keys(&[
         Key::Char('o'),
-        Key::Tab,
         Key::Char(' '),
         Key::Down,
         Key::Char(' '),
@@ -2779,11 +2789,10 @@ fn open_filter_cleanup_confirmation_and_unite_selection_use_the_injected_loader(
     )
     .unwrap();
     assert_eq!(confirm_loader.cleanup_calls, 1);
-    assert!(confirm.frames[3].join("\n").contains("No workspaces yet"));
+    assert!(confirm.frames[3].join("\n").contains("No projects yet"));
 
     let mut unite = FakeTerminal::with_keys(&[
         Key::Char('o'),
-        Key::Tab,
         Key::Char(' '),
         Key::Down,
         Key::Char(' '),
@@ -2933,7 +2942,7 @@ fn open_prev_wraps_and_escape_returns_to_welcome() {
     .unwrap();
     assert!(term.frames[1].join("\n").contains("alpha"));
     assert!(term.frames[2].join("\n").contains("beta"));
-    assert!(term.frames[3].join("\n").contains("Menu"));
+    assert!(term.frames[3].join("\n").contains("Clone repository"));
 }
 
 #[test]
@@ -2988,11 +2997,11 @@ fn open_touch_keeps_workspace_open_when_escape_is_pressed() {
 
     run(&mut term, vec![alpha, beta], recent, now(), &mut loader).unwrap();
 
-    assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+    assert_eq!(loader.opened, vec![PathBuf::from("/tmp/beta")]);
     assert!(
         term.frames
             .iter()
-            .any(|frame| frame.join("\n").contains("alpha-session"))
+            .any(|frame| frame.join("\n").contains("beta-session"))
     );
 }
 
@@ -3008,7 +3017,7 @@ fn empty_open_enter_stays_and_open_quit_exits() {
         &mut FakeLoader::default(),
     )
     .unwrap();
-    assert!(term.frames[1].join("\n").contains("No workspaces yet"));
+    assert!(term.frames[1].join("\n").contains("No projects yet"));
     // Welcome and the empty Open list. Enter, Down and Up have nothing to
     // move in an empty list, so they draw nothing (#554).
     assert_eq!(term.frames.len(), 2);
@@ -3057,7 +3066,6 @@ fn open_key_classifier_covers_edit_selection_and_confirmation_paths() {
     assert!(matches!(step_open(&mut open, Key::Escape), OpenStep::Back));
     assert!(matches!(step_open(&mut open, Key::CtrlQ), OpenStep::Quit));
 
-    let _ = step_open(&mut open, Key::Tab);
     let _ = step_open(&mut open, Key::Char(' '));
     let _ = step_open(&mut open, Key::Char(' '));
     let _ = step_open(&mut open, Key::Char(' '));
@@ -3097,7 +3105,7 @@ fn open_key_classifier_covers_edit_selection_and_confirmation_paths() {
 #[test]
 fn recent_loads_workspace_and_escape_keeps_it_open() {
     let mut term =
-        FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::CtrlQ, Key::Char('y')]);
+        FakeTerminal::with_keys(&[Key::Char('r'), Key::Escape, Key::CtrlQ, Key::Char('y')]);
     let mut loader = FakeLoader::default();
     run(
         &mut term,
@@ -3120,7 +3128,15 @@ fn recent_touch_keeps_workspace_open_when_escape_is_pressed() {
         Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
         Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
     ];
-    let keys = [Key::Char('2'), Key::Escape, Key::CtrlQ, Key::Char('y')];
+    let keys = [
+        Key::Char('o'),
+        Key::Tab,
+        Key::Down,
+        Key::Enter,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ];
     let mut term = FakeTerminal::with_keys(&keys);
     let mut loader = FakeLoader {
         opened_at: Some(now()),
@@ -3130,7 +3146,11 @@ fn recent_touch_keeps_workspace_open_when_escape_is_pressed() {
     run(&mut term, vec![beta, alpha], recent, now(), &mut loader).unwrap();
 
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
-    assert!(term.frames[2].join("\n").contains("alpha-session"));
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("alpha-session"))
+    );
 }
 
 #[test]
@@ -3140,7 +3160,7 @@ fn unite_recent_reopens_the_ordered_workspace_deck() {
         WorkspaceOverview::new(ws("other"), 0, 0, 0),
     ]));
     let empty = Recent::Unite(UniteOverview::new(Vec::new()));
-    let keys = [Key::Char('2'), Key::Char('1'), Key::CtrlQ, Key::Char('y')];
+    let keys = [Key::Char('2'), Key::Char('r'), Key::CtrlQ, Key::Char('y')];
     let mut term = FakeTerminal::with_keys(&keys);
     let mut loader = FakeLoader::default();
     run(
@@ -3361,7 +3381,7 @@ fn every_workspace_entry_returns_to_welcome_without_restarting() {
     // Recent `1` (first) → leave → Open `o`/↓/Enter (second) → leave →
     // New Existing (`x`) → leave → quit from Welcome. Each `w` is the exit
     // prompt's leave answer.
-    let mut keys = vec![Key::Char('1'), Key::CtrlQ, Key::Char('w')];
+    let mut keys = vec![Key::Char('r'), Key::CtrlQ, Key::Char('w')];
     keys.extend([
         Key::Char('o'),
         Key::Down,
@@ -3447,12 +3467,12 @@ fn every_workspace_entry_returns_to_welcome_without_restarting() {
         let welcome = frames
             .iter()
             .skip(home + 1)
-            .position(|frame| frame.contains("Menu"))
+            .position(|frame| frame.contains("Clone repository"))
             .unwrap_or_else(|| panic!("leaving {workspace} draws Welcome"))
             + home
             + 1;
         assert!(
-            !frames[welcome].contains("Open Workspace"),
+            !frames[welcome].contains("[Projects]"),
             "leaving {workspace} must land on Welcome, not the Open list: {}",
             frames[welcome]
         );
@@ -3491,7 +3511,7 @@ fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
 
     let cases = [
         (
-            vec![Key::Char('1')],
+            vec![Key::Char('r')],
             Vec::new(),
             vec![recent_at("first", now())],
         ),
@@ -3643,12 +3663,16 @@ fn a_fenced_workspace_refuses_on_the_welcome_reached_by_leaving() {
              workspace; this daemon serves the workspace /tmp/first.";
 
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::CtrlQ,
         Key::Char('w'),
         // The fenced workspace keeps Welcome up; the served one still opens.
-        Key::Char('2'),
-        Key::Char('1'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Down,
+        Key::Enter,
+        Key::Escape,
+        Key::Char('r'),
         Key::CtrlQ,
         Key::Char('q'),
     ]);
@@ -3656,6 +3680,10 @@ fn a_fenced_workspace_refuses_on_the_welcome_reached_by_leaving() {
         refuse: Some(REFUSAL.to_owned()),
         refuse_paths: vec![PathBuf::from("/tmp/second")],
         opened_at: Some(now() + Duration::hours(1)),
+        recent_projects: vec![
+            recent_at("first", now() + Duration::hours(1)),
+            recent_at("second", now() - Duration::hours(1)),
+        ],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();
@@ -3696,7 +3724,7 @@ fn a_fenced_workspace_refuses_on_the_welcome_reached_by_leaving() {
         .iter()
         .map(|frame| frame.join("\n"))
         .rev()
-        .find(|frame| frame.contains("Menu"))
+        .find(|frame| frame.contains("Open / add projects") && frame.contains("cannot open"))
         .expect("the switcher stays on screen after the refusal");
     assert!(contains_wrapped(&welcome, REFUSAL), "{welcome}");
 }
@@ -3752,7 +3780,7 @@ fn the_startup_splash_plays_once_per_process() {
 #[test]
 fn welcome_starts_correctly_after_an_interrupted_splash() {
     let mut term = SplashTerminal::new(vec![Some(Key::Char('o'))]).with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::CtrlQ,
         Key::Char('q'),
     ]);
@@ -3777,7 +3805,304 @@ fn welcome_starts_correctly_after_an_interrupted_splash() {
     // The frame right after the skipped splash is the switcher, drawn from
     // the given Recent; Welcome's own keys then drive it as usual.
     let welcome = term.frames[played].join("\n");
-    assert!(welcome.contains("Menu"), "{welcome}");
+    assert!(welcome.contains("Clone repository"), "{welcome}");
     assert!(welcome.contains("first"), "{welcome}");
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/first")]);
+}
+
+#[test]
+fn resume_restores_saved_order_and_active_project_independently_of_recents() {
+    let last = usagi_core::domain::recent::LastProjectSet {
+        paths: vec!["/tmp/alpha".into(), "/tmp/beta".into()],
+        active: "/tmp/beta".into(),
+    };
+    let mut loader = FakeLoader {
+        last_projects: Some(last.clone()),
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('w'),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('q'),
+    ]);
+    run(
+        &mut term,
+        vec![ws("alpha"), ws("beta")],
+        vec![recent("unrelated")],
+        now(),
+        &mut loader,
+    )
+    .unwrap();
+    assert_eq!(
+        loader.opened,
+        vec![
+            PathBuf::from("/tmp/alpha"),
+            PathBuf::from("/tmp/beta"),
+            PathBuf::from("/tmp/alpha"),
+            PathBuf::from("/tmp/beta")
+        ]
+    );
+    assert_eq!(loader.last_projects, Some(last));
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("beta-session"))
+    );
+}
+
+#[test]
+fn project_picker_opens_unregistered_directory_without_a_dummy_project() {
+    let mut loader = FakeLoader::default();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Enter,
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/added".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('q'),
+    ]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    assert_eq!(loader.opened, vec![PathBuf::from("/tmp/added")]);
+    assert_eq!(
+        loader.last_projects.unwrap().active,
+        PathBuf::from("/tmp/added")
+    );
+}
+
+#[test]
+fn picker_marks_multiple_projects_without_switching_to_unite_mode() {
+    let mut open = Open::new(vec![ws("alpha"), ws("beta")]);
+    assert!(matches!(
+        step_open(&mut open, Key::Char(' ')),
+        OpenStep::Stay
+    ));
+    let _ = step_open(&mut open, Key::Down);
+    let _ = step_open(&mut open, Key::Char(' '));
+    assert!(
+        matches!(step_open(&mut open, Key::Enter), OpenStep::Choose(paths) if paths.len() == 2)
+    );
+    let _ = step_open(&mut open, Key::Tab);
+    let _ = step_open(&mut open, Key::Tab);
+    let _ = step_open(&mut open, Key::Paste("/tmp/new".into()));
+    let _ = step_open(&mut open, Key::Tab);
+    assert_eq!(open.chosen_paths().len(), 2);
+    let _ = step_open(&mut open, Key::Tab);
+    let _ = step_open(&mut open, Key::Tab);
+    assert_eq!(open.chosen_paths(), vec![PathBuf::from("/tmp/new")]);
+}
+
+#[test]
+fn resume_storage_errors_keep_the_picker_available_and_preserve_saved_data() {
+    let mut loader = FakeLoader {
+        last_projects_error: Some("resume store unreadable"),
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::Escape, Key::Char('q')]);
+    run(
+        &mut term,
+        vec![ws("alpha")],
+        vec![recent("alpha")],
+        now(),
+        &mut loader,
+    )
+    .unwrap();
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Could not read last projects"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Filter:"))
+    );
+    assert!(loader.opened.is_empty());
+
+    let mut loader = FakeLoader {
+        save_projects_error: Some("resume store unwritable"),
+        ..FakeLoader::default()
+    };
+    let mut deck = WorkspaceDeck::new(&snapshot("alpha"));
+    remember_project_deck(&mut loader, &mut deck);
+    assert!(
+        deck.notice()
+            .unwrap()
+            .contains("Could not save last projects")
+    );
+    assert!(loader.last_projects.is_none());
+    deck.close_path(Path::new("/tmp/alpha"));
+    remember_project_deck(&mut loader, &mut deck);
+    assert!(loader.last_projects.is_none());
+}
+
+#[test]
+fn resume_activation_failure_returns_to_welcome_without_replacing_saved_order() {
+    let last = usagi_core::domain::recent::LastProjectSet {
+        paths: vec!["/tmp/alpha".into(), "/tmp/beta".into()],
+        active: "/tmp/beta".into(),
+    };
+    let mut loader = FakeLoader {
+        last_projects: Some(last.clone()),
+        activation_failure_path: Some(last.active.clone()),
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::Char('q')]);
+    run(
+        &mut term,
+        vec![ws("alpha"), ws("beta")],
+        Vec::new(),
+        now(),
+        &mut loader,
+    )
+    .unwrap();
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("saved project activation failed"))
+    );
+    assert_eq!(loader.last_projects, Some(last));
+}
+
+#[test]
+fn directory_open_failure_preserves_input_and_clone_back_keeps_resume() {
+    let last = usagi_core::domain::recent::LastProjectSet {
+        paths: vec!["/tmp/alpha".into()],
+        active: "/tmp/alpha".into(),
+    };
+    let mut loader = FakeLoader {
+        last_projects: Some(last.clone()),
+        fail: true,
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Char('e'),
+        Key::Escape,
+        Key::Char('o'),
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/unavailable".into()),
+        Key::Enter,
+        Key::Escape,
+        Key::Char('q'),
+    ]);
+    run(&mut term, vec![ws("alpha")], Vec::new(), now(), &mut loader).unwrap();
+    assert!(term.frames.iter().any(|frame| {
+        let text = frame.join("\n");
+        text.contains("open failed") && text.contains("/tmp/unavailable")
+    }));
+    assert_eq!(loader.last_projects, Some(last));
+}
+
+#[test]
+fn resume_keeps_the_opened_canonical_identity_when_saved_path_is_an_alias() {
+    let mut loader = FakeLoader {
+        last_projects: Some(usagi_core::domain::recent::LastProjectSet {
+            paths: vec!["/alias/alpha".into()],
+            active: "/alias/alpha".into(),
+        }),
+        ..FakeLoader::default()
+    };
+    // The loader resolves this path to its canonical /tmp/alpha snapshot.
+    let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::CtrlQ, Key::Char('q')]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    let saved = loader.last_projects.unwrap();
+    assert_eq!(saved.paths, vec![PathBuf::from("/tmp/alpha")]);
+    assert_eq!(saved.active, PathBuf::from("/tmp/alpha"));
+}
+
+#[test]
+fn returning_from_a_directory_open_reloads_single_and_group_history() {
+    let group = Recent::Unite(usagi_core::domain::recent::UniteOverview::new(vec![
+        WorkspaceOverview::new(ws("added"), 1, 0, 0),
+        WorkspaceOverview::new(ws("other"), 1, 0, 0),
+    ]));
+    let mut loader = FakeLoader {
+        recent_projects: vec![group, recent("added"), recent("other")],
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Enter,
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/added".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('w'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('q'),
+    ]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    assert_eq!(
+        loader.opened,
+        vec![
+            PathBuf::from("/tmp/added"),
+            "/tmp/added".into(),
+            "/tmp/other".into()
+        ]
+    );
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("added · other"))
+    );
+}
+
+#[test]
+fn failed_entry_history_refresh_keeps_existing_choices_and_reports_errors() {
+    let mut welcome = Welcome::new(vec![recent("alpha")]);
+    let mut open = open_from_registry(vec![ws("alpha")], welcome.all_recent());
+    let mut loader = FakeLoader {
+        recent_projects_error: Some("history unreadable"),
+        ..FakeLoader::default()
+    };
+    crate::presentation::refresh_entry_projects(&mut loader, &mut welcome, &mut open);
+    assert!(welcome.notice().unwrap().contains("history unreadable"));
+    assert_eq!(open.workspaces().len(), 1);
+    assert_eq!(welcome.all_recent().len(), 1);
+    loader.last_projects_error = Some("last set unreadable");
+    crate::presentation::refresh_entry_projects(&mut loader, &mut welcome, &mut open);
+    assert!(welcome.notice().unwrap().contains("last set unreadable"));
+    assert!(welcome.last_projects().is_none());
+}
+
+#[test]
+fn missing_cleanup_uses_projects_loaded_after_returning_from_a_deck() {
+    let mut loader = FakeLoader {
+        recent_projects: vec![recent("added"), recent("alpha")],
+        missing: vec!["/tmp/added".into()],
+        cleanup_removed: vec!["/tmp/added".into()],
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Enter,
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/alpha".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('w'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Enter,
+        Key::Char('y'),
+        Key::Escape,
+        Key::Char('q'),
+    ]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    assert_eq!(
+        loader.cleanup_candidates,
+        vec![vec![PathBuf::from("/tmp/added")]]
+    );
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Workspace registration removed."))
+    );
 }

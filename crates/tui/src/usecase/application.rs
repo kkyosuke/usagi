@@ -205,6 +205,27 @@ pub trait WorkspaceLoader: Send {
     /// Returns an error when the user-data store cannot be updated.
     fn record_unite(&mut self, paths: &[PathBuf]) -> io::Result<()>;
 
+    /// Load the last committed deck, separately from workspace recency.
+    ///
+    /// # Errors
+    /// Returns an error if the optional resume store cannot be read.
+    fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>>;
+
+    /// Reload the committed single-project and group history after leaving a deck.
+    ///
+    /// # Errors
+    /// Returns an error if the history projection cannot be read.
+    fn recent_projects(&mut self) -> io::Result<Vec<usagi_core::domain::recent::Recent>>;
+
+    /// Save tab order and the active project after a successful deck change.
+    ///
+    /// # Errors
+    /// Returns an error if the resume store cannot be written.
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> io::Result<()>;
+
     /// Start a non-blocking read of the global workspace registry.
     ///
     /// Home uses this only while its `+ Open` overlay is visible so workspace

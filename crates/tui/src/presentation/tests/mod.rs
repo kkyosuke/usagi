@@ -382,7 +382,9 @@ fn user_interactions() -> Vec<Key> {
 }
 
 fn ws(name: &str) -> Workspace {
-    Workspace::new(name, format!("/tmp/{name}"))
+    let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
+    workspace.updated_at = now();
+    workspace
 }
 
 fn ws_minutes_ago(name: &str, minutes: i64) -> Workspace {
@@ -2683,6 +2685,12 @@ enum FakeRegistryRefresh {
 
 #[derive(Default)]
 struct FakeLoader {
+    last_projects: Option<usagi_core::domain::recent::LastProjectSet>,
+    last_projects_error: Option<&'static str>,
+    save_projects_error: Option<&'static str>,
+    activation_failure_path: Option<PathBuf>,
+    recent_projects: Vec<Recent>,
+    recent_projects_error: Option<&'static str>,
     operation_mode: FakeOperationMode,
     opened: Vec<PathBuf>,
     refreshed: Vec<PathBuf>,
@@ -2783,11 +2791,39 @@ impl WorkspaceLoader for FakeLoader {
         }
     }
 
+    fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>> {
+        if let Some(error) = self.last_projects_error {
+            return Err(io::Error::other(error));
+        }
+        Ok(self.last_projects.clone())
+    }
+
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> io::Result<()> {
+        if let Some(error) = self.save_projects_error {
+            return Err(io::Error::other(error));
+        }
+        self.last_projects = Some(projects.clone());
+        Ok(())
+    }
+
+    fn recent_projects(&mut self) -> io::Result<Vec<Recent>> {
+        if let Some(error) = self.recent_projects_error {
+            return Err(io::Error::other(error));
+        }
+        Ok(self.recent_projects.clone())
+    }
+
     fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
         Ok(())
     }
 
-    fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
+    fn activate_prepared(&mut self, path: &Path) -> io::Result<()> {
+        if self.activation_failure_path.as_deref() == Some(path) {
+            return Err(io::Error::other("saved project activation failed"));
+        }
         self.activate_error
             .map_or(Ok(()), |error| Err(io::Error::other(error)))
     }

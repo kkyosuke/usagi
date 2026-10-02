@@ -2334,7 +2334,7 @@ fn failed_clone_retains_every_clone_draft_field_and_mode() {
 #[test]
 fn missing_recent_can_cancel_without_mutating_the_registry() {
     let alpha = ws("alpha");
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('n'), Key::Quit]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Char('n'), Key::Quit]);
     let mut loader = FakeLoader {
         missing: vec![alpha.path.clone()],
         ..FakeLoader::default()
@@ -2361,7 +2361,7 @@ fn missing_recent_can_cancel_without_mutating_the_registry() {
     assert!(term.frames.last().unwrap().join("\n").contains("alpha"));
 
     let alpha = ws("alpha");
-    let mut confirm_term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('y'), Key::Quit]);
+    let mut confirm_term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Char('y'), Key::Quit]);
     let mut confirm_loader = FakeLoader {
         missing: vec![alpha.path.clone()],
         cleanup_removed: vec![alpha.path.clone()],
@@ -2376,14 +2376,15 @@ fn missing_recent_can_cancel_without_mutating_the_registry() {
     )
     .unwrap();
     let final_frame = confirm_term.frames.last().unwrap().join("\n");
-    assert!(final_frame.contains("No recent workspace"));
+    assert!(!final_frame.contains("Open last projects"));
+    assert!(final_frame.contains("Open / add projects"));
     assert!(!final_frame.contains("alpha"));
 }
 
 #[test]
 fn unreadable_recent_reports_the_error_without_a_removal_prompt() {
     let alpha = ws("alpha");
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Quit]);
     let mut loader = FakeLoader {
         missing_error: Some(io::ErrorKind::PermissionDenied),
         ..FakeLoader::default()
@@ -3047,7 +3048,7 @@ fn an_accepted_resume_whose_display_intent_cannot_be_saved_surfaces_a_typed_noti
 /// shell here is exactly how a wedged daemon locks a user out of usagi.
 #[test]
 fn an_unreachable_daemon_keeps_the_switcher_up_instead_of_ending_the_process() {
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q'), Key::Enter]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Char('q'), Key::Enter]);
     let mut loader = FakeLoader {
         unreachable: Some("daemon unavailable: the daemon did not answer".to_owned()),
         ..FakeLoader::default()

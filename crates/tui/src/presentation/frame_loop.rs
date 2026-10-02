@@ -37,14 +37,13 @@ use super::{
     managed_background_terminal, managed_background_terminal_geometry, new_project_notice,
     open_director_from_new_button, open_failure_notice, open_from_registry, opens_workspace_help,
     prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
-    prepare_workspace_deck, project_bar, project_controller_sessions, recent_paths,
-    registry_contains_path, relative_time_clock, remember_workspace_session_focus,
-    remove_registry_paths, render_home, render_home_at, render_missing_workspace_prompt,
-    render_open, restore_workspace_closeup, restore_workspace_session_focus,
-    retarget_drawer_chords, right_pane_tab_at, route_garden_input, route_pr_modal_click,
-    route_workspace_input_before_reducer, run_workspace_config, save_config_responsive,
-    save_config_source_responsive, scroll_key_help, select_right_pane_tab, session_name_for,
-    sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
+    prepare_workspace_deck, project_bar, project_controller_sessions, registry_contains_path,
+    relative_time_clock, remember_workspace_session_focus, remove_registry_paths, render_home,
+    render_home_at, render_missing_workspace_prompt, render_open, restore_workspace_closeup,
+    restore_workspace_session_focus, retarget_drawer_chords, right_pane_tab_at, route_garden_input,
+    route_pr_modal_click, route_workspace_input_before_reducer, run_workspace_config,
+    save_config_responsive, save_config_source_responsive, scroll_key_help, select_right_pane_tab,
+    session_name_for, sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
     spawn_work_run_control_job, spawn_work_run_observation_job, step_config, step_new, step_open,
     step_welcome, surface_agent_tab_intent_error, sync_runtime_sessions,
     sync_terminal_selection_motions, visit_garden_agent, work_run_control_projection,
@@ -1680,6 +1679,9 @@ pub(super) fn drive_workspace_controller(
                         }
                     } else {
                         deck.close_path(&path);
+                        if let Some(loader) = loader.as_mut() {
+                            super::remember_project_deck(*loader, deck);
+                        }
                         if let Some(loader) = loader.as_mut()
                             && let Err(error) = (**loader).record_unite(&deck.paths())
                         {
@@ -2159,6 +2161,14 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
     let mut registry = workspaces.clone();
     let mut welcome = Welcome::new(recent);
     welcome.set_notice(notice);
+    match loader.last_projects() {
+        Ok(Some(last)) => welcome.set_last_projects(Some(last)),
+        Ok(None) => {}
+        Err(error) => {
+            welcome.set_last_projects(None);
+            welcome.set_notice(Some(format!("Could not read last projects: {error}")));
+        }
+    }
     let mut open = open_from_registry(workspaces, welcome.all_recent());
     let mut new_form = New::default();
     let mut config_form = Config::load_with_available_models(settings, available_models);
@@ -2217,6 +2227,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             )? {
                 return Ok(exit);
             }
+            super::refresh_entry_projects(loader, &mut welcome, &mut open);
             screen = Screen::Welcome;
             drawn_material = None;
             continue;
@@ -2275,10 +2286,10 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 {
                     let paths = prompt.paths.clone();
                     missing_workspace_prompt = None;
-                    let candidates = registry
-                        .iter()
+                    let candidates = open
+                        .workspaces()
+                        .into_iter()
                         .filter(|workspace| paths.contains(&workspace.path))
-                        .cloned()
                         .collect::<Vec<_>>();
                     let removed = loader.cleanup_missing(&candidates)?;
                     open.remove_paths(&removed);
@@ -2329,14 +2340,13 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     config_form = Config::load_with_available_models(settings, available_models);
                     screen = Screen::Config;
                 }
-                WelcomeStep::OpenRecent(index) => {
-                    // `Welcome` only creates this action for a visible Recent
-                    // number, so the index is fenced by the same model.
-                    let recent = &welcome.recent()[index];
-                    let paths = recent_paths(recent);
-                    if paths.is_empty() {
-                        continue;
-                    }
+                WelcomeStep::Resume => {
+                    // Resume is offered only for a validated, nonempty saved set.
+                    let last = welcome
+                        .last_projects()
+                        .expect("Resume has a saved set")
+                        .clone();
+                    let paths = last.paths;
                     match loader.missing_paths(&paths) {
                         Ok(missing) if !missing.is_empty() => {
                             missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
@@ -2350,7 +2360,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     }
                     // A workspace this daemon does not serve keeps the switcher on
                     // screen with the reason, so another Recent entry can be tried.
-                    let (snapshots, snapshot, deck) =
+                    let (snapshots, mut snapshot, mut deck) =
                         match prepare_workspace_deck(term, loader, &paths) {
                             Ok(prepared) => prepared,
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -2367,8 +2377,27 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                                 None => return Err(error),
                             },
                         };
+                    if let Some(active) = snapshots
+                        .iter()
+                        .find(|snapshot| snapshot.workspace.path == last.active)
+                    {
+                        if let Err(error) = activate_workspace_responsive(
+                            term,
+                            loader,
+                            &active.workspace.path,
+                            "Activating last project…",
+                        ) {
+                            welcome.set_notice(Some(error.to_string()));
+                            continue;
+                        }
+                        snapshot = active.clone();
+                        deck.activate_snapshot(active);
+                    }
                     welcome.set_notice(None);
                     for snapshot in &snapshots {
+                        if !registry_contains_path(&registry, &snapshot.workspace.path) {
+                            registry.push(snapshot.workspace.clone());
+                        }
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
@@ -2384,6 +2413,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
                     screen = Screen::Welcome;
                 }
             },
@@ -2392,7 +2422,12 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
                 OpenStep::Choose(paths) => {
-                    match loader.missing_paths(&paths) {
+                    let missing = if open.view() == super::views::open::OpenView::Directory {
+                        Ok(Vec::new())
+                    } else {
+                        loader.missing_paths(&paths)
+                    };
+                    match missing {
                         Ok(missing) if !missing.is_empty() => {
                             missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
                             continue;
@@ -2419,11 +2454,18 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                                     open.set_notice(Some(notice));
                                     continue;
                                 }
+                                None if open.view() == super::views::open::OpenView::Directory => {
+                                    open.set_notice(Some(error.to_string()));
+                                    continue;
+                                }
                                 None => return Err(error),
                             },
                         };
                     open.set_notice(None);
                     for snapshot in &snapshots {
+                        if !registry_contains_path(&registry, &snapshot.workspace.path) {
+                            registry.push(snapshot.workspace.clone());
+                        }
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
@@ -2442,16 +2484,19 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
                     screen = Screen::Welcome;
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
+                    welcome.remove_paths(&removed);
                     remove_registry_paths(&mut registry, &removed);
                 }
                 OpenStep::ConfirmUnregister(path) => {
                     let removed = loader.unregister(&[path])?;
                     open.remove_paths(&removed);
+                    welcome.remove_paths(&removed);
                     remove_registry_paths(&mut registry, &removed);
                 }
             },
@@ -2462,6 +2507,9 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     if let Some(pending) = pending_create.as_mut() {
                         pending.cancelled = true;
                         new_form.finish_create();
+                    }
+                    if let Ok(Some(last)) = loader.last_projects() {
+                        welcome.set_last_projects(Some(last));
                     }
                     screen = Screen::Welcome;
                 }

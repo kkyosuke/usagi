@@ -1534,7 +1534,7 @@ fn direct_welcome_recent_and_open_entries_share_the_director_drawer_shell() {
     assert!(has_director_drawer(&direct.frames));
 
     let mut recent_term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::Live(LiveTerminalAction::Director),
         Key::Escape,
         Key::CtrlQ,

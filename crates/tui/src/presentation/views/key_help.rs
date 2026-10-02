@@ -130,15 +130,14 @@ impl Context {
             Self::Welcome => &[
                 ("↑/k  ↓/j", "select"),
                 ("Enter", "open selected item"),
-                ("o / e / c", "Open / New / Config"),
-                ("1 … 3", "open Recent card"),
+                ("r / o / e / c", "Last projects / Open / Clone / Config"),
                 ("q / Esc", "quit"),
             ],
             Self::Open => &[
                 ("↑ / ↓", "select workspace"),
                 ("type / paste", "edit filter"),
-                ("Tab", "Single / Unite"),
-                ("Space", "mark Unite member"),
+                ("Tab", "Projects / Recent / Directory"),
+                ("Space", "mark project"),
                 ("Ctrl-X", "unregister selected"),
                 ("C", "clean missing registrations"),
                 ("Enter / Esc", "open / back"),
@@ -615,7 +614,7 @@ mod tests {
         let frame = render_over(18, 80, &vec![String::new(); 18], help(Context::Welcome));
         let rendered = frame.join("\n");
 
-        assert!(rendered.contains("open Recent card"));
+        assert!(rendered.contains("Last projects / Open"));
         assert!(!rendered.contains("add workspace"));
     }
 

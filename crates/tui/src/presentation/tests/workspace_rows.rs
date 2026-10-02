@@ -1048,7 +1048,7 @@ fn missing_workspace_prompt_keyboard_controls_are_complete() {
 
 #[test]
 fn quitting_from_a_recent_workspace_exits_the_runtime() {
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::CtrlQ, Key::Char('y')]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::CtrlQ, Key::Char('y')]);
     run(
         &mut term,
         Vec::new(),
@@ -1310,7 +1310,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
     ));
 
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::Char('?'),
         // Ctrl-X would remove the selected session outside Help.
         Key::CtrlX,
@@ -1348,7 +1348,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
 fn workspace_loader_failure_is_propagated() {
     for (keys, recent) in [
         (vec![Key::Char('o'), Key::Enter], Vec::new()),
-        (vec![Key::Char('1')], vec![recent("alpha")]),
+        (vec![Key::Char('r')], vec![recent("alpha")]),
     ] {
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
@@ -1367,15 +1367,22 @@ fn workspace_loader_failure_is_propagated() {
 #[test]
 fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::CtrlQ,
         Key::Char('w'),
-        Key::Char('2'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Down,
+        Key::Enter,
         Key::CtrlQ,
         Key::Char('q'),
     ]);
     let mut loader = FakeLoader {
         opened_at: Some(now() + Duration::hours(1)),
+        recent_projects: vec![
+            recent_at("first", now() + Duration::hours(1)),
+            recent_at("second", now() - Duration::hours(1)),
+        ],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();
@@ -1492,7 +1499,13 @@ fn add_workspace_overlay_can_close_its_checked_active_project() {
 
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
     assert_eq!(factory.drops_at_create, vec![0]);
-    assert!(term.frames.last().unwrap().join("\n").contains("Recent"));
+    assert!(
+        term.frames
+            .last()
+            .unwrap()
+            .join("\n")
+            .contains("Clone repository")
+    );
 }
 
 #[test]
