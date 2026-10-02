@@ -306,6 +306,22 @@ impl PtyTerminal {
             .and_then(|status| i32::try_from(status.exit_code()).map_err(std::io::Error::other))
     }
 
+    /// Reports the child's exit code once it has exited, without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child lock or the status query fails, or the
+    /// exit code is outside the supported range.
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=waiting_for_exit_leaves_the_terminal_lock_free
+    pub fn try_wait(&self) -> std::io::Result<Option<i32>> {
+        self.child
+            .lock()
+            .map_err(|_| std::io::Error::other("PTY child lock poisoned"))?
+            .try_wait()?
+            .map(|status| i32::try_from(status.exit_code()).map_err(std::io::Error::other))
+            .transpose()
+    }
+
     /// Terminates and reaps this daemon-owned child. Used only to compensate a
     /// failed admission commit after the process has already been spawned.
     ///
@@ -334,6 +350,36 @@ impl PtyWriter for PtyTerminal {
     }
 }
 
+/// How often [`wait_for_exit`] re-checks a child whose output already ended.
+pub const PTY_EXIT_POLL: Duration = Duration::from_millis(50);
+
+/// Waits for the child of a shared terminal to exit without holding the
+/// terminal's lock while it waits.
+///
+/// A blocking `waitpid` under that lock would park every input, resize and
+/// close of the terminal, all of which run under daemon-wide runtime locks,
+/// for as long as the child lives. That includes the close that would end it.
+/// Output can end before the child does, for example when the child closes its
+/// terminal descriptors, so the lock is taken only to check, then released.
+///
+/// # Errors
+///
+/// Returns an error when the terminal lock is poisoned or the status query
+/// fails.
+pub fn wait_for_exit(terminal: &Mutex<PtyTerminal>, poll: Duration) -> std::io::Result<i32> {
+    loop {
+        let Ok(terminal_guard) = terminal.lock() else {
+            return Err(std::io::Error::other("PTY terminal lock poisoned"));
+        };
+        let exited = terminal_guard.try_wait()?;
+        drop(terminal_guard);
+        if let Some(code) = exited {
+            return Ok(code);
+        }
+        std::thread::sleep(poll);
+    }
+}
+
 fn io_error(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(error.to_string())
 }
@@ -347,11 +393,12 @@ fn io_error_with_context(context: &str, error: impl std::fmt::Display) -> std::i
 mod tests {
     use super::{
         PollReadiness, PtyTerminal, Readiness, ReadinessReader, StallBoundedWriter, fcntl_outcome,
-        poll_outcome, set_nonblocking,
+        poll_outcome, set_nonblocking, wait_for_exit,
     };
     use crate::usecase::terminal::{Geometry, InputAck, InputRequest, PtyWriter, TerminalRegistry};
     use std::collections::VecDeque;
     use std::io::{Error, ErrorKind, Read, Write};
+    use std::sync::Mutex;
     use std::time::Duration;
     use usagi_core::domain::id::{
         ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId, TerminalRef,
@@ -928,6 +975,55 @@ mod tests {
             output.extend_from_slice(&buffer[..read]);
         }
         assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn waiting_for_exit_leaves_the_terminal_lock_free() {
+        let terminal = Mutex::new(
+            PtyTerminal::spawn_with(
+                "/bin/sh",
+                &["-c".to_owned(), "read line; exit 3".to_owned()],
+                &[],
+                std::path::Path::new("/"),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap(),
+        );
+
+        // As in the daemon, output is drained: on macOS the child's last
+        // terminal close waits for unread output.
+        let mut reader = terminal.lock().unwrap().reader().unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+            let waiter = scope.spawn(|| wait_for_exit(&terminal, Duration::from_millis(5)));
+            // The child exits only after this input, which needs the lock the
+            // waiter would have held for the whole wait.
+            std::thread::sleep(Duration::from_millis(30));
+            terminal.lock().unwrap().write_all(b"done\n").unwrap();
+            assert_eq!(waiter.join().unwrap().unwrap(), 3);
+        });
+    }
+
+    #[test]
+    fn waiting_for_exit_reports_a_poisoned_terminal_lock() {
+        let terminal = Mutex::new(
+            PtyTerminal::spawn(
+                "/usr/bin/true",
+                std::path::Path::new("/"),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap(),
+        );
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = terminal.lock().unwrap();
+            panic!("poison the terminal lock");
+        }));
+
+        assert!(wait_for_exit(&terminal, Duration::from_millis(5)).is_err());
+        let Err(poisoned) = terminal.into_inner() else {
+            panic!("the terminal lock was poisoned above");
+        };
+        assert_eq!(poisoned.into_inner().wait().unwrap(), 0);
     }
 
     #[test]

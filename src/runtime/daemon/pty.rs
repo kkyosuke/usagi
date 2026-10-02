@@ -338,10 +338,13 @@ impl PtySpawner for AgentPty {
                     return;
                 }
             }
-            let Ok(status) = exit_pty
-                .lock()
-                .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
-            else {
+            // The terminal lock is held only to check: input, resize and close
+            // of this terminal run under daemon-wide locks and must not wait for
+            // a child whose output ended before it exited.
+            let Ok(status) = usagi_daemon::infrastructure::pty::wait_for_exit(
+                &exit_pty,
+                usagi_daemon::infrastructure::pty::PTY_EXIT_POLL,
+            ) else {
                 return;
             };
             if observations
@@ -544,10 +547,13 @@ impl GenericPtySpawner for DaemonPty {
                     return;
                 }
             }
-            let Ok(status) = exit_pty
-                .lock()
-                .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
-            else {
+            // The terminal lock is held only to check: input, resize and close
+            // of this terminal run under daemon-wide locks and must not wait for
+            // a child whose output ended before it exited.
+            let Ok(status) = usagi_daemon::infrastructure::pty::wait_for_exit(
+                &exit_pty,
+                usagi_daemon::infrastructure::pty::PTY_EXIT_POLL,
+            ) else {
                 return;
             };
             if output_sender
