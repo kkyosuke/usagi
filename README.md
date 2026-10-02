@@ -88,7 +88,7 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 [`[session].setup_commands`](document/05-daemon.md#session-作成後の-setup-command) に直接設定できます。
 
 次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
-サイドバーでは、委譲して作成した子 session を親の直下にまとめて表示します。
+サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。
 [Session Garden](document/assets/session-garden.gif) では、ゆったり動くうさぎと庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。

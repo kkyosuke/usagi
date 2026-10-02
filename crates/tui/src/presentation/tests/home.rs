@@ -3082,3 +3082,28 @@ fn an_unreachable_daemon_keeps_the_switcher_up_instead_of_ending_the_process() {
     // port was created for a workspace that never opened.
     assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn switch_reorder_projects_rows_and_does_not_resync_on_every_frame() {
+    use crate::usecase::application::controller::{AppEvent, AppKey};
+    let [a, b] = std::array::from_fn(|_| SessionId::new());
+    let mut snapshot = state("demo");
+    let mut second = snapshot.sessions[0].clone();
+    second.name = "second".into();
+    snapshot.sessions.push(second);
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), snapshot, vec![a, b]);
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![a, b]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+    assert_eq!(runtime.state().sessions(), &[b, a]);
+    for _ in 0..2 {
+        assert!(crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]).is_empty());
+        let rows = crate::presentation::project_controller_sessions(&ui, runtime.state());
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![b, a]
+        );
+        assert_eq!(rows[0].label, "second");
+    }
+}

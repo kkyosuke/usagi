@@ -1221,6 +1221,8 @@ pub struct AppState {
     agent_launch_error: Option<Notice>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
+    /// Workspace-local display preference; daemon lifecycle order is unchanged.
+    session_order_revision: u64,
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
     /// authoritative な identity は [`sessions`](Self::sessions) が持つ。
     session_names: Vec<String>,
@@ -1458,6 +1460,7 @@ impl AppState {
             agent_launch_error: None,
             workspace,
             sessions,
+            session_order_revision: 0,
             session_names: Vec::new(),
             favorite_sessions: std::collections::BTreeSet::new(),
             session_lifecycles: BTreeMap::new(),
@@ -1669,6 +1672,24 @@ impl AppState {
     #[must_use]
     pub fn sessions(&self) -> &[SessionId] {
         &self.sessions
+    }
+    /// Generation of manual session-order changes, used by the row cache.
+    #[must_use]
+    pub const fn session_order_revision(&self) -> u64 {
+        self.session_order_revision
+    }
+    /// Apply the local display preference to a fresh authoritative membership.
+    /// Existing identities keep their positions; newly observed sessions append
+    /// in snapshot order. Before the first reorder, follow snapshot order.
+    pub fn order_session_snapshot(&self, sessions: &mut [SessionId]) {
+        if self.session_order_revision != 0 {
+            sessions.sort_by_key(|id| {
+                self.sessions
+                    .iter()
+                    .position(|current| current == id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
     }
     /// 表示中 session の name（同名 validation 用の advisory copy）。
     #[must_use]
@@ -2501,6 +2522,8 @@ pub enum AppEvent {
     /// deck uses this when returning to a workspace whose controller was torn
     /// down during a project switch.
     FocusSession(SessionId),
+    /// Restore the process deck's manual display order on project re-entry.
+    RestoreSessionOrder(Vec<SessionId>),
     /// Open one stable session without relying on list position. The process
     /// deck uses this after a Garden visit switched to another workspace.
     VisitSession(SessionId),
@@ -2994,6 +3017,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::FocusSession(session) => focus_session(state, session),
+        AppEvent::RestoreSessionOrder(order) => restore_session_order(state, &order),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
             if state.overlay == Some(Overlay::Garden) {
@@ -3541,7 +3565,8 @@ fn update_runtime_phase(
     Vec::new()
 }
 
-fn update_session_snapshot(state: &mut AppState, sessions: Vec<SessionId>) -> Vec<Effect> {
+fn update_session_snapshot(state: &mut AppState, mut sessions: Vec<SessionId>) -> Vec<Effect> {
+    state.order_session_snapshot(&mut sessions);
     // Never combine a press from before an authoritative snapshot with
     // one after it, even when the same stable ID remains visible.
     state.pending_session_click = None;
@@ -4957,6 +4982,37 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     Vec::new()
 }
 
+fn restore_session_order(state: &mut AppState, order: &[SessionId]) -> Vec<Effect> {
+    state.sessions.sort_by_key(|id| {
+        order
+            .iter()
+            .position(|saved| saved == id)
+            .unwrap_or(usize::MAX)
+    });
+    state.session_order_revision = state.session_order_revision.saturating_add(1);
+    Vec::new()
+}
+
+/// Move only the cursor's row; stable selected/active identities do not change.
+fn reorder_selected_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect> {
+    let Selection::Target(Target::Session(session)) = state.selected else {
+        return Vec::new();
+    };
+    let Some(index) = state.sessions.iter().position(|id| *id == session) else {
+        return Vec::new();
+    };
+    let next = match direction {
+        TabDirection::Previous => index.saturating_sub(1),
+        TabDirection::Next => (index + 1).min(state.sessions.len() - 1),
+    };
+    if index != next {
+        state.sessions.swap(index, next);
+        state.session_order_revision = state.session_order_revision.saturating_add(1);
+        state.pending_session_click = None;
+    }
+    Vec::new()
+}
+
 /// Move between usable managed sessions without exposing the synthetic create
 /// row or a failed/deleting checkout as a navigation destination. Switch keeps
 /// its cursor semantics; Closeup updates the active target and remains Closeup.
@@ -5030,6 +5086,16 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 }
                 _ => Vec::new(),
             }
+        }
+        AppKey::Char('p')
+            if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
+        {
+            reorder_selected_session(state, TabDirection::Previous)
+        }
+        AppKey::Char('n')
+            if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
+        {
+            reorder_selected_session(state, TabDirection::Next)
         }
         AppKey::OpenDecisions => open_decisions(state),
         AppKey::Up => {

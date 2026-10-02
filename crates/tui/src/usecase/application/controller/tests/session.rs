@@ -1932,3 +1932,133 @@ fn session_favorite_shortcut_is_owned_only_by_switch_session_rows() {
             .any(|effect| matches!(effect, Effect::ToggleSessionFavorite { .. }))
     );
 }
+
+#[test]
+fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
+    let workspace = WorkspaceId::new();
+    let [a, b, c, new] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(workspace, vec![a, b, c]);
+    assert_eq!(state.session_order_revision(), 0);
+    assert!(update(&mut state, AppEvent::Key(AppKey::Char('p'))).is_empty());
+    assert_eq!(state.session_order_revision(), 0);
+    assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
+    assert_eq!(state.sessions(), &[b, a, c]);
+    assert_eq!(state.selected(), Selection::Target(Target::Session(a)));
+    assert_eq!(state.active(), Some(a));
+    assert_eq!(state.session_order_revision(), 1);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    assert_eq!(state.sessions(), &[b, c, a]);
+    assert_eq!(state.session_order_revision(), 2);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+    assert_eq!(state.sessions(), &[b, a, c]);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![new, c, a, b])),
+    );
+    assert_eq!(state.sessions(), &[b, a, c, new]);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![new, c, b])),
+    );
+    assert_eq!(state.sessions(), &[b, c, new]);
+    assert_eq!(state.selected(), Selection::Target(Target::Session(c)));
+    assert_eq!(state.active(), Some(c));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![])),
+    );
+    assert!(state.sessions().is_empty());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    assert!(state.sessions().is_empty());
+}
+
+#[test]
+fn session_reorder_is_inert_outside_switch_session_rows() {
+    let workspace = WorkspaceId::new();
+    let [a, b] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(workspace, vec![a, b]);
+    for selection in [
+        Selection::NewSession,
+        Selection::Idle,
+        Selection::Target(Target::Root(workspace)),
+        Selection::Target(Target::Session(SessionId::new())),
+    ] {
+        state.selected = selection;
+        for key in ['p', 'n'] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(key)));
+            assert_eq!(state.sessions(), &[a, b]);
+        }
+    }
+    state.selected = Selection::Target(Target::Session(a));
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    assert_eq!(state.sessions(), &[a, b]);
+    state.route = Route::Home(HomeMode::Switch);
+    state.overlay = Some(Overlay::Overview);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    assert_eq!(state.sessions(), &[a, b]);
+    state.overlay = None;
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    assert_eq!(state.sessions(), &[a, b]);
+    assert_eq!(state.session_order_revision(), 0);
+}
+
+#[test]
+fn session_reorder_clears_pointer_pair_and_handles_single_row() {
+    let workspace = WorkspaceId::new();
+    let [a, b] = std::array::from_fn(|_| SessionId::new());
+    let mut state = sized_home(workspace, vec![a, b], 100, 30);
+    let _ = click_at(&mut state, 5, 2, 1_000);
+    assert!(state.pending_session_click.is_some());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    assert!(state.pending_session_click.is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![a])),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+    assert_eq!(state.sessions(), &[a]);
+    assert_eq!(state.session_order_revision(), 1);
+}
+
+#[test]
+fn session_favorites_stay_with_identity_after_reordering_and_refresh() {
+    let workspace = WorkspaceId::new();
+    let [first, second] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(workspace, vec![first, second]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([second]),
+        )),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+    assert_eq!(state.sessions(), &[second, first]);
+    assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+    assert_eq!(state.active(), Some(first));
+    assert!(state.is_favorite(second));
+    assert!(!state.is_favorite(first));
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('f'))),
+        vec![Effect::ToggleSessionFavorite { session: second }],
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![first, second])),
+    );
+    assert_eq!(state.sessions(), &[second, first]);
+    assert!(state.is_favorite(second));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::new(),
+        )),
+    );
+    assert!(!state.is_favorite(second));
+    assert_eq!(state.sessions(), &[second, first]);
+    assert_eq!(state.session_order_revision(), 1);
+}
