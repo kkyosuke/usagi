@@ -157,12 +157,13 @@ impl From<EnvLimitError> for UserEnvironmentError {
 /// binding `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` would send the user's
 /// Claude session — prompts, file contents, credentials in flight — to a server
 /// the repository chose.
-const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 14] = [
+const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
     "PATH",
     "TMPDIR",
     "HOME",
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
+    usagi_core::infrastructure::paths::TRUST_ROOT_ENV,
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
@@ -820,6 +821,7 @@ mod tests {
         let cases = [
             ("PATH", "/workspace/fake-bin"),
             ("TMPDIR", "/"),
+            ("USAGI_TRUST_ROOT", "/"),
             ("HOME", "/"),
             ("CODEX_HOME", "/workspace/.codex"),
             ("USAGI_CLAUDE_SANDBOX_PASSTHROUGH", "1"),

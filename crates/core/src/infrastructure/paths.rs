@@ -69,6 +69,8 @@ const WORKSPACE_STATE_DIGEST_BYTES: usize = 6;
 
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
+/// Explicit user-owned filesystem boundary for private daemon directories.
+pub const TRUST_ROOT_ENV: &str = "USAGI_TRUST_ROOT";
 /// Environment variable selecting the isolated runtime state mode.
 pub const RUNTIME_MODE_ENV: &str = "USAGI_RUNTIME_MODE";
 /// Trusted workspace root forwarded to a daemon-provisioned MCP child.

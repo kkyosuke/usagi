@@ -2448,6 +2448,61 @@ fn doctor_reports_real_diagnostics() {
 }
 
 #[test]
+fn explicit_trust_root_starts_the_shipping_daemon_below_an_untrusted_parent() {
+    struct Reap(PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            daemon_fixture::reap(&self.0);
+        }
+    }
+    let _guard = daemon_fixture::heavy_e2e_lock();
+    let temp = daemon_fixture::short_dir("tr-");
+    let provider = temp.path().canonicalize().unwrap().join("p");
+    std::fs::create_dir(&provider).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let root = provider.join("r");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.join("h");
+    let workspace = root.join("w");
+    std::fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    let _reap = Reap(home.clone());
+    let command = |args: &[&OsStr]| {
+        let mut command = daemon_fixture::usagi_command(&home, Channel::Local, &workspace, args);
+        command.env("USAGI_TRUST_ROOT", &root);
+        command
+    };
+    let refused = command(&[OsStr::new("daemon"), OsStr::new("start")])
+        .env_remove("USAGI_TRUST_ROOT")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("unsafe parent"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(daemon_record(&channel_data_dir(&home)).is_none());
+    let started = command(&[OsStr::new("daemon"), OsStr::new("start")])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{}", stderr(&started));
+    let repeated = command(&[OsStr::new("daemon"), OsStr::new("start")])
+        .output()
+        .unwrap();
+    assert!(repeated.status.success(), "{}", stderr(&repeated));
+    assert!(stdout(&repeated).contains("already running"));
+    let doctor = command(&[OsStr::new("doctor")]).output().unwrap();
+    assert!(doctor.status.success(), "{}", stderr(&doctor));
+    assert!(stdout(&doctor).contains("[ok] Daemon: daemon is reachable"));
+    let stopped = command(&[OsStr::new("daemon"), OsStr::new("stop")])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{}", stderr(&stopped));
+}
+
+#[test]
 fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();

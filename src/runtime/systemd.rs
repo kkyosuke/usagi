@@ -175,6 +175,23 @@ fn render(
     data_home: &DataHome,
     workspace: &Path,
 ) -> std::io::Result<String> {
+    let root = std::env::var_os(usagi_core::infrastructure::paths::TRUST_ROOT_ENV);
+    render_with_trust_root(
+        executable,
+        stderr_log,
+        data_home,
+        workspace,
+        root.as_deref().map(Path::new),
+    )
+}
+
+fn render_with_trust_root(
+    executable: &Path,
+    stderr_log: &Path,
+    data_home: &DataHome,
+    workspace: &Path,
+    trust_root: Option<&Path>,
+) -> std::io::Result<String> {
     let executable = utf8(executable, "non-UTF-8 executable path")?;
     let stderr_log = utf8(stderr_log, "non-UTF-8 log path")?;
     // A base that cannot be spelled as UTF-8 is refused rather than lossily
@@ -186,6 +203,17 @@ fn render(
     // anyone chose — and under the default `~/.usagi` data home it collides the
     // workspace fence with the single-instance lock.
     let workspace = utf8(workspace, "non-UTF-8 workspace root")?;
+    let trust_environment = trust_root
+        .map(|root| {
+            utf8(root, "non-UTF-8 trust root").map(|root| {
+                format!(
+                    "Environment={}\n",
+                    assignment(usagi_core::infrastructure::paths::TRUST_ROOT_ENV, root)
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(format!(
         "[Unit]\n\
          Description=usagi daemon\n\
@@ -198,7 +226,7 @@ fn render(
          RestartSec=1\n\
          Environment={}\n\
          Environment={}\n\
-         StandardError=append:{}\n\
+         {trust_environment}StandardError=append:{}\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
@@ -257,6 +285,22 @@ fn quoted(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_preserves_and_escapes_the_explicit_trust_root() {
+        let unit = super::render_with_trust_root(
+            std::path::Path::new("/bin/usagi"),
+            std::path::Path::new("/data/stderr"),
+            &super::DataHome::new(
+                "/data",
+                usagi_core::infrastructure::paths::RuntimeMode::Local,
+            ),
+            std::path::Path::new("/workspace"),
+            Some(std::path::Path::new("/workspace/%n\"root")),
+        )
+        .unwrap();
+        assert!(unit.contains("Environment=\"USAGI_TRUST_ROOT=/workspace/%%n\\\"root\"\n"));
+    }
+
     use super::{
         DataHome, UNIT, install_with, quoted, render, specifier_safe, uninstall_with,
         unit_path_from_config_dir,

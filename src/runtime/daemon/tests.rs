@@ -7121,7 +7121,7 @@ fn product_mcp_arguments_start_usagi_mcp_from_the_daemon_binary() {
             "-c",
             "mcp_servers.usagi.args = [\"mcp\"]",
             "-c",
-            "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
+            "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\", \"USAGI_TRUST_ROOT\"]",
             "-c",
             "mcp_servers.usagi.required = true",
             "-c",
@@ -7452,7 +7452,7 @@ fn pure_daemon_helpers_keep_their_decisions_measured() {
     assert!(matches!(transition_mode(true), TransitionMode::Cold));
 
     let mut context = provision_context(None);
-    assert_eq!(mcp_environment_allowlist(&context).len(), 3);
+    assert_eq!(mcp_environment_allowlist(&context).len(), 4);
     context.inject_mcp = false;
     assert!(mcp_environment_allowlist(&context).is_empty());
 
@@ -7859,6 +7859,48 @@ fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
             claude_writable_roots(SandboxMode::Root, Path::new("/repo/.usagi/sessions/work"));
         assert!(roots.is_empty(), "{roots:?}");
     }
+}
+
+#[test]
+fn managed_mcp_child_inherits_the_daemons_explicit_trust_root() {
+    const FIXTURE: &str = "USAGI_TRUST_ROOT_TEST_CHILD";
+    if std::env::var_os(FIXTURE).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::daemon::tests::managed_mcp_child_inherits_the_daemons_explicit_trust_root",
+                "--nocapture",
+            ])
+            .env(FIXTURE, "1")
+            .env(paths::TRUST_ROOT_ENV, "/managed")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let mut context = provision_context(Some(SessionId::new()));
+    let home = paths::DataHome::new("/managed/state", paths::RuntimeMode::Local);
+    let environment = mcp_environment(&context, &home, Path::new("/managed/repo")).unwrap();
+    assert!(
+        environment
+            .iter()
+            .any(|(name, value)| name.as_str() == paths::TRUST_ROOT_ENV && value == "/managed")
+    );
+    assert!(
+        mcp_environment_allowlist(&context)
+            .iter()
+            .any(|name| name.as_str() == paths::TRUST_ROOT_ENV)
+    );
+    context.inject_mcp = false;
+    assert!(
+        mcp_environment(&context, &home, Path::new("/managed/repo"))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
