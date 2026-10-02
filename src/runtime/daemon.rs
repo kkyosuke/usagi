@@ -40,8 +40,8 @@ use workers::{
     ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown, SigtermTerminator, SystemAgentReadiness,
     retain_client_worker, spawn_critical_worker, spawn_orphan_cleanup_worker,
     spawn_pr_refresh_worker, spawn_tenant_retire_worker, start_connection_cleanup_worker,
-    start_draining_collection_worker, start_pr_projection_worker, start_retention_gc_worker,
-    start_session_teardown_worker,
+    start_draining_collection_worker, start_lock_watchdog, start_pr_projection_worker,
+    start_retention_gc_worker, start_session_teardown_worker,
 };
 #[cfg(test)]
 use workers::{

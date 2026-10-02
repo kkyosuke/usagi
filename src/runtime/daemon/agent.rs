@@ -258,6 +258,21 @@ impl SharedAgentState {
     }
 }
 
+/// The Agent owner lock as the lock watchdog probes it. It holds only a weak
+/// reference: the Agent observer exits once the owner's last strong reference
+/// is gone, and a probe must not postpone that.
+pub(super) struct AgentOwnerLock(pub(super) std::sync::Weak<SharedAgentState>);
+
+impl usagi_daemon::usecase::lock_watch::ProbeTarget for AgentOwnerLock {
+    fn acquire(&self) -> bool {
+        let Some(agent) = self.0.upgrade() else {
+            return false;
+        };
+        drop(agent.lock());
+        true
+    }
+}
+
 pub(super) struct AgentDecisionWaker<'a> {
     pub(super) agent: &'a SharedAgentRuntime,
 }
