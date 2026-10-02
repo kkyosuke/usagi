@@ -9156,7 +9156,20 @@ mod tests {
         );
         let (host, actions) = ControllerHost::channel();
         let mut factory = ProductionBackendFactory::default();
+        std::fs::write(temporary.path().join(".git/info/exclude"), ".usagi/\n").unwrap();
+        usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore::new(
+            temporary.path(),
+        )
+        .toggle(session_ids[0])
+        .unwrap();
         let mut composition = factory.create(&snapshot, host);
+        assert_eq!(
+            composition.backend.drain_events(),
+            vec![AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::from([session_ids[0]])
+            ))],
+            "opening a workspace restores its saved favorites before handling commands",
+        );
         // The Daemon modal compares the daemon's build with this client's own.
         assert_eq!(
             factory.client_build(),
