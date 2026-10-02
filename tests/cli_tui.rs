@@ -2464,6 +2464,14 @@ fn explicit_trust_root_starts_the_shipping_daemon_below_an_untrusted_parent() {
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let home = root.join("h");
+    // Like DaemonHome, prepare private state independently of the invoking
+    // shell's umask. A refused bootstrap can otherwise leave ordinary 0755
+    // storage directories that the next invocation correctly refuses.
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let data_dir = channel_data_dir(&home);
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let workspace = root.join("w");
     std::fs::create_dir(&workspace).unwrap();
     git(&workspace, &["init", "-q"]);
@@ -2471,6 +2479,14 @@ fn explicit_trust_root_starts_the_shipping_daemon_below_an_untrusted_parent() {
     let command = |args: &[&OsStr]| {
         let mut command = daemon_fixture::usagi_command(&home, Channel::Local, &workspace, args);
         command.env("USAGI_TRUST_ROOT", &root);
+        // SAFETY: umask is an async-signal-safe syscall, and only the child
+        // changes its mask; parallel tests keep their original process state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o022);
+                Ok(())
+            });
+        }
         command
     };
     let refused = command(&[OsStr::new("daemon"), OsStr::new("start")])
