@@ -304,13 +304,12 @@ pub fn start_lock_watch(
         let probe = Arc::new(LockProbe::new(target.name));
         probes.push(Arc::clone(&probe));
         let shutdown = Arc::clone(shutdown);
-        probe_threads.push(
-            std::thread::Builder::new()
-                .name("usagi-lock-probe".to_owned())
-                .spawn(move || {
-                    run_lock_probe(&probe, &*target.target, &shutdown, timing.probe_tick);
-                })?,
-        );
+        let probe_thread = std::thread::Builder::new()
+            .name("usagi-lock-probe".to_owned())
+            .spawn(move || run_lock_probe(&probe, &*target.target, &shutdown, timing.probe_tick));
+        // `?` shares its line with the push: a line holding only the `?` would
+        // count as unexecuted whenever every spawn succeeds.
+        probe_threads.push(probe_thread?);
     }
     let mut watch = LockWatch::new(timing.threshold, probes);
     let shutdown = Arc::clone(shutdown);
@@ -324,8 +323,11 @@ pub fn start_lock_watch(
             // counters while the process exits; a daemon gets the same tidy end.
             *left.lock().unwrap_or_else(PoisonError::into_inner) =
                 join_ended_probes(probe_threads, timing.probe_exit_grace);
-        })?;
-    Ok(LockWatchThreads { watch, parked })
+        });
+    Ok(LockWatchThreads {
+        watch: watch?,
+        parked,
+    })
 }
 
 /// Joins the probes that end within `grace` and returns the ones still parked.
