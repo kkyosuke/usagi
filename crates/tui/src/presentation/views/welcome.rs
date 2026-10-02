@@ -4,7 +4,7 @@ use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets;
 use chrono::{DateTime, Utc};
-use usagi_core::domain::recent::{LastProjectSet, Recent, UniteOverview};
+use usagi_core::domain::recent::{LastProjectSet, Recent};
 use usagi_core::domain::workspace::Workspace;
 
 const FOOTER: &str = "↑↓/jk select · Enter open · Ctrl-? help";
@@ -95,6 +95,10 @@ impl Welcome {
         self.last_projects.as_ref()
     }
 
+    pub(crate) fn set_recent(&mut self, recent: Vec<Recent>) {
+        *self = Self::new(recent);
+    }
+
     pub fn set_last_projects(&mut self, projects: Option<LastProjectSet>) {
         self.last_projects = projects.filter(LastProjectSet::is_valid);
         self.items = Vec::new();
@@ -145,30 +149,7 @@ impl Welcome {
     /// projection. Unite entries retain their surviving members and disappear
     /// only when no registered member remains.
     pub(crate) fn remove_paths(&mut self, paths: &[std::path::PathBuf]) {
-        self.recent = self
-            .recent
-            .drain(..)
-            .filter_map(|recent| match recent {
-                Recent::Workspace(overview) => (!paths.contains(&overview.workspace.path))
-                    .then_some(Recent::Workspace(overview)),
-                Recent::Unite(unite) => {
-                    let updated_at = unite.updated_at()?;
-                    let members = unite
-                        .members()
-                        .iter()
-                        .filter(|member| !paths.contains(&member.workspace.path))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if members.is_empty() {
-                        None
-                    } else {
-                        Some(Recent::Unite(UniteOverview::with_updated_at(
-                            members, updated_at,
-                        )))
-                    }
-                }
-            })
-            .collect();
+        crate::presentation::prune_recent_paths(&mut self.recent, paths);
         if let Some(mut last) = self.last_projects.clone() {
             last.retain_paths(|path| !paths.iter().any(|removed| removed == path));
             self.set_last_projects(Some(last));
@@ -362,6 +343,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use usagi_core::domain::recent::UniteOverview;
     use usagi_core::domain::workspace::WorkspaceOverview;
 
     fn recent(name: &str) -> Recent {
@@ -376,6 +358,7 @@ mod tests {
     #[test]
     fn first_launch_opens_picker_and_history_defaults_to_resume() {
         let empty = Welcome::default();
+        assert_eq!(empty.items()[empty.selected_index()].key, 'o');
         assert_eq!(empty.selected_action(), MenuAction::Open);
         assert_eq!(empty.action_for('r'), None);
         let mut welcome = Welcome::new(vec![recent("alpha"), recent("beta")]);
@@ -390,6 +373,27 @@ mod tests {
         assert_eq!(welcome.selected_action(), MenuAction::Quit);
         welcome.select_next();
         assert_eq!(welcome.selected_action(), MenuAction::Resume);
+    }
+
+    #[test]
+    fn unregister_prunes_unite_history_and_removes_empty_groups() {
+        let members = ["alpha", "beta"]
+            .into_iter()
+            .map(|name| {
+                WorkspaceOverview::new(Workspace::new(name, format!("/tmp/{name}")), 0, 0, 0)
+            })
+            .collect();
+        let mut welcome = Welcome::new(vec![
+            Recent::Unite(UniteOverview::new(members)),
+            Recent::Unite(UniteOverview::new(Vec::new())),
+        ]);
+        welcome.remove_paths(&["/tmp/alpha".into()]);
+        assert_eq!(welcome.all_recent().len(), 1);
+        assert!(matches!(&welcome.all_recent()[0], Recent::Unite(group)
+            if group.members().len() == 1 && group.primary_name() == "beta"));
+        welcome.remove_paths(&["/tmp/beta".into()]);
+        assert!(welcome.all_recent().is_empty());
+        assert!(welcome.last_projects().is_none());
     }
 
     #[test]

@@ -453,11 +453,7 @@ impl Open {
         self.workspaces
             .retain(|overview| !paths.iter().any(|path| path == &overview.workspace.path));
         self.unite_paths.retain(|path| !paths.contains(path));
-        self.history.retain(|recent| {
-            !history_paths(recent)
-                .iter()
-                .any(|path| paths.contains(path))
-        });
+        crate::presentation::prune_recent_paths(&mut self.history, paths);
         self.cleanup_confirming = false;
         self.unregistering_path = None;
         self.unregister_confirmation.select_confirm();
@@ -755,7 +751,7 @@ pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Ut
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{Open, overflow_line, render, viewport};
+    use super::{Open, Recent, history_lines, overflow_line, render, viewport};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
     use std::path::Path;
@@ -816,6 +812,52 @@ mod tests {
         let open = Open::new(Vec::new());
         assert!(open.is_empty());
         assert_eq!(open.selected(), None);
+    }
+
+    #[test]
+    fn recent_picker_renders_groups_scrolls_and_never_unregisters_a_hidden_project() {
+        let members = vec![
+            WorkspaceOverview::new(workspace("alpha", 1), 0, 0, 0),
+            WorkspaceOverview::new(workspace("beta", 2), 0, 0, 0),
+        ];
+        let mut history = vec![Recent::Unite(
+            usagi_core::domain::recent::UniteOverview::new(members),
+        )];
+        history.extend((0..12).map(|i| {
+            Recent::Workspace(WorkspaceOverview::new(
+                workspace(&format!("item-{i}"), i),
+                0,
+                0,
+                0,
+            ))
+        }));
+        let mut open = Open::new(vec![workspace("hidden", 1)]).with_history(history);
+        open.cycle_view();
+        assert!(rendered(&open).contains("alpha · beta"));
+        assert_eq!(
+            open.chosen_paths(),
+            vec![std::path::PathBuf::from("/tmp/alpha"), "/tmp/beta".into()]
+        );
+        assert!(history_lines(80, &open, 6).join("\n").contains('↓'));
+        open.select_prev();
+        assert!(history_lines(80, &open, 6).join("\n").contains('↑'));
+        open.toggle_unite_member();
+        open.request_unregister();
+        assert!(open.unite_paths().is_empty());
+        assert!(open.unregistering_path().is_none());
+        let group_time = open.history[0].updated_at();
+        open.remove_paths(&["/tmp/alpha".into()]);
+        assert_eq!(
+            open.chosen_paths(),
+            vec![std::path::PathBuf::from("/tmp/beta")]
+        );
+        assert_eq!(open.history[0].updated_at(), group_time);
+        open.remove_paths(&["/tmp/beta".into()]);
+        assert_eq!(open.history.len(), 12);
+        open.cycle_view();
+        assert!(open.chosen_paths().is_empty());
+        open.select_next();
+        open.select_prev();
     }
 
     #[test]

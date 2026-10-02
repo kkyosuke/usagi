@@ -3,6 +3,7 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::{Welcome, remember_project_deck};
 
 /// うさぎの click は session を訪問したうえで、その agent 自身の tab を開く。
 /// 区画（nameplate や余白）の click は従来どおり session の Closeup までで、
@@ -3679,6 +3680,10 @@ fn a_fenced_workspace_refuses_on_the_welcome_reached_by_leaving() {
         refuse: Some(REFUSAL.to_owned()),
         refuse_paths: vec![PathBuf::from("/tmp/second")],
         opened_at: Some(now() + Duration::hours(1)),
+        recent_projects: vec![
+            recent_at("first", now() + Duration::hours(1)),
+            recent_at("second", now() - Duration::hours(1)),
+        ],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();
@@ -3888,4 +3893,181 @@ fn picker_marks_multiple_projects_without_switching_to_unite_mode() {
     let _ = step_open(&mut open, Key::Tab);
     let _ = step_open(&mut open, Key::Tab);
     assert_eq!(open.chosen_paths(), vec![PathBuf::from("/tmp/new")]);
+}
+
+#[test]
+fn resume_storage_errors_keep_the_picker_available_and_preserve_saved_data() {
+    let mut loader = FakeLoader {
+        last_projects_error: Some("resume store unreadable"),
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::Escape, Key::Char('q')]);
+    run(
+        &mut term,
+        vec![ws("alpha")],
+        vec![recent("alpha")],
+        now(),
+        &mut loader,
+    )
+    .unwrap();
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Could not read last projects"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Filter:"))
+    );
+    assert!(loader.opened.is_empty());
+
+    let mut loader = FakeLoader {
+        save_projects_error: Some("resume store unwritable"),
+        ..FakeLoader::default()
+    };
+    let mut deck = WorkspaceDeck::new(&snapshot("alpha"));
+    remember_project_deck(&mut loader, &mut deck);
+    assert!(
+        deck.notice()
+            .unwrap()
+            .contains("Could not save last projects")
+    );
+    assert!(loader.last_projects.is_none());
+    deck.close_path(Path::new("/tmp/alpha"));
+    remember_project_deck(&mut loader, &mut deck);
+    assert!(loader.last_projects.is_none());
+}
+
+#[test]
+fn resume_activation_failure_returns_to_welcome_without_replacing_saved_order() {
+    let last = usagi_core::domain::recent::LastProjectSet {
+        paths: vec!["/tmp/alpha".into(), "/tmp/beta".into()],
+        active: "/tmp/beta".into(),
+    };
+    let mut loader = FakeLoader {
+        last_projects: Some(last.clone()),
+        activation_failure_path: Some(last.active.clone()),
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::Char('q')]);
+    run(
+        &mut term,
+        vec![ws("alpha"), ws("beta")],
+        Vec::new(),
+        now(),
+        &mut loader,
+    )
+    .unwrap();
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("saved project activation failed"))
+    );
+    assert_eq!(loader.last_projects, Some(last));
+}
+
+#[test]
+fn directory_open_failure_preserves_input_and_clone_back_keeps_resume() {
+    let last = usagi_core::domain::recent::LastProjectSet {
+        paths: vec!["/tmp/alpha".into()],
+        active: "/tmp/alpha".into(),
+    };
+    let mut loader = FakeLoader {
+        last_projects: Some(last.clone()),
+        fail: true,
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Char('e'),
+        Key::Escape,
+        Key::Char('o'),
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/unavailable".into()),
+        Key::Enter,
+        Key::Escape,
+        Key::Char('q'),
+    ]);
+    run(&mut term, vec![ws("alpha")], Vec::new(), now(), &mut loader).unwrap();
+    assert!(term.frames.iter().any(|frame| {
+        let text = frame.join("\n");
+        text.contains("open failed") && text.contains("/tmp/unavailable")
+    }));
+    assert_eq!(loader.last_projects, Some(last));
+}
+
+#[test]
+fn resume_keeps_the_opened_canonical_identity_when_saved_path_is_an_alias() {
+    let mut loader = FakeLoader {
+        last_projects: Some(usagi_core::domain::recent::LastProjectSet {
+            paths: vec!["/alias/alpha".into()],
+            active: "/alias/alpha".into(),
+        }),
+        ..FakeLoader::default()
+    };
+    // The loader resolves this path to its canonical /tmp/alpha snapshot.
+    let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::CtrlQ, Key::Char('q')]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    let saved = loader.last_projects.unwrap();
+    assert_eq!(saved.paths, vec![PathBuf::from("/tmp/alpha")]);
+    assert_eq!(saved.active, PathBuf::from("/tmp/alpha"));
+}
+
+#[test]
+fn returning_from_a_directory_open_reloads_single_and_group_history() {
+    let group = Recent::Unite(usagi_core::domain::recent::UniteOverview::new(vec![
+        WorkspaceOverview::new(ws("added"), 1, 0, 0),
+        WorkspaceOverview::new(ws("other"), 1, 0, 0),
+    ]));
+    let mut loader = FakeLoader {
+        recent_projects: vec![group, recent("added"), recent("other")],
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Enter,
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/added".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('w'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('q'),
+    ]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    assert_eq!(
+        loader.opened,
+        vec![
+            PathBuf::from("/tmp/added"),
+            "/tmp/added".into(),
+            "/tmp/other".into()
+        ]
+    );
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("added · other"))
+    );
+}
+
+#[test]
+fn failed_entry_history_refresh_keeps_existing_choices_and_reports_errors() {
+    let mut welcome = Welcome::new(vec![recent("alpha")]);
+    let mut open = open_from_registry(vec![ws("alpha")], welcome.all_recent());
+    let mut loader = FakeLoader {
+        recent_projects_error: Some("history unreadable"),
+        ..FakeLoader::default()
+    };
+    crate::presentation::refresh_entry_projects(&mut loader, &mut welcome, &mut open);
+    assert!(welcome.notice().unwrap().contains("history unreadable"));
+    assert_eq!(open.workspaces().len(), 1);
+    assert_eq!(welcome.all_recent().len(), 1);
+    loader.last_projects_error = Some("last set unreadable");
+    crate::presentation::refresh_entry_projects(&mut loader, &mut welcome, &mut open);
+    assert!(welcome.notice().unwrap().contains("last set unreadable"));
+    assert!(welcome.last_projects().is_none());
 }

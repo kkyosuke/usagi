@@ -2726,6 +2726,53 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
     Open::with_overviews(open_overviews).with_history(recent.to_vec())
 }
 
+fn refresh_entry_projects(
+    loader: &mut dyn WorkspaceLoader,
+    welcome: &mut Welcome,
+    open: &mut Open,
+) {
+    match loader.recent_projects() {
+        Ok(recent) => {
+            *open = open_from_registry(open.workspaces(), &recent);
+            welcome.set_recent(recent);
+        }
+        Err(error) => welcome.set_notice(Some(format!("Could not read recent projects: {error}"))),
+    }
+    match loader.last_projects() {
+        Ok(Some(last)) => welcome.set_last_projects(Some(last)),
+        Ok(None) => {}
+        Err(error) => {
+            welcome.set_last_projects(None);
+            welcome.set_notice(Some(format!("Could not read last projects: {error}")));
+        }
+    }
+}
+
+fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
+    *recent = recent
+        .drain(..)
+        .filter_map(|recent| match recent {
+            Recent::Workspace(overview) => {
+                (!paths.contains(&overview.workspace.path)).then_some(Recent::Workspace(overview))
+            }
+            Recent::Unite(unite) => {
+                let updated_at = unite.updated_at()?;
+                let members = unite
+                    .members()
+                    .iter()
+                    .filter(|member| !paths.contains(&member.workspace.path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!members.is_empty()).then(|| {
+                    Recent::Unite(usagi_core::domain::recent::UniteOverview::with_updated_at(
+                        members, updated_at,
+                    ))
+                })
+            }
+        })
+        .collect();
+}
+
 #[cfg(test)]
 /// `start` で選んだ画面を起点にした対話 runtime。
 ///

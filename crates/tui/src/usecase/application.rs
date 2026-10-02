@@ -211,6 +211,12 @@ pub trait WorkspaceLoader: Send {
     /// Returns an error if the optional resume store cannot be read.
     fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>>;
 
+    /// Reload the committed single-project and group history after leaving a deck.
+    ///
+    /// # Errors
+    /// Returns an error if the history projection cannot be read.
+    fn recent_projects(&mut self) -> io::Result<Vec<usagi_core::domain::recent::Recent>>;
+
     /// Save tab order and the active project after a successful deck change.
     ///
     /// # Errors

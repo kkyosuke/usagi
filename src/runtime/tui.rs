@@ -3963,6 +3963,10 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         self.storage.save_last_projects(projects).map_err(io_error)
     }
 
+    fn recent_projects(&mut self) -> std::io::Result<Vec<Recent>> {
+        workspace_usecase::recent(&self.storage).map_err(io_error)
+    }
+
     fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
         workspace_usecase::touch_unite(&self.storage, paths, Utc::now()).map_err(io_error)
     }
@@ -8211,6 +8215,32 @@ mod tests {
             std::thread::yield_now();
         };
         assert_eq!(second, vec![alpha, beta]);
+    }
+
+    #[test]
+    fn saved_project_loader_prunes_unregistered_members_without_rewriting_the_deck() {
+        use std::path::PathBuf;
+        use usagi_core::domain::recent::LastProjectSet;
+        let temporary = tempfile::tempdir().unwrap();
+        let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path()));
+        assert!(loader.last_projects().unwrap().is_none());
+        let saved = LastProjectSet {
+            paths: vec!["/alpha".into(), "/beta".into()],
+            active: "/beta".into(),
+        };
+        loader.record_last_projects(&saved).unwrap();
+        loader
+            .storage
+            .save_workspaces(&[Workspace::new("alpha", "/alpha")])
+            .unwrap();
+        let retained = loader.last_projects().unwrap().unwrap();
+        assert_eq!(retained.paths, vec![PathBuf::from("/alpha")]);
+        assert_eq!(retained.active, PathBuf::from("/alpha"));
+        assert_eq!(loader.storage.load_last_projects().unwrap(), Some(saved));
+        loader.storage.save_workspaces(&[]).unwrap();
+        assert!(loader.last_projects().unwrap().unwrap().paths.is_empty());
+        std::fs::write(temporary.path().join("last-projects.json"), "broken").unwrap();
+        assert!(loader.last_projects().is_err());
     }
 
     #[test]

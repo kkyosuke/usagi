@@ -316,6 +316,15 @@ mod tests {
         invalid.paths.clear();
         assert!(storage.save_last_projects(&invalid).is_err());
         assert_eq!(storage.load_last_projects().unwrap(), Some(projects));
+        let file = temp.path().join("last-projects.json");
+        std::fs::write(&file, r#"{"version":1,"paths":[],"active":"/alpha"}"#).unwrap();
+        assert!(storage.load_last_projects().is_err());
+        std::fs::write(
+            &file,
+            r#"{"version":999,"paths":["/alpha"],"active":"/alpha"}"#,
+        )
+        .unwrap();
+        assert!(storage.load_last_projects().is_err());
         std::fs::write(temp.path().join("last-projects.json"), "broken").unwrap();
         assert!(storage.load_last_projects().is_err());
     }

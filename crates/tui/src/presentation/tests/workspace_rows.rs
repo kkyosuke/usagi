@@ -1379,6 +1379,10 @@ fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
     ]);
     let mut loader = FakeLoader {
         opened_at: Some(now() + Duration::hours(1)),
+        recent_projects: vec![
+            recent_at("first", now() + Duration::hours(1)),
+            recent_at("second", now() - Duration::hours(1)),
+        ],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();

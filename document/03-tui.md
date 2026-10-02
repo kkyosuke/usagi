@@ -63,6 +63,8 @@ Open / add projects は `Tab` で Projects / Recent / Directory を切り替え�
 絞り込み、↑↓ で選択する。`Space` で複数選択し、`Enter` で開く。mark がなければ選択中の 1 件を開く。
 Recent は単体 workspace と保存済み Unite deck の履歴を検索して開く。Directory は既存ディレクトリを入力し、
 共通の open 経路で canonicalize・登録して開く。入力エラーは画面上に表示し、入力を保持する。
+project を離れて Welcome に戻ると保存済み履歴を読み直すため、同じ起動中に追加した project やグループも Recent に現れる。
+登録解除ではグループの残存 member を保持し、空になった履歴だけを除く。
 New と Config はそれぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 前回の作業は user-data scope の `last-projects.json` に project の順序と active path を versioned/atomic に保存する。

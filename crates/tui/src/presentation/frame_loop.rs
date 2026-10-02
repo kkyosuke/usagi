@@ -2226,9 +2226,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             )? {
                 return Ok(exit);
             }
-            if let Ok(Some(last)) = loader.last_projects() {
-                welcome.set_last_projects(Some(last));
-            }
+            super::refresh_entry_projects(loader, &mut welcome, &mut open);
             screen = Screen::Welcome;
             drawn_material = None;
             continue;
@@ -2342,13 +2340,12 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     screen = Screen::Config;
                 }
                 WelcomeStep::Resume => {
-                    let Some(last) = welcome.last_projects().cloned() else {
-                        continue;
-                    };
+                    // Resume is offered only for a validated, nonempty saved set.
+                    let last = welcome
+                        .last_projects()
+                        .expect("Resume has a saved set")
+                        .clone();
                     let paths = last.paths;
-                    if paths.is_empty() {
-                        continue;
-                    }
                     match loader.missing_paths(&paths) {
                         Ok(missing) if !missing.is_empty() => {
                             missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
@@ -2383,7 +2380,12 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                         .iter()
                         .find(|snapshot| snapshot.workspace.path == last.active)
                     {
-                        if let Err(error) = loader.activate_prepared(&active.workspace.path) {
+                        if let Err(error) = activate_workspace_responsive(
+                            term,
+                            loader,
+                            &active.workspace.path,
+                            "Activating last project…",
+                        ) {
                             welcome.set_notice(Some(error.to_string()));
                             continue;
                         }
@@ -2410,9 +2412,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
-                    if let Ok(Some(last)) = loader.last_projects() {
-                        welcome.set_last_projects(Some(last));
-                    }
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
                     screen = Screen::Welcome;
                 }
             },
@@ -2483,9 +2483,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
-                    if let Ok(Some(last)) = loader.last_projects() {
-                        welcome.set_last_projects(Some(last));
-                    }
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
                     screen = Screen::Welcome;
                 }
                 OpenStep::ConfirmCleanup => {
