@@ -257,8 +257,10 @@ pub struct LockWatchTiming {
 }
 
 impl LockWatchTiming {
-    /// No legitimate holder keeps a shared runtime lock for more than a few
-    /// seconds: a PTY write gives up after two.
+    /// A bounded holder keeps a shared runtime lock for a few seconds at most:
+    /// a PTY write gives up once it has made no progress for two. A write that
+    /// keeps progressing (a long paste to a slow reader) can hold it longer, and
+    /// a wait that long is worth reporting too.
     pub const SHIPPING: Self = Self {
         probe_tick: Duration::from_secs(5),
         watch_tick: Duration::from_secs(2),
