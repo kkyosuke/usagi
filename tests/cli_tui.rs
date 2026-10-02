@@ -2488,14 +2488,15 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
         LocalSettings::from(&Settings::default())
     );
 
-    // 非 tty でも open は registry へ登録し、続く hop の Recent に現れる。
+    // 非 tty でも open は registry へ登録し、続く hop の再開対象に現れる。
     let registry =
         std::fs::read_to_string(channel_data_dir(home.path()).join("workspaces.json")).unwrap();
     assert!(registry.contains("explicit-workspace"));
     let output = run_with_home(&[OsStr::new("hop")], &home);
     assert!(output.status.success());
     let out = stdout(&output);
-    assert!(out.contains("Recent"));
+    assert!(out.contains("Open last projects"));
+    assert!(!out.contains("Recent"));
     assert!(out.contains("explicit-workspace"));
 
     stop_daemon(&home);
