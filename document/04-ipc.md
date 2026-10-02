@@ -932,6 +932,11 @@ connection を越える identity・ordering・replay は [terminal input identit
 | 1 byte 以上を適用後の failure / `WriteZero` | `Ambiguous { applied_prefix }` | 同一 operation の再送は `Cached(Ambiguous { applied_prefix })` とし、既適用 byte を暗黙に再送しない |
 
 PTY write が `Interrupted` を返した場合、daemon はそれまでの `applied_prefix` を維持して残りを再試行する。
+PTY の入力 queue が 2 秒間 1 byte も受け付けない場合、daemon は write を打ち切り、それまでの `applied_prefix` で
+上表の failure として返す。入力を読まなくなった子プロセスが、daemon-wide な runtime lock を握ったままの write を
+無期限に止め、他のすべての接続を巻き込むことを防ぐためである。この上限を守るため、daemon は master が書き込み可能に
+なるのを待ってから 1 byte ずつ書く。`O_NONBLOCK` は使わない。writer と出力 reader が 1 つの open file description を
+共有しているので、flag を立てると reader の read まで壊れるからである。
 wire 型は既存の `applied_prefix` を使うため protocol revision の変更を伴わない。
 
 TUI adapter は final `ResponseOutcome::Ok` の ACK body だけを検証し、`Written` だけを通常成功として投影する。
