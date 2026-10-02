@@ -327,14 +327,12 @@ fn run_lock_probe(
     shutdown: &ShutdownRequest,
     tick: Duration,
 ) {
-    while !shutdown.is_requested() {
-        if !probe.measure(|| target.acquire()) {
-            return;
-        }
-        if shutdown.wait_for_tick(tick) {
-            return;
-        }
-    }
+    // One condition, so how the loop ends (shutdown before or after the
+    // acquisition, or the owner gone) never decides which lines run.
+    while !shutdown.is_requested()
+        && probe.measure(|| target.acquire())
+        && !shutdown.wait_for_tick(tick)
+    {}
 }
 
 /// Reports every lock change once per tick until shutdown.

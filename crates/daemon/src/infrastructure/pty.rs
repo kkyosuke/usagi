@@ -1020,9 +1020,7 @@ mod tests {
         }));
 
         assert!(wait_for_exit(&terminal, Duration::from_millis(5)).is_err());
-        let Err(poisoned) = terminal.into_inner() else {
-            panic!("the terminal lock was poisoned above");
-        };
+        let poisoned = terminal.into_inner().err().unwrap();
         assert_eq!(poisoned.into_inner().wait().unwrap(), 0);
     }
 
