@@ -4071,3 +4071,38 @@ fn failed_entry_history_refresh_keeps_existing_choices_and_reports_errors() {
     assert!(welcome.notice().unwrap().contains("last set unreadable"));
     assert!(welcome.last_projects().is_none());
 }
+
+#[test]
+fn missing_cleanup_uses_projects_loaded_after_returning_from_a_deck() {
+    let mut loader = FakeLoader {
+        recent_projects: vec![recent("added"), recent("alpha")],
+        missing: vec!["/tmp/added".into()],
+        cleanup_removed: vec!["/tmp/added".into()],
+        ..FakeLoader::default()
+    };
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Enter,
+        Key::Tab,
+        Key::Tab,
+        Key::Paste("/tmp/alpha".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('w'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Enter,
+        Key::Char('y'),
+        Key::Escape,
+        Key::Char('q'),
+    ]);
+    run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap();
+    assert_eq!(
+        loader.cleanup_candidates,
+        vec![vec![PathBuf::from("/tmp/added")]]
+    );
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Workspace registration removed."))
+    );
+}

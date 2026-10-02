@@ -2285,10 +2285,10 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 {
                     let paths = prompt.paths.clone();
                     missing_workspace_prompt = None;
-                    let candidates = registry
-                        .iter()
+                    let candidates = open
+                        .workspaces()
+                        .into_iter()
                         .filter(|workspace| paths.contains(&workspace.path))
-                        .cloned()
                         .collect::<Vec<_>>();
                     let removed = loader.cleanup_missing(&candidates)?;
                     open.remove_paths(&removed);
