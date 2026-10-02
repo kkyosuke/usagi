@@ -2726,7 +2726,54 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
             .filter(|workspace| !projected.contains(&workspace.path))
             .map(|workspace| WorkspaceOverview::new(workspace, 0, 0, 0)),
     );
-    Open::with_overviews(open_overviews)
+    Open::with_overviews(open_overviews).with_history(recent.to_vec())
+}
+
+fn refresh_entry_projects(
+    loader: &mut dyn WorkspaceLoader,
+    welcome: &mut Welcome,
+    open: &mut Open,
+) {
+    match loader.recent_projects() {
+        Ok(recent) => {
+            *open = open_from_registry(open.workspaces(), &recent);
+            welcome.set_recent(recent);
+        }
+        Err(error) => welcome.set_notice(Some(format!("Could not read recent projects: {error}"))),
+    }
+    match loader.last_projects() {
+        Ok(Some(last)) => welcome.set_last_projects(Some(last)),
+        Ok(None) => {}
+        Err(error) => {
+            welcome.set_last_projects(None);
+            welcome.set_notice(Some(format!("Could not read last projects: {error}")));
+        }
+    }
+}
+
+fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
+    *recent = recent
+        .drain(..)
+        .filter_map(|recent| match recent {
+            Recent::Workspace(overview) => {
+                (!paths.contains(&overview.workspace.path)).then_some(Recent::Workspace(overview))
+            }
+            Recent::Unite(unite) => {
+                let updated_at = unite.updated_at()?;
+                let members = unite
+                    .members()
+                    .iter()
+                    .filter(|member| !paths.contains(&member.workspace.path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!members.is_empty()).then(|| {
+                    Recent::Unite(usagi_core::domain::recent::UniteOverview::with_updated_at(
+                        members, updated_at,
+                    ))
+                })
+            }
+        })
+        .collect();
 }
 
 #[cfg(test)]
@@ -2821,6 +2868,7 @@ fn open_snapshot_via_controller(
     available_models: AvailableAgentModels,
 ) -> io::Result<WorkspaceStep> {
     settings.select_workspace(&snapshot.workspace.path)?;
+    remember_project_deck(loader, deck);
     let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
     drive_workspace_controller(
         term,
@@ -2908,17 +2956,32 @@ fn enter_workspace_deck(
             backend_factory,
             available_models,
         )?;
+        remember_project_deck(loader, &mut deck);
         match step {
             WorkspaceStep::Quit => return Ok(Some(Exit::Quit)),
             WorkspaceStep::Back => return Ok(None),
             WorkspaceStep::Activate(prepared) => {
                 deck.activate_snapshot(&prepared);
+                remember_project_deck(loader, &mut deck);
                 if deck.slots().len() > 1 {
                     let _ = loader.record_unite(&deck.paths());
                 }
                 snapshot = *prepared;
             }
         }
+    }
+}
+
+fn remember_project_deck(loader: &mut dyn WorkspaceLoader, deck: &mut WorkspaceDeck) {
+    if deck.slots().is_empty() {
+        return;
+    }
+    let projects = usagi_core::domain::recent::LastProjectSet {
+        paths: deck.paths(),
+        active: deck.active_path().to_path_buf(),
+    };
+    if let Err(error) = loader.record_last_projects(&projects) {
+        deck.set_notice(format!("Could not save last projects: {error}"));
     }
 }
 
