@@ -31,10 +31,10 @@ impl SessionFavoritesStore {
     /// Read favorites, treating a missing file as an empty preference set.
     ///
     /// # Errors
-    /// Returns an error if the file cannot be read or decoded.
+    /// Returns an error if the file cannot be read or decoded, or uses a newer schema.
     pub fn load(&self) -> Result<BTreeSet<SessionId>> {
         let favorites: Favorites =
-            json_file::read_versioned(&self.dir.join("session-favorites.json"))?
+            json_file::read_supported_version(&self.dir.join("session-favorites.json"))?
                 .unwrap_or_default();
         Ok(favorites.sessions)
     }
@@ -101,6 +101,22 @@ mod tests {
         );
         assert!(store.toggle(session).is_err());
         assert_eq!(store.load().unwrap(), BTreeSet::from([session]));
+    }
+
+    #[test]
+    fn newer_preferences_are_rejected_without_losing_their_contents() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        std::fs::create_dir_all(&store.dir).unwrap();
+        let path = store.dir.join("session-favorites.json");
+        let source = format!(
+            r#"{{"version":{},"sessions":[],"future_field":"keep me"}}"#,
+            json_file::FILE_FORMAT_VERSION + 1,
+        );
+        std::fs::write(&path, &source).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.toggle(SessionId::new()).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
 
     #[test]
