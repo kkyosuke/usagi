@@ -252,6 +252,8 @@ pub struct LockWatchTiming {
     pub probe_tick: Duration,
     pub watch_tick: Duration,
     pub threshold: Duration,
+    /// How long the watch thread waits, after shutdown, for the probes to end.
+    pub probe_exit_grace: Duration,
 }
 
 impl LockWatchTiming {
@@ -263,6 +265,7 @@ impl LockWatchTiming {
         probe_tick: Duration::from_secs(5),
         watch_tick: Duration::from_secs(2),
         threshold: Duration::from_secs(10),
+        probe_exit_grace: Duration::from_secs(1),
     };
 }
 
@@ -270,15 +273,17 @@ impl LockWatchTiming {
 pub type LockWatchReport = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// The threads [`start_lock_watch`] started.
+///
+/// The watch thread always exits on shutdown, so a daemon joins it with its
+/// other workers. Before it exits it joins every probe that ends within the
+/// grace period; a probe that is still parked on a stalled lock is left in
+/// `parked` rather than joined, so a stalled lock cannot turn into a shutdown
+/// hang. Each probe holds only a weak reference to its lock's owner.
 #[derive(Debug)]
 pub struct LockWatchThreads {
-    /// Always exits on shutdown, so a daemon joins it with its other workers.
     pub watch: JoinHandle<()>,
-    /// One per target. A daemon detaches these: a probe may stay parked on a
-    /// deadlocked lock, and joining it would turn a report into a shutdown
-    /// hang. Each holds only a weak reference and exits on shutdown or once
-    /// its lock's owner is gone.
-    pub probes: Vec<JoinHandle<()>>,
+    /// Filled when the watch thread exits.
+    pub parked: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 /// Starts one probe thread per target and the watch thread.
@@ -309,15 +314,32 @@ pub fn start_lock_watch(
     }
     let mut watch = LockWatch::new(timing.threshold, probes);
     let shutdown = Arc::clone(shutdown);
+    let parked = Arc::new(Mutex::new(Vec::new()));
+    let left = Arc::clone(&parked);
     let watch = std::thread::Builder::new()
         .name("usagi-lock-watch".to_owned())
         .spawn(move || {
             run_lock_watch(&mut watch, &workers, &*report, &shutdown, timing.watch_tick);
+            // A probe left running past its test would keep writing coverage
+            // counters while the process exits; a daemon gets the same tidy end.
+            *left.lock().unwrap_or_else(PoisonError::into_inner) =
+                join_ended_probes(probe_threads, timing.probe_exit_grace);
         })?;
-    Ok(LockWatchThreads {
-        watch,
-        probes: probe_threads,
-    })
+    Ok(LockWatchThreads { watch, parked })
+}
+
+/// Joins the probes that end within `grace` and returns the ones still parked.
+fn join_ended_probes(probes: Vec<JoinHandle<()>>, grace: Duration) -> Vec<JoinHandle<()>> {
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && probes.iter().any(|probe| !probe.is_finished()) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (ended, parked): (Vec<_>, Vec<_>) = probes.into_iter().partition(JoinHandle::is_finished);
+    for probe in ended {
+        // A probe only acquires and releases a lock; there is nothing to report.
+        let _ = probe.join();
+    }
+    parked
 }
 
 /// Acquires one lock per tick until shutdown or until its owner is gone.

@@ -707,7 +707,8 @@ pub(super) fn start_lock_watchdog(
         LockWatchTiming::SHIPPING,
         Arc::new(ErrorLog::record),
     )?;
-    // Probes stay detached: one may be parked on the very lock it reports.
+    // The watch thread joins the probes that end with it. One still parked on
+    // the very lock it reports is left, so it cannot hold up shutdown.
     Ok(threads.watch)
 }
 

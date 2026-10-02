@@ -1233,7 +1233,8 @@ client worker 数は、終了したがまだ回収されていない worker も�
 
 lock の取得待ちは、5 秒ごとに各 lock を取得する probe thread と、それを 2 秒ごとに観測する watch thread の組で測る。
 probe thread は停止した lock でいっしょに止まるので、報告するのは別の thread である。probe は lock の持ち主への弱参照
-だけを持ち、shutdown か持ち主の解放で終わる。lock が戻らないまま shutdown しても、shutdown はこの probe を待たない。
+だけを持ち、shutdown か持ち主の解放で終わる。shutdown では watch thread が probe の終了を最大 1 秒待って join する。
+停止した lock で待ち続けている probe は join せずに残すので、lock が戻らなくても shutdown は止まらない。
 
 ログへ request / response body、argv、環境変数、secret、terminal / provider の raw output は記録しない。これにより detached
 `serve` の標準エラーが破棄される場合でも、起動失敗や異常終了の原因を日次 error log から確認でき、TUI は同じ失敗の

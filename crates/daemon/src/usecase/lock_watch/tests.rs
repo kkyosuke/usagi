@@ -214,6 +214,7 @@ fn the_watchdog_reports_a_held_lock_and_its_release_then_stops_on_shutdown() {
             probe_tick: Duration::from_millis(5),
             watch_tick: Duration::from_millis(5),
             threshold: Duration::from_millis(50),
+            probe_exit_grace: Duration::from_secs(5),
         },
         Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_owned())),
     )
@@ -230,7 +231,45 @@ fn the_watchdog_reports_a_held_lock_and_its_release_then_stops_on_shutdown() {
 
     shutdown.request();
     threads.watch.join().unwrap();
-    for probe in threads.probes {
+    assert!(
+        threads.parked.lock().unwrap().is_empty(),
+        "a probe on an available lock ends with the watch"
+    );
+}
+
+#[test]
+fn a_probe_parked_on_a_stalled_lock_does_not_hold_up_shutdown() {
+    let owner = Arc::new(Mutex::new(()));
+    let shutdown = Arc::new(ShutdownRequest::new());
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&reports);
+    let held = owner.lock().unwrap();
+    let threads = start_lock_watch(
+        vec![LockTarget::new(
+            "agent runtime",
+            Box::new(Arc::downgrade(&owner)),
+        )],
+        Arc::new(ClientWorkers::new()),
+        &shutdown,
+        LockWatchTiming {
+            probe_tick: Duration::from_millis(5),
+            watch_tick: Duration::from_millis(5),
+            threshold: Duration::from_millis(10),
+            probe_exit_grace: Duration::from_millis(20),
+        },
+        Arc::new(move |line: &str| sink.lock().unwrap().push(line.to_owned())),
+    )
+    .unwrap();
+    // Shutdown only once the probe is known to be parked on the held lock.
+    wait_for(&reports, "has not been available");
+
+    shutdown.request();
+    threads.watch.join().unwrap();
+    let parked = std::mem::take(&mut *threads.parked.lock().unwrap());
+    assert_eq!(parked.len(), 1, "the stalled probe is left, not joined");
+
+    drop(held);
+    for probe in parked {
         probe.join().unwrap();
     }
 }
