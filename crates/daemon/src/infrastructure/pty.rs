@@ -923,12 +923,10 @@ mod tests {
         let mut output = Vec::new();
         let mut buffer = [0; 256];
         while !String::from_utf8_lossy(&output).contains("<usagi>") {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => output.extend_from_slice(&buffer[..read]),
-            }
+            let read = reader.read(&mut buffer).unwrap();
+            assert_ne!(read, 0, "output ended before the echoed line");
+            output.extend_from_slice(&buffer[..read]);
         }
-        assert!(String::from_utf8_lossy(&output).contains("<usagi>"));
         assert_eq!(terminal.wait().unwrap(), 0);
     }
 
