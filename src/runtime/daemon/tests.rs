@@ -351,6 +351,22 @@ fn empty_supervisor_agent(dispatch: DispatchStore) -> SharedAgentRuntime {
     })
 }
 
+#[test]
+fn the_agent_owner_lock_probe_acquires_while_the_owner_lives_and_stops_after() {
+    use usagi_daemon::usecase::lock_watch::ProbeTarget as _;
+
+    let temp = tempfile::tempdir().unwrap();
+    let agent = empty_supervisor_agent(DispatchStore::new(temp.path()));
+    let probe = agent::AgentOwnerLock(Arc::downgrade(&agent));
+    assert!(probe.acquire());
+
+    drop(agent);
+    assert!(
+        !probe.acquire(),
+        "the probe must not keep the Agent owner alive"
+    );
+}
+
 fn persist_supervisor_dispatch(
     dispatch: &DispatchStore,
     workspace: WorkspaceId,

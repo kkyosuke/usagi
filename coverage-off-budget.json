@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 553,
+  "total": 556,
   "owners": {
     "core": 10,
-    "daemon": 374,
+    "daemon": 377,
     "root-cli": 41,
     "tui": 128
   },
@@ -18,10 +18,11 @@
     "crates/daemon/src/infrastructure/child_identity.rs": 5,
     "crates/daemon/src/infrastructure/generation_registry.rs": 7,
     "crates/daemon/src/infrastructure/os_user.rs": 1,
-    "crates/daemon/src/infrastructure/pty.rs": 3,
+    "crates/daemon/src/infrastructure/pty.rs": 4,
     "crates/daemon/src/infrastructure/resource_store.rs": 14,
     "crates/daemon/src/infrastructure/session_worktree.rs": 11,
     "crates/daemon/src/infrastructure/unix_transport.rs": 36,
+    "crates/daemon/src/usecase/lock_watch.rs": 1,
     "crates/daemon/src/usecase/resources/mod.rs": 4,
     "crates/daemon/src/usecase/stop.rs": 1,
     "crates/tui/src/infrastructure/live_input.rs": 1,
@@ -88,7 +89,7 @@
     "src/runtime/daemon/standby.rs": 18,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/daemon/tests.rs": 1,
-    "src/runtime/daemon/workers.rs": 23,
+    "src/runtime/daemon/workers.rs": 24,
     "src/runtime/inventory_pump.rs": 1,
     "src/runtime/launchd.rs": 1,
     "src/runtime/platform_child_reaper.rs": 3,
