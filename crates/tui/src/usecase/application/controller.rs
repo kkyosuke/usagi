@@ -1226,6 +1226,7 @@ pub struct AppState {
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
     /// authoritative な identity は [`sessions`](Self::sessions) が持つ。
     session_names: Vec<String>,
+    favorite_sessions: std::collections::BTreeSet<SessionId>,
     /// Per-session lifecycle by stable identity, used to gate actions by
     /// capability (attach only when `can_use`). A session absent here is treated
     /// as `Available`, so pre-lifecycle callers keep their behaviour.
@@ -1414,6 +1415,12 @@ impl ExitChoice {
 }
 
 impl AppState {
+    /// Whether this exact session is a user favorite.
+    #[must_use]
+    pub fn is_favorite(&self, session: SessionId) -> bool {
+        self.favorite_sessions.contains(&session)
+    }
+
     /// The first managed session is selected/active when present. An empty Home
     /// starts neutral instead of implicitly selecting the new-session action.
     #[must_use]
@@ -1455,6 +1462,7 @@ impl AppState {
             sessions,
             session_order_revision: 0,
             session_names: Vec::new(),
+            favorite_sessions: std::collections::BTreeSet::new(),
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
             prs: BTreeMap::new(),
@@ -2567,6 +2575,8 @@ impl From<RuntimeEvent<BackendEvent>> for AppEvent {
 /// backend が TUI-local projection として返す event。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendEvent {
+    /// Persisted workspace-local session favorites.
+    SessionFavorites(std::collections::BTreeSet<SessionId>),
     Workflow {
         job: super::workflow::WorkflowJob,
         result: Result<
@@ -2714,6 +2724,12 @@ pub enum TabDirection {
 /// reducer が要求する外部操作。daemon wire 型への変換は adapter 側の責務。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Read workspace-local favorite preferences.
+    LoadSessionFavorites,
+    /// Toggle one exact session under the preference store lock.
+    ToggleSessionFavorite {
+        session: SessionId,
+    },
     Workflow(super::workflow::WorkflowJob),
     /// Select the session's non-terminal workflow tab without launching an Agent.
     OpenWorkflow {
@@ -3387,6 +3403,10 @@ fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) 
 /// update backend event.
 fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
     match event {
+        BackendEvent::SessionFavorites(favorites) => {
+            state.favorite_sessions = favorites;
+            Vec::new()
+        }
         BackendEvent::Workflow { job, result } => update_workflow_backend(state, job, result),
         BackendEvent::Decisions {
             workspace,
@@ -5055,6 +5075,18 @@ fn open_decisions(state: &mut AppState) -> Vec<Effect> {
 #[allow(clippy::too_many_lines)] // Exhaustive Home command ownership remains visible in one reducer table.
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
+        AppKey::Char('f')
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            match state.selected {
+                Selection::Target(Target::Session(session))
+                    if state.sessions.contains(&session) =>
+                {
+                    vec![Effect::ToggleSessionFavorite { session }]
+                }
+                _ => Vec::new(),
+            }
+        }
         AppKey::Char('p')
             if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
         {

@@ -1471,11 +1471,13 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
     let subscription = attach(&mut foreground, &terminal);
     fs::write(&hang, "hang").unwrap();
 
+    // Complete every handshake before the burst: otherwise a delayed worker
+    // can enter `client` after shutdown and retry a stopped daemon for 60s.
+    let clients: Vec<_> = (0..6).map(|_| client(&data_dir)).collect();
     let mut launches = Vec::new();
-    for _ in 0..6 {
-        let data_dir = data_dir.clone();
+    for mut client in clients {
         launches.push(thread::spawn(move || {
-            client(&data_dir).request(DaemonRequest::Agent {
+            client.request(DaemonRequest::Agent {
                 operation_id: OperationId::new().to_string(),
                 intent: launch_intent(workspace, session, None),
             })

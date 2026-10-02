@@ -84,6 +84,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     }
 }
 

@@ -185,6 +185,16 @@ pub trait AgentPort {
 /// A scratchpad belongs to one target (workspace root or session); an
 /// environment belongs to one [`EnvScope`] (this workspace, or every workspace).
 pub trait TargetStorePort {
+    /// Read user favorites independently of session lifecycle state.
+    fn load_session_favorites(&mut self, completions: Completions) {
+        completions.emit(AppEvent::Backend(
+            super::controller::BackendEvent::SessionFavorites(std::collections::BTreeSet::new()),
+        ));
+    }
+    /// Toggle a favorite, reporting a snapshot only after persistence succeeds.
+    fn toggle_session_favorite(&mut self, _session: SessionId, completions: Completions) {
+        unavailable(&completions, "Session favorites are unavailable.");
+    }
     /// Read a target's scratchpad.
     fn load_notes(&mut self, target: Target, completions: Completions);
     /// Persist an edited scratchpad.
@@ -586,6 +596,11 @@ impl DaemonBackend {
             }),
             Effect::OpenExternalTerminal { target } => self.agent.open_external_terminal(target),
             Effect::SelectTab { direction } => self.agent.select_tab(direction),
+            Effect::LoadSessionFavorites => self.store.load_session_favorites(self.completions()),
+            Effect::ToggleSessionFavorite { session } => {
+                self.store
+                    .toggle_session_favorite(session, self.completions());
+            }
             Effect::LoadNotes { target } => self.store.load_notes(target, self.completions()),
             Effect::SaveNotes { target, scratchpad } => {
                 self.store
@@ -1332,6 +1347,25 @@ mod tests {
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::RolesError { scope, .. })]
                 if *scope == RoleEditorScope::Global
+        ));
+    }
+
+    #[test]
+    fn session_favorites_dispatch_and_unavailable_adapter_are_explicit() {
+        let mut backend = backend();
+        backend.dispatch(Effect::LoadSessionFavorites);
+        assert_eq!(
+            backend.drain_events(),
+            vec![AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::new()
+            ))]
+        );
+        backend.dispatch(Effect::ToggleSessionFavorite {
+            session: SessionId::new(),
+        });
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::Notice(_))]
         ));
     }
 

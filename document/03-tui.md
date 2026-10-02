@@ -434,6 +434,11 @@ Overview、Closeup action、PR、preview、text、notes、
 environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
 
+Switch の session 行で `f` を押すと、お気に入り登録・解除を切り替える。お気に入りは名前の前に `★` を表示する。
+登録は workspace ごとのローカル設定として session の固有 ID に紐づき、再起動後も保持する。同名の session を
+作り直しても引き継がない。既存の親子階層・並び順を保ち、保存に失敗した場合は通知して表示を変更しない。
+`+ new session` 行、Closeup、前面 modal ではこの shortcut を実行しない。
+
 ### Switch の右ペインは cursor の preview
 
 Switch は左 sidebar が navigation を持つため、右ペインは cursor（hover）が指す session の preview である。

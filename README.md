@@ -47,6 +47,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
 計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
 進捗の確認と追加指示も同じタブで行えます。
+よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
 質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。選択への補足コメントや、送信前の確認画面も利用できます。

@@ -40,6 +40,7 @@ pub(crate) mod issue_number_sequence;
 pub mod lifecycle;
 pub mod memory;
 pub mod pr_inventory;
+pub mod session_favorites;
 pub mod settings;
 pub mod state;
 pub mod supervisor;

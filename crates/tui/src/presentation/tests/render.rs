@@ -85,6 +85,7 @@ fn render_controller_frame_composites_the_home_and_overlays() {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     };
     let sessions = std::slice::from_ref(&projected);
     let git = std::collections::BTreeMap::new();
