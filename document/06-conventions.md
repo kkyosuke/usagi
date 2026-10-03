@@ -124,7 +124,10 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
   （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
   Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
   issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
-- ベースブランチは `main`。
+- 単独 PR と stacked PR の最下段のベースブランチは `main`。stack の上段は直前の PR の
+  head branch をベースにし、各 PR の本文で順序と前段を示す。現在の必須 CI は `main` 向け PR が
+  対象のため、各段を一時的に `main` 向けにして最終 head の CI を検証してからベースを前段へ変更する。
+  前段を更新したら上段を restack し、更新後の head を同じ手順でレビュー・検証し直す。
 - **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 
 ## ドキュメント規約
