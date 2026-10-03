@@ -274,6 +274,7 @@ struct RepoEnvironmentStore {
     environment: SettingsEnvironmentStore,
     role_data_home: PathBuf,
     role_workspace: PathBuf,
+    favorites: favorites::SessionFavoritesWorker,
 }
 
 impl RepoEnvironmentStore {
@@ -287,6 +288,7 @@ impl RepoEnvironmentStore {
             environment,
             role_data_home,
             role_workspace: workspace_path.to_owned(),
+            favorites: favorites::SessionFavoritesWorker::new(workspace_path),
         }
     }
 
@@ -429,12 +431,7 @@ impl EnvironmentStorePort for SettingsEnvironmentStore {
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=repo_environment_store_persistence_contract
 impl BackendTargetStorePort for RepoEnvironmentStore {
     fn load_session_favorites(&mut self, completions: Completions) {
-        let result =
-            usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore::new(
-                &self.role_workspace,
-            )
-            .load();
-        emit_session_favorites(result, &completions);
+        self.favorites.dispatch(None, completions);
     }
 
     fn toggle_session_favorite(
@@ -442,12 +439,7 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         session: usagi_core::domain::id::SessionId,
         completions: Completions,
     ) {
-        let result =
-            usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore::new(
-                &self.role_workspace,
-            )
-            .toggle(session);
-        emit_session_favorites(result, &completions);
+        self.favorites.dispatch(Some(session), completions);
     }
 
     fn load_notes(
@@ -2135,6 +2127,7 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
     }
 }
 
+mod favorites;
 mod workflow;
 
 struct DaemonWorkRunPort;
@@ -8609,6 +8602,45 @@ mod tests {
     }
 
     #[test]
+    fn session_favorite_dispatch_does_not_wait_for_the_store_lock() {
+        let workspace = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
+            data.path().to_path_buf(),
+        );
+        let lock = usagi_core::infrastructure::persistence::store_lock::StoreLock::acquire(
+            &usagi_core::infrastructure::paths::project_data_dir(workspace.path()),
+        )
+        .unwrap();
+        let session = SessionId::new();
+        let (completions, events) = Completions::channel();
+        let (admitted, dispatched) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            BackendTargetStorePort::toggle_session_favorite(&mut store, session, completions);
+            admitted.send(()).unwrap();
+            store
+        });
+        let admission = dispatched.recv_timeout(Duration::from_secs(1));
+        let pending = events.try_recv();
+        drop(lock);
+        let store = caller.join().unwrap();
+        assert!(pending.is_err(), "held storage cannot complete the save");
+        assert!(
+            admission.is_ok(),
+            "frame dispatch waited for the storage lock"
+        );
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::from([session]),
+            )),
+        );
+        drop(store);
+    }
+
+    #[test]
     fn repo_store_resolves_targets_and_reports_a_stale_session() {
         let workspace = tempfile::tempdir().unwrap();
         let alpha = SessionId::new();
@@ -9402,12 +9434,24 @@ mod tests {
         .toggle(session_ids[0])
         .unwrap();
         let mut composition = factory.create(&snapshot, host);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let favorites = loop {
+            let events = composition.backend.drain_events();
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "favorites completion did not arrive"
+            );
+            std::thread::yield_now();
+        };
         assert_eq!(
-            composition.backend.drain_events(),
+            favorites,
             vec![AppEvent::Backend(BackendEvent::SessionFavorites(
                 std::collections::BTreeSet::from([session_ids[0]])
             ))],
-            "opening a workspace restores its saved favorites before handling commands",
+            "opening a workspace restores saved favorites through the background lane",
         );
         // The Daemon modal compares the daemon's build with this client's own.
         assert_eq!(

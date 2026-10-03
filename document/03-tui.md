@@ -438,6 +438,11 @@ Closeup pane の tab として開く。
 Switch の session 行で `f` を押すと、お気に入り登録・解除を切り替える。お気に入りは名前の前に `★` を表示する。
 登録は workspace ごとのローカル設定として session の固有 ID に紐づき、再起動後も保持する。同名の session を
 作り直しても引き継がない。既存の親子階層・並び順を保ち、保存に失敗した場合は通知して表示を変更しない。
+読込・保存は順序を保つ背景 worker で処理し、ロック待ち中も入力と再描画を続ける。保存成功の結果を受け取った次の
+描画で星を更新する。workspace を離れると受付待ちの操作と実行中のロック待ちを中止し、worker の終了を待つ。
+既にロックを取得した保存は完了させる。worker を起動できない場合や受付待ちの上限に達した場合は通知し、その操作を再試行できる。
+保存ファイルとロックファイルは開いた descriptor で通常ファイルと確認してから使い、FIFO・device・directory は通知付きで拒否する。
+FIFO の writer を待たずに拒否するため、workspace を離れるときの worker 終了も妨げない。
 `+ new session` 行、Closeup、前面 modal ではこの shortcut を実行しない。
 
 ### Switch の右ペインは cursor の preview
@@ -478,6 +483,8 @@ modal は端末の幅・高さの 4/5 に広がる（内幅 70〜120 桁、本�
 decision の title、prompt、option label/description、freeform は modal 幅で折り返す。表示域を超える editor の
 内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
 freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
+単一選択でも送信するのは現在選択中の欄の回答である。自由入力から矢印で選択肢へ戻った場合は選択 ID を送信し、
+自由入力の下書きは次に入力を再開するまで保持する。
 
 比較表・テキスト図がある質問は、最初に説明の先頭を表示する。表はセルを折り返して列を揃え、狭い画面では
 列見出し付きの項目表示に切り替えて内容を残す。図は空白と改行を保持し、`←` / `→` で横方向へ読み進める。
@@ -967,6 +974,7 @@ inline の `+ new session` フォームは、名前が既存の worktree と衝�
 イベントごとに手で立てる dirty flag 方式は取らない。material が等しければ frame も等しいという等式が成り立つのは、
 **renderer が material 以外の値を読まない**からである。この規約のために、`render_home` は実時計を自分で読むのを
 やめて呼び出し側から受け取る。renderer に新しい入力を足すときは material にも足す。
+session 行の material は workspace の観測だけでなく、お気に入りと[メモの保存結果](#session-memo)も含める。
 
 | 面 | material |
 |---|---|
@@ -2264,6 +2272,7 @@ goal は改行を ` / ` に畳んで 1 行で表示する。担当行は現在�
 反転表示のラベルを持ち、入力 caret は Goal に focus があるときだけ表示する。Goal が空で focus が無いときは
 入力先であることを示す案内を表示する。Workflow タブを選択した Closeup では右ペインを dim にせず、
 live terminal と同じ明るさで表示する。
+高さの小さい pane では開始フォームが focus に追従し、選択中の欄を常に表示する。
 
 Enter は改行、Ctrl-S は開始／送信、矢印・Home / End・Delete / Backspace は入力編集である。
 履歴には workflow の session で交わされたメッセージをすべて残す。工程を動かしたメッセージだけでなく、

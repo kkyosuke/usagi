@@ -1175,6 +1175,7 @@ pub struct AppState {
     /// authoritative な identity は [`sessions`](Self::sessions) が持つ。
     session_names: Vec<String>,
     favorite_sessions: std::collections::BTreeSet<SessionId>,
+    session_favorites_revision: u64,
     /// Per-session lifecycle by stable identity, used to gate actions by
     /// capability (attach only when `can_use`). A session absent here is treated
     /// as `Available`, so pre-lifecycle callers keep their behaviour.
@@ -1414,6 +1415,7 @@ impl AppState {
             session_order_revision: 0,
             session_names: Vec::new(),
             favorite_sessions: std::collections::BTreeSet::new(),
+            session_favorites_revision: 0,
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
             prs: BTreeMap::new(),
@@ -1645,6 +1647,11 @@ impl AppState {
     #[must_use]
     pub const fn session_order_revision(&self) -> u64 {
         self.session_order_revision
+    }
+    /// Generation of favorite changes used by the interactive session-row cache.
+    #[must_use]
+    pub const fn session_favorites_revision(&self) -> u64 {
+        self.session_favorites_revision
     }
     /// Apply the local display preference to a fresh authoritative membership.
     /// Existing identities keep their positions; newly observed sessions append
@@ -3394,10 +3401,7 @@ fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) 
 /// update backend event.
 fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
     match event {
-        BackendEvent::SessionFavorites(favorites) => {
-            state.favorite_sessions = favorites;
-            Vec::new()
-        }
+        BackendEvent::SessionFavorites(favorites) => update_session_favorites(state, favorites),
         BackendEvent::Workflow { job, result } => update_workflow_backend(state, job, result),
         BackendEvent::Decisions {
             workspace,
@@ -3491,6 +3495,14 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             }
         }
     }
+}
+
+fn update_session_favorites(state: &mut AppState, favorites: BTreeSet<SessionId>) -> Vec<Effect> {
+    if state.favorite_sessions != favorites {
+        state.favorite_sessions = favorites;
+        state.session_favorites_revision = state.session_favorites_revision.saturating_add(1);
+    }
+    Vec::new()
 }
 
 fn update_backend_notice(state: &mut AppState, notice: Notice) -> Vec<Effect> {

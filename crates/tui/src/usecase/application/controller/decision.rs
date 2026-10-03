@@ -239,12 +239,7 @@ fn submit_decision(
 ) -> Vec<Effect> {
     editor.scroll_offset = None;
     editor.error = None;
-    let answer = if editor.decision.allow_freeform
-        && (if multiple || editor.decision.allow_comment {
-            editor.input_freeform
-        } else {
-            !editor.freeform.trim().is_empty()
-        }) {
+    let answer = if editor.decision.allow_freeform && editor.input_freeform {
         UserDecisionAnswer::Freeform {
             text: editor.freeform.trim().to_owned(),
         }

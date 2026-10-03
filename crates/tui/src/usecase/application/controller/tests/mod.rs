@@ -2168,6 +2168,43 @@ fn decision_editor_covers_freeform_navigation_and_invalid_answers() {
 }
 
 #[test]
+fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft() {
+    let workspace = WorkspaceId::new();
+    let mut request = pending_decision(workspace);
+    request.allow_freeform = true;
+    let mut second = request.options[0].clone();
+    second.id = "second".into();
+    second.label = "Second".into();
+    request.options.push(second);
+    let mut editor = DecisionEditor::new(request.clone());
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('x'));
+    assert!(editor.input_freeform);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Down);
+    assert!(!editor.input_freeform);
+    assert_eq!(
+        decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        vec![Effect::ResolveDecision {
+            workspace,
+            decision_id: request.decision_id,
+            answer: UserDecisionAnswer::Option {
+                option_id: "second".into(),
+                comment: None,
+            },
+        }]
+    );
+    assert_eq!(editor.freeform, "x");
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('y'));
+    assert_eq!(
+        decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        vec![Effect::ResolveDecision {
+            workspace,
+            decision_id: request.decision_id,
+            answer: UserDecisionAnswer::Freeform { text: "xy".into() },
+        }]
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // The reducer matrix shares one state and preserves event order.
 fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     let (workspace, session, _) = ids();
