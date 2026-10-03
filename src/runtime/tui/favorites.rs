@@ -26,52 +26,74 @@ pub(super) struct SessionFavoritesWorker {
 impl SessionFavoritesWorker {
     pub(super) fn new(workspace: &Path) -> Self {
         let store = SessionFavoritesStore::new(workspace);
-        Self::with_runner(move |session| match session {
-            Some(session) => store.toggle(session),
+        Self::with_runner(move |session, stopping| match session {
+            Some(session) => store.toggle_cancellable(session, || stopping.load(Ordering::Acquire)),
             None => store.load(),
         })
     }
 
     fn with_runner(
-        runner: impl FnMut(Option<SessionId>) -> anyhow::Result<BTreeSet<SessionId>> + Send + 'static,
+        runner: impl FnMut(Option<SessionId>, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>
+        + Send
+        + 'static,
     ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(16);
         let stopping = Arc::new(AtomicBool::new(false));
         let stop_worker = Arc::clone(&stopping);
-        let worker = std::thread::spawn(move || run(&receiver, &stop_worker, runner));
-        Self {
-            sender: Some(sender),
-            worker: Some(worker),
-            stopping,
+        let worker = std::thread::Builder::new()
+            .name("session-favorites".to_owned())
+            .spawn(move || run(&receiver, &stop_worker, runner));
+        Self::from_spawn(sender, stopping, worker)
+    }
+
+    fn from_spawn(
+        sender: SyncSender<Task>,
+        stopping: Arc<AtomicBool>,
+        worker: std::io::Result<JoinHandle<()>>,
+    ) -> Self {
+        match worker {
+            Ok(worker) => Self {
+                sender: Some(sender),
+                worker: Some(worker),
+                stopping,
+            },
+            Err(_) => Self {
+                sender: None,
+                worker: None,
+                stopping,
+            },
         }
     }
 
     pub(super) fn dispatch(&self, session: Option<SessionId>, completions: Completions) {
-        if let Err(error) = self
-            .sender
-            .as_ref()
-            .expect("favorite worker owns its sender until drop")
-            .try_send((session, completions))
-        {
+        let Some(sender) = &self.sender else {
+            unavailable(&completions);
+            return;
+        };
+        if let Err(error) = sender.try_send((session, completions)) {
             let (mpsc::TrySendError::Full((_, completions))
             | mpsc::TrySendError::Disconnected((_, completions))) = error;
-            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                "Session favorites queue is unavailable; retry.",
-            ))));
+            unavailable(&completions);
         }
     }
+}
+
+fn unavailable(completions: &Completions) {
+    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+        "Session favorites queue is unavailable; retry.",
+    ))));
 }
 
 fn run(
     receiver: &Receiver<Task>,
     stopping: &AtomicBool,
-    mut runner: impl FnMut(Option<SessionId>) -> anyhow::Result<BTreeSet<SessionId>>,
+    mut runner: impl FnMut(Option<SessionId>, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>,
 ) {
     while let Ok((session, completions)) = receiver.recv() {
         if stopping.load(Ordering::Acquire) {
             break;
         }
-        super::emit_session_favorites(runner(session), &completions);
+        super::emit_session_favorites(runner(session, stopping), &completions);
     }
 }
 
@@ -96,7 +118,7 @@ mod tests {
         let (release, ready) = mpsc::channel();
         let mut favorites = BTreeSet::new();
         let mut first = true;
-        let worker = SessionFavoritesWorker::with_runner(move |session| {
+        let worker = SessionFavoritesWorker::with_runner(move |session, _| {
             if first {
                 first = false;
                 started.send(()).unwrap();
@@ -137,7 +159,7 @@ mod tests {
 
     #[test]
     fn storage_and_queue_failures_return_visible_completions() {
-        let worker = SessionFavoritesWorker::with_runner(|_| anyhow::bail!("storage error"));
+        let worker = SessionFavoritesWorker::with_runner(|_, _| anyhow::bail!("storage error"));
         let (completions, events) = Completions::channel();
         worker.dispatch(None, completions);
         assert!(matches!(
@@ -170,10 +192,67 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_worker_spawn_returns_a_visible_completion() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let worker = SessionFavoritesWorker::from_spawn(
+            sender,
+            Arc::new(AtomicBool::new(false)),
+            Err(std::io::Error::other("thread unavailable")),
+        );
+        let (completions, events) = Completions::channel();
+        worker.dispatch(None, completions);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+    }
+
+    #[test]
+    fn leaving_a_workspace_cancels_an_active_store_lock_wait_and_reaps_the_worker() {
+        use std::cell::Cell;
+        use usagi_core::infrastructure::paths::project_data_dir;
+        use usagi_core::infrastructure::persistence::store_lock::StoreLock;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let held = StoreLock::acquire(&project_data_dir(workspace.path())).unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        let (started, waiting) = mpsc::channel();
+        let worker = SessionFavoritesWorker::with_runner(move |session, stopping| {
+            let probes = Cell::new(0);
+            store.toggle_cancellable(session.unwrap(), || {
+                probes.set(probes.get() + 1);
+                if probes.get() == 2 {
+                    started.send(()).unwrap();
+                }
+                stopping.load(Ordering::Acquire)
+            })
+        });
+        let (completions, events) = Completions::channel();
+        worker.dispatch(Some(SessionId::new()), completions);
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (finished, joined) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(worker);
+            finished.send(()).unwrap();
+        });
+        let stopped = joined.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        shutdown.join().unwrap();
+        assert!(
+            stopped.is_ok(),
+            "workspace drop must cancel lock contention"
+        );
+        assert!(matches!(
+            events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+    }
+
+    #[test]
     fn shutdown_cancels_queued_work_and_reaps_the_running_worker() {
         let (started, observed) = mpsc::channel();
         let (release, ready) = mpsc::channel();
-        let worker = SessionFavoritesWorker::with_runner(move |_| {
+        let worker = SessionFavoritesWorker::with_runner(move |_, _| {
             started.send(()).unwrap();
             ready.recv_timeout(Duration::from_secs(5)).unwrap();
             Ok(BTreeSet::new())

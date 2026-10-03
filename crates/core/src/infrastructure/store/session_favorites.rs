@@ -45,6 +45,25 @@ impl SessionFavoritesStore {
     /// Returns an error if locking, reading, or durable writing fails.
     pub fn toggle(&self, session: SessionId) -> Result<BTreeSet<SessionId>> {
         let _lock = StoreLock::acquire(&self.dir)?;
+        self.toggle_locked(session)
+    }
+
+    /// Toggle while allowing an owner leaving the workspace to cancel its lock
+    /// wait. Once acquired, the complete read-modify-write finishes under the
+    /// guard so cancellation cannot interrupt a durable mutation.
+    ///
+    /// # Errors
+    /// Returns an error on cancellation, locking, reading, or durable writing.
+    pub fn toggle_cancellable(
+        &self,
+        session: SessionId,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<BTreeSet<SessionId>> {
+        let _lock = StoreLock::acquire_cancellable(&self.dir, cancelled)?;
+        self.toggle_locked(session)
+    }
+
+    fn toggle_locked(&self, session: SessionId) -> Result<BTreeSet<SessionId>> {
         let mut favorites = self.load()?;
         if !favorites.remove(&session) {
             favorites.insert(session);
@@ -81,6 +100,22 @@ mod tests {
         assert_eq!(store.toggle(first).unwrap(), BTreeSet::from([second]));
         assert!(!other.load().unwrap().contains(&SessionId::new()));
         assert!(other.toggle(second).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_toggle_preserves_preferences_and_a_live_toggle_still_saves() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        let first = SessionId::new();
+        let second = SessionId::new();
+        assert_eq!(
+            store.toggle_cancellable(first, || false).unwrap(),
+            BTreeSet::from([first])
+        );
+        let held = StoreLock::acquire(&store.dir).unwrap();
+        assert!(store.toggle_cancellable(second, || true).is_err());
+        assert_eq!(store.load().unwrap(), BTreeSet::from([first]));
+        drop(held);
     }
 
     #[test]

@@ -63,16 +63,36 @@ impl StoreLock {
         Self::acquire_with_timeout(dir, ACQUIRE_TIMEOUT)
     }
 
+    /// Acquire with the same wait budget as [`acquire`](Self::acquire), but stop
+    /// waiting when `cancelled` becomes true. The probe runs before filesystem
+    /// access and before each non-blocking acquisition attempt.
+    ///
+    /// # Errors
+    /// Returns the same errors as `acquire`, or an error when cancelled.
+    pub fn acquire_cancellable(dir: &Path, cancelled: impl Fn() -> bool) -> Result<Self> {
+        Self::acquire_with_policy(dir, ACQUIRE_TIMEOUT, cancelled)
+    }
+
     /// [`acquire`](Self::acquire) with an explicit wait budget, so tests can use a
     /// short one. Polls a non-blocking `try_lock` rather than blocking forever, so
     /// a holder wedged mid-operation surfaces as an error the caller can report
     /// instead of hanging the UI.
     fn acquire_with_timeout(dir: &Path, timeout: Duration) -> Result<Self> {
+        Self::acquire_with_policy(dir, timeout, || false)
+    }
+
+    fn acquire_with_policy(
+        dir: &Path,
+        timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self> {
+        anyhow::ensure!(!cancelled(), "store lock acquisition cancelled");
         fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
         let path = Self::path(dir);
         let file = Self::open_lock_file(&path)?;
         let deadline = Instant::now() + timeout;
         loop {
+            anyhow::ensure!(!cancelled(), "store lock acquisition cancelled");
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(Self { file }),
                 // Held by another process (or, rarely, a transient lock error):
@@ -165,6 +185,47 @@ mod tests {
         let guard = StoreLock::acquire(&dir).unwrap();
         assert!(dir.join(LOCK_FILE_NAME).is_file());
         drop(guard);
+    }
+
+    #[test]
+    fn cancelled_acquisition_does_not_create_store_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        let error = StoreLock::acquire_cancellable(&dir, || true).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn cancellation_stops_a_wait_without_releasing_the_other_holder() {
+        use std::cell::Cell;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        let held = StoreLock::acquire(&dir).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_waiter = Arc::clone(&cancelled);
+        let (started, waiting) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let probes = Cell::new(0);
+            let acquired = StoreLock::acquire_cancellable(&dir, || {
+                probes.set(probes.get() + 1);
+                if probes.get() == 2 {
+                    started.send(()).unwrap();
+                }
+                cancel_waiter.load(Ordering::Acquire)
+            });
+            finished.send(acquired.unwrap_err().to_string()).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancelled.store(true, Ordering::Release);
+        let stopped = result.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        handle.join().unwrap();
+        assert!(stopped.unwrap().contains("cancelled"));
     }
 
     #[test]
