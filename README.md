@@ -47,6 +47,8 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
 計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
 進捗の確認と追加指示も同じタブで行えます。
+macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
+logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
 よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
 保存中も操作でき、登録・解除の結果は星の表示へ反映されます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
