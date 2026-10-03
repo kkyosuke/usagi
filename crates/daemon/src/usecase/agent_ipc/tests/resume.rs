@@ -3,6 +3,76 @@
 use super::*;
 
 #[test]
+fn completion_report_does_not_make_an_active_turn_safe_to_sleep() {
+    for phase in [AgentPhase::Running, AgentPhase::Waiting] {
+        let mut agent = runtime();
+        let mut one_slot = RuntimeCoordinator::new(1, 64 * 1024, 64);
+        one_slot
+            .activate_generation(agent.active_generation().unwrap())
+            .unwrap();
+        agent.coordinator = one_slot;
+        agent
+            .pty
+            .as_any_mut()
+            .downcast_mut::<Pty>()
+            .unwrap()
+            .terminate_success = true;
+        let launch_intent = intent(None);
+        let session = launch_intent.session.unwrap();
+        agent
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = agent.mcp_callers.keys().next().unwrap().clone();
+        agent.report_agent_phase(&credential, phase).unwrap();
+        assert!(
+            agent
+                .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
+                .unwrap()
+                .accepted
+        );
+
+        // Completion is an MCP tool call inside the provider's active turn.
+        // Only its lifecycle Stop report makes that turn safe to sleep.
+        assert_eq!(agent.sleep_one_for_capacity(), Ok(false));
+        assert_eq!(
+            agent.sleep_session(session).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        assert_eq!(agent.session_phase(session), phase);
+        assert_eq!(
+            agent
+                .workspace_agent_statuses(launch_intent.workspace)
+                .unwrap()[&session],
+            AgentStatus::Running
+        );
+        assert_eq!(
+            agent
+                .pty
+                .as_any_mut()
+                .downcast_mut::<Pty>()
+                .unwrap()
+                .terminate_calls,
+            0
+        );
+
+        agent
+            .report_agent_phase(&credential, AgentPhase::Ended)
+            .unwrap();
+        assert_eq!(
+            agent
+                .workspace_agent_statuses(launch_intent.workspace)
+                .unwrap()[&session],
+            AgentStatus::Idle
+        );
+        assert_eq!(agent.sleep_one_for_capacity(), Ok(true));
+    }
+}
+
+#[test]
 fn saturated_capacity_selection_compares_every_completed_resume_candidate() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();

@@ -134,6 +134,97 @@ fn a_full_activity_cycle_preserves_all_agents_including_more_than_six_in_one_hom
 }
 
 #[test]
+fn running_rabbits_stay_awake_for_the_entire_animation_cycle() {
+    let mut fixtures = sessions(3);
+    for status in [None, Some(DispatchAgentStatus::Running)] {
+        for session in &mut fixtures {
+            session.agent_status = status;
+        }
+        for (height, width) in [(24, 120), (24, 80), (13, 64)] {
+            for reduced_motion in [false, true] {
+                for tick in 0..ANIMATION_CYCLE_TICKS {
+                    let frame = super::super::render(
+                        height,
+                        width,
+                        "atlas",
+                        &fixtures,
+                        tick,
+                        reduced_motion,
+                    )
+                    .expect("Garden fits");
+                    let text = text(&frame);
+                    assert!(
+                        !text.contains("-.-") && !text.contains(" z"),
+                        "running rabbit slept at {height}x{width}, tick {tick}, \
+                         dispatch {status:?}, reduced motion {reduced_motion}:\n{text}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn resting_and_attention_poses_still_follow_the_agent_state() {
+    let places = roaming_places(
+        Area {
+            x: 0,
+            y: 4,
+            width: 40,
+            height: 12,
+        },
+        (9, 4),
+    );
+    for phase in [
+        AgentPhase::Absent,
+        AgentPhase::Ready,
+        AgentPhase::Sleeping,
+        AgentPhase::Ended,
+        AgentPhase::Exited,
+    ] {
+        assert_eq!(
+            agent_motion(phase, None, false, places, 210, 0, false).activity,
+            Activity::Sleeping
+        );
+    }
+    for reduced_motion in [false, true] {
+        for (phase, expected) in [
+            (AgentPhase::Waiting, Activity::Waiting),
+            (AgentPhase::Interrupted, Activity::Interrupted),
+        ] {
+            assert_eq!(
+                agent_motion(
+                    phase,
+                    Some(DispatchAgentStatus::Running),
+                    false,
+                    places,
+                    210,
+                    0,
+                    reduced_motion,
+                )
+                .activity,
+                expected
+            );
+        }
+        for status in [DispatchAgentStatus::Idle, DispatchAgentStatus::Exited] {
+            assert_eq!(
+                agent_motion(
+                    AgentPhase::Running,
+                    Some(status),
+                    false,
+                    places,
+                    210,
+                    0,
+                    reduced_motion,
+                )
+                .activity,
+                Activity::Sleeping
+            );
+        }
+    }
+}
+
+#[test]
 fn lifecycle_and_dispatch_overrides_keep_runtime_identity_and_safe_home_status() {
     let mut fixtures = sessions(1);
     let phases = [

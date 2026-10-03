@@ -97,7 +97,7 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 `o` の Open / add projects では登録済み project・Recent・Directory を切り替え、複数 project の選択や既存ディレクトリの追加ができます。
 Clone は `e`、全体の Config は `c` から開きます。
 サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。
-[Session Garden](document/assets/session-garden.gif) では、ゆったり動くうさぎと庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
+[Session Garden](document/assets/session-garden.gif) では、[Agent の状態に沿って動くうさぎ](document/03-tui.md#区画とうさぎ)と庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。
 中断 Agent の Closeup でも、Ctrl+C は[終了確認](document/03-tui.md)を通します。

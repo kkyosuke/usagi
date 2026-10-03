@@ -923,6 +923,107 @@ fn workspace_observation_aggregates_session_status_independent_of_store_order() 
 }
 
 #[test]
+fn workspace_observation_promotes_reported_work_over_terminal_dispatch_history() {
+    for runtime_factory in [codex_runtime, structured_claude_runtime] {
+        for status in [AgentStatus::Idle, AgentStatus::Exited, AgentStatus::Failed] {
+            let mut runtime = runtime_factory();
+            let launch_intent = intent(None);
+            let workspace = launch_intent.workspace;
+            let session = launch_intent.session.unwrap();
+            let admission = runtime
+                .launch(
+                    &OperationId::new().to_string(),
+                    &launch_intent,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+            let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+            for agent in runtime.dispatch.agents().unwrap() {
+                runtime
+                    .dispatch
+                    .transition_agent(agent.agent_id, status, None)
+                    .unwrap();
+            }
+            assert_eq!(
+                runtime
+                    .workspace_observation(workspace)
+                    .unwrap()
+                    .session_statuses[&session],
+                status
+            );
+            for phase in [AgentPhase::Running, AgentPhase::Waiting] {
+                runtime.report_agent_phase(&credential, phase).unwrap();
+                assert_eq!(runtime.session_phase(session), phase);
+                assert_eq!(
+                    runtime
+                        .workspace_observation(workspace)
+                        .unwrap()
+                        .session_statuses[&session],
+                    AgentStatus::Running,
+                    "live {phase:?} must outrank old {status:?} dispatch state"
+                );
+                assert!(
+                    runtime
+                        .workspace_observation(WorkspaceId::new())
+                        .unwrap()
+                        .session_statuses
+                        .is_empty()
+                );
+            }
+            for phase in [AgentPhase::Ready, AgentPhase::Ended, AgentPhase::Exited] {
+                runtime.report_agent_phase(&credential, phase).unwrap();
+                assert_eq!(
+                    runtime
+                        .workspace_observation(workspace)
+                        .unwrap()
+                        .session_statuses[&session],
+                    status
+                );
+            }
+            runtime
+                .report_agent_phase(&credential, AgentPhase::Running)
+                .unwrap();
+            let runtime_id = runtime.mcp_callers[&credential].runtime.agent_runtime_id;
+            runtime.exit(&admission.terminal, 0).unwrap();
+            // Even a stale report cannot make an observed exited process busy.
+            runtime
+                .reported_phases
+                .insert(runtime_id, AgentPhase::Running);
+            assert_ne!(
+                runtime
+                    .workspace_observation(workspace)
+                    .unwrap()
+                    .session_statuses[&session],
+                AgentStatus::Running
+            );
+        }
+    }
+}
+
+#[test]
+fn workspace_observation_does_not_turn_root_activity_into_a_session() {
+    let mut runtime = codex_runtime();
+    let launch_intent = root_intent(None);
+    runtime
+        .launch(
+            &OperationId::new().to_string(),
+            &launch_intent,
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
+    assert!(
+        runtime
+            .workspace_agent_statuses(launch_intent.workspace)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     let mut runtime = AgentRuntime::new(
         DaemonGeneration::new(),
