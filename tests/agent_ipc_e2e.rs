@@ -65,6 +65,11 @@ fn shipping_build_identity() -> usagi_core::infrastructure::ipc::BuildIdentity {
 // that startup variance; connection failures still fail deterministically.
 const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 
+// Repository preparation and the daemon must resolve the same Git executable.
+// On macOS, the parent PATH can select Homebrew Git while the daemon selects
+// Apple's developer-tool launcher; prepare that toolchain before read deadlines.
+const FIXTURE_SYSTEM_PATH: &str = "/usr/bin:/bin";
+
 /// Each case starts the shipping daemon binary. Serialising those startups
 /// avoids starving a loaded worker and turning socket publication into a
 /// spurious readiness timeout.
@@ -87,6 +92,7 @@ fn channel_data_dir(home: &Path) -> PathBuf {
 
 fn git(repo: &Path, args: &[&str]) {
     let status = Command::new("git")
+        .env("PATH", FIXTURE_SYSTEM_PATH)
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -325,7 +331,7 @@ fn spawn_daemon_command(
     source_identity: Option<&str>,
     sandbox_home: Option<&Path>,
 ) -> Daemon {
-    let fixture_path = format!("{}:/usr/bin:/bin", path.display());
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", path.display());
     let mut command = usagi_command(
         home,
         Channel::Local,
@@ -2692,7 +2698,7 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
     let agent_spawns = home.path().join("agent-spawn-count");
     write_restartable_codex(&bin, &agent_spawns);
 
-    let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
     let daemon = start_daemon(repo.path(), home.path(), &bin, None);
     let data_dir = channel_data_dir(home.path());
     Storage::new(&data_dir)
@@ -2853,7 +2859,7 @@ fn root_restart_recovers_agents_after_requester_exit() {
     let release = home.path().join("release-successor-readiness");
     write_recovery_gated_codex(&bin, &agent_spawns, &block, &probed, &release);
 
-    let fixture_path = format!("{}:/usr/bin:/bin", bin.display());
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
     let daemon = start_daemon(repo.path(), home.path(), &bin, None);
     let data_dir = channel_data_dir(home.path());
     Storage::new(&data_dir)

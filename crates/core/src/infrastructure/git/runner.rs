@@ -23,8 +23,8 @@ pub trait GitRunner {
     ///
     /// # Errors
     ///
-    /// Returns an error only when the `git` process could not be spawned; a
-    /// non-zero git exit is reported through [`GitOutput::success`] (`false`),
-    /// not as an `Err`.
+    /// Returns an error when execution or bounded observation cannot complete.
+    /// A completed non-zero git exit is reported through [`GitOutput::success`]
+    /// (`false`), not as an `Err`.
     fn run(&self, repo: &Path, args: &[&str]) -> Result<GitOutput>;
 }

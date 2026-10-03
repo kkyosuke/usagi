@@ -324,6 +324,10 @@ daemon から分離して常駐する bootstrap broker も同じ teardown の対
 `mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
 なる（自分自身を撃たない）。
 
+Agent IPC E2E の Git fixture は daemon と同じ system PATH で準備する。macOS では親の PATH が Homebrew Git、
+daemon の固定 PATH が Apple Git を選ぶことがあるため、daemon が使う toolchain の初回起動を fixture 準備に含める。
+daemon の Git read / effect deadline は production と同じ値で検証する。
+
 ### 重い E2E の直列化
 
 shipping binary・daemon・fixture provider・実 PTY を同時に走らせる E2E は CPU を占有する。並行させると frame 待ちや

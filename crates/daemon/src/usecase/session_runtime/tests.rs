@@ -4697,3 +4697,47 @@ fn shared_teardown_reports_storage_failure() {
         Err("daemon could not persist session lifecycle state".into())
     );
 }
+
+#[test]
+fn status_git_observations_run_without_the_session_owner_lock() {
+    struct ObservingGit<'a>(&'a Mutex<SessionRuntime>, AtomicUsize);
+    impl GitRunner for ObservingGit<'_> {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            let owner = self
+                .0
+                .try_lock()
+                .expect("Git must run outside the session owner lock");
+            assert!(owner.workspace_id().is_ok());
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(GitOutput {
+                success: true,
+                stdout: "main\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::open(
+        temp.path().join("repository"),
+        &temp.path().join("daemon"),
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        FakeSessionWorktreeIo {
+            occupied: false,
+            build_calls: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .unwrap();
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({"name":"sample"}),
+        )
+        .unwrap();
+    let runtime = Mutex::new(runtime);
+    let git = ObservingGit(&runtime, AtomicUsize::new(0));
+    let reply = perform_status(&runtime, &git, &operation()).unwrap();
+    assert_eq!(reply.body["sessions"][0]["name"], "sample");
+    assert_eq!(git.1.load(Ordering::SeqCst), 4);
+}

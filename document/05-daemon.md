@@ -68,6 +68,12 @@ client に返す session 一覧は、使用可能な `available` に加えて、
 
 ## session tree と ignore rules
 
+`session_status` は lifecycle とその revision の snapshot を短い session lock で取得し、各 worktree の Git
+観測を lock の外で行う。観測中の session 作成・削除は次の snapshot に反映される。daemon の Git subprocess は
+status / revision / merge-base 等の観測を 2 秒、worktree 作成・撤去等の effect を 30 秒、stdout / stderr を各 8 MiB に
+制限する。deadline または capture 上限超過は storage failure として返し、他の scope 解決・一覧・launch admission を
+無期限に待たせない。完了した nonzero exit の stderr は従来の Git 診断用に保持する。
+
 `session create <name>` は lifecycle の reservation と Git effect の前に `.usagi/sessions/<name>` の
 存在を検査する。snapshot に未登録の stale directory や dangling symlink も占有済みとして拒否する。
 `session create <name>` は workspace root が Git repository なら session root をその repository の
@@ -1904,7 +1910,12 @@ root が持つのは product に依らない部分（terminate grace と coalesc
 同じ provider の同時 probe は 1 child に coalesce する。timeout 時はその exact child を TERM、bounded grace、KILL の順で停止して reap し、
 nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential や raw output を
 含まない `unavailable` に正規化する。共通の bounded child runner は独立 process group を TERM、bounded grace、KILL の
-順で停止して reap し、pipe reader も join する。preflight 後に owner lock を取り直し、operation idempotency、generation、
+順で停止して reap する。capture と stdin worker は nonblocking pipe を使い、cleanup grace 後も
+`setsid` した descendant が pipe を保持していれば worker を cancel して join し、未完の観測を timeout として拒否する。
+cancel 後も capture 上限内の利用可能な bytes と EOF を確認する。正常終了した child の reader が遅れて実行されても、
+閉じた pipe の完全な出力を timeout にせず、開いた pipe や上限を超えて出力し続ける descendant は bounded に拒否する。
+1Password の `op read` も同じ nonblocking capture と cleanup を使い、未完の出力を secret value として返さない。
+preflight 後に owner lock を取り直し、operation idempotency、generation、
 scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の
 `--version` は readiness とは別の typed probe であり、1 秒の deadline と各 16 KiB の output bound を自分で持ち、
 child lifecycle だけを同じ bounded child runner に従わせる。
