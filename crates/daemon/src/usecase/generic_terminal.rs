@@ -120,6 +120,16 @@ pub trait TerminalStore {
 }
 /// Resolves a code-defined profile or trusted local settings once, before spawn.
 pub trait TerminalProfileResolver {
+    /// Checks code-defined profile metadata without external I/O or resolving
+    /// configured environment values. Admission still resolves the profile
+    /// immediately before spawn.
+    fn validate_request(
+        &self,
+        _request: &TerminalLaunchRequest,
+    ) -> Result<(), TerminalLaunchValidationError> {
+        Ok(())
+    }
+
     fn resolve(
         &mut self,
         request: &TerminalLaunchRequest,
@@ -275,9 +285,7 @@ impl GenericTerminalCoordinator {
         if self.records.contains_key(&key) {
             return Err(GenericTerminalError::TerminalAlreadyExists);
         }
-        if self.occupied_slots() >= self.limit {
-            return Err(GenericTerminalError::ConcurrencyExhausted);
-        }
+        self.ensure_launch_capacity()?;
         // Reserve the worst-case final this runtime will leave behind before
         // anything is spawned. An exhausted aggregate budget refuses the launch
         // here instead of dropping somebody else's protected final later.
@@ -855,6 +863,16 @@ impl GenericTerminalCoordinator {
                 )
             })
             .count()
+    }
+
+    /// Checks the current PTY ceiling without reserving a slot. A caller that
+    /// releases its owner lock must check again when it admits the launch.
+    pub fn ensure_launch_capacity(&self) -> Result<(), GenericTerminalError> {
+        if self.occupied_slots() >= self.limit {
+            Err(GenericTerminalError::ConcurrencyExhausted)
+        } else {
+            Ok(())
+        }
     }
     fn persist(&self, store: &mut dyn TerminalStore) -> Result<(), GenericTerminalError> {
         store

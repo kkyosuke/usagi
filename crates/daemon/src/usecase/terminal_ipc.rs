@@ -21,7 +21,9 @@ use usagi_core::{
             TerminalLaunchScope, TerminalLaunchValidationError,
         },
     },
-    infrastructure::ipc::{ErrorCode, ProtocolError, TerminalGeometry, TerminalRequest},
+    infrastructure::ipc::{
+        ErrorCode, ProtocolError, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    },
     usecase::vt_screen::{COLS_MAX, ROWS_MAX},
 };
 
@@ -112,6 +114,33 @@ pub const GENERIC_TERMINAL_LIMIT: usize =
     usagi_core::domain::settings::DEFAULT_TERMINAL_MAX_CONCURRENT as usize;
 
 impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
+    /// Whether a launch needs fresh profile/environment resolution. A known
+    /// producer is answered by the normal replay/conflict path, which does not
+    /// resolve a profile. New launches check pure admission constraints before
+    /// any external preparation; admission checks them again before spawn.
+    pub fn launch_needs_profile_resolution(
+        &self,
+        intent: &TerminalLaunchIntent,
+    ) -> Result<bool, ProtocolError>
+    where
+        R: TerminalProfileResolver,
+    {
+        if intent
+            .launch_operation
+            .is_some_and(|producer| self.coordinator.launch_by_operation(&producer).is_some())
+        {
+            return Ok(false);
+        }
+        geometry(intent.geometry)?;
+        self.coordinator
+            .ensure_launch_capacity()
+            .map_err(map_error)?;
+        self.resolver
+            .validate_request(&intent.request)
+            .map_err(|error| map_error(GenericTerminalError::Launch(error)))?;
+        Ok(true)
+    }
+
     pub fn new(generation: DaemonGeneration, resolver: R, store: S, pty: P, scope: Q) -> Self {
         Self::new_with_limit(
             generation,
@@ -709,6 +738,19 @@ mod tests {
     }
     struct Resolver;
     impl TerminalProfileResolver for Resolver {
+        fn validate_request(
+            &self,
+            request: &TerminalLaunchRequest,
+        ) -> Result<(), TerminalLaunchValidationError> {
+            if request.profile_id.as_str() == "login-shell" {
+                Ok(())
+            } else {
+                Err(TerminalLaunchValidationError::UnknownProfile {
+                    profile_id: request.profile_id.clone(),
+                })
+            }
+        }
+
         fn resolve(
             &mut self,
             request: &usagi_core::domain::terminal_launch::TerminalLaunchRequest,
@@ -989,6 +1031,76 @@ mod tests {
     }
 
     #[test]
+    fn launch_preparation_skips_known_producers_and_rejects_pure_invalid_requests() {
+        let scope = scope_of(Some(SessionId::new()));
+        let mut runtime = runtime_for(scope.clone());
+        let producer = OperationId::new();
+        let TerminalRequest::Launch { mut intent } = launch_request(&scope, Some(producer), 80)
+        else {
+            panic!("expected launch request");
+        };
+        assert!(runtime.launch_needs_profile_resolution(&intent).unwrap());
+        call(
+            &mut runtime,
+            ConnectionId::new(),
+            ClientId::new(),
+            TerminalAction::Launch,
+            TerminalRequest::Launch {
+                intent: intent.clone(),
+            },
+        );
+        assert!(!runtime.launch_needs_profile_resolution(&intent).unwrap());
+
+        // Even invalid changed bytes under a known producer belong to the
+        // cached conflict path, before any geometry/profile/environment work.
+        intent.geometry.cols = 0;
+        intent.request.profile_id = TerminalProfileId::new("unknown-profile").unwrap();
+        assert!(!runtime.launch_needs_profile_resolution(&intent).unwrap());
+        let conflict = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: intent.clone(),
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::IdempotencyConflict);
+        assert_eq!(runtime.pty.spawned_directories.len(), 1);
+
+        intent.launch_operation = None;
+        assert_eq!(
+            runtime
+                .launch_needs_profile_resolution(&intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        intent.geometry.cols = 80;
+        assert_eq!(
+            runtime
+                .launch_needs_profile_resolution(&intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        intent.request.profile_id = TerminalProfileId::new("login-shell").unwrap();
+        assert!(runtime.launch_needs_profile_resolution(&intent).unwrap());
+
+        // Resolvers without a pure metadata validator retain their normal
+        // resolve-time validation contract.
+        let scoped = ScopedProfileResolver {
+            profile: &mut runtime.resolver,
+            working_directory: PathBuf::from("/available-worktree"),
+        };
+        scoped.validate_request(&intent.request).unwrap();
+    }
+
+    #[test]
     fn configured_terminal_limit_refuses_the_next_pty_before_spawn() {
         let scope = scope_of(Some(SessionId::new()));
         let mut runtime = runtime_for_limit(scope.clone(), 1);
@@ -998,6 +1110,19 @@ mod tests {
             ClientId::new(),
             TerminalAction::Launch,
             launch_request(&scope, Some(OperationId::new()), 80),
+        );
+
+        let TerminalRequest::Launch { intent } =
+            launch_request(&scope, Some(OperationId::new()), 80)
+        else {
+            panic!("expected launch request");
+        };
+        assert_eq!(
+            runtime
+                .launch_needs_profile_resolution(&intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceExhausted
         );
 
         let error = runtime

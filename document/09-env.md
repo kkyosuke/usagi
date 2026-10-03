@@ -95,6 +95,8 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - 解決は Agent / Terminal の owner lock を取る前に行う。起動要求ごとに一時スナップショットを作り、
   provision は同じ thread・workspace の値だけを読み、要求の終了時にスナップショットを外す。
   未準備の provision は外部コマンドを実行せず拒否する。値を durable record や IPC へ渡さない。
+- Terminal の既知の起動 operation は owner が再送・競合を判定し、新しい secret 解決を行わない。
+  新規起動は geometry・PTY 同時実行上限・trusted profile の検証を準備前に通し、起動の admission でも再確認する。
 - secret cache の lock は memory の参照・更新中だけ保持する。同じ credential・scope・参照の並行要求は
   1 件の進行中 read を共有し、別参照や secret を使わない起動をその read の待ちに巻き込まない。
 - 解決は最大 4 worker の bounded queue で行う（1 参照 = 1 subprocess）。1 件あたり 30 秒の deadline を持つ。
