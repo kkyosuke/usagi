@@ -633,6 +633,7 @@ run・pending_start は受理時の担当を固定し、snapshot の agents は�
 同じ operation ID の担当変更は競合として拒否する。
 開始前の intent は `pending_start` に元の operation ID・goal・agents・開始エラーを返すため、
 TUI を再起動しても同じ開始操作を再試行できる。
+`revision_limit` が範囲外なら `invalid_argument` を返し、開始 intent を保存しない。
 
 `Finish` は active な run、または起動前の開始 intent を終了する。終了は保存済み状態の変更だけで、
 Agent の停止も worktree の削除も伴わない。終了した run は `PR ready` なら完了、それ以外の工程なら

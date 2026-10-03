@@ -13517,20 +13517,37 @@ mod workflow_composition {
             ErrorCode::InvalidArgument
         );
         let operation = usagi_core::domain::id::OperationId::new();
-        assert_eq!(
-            fixture
+        for (goal, revision_limit) in [
+            (" ", usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT),
+            ("Implement feature", 0),
+            (
+                "Implement feature",
+                usagi_core::domain::workflow::MAX_REVISION_LIMIT + 1,
+            ),
+        ] {
+            let refused = fixture
                 .control(
                     operation,
                     WorkflowCommand::Start {
-                        goal: " ".into(),
+                        goal: goal.into(),
                         agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-                        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
-                    }
+                        revision_limit,
+                    },
                 )
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidArgument
-        );
+                .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::InvalidArgument);
+            assert_eq!(
+                refused.retry_mode,
+                usagi_core::infrastructure::ipc::RetryMode::Never
+            );
+            let snapshot = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap();
+            assert!(snapshot.run.is_none() && snapshot.pending_start.is_none());
+        }
         let command = WorkflowCommand::Start {
             goal: "Implement feature".into(),
             agents: usagi_core::domain::workflow::WorkflowAgents::default(),

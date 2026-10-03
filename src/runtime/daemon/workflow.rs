@@ -857,6 +857,7 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
     let message = error.to_string();
     let code = match message.as_str() {
         "invalid workflow goal"
+        | "invalid workflow revision limit"
         | "workflow has not started"
         | "workflow launch is not yet admitted"
         | "reviewer is not assigned yet"
