@@ -1793,11 +1793,11 @@ deterministic に返す。resumable projection は availability と非機密な 
 history を provider 単位で表示できる closed vocabulary（`ProviderKind` と safe な `ProviderResumePhase`）だけを返す。
 これらは code-defined enum であり、provider-native ID / argv / cwd / transcript は返さない。metadata を保存していない
 record では両 field を省略し、名前・path・profile ID から provider を推測しない。
-cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch store から読んだ
+cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch と現在の活動を投影した
 managed session ごとの `AgentStatus` を添える。同じ session に複数 Agent がある場合は
 `running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値にする。root Agent は
 session status map へ載せない。これにより PTY record の粗い `Live` と dispatch の terminal state
-（`Idle` / `Exited` / `Failed`）を混同しない。
+（`Idle` / `Exited` / `Failed`）を混同しない。[現在の phase に基づく活動反映](#agent-phase-の投影)も同じ投影に重ねる。
 `AgentResumeTarget` は continuation、source、workspace、optional session、worktree、source runtime incarnation、
 adapter revision だけを持つ。旧 schema record は continuation / source を合成せず、target 無しの unavailable item
 として起動可能なまま読む。
@@ -2011,6 +2011,13 @@ Claude の `PermissionRequest` / `Notification` と Codex の `PostToolUse` は 
 観測だけだからである。provider metadata を持たない runtime（structured capture 前の Antigravity / Claude / Codex など）への報告は
   projection だけを refine し、metadata を合成しない。
 - 未知 credential、失効 credential、非 live runtime、malformed request は何も記録せず safe error になる。
+
+表示用 `AgentStatus` の活動反映も本節を正本とする。同じ workspace / session の exact live runtime が lifecycle hook で
+`running` / `waiting` を報告している間は、過去の dispatch の完了・停止・失敗にかかわらず表示用 status を `Running` にする。
+完了した dispatch の後に利用者が新しい prompt を送った場合も、現在の活動が Garden に反映される。
+`ready` / `ended` / `exited` の報告、live でない runtime、別 workspace、root scope はこの昇格を行わない。
+completion MCP の受理は provider の turn 終了を確定しないため、活動 phase を変更しない。受理後も lifecycle hook が
+`ended` を報告するまでは実行中の活動を保ち、completion の再送も後続 prompt の活動を上書きしない。
 
 ### fixture による手動確認
 

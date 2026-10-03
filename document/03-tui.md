@@ -1289,7 +1289,7 @@ inactive project の pending decision は resident controller がなく観測し
 池・餌場・木を持つ共通の庭を表示する。この共通の庭では session 名と状態を右の一覧だけに置き、
 庭の下側には重複する巣穴や立札を描かず、
 その領域もうさぎの移動に使う。
-うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事・休息を繰り返す。
+うさぎは画面内の互いに重ならない範囲で歩行・飲水・食事と、Agent phase に沿った姿勢を繰り返す。
 周期の半分以上は立ち止まり、周囲を見る間に耳を小さく動かす。歩行の姿勢も数 frame 保持してゆったり切り替える。
 端末寸法と総 Agent 数から歩ける範囲を
 均等に割り当て、全羽が収まる最大の姿（従来の 4 行のうさぎ、2 行の小さなうさぎ、2 桁の `兎`）を選ぶ。
@@ -1366,6 +1366,8 @@ dispatch status も区画へ重ねる。active project は `session list`、inac
 `exited` / `failed` は inventory の粗い `live → running` より強く、全うさぎの姿と状態を starting / calm / stopped /
 failed にする。ただし観測済み runtime の数と stable identity は変えず、各うさぎの hitbox も保つ。dispatch が `running`
 の間は runtime-local の `waiting` / `interrupted` pose をより粗い running pose で潰さない。
+両 observation の status は [daemon の現在の活動を反映した集約](05-daemon.md#agent-phase-の投影)を使い、
+以前の dispatch の完了表示が新しい prompt の実行を隠さない。
 
 複数 runtime は注目順（`waiting → running → ready → interrupted → sleep → idle → done`）に並べ、同 phase の
 tie-break を stable `AgentRuntimeId` 順にする。この順序と状態内訳の語彙は
@@ -1381,6 +1383,8 @@ controller が runtime の `Ended` / `Exited` を観測した runtime（tab は�
 session 選択状態は Garden に投影せず、右の一覧が無い庭の立札もすべて同じ dim で表示する。`Failed` は daemon projection が安全化した短い failure summary だけを
 `failed · <summary>` として幅内に表示し、raw error、path、provider-native ID は renderer へ渡さない。
 
+共通の庭の `Running` は歩行・飲水・食事を続け、生活 cycle の木陰で休む時間も目を開いた作業姿勢を保つ。
+装飾の周期だけで睡眠姿勢へ切り替わらず、`Waiting` / `Interrupted` と dispatch の完了・停止はそれぞれの姿勢で表す。
 compact 詳細区画の `Running` は hop・bound・sniff・dig・look の 5 動作を繰り返し、各姿勢を 3 frame 保持する。各 runtime の stable `AgentRuntimeId` から
 動作順と開始位置をずらすため、同じ phase のうさぎも一斉に同じ動きをしない。うさぎ本体の色は ID から 5 色の palette の
 1 色（クリーム・ピーチ・淡いピンク・ラベンダー・アイスブルー）を選び、同じ ID・tick・size なら同じ色と pose になって refresh で見た目が飛ばない。compact の dense 表示ではうさぎを静止させ、
