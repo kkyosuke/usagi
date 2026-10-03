@@ -77,6 +77,16 @@ pub struct WorkflowRecord {
     /// [`FINISHED_LIMIT`](crate::domain::workflow::FINISHED_LIMIT).
     #[serde(default)]
     pub finished: Vec<crate::domain::workflow::FinishedRun>,
+    /// Fixed-size rejection fence for retired human commands. Unlike the display
+    /// archive, this is never shed to make room for progress history.
+    #[serde(default)]
+    pub retired_through: Option<OperationId>,
+}
+
+impl WorkflowRecord {
+    /// Version 2 retains retired command identity independently of display history.
+    /// Older writers only accept version 1, so they cannot discard this fence.
+    pub const VERSION: u32 = 2;
 }
 
 impl DispatchStore {
@@ -160,7 +170,9 @@ impl DispatchStore {
         let value: Option<WorkflowRecord> =
             json_file::read_bounded(&self.workflow_path(workspace, session), MAX_BYTES)?;
         ensure!(
-            value.as_ref().is_none_or(|record| record.version == 1),
+            value
+                .as_ref()
+                .is_none_or(|record| matches!(record.version, 1 | WorkflowRecord::VERSION)),
             "unsupported workflow version"
         );
         Ok(value)
@@ -229,6 +241,21 @@ impl DispatchStore {
         session: SessionId,
         mut value: WorkflowRecord,
     ) -> Result<()> {
+        ensure!(
+            matches!(value.version, 1 | WorkflowRecord::VERSION),
+            "unsupported workflow version"
+        );
+        // Derive the legacy fence before any capacity trimming. Version 2 also
+        // prevents older daemons, which reject it, from erasing that evidence.
+        value.retired_through = value
+            .finished
+            .iter()
+            .map(|run| run.id)
+            .chain(value.retired_through)
+            .chain(value.finish)
+            .chain(value.finish.map(|_| value.operation))
+            .max();
+        value.version = WorkflowRecord::VERSION;
         while serde_json::to_vec_pretty(&value)?.len() >= MAX_BYTES {
             // Spend the live run's history first. The archive of ended runs is
             // small and bounded already, and it is the one thing this record
@@ -282,6 +309,7 @@ mod tests {
                     issue: None,
                     finish: None,
                     finished: Vec::new(),
+                    retired_through: None,
                 });
                 Ok(())
             })
@@ -401,6 +429,7 @@ mod tests {
                     issue: None,
                     finish: None,
                     finished: Vec::new(),
+                    retired_through: None,
                 });
                 if fail {
                     std::fs::rename(parent, directory.path().join("saved-parent"))?;
@@ -447,6 +476,7 @@ mod tests {
                     issue: None,
                     finish: None,
                     finished: Vec::new(),
+                    retired_through: None,
                 });
                 Ok(())
             });
@@ -496,6 +526,7 @@ mod tests {
                     issue: None,
                     finish: None,
                     finished: Vec::new(),
+                    retired_through: None,
                 });
                 Ok(())
             })
@@ -520,22 +551,23 @@ mod tests {
             issue: None,
             pr_url: None,
         };
+        let archive = vec![
+            ended("a".repeat(MAX_BYTES * 3 / 5)),
+            ended("b".repeat(MAX_BYTES * 3 / 5)),
+        ];
+        let retired = OperationId::new();
         store
             .update_workflow(workspace, session, |value| {
                 let record = value.as_mut().unwrap();
                 record.run = None;
-                record.finished = vec![
-                    ended("a".repeat(MAX_BYTES * 3 / 5)),
-                    ended("b".repeat(MAX_BYTES * 3 / 5)),
-                ];
+                record.retired_through = Some(retired);
+                record.finished = archive;
                 Ok(())
             })
             .unwrap();
-        let kept = store
-            .workflow(workspace, session)
-            .unwrap()
-            .unwrap()
-            .finished;
+        let stored = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(stored.retired_through, Some(retired));
+        let kept = stored.finished;
         assert_eq!(kept.len(), 1);
         assert!(
             kept[0].goal.starts_with('b'),
@@ -557,14 +589,73 @@ mod tests {
             store.workflow(workspace, session).unwrap().unwrap().goal,
             "Task"
         );
+        assert!(
+            store
+                .update_workflow(workspace, session, |value| {
+                    value.as_mut().unwrap().version = 3;
+                    Ok(())
+                })
+                .is_err()
+        );
+        let mut unsupported = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(unsupported.version, WorkflowRecord::VERSION);
+        unsupported.version = 3;
+        std::fs::write(
+            store.workflow_path(workspace, session),
+            serde_json::to_vec(&unsupported).unwrap(),
+        )
+        .unwrap();
+        assert!(store.workflow(workspace, session).is_err());
+    }
+    #[test]
+    fn legacy_records_migrate_before_display_history_can_erase_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let finish = OperationId::new();
+        let legacy = serde_json::json!({
+            "version":1,"operation":operation,"goal":"Task","run":null,
+            "initial_notified":false,"cursor":null,"finish":finish,
+            "finished":[{"id":operation,"outcome":"stopped","goal":"Task","phase":"starting","issue":null,"pr_url":null}]
+        });
+        let path = store.workflow_path(workspace, session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        let loaded = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(loaded.version, 1);
+        assert!(loaded.retired_through.is_none());
+        // A normal metadata write migrates the fence before capacity pruning.
+        store
+            .update_workflow(workspace, session, |_| Ok(()))
+            .unwrap();
+        let mut migrated = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(migrated.version, WorkflowRecord::VERSION);
+        assert_eq!(migrated.retired_through, Some(finish));
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // This is the previous daemon's version gate: it refuses the new file.
+        assert_ne!(on_disk["version"].as_u64(), Some(1));
         store
             .update_workflow(workspace, session, |value| {
-                value.as_mut().unwrap().version = 2;
+                value.as_mut().unwrap().finished.clear();
                 Ok(())
             })
             .unwrap();
+        assert_eq!(
+            store
+                .workflow(workspace, session)
+                .unwrap()
+                .unwrap()
+                .retired_through,
+            Some(finish)
+        );
+        migrated.version = 3;
+        std::fs::write(&path, serde_json::to_vec(&migrated).unwrap()).unwrap();
         assert!(store.workflow(workspace, session).is_err());
     }
+
     #[test]
     fn workflow_is_durable_scoped_and_conflicts_preserve_original() {
         let dir = tempfile::tempdir().unwrap();
@@ -593,6 +684,7 @@ mod tests {
                     issue: None,
                     finish: None,
                     finished: Vec::new(),
+                    retired_through: None,
                 });
                 Ok(())
             })

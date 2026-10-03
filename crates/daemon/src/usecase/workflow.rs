@@ -1,6 +1,6 @@
 //! Durable human workflow commands and projections of authenticated peer evidence.
 use anyhow::{Context, Result, ensure};
-use usagi_core::domain::agent_message::MessageKind;
+use usagi_core::domain::agent_message::{MessageKind, ReviewTarget};
 use usagi_core::domain::id::{AgentId, OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::workflow::{Phase, WorkflowCommand, WorkflowRun, WorkflowSnapshot};
 use usagi_core::infrastructure::store::dispatch::{DispatchStore, workflows::WorkflowRecord};
@@ -16,7 +16,23 @@ pub fn admit(
     command: &WorkflowCommand,
     issue: Option<u32>,
 ) -> Result<()> {
+    admit_with_previous(store, workspace, session, operation, command, issue).map(drop)
+}
+
+/// Admit and capture the immediately preceding record under the same store lock.
+/// A refused launch can restore its own predecessor without a read/admit race.
+/// # Errors
+/// Rejects invalid goals, absent workflows and conflicting identities.
+pub fn admit_with_previous(
+    store: &DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    operation: OperationId,
+    command: &WorkflowCommand,
+    issue: Option<u32>,
+) -> Result<Option<WorkflowRecord>> {
     store.update_workflow(workspace, session, |value| {
+        let previous = value.clone();
         match command {
             WorkflowCommand::Start {
                 goal,
@@ -26,6 +42,7 @@ pub fn admit(
             WorkflowCommand::Instruct { recipient, body } => {
                 let record = value.as_mut().context("workflow has not started")?;
                 ensure!(record.finish.is_none(), "workflow has already finished");
+                ensure_not_retired(record, operation)?;
                 ensure!(
                     record.operation != operation,
                     "instruction ID conflicts with workflow start"
@@ -39,11 +56,26 @@ pub fn admit(
             }
             WorkflowCommand::Finish => {
                 let record = value.as_mut().context("workflow has not started")?;
+                ensure!(
+                    record.operation != operation
+                        && record.run.as_ref().is_none_or(|run| {
+                            run.instructions.iter().all(|item| item.id != operation)
+                        }),
+                    "finish ID conflicts with an existing workflow command"
+                );
                 if record.finish == Some(operation) {
                     // The same request arriving twice ends the run once.
-                    return Ok(());
+                    return Ok(previous);
                 }
                 ensure!(record.finish.is_none(), "workflow has already finished");
+                ensure_not_retired(record, operation)?;
+                let retired = record
+                    .run
+                    .iter()
+                    .flat_map(|run| run.instructions.iter().map(|item| item.id))
+                    .chain([record.operation, operation])
+                    .max();
+                record.retired_through = record.retired_through.max(retired);
                 record.finished.push(record.run.as_ref().map_or_else(
                     || {
                         // A start that never launched has no run to archive, so
@@ -74,8 +106,25 @@ pub fn admit(
                 record.announced = None;
             }
         }
-        Ok(())
+        Ok(previous)
     })
+}
+
+/// Refuse an old human command even when the display archive was pruned. Legacy
+/// records derive the fence from every retained ID before their next admission.
+fn ensure_not_retired(record: &WorkflowRecord, operation: OperationId) -> Result<()> {
+    let retired = record
+        .finished
+        .iter()
+        .map(|run| run.id)
+        .chain(record.retired_through)
+        .chain(record.finish)
+        .max();
+    ensure!(
+        retired.is_none_or(|retired| operation > retired),
+        "workflow operation has already retired"
+    );
+    Ok(())
 }
 
 /// The `Start` arm of [`admit`], lifted out so the admission function stays
@@ -102,10 +151,11 @@ fn admit_start(
         // The previous run ended, so this is a new intent in the
         // same session: everything the old run owned is reset, and
         // only the archive of ended runs carries over.
-        ensure!(
-            !existing.finished.iter().any(|ended| ended.id == operation),
-            "workflow operation has already finished"
-        );
+        ensure_not_retired(existing, operation)?;
+        existing.retired_through = existing
+            .retired_through
+            .max(existing.finish)
+            .max(Some(existing.operation));
         existing.agents = agents;
         existing.revision_limit = revision_limit;
         existing.operation = operation;
@@ -139,7 +189,7 @@ fn admit_start(
         *value = Some(WorkflowRecord {
             agents,
             revision_limit,
-            version: 1,
+            version: WorkflowRecord::VERSION,
             operation,
             goal: goal.to_owned(),
             run: None,
@@ -154,8 +204,28 @@ fn admit_start(
             issue,
             finish: None,
             finished: Vec::new(),
+            retired_through: None,
         });
     }
+    Ok(())
+}
+
+/// Check a start after external readiness, before it can produce launch effects.
+/// # Errors
+/// Rejects a replaced or finished intent and returns store read failures.
+pub fn ensure_current_start(
+    store: &DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    operation: OperationId,
+) -> Result<()> {
+    let current = store
+        .workflow(workspace, session)?
+        .context("workflow intent is missing")?;
+    ensure!(
+        current.operation == operation && current.finish.is_none(),
+        "workflow start is no longer current"
+    );
     Ok(())
 }
 
@@ -445,9 +515,9 @@ const MAX_CACHED_SESSIONS: usize = 64;
 
 /// One remembered `gh pr view` read.
 struct CachedRead {
-    /// The approved HEAD the read was made for. A different HEAD is different
+    /// The approved range the read was made for. A new base or head is new
     /// evidence, never a cache hit.
-    head_sha: String,
+    target: ReviewTarget,
     /// The PR the read was made against. Two PRs can share a head commit (a
     /// backport opened from the same HEAD), and the entry chosen from the
     /// inventory can change between passes, so serving one PR's checks as
@@ -473,17 +543,17 @@ pub struct VerificationCache {
 }
 
 impl VerificationCache {
-    /// The remembered read for this HEAD, if another one is not due yet.
+    /// The remembered read for this reviewed range, if another one is not due yet.
     #[must_use]
     pub fn fresh(
         &self,
         session: SessionId,
-        head_sha: &str,
+        target: &ReviewTarget,
         url: &str,
         now_ms: u64,
     ) -> Option<&str> {
         let entry = self.entries.get(&session)?;
-        if entry.head_sha != head_sha || entry.url != url {
+        if entry.target != *target || entry.url != url {
             return None;
         }
         let wait = VERIFICATION_TTL_MS
@@ -496,7 +566,7 @@ impl VerificationCache {
     pub fn record(
         &mut self,
         session: SessionId,
-        head_sha: &str,
+        target: &ReviewTarget,
         url: &str,
         now_ms: u64,
         output: String,
@@ -504,7 +574,7 @@ impl VerificationCache {
     ) {
         let waits = match self.entries.get(&session) {
             // A streak only continues for the same evidence and the same answer.
-            Some(entry) if entry.head_sha == head_sha && entry.url == url && waiting => {
+            Some(entry) if entry.target == *target && entry.url == url && waiting => {
                 entry.waits.saturating_add(1)
             }
             _ => 0,
@@ -525,7 +595,7 @@ impl VerificationCache {
         self.entries.insert(
             session,
             CachedRead {
-                head_sha: head_sha.to_owned(),
+                target: target.clone(),
                 url: url.to_owned(),
                 output,
                 read_at_ms: now_ms,
@@ -562,6 +632,9 @@ pub fn verify_pr(
     entries: &[usagi_core::domain::pr_inventory::PrEntry],
     issue: Option<u32>,
 ) -> Result<String, &'static str> {
+    if !target.is_valid() {
+        return Err("Review range is invalid");
+    }
     let head = git
         .run(directory, &["rev-parse", "--verify", "HEAD"])
         .map_err(|_| "Could not read worktree HEAD")?;
@@ -589,6 +662,7 @@ pub fn verify_pr(
     if view.head_oid != target.head_sha {
         return Err("PR HEAD changed; a new review is required");
     }
+    verify_reviewed_range(git, directory, target, &value)?;
     if view.draft {
         return Err("Waiting for the PR to be marked ready for review");
     }
@@ -639,6 +713,48 @@ pub fn verify_pr(
         return Err("Worktree HEAD changed during verification");
     }
     Ok(entry.url().to_owned())
+}
+
+/// A PR presents the head relative to its merge base, which can remain the
+/// reviewed commit even after the destination branch advances. Comparing only
+/// the destination tip would incorrectly invalidate that unchanged PR diff.
+fn verify_reviewed_range(
+    git: &dyn usagi_core::infrastructure::git::GitRunner,
+    directory: &std::path::Path,
+    target: &usagi_core::domain::agent_message::ReviewTarget,
+    value: &serde_json::Value,
+) -> Result<(), &'static str> {
+    let base = value
+        .get("baseRefOid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("PR verification response lacks its base commit")?;
+    if !(usagi_core::domain::agent_message::ReviewTarget {
+        base_sha: base.to_owned(),
+        head_sha: target.head_sha.clone(),
+    })
+    .is_valid()
+    {
+        return Err("PR verification response has an invalid base commit");
+    }
+    let merge_base = git
+        .run(
+            directory,
+            &[
+                "--no-replace-objects",
+                "merge-base",
+                "--all",
+                base,
+                &target.head_sha,
+            ],
+        )
+        .map_err(|_| "Could not determine the PR diff base")?;
+    if !merge_base.success || merge_base.stdout.split_whitespace().count() != 1 {
+        return Err("Could not determine the PR diff base");
+    }
+    if merge_base.stdout.trim() != target.base_sha {
+        return Err("PR diff changed; a new review is required");
+    }
+    Ok(())
 }
 
 /// The two repository conventions an issue-backed PR has to satisfy.
@@ -947,6 +1063,114 @@ mod tests {
             capped.finished[FINISHED_LIMIT - 1].goal,
             format!("round {}", FINISHED_LIMIT - 1)
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One lifecycle fixture checks command identity before and after archive eviction.
+    fn finish_refuses_other_command_ids_and_retired_commands_stay_retired() {
+        use usagi_core::domain::workflow::{FINISHED_LIMIT, WorkflowAgents};
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let start = WorkflowCommand::Start {
+            goal: "Task".into(),
+            agents: WorkflowAgents::default(),
+            revision_limit: 3,
+        };
+        let first = OperationId::new();
+        assert!(
+            admit_with_previous(&store, workspace, session, first, &start, None)
+                .unwrap()
+                .is_none()
+        );
+        ensure_current_start(&store, workspace, session, first).unwrap();
+        assert!(ensure_current_start(&store, workspace, SessionId::new(), first).is_err());
+        assert!(ensure_current_start(&store, workspace, session, OperationId::new()).is_err());
+        bind(&store, workspace, session, first, AgentId::new()).unwrap();
+        ensure_current_start(&store, workspace, session, first).unwrap();
+        let instruction = OperationId::new();
+        let instruct = WorkflowCommand::Instruct {
+            recipient: Recipient::Implementer,
+            body: "Keep going".into(),
+        };
+        admit(&store, workspace, session, instruction, &instruct, None).unwrap();
+        for conflict in [first, instruction] {
+            let error = admit(
+                &store,
+                workspace,
+                session,
+                conflict,
+                &WorkflowCommand::Finish,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "finish ID conflicts with an existing workflow command"
+            );
+            assert!(
+                store
+                    .workflow(workspace, session)
+                    .unwrap()
+                    .unwrap()
+                    .run
+                    .is_some()
+            );
+        }
+        let finish = OperationId::new();
+        admit(
+            &store,
+            workspace,
+            session,
+            finish,
+            &WorkflowCommand::Finish,
+            None,
+        )
+        .unwrap();
+        assert!(ensure_current_start(&store, workspace, session, first).is_err());
+        // Start, Instruct and Finish cannot turn into fresh intents after retirement.
+        for conflict in [first, instruction, finish] {
+            assert!(admit(&store, workspace, session, conflict, &start, None).is_err());
+        }
+        for _ in 0..FINISHED_LIMIT {
+            let next = OperationId::new();
+            let previous = admit_with_previous(&store, workspace, session, next, &start, None)
+                .unwrap()
+                .unwrap();
+            assert!(previous.finish.is_some());
+            admit(
+                &store,
+                workspace,
+                session,
+                OperationId::new(),
+                &WorkflowCommand::Finish,
+                None,
+            )
+            .unwrap();
+        }
+        let ended = store.workflow(workspace, session).unwrap().unwrap();
+        assert!(!ended.finished.iter().any(|run| run.id == first));
+        assert!(
+            ended
+                .retired_through
+                .is_some_and(|retired| retired >= finish)
+        );
+        // Reopening the store and removing every display row still retains the fence.
+        store
+            .update_workflow(workspace, session, |value| {
+                value.as_mut().unwrap().finished.clear();
+                Ok(())
+            })
+            .unwrap();
+        let reopened = DispatchStore::new(directory.path());
+        assert!(admit(&reopened, workspace, session, first, &start, None).is_err());
+        let next = OperationId::new();
+        admit(&reopened, workspace, session, next, &start, None).unwrap();
+        bind(&reopened, workspace, session, next, AgentId::new()).unwrap();
+        for (id, command) in [(instruction, &instruct), (finish, &WorkflowCommand::Finish)] {
+            assert!(admit(&reopened, workspace, session, id, command, None).is_err());
+        }
     }
 
     #[test]
@@ -1547,6 +1771,9 @@ mod tests {
                 success: true,
                 stdout: if args[0] == "status" {
                     String::new()
+                } else if args.get(1) == Some(&"merge-base") {
+                    assert_eq!(args[0], "--no-replace-objects");
+                    "b".repeat(40)
                 } else {
                     "a".repeat(40)
                 },
@@ -1596,6 +1823,193 @@ mod tests {
         }
     }
     #[test]
+    #[allow(clippy::too_many_lines)] // Real Git history distinguishes an advanced destination from a changed diff.
+    fn verification_proves_the_reviewed_pr_merge_base() {
+        use usagi_core::infrastructure::git::GitRunner;
+        let directory = tempfile::tempdir().unwrap();
+        let git = crate::infrastructure::session_worktree::SystemGit;
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["config", "user.name", "Review"],
+            vec!["config", "user.email", "review@example.invalid"],
+            vec!["config", "commit.gpgsign", "false"],
+            vec!["commit", "--allow-empty", "--quiet", "-m", "base"],
+        ] {
+            assert!(git.run(directory.path(), &args).unwrap().success);
+        }
+        let sha = || {
+            git.run(directory.path(), &["rev-parse", "HEAD"])
+                .unwrap()
+                .stdout
+                .trim()
+                .to_owned()
+        };
+        let base = sha();
+        assert!(
+            git.run(directory.path(), &["checkout", "--quiet", "-b", "feature"])
+                .unwrap()
+                .success
+        );
+        std::fs::write(directory.path().join("implementation"), "new code").unwrap();
+        assert!(
+            git.run(directory.path(), &["add", "implementation"])
+                .unwrap()
+                .success
+        );
+        assert!(
+            git.run(
+                directory.path(),
+                &["commit", "--quiet", "-m", "implementation"]
+            )
+            .unwrap()
+            .success
+        );
+        let head = sha();
+        assert!(
+            git.run(directory.path(), &["checkout", "--quiet", "main"])
+                .unwrap()
+                .success
+        );
+        std::fs::write(directory.path().join("other"), "base advanced").unwrap();
+        assert!(
+            git.run(directory.path(), &["add", "other"])
+                .unwrap()
+                .success
+        );
+        assert!(
+            git.run(
+                directory.path(),
+                &["commit", "--quiet", "-m", "advance destination"]
+            )
+            .unwrap()
+            .success
+        );
+        let destination = sha();
+        assert!(
+            git.run(directory.path(), &["checkout", "--quiet", "feature"])
+                .unwrap()
+                .success
+        );
+        let mut target = usagi_core::domain::agent_message::ReviewTarget {
+            base_sha: base.clone(),
+            head_sha: head,
+        };
+        let mut entry = usagi_core::domain::pr_inventory::PrEntry::new(
+            usagi_core::domain::pr_inventory::extract(b"https://github.com/owner/repo/pull/1")
+                .remove(0),
+        );
+        entry.head_oid = Some(target.head_sha.clone());
+        let mut value = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":destination,"headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
+        let verify = |target: &usagi_core::domain::agent_message::ReviewTarget,
+                      value: &serde_json::Value| {
+            verify_pr(
+                &git,
+                &mut gh_view(&value.to_string()),
+                directory.path(),
+                target,
+                std::slice::from_ref(&entry),
+                None,
+            )
+        };
+        // The destination advanced, but its PR diff still starts at the reviewed base.
+        assert_eq!(verify(&target, &value), Ok(entry.url().to_owned()));
+        // Approval of an empty range cannot approve this PR's actual implementation.
+        target.base_sha = target.head_sha.clone();
+        assert_eq!(
+            verify(&target, &value),
+            Err("PR diff changed; a new review is required")
+        );
+        // A local replacement can make the empty range look like the merge
+        // base, but it cannot change the PR's immutable Git objects.
+        assert!(
+            git.run(
+                directory.path(),
+                &["replace", "--graft", &destination, &target.head_sha]
+            )
+            .unwrap()
+            .success
+        );
+        assert_eq!(
+            git.run(
+                directory.path(),
+                &["merge-base", &destination, &target.head_sha]
+            )
+            .unwrap()
+            .stdout
+            .trim(),
+            target.head_sha
+        );
+        assert_eq!(
+            verify(&target, &value),
+            Err("PR diff changed; a new review is required")
+        );
+        assert!(
+            git.run(directory.path(), &["replace", "-d", &destination])
+                .unwrap()
+                .success
+        );
+        target.base_sha = base;
+        value["baseRefOid"] = serde_json::json!(target.head_sha);
+        assert_eq!(
+            verify(&target, &value),
+            Err("PR diff changed; a new review is required")
+        );
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!("--help"),
+            serde_json::json!("missing"),
+        ] {
+            value["baseRefOid"] = invalid;
+            assert!(verify(&target, &value).is_err());
+        }
+        value["baseRefOid"] = serde_json::json!("f".repeat(40));
+        assert_eq!(
+            verify(&target, &value),
+            Err("Could not determine the PR diff base")
+        );
+        target.base_sha = "invalid".into();
+        assert_eq!(verify(&target, &value), Err("Review range is invalid"));
+    }
+
+    #[test]
+    fn verification_refuses_absent_or_ambiguous_merge_bases() {
+        struct MergeBase(String);
+        impl usagi_core::infrastructure::git::GitRunner for MergeBase {
+            fn run(
+                &self,
+                _: &std::path::Path,
+                args: &[&str],
+            ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+                assert_eq!(&args[..3], ["--no-replace-objects", "merge-base", "--all"]);
+                Ok(usagi_core::infrastructure::git::GitOutput {
+                    success: true,
+                    stdout: self.0.clone(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let target = usagi_core::domain::agent_message::ReviewTarget {
+            base_sha: "b".repeat(40),
+            head_sha: "a".repeat(40),
+        };
+        let value = serde_json::json!({"baseRefOid":target.base_sha});
+        for output in [
+            String::new(),
+            format!("{}\n{}", target.base_sha, target.head_sha),
+        ] {
+            assert_eq!(
+                verify_reviewed_range(
+                    &MergeBase(output),
+                    std::path::Path::new("/fixture"),
+                    &target,
+                    &value
+                ),
+                Err("Could not determine the PR diff base")
+            );
+        }
+    }
+
+    #[test]
     fn workflow_verification_waits_for_missing_required_checks() {
         let target = usagi_core::domain::agent_message::ReviewTarget {
             base_sha: "b".repeat(40),
@@ -1607,7 +2021,7 @@ mod tests {
         );
         entry.head_oid = Some(target.head_sha.clone());
         // Lint exists and passes, but coverage has not published any check yet.
-        let mut value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"name":"lint","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
+        let mut value = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":target.base_sha,"headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"name":"lint","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE"});
         for state in [
             serde_json::Value::Null,
             serde_json::json!("BLOCKED"),
@@ -1674,7 +2088,7 @@ mod tests {
                 .remove(0),
         );
         entry.head_oid = Some(target.head_sha.clone());
-        let value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
+        let value = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":target.base_sha,"headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
         let file = directory.path().join("uncommitted.rs");
         // Hidden untracked files must be caught on both sides of the remote read.
         for after_read in [false, true] {
@@ -1716,8 +2130,8 @@ mod tests {
                 .remove(0),
         );
         entry.head_oid = Some(target.head_sha.clone());
-        let output=serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
-        for at in 0..4 {
+        let output=serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":target.base_sha,"headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
+        for at in 0..5 {
             for mode in 0..3 {
                 assert!(
                     verify_pr(
@@ -1768,7 +2182,7 @@ mod tests {
             // Both initial probes succeeded. A writer changes the worktree
             // while this request is outstanding, without moving HEAD.
             git.0.set(true);
-            Ok(serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string())
+            Ok(serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":target.base_sha,"headRefOid":target.head_sha,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string())
         };
         assert_eq!(
             verify_pr(
@@ -1795,7 +2209,7 @@ mod tests {
                 .remove(0),
         );
         entry.head_oid = Some(target.head_sha.clone());
-        let mut value = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
+        let mut value = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":target.base_sha,"headRefOid":target.head_sha,"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
         let directory = std::path::Path::new("/fixture");
         // Verification names the PR it matched, so the notice a human reads can
         // link to it.
@@ -2080,22 +2494,25 @@ mod tests {
     fn the_verification_cache_spends_one_github_read_per_window_and_backs_off() {
         use usagi_core::domain::id::SessionId;
         let session = SessionId::new();
-        let head = "a".repeat(40);
+        let target = ReviewTarget {
+            base_sha: "b".repeat(40),
+            head_sha: "a".repeat(40),
+        };
         let url = "https://github.com/owner/repo/pull/1";
         let mut cache = VerificationCache::default();
 
         // Nothing remembered: the first pass has to read.
-        assert!(cache.fresh(session, &head, url, 0).is_none());
-        cache.record(session, &head, url, 0, "first".into(), false);
+        assert!(cache.fresh(session, &target, url, 0).is_none());
+        cache.record(session, &target, url, 0, "first".into(), false);
 
         // Inside the window every further pass is answered without GitHub.
         for now in [0, 1, VERIFICATION_TTL_MS - 1] {
-            assert_eq!(cache.fresh(session, &head, url, now), Some("first"));
+            assert_eq!(cache.fresh(session, &target, url, now), Some("first"));
         }
         // At the window's edge another read is due.
         assert!(
             cache
-                .fresh(session, &head, url, VERIFICATION_TTL_MS)
+                .fresh(session, &target, url, VERIFICATION_TTL_MS)
                 .is_none()
         );
 
@@ -2103,56 +2520,61 @@ mod tests {
         let mut at = VERIFICATION_TTL_MS;
         let mut expected = VERIFICATION_TTL_MS * 2;
         for _ in 0..3 {
-            cache.record(session, &head, url, at, "waiting".into(), true);
+            cache.record(session, &target, url, at, "waiting".into(), true);
             assert_eq!(
-                cache.fresh(session, &head, url, at + expected - 1),
+                cache.fresh(session, &target, url, at + expected - 1),
                 Some("waiting")
             );
-            assert!(cache.fresh(session, &head, url, at + expected).is_none());
+            assert!(cache.fresh(session, &target, url, at + expected).is_none());
             at += expected;
             expected *= 2;
         }
 
         // The backoff stops growing at the cap rather than running away.
         for _ in 0..40 {
-            cache.record(session, &head, url, at, "waiting".into(), true);
+            cache.record(session, &target, url, at, "waiting".into(), true);
         }
         assert_eq!(
-            cache.fresh(session, &head, url, at + VERIFICATION_MAX_BACKOFF_MS - 1),
+            cache.fresh(session, &target, url, at + VERIFICATION_MAX_BACKOFF_MS - 1),
             Some("waiting")
         );
         assert!(
             cache
-                .fresh(session, &head, url, at + VERIFICATION_MAX_BACKOFF_MS)
+                .fresh(session, &target, url, at + VERIFICATION_MAX_BACKOFF_MS)
                 .is_none()
         );
 
         // An answer that is not "waiting" ends the streak.
-        cache.record(session, &head, url, at, "settled".into(), false);
+        cache.record(session, &target, url, at, "settled".into(), false);
         assert!(
             cache
-                .fresh(session, &head, url, at + VERIFICATION_TTL_MS)
+                .fresh(session, &target, url, at + VERIFICATION_TTL_MS)
                 .is_none()
         );
 
         // A different HEAD is different evidence, never a hit.
-        cache.record(session, &head, url, at, "settled".into(), false);
-        assert!(cache.fresh(session, &"b".repeat(40), url, at).is_none());
+        cache.record(session, &target, url, at, "settled".into(), false);
+        let mut revised = target.clone();
+        revised.head_sha = "c".repeat(40);
+        assert!(cache.fresh(session, &revised, url, at).is_none());
+        revised = target.clone();
+        revised.base_sha = "c".repeat(40);
+        assert!(cache.fresh(session, &revised, url, at).is_none());
         // So is a different PR: two PRs can share a head commit, and serving one
         // PR's checks as another's would publish a URL nothing was read for.
         assert!(
             cache
-                .fresh(session, &head, "https://github.com/owner/repo/pull/2", at)
+                .fresh(session, &target, "https://github.com/owner/repo/pull/2", at)
                 .is_none()
         );
-        assert_eq!(cache.fresh(session, &head, url, at), Some("settled"));
+        assert_eq!(cache.fresh(session, &target, url, at), Some("settled"));
 
         // Leaving verification drops what was remembered.
         cache.forget(session);
-        assert!(cache.fresh(session, &head, url, at).is_none());
+        assert!(cache.fresh(session, &target, url, at).is_none());
         // Another session never reads this one's answer.
-        cache.record(session, &head, url, at, "settled".into(), false);
-        assert!(cache.fresh(SessionId::new(), &head, url, at).is_none());
+        cache.record(session, &target, url, at, "settled".into(), false);
+        assert!(cache.fresh(SessionId::new(), &target, url, at).is_none());
 
         // Sessions removed while their run was live are never enumerated again,
         // so the map sheds the least recently read instead of growing for the
@@ -2160,7 +2582,7 @@ mod tests {
         for index in 0..MAX_CACHED_SESSIONS {
             cache.record(
                 SessionId::new(),
-                &head,
+                &target,
                 url,
                 at + 1 + index as u64,
                 "settled".into(),
@@ -2169,7 +2591,7 @@ mod tests {
         }
         assert_eq!(cache.entries.len(), MAX_CACHED_SESSIONS);
         assert!(
-            cache.fresh(session, &head, url, at).is_none(),
+            cache.fresh(session, &target, url, at).is_none(),
             "the stalest entry was shed"
         );
 

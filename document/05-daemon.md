@@ -1314,7 +1314,7 @@ lane は tick ごとに保存済み workflow record を列挙し、各 run に�
 | reconcile | peer message journal を cursor から読み、証拠に一致する phase / review だけを進める |
 | 担当の生存確認 | 担当 Agent が停止していれば判断待ちへ落とし、復帰を確認できれば元の phase へ戻す |
 | 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
-| 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・承認 HEAD に対する PR の checks 成功を要求する） |
+| 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・レビュー済み base と実 PR diff の一致・承認 HEAD に対する PR の checks 成功を要求する） |
 
 次の record は読み飛ばす。読み飛ばした record は書き換えないため、1 件あたりのコストは record を
 1 回読むことだけになる。
@@ -1329,15 +1329,20 @@ lane は tick ごとに保存済み workflow record を列挙し、各 run に�
 PR を tick ごとに GitHub へ照会し続け、ブランチが動いた瞬間に工程を降格させてしまうからである。画面を
 開いている人の request は従来どおり再検証し、古くなった承認を無効化する。
 
-検証のうち **GitHub への `gh pr view` だけは、承認済み HEAD ごとにキャッシュする**。lane の tick と
+検証のうち **GitHub への `gh pr view` だけは、承認済み base / HEAD の組ごとにキャッシュする**。lane の tick と
 画面を開いている人の polling は同じ run を繰り返し検証するため、キャッシュが無いと同じ答えを何度も
 GitHub に聞くことになる。キャッシュの窓は 15 秒から始まり、答えが「まだ待ち」（`Waiting …`）の間は
-倍々に伸びて 5 分で頭打ちになる。承認済み HEAD か対象 PR が変わったときは hit せず、run が検証対象の phase
+倍々に伸びて 5 分で頭打ちになる。承認済み base / HEAD か対象 PR が変わったときは hit せず、run が検証対象の phase
 （`Checking PR` / `PR ready`）から外れたときに破棄する。無人の sweep が `PR ready` を
 再検証しないのは検証を省くだけで、キャッシュは破棄しない（破棄すると lane の tick が
 実質の間隔になり、窓の意味が無くなる）。保持する session 数にも上限を設ける。窓の中でも **worktree の HEAD 一致と未コミット変更なしの判定はローカルで毎回行う**。
 PR の観測前後に両方を確認し、観測中に未コミット変更が生じた場合も `PR ready` に進めない。
 未追跡 file は `--untracked-files=all` で列挙し、利用者の `status.showUntrackedFiles` 設定に左右されない。
+PR の `baseRefOid` と承認済み HEAD の merge-base が、レビューに記録された base SHA と一致することも要求する。
+merge-base の計算は local replace ref を無効にし、GitHub が保持する元の commit graph を検証する。
+ベースブランチの先端が進んでも merge-base が同じなら承認は有効だが、空の範囲や別の PR diff に対する承認は
+`PR ready` の証拠にならない。base の欠落・不正な SHA・ローカルに無い Git object・複数の merge-base は保留し、
+diff の変更は再レビューを要求する。merged PR でも保存済みの base と head を検証する。
 open PR は checks 成功に加えて GitHub の `mergeStateStatus` が `CLEAN` または `HAS_HOOKS` であることを要求する。
 必須 check の未出現などで `BLOCKED`、基点更新待ちの `BEHIND`、不明・欠落を含むその他の状態は待機とし、
 既に出現した checks だけの成功で `PR ready` に進めない。merged PR は merge state の再確定を要求しない。
@@ -1366,6 +1371,19 @@ Workflow request のうち snapshot はこの pass をそのまま通り、contr
 
 どの request も reconcile は 1 回だけ通る。control は自分が適用した記録変更を保存済み projection として
 返し、journal を二重に replay しない。
+
+開始時の前状態は admission と同じ store lock 内で取得する。readiness が lock の外で失敗した場合の rollback と
+error 保存は、その Start ID が今も未起動・未終了の intent である場合だけ適用する。待っている間に終了・再開始・
+起動された run を、古い開始要求の完了で上書きしない。外部 readiness から戻った launch も現行 Start を確認する。
+
+Start / Instruct / Finish は同じ operation ID を別の command に使えない。終了済み要求の拒否情報は最大 5 件の
+表示履歴とは別に、record の固定サイズの `retired_through`（UUIDv7 の最大終了済み command ID）へ保存する。
+終了時には Start・全 Instruct・Finish ID を取り込み、履歴の件数制限・容量削減・daemon restart でも失わない。
+次の新しい command はこの値より新しい ID を発行する必要があり、古い ID の新規要求は拒否する。
+現行 Finish の同じ ID の再送は成功のまま応答し、現行 Start / Instruct の再送は元の内容との一致を要求する。
+旧 version 1 record は残っている終了 ID から拒否境界を引き継ぎ、保存時に version 2 へ移行する。
+旧 daemon は version 2 を拒否するため、新 field を消して拒否境界を失うことはない。
+更新前に既に削除された ID 自体の復元は行わない。
 
 decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
 atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
