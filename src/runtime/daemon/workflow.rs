@@ -866,6 +866,7 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
         | "instruction ID conflicts with workflow start"
         | "instruction ID conflicts with an existing instruction"
         | "finish ID conflicts with an existing workflow command"
+        | "workflow has already finished"
         | "workflow operation has already retired" => ErrorCode::IdempotencyConflict,
         _ => ErrorCode::Unavailable,
     };
@@ -1194,6 +1195,7 @@ mod tests {
             "instruction ID conflicts with workflow start",
             "instruction ID conflicts with an existing instruction",
             "finish ID conflicts with an existing workflow command",
+            "workflow has already finished",
             "workflow operation has already retired",
         ] {
             assert_eq!(
