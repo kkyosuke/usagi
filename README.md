@@ -139,6 +139,9 @@ Agent は組み込みの MCP server を通じて session の作成・観測・�
 toolchain は `rust-toolchain.toml` に固定されています。環境構築、開発フロー、品質 gate、PR の手順は
 [開発規約](document/06-conventions.md) を参照してください。
 
+クラウド環境の親ディレクトリの所有権が通常と異なる場合は、
+[`USAGI_TRUST_ROOT` で検査の起点を指定](document/05-daemon.md#private-directory-の検査起点)できます。
+
 ## ライセンス
 
 [MIT](LICENSE)

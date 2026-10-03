@@ -154,6 +154,23 @@ fn render(
     data_home: &DataHome,
     workspace: &Path,
 ) -> std::io::Result<String> {
+    let root = std::env::var_os(usagi_core::infrastructure::paths::TRUST_ROOT_ENV);
+    render_with_trust_root(
+        executable,
+        stderr_log,
+        data_home,
+        workspace,
+        root.as_deref().map(Path::new),
+    )
+}
+
+fn render_with_trust_root(
+    executable: &Path,
+    stderr_log: &Path,
+    data_home: &DataHome,
+    workspace: &Path,
+    trust_root: Option<&Path>,
+) -> std::io::Result<String> {
     let executable = executable.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -178,8 +195,24 @@ fn render(
     let workspace = workspace.to_str().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 workspace root")
     })?;
+    let trust_environment = trust_root
+        .map(|root| {
+            root.to_str()
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 trust root")
+                })
+                .map(|root| {
+                    format!(
+                        "<key>{}</key><string>{}</string>",
+                        usagi_core::infrastructure::paths::TRUST_ROOT_ENV,
+                        xml_escape(root)
+                    )
+                })
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>serve</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>{}</string>\n<key>WorkingDirectory</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>{DATA_DIR_ENV}</key><string>{}</string><key>{RUNTIME_MODE_ENV}</key><string>{}</string></dict>\n</dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>daemon</string><string>serve</string></array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>StandardErrorPath</key><string>{}</string>\n<key>WorkingDirectory</key><string>{}</string>\n<key>EnvironmentVariables</key><dict><key>{DATA_DIR_ENV}</key><string>{}</string><key>{RUNTIME_MODE_ENV}</key><string>{}</string>{trust_environment}</dict>\n</dict></plist>\n",
         xml_escape(executable),
         xml_escape(stderr_log),
         xml_escape(workspace),
@@ -197,6 +230,22 @@ fn xml_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_preserves_and_escapes_the_explicit_trust_root() {
+        let plist = super::render_with_trust_root(
+            std::path::Path::new("/bin/usagi"),
+            std::path::Path::new("/data/stderr"),
+            &super::DataHome::new(
+                "/data",
+                usagi_core::infrastructure::paths::RuntimeMode::Local,
+            ),
+            std::path::Path::new("/workspace"),
+            Some(std::path::Path::new("/workspace/a&b")),
+        )
+        .unwrap();
+        assert!(plist.contains("<key>USAGI_TRUST_ROOT</key><string>/workspace/a&amp;b</string>"));
+    }
+
     use super::{DataHome, install_with, plist_path_from_home, render, uninstall_with};
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
