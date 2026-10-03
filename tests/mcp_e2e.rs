@@ -1909,7 +1909,7 @@ credential_excluded=false
 approval_disabled=false
 usagi_required=false
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]' ]; then
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT", "USAGI_TRUST_ROOT"]' ]; then
     credential_excluded=true
   fi
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.required = true' ]; then
