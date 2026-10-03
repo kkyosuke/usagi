@@ -174,7 +174,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
-use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::bounded_process::{
+    ChildObservation, ChildPolicy, observe, observe_until,
+};
 use usagi_core::infrastructure::client::{
     ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient, PolicyClient,
     TerminalLaneBudget,
@@ -593,8 +595,9 @@ fn bounded_readiness_command(
     arguments: &[&str],
     bounds: ReadinessBounds,
     terminate_grace: Duration,
+    abort: &AtomicBool,
 ) -> AgentReadiness {
-    let observation = observe(
+    let observation = observe_until(
         program,
         arguments,
         ChildPolicy {
@@ -602,6 +605,7 @@ fn bounded_readiness_command(
             terminate_grace,
             output_limit: bounds.output_limit,
         },
+        abort,
     );
     // The wire answer stays one safe message, so the closed failure kind is the
     // only evidence that tells a slow CLI from a missing or signed-out one.

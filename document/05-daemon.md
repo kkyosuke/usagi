@@ -1933,6 +1933,8 @@ account の model を列挙する Antigravity は 15 秒・各 256 KiB である
 probe が遅い・出力が多いという product 固有の性質だけで、install 済みかつ認証済みの CLI が `unavailable` になる。
 deadline は hang した CLI を打ち切るための上限であり、典型的な起動時間ではなく、CPU 競合時や自動更新直後の
 初回起動を含む最も遅い正常起動より十分大きく取る（`claude auth status` は CPU 競合時に 1 秒を超える）。
+probe は shutdown が join する client worker 上で走るため、daemon の shutdown flag が立つと deadline を待たずに
+process group を terminate・reap して `unavailable` を返す。長い budget が daemon の停止を遅らせることはない。
 root が持つのは product に依らない部分（terminate grace と coalescing）だけである。
 
 probe が readiness を証明できなかったとき、wire には単一の safe message だけを返し、daemon の error log

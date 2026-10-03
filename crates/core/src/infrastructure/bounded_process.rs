@@ -120,10 +120,31 @@ pub(crate) struct Capture {
 /// limited to `output_limit` bytes per stream.
 #[must_use]
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
+    observe_until(program, arguments, policy, &NEVER_ABORTED)
+}
+
+/// [`observe`], with an owner that can end the probe before its deadline.
+///
+/// Setting `abort` brings the deadline forward: the process group is
+/// terminated and reaped exactly as on timeout, and the result is
+/// [`ChildObservation::TimedOut`]. A long per-product budget therefore never
+/// holds up an owner that is shutting down.
+#[must_use]
+pub fn observe_until(
+    program: &str,
+    arguments: &[&str],
+    policy: ChildPolicy,
+    abort: &AtomicBool,
+) -> ChildObservation {
     let mut command = Command::new(program);
     command.args(arguments);
-    normalize_observation(observe_command_output(command, policy))
+    normalize_observation(public_output(execute_command_output_until(
+        command, policy, abort,
+    )))
 }
+
+/// The abort flag of an observation no owner can end early.
+static NEVER_ABORTED: AtomicBool = AtomicBool::new(false);
 
 fn normalize_observation(observation: ChildOutputObservation) -> ChildObservation {
     match observation {
@@ -173,10 +194,18 @@ fn public_output(result: Result<ChildCommandOutput, ChildOutputError>) -> ChildO
 /// # Errors
 ///
 /// Returns a closed failure when spawning, waiting, capture, or cleanup fails.
-#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=preserves_machine_output_bytes,normalizes_success_and_safe_failure_states,escaped_descendant_cannot_hold_capture_or_input_workers
 pub fn execute_command_output(
+    command: Command,
+    policy: ChildPolicy,
+) -> Result<ChildCommandOutput, ChildOutputError> {
+    execute_command_output_until(command, policy, &NEVER_ABORTED)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=preserves_machine_output_bytes,normalizes_success_and_safe_failure_states,escaped_descendant_cannot_hold_capture_or_input_workers,abort_ends_the_probe_before_its_deadline
+fn execute_command_output_until(
     mut command: Command,
     policy: ChildPolicy,
+    abort: &AtomicBool,
 ) -> Result<ChildCommandOutput, ChildOutputError> {
     command
         .stdin(Stdio::null())
@@ -229,7 +258,7 @@ pub fn execute_command_output(
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildOutputError::OutputTooLarge);
             }
-            Ok(None) if Instant::now() < deadline => {
+            Ok(None) if Instant::now() < deadline && !abort.load(Ordering::Acquire) => {
                 thread::sleep(
                     Duration::from_millis(5)
                         .min(deadline.saturating_duration_since(Instant::now())),
@@ -1082,6 +1111,29 @@ mod tests {
         );
         assert_eq!(result, ChildObservation::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn abort_ends_the_probe_before_its_deadline() {
+        let abort = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&abort);
+        let started = Instant::now();
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            setter.store(true, Ordering::Release);
+        });
+        let result = observe_until(
+            "sh",
+            &["-c", "sleep 30"],
+            ChildPolicy {
+                timeout: Duration::from_secs(30),
+                ..policy()
+            },
+            &abort,
+        );
+        trigger.join().unwrap();
+        assert_eq!(result, ChildObservation::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
