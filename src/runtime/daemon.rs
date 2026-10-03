@@ -594,7 +594,7 @@ fn bounded_readiness_command(
     bounds: ReadinessBounds,
     terminate_grace: Duration,
 ) -> AgentReadiness {
-    readiness_from_observation(&observe(
+    let observation = observe(
         program,
         arguments,
         ChildPolicy {
@@ -602,7 +602,30 @@ fn bounded_readiness_command(
             terminate_grace,
             output_limit: bounds.output_limit,
         },
-    ))
+    );
+    // The wire answer stays one safe message, so the closed failure kind is the
+    // only evidence that tells a slow CLI from a missing or signed-out one.
+    if let Some(reason) = readiness_failure_reason(&observation) {
+        ErrorLog::record(&format!(
+            "agent readiness probe failed: program={program} reason={reason}"
+        ));
+    }
+    readiness_from_observation(&observation)
+}
+
+/// The non-secret, closed name of why a status probe did not prove readiness.
+/// The program is a vocabulary command name; argv, output, and OS errors are
+/// never part of it.
+fn readiness_failure_reason(observation: &ChildObservation) -> Option<&'static str> {
+    match observation {
+        ChildObservation::Success(_) | ChildObservation::EmptyOutput => None,
+        ChildObservation::SpawnFailed => Some("spawn_failed"),
+        ChildObservation::ExitFailure => Some("exit_failure"),
+        ChildObservation::TimedOut => Some("timed_out"),
+        ChildObservation::OutputTooLarge => Some("output_too_large"),
+        ChildObservation::InvalidOutput => Some("invalid_output"),
+        ChildObservation::ObservationFailed => Some("observation_failed"),
+    }
 }
 
 fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness {

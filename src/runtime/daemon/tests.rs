@@ -1938,6 +1938,34 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
 }
 
 #[test]
+fn readiness_failures_are_named_by_a_closed_reason() {
+    for (observation, reason) in [
+        (ChildObservation::Success("ok".to_owned()), None),
+        (ChildObservation::EmptyOutput, None),
+        (ChildObservation::SpawnFailed, Some("spawn_failed")),
+        (ChildObservation::ExitFailure, Some("exit_failure")),
+        (ChildObservation::TimedOut, Some("timed_out")),
+        (ChildObservation::OutputTooLarge, Some("output_too_large")),
+        (ChildObservation::InvalidOutput, Some("invalid_output")),
+        (
+            ChildObservation::ObservationFailed,
+            Some("observation_failed"),
+        ),
+    ] {
+        assert_eq!(
+            readiness_failure_reason(&observation),
+            reason,
+            "{observation:?}"
+        );
+        assert_eq!(
+            readiness_from_observation(&observation) == AgentReadiness::Ready,
+            reason.is_none(),
+            "{observation:?}"
+        );
+    }
+}
+
+#[test]
 fn readiness_is_distinct_from_install_and_rejects_unauthenticated_status() {
     assert_eq!(
         readiness_from_observation(&ChildObservation::EmptyOutput),
