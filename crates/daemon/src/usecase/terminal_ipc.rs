@@ -1011,14 +1011,22 @@ mod tests {
         cols: u16,
     ) -> TerminalRequest {
         TerminalRequest::Launch {
-            intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
-                request: TerminalLaunchRequest {
-                    profile_id: TerminalProfileId::new("login-shell").unwrap(),
-                    scope: scope.clone(),
-                },
-                geometry: TerminalGeometry { cols, rows: 24 },
-                launch_operation: operation,
+            intent: launch_intent(scope, operation, cols),
+        }
+    }
+
+    fn launch_intent(
+        scope: &TerminalLaunchScope,
+        operation: Option<OperationId>,
+        cols: u16,
+    ) -> TerminalLaunchIntent {
+        TerminalLaunchIntent {
+            request: TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope: scope.clone(),
             },
+            geometry: TerminalGeometry { cols, rows: 24 },
+            launch_operation: operation,
         }
     }
 
@@ -1035,10 +1043,7 @@ mod tests {
         let scope = scope_of(Some(SessionId::new()));
         let mut runtime = runtime_for(scope.clone());
         let producer = OperationId::new();
-        let TerminalRequest::Launch { mut intent } = launch_request(&scope, Some(producer), 80)
-        else {
-            panic!("expected launch request");
-        };
+        let mut intent = launch_intent(&scope, Some(producer), 80);
         assert!(runtime.launch_needs_profile_resolution(&intent).unwrap());
         call(
             &mut runtime,
@@ -1112,11 +1117,7 @@ mod tests {
             launch_request(&scope, Some(OperationId::new()), 80),
         );
 
-        let TerminalRequest::Launch { intent } =
-            launch_request(&scope, Some(OperationId::new()), 80)
-        else {
-            panic!("expected launch request");
-        };
+        let intent = launch_intent(&scope, Some(OperationId::new()), 80);
         assert_eq!(
             runtime
                 .launch_needs_profile_resolution(&intent)
