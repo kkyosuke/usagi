@@ -101,8 +101,8 @@ mod action_io {
     use super::{
         Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
         LauncherPolicyInputs, McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox, clean,
-        daemon, execute_self_update, exit_code, guard_workspace, mcp_daemon_route, tui,
-        write_client_error, write_daemon_outcome,
+        daemon, execute_self_update, exit_code, guard_workspace, managed_update_sync_exit_code,
+        mcp_daemon_route, tui, write_client_error, write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
@@ -133,7 +133,10 @@ mod action_io {
             }
             (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
                 match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
-                    Ok(()) => Ok(ExitCode::SUCCESS),
+                    Ok(outcome) => Ok(managed_update_sync_exit_code(
+                        outcome,
+                        std::env::var("USAGI_UPDATE_SYNC_OUTCOMES").as_deref() == Ok("1"),
+                    )),
                     Err(error) => {
                         write_client_error(err, "daemon synchronization refused", &error)?;
                         Ok(ExitCode::FAILURE)
@@ -767,6 +770,21 @@ fn write_client_error(
             err,
             "{context} [busy]: another usagi process is establishing the daemon connection; try again"
         ),
+    }
+}
+
+fn managed_update_sync_exit_code(
+    outcome: daemon::ManagedUpdateSync,
+    report_deferred: bool,
+) -> ExitCode {
+    // Older binaries embed an installer that treats every nonzero sync status
+    // as an update failure. A new installer opts into the deferred status so
+    // upgrades from those binaries can still succeed without restarting Agents.
+    match (outcome, report_deferred) {
+        (daemon::ManagedUpdateSync::Deferred, true) => ExitCode::from(3),
+        (daemon::ManagedUpdateSync::Complete | daemon::ManagedUpdateSync::Deferred, _) => {
+            ExitCode::SUCCESS
+        }
     }
 }
 

@@ -3855,18 +3855,21 @@ pub(crate) fn managed_update_diagnostic_client(
     }
 }
 
+/// Whether an installed artifact is serving or awaits live Agent completion.
+pub(crate) enum ManagedUpdateSync {
+    Complete,
+    Deferred,
+}
+
 /// Synchronize the published daemon with the exact installed binary while the
-/// installer still owns `update.lock`.
-///
-/// This lifecycle-only path never starts an absent daemon and never repairs or
-/// restarts Agents. A live process-local Agent credential leaves the old daemon
-/// untouched and makes the update report a deferred synchronization.
+/// installer still owns `update.lock`. An absent daemon stays stopped; live
+/// Agent credentials defer replacement while preserving the current owner.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
 pub(crate) fn sync_after_update(
     out: &mut dyn Write,
     policy: ClientPolicy,
     info: &AppInfo,
-) -> std::io::Result<Result<(), ClientError>> {
+) -> std::io::Result<Result<ManagedUpdateSync, ClientError>> {
     let expected_build = current_build();
     let (lock, client) = match managed_update_diagnostic_client(policy) {
         Ok(value) => value,
@@ -3874,7 +3877,7 @@ pub(crate) fn sync_after_update(
     };
     let Some(mut owner) = client else {
         writeln!(out, "daemon sync: daemon is not running; left it stopped")?;
-        return Ok(Ok(()));
+        return Ok(Ok(ManagedUpdateSync::Complete));
     };
     let published_build = owner.server_build().clone();
     if published_build != expected_build {
@@ -3923,9 +3926,11 @@ pub(crate) fn sync_after_update(
         match diagnosis.provisioned_mcp_callers {
             Some(0) => {}
             Some(credentials) => {
-                return Ok(Err(ClientError::Lifecycle(format!(
-                    "daemon synchronization deferred: {credentials} daemon-provisioned MCP caller credential(s) remain; {RESTART_AGENTS_REMEDY}"
-                ))));
+                writeln!(
+                    out,
+                    "daemon sync: deferred to preserve {credentials} Agent connection(s); {RESTART_AGENTS_REMEDY}"
+                )?;
+                return Ok(Ok(ManagedUpdateSync::Deferred));
             }
             None => {
                 return Ok(Err(ClientError::Lifecycle(
@@ -3955,7 +3960,7 @@ pub(crate) fn sync_after_update(
         return Ok(Err(error));
     }
     writeln!(out, "daemon sync: installed build is current and serving")?;
-    Ok(Ok(()))
+    Ok(Ok(ManagedUpdateSync::Complete))
 }
 
 /// A workspace-bound daemon client for a background observation lane.

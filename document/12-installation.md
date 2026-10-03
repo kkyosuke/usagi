@@ -86,6 +86,7 @@ usagi update -v
 ```
 
 更新後の CLI は次回起動から使われるため、起動中の TUI は終了して開き直す。
+実行中の Agent が daemon の切り替えを妨げる場合も binary の更新は成功し、切り替えの保留を表示する。
 更新時の download・検証・atomic replacement と内部 daemon 同期は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)、
 live Agent を含む daemon の安全な引き継ぎと拒否条件は
