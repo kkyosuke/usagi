@@ -1988,29 +1988,48 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
 
 #[test]
 fn readiness_failures_are_named_by_a_closed_reason() {
-    for (observation, reason) in [
-        (ChildObservation::Success("ok".to_owned()), None),
-        (ChildObservation::EmptyOutput, None),
-        (ChildObservation::SpawnFailed, Some("spawn_failed")),
-        (ChildObservation::ExitFailure, Some("exit_failure")),
-        (ChildObservation::TimedOut, Some("timed_out")),
-        (ChildObservation::OutputTooLarge, Some("output_too_large")),
-        (ChildObservation::InvalidOutput, Some("invalid_output")),
+    for (observation, reasons) in [
+        (ChildObservation::Success("ok".to_owned()), [None, None]),
+        (ChildObservation::EmptyOutput, [None, None]),
+        (
+            ChildObservation::SpawnFailed,
+            [Some("spawn_failed"), Some("spawn_failed")],
+        ),
+        (
+            ChildObservation::ExitFailure,
+            [Some("exit_failure"), Some("exit_failure")],
+        ),
+        (
+            ChildObservation::TimedOut,
+            [Some("timed_out"), Some("shutdown")],
+        ),
+        (
+            ChildObservation::OutputTooLarge,
+            [Some("output_too_large"), Some("output_too_large")],
+        ),
+        (
+            ChildObservation::InvalidOutput,
+            [Some("invalid_output"), Some("invalid_output")],
+        ),
         (
             ChildObservation::ObservationFailed,
-            Some("observation_failed"),
+            [Some("observation_failed"), Some("observation_failed")],
         ),
     ] {
-        assert_eq!(
-            readiness_failure_reason(&observation),
-            reason,
-            "{observation:?}"
-        );
-        assert_eq!(
-            readiness_from_observation(&observation) == AgentReadiness::Ready,
-            reason.is_none(),
-            "{observation:?}"
-        );
+        // A concurrent shutdown changes only the cancelled/timed-out probe,
+        // not a known spawn, exit, capture, or decoding failure.
+        for (shutdown_requested, reason) in [false, true].into_iter().zip(reasons) {
+            assert_eq!(
+                readiness_failure_reason(&observation, shutdown_requested),
+                reason,
+                "{observation:?}, shutdown={shutdown_requested}"
+            );
+            assert_eq!(
+                readiness_from_observation(&observation) == AgentReadiness::Ready,
+                reason.is_none(),
+                "{observation:?}"
+            );
+        }
     }
 }
 

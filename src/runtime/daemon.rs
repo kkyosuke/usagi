@@ -609,14 +609,7 @@ fn bounded_readiness_command(
     );
     // The wire answer stays one safe message, so the closed failure kind is the
     // only evidence that tells a slow CLI from a missing or signed-out one.
-    if let Some(reason) = readiness_failure_reason(&observation) {
-        // A probe that shutdown ended reports `TimedOut`, but recording it as a
-        // timeout would blame a CLI that was never given its budget.
-        let reason = if abort.load(Ordering::Acquire) {
-            "shutdown"
-        } else {
-            reason
-        };
+    if let Some(reason) = readiness_failure_reason(&observation, abort.load(Ordering::Acquire)) {
         ErrorLog::record(&format!(
             "agent readiness probe failed: program={program} reason={reason}"
         ));
@@ -627,11 +620,17 @@ fn bounded_readiness_command(
 /// The non-secret, closed name of why a status probe did not prove readiness.
 /// The program is a vocabulary command name; argv, output, and OS errors are
 /// never part of it.
-fn readiness_failure_reason(observation: &ChildObservation) -> Option<&'static str> {
+fn readiness_failure_reason(
+    observation: &ChildObservation,
+    shutdown_requested: bool,
+) -> Option<&'static str> {
     match observation {
         ChildObservation::Success(_) | ChildObservation::EmptyOutput => None,
         ChildObservation::SpawnFailed => Some("spawn_failed"),
         ChildObservation::ExitFailure => Some("exit_failure"),
+        // Shutdown cancellation normalizes to TimedOut. Completed failures
+        // retain their own cause when shutdown races with their observation.
+        ChildObservation::TimedOut if shutdown_requested => Some("shutdown"),
         ChildObservation::TimedOut => Some("timed_out"),
         ChildObservation::OutputTooLarge => Some("output_too_large"),
         ChildObservation::InvalidOutput => Some("invalid_output"),

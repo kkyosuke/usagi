@@ -107,6 +107,9 @@ Switch では選択中の session の [メモ](document/03-tui.md#session-memo) 
 
 起動失敗や daemon の異常終了を調べる際は、[failure log](document/05-daemon.md#failure-logging)を確認してください。
 
+Agent は起動前に CLI の認証状態を確認し、確認失敗の理由を daemon log に記録します。
+詳しくは[起動前の認証確認](document/05-daemon.md#agent-cli-の-readiness-preflight)を参照してください。
+
 ## 基本概念
 
 | 用語 | 意味 |

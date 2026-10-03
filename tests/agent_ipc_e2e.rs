@@ -21,7 +21,7 @@ use usagi_core::domain::agent::{
 };
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
-use usagi_core::domain::settings::{DefaultModel, Settings};
+use usagi_core::domain::settings::Settings;
 use usagi_core::domain::supervisor::{
     SupervisorRunId, SupervisorRunQuery, SupervisorRunState, SupervisorWorkspaceSnapshot, TaskState,
 };
@@ -1519,15 +1519,12 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
         "owner operations waited for readiness"
     );
 
-    // Retirement joins the in-flight status probe after its product deadline
-    // and process-group cleanup. A fixed five-second observation incorrectly
-    // fails when Codex's healthy-start budget is larger. Keep the owner IO
-    // bounds above independent, and retain the exact-child reap check below.
-    let shutdown_bound =
-        DefaultModel::OpenAi.readiness_command().timeout() + Duration::from_secs(5);
+    // Shutdown must cancel the in-flight probe and reap its child without
+    // waiting for the longer provider deadline. This also proves that the
+    // shipping daemon passes its own shutdown flag to the readiness runner.
     assert!(
-        daemon.terminate_and_wait(shutdown_bound),
-        "shutdown exceeded the readiness deadline and cleanup bound"
+        daemon.terminate_and_wait(Duration::from_secs(5)),
+        "shutdown waited for the readiness deadline instead of cancelling the probe"
     );
     for launch in launches {
         let _ = launch.join().unwrap();
