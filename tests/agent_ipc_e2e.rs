@@ -579,6 +579,68 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, W
     )
 }
 
+/// The shipped daemon must give its real PTY children a service namespace
+/// independent of the caller's GUI login, while preserving OS user lookup.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_daemon_ptys_use_persistent_user_service_context() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-context-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let shell = bin.join("context-shell");
+    let result = home.path().join("context-result");
+    fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\nset -eu\n{{\n/bin/launchctl managername\n/usr/bin/id -un\n/usr/bin/ssh -F /dev/null -G git@example.invalid >/dev/null\nprintf 'ready\\n'\n}} > {}\n",
+            shell_quote(result.to_str().unwrap()),
+        ),
+    ).unwrap();
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o755)).unwrap();
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut client);
+    client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .expect("the generic PTY launches through the shipping daemon");
+    let expected_user = usagi_daemon::infrastructure::os_user::effective_user_name()
+        .expect("the fixture's effective UID has an OS user record");
+    let expected = format!("Background\n{expected_user}\nready\n");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let actual = fs::read_to_string(&result).unwrap_or_default();
+        if actual == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "PTY context probe: {actual:?}; {}",
+            daemon_error_log(&data_dir)
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions() {
     let _serial = serial();
