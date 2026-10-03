@@ -22,13 +22,12 @@ use super::{
     SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime, SharedSupervisorRuntime,
     SharedTerminalRuntime, SharedVerificationCache, SupervisorRuntime, SupervisorToolAction,
     SystemClock, SystemGit, TeardownSignal, Tenant, TerminalId, TerminalPipelineMetrics,
-    UnixStandbyProbe, UserDecisionStore, WorkspaceId, Workspaces, aggregate_agent_status,
-    bounded_supervisor_query, clear_pending_daemon_agent_restart, current_build,
-    observe_generation_process, output_pipeline_counters, paths, perform_compensating_remove,
-    perform_create, perform_delegated_create, perform_remove_with_merged_head,
-    pr_projection_counters, process_start_identity, recover_rollover,
-    restore_pending_daemon_agents, rollover_trigger, validate_owned_directory,
-    write_pending_daemon_agent_restart,
+    UnixStandbyProbe, UserDecisionStore, WorkspaceId, Workspaces, bounded_supervisor_query,
+    clear_pending_daemon_agent_restart, current_build, observe_generation_process,
+    output_pipeline_counters, paths, perform_compensating_remove, perform_create,
+    perform_delegated_create, perform_remove_with_merged_head, pr_projection_counters,
+    process_start_identity, recover_rollover, restore_pending_daemon_agents, rollover_trigger,
+    validate_owned_directory, write_pending_daemon_agent_restart,
 };
 
 pub(super) struct DispatchToolContext<'a> {

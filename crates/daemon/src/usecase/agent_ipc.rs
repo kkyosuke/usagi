@@ -1709,13 +1709,17 @@ impl AgentRuntime {
         }
     }
 
-    /// Returns one cross-project observation with both runtime detail and the
-    /// dispatch terminal state used by `session list`. Multiple dispatch Agents
-    /// in one session use the same deterministic status precedence as that list.
-    pub fn workspace_observation(
+    /// Projects dispatch availability together with activity reported by exact
+    /// live runtimes. A new prompt or tool may be running after its previous
+    /// dispatch completed, so current activity outranks terminal registry history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unavailable error when dispatch storage cannot be read.
+    pub fn workspace_agent_statuses(
         &self,
         workspace: WorkspaceId,
-    ) -> Result<AgentWorkspaceObservation, ProtocolError> {
+    ) -> Result<BTreeMap<SessionId, AgentStatus>, ProtocolError> {
         let mut selected = BTreeMap::new();
         for agent in self
             .dispatch
@@ -1732,9 +1736,32 @@ impl AgentRuntime {
                 })
                 .or_insert(agent.status);
         }
+        for record in self.coordinator.snapshot().records {
+            if record.runtime.terminal.workspace_id != workspace
+                || record.state != super::runtime::RuntimeState::Running
+                || !matches!(
+                    self.reported_phases.get(&record.runtime.agent_runtime_id),
+                    Some(AgentPhase::Running | AgentPhase::Waiting)
+                )
+            {
+                continue;
+            }
+            if let Some(session) = record.runtime.session_id {
+                selected.insert(session, AgentStatus::Running);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Returns one cross-project observation with both runtime detail and the
+    /// activity-aware dispatch state also used by `session list`.
+    pub fn workspace_observation(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<AgentWorkspaceObservation, ProtocolError> {
         Ok(AgentWorkspaceObservation {
             inventory: self.inventory(workspace),
-            session_statuses: selected,
+            session_statuses: self.workspace_agent_statuses(workspace)?,
         })
     }
 

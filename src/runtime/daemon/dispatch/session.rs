@@ -14,8 +14,8 @@ use super::super::workflow;
 use super::{
     AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore, ErrorLog,
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
-    SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, aggregate_agent_status,
-    best_effort_merged_pr_head, bind_delegated_supervisor_dispatch, clean_orphan_session_resources,
+    SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, best_effort_merged_pr_head,
+    bind_delegated_supervisor_dispatch, clean_orphan_session_resources,
     dispatch_agent_after_preflight, perform_compensating_remove, perform_create,
     perform_delegated_create, perform_remove_with_merged_head,
     reconcile_pending_supervisor_promotions, record_session_lineage,
@@ -178,9 +178,11 @@ pub(super) fn dispatch_session_action(
                     .map_err(|_| SessionRuntimeError::Storage)?
                     .handle(action, operation_id, payload)?
             };
+            let workspace = bound_workspace()?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-            let store = runtime.dispatch_store();
-            let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;
+            let agent_statuses = runtime
+                .workspace_agent_statuses(workspace)
+                .map_err(|_| SessionRuntimeError::Storage)?;
             let runtime_observation = |id, names: &_, parents: &_| {
                 use usagi_core::infrastructure::session_snapshot::SessionRuntimeObservation;
 
@@ -191,12 +193,7 @@ pub(super) fn dispatch_session_action(
                     agent_phase: runtime.session_phase(id),
                     agent_resumable,
                     agent_resume_reason,
-                    agent_status: aggregate_agent_status(
-                        agents
-                            .iter()
-                            .filter(|agent| agent.session_id == Some(id))
-                            .map(|agent| agent.status),
-                    ),
+                    agent_status: agent_statuses.get(&id).copied(),
                     parent_session_name,
                     organization_depth,
                     organization_path,
