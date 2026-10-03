@@ -610,6 +610,13 @@ fn bounded_readiness_command(
     // The wire answer stays one safe message, so the closed failure kind is the
     // only evidence that tells a slow CLI from a missing or signed-out one.
     if let Some(reason) = readiness_failure_reason(&observation) {
+        // A probe that shutdown ended reports `TimedOut`, but recording it as a
+        // timeout would blame a CLI that was never given its budget.
+        let reason = if abort.load(Ordering::Acquire) {
+            "shutdown"
+        } else {
+            reason
+        };
         ErrorLog::record(&format!(
             "agent readiness probe failed: program={program} reason={reason}"
         ));

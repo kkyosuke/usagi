@@ -1939,7 +1939,8 @@ root が持つのは product に依らない部分（terminate grace と coalesc
 
 probe が readiness を証明できなかったとき、wire には単一の safe message だけを返し、daemon の error log
 （`<data dir>/logs/`）に program 名（vocabulary の command 名）と closed な失敗種別（`spawn_failed` /
-`exit_failure` / `timed_out` / `output_too_large` / `invalid_output` / `observation_failed`）だけを記録する。
+`exit_failure` / `timed_out` / `output_too_large` / `invalid_output` / `observation_failed`、shutdown が打ち切った probe は
+`shutdown`）だけを記録する。
 argv、CLI 出力、OS error は記録しない。
 
 同じ provider の同時 probe は 1 child に coalesce する。timeout 時はその exact child を TERM、bounded grace、KILL の順で停止して reap し、
