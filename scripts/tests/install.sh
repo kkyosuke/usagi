@@ -56,6 +56,7 @@ make_binary() {
         '    shift' \
         '    [ "${USAGI_SYNC_UNSUPPORTED:-}" != "1" ] || exit 2' \
         '    [ "$#" -eq 1 ] && [ "$1" = "sync-after-update" ] || exit 2' \
+        '    [ "${USAGI_UPDATE_SYNC_OUTCOMES:-}" = "1" ] || exit 74' \
         '    [ -z "${USAGI_SYNC_LOG:-}" ] || printf "%s|%s\\n" "$PWD" "$1" >> "$USAGI_SYNC_LOG"' \
         '    while [ -n "${USAGI_SYNC_WAIT_FOR:-}" ] && [ ! -e "$USAGI_SYNC_WAIT_FOR" ]; do sleep 0.01; done' \
         '    exit "${USAGI_SYNC_STATUS:-0}"' \
@@ -262,6 +263,20 @@ grep -q 'could not complete daemon synchronization' "$CASE_DIR/err"
 grep -q "inspect 'usagi daemon status'" "$CASE_DIR/err"
 if grep -q 'left unchanged' "$CASE_DIR/err"; then
     echo "generic synchronization failure made an invalid pre-commit guarantee" >&2
+    exit 1
+fi
+
+prepare_case managed-update-deferred-for-live-agents
+USAGI_SYNC_STATUS=3
+export USAGI_SYNC_STATUS
+run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"
+unset USAGI_SYNC_STATUS
+[ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
+grep -q 'v1.0.0 から v2.0.0' "$CASE_DIR/out"
+grep -q 'daemon の切り替えは保留' "$CASE_DIR/out"
+[ ! -s "$CASE_DIR/err" ]
+if grep -q 'daemon の build を同期した' "$CASE_DIR/out"; then
+    echo "deferred synchronization incorrectly reported a serving successor" >&2
     exit 1
 fi
 

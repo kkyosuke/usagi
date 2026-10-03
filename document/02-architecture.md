@@ -65,6 +65,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │   ├── daemon/pty.rs        # PTY の確保と所有、terminal runtime の composition
 │   │   ├── daemon/instance_lock.rs # single-instance lock と workspace fence、custody 監視
 │   │   ├── daemon/broker.rs     # bootstrap broker の起動・endpoint 公開・idle 監視
+│   │   ├── daemon/managed_update.rs # binary 更新後の daemon 同期・live Agent による保留
 │   │   ├── daemon/dispatch.rs # admitted request と daemon owner / store の composition adapter
 │   │   ├── daemon/agent_provisioning.rs # provider argv・sandbox・role・MCP 注入の合成
 │   │   └── tui.rs        # crossterm terminal と workspace filesystem adapter
@@ -950,7 +951,13 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   `lifecycle.lock` の下で同期時点の exact owner を unbound 接続により再観測し、handoff、successor build、serving readiness の
   検証まで同じ直列化区間に含める。明示的な `daemon stop` / `restart` も `lifecycle.lock` を通るため、その途中へ割り込まない。
   daemon が無い場合や crash 後の stale owner を回収した場合は singleton lock でも不在を証明し、新規起動しない。
-  live Agent の process-local MCP authority を安全に移せない場合、内部同期は replacement を拒否して Agent と旧 daemon を維持する。
+  live Agent の process-local MCP authority を安全に移せない場合、内部同期は replacement を保留して Agent と旧 daemon を維持する。
+  installer は子の `USAGI_UPDATE_SYNC_OUTCOMES=1` で内部同期の保留結果を受け取る契約へ opt in する。
+  opt in 時の exit code は、同期完了・daemon 不在が `0`、live Agent を維持した保留が `3`、未対応 command が `2`、
+  その他の失敗が非 zero である。installer は `3` を binary 更新の成功として扱い、daemon の切り替えが保留中であることを表示する。
+  この契約を持たない旧 binary の埋め込み installer から呼ばれた場合は、保留を stdout に表示して `0` を返す。
+  この契約へ opt in した installer は保留時に同期完了を表示しない。Agent の終了後または会話を引き継ぐ
+  `usagi daemon restart --restart-agents` で切り替える。
   選択した旧 release が managed daemon sync capability を解釈できない場合や、published daemon が server-side handoff fence を証明できない場合も、
   legacy の弱い replacement を実行せず非 0 で終える。内部 command は Agent integration 履歴の修復を行わず、daemon build の同期だけを担う。
   atomic rename 後の拒否では binary は選択版、daemon は旧 build のままであり、安全な現行版へ更新するか Agent 終了後に `usagi daemon restart` を実行する。
