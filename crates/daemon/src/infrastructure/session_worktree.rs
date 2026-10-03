@@ -35,6 +35,7 @@ impl GitRunner for SystemGit {
 }
 
 fn git_policy(args: &[&str]) -> ChildPolicy {
+    let args = args.strip_prefix(&["--no-replace-objects"]).unwrap_or(args);
     let observation = args.first().is_some_and(|argument| {
         matches!(
             *argument,
@@ -498,6 +499,17 @@ mod bounded_git_tests {
         );
         assert_eq!(
             git_policy(&["worktree", "list"]).timeout,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            git_policy(&[
+                "--no-replace-objects",
+                "merge-base",
+                "--all",
+                "base",
+                "head"
+            ])
+            .timeout,
             Duration::from_secs(2)
         );
         assert_eq!(
