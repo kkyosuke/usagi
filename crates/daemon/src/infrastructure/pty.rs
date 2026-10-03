@@ -998,6 +998,23 @@ mod tests {
         assert!(writable.wait(libc::POLLOUT, None).unwrap());
     }
 
+    #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=real_pty_input_to_a_child_that_never_reads_fails_instead_of_blocking
+    fn configure_raw_input(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+        // Canonical line discipline can discard overflow on Linux. Raw input
+        // with echo disabled makes the unread queue apply pressure.
+        let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: the caller owns this open terminal descriptor; tcgetattr
+        // initializes mode before it is read by cfmakeraw.
+        fcntl_outcome(unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) })?;
+        // SAFETY: tcgetattr succeeded, initializing this termios value.
+        let mut mode = unsafe { mode.assume_init() };
+        // SAFETY: mode was initialized by tcgetattr and is writable.
+        unsafe { libc::cfmakeraw(&raw mut mode) };
+        // SAFETY: this owned terminal and initialized mode remain valid.
+        fcntl_outcome(unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw const mode) })?;
+        Ok(())
+    }
+
     #[test]
     fn real_pty_input_to_a_child_that_never_reads_fails_instead_of_blocking() {
         // The deadlock this bounds: an Agent stops reading input while the
@@ -1014,21 +1031,7 @@ mod tests {
         // Fill the kernel flip buffers as well as the line discipline queue:
         // Linux can accept hundreds of KiB without the slave reading input.
         let input = vec![b'x'; 8 * 1024 * 1024];
-        let observations = (|| -> std::io::Result<_> {
-            // Canonical line discipline can discard overflow on Linux. Raw
-            // input with echo disabled makes the unread queue apply pressure.
-            let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
-            // SAFETY: the terminal owns this open master descriptor;
-            // tcgetattr initializes mode before it is read by cfmakeraw.
-            fcntl_outcome(unsafe { libc::tcgetattr(terminal.master_fd, mode.as_mut_ptr()) })?;
-            // SAFETY: tcgetattr succeeded, initializing this termios value.
-            let mut mode = unsafe { mode.assume_init() };
-            // SAFETY: mode was initialized by tcgetattr and is writable.
-            unsafe { libc::cfmakeraw(&raw mut mode) };
-            // SAFETY: this owned terminal and initialized mode remain valid.
-            fcntl_outcome(unsafe {
-                libc::tcsetattr(terminal.master_fd, libc::TCSANOW, &raw const mode)
-            })?;
+        let observations = configure_raw_input(terminal.master_fd).map(|()| {
             terminal.writer.lock().unwrap().stall_timeout = Duration::from_millis(200);
 
             let started = std::time::Instant::now();
@@ -1036,8 +1039,8 @@ mod tests {
             let first_elapsed = started.elapsed();
             let started = std::time::Instant::now();
             let second = terminal.write_all(b"x");
-            Ok((first, first_elapsed, second, started.elapsed()))
-        })();
+            (first, first_elapsed, second, started.elapsed())
+        });
         // Reap before asserting either outcome, including a failed setup, so
         // a failing regression never leaves its sleep child running.
         terminal.terminate_reap().unwrap();
