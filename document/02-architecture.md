@@ -961,6 +961,10 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
   公開前の crash と空の共有 root は admission を妨げない。lock root / owner node の symlink は拒否し、待機は約 60 秒を上限とする。
   PID の再利用、permission denial、判別できない liveness probe failure は live owner として保守的に待つ。
+  公開済み PID / ticket は通常ファイルで固定し、symlink・FIFO・device・directory を読まない。new owner の PID が
+  読めない、欠けている、または不正な場合は未知として回収せず、同順位の admission も待つ。legacy PID の読取失敗は
+  空値へ変換せず待つが、読めた空値・不正値は従来の復旧対象とする。ticket の初回読取中に choosing が消えた場合は、
+  同じ node の公開済み ticket を再読して最大値へ取り込み、atomic に retire 済みなら飛ばす。
   PID probe の C locale で `No such process` を確認した場合だけ死亡とみなす。旧方式の公開済み live PID は process が cleanup を終えて
   終了するまで待ち、残った legacy PID metadata は新 owner の公開前に除去する。直列化と stale 回収の保証は新方式同士に適用する。
   旧方式の PID 公開前の空 root と、既に stale PID を読んだ旧 process による共有 root の削除は新方式から制御できないため、

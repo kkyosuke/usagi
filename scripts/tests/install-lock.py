@@ -19,9 +19,13 @@ def definition(source, name):
 
 source = Path(sys.argv[1]).read_text()
 functions = "\n".join(definition(source, name) for name in (
-    "cleanup", "fail", "process_is_live", "lock_owner_alive", "read_lock_ticket",
+    "cleanup", "fail", "process_is_live", "read_lock_metadata", "read_lock_pid",
+    "lock_owner_alive", "read_lock_ticket",
     "wait_for_update_lock", "acquire_lock",
 ))
+functions += "\n" + definition(source, "read_lock_ticket").replace(
+    "read_lock_ticket()", "observed_read_lock_ticket()", 1
+)
 
 bootstrap = r"""
 set -euo pipefail
@@ -36,6 +40,18 @@ STAGE_DIR=""
 SELECTOR_ACTIVE=0
 """ + functions + r"""
 trap cleanup EXIT HUP INT TERM
+read_lock_ticket() {
+    local value status=0
+    value="$(observed_read_lock_ticket "$1")" || status=$?
+    if [ -n "${READ_FAILURE_BARRIER_NODE:-}" ] &&
+        [ "$1" = "$READ_FAILURE_BARRIER_NODE" ] && [ "$status" -ne 0 ] &&
+        [ ! -e "$COORD/read-failed-$ROLE" ]; then
+        touch "$COORD/read-failed-$ROLE"
+        while [ ! -e "$COORD/read-$ROLE" ]; do command sleep 0.01; done
+    fi
+    printf '%s\n' "$value"
+    return "$status"
+}
 kill() {
     if [ -n "${LIVENESS_ERROR:-}" ]; then
         printf '%s\n' "$LIVENESS_ERROR" >&2
@@ -87,11 +103,19 @@ rm() {
     fi
 }
 sleep() {
-    [ "${FAST_WAIT:-0}" -eq 1 ] && return 0
+    if [ "${FAST_WAIT:-0}" -eq 1 ]; then
+        # Exercise the production deadline boundary without hundreds of
+        # forked metadata probes in each failure-policy fixture.
+        [ "$LOCK_ATTEMPTS" -ge 596 ] || LOCK_ATTEMPTS=596
+        return 0
+    fi
     touch "$COORD/waiting-$ROLE"
     command sleep "$@"
 }
 sed() {
+    if [ -n "${PID_READ_ERROR:-}" ] && [ "$3" = "$PID_READ_ERROR" ]; then
+        return 1
+    fi
     if [ "${FAST_WAIT:-0}" -eq 1 ] && [ "$1" = -n ] && [ "$2" = 1p ]; then
         local line=""
         IFS= read -r line < "$3" || true
@@ -127,7 +151,8 @@ class Case:
         child = subprocess.Popen([
             "/bin/bash", "-c", bootstrap, "install-lock-test", str(self.home),
             role, str(self.coord),
-        ], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
         self.children.append(child)
         return child
 
@@ -157,12 +182,145 @@ class Case:
     def close(self):
         for child in self.children:
             if child.poll() is None:
-                child.terminate()
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             try:
                 child.communicate(timeout=15)
             except subprocess.TimeoutExpired:
-                child.kill()
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 child.communicate(timeout=15)
+
+
+def ticket_publication_and_retirement_after_a_failed_read(root):
+    for retire in (False, True):
+        case = Case(root, "doorway-" + ("retirement" if retire else "publication"))
+        try:
+            publishing = case.launch("b", TICKET_BARRIER=1)
+            case.await_marker("ticket-ready-b")
+            scanning = case.launch("a", READ_FAILURE_BARRIER_NODE=case.node("b"))
+            case.await_marker("read-failed-a")
+            if retire:
+                publishing.terminate()
+                case.signal("ticket-b")
+                case.finish(publishing)
+                assert not case.node("b").exists()
+            else:
+                case.signal("ticket-b")
+                case.await_marker("waiting-b")
+                assert (case.node("b") / "ticket").read_text().strip() == "1"
+                assert not (case.node("b") / "choosing").exists()
+            case.signal("read-a")
+            if not retire:
+                case.await_marker("acquired-b")
+                case.await_marker("waiting-a")
+                assert (case.node("a") / "ticket").read_text().strip() == "2"
+                assert not (case.coord / "acquired-a").exists()
+                case.signal("release-b")
+                case.finish(publishing)
+            case.await_marker("acquired-a")
+            case.signal("release-a")
+            case.finish(scanning)
+        finally:
+            for role in ("a", "b"):
+                for stage in ("read", "ticket", "release"):
+                    case.signal(f"{stage}-{role}")
+            case.close()
+
+
+def unreadable_identity_is_unknown_until_timeout(root):
+    for legacy in (False, True):
+        case = Case(root, "unreadable-pid-" + ("legacy" if legacy else "node"))
+        try:
+            lock = case.home / "update.lock"
+            owner = lock if legacy else lock / "owner.fixture"
+            owner.mkdir(parents=True)
+            pid = owner / "pid"
+            pid.write_text(str(os.getpid()) + "\n")
+            if not legacy:
+                (owner / "ticket").write_text("1\n")
+            child = case.launch("a", FAST_WAIT=1, PID_READ_ERROR=pid)
+            assert "another usagi update" in case.finish(child, 1)
+            assert owner.is_dir() and pid.read_text().strip() == str(os.getpid())
+            if legacy:
+                assert not list(lock.glob("owner.*"))
+            else:
+                assert list(lock.glob("owner.*")) == [owner]
+        finally:
+            case.close()
+
+    case = Case(root, "unreadable-pid-with-equal-tickets")
+    try:
+        holder = case.launch("b", PUBLISH_BARRIER=1, TICKET_BARRIER=1)
+        case.await_marker("published-b")
+        denied = case.launch("a", TICKET_BARRIER=1, FAST_WAIT=1,
+                             PID_READ_ERROR=case.node("b") / "pid")
+        case.await_marker("ticket-ready-a")
+        case.signal("publish-b")
+        case.await_marker("ticket-ready-b")
+        case.signal("ticket-b")
+        case.await_marker("waiting-b")
+        case.signal("ticket-a")
+        assert "another usagi update" in case.finish(denied, 1)
+        case.await_marker("acquired-b")
+        assert (case.node("b") / "ticket").read_text().strip() == "1"
+        assert case.node("b").is_dir()
+        case.signal("release-b")
+        case.finish(holder)
+    finally:
+        for role in ("a", "b"):
+            for stage in ("publish", "ticket", "release"):
+                case.signal(f"{stage}-{role}")
+        case.close()
+
+
+def malformed_identity_and_special_metadata_remain_closed(root):
+    for label, field, shape, legacy in (
+        ("empty-pid", "pid", "empty", False),
+        ("missing-pid", "pid", "missing", False),
+        ("invalid-pid", "pid", "invalid", False),
+        ("large-pid", "pid", "large", False),
+        ("fifo-pid", "pid", "fifo", False),
+        ("fifo-legacy-pid", "pid", "fifo", True),
+        ("directory-pid", "pid", "directory", False),
+        ("directory-legacy-pid", "pid", "directory", True),
+        ("symlink-pid", "pid", "symlink", False),
+        ("fifo-ticket", "ticket", "fifo", False),
+        ("directory-ticket", "ticket", "directory", False),
+        ("symlink-ticket", "ticket", "symlink", False),
+    ):
+        case = Case(root, label)
+        try:
+            lock = case.home / "update.lock"
+            owner = lock if legacy else lock / "owner.fixture"
+            owner.mkdir(parents=True)
+            (owner / "pid").write_text(str(os.getpid()) + "\n")
+            if not legacy:
+                (owner / "ticket").write_text("1\n")
+            path = owner / field
+            path.unlink()
+            if shape == "fifo":
+                os.mkfifo(path)
+            elif shape == "directory":
+                path.mkdir()
+            elif shape == "symlink":
+                target = owner / "metadata-source"
+                target.write_text("1\n")
+                path.symlink_to(target)
+            elif shape != "missing":
+                path.write_text({"empty": "", "invalid": "invalid\n",
+                                 "large": "99999999999\n"}[shape])
+            child = case.launch("a", FAST_WAIT=1)
+            expected = "invalid update lock ticket" if field == "ticket" else "another usagi update"
+            assert expected in case.finish(child, 1)
+            assert owner.is_dir()
+            assert not path.exists() if shape == "missing" else path.exists()
+        finally:
+            case.close()
 
 
 def concurrent_stale_recovery(root):
@@ -296,11 +454,13 @@ rm -rf -- "$1"
         # The root has no pid or participants after normal release.
         unpublished = lock / ".prepare.crashed-without-pid"
         unpublished.mkdir()
-        (lock / "pid").write_text("invalid\n")
-        again = case.launch("b")
-        case.await_marker("acquired-b")
-        case.signal("release-b")
-        case.finish(again)
+        for index, value in enumerate(("", "0\n", "invalid\n")):
+            (lock / "pid").write_text(value)
+            role = f"b{index}"
+            again = case.launch(role)
+            case.await_marker(f"acquired-{role}")
+            case.signal(f"release-{role}")
+            case.finish(again)
         assert unpublished.is_dir(), "unpublished nodes are inert"
         assert lock.stat().st_mode & 0o777 == 0o700
         assert not (lock / "pid").exists(), "legacy metadata must not invite stale root deletion"
@@ -420,6 +580,9 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
                  legacy_and_empty_root, invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,
                  retiring_a_live_owner_does_not_expose_partial_metadata,
-                 failed_liveness_probes_preserve_owners_until_timeout):
+                 failed_liveness_probes_preserve_owners_until_timeout,
+                 ticket_publication_and_retirement_after_a_failed_read,
+                 unreadable_identity_is_unknown_until_timeout,
+                 malformed_identity_and_special_metadata_remain_closed):
         test(root)
         print(test.__name__ + ": passed")

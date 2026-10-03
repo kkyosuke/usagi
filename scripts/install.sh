@@ -223,12 +223,29 @@ process_is_live() {
     esac
 }
 
-lock_owner_alive() {
-    local node=$1 owner
-    owner="$(sed -n '1p' "$node/pid" 2>/dev/null || true)"
+read_lock_metadata() {
+    # Published PID/ticket files are immutable regular files. Refuse special
+    # files before sed so an unknown owner cannot block a liveness probe.
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    sed -n '1p' "$1" 2>/dev/null
+}
+
+read_lock_pid() {
+    local owner
+    owner="$(read_lock_metadata "$1/pid")" || return 1
     case "$owner" in
         ''|0|*[!0-9]*) return 1 ;;
     esac
+    [ "${#owner}" -le 10 ] || return 1
+    owner=$((10#$owner))
+    [ "$owner" -gt 0 ] && [ "$owner" -le 2147483647 ] || return 1
+    printf '%s\n' "$owner"
+}
+
+lock_owner_alive() {
+    local owner
+    # Missing, unreadable or malformed identity is unknown, not proof of death.
+    owner="$(read_lock_pid "$1")" || return 0
     # A reused PID conservatively remains busy. Clock or locale-sensitive
     # process timestamps must never cause a live participant to be reclaimed.
     process_is_live "$owner"
@@ -236,7 +253,7 @@ lock_owner_alive() {
 
 read_lock_ticket() {
     local ticket
-    ticket="$(sed -n '1p' "$1/ticket" 2>/dev/null || true)"
+    ticket="$(read_lock_metadata "$1/ticket")" || return 1
     case "$ticket" in
         ''|*[!0-9]*) return 1 ;;
     esac
@@ -253,7 +270,7 @@ wait_for_update_lock() {
 }
 
 acquire_lock() {
-    local node candidate name maximum=0 ticket owner blocked legacy_owner
+    local node candidate name maximum=0 ticket owner blocked legacy_owner owner_pid
     LOCK_ATTEMPTS=0
     mkdir -p -- "$USAGI_DIR"
     chmod 700 "$USAGI_DIR"
@@ -264,7 +281,11 @@ acquire_lock() {
     # Respect an existing legacy owner. Empty or invalid legacy roots are
     # recovered without deleting the directory or any newer participant.
     while true; do
-        legacy_owner="$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)"
+        if [ ! -e "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ]; then break; fi
+        if ! legacy_owner="$(read_lock_metadata "$LOCK_DIR/pid")"; then
+            wait_for_update_lock
+            continue
+        fi
         case "$legacy_owner" in
             ''|0|*[!0-9]*) break ;;
         esac
@@ -300,12 +321,16 @@ acquire_lock() {
             rm -rf -- "$node"
             continue
         fi
-        if ticket="$(read_lock_ticket "$node")"; then
-            [ "$ticket" -le "$maximum" ] || maximum=$ticket
-        elif [ ! -f "$node/choosing" ]; then
-            [ -d "$node" ] || continue
-            fail "invalid update lock ticket"
+        if ! ticket="$(read_lock_ticket "$node")"; then
+            [ ! -f "$node/choosing" ] || continue
+            # The other doorway may have closed after the failed read. Reread
+            # its published ticket before diagnosing malformed metadata.
+            if ! ticket="$(read_lock_ticket "$node")"; then
+                [ -d "$node" ] || continue
+                fail "invalid update lock ticket"
+            fi
         fi
+        [ "$ticket" -le "$maximum" ] || maximum=$ticket
     done
     [ "$maximum" -lt 2147483646 ] || fail "update lock ticket limit reached"
     ticket=$((maximum + 1))
@@ -331,12 +356,20 @@ acquire_lock() {
                 [ -d "$node" ] || continue
                 fail "invalid update lock ticket"
             fi
-            if [ "$owner" -lt "$ticket" ] || {
-                [ "$owner" -eq "$ticket" ] &&
-                [ "$(sed -n '1p' "$node/pid" 2>/dev/null || true)" -lt "$$" ];
-            }; then
+            if [ "$owner" -lt "$ticket" ]; then
                 blocked=1
                 break
+            fi
+            if [ "$owner" -eq "$ticket" ]; then
+                if ! owner_pid="$(read_lock_pid "$node")"; then
+                    [ -d "$node" ] || continue
+                    blocked=1
+                    break
+                fi
+                if [ "$owner_pid" -lt "$$" ]; then
+                    blocked=1
+                    break
+                fi
             fi
         done
         [ "$blocked" -ne 0 ] || break
