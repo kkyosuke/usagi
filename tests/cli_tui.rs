@@ -2509,9 +2509,23 @@ fn explicit_trust_root_starts_the_shipping_daemon_below_an_untrusted_parent() {
         .unwrap();
     assert!(repeated.status.success(), "{}", stderr(&repeated));
     assert!(stdout(&repeated).contains("already running"));
+    // `daemon start` returns once the daemon is recorded; the endpoint is
+    // published afterwards, so a loaded runner can reach `doctor` first.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while connect_current(&channel_data_dir(&home)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "explicitly started daemon did not publish its endpoint"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let doctor = command(&[OsStr::new("doctor")]).output().unwrap();
     assert!(doctor.status.success(), "{}", stderr(&doctor));
-    assert!(stdout(&doctor).contains("[ok] Daemon: daemon is reachable"));
+    let report = stdout(&doctor);
+    assert!(
+        report.contains("[ok] Daemon: daemon is reachable"),
+        "{report}"
+    );
     let stopped = command(&[OsStr::new("daemon"), OsStr::new("stop")])
         .output()
         .unwrap();
