@@ -303,6 +303,7 @@ pub(super) fn spawn_ipc_server(
         &children,
         hydration,
         terminal_limit,
+        shutdown.flag(),
     )?;
     background_workers.push(start_daemon_agent_restart_recovery(
         data_dir.to_path_buf(),

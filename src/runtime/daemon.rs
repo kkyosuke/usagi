@@ -176,7 +176,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
-use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::bounded_process::{
+    ChildObservation, ChildPolicy, observe, observe_until,
+};
 use usagi_core::infrastructure::client::{
     ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient, PolicyClient,
     TerminalLaneBudget,
@@ -595,8 +597,9 @@ fn bounded_readiness_command(
     arguments: &[&str],
     bounds: ReadinessBounds,
     terminate_grace: Duration,
+    abort: &AtomicBool,
 ) -> AgentReadiness {
-    readiness_from_observation(&observe(
+    let observation = observe_until(
         program,
         arguments,
         ChildPolicy {
@@ -604,7 +607,37 @@ fn bounded_readiness_command(
             terminate_grace,
             output_limit: bounds.output_limit,
         },
-    ))
+        abort,
+    );
+    // The wire answer stays one safe message, so the closed failure kind is the
+    // only evidence that tells a slow CLI from a missing or signed-out one.
+    if let Some(reason) = readiness_failure_reason(&observation, abort.load(Ordering::Acquire)) {
+        ErrorLog::record(&format!(
+            "agent readiness probe failed: program={program} reason={reason}"
+        ));
+    }
+    readiness_from_observation(&observation)
+}
+
+/// The non-secret, closed name of why a status probe did not prove readiness.
+/// The program is a vocabulary command name; argv, output, and OS errors are
+/// never part of it.
+fn readiness_failure_reason(
+    observation: &ChildObservation,
+    shutdown_requested: bool,
+) -> Option<&'static str> {
+    match observation {
+        ChildObservation::Success(_) | ChildObservation::EmptyOutput => None,
+        ChildObservation::SpawnFailed => Some("spawn_failed"),
+        ChildObservation::ExitFailure => Some("exit_failure"),
+        // Shutdown cancellation normalizes to TimedOut. Completed failures
+        // retain their own cause when shutdown races with their observation.
+        ChildObservation::TimedOut if shutdown_requested => Some("shutdown"),
+        ChildObservation::TimedOut => Some("timed_out"),
+        ChildObservation::OutputTooLarge => Some("output_too_large"),
+        ChildObservation::InvalidOutput => Some("invalid_output"),
+        ChildObservation::ObservationFailed => Some("observation_failed"),
+    }
 }
 
 fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness {

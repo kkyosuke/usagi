@@ -232,8 +232,15 @@ impl TeamTemplate {
 }
 
 /// Budget of a status probe whose CLI answers from local credentials alone.
-/// Claude and the Codex-compatible CLIs read a token file and exit.
-const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+/// Claude and the Codex-compatible CLIs read a token file and exit, but the
+/// process start-up is not free: `claude auth status` boots a ~230 MB bundled
+/// runtime and measured 0.8–0.9 s on an idle host and 1.3–1.5 s under CPU
+/// contention, and the first run of a freshly auto-updated binary also pays
+/// the OS code-signature scan. A two-second budget left less than 2x headroom,
+/// so a busy host reported an installed, authenticated CLI as unavailable and
+/// refused every launch. The budget only bounds a hung CLI, so it stays well
+/// above the slowest healthy start-up instead of near the typical one.
+const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Budget of Antigravity's probe. `agy models` is not a local credential read:
 /// it starts the product's language server and lists the models the signed-in
