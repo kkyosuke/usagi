@@ -65,6 +65,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │   ├── daemon/pty.rs        # PTY の確保と所有、terminal runtime の composition
 │   │   ├── daemon/instance_lock.rs # single-instance lock と workspace fence、custody 監視
 │   │   ├── daemon/broker.rs     # bootstrap broker の起動・endpoint 公開・idle 監視
+│   │   ├── daemon/managed_update.rs # binary 更新後の daemon 同期・live Agent による保留
 │   │   ├── daemon/dispatch.rs # admitted request と daemon owner / store の composition adapter
 │   │   ├── daemon/agent_provisioning.rs # provider argv・sandbox・role・MCP 注入の合成
 │   │   └── tui.rs        # crossterm terminal と workspace filesystem adapter

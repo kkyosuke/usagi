@@ -774,6 +774,7 @@ fn daemon_composition_root_keeps_its_concerns_in_their_modules() {
         ("broker.rs", "fn spawn_bootstrap_broker"),
         ("instance_lock.rs", "fn open_private_lock"),
         ("ipc_accept.rs", "fn start_ipc_accept_loop"),
+        ("managed_update.rs", "fn sync_after_update"),
         ("pty.rs", "fn new_terminal_runtime"),
         ("standby.rs", "fn promote_standby_generation"),
         ("workers.rs", "fn spawn_critical_worker"),
