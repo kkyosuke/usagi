@@ -87,6 +87,27 @@ impl WorkflowRecord {
     /// Version 2 retains retired command identity independently of display history.
     /// Older writers only accept version 1, so they cannot discard this fence.
     pub const VERSION: u32 = 2;
+
+    /// Maximum known retired human command ID, including legacy evidence that
+    /// has not yet been migrated into the fixed-size fence. A live run's IDs
+    /// join the fence only when its intent is finished.
+    #[must_use]
+    pub fn retired_bound(&self) -> Option<OperationId> {
+        let ended_run = self.finish.and(self.run.as_ref());
+        self.finished
+            .iter()
+            .map(|run| run.id)
+            .chain(self.retired_through)
+            .chain(self.finish)
+            .chain(self.finish.map(|_| self.operation))
+            .chain(ended_run.map(|run| run.id))
+            .chain(
+                ended_run
+                    .into_iter()
+                    .flat_map(|run| run.instructions.iter().map(|instruction| instruction.id)),
+            )
+            .max()
+    }
 }
 
 impl DispatchStore {
@@ -247,14 +268,7 @@ impl DispatchStore {
         );
         // Derive the legacy fence before any capacity trimming. Version 2 also
         // prevents older daemons, which reject it, from erasing that evidence.
-        value.retired_through = value
-            .finished
-            .iter()
-            .map(|run| run.id)
-            .chain(value.retired_through)
-            .chain(value.finish)
-            .chain(value.finish.map(|_| value.operation))
-            .max();
+        value.retired_through = value.retired_bound();
         value.version = WorkflowRecord::VERSION;
         while serde_json::to_vec_pretty(&value)?.len() >= MAX_BYTES {
             // Spend the live run's history first. The archive of ended runs is
@@ -654,6 +668,57 @@ mod tests {
         migrated.version = 3;
         std::fs::write(&path, serde_json::to_vec(&migrated).unwrap()).unwrap();
         assert!(store.workflow(workspace, session).is_err());
+    }
+
+    #[test]
+    fn legacy_finished_run_ids_survive_metadata_migration_and_pruning() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let agent = crate::domain::id::AgentId::new();
+        let id =
+            |last| OperationId::parse(&format!("018ff000-0000-7000-8000-{last:012x}")).unwrap();
+        let legacy = serde_json::json!({
+            "version":1,"operation":id(3),"goal":"Task","initial_notified":false,
+            "cursor":null,"finish":id(1),"finished":[],"run":{
+                "id":id(4),"session":session,"goal":"Task","implementer":agent,
+                "reviewer":null,"phase":"implementing","revision_limit":3,
+                "revisions":0,"review":null,"waiting_reason":null,
+                "instructions":[{"id":id(5),"requested_recipient":"implementer",
+                    "recipient":agent,"body":"Accepted","delivery":"notified"}]
+            }
+        });
+        let path = store.workflow_path(workspace, session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        store
+            .update_workflow(workspace, session, |_| Ok(()))
+            .unwrap();
+        let migrated = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(migrated.version, WorkflowRecord::VERSION);
+        assert_eq!(migrated.retired_through, Some(id(5)));
+        store
+            .update_workflow(workspace, session, |value| {
+                let record = value.as_mut().unwrap();
+                record.run = None;
+                record.finished.clear();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .workflow(workspace, session)
+                .unwrap()
+                .unwrap()
+                .retired_through,
+            Some(id(5))
+        );
+        // Accepted IDs of an unfinished run are not retired by migration.
+        let mut live = migrated;
+        live.finish = None;
+        live.retired_through = None;
+        assert_eq!(live.retired_bound(), None);
     }
 
     #[test]

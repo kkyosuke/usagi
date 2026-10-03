@@ -288,9 +288,9 @@ pub(super) fn control_workflow(
     // Admission persists the record before the launch is attempted, so a start
     // that is refused outright has to be able to undo it. Keep what the session
     // looked like before.
-    let before =
-        workflow::admit_with_previous(&store, workspace, session, operation, &command, issue)
-            .map_err(|error| admission_error(&error))?;
+    let before = admit_control(
+        agent, &store, workspace, session, operation, &command, issue,
+    )?;
     match command {
         WorkflowCommand::Start {
             goal,
@@ -324,6 +324,9 @@ pub(super) fn control_workflow(
                 // operation after an authentication failure. Every failure
                 // after a successful launch is reported as `Unavailable`, so a
                 // run whose Agent did start is never rolled back here.
+                // Serialize this completion with another same-ID launch, too:
+                // its final check / spawn / bind must see one stable intent.
+                let _owner = agent.lock().map_err(unavailable)?;
                 if error.retry_mode == RetryMode::Never {
                     rollback_admission(&store, workspace, session, operation, before.as_ref())?;
                 } else {
@@ -341,6 +344,25 @@ pub(super) fn control_workflow(
     // The command changed the record, not the peer journal, so the answer is a
     // stored projection rather than a second replay.
     workflow::projection(&store, workspace, session).map_err(unavailable)
+}
+
+fn admit_control(
+    agent: &SharedAgentRuntime,
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    operation: OperationId,
+    command: &WorkflowCommand,
+    issue: Option<u32>,
+) -> Result<
+    Option<usagi_core::infrastructure::store::dispatch::workflows::WorkflowRecord>,
+    ProtocolError,
+> {
+    // Start's final check / spawn / bind uses this same owner lock. A Finish
+    // that already reconciled cannot invalidate the intent halfway through it.
+    let _owner = agent.lock().map_err(unavailable)?;
+    workflow::admit_with_previous(store, workspace, session, operation, command, issue)
+        .map_err(|error| admission_error(&error))
 }
 
 /// Reflect observed evidence in the stored run: replay the peer journal, then
@@ -1063,6 +1085,82 @@ mod tests {
     use usagi_core::domain::id::AgentId;
     use usagi_core::domain::workflow::{Phase, Review, WorkflowRun};
     use usagi_core::infrastructure::store::dispatch::DispatchStore;
+
+    #[test]
+    fn finish_admission_cannot_interleave_with_start_launch_and_binding() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let agent = super::super::tests::empty_supervisor_agent(store.clone());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let finish = OperationId::new();
+        admit_control(
+            &agent,
+            &store,
+            workspace,
+            session,
+            operation,
+            &WorkflowCommand::Start {
+                goal: "Task".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: 3,
+            },
+            None,
+        )
+        .unwrap();
+        let (interleaved, binding, finished) = std::thread::scope(|scope| {
+            // This is the production final-check / spawn / bind critical section.
+            // Declaring the guard inside the scope also releases it on failure
+            // before the scoped worker is joined.
+            let owner = agent.lock().unwrap();
+            workflow::ensure_current_start(&store, workspace, session, operation).unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let worker_agent = &agent;
+            let worker_store = &store;
+            let worker = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = admit_control(
+                    worker_agent,
+                    worker_store,
+                    workspace,
+                    session,
+                    finish,
+                    &WorkflowCommand::Finish,
+                    None,
+                );
+                finished_tx.send(result).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let early = finished_rx.recv_timeout(Duration::from_millis(200));
+            let interleaved = early.is_ok();
+            let binding = workflow::bind(
+                owner.dispatch_store(),
+                workspace,
+                session,
+                operation,
+                AgentId::new(),
+            );
+            drop(owner);
+            let finished =
+                early.unwrap_or_else(|_| finished_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+            worker.join().unwrap();
+            (interleaved, binding, finished)
+        });
+        assert!(
+            !interleaved,
+            "Finish was admitted after the final Start check"
+        );
+        binding.unwrap();
+        finished.unwrap();
+        let record = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(record.finish, Some(finish));
+        assert_eq!(record.finished.len(), 1);
+        assert_eq!(record.finished[0].phase, Phase::Implementing);
+    }
 
     #[test]
     fn workflow_error_mapping_distinguishes_refusal_from_unknown_effect() {

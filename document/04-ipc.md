@@ -641,7 +641,7 @@ Agent の停止も worktree の削除も伴わない。終了した run は `PR 
 別の operation ID による 2 度目の終了と、終了済み record への `Instruct` は拒否する。終了後の `Start` は
 新しい intent として受理し、終了済み run の表示履歴と拒否境界を引き継ぐ。
 終了済み command ID 以下の UUIDv7 ID を新規 command に使うと `idempotency_conflict` になる。
-表示履歴から削除された run の ID も再受理しない。新しい intent の ID は前の終了より後に発行する。
+表示履歴から削除された run の ID も再受理しない。新しい intent の ID は保存済みの拒否境界より大きい値を使う。
 拒否境界の永続化・旧 record の移行は [workflow lane](05-daemon.md#workflow-lane) が正本である。
 
 daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。

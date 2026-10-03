@@ -69,13 +69,8 @@ pub fn admit_with_previous(
                 }
                 ensure!(record.finish.is_none(), "workflow has already finished");
                 ensure_not_retired(record, operation)?;
-                let retired = record
-                    .run
-                    .iter()
-                    .flat_map(|run| run.instructions.iter().map(|item| item.id))
-                    .chain([record.operation, operation])
-                    .max();
-                record.retired_through = record.retired_through.max(retired);
+                record.finish = Some(operation);
+                record.retired_through = record.retired_bound();
                 record.finished.push(record.run.as_ref().map_or_else(
                     || {
                         // A start that never launched has no run to archive, so
@@ -97,7 +92,6 @@ pub fn admit_with_previous(
                     .saturating_sub(usagi_core::domain::workflow::FINISHED_LIMIT);
                 record.finished.drain(..excess);
                 record.run = None;
-                record.finish = Some(operation);
                 // Progress state belongs to the run that just ended. The journal
                 // cursor is the exception: keeping it is what stops the next run
                 // from replaying this one's peer messages as its own evidence.
@@ -113,13 +107,7 @@ pub fn admit_with_previous(
 /// Refuse an old human command even when the display archive was pruned. Legacy
 /// records derive the fence from every retained ID before their next admission.
 fn ensure_not_retired(record: &WorkflowRecord, operation: OperationId) -> Result<()> {
-    let retired = record
-        .finished
-        .iter()
-        .map(|run| run.id)
-        .chain(record.retired_through)
-        .chain(record.finish)
-        .max();
+    let retired = record.retired_bound();
     ensure!(
         retired.is_none_or(|retired| operation > retired),
         "workflow operation has already retired"
@@ -152,10 +140,7 @@ fn admit_start(
         // same session: everything the old run owned is reset, and
         // only the archive of ended runs carries over.
         ensure_not_retired(existing, operation)?;
-        existing.retired_through = existing
-            .retired_through
-            .max(existing.finish)
-            .max(Some(existing.operation));
+        existing.retired_through = existing.retired_bound();
         existing.agents = agents;
         existing.revision_limit = revision_limit;
         existing.operation = operation;
@@ -1174,6 +1159,71 @@ mod tests {
     }
 
     #[test]
+    fn legacy_retirement_uses_the_finished_start_after_display_pruning() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        // The previous producer's clock was ahead of the producer that issued
+        // Finish. Migration must retain both IDs even without display history.
+        let id =
+            |last| OperationId::parse(&format!("018ff000-0000-7000-8000-{last:012x}")).unwrap();
+        let finish = id(1);
+        let retired_start = id(3);
+        let path = directory
+            .path()
+            .join("workflows")
+            .join(workspace.as_str())
+            .join(format!("{}.json", session.as_str()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let start = WorkflowCommand::Start {
+            goal: "Next task".into(),
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            revision_limit: 3,
+        };
+        for retained_max in [3, 4, 5] {
+            let run = if retained_max == 3 {
+                serde_json::Value::Null
+            } else {
+                let agent = AgentId::new();
+                let instructions = if retained_max == 5 {
+                    serde_json::json!([{
+                        "id":id(5),"requested_recipient":"implementer","recipient":agent,
+                        "body":"Accepted instruction","delivery":"notified"
+                    }])
+                } else {
+                    serde_json::json!([])
+                };
+                serde_json::json!({
+                    "id":id(4),"session":session,"goal":"Task","implementer":agent,
+                    "reviewer":null,"phase":"implementing","revision_limit":3,
+                    "revisions":0,"review":null,"waiting_reason":null,
+                    "instructions":instructions
+                })
+            };
+            let legacy = serde_json::json!({
+                "version":1,"operation":retired_start,"goal":"Task","run":run,
+                "initial_notified":false,"cursor":null,"finish":finish,"finished":[]
+            });
+            std::fs::write(&path, legacy.to_string()).unwrap();
+            for stale in (2..=retained_max).map(id) {
+                assert_eq!(
+                    admit(&store, workspace, session, stale, &start, None)
+                        .unwrap_err()
+                        .to_string(),
+                    "workflow operation has already retired"
+                );
+            }
+            let next = id(retained_max + 1);
+            admit(&store, workspace, session, next, &start, None).unwrap();
+            let current = store.workflow(workspace, session).unwrap().unwrap();
+            assert_eq!(current.operation, next);
+            assert_eq!(current.version, WorkflowRecord::VERSION);
+            assert_eq!(current.retired_through, Some(id(retained_max)));
+        }
+    }
+
+    #[test]
     fn an_issue_backed_retry_is_the_same_intent_even_after_the_issue_moved() {
         let dir = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(dir.path());
@@ -1948,6 +1998,25 @@ mod tests {
                 .unwrap()
                 .success
         );
+        // Legacy grafts alter the graph independently of replace refs. They
+        // must not manufacture an approval of the PR's empty range either.
+        let grafts = directory.path().join(".git/info/grafts");
+        std::fs::write(&grafts, format!("{destination} {}\n", target.head_sha)).unwrap();
+        assert_eq!(
+            git.run(
+                directory.path(),
+                &["merge-base", &destination, &target.head_sha]
+            )
+            .unwrap()
+            .stdout
+            .trim(),
+            target.head_sha
+        );
+        assert_eq!(
+            verify(&target, &value),
+            Err("PR diff changed; a new review is required")
+        );
+        std::fs::remove_file(grafts).unwrap();
         target.base_sha = base;
         value["baseRefOid"] = serde_json::json!(target.head_sha);
         assert_eq!(
@@ -1969,6 +2038,74 @@ mod tests {
         );
         target.base_sha = "invalid".into();
         assert_eq!(verify(&target, &value), Err("Review range is invalid"));
+    }
+
+    #[test]
+    fn verification_ignores_local_shallow_boundaries_when_original_objects_exist() {
+        use usagi_core::infrastructure::git::GitRunner as _;
+        let directory = tempfile::tempdir().unwrap();
+        let git = crate::infrastructure::session_worktree::SystemGit;
+        let run = |args: &[&str]| {
+            let output = git.run(directory.path(), args).unwrap();
+            assert!(output.success, "{args:?}: {}", output.stderr);
+            output.stdout.trim().to_owned()
+        };
+        run(&["init", "--quiet"]);
+        run(&["config", "user.name", "Workflow verification"]);
+        run(&["config", "user.email", "workflow@example.com"]);
+        run(&["commit", "--allow-empty", "--quiet", "-m", "A"]);
+        let a = run(&["rev-parse", "HEAD"]);
+        let tree_a = run(&["rev-parse", "HEAD^{tree}"]);
+        std::fs::write(
+            directory.path().join("implementation"),
+            "destination change",
+        )
+        .unwrap();
+        run(&["add", "implementation"]);
+        run(&["commit", "--quiet", "-m", "B"]);
+        let b = run(&["rev-parse", "HEAD"]);
+        let tree_b = run(&["rev-parse", "HEAD^{tree}"]);
+        let commit = |name: &str, tree: &str, parents: &[&str]| {
+            let mut args = vec!["commit-tree", tree, "-m", name];
+            for parent in parents {
+                args.extend(["-p", parent]);
+            }
+            run(&args)
+        };
+        let x = commit("X", &tree_b, &[&b]);
+        let head = commit("H", &tree_a, &[&x, &a]);
+        let destination = commit("D", &tree_b, &[&b]);
+        run(&["checkout", "--quiet", "--detach", &head]);
+        assert!(run(&["diff", "--name-only", &a, &head]).is_empty());
+        assert_eq!(run(&["diff", "--name-only", &b, &head]), "implementation");
+        let target = ReviewTarget {
+            base_sha: a.clone(),
+            head_sha: head.clone(),
+        };
+        let mut entry = usagi_core::domain::pr_inventory::PrEntry::new(
+            usagi_core::domain::pr_inventory::extract(b"https://github.com/owner/repo/pull/1")
+                .remove(0),
+        );
+        entry.head_oid = Some(head.clone());
+        let value = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":destination,"headRefOid":head,"isDraft":false,"statusCheckRollup":[{"conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
+        let verify = || {
+            verify_pr(
+                &git,
+                &mut gh_view(&value.to_string()),
+                directory.path(),
+                &target,
+                std::slice::from_ref(&entry),
+                None,
+            )
+        };
+        assert_eq!(run(&["merge-base", "--all", &destination, &head]), b);
+        assert_eq!(verify(), Err("PR diff changed; a new review is required"));
+        // A -> B -> X -> H, with H's second parent A and destination D -> B.
+        // Hiding X's parents changes the local merge base to A, even though
+        // every immutable object needed to prove the real base B still exists.
+        std::fs::write(directory.path().join(".git/shallow"), format!("{x}\n")).unwrap();
+        assert_eq!(run(&["merge-base", "--all", &destination, &head]), a);
+        assert_eq!(verify(), Err("PR diff changed; a new review is required"));
     }
 
     #[test]

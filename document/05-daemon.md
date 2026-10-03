@@ -1339,7 +1339,8 @@ GitHub に聞くことになる。キャッシュの窓は 15 秒から始まり
 PR の観測前後に両方を確認し、観測中に未コミット変更が生じた場合も `PR ready` に進めない。
 未追跡 file は `--untracked-files=all` で列挙し、利用者の `status.showUntrackedFiles` 設定に左右されない。
 PR の `baseRefOid` と承認済み HEAD の merge-base が、レビューに記録された base SHA と一致することも要求する。
-merge-base の計算は local replace ref を無効にし、GitHub が保持する元の commit graph を検証する。
+merge-base の計算は local replace ref・legacy graft file・local shallow 境界を無効にし、GitHub が保持する
+元の commit graph を検証する。shallow clone で必要な object が無ければ、部分的な graph から承認を推測せず保留する。
 ベースブランチの先端が進んでも merge-base が同じなら承認は有効だが、空の範囲や別の PR diff に対する承認は
 `PR ready` の証拠にならない。base の欠落・不正な SHA・ローカルに無い Git object・複数の merge-base は保留し、
 diff の変更は再レビューを要求する。merged PR でも保存済みの base と head を検証する。
@@ -1375,13 +1376,18 @@ Workflow request のうち snapshot はこの pass をそのまま通り、contr
 開始時の前状態は admission と同じ store lock 内で取得する。readiness が lock の外で失敗した場合の rollback と
 error 保存は、その Start ID が今も未起動・未終了の intent である場合だけ適用する。待っている間に終了・再開始・
 起動された run を、古い開始要求の完了で上書きしない。外部 readiness から戻った launch も現行 Start を確認する。
+現行 Start の最終確認・Agent 起動・run の binding は同じ owner lock 内で行い、control admission と開始失敗の
+保存もその lock で直列化する。Finish が最終確認と binding の間に割り込んで、記録されない Agent を起動しない。
 
 Start / Instruct / Finish は同じ operation ID を別の command に使えない。終了済み要求の拒否情報は最大 5 件の
 表示履歴とは別に、record の固定サイズの `retired_through`（UUIDv7 の最大終了済み command ID）へ保存する。
 終了時には Start・全 Instruct・Finish ID を取り込み、履歴の件数制限・容量削減・daemon restart でも失わない。
-次の新しい command はこの値より新しい ID を発行する必要があり、古い ID の新規要求は拒否する。
+次の新しい command は UUIDv7 の全体順序でこの値より大きい ID を使う必要があり、境界以下の ID は拒否する。
+異なる producer が同じ millisecond に生成した ID や時計が戻った producer の ID は、新しく発行したものでも
+境界以下になり得る。発行時刻だけでは受理を保証せず、その場合も `idempotency_conflict` を返す。
 現行 Finish の同じ ID の再送は成功のまま応答し、現行 Start / Instruct の再送は元の内容との一致を要求する。
-旧 version 1 record は残っている終了 ID から拒否境界を引き継ぎ、保存時に version 2 へ移行する。
+旧 version 1 record は残っている終了 ID と、終了済み intent に残る Start / Instruct ID の最大値から拒否境界を
+引き継ぎ、保存時に version 2 へ移行する。
 旧 daemon は version 2 を拒否するため、新 field を消して拒否境界を失うことはない。
 更新前に既に削除された ID 自体の復元は行わない。
 
