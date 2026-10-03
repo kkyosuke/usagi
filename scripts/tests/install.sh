@@ -4,8 +4,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INSTALLER="$ROOT/scripts/install.sh"
-TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/usagi-install-tests.XXXXXXXX")"
+cleanup_test() {
+    local status=$? child
+    trap - EXIT
+    set +e
+    # Unblock and reap fake daemon synchronization before deleting fixtures,
+    # including when a startup assertion failed while the child was running.
+    if [ -n "${USAGI_SYNC_WAIT_FOR:-}" ]; then touch "$USAGI_SYNC_WAIT_FOR"; fi
+    for child in $(jobs -p); do wait "$child"; done
+    rm -rf "$TEST_ROOT"
+    exit "$status"
+}
+trap cleanup_test EXIT
 
 case "$(uname -s)" in
     Darwin) TEST_OS=macos ;;
@@ -201,6 +212,13 @@ prepare_case selected-version
 run_installer_for_version >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 
+prepare_case 'spaces in configured home'
+run_installer >"$CASE_DIR/out"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+grep -q 'v1.0.0 から v2.0.0' "$CASE_DIR/out"
+[ "$(mode "$HOME_DIR/.usagi/update.lock")" = 700 ]
+[ -z "$(find "$HOME_DIR/.usagi/update.lock" -name 'owner.*' -print)" ]
+
 prepare_case managed-update
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
 export USAGI_SYNC_LOG
@@ -253,10 +271,15 @@ USAGI_SYNC_WAIT_FOR="$CASE_DIR/release-sync"
 export USAGI_SYNC_LOG USAGI_SYNC_WAIT_FOR
 run_managed_installer >"$CASE_DIR/first.out" 2>"$CASE_DIR/first.err" &
 FIRST_PID=$!
-for _ in $(seq 1 200); do
+for _ in $(seq 1 1500); do
     [ -s "$CASE_DIR/sync.log" ] && break
     sleep 0.01
 done
+if [ ! -s "$CASE_DIR/sync.log" ]; then
+    cat "$CASE_DIR/first.err" >&2
+    echo "managed update did not reach daemon synchronization" >&2
+    exit 1
+fi
 [ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 1 ]
 run_managed_installer >"$CASE_DIR/second.out" 2>"$CASE_DIR/second.err" &
 SECOND_PID=$!
@@ -554,5 +577,7 @@ wait "$first_pid"
 wait "$second_pid"
 unset FAKE_CURL_GUARD
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+
+python3 "$ROOT/scripts/tests/install-lock.py" "$INSTALLER" "$TEST_ROOT"
 
 echo "install.sh regression tests passed"

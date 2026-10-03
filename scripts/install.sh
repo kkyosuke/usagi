@@ -10,11 +10,13 @@ readonly LOCK_DIR="$USAGI_DIR/update.lock"
 
 STAGE_DIR=""
 LOCK_HELD=0
+LOCK_NODE=""
+LOCK_ATTEMPTS=0
 SELECTOR_ACTIVE=0
 SELECT_VERSION=0
 
 cleanup() {
-    local status=$?
+    local status=$? retired
     if [ "$SELECTOR_ACTIVE" -eq 1 ]; then
         printf '\033[?25h' > /dev/tty 2>/dev/null || true
         SELECTOR_ACTIVE=0
@@ -22,8 +24,13 @@ cleanup() {
     if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
         rm -rf -- "$STAGE_DIR"
     fi
-    if [ "$LOCK_HELD" -eq 1 ] && [ -d "$LOCK_DIR" ]; then
-        rm -rf -- "$LOCK_DIR"
+    if [ -n "$LOCK_NODE" ] && [ -d "$LOCK_NODE" ]; then
+        # Retire atomically before removing metadata so another participant
+        # cannot mistake a partially removed live node for a malformed owner.
+        retired="$LOCK_DIR/.retired.${LOCK_NODE##*/}"
+        if mv -- "$LOCK_NODE" "$retired" 2>/dev/null; then
+            rm -rf -- "$retired"
+        fi
     fi
     exit "$status"
 }
@@ -199,35 +206,177 @@ esac
 read_version() {
     local bin=$1 output
     [ -x "$bin" ] || return 0
-    output="$($bin --version 2>/dev/null)" || return 0
+    output="$("$bin" --version 2>/dev/null)" || return 0
     printf '%s\n' "$output" | awk 'NF == 2 && $1 == "usagi" { print $2 }'
 }
 
+# Immutable owner nodes let stale recovery and cleanup remove only the exact
+# observed incarnation. The shared directory is never replaced or removed.
+process_is_live() {
+    local error
+    if error="$(LC_ALL=C kill -0 "$1" 2>&1)"; then return 0; fi
+    # EPERM (including sandbox restrictions) is not proof of death. Only the
+    # supported platforms' C-locale ESRCH message permits stale reclamation.
+    case "$error" in
+        *'No such process'*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+read_lock_metadata() {
+    # Published PID/ticket files are immutable regular files. Refuse special
+    # files before sed so an unknown owner cannot block a liveness probe.
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    sed -n '1p' "$1" 2>/dev/null
+}
+
+read_lock_pid() {
+    local owner
+    owner="$(read_lock_metadata "$1/pid")" || return 1
+    case "$owner" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#owner}" -le 10 ] || return 1
+    owner=$((10#$owner))
+    [ "$owner" -gt 0 ] && [ "$owner" -le 2147483647 ] || return 1
+    printf '%s\n' "$owner"
+}
+
+lock_owner_alive() {
+    local owner
+    # Missing, unreadable or malformed identity is unknown, not proof of death.
+    owner="$(read_lock_pid "$1")" || return 0
+    # A reused PID conservatively remains busy. Clock or locale-sensitive
+    # process timestamps must never cause a live participant to be reclaimed.
+    process_is_live "$owner"
+}
+
+read_lock_ticket() {
+    local ticket
+    ticket="$(read_lock_metadata "$1/ticket")" || return 1
+    case "$ticket" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#ticket}" -le 10 ] || return 1
+    ticket=$((10#$ticket))
+    [ "$ticket" -gt 0 ] && [ "$ticket" -le 2147483646 ] || return 1
+    printf '%s\n' "$ticket"
+}
+
+wait_for_update_lock() {
+    LOCK_ATTEMPTS=$((LOCK_ATTEMPTS + 1))
+    [ "$LOCK_ATTEMPTS" -lt 600 ] || fail "another usagi update is still running"
+    sleep 0.1
+}
+
 acquire_lock() {
-    local attempt=0 owner=""
+    local node candidate name maximum=0 ticket owner blocked legacy_owner owner_pid
+    LOCK_ATTEMPTS=0
     mkdir -p -- "$USAGI_DIR"
     chmod 700 "$USAGI_DIR"
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
+    mkdir -p -m 700 -- "$LOCK_DIR"
+    chmod 700 "$LOCK_DIR"
 
-    while ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; do
-        if [ -f "$LOCK_DIR/pid" ]; then
-            owner="$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)"
+    # Respect an existing legacy owner. Empty or invalid legacy roots are
+    # recovered without deleting the directory or any newer participant.
+    while true; do
+        if [ ! -e "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ]; then break; fi
+        if ! legacy_owner="$(read_lock_metadata "$LOCK_DIR/pid")"; then
+            wait_for_update_lock
+            continue
         fi
-        case "$owner" in
-            ''|*[!0-9]*) ;;
-            *)
-                if ! kill -0 "$owner" 2>/dev/null; then
-                    rm -rf -- "$LOCK_DIR"
-                    owner=""
-                    continue
-                fi
-                ;;
+        case "$legacy_owner" in
+            ''|0|*[!0-9]*) break ;;
         esac
-        attempt=$((attempt + 1))
-        [ "$attempt" -lt 600 ] || fail "another usagi update is still running"
-        sleep 0.1
+        process_is_live "$legacy_owner" || break
+        # Keep the observed PID until it exits: legacy cleanup removes pid
+        # before the directory, and must finish before this directory is reused.
+        while process_is_live "$legacy_owner"; do
+            wait_for_update_lock
+        done
     done
+    # Do not leave a dead legacy pid that invites an older installer to delete
+    # this stable root after new owners have published their nodes.
+    rm -f -- "$LOCK_DIR/pid"
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
+    mkdir -p -m 700 -- "$LOCK_DIR"
+    chmod 700 "$LOCK_DIR"
+
+    LOCK_NODE="$(mktemp -d "$LOCK_DIR/.prepare.$$.XXXXXXXX")"
+    printf '%s\n' "$$" > "$LOCK_NODE/pid"
+    : > "$LOCK_NODE/choosing"
+    name=${LOCK_NODE##*/}
+    candidate="$LOCK_DIR/owner.${name#.prepare.}"
+    mv -- "$LOCK_NODE" "$candidate"
+    LOCK_NODE=$candidate
+
+    # Publish choosing before reading tickets. An earlier participant waits
+    # for this doorway to close, including when concurrent tickets are equal.
+    for node in "$LOCK_DIR"/owner.*; do
+        [ -d "$node" ] || continue
+        [ ! -L "$node" ] || fail "update owner node must not be a symlink"
+        [ "$node" != "$LOCK_NODE" ] || continue
+        if ! lock_owner_alive "$node"; then
+            rm -rf -- "$node"
+            continue
+        fi
+        if ! ticket="$(read_lock_ticket "$node")"; then
+            [ ! -f "$node/choosing" ] || continue
+            # The other doorway may have closed after the failed read. Reread
+            # its published ticket before diagnosing malformed metadata.
+            if ! ticket="$(read_lock_ticket "$node")"; then
+                [ -d "$node" ] || continue
+                fail "invalid update lock ticket"
+            fi
+        fi
+        [ "$ticket" -le "$maximum" ] || maximum=$ticket
+    done
+    [ "$maximum" -lt 2147483646 ] || fail "update lock ticket limit reached"
+    ticket=$((maximum + 1))
+    printf '%s\n' "$ticket" > "$LOCK_NODE/ticket.next"
+    mv -- "$LOCK_NODE/ticket.next" "$LOCK_NODE/ticket"
+    rm -- "$LOCK_NODE/choosing"
+
+    while true; do
+        blocked=0
+        for node in "$LOCK_DIR"/owner.*; do
+            [ -d "$node" ] || continue
+            [ ! -L "$node" ] || fail "update owner node must not be a symlink"
+            [ "$node" != "$LOCK_NODE" ] || continue
+            if ! lock_owner_alive "$node"; then
+                rm -rf -- "$node"
+                continue
+            fi
+            if [ -f "$node/choosing" ]; then
+                blocked=1
+                break
+            fi
+            if ! owner="$(read_lock_ticket "$node")"; then
+                [ -d "$node" ] || continue
+                fail "invalid update lock ticket"
+            fi
+            if [ "$owner" -lt "$ticket" ]; then
+                blocked=1
+                break
+            fi
+            if [ "$owner" -eq "$ticket" ]; then
+                if ! owner_pid="$(read_lock_pid "$node")"; then
+                    [ -d "$node" ] || continue
+                    blocked=1
+                    break
+                fi
+                if [ "$owner_pid" -lt "$$" ]; then
+                    blocked=1
+                    break
+                fi
+            fi
+        done
+        [ "$blocked" -ne 0 ] || break
+        wait_for_update_lock
+    done
+    [ -d "$LOCK_NODE" ] || fail "update lock owner disappeared"
     LOCK_HELD=1
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
 }
 
 platform_asset() {

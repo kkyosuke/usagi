@@ -954,6 +954,21 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   選択した旧 release が managed daemon sync capability を解釈できない場合や、published daemon が server-side handoff fence を証明できない場合も、
   legacy の弱い replacement を実行せず非 0 で終える。内部 command は Agent integration 履歴の修復を行わず、daemon build の同期だけを担う。
   atomic rename 後の拒否では binary は選択版、daemon は旧 build のままであり、安全な現行版へ更新するか Agent 終了後に `usagi daemon restart` を実行する。
+  installer lock の正本は `scripts/install.sh` である。mode 0700 の共有 `update.lock` directory を保持し、各 process は
+  PID と choosing marker を private directory に準備してから固有 owner node として atomic に公開する。
+  [Lamport の bakery algorithm](https://lamport.azurewebsites.net/pubs/bakery.pdf) に従う choosing / ticket と
+  `(ticket, PID)` の順序で admission を決め、ticket は 2147483646 を上限として overflow 前に拒否する。
+  stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
+  公開前の crash と空の共有 root は admission を妨げない。lock root / owner node の symlink は拒否し、待機は約 60 秒を上限とする。
+  PID の再利用、permission denial、判別できない liveness probe failure は live owner として保守的に待つ。
+  公開済み PID / ticket は通常ファイルで固定し、symlink・FIFO・device・directory を読まない。new owner の PID が
+  読めない、欠けている、または不正な場合は未知として回収せず、同順位の admission も待つ。legacy PID の読取失敗は
+  空値へ変換せず待つが、読めた空値・不正値は従来の復旧対象とする。ticket の初回読取中に choosing が消えた場合は、
+  同じ node の公開済み ticket を再読して最大値へ取り込み、atomic に retire 済みなら飛ばす。
+  PID probe の C locale で `No such process` を確認した場合だけ死亡とみなす。旧方式の公開済み live PID は process が cleanup を終えて
+  終了するまで待ち、残った legacy PID metadata は新 owner の公開前に除去する。直列化と stale 回収の保証は新方式同士に適用する。
+  旧方式の PID 公開前の空 root と、既に stale PID を読んだ旧 process による共有 root の削除は新方式から制御できないため、
+  異なる方式の installer を並行実行しない。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
   出るツール呼び出しを拒否）と、Antigravity / Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
   （phase 報告）。この 2 つは人間向けではないため `--help` に出さない（`hide = true`）。呼び手（人手でも

@@ -67,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 usagi doctor  # 必要なツールと設定を確認
 ```
 
-対応環境と必要なツール、ソースからのビルド、更新、shell 補完は
+対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。
 
 ## はじめる
