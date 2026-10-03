@@ -716,7 +716,7 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 
 `agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
 `WorkspaceId` の `AgentInventory` と `session_statuses` を同じ応答で返す。status map は managed session の
-`SessionId` だけを key とし、値は dispatch store の closed `AgentStatus` である。同じ session に複数 Agent がある場合は
+`SessionId` だけを key とし、値は [daemon の活動を反映した](05-daemon.md#agent-phase-の投影) closed `AgentStatus` である。同じ session に複数 Agent がある場合は
 `running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値になる。root Agent、
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。

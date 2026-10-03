@@ -164,7 +164,7 @@ use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{
     AgentIntegrationRevision, AgentProfileId, DaemonRestartAgent, DaemonRestartAgentPlan,
-    DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
+    DurableLaunchSnapshot, EnvironmentVariableName,
 };
 use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::clock::MonotonicClock;

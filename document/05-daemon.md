@@ -1777,11 +1777,11 @@ deterministic に返す。resumable projection は availability と非機密な 
 history を provider 単位で表示できる closed vocabulary（`ProviderKind` と safe な `ProviderResumePhase`）だけを返す。
 これらは code-defined enum であり、provider-native ID / argv / cwd / transcript は返さない。metadata を保存していない
 record では両 field を省略し、名前・path・profile ID から provider を推測しない。
-cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch store から読んだ
+cross-project view 用の `AgentWorkspaceObservation` はこの inventory に、同じ workspace の dispatch と現在の活動を投影した
 managed session ごとの `AgentStatus` を添える。同じ session に複数 Agent がある場合は
 `running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値にする。root Agent は
 session status map へ載せない。これにより PTY record の粗い `Live` と dispatch の terminal state
-（`Idle` / `Exited` / `Failed`）を混同しない。
+（`Idle` / `Exited` / `Failed`）を混同しない。[現在の phase に基づく活動反映](#agent-phase-の投影)も同じ投影に重ねる。
 `AgentResumeTarget` は continuation、source、workspace、optional session、worktree、source runtime incarnation、
 adapter revision だけを持つ。旧 schema record は continuation / source を合成せず、target 無しの unavailable item
 として起動可能なまま読む。
@@ -1906,7 +1906,7 @@ caller credential を受け取る。claim は kernel 由来の peer PID / 親 PI
 後続 request 以外へ公開せず、durable snapshot、TUI、terminal journal、argv、log、safe error に保存・公開しない。
 この事前許可も spawn 時 argv に限り、durable snapshot や IPC response には残らない。
 
-[`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late と wrong-generation は state や inbox を変更しない。duplicate completion は inbox を増やさず、最初に確定した message の kind を権威として run / agent status の冪等な遷移だけを再実行する。run と agent の遷移は同じ dispatch registry lock 内で行い、agent は `current_run` が報告対象 run と一致する場合だけ解放するため、同じ Agent identity を再利用した後続 run を旧 report が上書きしない。これにより inbox 保存後の registry 保存失敗を同じ report の再送で収束させ、再送 payload による outcome の差し替えは許さない。
+[`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late と wrong-generation は state や inbox を変更しない。completion の最初の inbox commit はその runtime の活動 phase を `ended` にし、duplicate は後から届いた新しい prompt の phase を上書きしない。duplicate completion は inbox を増やさず、最初に確定した message の kind を権威として run / agent status の冪等な遷移だけを再実行する。run と agent の遷移は同じ dispatch registry lock 内で行い、agent は `current_run` が報告対象 run と一致する場合だけ解放するため、同じ Agent identity を再利用した後続 run を旧 report が上書きしない。これにより inbox 保存後の registry 保存失敗を同じ report の再送で収束させ、再送 payload による outcome の差し替えは許さない。
 
 Agent の workspace ownership と新しい prompt queue は `dispatch-workspaces.json` に保存する。`dispatch.json` の schema を
 変えないため、planned rollover 中に旧 draining generation が Agent exit を whole-snapshot 保存しても ownership を消さない。
@@ -1995,6 +1995,11 @@ Claude の `PermissionRequest` / `Notification` と Codex の `PostToolUse` は 
 観測だけだからである。provider metadata を持たない runtime（structured capture 前の Antigravity / Claude / Codex など）への報告は
   projection だけを refine し、metadata を合成しない。
 - 未知 credential、失効 credential、非 live runtime、malformed request は何も記録せず safe error になる。
+
+表示用 `AgentStatus` の活動反映も本節を正本とする。同じ workspace / session の exact live runtime が lifecycle hook で
+`running` / `waiting` を報告している間は、過去の dispatch の完了・停止・失敗にかかわらず表示用 status を `Running` にする。
+完了した dispatch の後に利用者が新しい prompt を送った場合も、現在の活動が Garden に反映される。
+`ready` / `ended` / `exited` の報告、live でない runtime、別 workspace、root scope はこの昇格を行わない。
 
 ### fixture による手動確認
 

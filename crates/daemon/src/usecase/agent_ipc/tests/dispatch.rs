@@ -949,6 +949,9 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         commits: vec!["abc".into()],
         ..Default::default()
     };
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
     let delivery = runtime
         .report_from_mcp(
             &credential,
@@ -961,6 +964,12 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
     assert_eq!(delivery.delivered_to, caller);
     assert_eq!(delivery.worker.session_id, Some(session));
     assert!(delivery.accepted);
+    assert_eq!(runtime.session_phase(session), AgentPhase::Ended);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Idle,
+        "the first completion must clear its running activity"
+    );
     let wake = runtime
         .dispatch_store()
         .queued_prompt(workspace, Some(parent_session))
@@ -1021,6 +1030,9 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             Some(completed_run),
         )
         .unwrap();
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
     let duplicate = runtime
         .report_from_mcp(
             &credential,
@@ -1031,6 +1043,11 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         )
         .unwrap();
     assert!(!duplicate.accepted);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Running,
+        "replaying an old completion must preserve a newer prompt's activity"
+    );
     assert_eq!(
         duplicate
             .committed
