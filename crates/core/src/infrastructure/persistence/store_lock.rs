@@ -19,7 +19,7 @@
 //! The store's directory scans only pick up `*.md` files, so the lock file is
 //! never parsed as data.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -58,7 +58,7 @@ impl StoreLock {
     /// # Errors
     ///
     /// Returns an error when `dir` cannot be created, the lock file cannot be
-    /// opened, or the lock cannot be taken within the timeout.
+    /// opened, is not a regular file, or the lock cannot be taken within the timeout.
     pub fn acquire(dir: &Path) -> Result<Self> {
         Self::acquire_with_timeout(dir, ACQUIRE_TIMEOUT)
     }
@@ -123,28 +123,50 @@ impl StoreLock {
     /// descriptor — `fs2` locks whatever handle it is given — we can retry with a
     /// read-only open when the file already exists. If the file is missing we
     /// cannot fall back (read-only cannot create it), so the original error stands.
+    /// On Unix both opens are non-blocking, so a FIFO cannot wait for a writer
+    /// before its descriptor is rejected by the regular-file check.
     fn open_lock_file(path: &Path) -> Result<File> {
-        match File::options()
+        match Self::lock_open_options()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(path)
         {
-            Ok(file) => Ok(file),
+            Ok(file) => Self::regular_lock_file(path, file),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.exists() => {
                 // Advisory locking only needs a valid descriptor, not write
                 // access, so a read-only handle is enough to try_lock_exclusive
                 // on both Unix (flock) and Windows (LockFileEx, per fs2).
-                File::options()
+                let file = Self::lock_open_options()
                     .read(true)
                     .open(path)
-                    .context(format!("failed to open {} read-only", path.display()))
+                    .context(format!("failed to open {} read-only", path.display()))?;
+                Self::regular_lock_file(path, file)
             }
             Err(e) => {
                 Err(anyhow::Error::new(e)).context(format!("failed to open {}", path.display()))
             }
         }
+    }
+
+    fn lock_open_options() -> OpenOptions {
+        let mut options = File::options();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        options
+    }
+
+    fn regular_lock_file(path: &Path, file: File) -> Result<File> {
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "store lock is not a regular file: {}",
+            path.display()
+        );
+        Ok(file)
     }
 
     /// Path of the lock file for the store rooted at `dir`.
@@ -308,6 +330,72 @@ mod tests {
         fs::write(&path, "x").unwrap();
         // create_dir_all fails because the path is an existing file.
         assert!(StoreLock::acquire(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_lock_files_are_rejected_without_blocking_the_read_only_fallback() {
+        use std::cell::Cell;
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for mode in [0o400, 0o600] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("store");
+            fs::create_dir_all(&dir).unwrap();
+            let path = StoreLock::path(&dir);
+            let native = CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), mode) }, 0);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let stop = Arc::clone(&cancelled);
+            let (started, entered) = mpsc::channel();
+            let (finished, received) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let announced = Cell::new(false);
+                let result = StoreLock::acquire_cancellable(&dir, || {
+                    if !announced.replace(true) {
+                        started.send(()).unwrap();
+                    }
+                    stop.load(Ordering::Acquire)
+                });
+                finished
+                    .send(result.map(drop).map_err(|error| error.to_string()))
+                    .unwrap();
+            });
+            let entered = entered.recv_timeout(Duration::from_secs(5));
+            let completed = received.recv_timeout(Duration::from_secs(1));
+            let stalled = completed.is_err();
+            cancelled.store(true, Ordering::Release);
+            let result = if stalled {
+                // Unblock a regressing readonly open before asserting. Keep
+                // both FIFO ends alive until the cancelled acquisition returns.
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                let writer = File::options()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&path)
+                    .unwrap();
+                let result = received.recv_timeout(Duration::from_secs(5));
+                drop(writer);
+                result
+            } else {
+                completed
+            };
+            worker.join().unwrap();
+            entered.unwrap();
+            assert!(
+                !stalled,
+                "FIFO lock open waited for a writer in mode {mode:o}"
+            );
+            assert!(
+                result.unwrap().unwrap_err().contains("not a regular file"),
+                "FIFO lock was accepted in mode {mode:o}"
+            );
+        }
     }
 
     #[cfg(unix)]

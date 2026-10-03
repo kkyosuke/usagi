@@ -441,7 +441,7 @@ Switch の session 行で `f` を押すと、お気に入り登録・解除を�
 読込・保存は順序を保つ背景 worker で処理し、ロック待ち中も入力と再描画を続ける。保存成功の結果を受け取った次の
 描画で星を更新する。workspace を離れると受付待ちの操作と実行中のロック待ちを中止し、worker の終了を待つ。
 既にロックを取得した保存は完了させる。worker を起動できない場合や受付待ちの上限に達した場合は通知し、その操作を再試行できる。
-保存ファイルは開いた descriptor で通常ファイルと確認してから読み、FIFO・device・directory は通知付きで拒否する。
+保存ファイルとロックファイルは開いた descriptor で通常ファイルと確認してから使い、FIFO・device・directory は通知付きで拒否する。
 FIFO の writer を待たずに拒否するため、workspace を離れるときの worker 終了も妨げない。
 `+ new session` 行、Closeup、前面 modal ではこの shortcut を実行しない。
 

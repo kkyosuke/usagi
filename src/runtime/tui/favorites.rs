@@ -250,6 +250,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn fifo_store_lock_fails_without_a_writer_and_workspace_drop_reaps_the_worker() {
+        use std::ffi::CString;
+        use std::fs::{self, File};
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use usagi_core::infrastructure::paths::project_data_dir;
+        use usagi_core::infrastructure::persistence::store_lock::StoreLock;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = project_data_dir(workspace.path());
+        fs::create_dir_all(&dir).unwrap();
+        let path = StoreLock::path(&dir);
+        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o400) }, 0);
+
+        let worker = SessionFavoritesWorker::new(workspace.path());
+        let (completions, events) = Completions::channel();
+        worker.dispatch(Some(SessionId::new()), completions);
+        let event = events.recv_timeout(Duration::from_secs(1));
+        let (finished, joined) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(worker);
+            let _ = finished.send(());
+        });
+        let stopped = joined.recv_timeout(Duration::from_secs(1));
+
+        // Release a regressing read-only open before asserting, keeping both
+        // FIFO ends alive until the worker and its shutdown thread have joined.
+        let release = if event.is_err() || stopped.is_err() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            Some(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&path)
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        shutdown.join().unwrap();
+        drop(release);
+
+        assert!(
+            matches!(event, Ok(AppEvent::Backend(BackendEvent::Notice(_)))),
+            "FIFO store lock must report failure without a writer"
+        );
+        assert!(
+            stopped.is_ok(),
+            "workspace drop must reap its favorites worker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn fifo_preferences_fail_without_a_writer_and_workspace_drop_reaps_the_worker() {
         use std::ffi::CString;
         use std::fs::OpenOptions;
