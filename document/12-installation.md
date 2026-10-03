@@ -39,6 +39,12 @@ installer は Bash、`curl`、`tar`、`sha256sum` または `shasum` を使う�
 curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
 ```
 
+`USAGI_HOME` を指定すると、その directory の `bin/usagi` へ導入する。空白を含む path も指定できる。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | USAGI_HOME="$HOME/usagi tools" bash
+```
+
 installer は archive の SHA-256 と release version artifact を検証してから binary を差し替える。
 archive 構造、検証、atomic replacement の内部契約は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)を正本とする。
@@ -84,6 +90,9 @@ usagi update -v
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)、
 live Agent を含む daemon の安全な引き継ぎと拒否条件は
 [planned replacement](05-daemon.md#planned-replacement)を正本とする。
+
+同じ保存先への更新は順番に実行する。更新 process が crash しても、次の更新が残った owner を回収する。
+旧版と現行版の installer を同時に使う場合の範囲は、上記の内部契約を参照する。
 
 managed daemon 同期を持たない旧版から初めて更新する 1 回だけは、実行中の旧 `update` 自体を
 遡及的に変更できないため binary の差し替えだけで終了する。その場合は更新後の `usagi update` または
