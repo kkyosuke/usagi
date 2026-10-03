@@ -2448,6 +2448,91 @@ fn doctor_reports_real_diagnostics() {
 }
 
 #[test]
+fn explicit_trust_root_starts_the_shipping_daemon_below_an_untrusted_parent() {
+    struct Reap(PathBuf);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            daemon_fixture::reap(&self.0);
+        }
+    }
+    let _guard = daemon_fixture::heavy_e2e_lock();
+    let temp = daemon_fixture::short_dir("tr-");
+    let provider = temp.path().canonicalize().unwrap().join("p");
+    std::fs::create_dir(&provider).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let root = provider.join("r");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.join("h");
+    // Like DaemonHome, prepare private state independently of the invoking
+    // shell's umask. A refused bootstrap can otherwise leave ordinary 0755
+    // storage directories that the next invocation correctly refuses.
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let data_dir = channel_data_dir(&home);
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let workspace = root.join("w");
+    std::fs::create_dir(&workspace).unwrap();
+    git(&workspace, &["init", "-q"]);
+    let _reap = Reap(home.clone());
+    let command = |args: &[&OsStr]| {
+        let mut command = daemon_fixture::usagi_command(&home, Channel::Local, &workspace, args);
+        command.env("USAGI_TRUST_ROOT", &root);
+        // SAFETY: umask is an async-signal-safe syscall, and only the child
+        // changes its mask; parallel tests keep their original process state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o022);
+                Ok(())
+            });
+        }
+        command
+    };
+    let refused = command(&[OsStr::new("daemon"), OsStr::new("start")])
+        .env_remove("USAGI_TRUST_ROOT")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("unsafe parent"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(daemon_record(&channel_data_dir(&home)).is_none());
+    let started = command(&[OsStr::new("daemon"), OsStr::new("start")])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "{}", stderr(&started));
+    let repeated = command(&[OsStr::new("daemon"), OsStr::new("start")])
+        .output()
+        .unwrap();
+    assert!(repeated.status.success(), "{}", stderr(&repeated));
+    assert!(stdout(&repeated).contains("already running"));
+    // `daemon start` returns once the daemon is recorded; the endpoint is
+    // published afterwards, so a loaded runner can reach `doctor` first.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while connect_current(&channel_data_dir(&home)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "explicitly started daemon did not publish its endpoint"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let doctor = command(&[OsStr::new("doctor")]).output().unwrap();
+    assert!(doctor.status.success(), "{}", stderr(&doctor));
+    let report = stdout(&doctor);
+    assert!(
+        report.contains("[ok] Daemon: daemon is reachable"),
+        "{report}"
+    );
+    let stopped = command(&[OsStr::new("daemon"), OsStr::new("stop")])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{}", stderr(&stopped));
+}
+
+#[test]
 fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let _guard = daemon_fixture::heavy_e2e_lock();
     let home = short_home();

@@ -94,7 +94,12 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     arguments.extend(assignment("mcp_servers.usagi.args", &array(&["mcp"])));
     arguments.extend(assignment(
         "mcp_servers.usagi.env_vars",
-        &array(&["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]),
+        &array(&[
+            "USAGI_HOME",
+            "USAGI_RUNTIME_MODE",
+            "USAGI_WORKSPACE_ROOT",
+            "USAGI_TRUST_ROOT",
+        ]),
     ));
     arguments.extend(assignment("mcp_servers.usagi.required", "true"));
     arguments.extend(assignment(
@@ -326,7 +331,7 @@ mod wiring_tests {
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
-                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\", \"USAGI_TRUST_ROOT\"]",
                 "-c",
                 "mcp_servers.usagi.required = true",
                 "-c",
