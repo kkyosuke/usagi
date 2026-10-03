@@ -327,7 +327,7 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
     if basename == "gh" {
         return matches!(tokens.get(1).map(String::as_str), Some("pr"))
             && matches!(tokens.get(2).map(String::as_str), Some("view" | "list"))
-            && !tokens.iter().any(|token| token == "--web");
+            && !gh_opens_browser(&tokens);
     }
     if basename == "sleep" {
         if tokens.len() != 2 {
@@ -351,6 +351,55 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
         basename,
         "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "test" | "true" | "false"
     )
+}
+
+/// Match the browser flag as gh parses it, including grouped short flags.
+/// Argument-taking flags end a short group and consume their following value.
+fn gh_opens_browser(tokens: &[String]) -> bool {
+    let mut arguments = tokens.iter().skip(3);
+    while let Some(token) = arguments.next() {
+        if token == "--" {
+            break;
+        }
+        if token == "--web" || token.starts_with("--web=") {
+            return true;
+        }
+        if matches!(
+            token.as_str(),
+            "--repo"
+                | "--jq"
+                | "--template"
+                | "--assignee"
+                | "--author"
+                | "--base"
+                | "--head"
+                | "--label"
+                | "--limit"
+                | "--search"
+                | "--state"
+        ) {
+            arguments.next();
+            continue;
+        }
+        let Some(flags) = token
+            .strip_prefix('-')
+            .filter(|flags| !flags.starts_with('-'))
+        else {
+            continue;
+        };
+        for (offset, flag) in flags.char_indices() {
+            if flag == 'w' {
+                return true;
+            }
+            if "RqtAaBHLlSs".contains(flag) {
+                if offset + flag.len_utf8() == flags.len() {
+                    arguments.next();
+                }
+                break;
+            }
+        }
+    }
+    false
 }
 
 fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
@@ -387,12 +436,7 @@ pub fn escapes_worktree(worktree: &Path, target: &Path) -> bool {
 /// 拒否する。新規ファイルのため末尾の存在しない component は許容し、存在する symlink 付き ancestor
 /// まで解決してから字句的に付け直す。`root` / `cwd` を canonicalize できない、または cwd が root の
 /// 外にあるケースは、安全のため escape 扱い（true）にする（fail-closed）。
-///
-/// # Panics
-///
-/// 実際には panic しない。`cwd` を canonicalize した絶対パスを基準にするため `normalized` は常に
-/// 絶対パスで、ファイルシステムのルートという存在する ancestor を必ず持ち、その ancestor は
-/// 先に存在確認しているため canonicalize も成功する。
+/// 存在する ancestor の解決に失敗した場合も拒否し、検査中に path が変化しても panic しない。
 #[must_use]
 pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> bool {
     let (Ok(root), Ok(cwd)) = (std::fs::canonicalize(root), std::fs::canonicalize(cwd)) else {
@@ -406,19 +450,18 @@ pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> bool {
     } else {
         cwd.join(target)
     };
-    let normalized = normalize(&absolute);
-    // 存在する最深 ancestor まで遡り、そこを canonicalize（symlink 解決）してから、越えた
-    // 未作成 component を字句的に付け直す。`normalized` は絶対パスなのでルートという存在する
-    // ancestor を必ず持ち、その ancestor は存在するため canonicalize も成功する。
-    let existing = normalized
+    // Preserve symlink/.. ordering until the filesystem has resolved the
+    // existing prefix. Collapsing .. first would turn link/../file into a
+    // different path from the one the kernel opens.
+    absolute
         .ancestors()
         .find(|ancestor| ancestor.exists())
-        .expect("an absolute path always has the existing filesystem root as an ancestor");
-    let mut resolved = std::fs::canonicalize(existing).expect("an existing ancestor canonicalizes");
-    // `existing` は `normalized` の ancestor なので strip_prefix は必ず成功する。万一失敗しても
-    // 空を付け足す（＝存在する ancestor のまま）保守的な挙動に倒す。
-    resolved.push(normalized.strip_prefix(existing).unwrap_or(Path::new("")));
-    !resolved.starts_with(root)
+        .is_none_or(|existing| {
+            std::fs::canonicalize(existing).map_or(true, |mut resolved| {
+                resolved.push(absolute.strip_prefix(existing).unwrap_or(Path::new("")));
+                !normalize(&resolved).starts_with(&root)
+            })
+        })
 }
 
 /// `path` から `.` と `..` を字句的に畳み込む（ファイルシステムを参照しない）。`..` は直前に
@@ -807,6 +850,81 @@ mod tests {
             &worktree,
             Path::new("new/file")
         ));
+    }
+
+    #[test]
+    fn gh_browser_aliases_are_denied_without_confusing_argument_values() {
+        for command in [
+            "gh pr view 1 --web",
+            "gh pr view 1 --web=true",
+            "gh pr view 1 --web=false",
+            "gh pr view 1 -w",
+            "gh pr view 1 -wc",
+            "gh pr view 1 -cw",
+            "gh pr view 1 -w=true",
+            "gh pr list -w",
+        ] {
+            assert!(!root_command_is_read_only(command), "allowed {command}");
+        }
+        for command in [
+            "gh pr view 1 -Rowner/web",
+            "gh pr view 1 -R owner/web",
+            "gh pr view 1 -ctw",
+            "gh pr view 1 -t -w",
+            "gh pr view 1 --template -w",
+            "gh pr view 1 --help",
+            "gh pr list --search web",
+            "gh pr list -- -w",
+        ] {
+            assert!(root_command_is_read_only(command), "denied {command}");
+        }
+    }
+
+    #[test]
+    fn symlink_parent_components_follow_filesystem_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("inside/child")).unwrap();
+        std::fs::create_dir_all(outside.join("child")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("child"), root.join("escape")).unwrap();
+            std::os::unix::fs::symlink(root.join("inside/child"), root.join("safe")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(outside.join("child"), root.join("escape")).unwrap();
+            std::os::windows::fs::symlink_dir(root.join("inside/child"), root.join("safe"))
+                .unwrap();
+        }
+        for target in [
+            Path::new("escape/../victim"),
+            Path::new("escape/../new/file"),
+        ] {
+            assert!(path_escapes_root(&root, &root, target));
+            assert!(path_escapes_root(&root, &root, &root.join(target)));
+        }
+        std::fs::write(outside.join("victim"), "safe").unwrap();
+        assert!(path_escapes_root(
+            &root,
+            &root,
+            Path::new("escape/../victim")
+        ));
+        assert!(!path_escapes_root(
+            &root,
+            &root,
+            Path::new("safe/../new/file")
+        ));
+        assert!(!path_escapes_root(
+            &root,
+            &root,
+            Path::new("inside/../new/file")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.join("victim")).unwrap(),
+            "safe"
+        );
     }
 
     #[test]

@@ -962,7 +962,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   dispatch は共有）。MCP tool と違い provider のフックは command を呼び出すため、この統合は
   CLI コマンドとして持つしかない。`guard-workspace` は enforcing で、`PreToolUse` payload（`cwd` /
   `tool_name` / `tool_input`）を stdin から読み、`cwd` から選んだ 2 モード（session / root）で判定する。
-  session モードは session worktree の外を狙う file 書き込みを拒否し、root モードはコーディネータの
+  session モードは symlink と `..` を filesystem の解決順で検査し、session worktree の外を狙う file
+  書き込みを拒否する。未作成の末尾は許容し、既存 prefix の解決失敗は拒否する。root モードはコーディネータの
   リポジトリ変更（全 file 書き込みツールと read-only allowlist 外の shell command）を拒否する。判定は
   **ツール名の closed allowlist ではなく変更能力**で行う。名前で分かるのは書き込みツールと `Bash` と
   MCP tool までで、未知のツールは `tool_input` の shape で決める。file を名指しする key を持てば
@@ -1204,7 +1205,8 @@ launcher control として拒否し、Codex process の state / arg0
 だけを有界に修復し、lock-aware cleanup と削除は Codex 自身へ委ねる。
 
 Claude の root read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
-diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など
+diff 系は `--no-ext-diff --no-textconv` も必須にする。`gh pr view/list` のブラウザ起動は `--web`、
+`--web=...`、`-w` とその short flag group を拒否する。`-c` / `--config-env`、pager、upload-pack、signature 検証など
 外部 process を起動しうる option は拒否する。Agent child の daemon-issued environment は system/global config、
 fsmonitor、hook、submodule recursion、optional index lock、pager、external diff を無効化し、repository config や公開
 terminal environment が guard の前提を差し替えない。
