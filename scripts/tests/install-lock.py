@@ -156,6 +156,20 @@ class Case:
         self.children.append(child)
         return child
 
+    def launch_legacy(self, lock):
+        script = r'''
+set -eu
+printf '%s\n' "$$" > "$1/pid"
+touch "$2/legacy-ready"
+while [ ! -e "$2/release-legacy" ]; do sleep 0.01; done
+rm -rf -- "$1"
+'''
+        child = subprocess.Popen([
+            "/bin/bash", "-c", script, "legacy", str(lock), str(self.coord),
+        ], start_new_session=True)
+        self.children.append(child)
+        return child
+
     def await_marker(self, name):
         path = self.coord / name
         deadline = time.monotonic() + 15
@@ -431,15 +445,7 @@ def legacy_and_empty_root(root):
     try:
         lock = case.home / "update.lock"
         lock.mkdir(parents=True)
-        script = r'''
-set -eu
-printf '%s\n' "$$" > "$1/pid"
-touch "$2/legacy-ready"
-while [ ! -e "$2/release-legacy" ]; do sleep 0.01; done
-rm -rf -- "$1"
-'''
-        legacy = subprocess.Popen(["/bin/bash", "-c", script, "legacy", str(lock), str(case.coord)])
-        case.children.append(legacy)
+        legacy = case.launch_legacy(lock)
         case.await_marker("legacy-ready")
         waiting = case.launch("a")
         case.await_marker("waiting-a")
@@ -466,6 +472,33 @@ rm -rf -- "$1"
         assert not (lock / "pid").exists(), "legacy metadata must not invite stale root deletion"
     finally:
         case.close()
+
+
+def legacy_fixture_failure_cleanup_reaps_the_unreleased_child(root):
+    case = Case(root, "legacy-failure-cleanup")
+    lock = case.home / "update.lock"
+    lock.mkdir(parents=True)
+    legacy = case.launch_legacy(lock)
+    try:
+        case.await_marker("legacy-ready")
+        owns_group = os.getpgid(legacy.pid) == legacy.pid
+        # An earlier assertion can fail before release-legacy is signalled.
+        # Use the same failure cleanup as the actual legacy-owner fixture.
+        case.close()
+        reaped = legacy.poll() is not None
+    finally:
+        # The regression itself must reap even a broken cleanup implementation.
+        if legacy.poll() is None:
+            try:
+                if os.getpgid(legacy.pid) == legacy.pid:
+                    os.killpg(legacy.pid, signal.SIGKILL)
+                else:
+                    legacy.kill()
+            except ProcessLookupError:
+                pass
+        legacy.wait(timeout=15)
+    assert owns_group, "legacy fixture does not own its process group"
+    assert reaped, "failure cleanup left the legacy fixture running"
 
 
 def invalid_ticket_and_timeout(root):
@@ -577,7 +610,9 @@ def failed_liveness_probes_preserve_owners_until_timeout(root):
 with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
     root = Path(temporary)
     for test in (concurrent_stale_recovery, late_lower_pid, crash_in_choosing,
-                 legacy_and_empty_root, invalid_ticket_and_timeout,
+                 legacy_and_empty_root,
+                 legacy_fixture_failure_cleanup_reaps_the_unreleased_child,
+                 invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,
                  retiring_a_live_owner_does_not_expose_partial_metadata,
                  failed_liveness_probes_preserve_owners_until_timeout,
