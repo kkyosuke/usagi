@@ -108,7 +108,9 @@ struct StallBoundedWriter<W, R> {
 impl<W: Write, R: Readiness> PtyWriter for StallBoundedWriter<W, R> {
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         let deadline = Instant::now() + self.stall_timeout;
-        self.write_with_budget(bytes, || deadline.saturating_duration_since(Instant::now()))
+        self.write_with_budget(bytes, &mut || {
+            deadline.saturating_duration_since(Instant::now())
+        })
     }
 }
 
@@ -116,7 +118,7 @@ impl<W: Write, R: Readiness> StallBoundedWriter<W, R> {
     fn write_with_budget(
         &mut self,
         bytes: &[u8],
-        mut remaining: impl FnMut() -> Duration,
+        remaining: &mut dyn FnMut() -> Duration,
     ) -> Result<(), PtyWriteError> {
         let mut applied_prefix = 0;
         while applied_prefix < bytes.len() {
@@ -830,7 +832,9 @@ mod tests {
         );
         let mut budgets = [7, 7, 5, 3, 3, 1, 0].into_iter();
         assert_eq!(
-            writer.write_with_budget(b"abc", || Duration::from_millis(budgets.next().unwrap())),
+            writer.write_with_budget(b"abc", &mut || {
+                Duration::from_millis(budgets.next().unwrap())
+            }),
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 2 })
         );
         assert_eq!(writer.inner.written, b"ab");
@@ -848,7 +852,9 @@ mod tests {
         let mut interrupted = scripted([WriteStep::Interrupted], ScriptedReadiness::ready());
         let mut budgets = [1, 0].into_iter();
         assert_eq!(
-            interrupted.write_with_budget(b"x", || Duration::from_millis(budgets.next().unwrap())),
+            interrupted.write_with_budget(b"x", &mut || {
+                Duration::from_millis(budgets.next().unwrap())
+            }),
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 0 })
         );
         assert!(interrupted.stalled);
@@ -856,7 +862,9 @@ mod tests {
         let mut exhausted = scripted([WriteStep::WouldBlock], ScriptedReadiness::ready());
         let mut budgets = [1, 0].into_iter();
         assert_eq!(
-            exhausted.write_with_budget(b"x", || Duration::from_millis(budgets.next().unwrap())),
+            exhausted.write_with_budget(b"x", &mut || {
+                Duration::from_millis(budgets.next().unwrap())
+            }),
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 0 })
         );
         assert!(exhausted.stalled);
@@ -979,6 +987,23 @@ mod tests {
         assert!(fcntl_outcome(-1).is_err());
         assert_eq!(fcntl_outcome(3).unwrap(), 3);
         assert!(set_nonblocking(-1).is_err());
+    }
+
+    #[test]
+    fn pty_error_conversion_preserves_the_failure_details() {
+        let converted = super::io_error(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "terminal access denied",
+        ));
+        assert_eq!(converted.kind(), std::io::ErrorKind::Other);
+        assert_eq!(converted.to_string(), "terminal access denied");
+        let contextual =
+            super::io_error_with_context("allocate PTY", anyhow::anyhow!("no terminal available"));
+        assert_eq!(contextual.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            contextual.to_string(),
+            "allocate PTY: no terminal available"
+        );
     }
 
     #[test]
