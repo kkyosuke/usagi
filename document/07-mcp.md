@@ -175,12 +175,28 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `workflow_start` / `workflow_status` / `workflow_instruct` / `workflow_finish` | 認証済み Agent が作成した session の実装＋レビュー workflow を開始・観測・追加指示・終了する（[3. TUI#Session Workflow タブ](03-tui.md#session-workflow-タブ)が仕様の正本）。対象は他の session tool と同じ所有権規則に従い、**自分自身が動いている session も明示的に拒否する**ため、workflow の担当 Agent が自分の workflow を操作することはない。担当を省略した開始は workspace が最後に成功した組合せを使う。`goal` の代わりに `issue` 番号を渡すと backlog の内容が goal になり、その run の PR は `Internal-Issue` と issue の `done` を満たすまで `PR ready` にならない（[3. TUI#session-workflow-タブ](03-tui.md#session-workflow-タブ)が正本）。`workflow_finish` は run（または起動前の開始 intent）を終了して次の開始を受け付ける状態にし、Agent の停止も worktree の削除も行わない。1 回の tool 呼び出しは 1 つの operation ID で受理するので transport の再送は二重の run や指示や終了を作らないが、tool を呼び直せば新しい指示になる |
-| `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child の session worktree にある machine-local scratchpad を core usecase 経由で読み書きする |
+| `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child 自身の session ID に属する machine-local scratchpad を core usecase 経由で読み書きする（[保存先](#session-scratchpad)） |
 | `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
 | `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
+
+### Session scratchpad
+
+作業メモ・todo・decision は workspace の repository-local `state.json` にある `session_notes` で、daemon が
+解決した stable session ID ごとに保存する。TUI の [session memo](03-tui.md#session-memo) と同じ内容である。
+`session_note_get` の引数は空オブジェクト、`session_note_update` は `note` を受け取り、空文字はメモをクリアする。
+対象の ID は caller credential と利用可能な lifecycle から解決し、呼び出し側に session 名や保存先を選ばせない。
+
+最初の読み込みで旧 workspace の session レコードと旧 worktree の root scratchpad を移行する。
+旧 workspace レコードは session 名で照合するため、移行前に削除した session のレコードが残っていると、
+同名で最初に観測された session が取り込む。旧形式には incarnation を照合できる ID がない。
+メモ本文は旧 workspace 側を優先し、todo・decision は重複を除いて保持する。移行済みの空 entry は明示的なクリアを表し、
+旧メモを再取り込みしない。workspace の旧 session レコードから転送した scratchpad はクリアする。
+移行後は session ID で分離し、同名で再作成した session に引き継がせない。旧 worktree ストアが壊れている場合は
+その session の移行を保留し、他の session の表示・操作は継続する。scratchpad は Git 追跡外の作業用情報で、
+session lifecycle の権威にはならない。
 
 ### Agent が作成した session の authority
 

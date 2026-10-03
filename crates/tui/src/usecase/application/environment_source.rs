@@ -173,7 +173,13 @@ impl EnvironmentSourceEditor {
 fn display_width(value: &str) -> usize {
     value
         .chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+        .map(|character| {
+            if character == '\t' {
+                1
+            } else {
+                UnicodeWidthChar::width(character).unwrap_or(0)
+            }
+        })
         .sum()
 }
 
@@ -183,7 +189,11 @@ fn byte_offset_at_display_column(value: &str, column: usize) -> usize {
         if width >= column {
             return index;
         }
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        let character_width = if character == '\t' {
+            1
+        } else {
+            UnicodeWidthChar::width(character).unwrap_or(0)
+        };
         if width.saturating_add(character_width) > column {
             return index;
         }
@@ -228,6 +238,20 @@ pub fn parse_environment_source(source: &str) -> Result<EnvBindings, String> {
 #[cfg(test)]
 mod tests {
     use super::EnvironmentSourceEditor;
+
+    #[test]
+    fn vertical_navigation_uses_the_safe_display_cell_for_tabs() {
+        let mut editor = EnvironmentSourceEditor::new("A\tあX\nB\tCD");
+        editor.move_edge(false);
+        for _ in 0..3 {
+            editor.move_cursor(true);
+        }
+        assert_eq!(editor.cursor(), "A\tあ".len());
+        editor.move_vertical(true);
+        assert_eq!(editor.cursor(), editor.value().len());
+        editor.move_vertical(false);
+        assert_eq!(editor.cursor(), "A\tあ".len());
+    }
 
     #[test]
     fn editing_is_unicode_safe_and_shared_validation_runs() {

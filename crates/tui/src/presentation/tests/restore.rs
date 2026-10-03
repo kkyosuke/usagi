@@ -2077,7 +2077,7 @@ fn workspace_switch_restores_manual_session_order_with_fresh_membership() {
     assert!(deck.session_order_for_path(Path::new("/missing")).is_none());
     deck.remember_session_order(WorkspaceId::new(), &[a]);
     let mut previous = WorkspaceRuntime::new(snapshot.workspace_id, vec![a, b, c]);
-    let _ = previous.handle_key(Key::Char('n'));
+    let _ = previous.handle_key(Key::Char('N'));
     remember_workspace_session_focus(&mut deck, previous.state());
     deck.activate_snapshot(&snapshot);
     assert_eq!(

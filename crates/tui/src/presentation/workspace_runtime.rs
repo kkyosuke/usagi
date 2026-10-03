@@ -4819,6 +4819,7 @@ mod tests {
             cwd: "/work/alpha".into(),
             last_modified: Utc::now(),
             has_notes: false,
+            memo: None,
             pr_count: 0,
             removing: false,
             agent_resume: None,

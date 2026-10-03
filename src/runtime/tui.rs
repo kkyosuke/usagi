@@ -271,10 +271,6 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
 /// project each read/write back as a controller [`BackendEvent`].
 struct RepoEnvironmentStore {
     store: WorkspaceStateStore,
-    /// Stable session identities paired with their store names, captured from
-    /// the snapshot the runtime opened with (the TUI never infers a name from an
-    /// id elsewhere).
-    session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
     environment: SettingsEnvironmentStore,
     role_data_home: PathBuf,
     role_workspace: PathBuf,
@@ -283,29 +279,22 @@ struct RepoEnvironmentStore {
 impl RepoEnvironmentStore {
     fn new(
         workspace_path: &Path,
-        session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
         environment: SettingsEnvironmentStore,
         role_data_home: PathBuf,
     ) -> Self {
         Self {
             store: WorkspaceStateStore::new(workspace_path),
-            session_names,
             environment,
             role_data_home,
             role_workspace: workspace_path.to_owned(),
         }
     }
 
-    /// Resolve a controller target to the name-keyed store target, or `None`
-    /// when a session id is no longer in the snapshot (a stale target).
-    fn resolve(&self, target: Target) -> Option<StoreTarget<'_>> {
+    /// Map the controller's stable target directly to the canonical scratchpad.
+    fn resolve(target: Target) -> StoreTarget<'static> {
         match target {
-            Target::Root(_) => Some(StoreTarget::Root),
-            Target::Session(id) => self
-                .session_names
-                .iter()
-                .find(|(known, _)| *known == id)
-                .map(|(_, name)| StoreTarget::Session(name.as_str())),
+            Target::Root(_) => StoreTarget::Root,
+            Target::Session(id) => StoreTarget::Managed(id),
         }
     }
 
@@ -461,24 +450,22 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         emit_session_favorites(result, &completions);
     }
 
-    fn load_notes(&mut self, target: Target, completions: Completions) {
-        let event = match self.resolve(target) {
-            Some(scope) => match usagi_core::usecase::note::note(&self.store, scope) {
-                Ok(note) => BackendEvent::NotesLoaded {
-                    target,
-                    scratchpad: Scratchpad {
-                        note,
-                        ..Scratchpad::default()
-                    },
-                },
-                Err(error) => BackendEvent::NotesError {
-                    target,
-                    error: Self::safe_error(error),
-                },
-            },
-            None => BackendEvent::NotesError {
+    fn load_notes(
+        &mut self,
+        target: Target,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    ) {
+        let event = match usagi_core::usecase::note::read(&self.store, Self::resolve(target)) {
+            Ok(scratchpad) => BackendEvent::NotesLoaded {
+                request_id,
                 target,
-                error: Self::stale_target(),
+                scratchpad,
+            },
+            Err(error) => BackendEvent::NotesError {
+                request_id,
+                target,
+                error: Self::safe_error(error),
             },
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
@@ -529,40 +516,50 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         }
     }
 
-    fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions) {
+    fn save_notes(
+        &mut self,
+        target: Target,
+        scratchpad: Scratchpad,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    ) {
         let event = (|| -> Result<BackendEvent, SafeError> {
-            let session_name = match target {
-                Target::Root(_) => None,
-                Target::Session(id) => Some(
-                    self.session_names
-                        .iter()
-                        .find(|(known, _)| *known == id)
-                        .map(|(_, name)| name.clone())
-                        .ok_or_else(Self::stale_target)?,
-                ),
-            };
-            let _lock = self.store.lock().map_err(Self::safe_error)?;
-            let mut state = self
+            let scope = Self::resolve(target);
+            if !usagi_core::usecase::note::set_note(
+                &self.store,
+                scope,
+                scratchpad.note.as_deref().unwrap_or(""),
+                Utc::now(),
+            )
+            .map_err(Self::safe_error)?
+            {
+                return Err(Self::stale_target());
+            }
+            let stored = self
                 .store
                 .load()
                 .map_err(Self::safe_error)?
-                .unwrap_or_default();
-            match session_name {
-                None => state.root_notes = scratchpad.clone(),
-                Some(name) => {
-                    let record = state
-                        .sessions
-                        .iter_mut()
-                        .find(|record| record.name == name)
-                        .ok_or_else(Self::stale_target)?;
-                    record.notes = scratchpad.clone();
-                }
-            }
-            state.updated_at = Utc::now();
-            self.store.save(&state).map_err(Self::safe_error)?;
-            Ok(BackendEvent::NotesLoaded { target, scratchpad })
+                .ok_or_else(Self::stale_target)?;
+            let scratchpad = match target {
+                Target::Root(_) => stored.root_notes,
+                Target::Session(id) => stored
+                    .session_notes
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(Self::stale_target)?,
+            };
+            Ok(BackendEvent::NotesSaved {
+                request_id,
+                target,
+                scratchpad,
+                updated_at: Some(stored.updated_at),
+            })
         })()
-        .unwrap_or_else(|error| BackendEvent::NotesError { target, error });
+        .unwrap_or_else(|error| BackendEvent::NotesError {
+            request_id,
+            target,
+            error,
+        });
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
     }
 
@@ -1218,12 +1215,11 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         snapshot: &WorkspaceSnapshot,
         host: ControllerHost,
     ) -> ControllerBackendComposition {
-        let (session_names, sessions) = project_backend_sessions(snapshot);
+        let (_session_names, sessions) = project_backend_sessions(snapshot);
         let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let store = RepoEnvironmentStore::new(
             &snapshot.workspace.path,
-            session_names,
             SettingsEnvironmentStore::new(environment_data_dir.clone(), &snapshot.workspace.path),
             environment_data_dir,
         );
@@ -3223,13 +3219,18 @@ impl LifecycleSnapshot {
             .collect()
     }
 
-    fn project(&self, workspace: &Workspace, legacy: &[SessionRecord]) -> Vec<SessionRecord> {
+    fn project(
+        &self,
+        workspace: &Workspace,
+        legacy: &usagi_core::domain::workspace_state::WorkspaceState,
+    ) -> Vec<SessionRecord> {
         self.listed_sessions()
             .map(|session| {
                 // Lifecycle is daemon-authoritative, but `state.json` remains
                 // the durable home of UI-only annotations.  Retain a matching
                 // record wholesale and only replace its physical identity.
                 let mut record = legacy
+                    .sessions
                     .iter()
                     .find(|record| record.name == session.name)
                     .cloned()
@@ -3248,6 +3249,9 @@ impl LifecycleSnapshot {
                         notes: Scratchpad::default(),
                         prs: Vec::new(),
                     });
+                if let Some(notes) = legacy.session_notes.get(&session.session_id) {
+                    record.notes.clone_from(notes);
+                }
                 record.root = workspace
                     .path
                     .join(".usagi")
@@ -3836,18 +3840,19 @@ fn session_snapshot_result(
         .listed_sessions()
         .map(|session| session.session_id)
         .collect();
-    let legacy = match load_workspace_state(&workspace.path) {
+    let legacy = match load_workspace_notes(&workspace.path, snapshot) {
         Ok(state) => state,
         Err(error) => return Err(error.to_string()),
     };
     Ok(SessionCommandResult {
         message: message.into(),
-        sessions: Some(snapshot.project(workspace, &legacy.sessions)),
+        sessions: Some(snapshot.project(workspace, &legacy)),
         session_ids: Some(session_ids),
         agent_resumes: Some(snapshot.agent_resumes.clone()),
         session_lifecycles: Some(snapshot.session_lifecycles()),
         session_roles: Some(snapshot.session_roles.clone()),
         revision: Some(snapshot.revision),
+        notes_updated_at: Some(legacy.updated_at),
     })
 }
 
@@ -3858,6 +3863,36 @@ fn load_workspace_state(
         .load()
         .map_err(io_error)
         .map(Option::unwrap_or_default)
+}
+
+/// Read annotations once per snapshot and import old notes only for a newly
+/// observed, available session incarnation. The background snapshot pump owns IO.
+fn load_workspace_notes(
+    root: &Path,
+    lifecycle: &LifecycleSnapshot,
+) -> std::io::Result<usagi_core::domain::workspace_state::WorkspaceState> {
+    let mut state = load_workspace_state(root)?;
+    for session in lifecycle.listed_sessions().filter(|session| {
+        session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+    }) {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            state.session_notes.entry(session.session_id)
+        {
+            let worktree = root.join(".usagi").join("sessions").join(&session.name);
+            // A damaged legacy store belongs to this session. Keep its entry
+            // uninitialized so saving cannot replace unreadable data, while
+            // other sessions and the workspace remain usable.
+            if let Ok(notes) = usagi_core::infrastructure::session_notes::load(
+                root,
+                session.session_id,
+                &session.name,
+                &worktree,
+            ) {
+                entry.insert(notes);
+            }
+        }
+    }
+    Ok(state)
 }
 
 struct FsWorkspaceLoader {
@@ -3891,7 +3926,7 @@ impl FsWorkspaceLoader {
         workspace: Workspace,
         lifecycle: LifecycleSnapshot,
     ) -> std::io::Result<WorkspaceSnapshot> {
-        let mut state = load_workspace_state(&workspace.path)?;
+        let mut state = load_workspace_notes(&workspace.path, &lifecycle)?;
         let workspace_id = lifecycle.workspace_id;
         // Identities align with the listed rows (`project` lists the same set),
         // so a `Failed` row shows on the first frame with a removable action.
@@ -3900,7 +3935,7 @@ impl FsWorkspaceLoader {
             .map(|session| session.session_id)
             .collect();
         let session_lifecycles = lifecycle.session_lifecycles();
-        state.sessions = lifecycle.project(&workspace, &state.sessions);
+        state.sessions = lifecycle.project(&workspace, &state);
         Ok(WorkspaceSnapshot::with_runtime_projection(
             workspace,
             state,
@@ -7257,7 +7292,10 @@ mod tests {
         // removal in progress keeps its row until the teardown finishes.
         assert_eq!(
             snapshot
-                .project(&workspace, &[])
+                .project(
+                    &workspace,
+                    &usagi_core::domain::workspace_state::WorkspaceState::default()
+                )
                 .iter()
                 .map(|record| record.name.clone())
                 .collect::<Vec<_>>(),
@@ -7546,7 +7584,13 @@ mod tests {
             prs: Vec::new(),
         };
 
-        let projected = snapshot.project(&workspace, &[legacy]);
+        let projected = snapshot.project(
+            &workspace,
+            &usagi_core::domain::workspace_state::WorkspaceState {
+                sessions: vec![legacy],
+                ..Default::default()
+            },
+        );
         assert_eq!(projected[0].display_name.as_deref(), Some("Keep me"));
         assert_eq!(projected[0].origin, SessionOrigin::Mcp);
         assert_eq!(projected[0].notes.note.as_deref(), Some("do not drop"));
@@ -8445,12 +8489,86 @@ mod tests {
     }
 
     #[test]
+    fn workspace_notes_keep_sessions_usable_when_one_legacy_store_is_corrupt() {
+        use super::load_workspace_notes;
+        use usagi_core::infrastructure::store::state::WorkspaceStateStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("repo", directory.path());
+        let broken = ManagedSession::adopt_available("broken".into(), Utc::now());
+        let healthy = ManagedSession::adopt_available("healthy".into(), Utc::now());
+        let canonical = ManagedSession::adopt_available("canonical".into(), Utc::now());
+        let broken_id = broken.session_id;
+        let healthy_id = healthy.session_id;
+        let canonical_id = canonical.session_id;
+        let healthy_notes = Scratchpad {
+            note: Some("legacy memo".into()),
+            ..Default::default()
+        };
+        let canonical_notes = Scratchpad {
+            note: Some("saved memo".into()),
+            ..Default::default()
+        };
+        WorkspaceStateStore::new(directory.path())
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                session_notes: BTreeMap::from([(canonical_id, canonical_notes.clone())]),
+                ..Default::default()
+            })
+            .unwrap();
+        let broken_store =
+            WorkspaceStateStore::new(directory.path().join(".usagi/sessions/broken"));
+        std::fs::create_dir_all(broken_store.dir()).unwrap();
+        std::fs::write(broken_store.state_path(), "malformed").unwrap();
+        WorkspaceStateStore::new(directory.path().join(".usagi/sessions/healthy"))
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                root_notes: healthy_notes.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let lifecycle = LifecycleSnapshot {
+            workspace_id: WorkspaceId::new(),
+            root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            revision: 1,
+            sessions: vec![broken, healthy, canonical],
+            agent_resumes: BTreeMap::new(),
+            session_roles: BTreeMap::new(),
+        };
+
+        let notes = load_workspace_notes(directory.path(), &lifecycle).unwrap();
+        assert!(!notes.session_notes.contains_key(&broken_id));
+        assert_eq!(notes.session_notes[&healthy_id], healthy_notes);
+        assert_eq!(notes.session_notes[&canonical_id], canonical_notes);
+        // The resident refresh and initial open both keep all lifecycle rows.
+        let refreshed = session_snapshot_result("refresh", &lifecycle, &workspace).unwrap();
+        assert_eq!(
+            refreshed.session_ids.unwrap(),
+            [broken_id, healthy_id, canonical_id]
+        );
+        assert_eq!(refreshed.sessions.unwrap()[1].notes, healthy_notes);
+        let opened = FsWorkspaceLoader::runtime_snapshot(workspace, lifecycle).unwrap();
+        assert_eq!(opened.state.sessions.len(), 3);
+        assert_eq!(opened.state.sessions[2].notes, canonical_notes);
+        assert!(
+            !usagi_core::usecase::note::set_note(
+                &WorkspaceStateStore::new(directory.path()),
+                StoreTarget::Managed(broken_id),
+                "replacement",
+                Utc::now(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(broken_store.state_path()).unwrap(),
+            "malformed"
+        );
+    }
+
+    #[test]
     fn session_favorites_adapter_loads_toggles_and_reports_storage_errors() {
         let workspace = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let mut store = RepoEnvironmentStore::new(
             workspace.path(),
-            Vec::new(),
             SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
             data.path().to_path_buf(),
         );
@@ -8496,22 +8614,28 @@ mod tests {
         let alpha = SessionId::new();
         let store = RepoEnvironmentStore::new(
             workspace.path(),
-            vec![(alpha, "alpha".to_owned())],
             SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
             workspace.path().to_path_buf(),
         );
 
-        // The root always resolves; a known session resolves to its store name.
         assert!(matches!(
-            store.resolve(Target::Root(WorkspaceId::new())),
-            Some(StoreTarget::Root)
+            RepoEnvironmentStore::resolve(Target::Root(WorkspaceId::new())),
+            StoreTarget::Root
         ));
-        assert!(matches!(
-            store.resolve(Target::Session(alpha)),
-            Some(StoreTarget::Session("alpha"))
-        ));
-        // A session absent from the snapshot mapping is stale, not guessed.
-        assert!(store.resolve(Target::Session(SessionId::new())).is_none());
+        assert!(
+            matches!(RepoEnvironmentStore::resolve(Target::Session(alpha)), StoreTarget::Managed(id) if id == alpha)
+        );
+        // A missing canonical entry refuses writes rather than creating notes
+        // under a stale or name-reused session.
+        assert!(
+            !usagi_core::usecase::note::set_note(
+                &store.store,
+                StoreTarget::Managed(alpha),
+                "stale",
+                Utc::now()
+            )
+            .unwrap()
+        );
 
         let stale = RepoEnvironmentStore::stale_target();
         assert_eq!(stale.error_id, "target-store-error");
@@ -8525,12 +8649,79 @@ mod tests {
     }
 
     #[test]
+    fn repo_notes_save_preserves_concurrent_lists_and_returns_fenced_persisted_data() {
+        let workspace = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
+            workspace.path().to_path_buf(),
+        );
+        usagi_core::usecase::note::initialize_session(
+            &store.store,
+            id,
+            "memo",
+            &Scratchpad::default(),
+        )
+        .unwrap();
+        let scope = StoreTarget::Managed(id);
+        usagi_core::usecase::note::add_todo(&store.store, scope, "MCP-added todo", Utc::now())
+            .unwrap();
+        let request_id = RequestId::new();
+        let (save, receiver) = Completions::channel();
+        BackendTargetStorePort::save_notes(
+            &mut store,
+            Target::Session(id),
+            Scratchpad {
+                note: Some("日本語\n次の行".into()),
+                ..Default::default()
+            },
+            request_id,
+            save,
+        );
+        let AppEvent::Backend(BackendEvent::NotesSaved {
+            target,
+            request_id: response_id,
+            scratchpad,
+            updated_at,
+        }) = receiver.recv().unwrap()
+        else {
+            panic!("expected saved notes")
+        };
+        assert_eq!(target, Target::Session(id));
+        assert_eq!(response_id, request_id);
+        assert!(updated_at.is_some());
+        assert_eq!(scratchpad.note.as_deref(), Some("日本語\n次の行"));
+        assert_eq!(scratchpad.todos[0].text, "MCP-added todo");
+        let (load, receiver) = Completions::channel();
+        BackendTargetStorePort::load_notes(&mut store, target, request_id, load);
+        assert_eq!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::NotesLoaded {
+                target,
+                request_id,
+                scratchpad
+            })
+        );
+        let (save, receiver) = Completions::channel();
+        BackendTargetStorePort::save_notes(
+            &mut store,
+            Target::Session(SessionId::new()),
+            Scratchpad::default(),
+            request_id,
+            save,
+        );
+        assert!(
+            matches!(receiver.recv().unwrap(), AppEvent::Backend(BackendEvent::NotesError { request_id: response_id, .. }) if response_id == request_id)
+        );
+    }
+
+    #[test]
     fn production_role_store_reads_and_atomically_validates_workspace_catalog() {
         let workspace = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let mut store = RepoEnvironmentStore::new(
             workspace.path(),
-            Vec::new(),
             SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
             data.path().to_path_buf(),
         );
@@ -9237,6 +9428,7 @@ mod tests {
         ));
 
         composition.backend.dispatch(Effect::LoadNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target: Target::Root(workspace_id),
         });
         composition.backend.dispatch(Effect::LoadEnvironment {
@@ -9415,6 +9607,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp/demo"),
             last_modified: Utc::now(),
             has_notes: true,
+            memo: None,
             pr_count: 0,
             removing: false,
             agent_resume: None,

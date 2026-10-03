@@ -406,6 +406,7 @@ fn state(name: &str) -> WorkspaceState {
             notes: Scratchpad::default(),
             prs: Vec::new(),
         }],
+        session_notes: std::collections::BTreeMap::new(),
         root_notes: Scratchpad::default(),
         updated_at: now(),
     }
@@ -955,6 +956,7 @@ impl SessionCommandPort for SnapshotSessionPort {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         })
     }
 }
@@ -1492,6 +1494,7 @@ impl SessionCommandPort for BlockingSessionPort {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         })
     }
 }
@@ -1650,6 +1653,7 @@ impl SessionCommandPort for PanicOnceSessionPort {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         })
     }
 }

@@ -43,6 +43,7 @@ fn populated_state_round_trips_through_json() {
     let ts = Utc.with_ymd_and_hms(2026, 6, 20, 1, 0, 0).unwrap();
     let state = WorkspaceState {
         sessions: vec![session("alpha"), session("beta")],
+        session_notes: std::collections::BTreeMap::new(),
         root_notes: Scratchpad {
             note: Some("root memo".to_string()),
             todos: vec![SessionTodo::new("triage")],

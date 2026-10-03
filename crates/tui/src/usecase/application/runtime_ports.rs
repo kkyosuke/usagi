@@ -114,6 +114,8 @@ pub struct SessionCommandResult {
     pub session_roles: Option<BTreeMap<SessionId, SessionRoleProjection>>,
     /// Monotonic daemon lifecycle revision.
     pub revision: Option<u64>,
+    /// Timestamp of the annotation store read with these sidebar rows.
+    pub notes_updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SessionCommandResult {
@@ -128,6 +130,7 @@ impl SessionCommandResult {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         }
     }
 }

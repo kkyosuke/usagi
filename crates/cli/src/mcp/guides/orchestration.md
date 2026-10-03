@@ -34,7 +34,7 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | workflow 追加指示 | `workflow_instruct` | 進行中の workflow の担当へ durable な指示を送る |
 | workflow 終了 | `workflow_finish` | run を終了して次の開始を受け付ける。Agent は殺さず worktree も消さない |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
-| scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | 呼び出し元 session worktree の machine-local store を操作する |
+| scratchpad | `session_note_*` / `session_todo_*` / `session_decision_*` | workspace の machine-local store で呼び出し元 session ID の scratchpad を操作する。TUI の session memo と共有する |
 | session 破棄 | `session_remove` | 自身が作成した session の worktree を daemon が破棄し、lifecycle store を更新する |
 | worker dispatch | `session_dispatch` | caller 所有の session を作成または再利用し、worker PTY と run/binding を durable に記録する |
 | worker の観測 | `session_get` / `agent_list` / `agent_get` | 自身が作成した session に属する agent と run を返す |

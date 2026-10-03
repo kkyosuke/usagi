@@ -9,14 +9,18 @@ mod decision;
 use decision::update_decision_editor;
 mod entry;
 mod new;
+mod notes;
 mod preview;
 mod pull_requests;
+
+use chrono::{DateTime, Utc};
 
 pub use entry::{EntryEvent, EntryRoute, EntryState, EntryWorkspace, HomeSnapshot, update_entry};
 pub use new::{
     NewEvent, NewForm, NewMode, NewRequest, NewRoute, NewState, NewValidationError, update_new,
     validate_new_form,
 };
+pub use notes::{NoteCloseChoice, NoteEditor, NoteSection};
 pub use preview::{
     PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
 };
@@ -459,65 +463,6 @@ fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
 /// settings vocabulary, so the TUI never spells a product profile itself.
 fn profile_for(model: DefaultModel) -> AgentProfileId {
     AgentProfileId::new(model.profile_id()).expect("vocabulary profile ID is canonical")
-}
-
-/// Note editor で現在表示・編集している section。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoteSection {
-    Note,
-    Todos,
-    Decisions,
-}
-
-/// Target-local scratchpad の overlay state。
-///
-/// 保存前の値も含め TUI が所有する。port の失敗は [`error`](Self::error) にだけ
-/// 投影するので、利用者が入力した内容は失われない。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteEditor {
-    target: Target,
-    scratchpad: Scratchpad,
-    section: NoteSection,
-    draft: String,
-    error: Option<SafeError>,
-}
-
-impl NoteEditor {
-    fn loading(target: Target) -> Self {
-        Self {
-            target,
-            scratchpad: Scratchpad::default(),
-            section: NoteSection::Note,
-            draft: String::new(),
-            error: None,
-        }
-    }
-
-    /// Overlay が対象とする stable identity。
-    #[must_use]
-    pub const fn target(&self) -> Target {
-        self.target
-    }
-    /// 現在の表示・編集値。
-    #[must_use]
-    pub fn scratchpad(&self) -> &Scratchpad {
-        &self.scratchpad
-    }
-    /// 選択された section。
-    #[must_use]
-    pub const fn section(&self) -> NoteSection {
-        self.section
-    }
-    /// todo / decision 追加用、または note の編集値。
-    #[must_use]
-    pub fn draft(&self) -> &str {
-        &self.draft
-    }
-    /// port が分類した安全なエラー。
-    #[must_use]
-    pub fn error(&self) -> Option<&SafeError> {
-        self.error.as_ref()
-    }
 }
 
 /// One editable environment variable. Values intentionally remain inside the
@@ -1192,6 +1137,9 @@ pub struct AppState {
     /// second operation while the first request is in flight.
     director_launching: Option<OperationId>,
     note_editor: Option<NoteEditor>,
+    saved_notes: Option<(SessionId, Scratchpad)>,
+    saved_note_at: Option<DateTime<Utc>>,
+    note_revision: u64,
     environment_editor: Option<EnvironmentEditor>,
     role_editor: Option<RoleEditor>,
     workflows: std::collections::BTreeMap<SessionId, super::workflow::WorkflowPanel>,
@@ -1441,6 +1389,9 @@ impl AppState {
             director_goal: String::new(),
             director_launching: None,
             note_editor: None,
+            saved_notes: None,
+            saved_note_at: None,
+            note_revision: 0,
             environment_editor: None,
             role_editor: None,
             workflows: std::collections::BTreeMap::new(),
@@ -1564,6 +1515,23 @@ impl AppState {
     pub const fn mascot_tick(&self) -> u64 {
         self.mascot_tick
     }
+    /// The last successful note save, until the next authoritative snapshot.
+    #[must_use]
+    pub fn saved_notes(&self) -> Option<&(SessionId, Scratchpad)> {
+        self.saved_notes.as_ref()
+    }
+
+    /// Revision of the save acknowledgement used by the session-row cache.
+    #[must_use]
+    pub const fn note_revision(&self) -> u64 {
+        self.note_revision
+    }
+
+    #[must_use]
+    pub const fn saved_note_at(&self) -> Option<DateTime<Utc>> {
+        self.saved_note_at
+    }
+
     /// Open note editor, including unsaved values after a save failure.
     #[must_use]
     pub fn note_editor(&self) -> Option<&NoteEditor> {
@@ -2339,6 +2307,9 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
     }
     match key.code {
         KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlX),
+        KeyCode::Char('\u{13}') if !key.modifiers.shift && !key.modifiers.alt => {
+            Some(AppKey::SaveRoles)
+        }
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -2619,11 +2590,29 @@ pub enum BackendEvent {
     Feedback(Feedback),
     /// Scratchpad data returned by its persistence owner.
     NotesLoaded {
+        request_id: RequestId,
         target: Target,
         scratchpad: Scratchpad,
     },
     /// A safe scratchpad read/save failure.
-    NotesError { target: Target, error: SafeError },
+    NotesError {
+        request_id: RequestId,
+        target: Target,
+        error: SafeError,
+    },
+    /// A successful note write, fenced separately from reads.
+    NotesSaved {
+        request_id: RequestId,
+        target: Target,
+        scratchpad: Scratchpad,
+        updated_at: Option<DateTime<Utc>>,
+    },
+    /// A workspace snapshot has caught up with a saved memo.
+    SessionNoteObserved {
+        session: SessionId,
+        note: Option<String>,
+        updated_at: Option<DateTime<Utc>>,
+    },
     /// Environment bindings returned by the settings owner: the edited scope's
     /// own bindings, plus the global ones a workspace inherits (empty when the
     /// edited scope *is* global).
@@ -2765,10 +2754,12 @@ pub enum Effect {
     },
     /// Read an active target's scratchpad through the existing persistence owner.
     LoadNotes {
+        request_id: RequestId,
         target: Target,
     },
     /// Save an edited scratchpad through the existing persistence owner.
     SaveNotes {
+        request_id: RequestId,
         target: Target,
         scratchpad: Scratchpad,
     },
@@ -3441,7 +3432,9 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             },
         ),
         event @ (BackendEvent::NotesLoaded { .. }
+        | BackendEvent::NotesSaved { .. }
         | BackendEvent::NotesError { .. }
+        | BackendEvent::SessionNoteObserved { .. }
         | BackendEvent::EnvironmentLoaded { .. }
         | BackendEvent::EnvironmentSaved { .. }
         | BackendEvent::EnvironmentError { .. }
@@ -3571,6 +3564,15 @@ fn update_session_snapshot(state: &mut AppState, mut sessions: Vec<SessionId>) -
     // one after it, even when the same stable ID remains visible.
     state.pending_session_click = None;
     let previous_sessions = std::mem::replace(&mut state.sessions, sessions);
+    if state
+        .saved_notes
+        .as_ref()
+        .is_some_and(|(id, _)| !state.sessions.contains(id))
+    {
+        state.saved_notes = None;
+        state.saved_note_at = None;
+        state.note_revision = state.note_revision.saturating_add(1);
+    }
     state
         .workflows
         .retain(|session, _| state.sessions.contains(session));
@@ -3746,25 +3748,27 @@ fn update_workflow_backend(
 #[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.
 fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     match event {
-        BackendEvent::NotesLoaded { target, scratchpad } => {
-            if let Some(editor) = state
-                .note_editor
-                .as_mut()
-                .filter(|editor| editor.target == *target)
-            {
-                editor.scratchpad.clone_from(scratchpad);
-                editor.error = None;
-            }
-        }
-        BackendEvent::NotesError { target, error } => {
-            if let Some(editor) = state
-                .note_editor
-                .as_mut()
-                .filter(|editor| editor.target == *target)
-            {
-                editor.error = Some(error.clone());
-            }
-        }
+        BackendEvent::NotesLoaded {
+            request_id,
+            target,
+            scratchpad,
+        } => notes::loaded(state, *request_id, *target, scratchpad),
+        BackendEvent::NotesSaved {
+            request_id,
+            target,
+            scratchpad,
+            updated_at,
+        } => notes::saved(state, *request_id, *target, scratchpad, *updated_at),
+        BackendEvent::NotesError {
+            request_id,
+            target,
+            error,
+        } => notes::failed(state, *request_id, *target, error),
+        BackendEvent::SessionNoteObserved {
+            session,
+            note,
+            updated_at,
+        } => notes::observed(state, *session, note.as_deref(), *updated_at),
         BackendEvent::EnvironmentLoaded {
             scope,
             entries,
@@ -4735,7 +4739,8 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             _ => Vec::new(),
         },
-        Overlay::Notes | Overlay::Environment => {
+        Overlay::Notes => notes::key(state, &key),
+        Overlay::Environment => {
             if matches!(key, AppKey::Escape) {
                 state.overlay = None;
                 state.note_editor = None;
@@ -5087,12 +5092,12 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
                 _ => Vec::new(),
             }
         }
-        AppKey::Char('p')
+        AppKey::Char('P')
             if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
         {
             reorder_selected_session(state, TabDirection::Previous)
         }
-        AppKey::Char('n')
+        AppKey::Char('N')
             if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
         {
             reorder_selected_session(state, TabDirection::Next)
@@ -5177,6 +5182,11 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => pull_requests::open(state),
         AppKey::OpenPreview => open_preview(state),
+        AppKey::Char('n')
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            notes::open(state)
+        }
         AppKey::Char('a')
             if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
         {
@@ -5393,51 +5403,18 @@ fn remove_selected_session(state: &AppState) -> Vec<Effect> {
 }
 
 fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> {
-    let notes_open = state.overlay == Some(Overlay::Notes);
     let environment_open = state.overlay == Some(Overlay::Environment);
     if let Some(effects) = update_environment_source_key(state, key, environment_open) {
         return Some(effects);
     }
     match key {
-        AppKey::OpenNotes => Some(open_notes(state)),
+        AppKey::OpenNotes => Some(notes::open(state)),
         AppKey::OpenEnvironment => Some(open_environment_source(state, EnvScope::Workspace)),
-        AppKey::SelectNoteSection(section) => {
-            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
-                editor.section = *section;
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::SetNoteDraft(draft) => {
-            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
-                editor.draft.clone_from(draft);
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::Paste(text) if notes_open => Some(paste_note_draft(state, text)),
-        AppKey::CommitNoteDraft => Some(commit_note_draft(state)),
-        AppKey::ToggleTodo(index) => {
-            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open)
-                && let Some(todo) = editor.scratchpad.todos.get_mut(*index)
-            {
-                todo.done = !todo.done;
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::SaveNotes => Some(
-            state
-                .note_editor
-                .as_ref()
-                .filter(|_| notes_open)
-                .map_or_else(Vec::new, |editor| {
-                    vec![Effect::SaveNotes {
-                        target: editor.target,
-                        scratchpad: editor.scratchpad.clone(),
-                    }]
-                }),
-        ),
+        AppKey::SelectNoteSection(_)
+        | AppKey::SetNoteDraft(_)
+        | AppKey::CommitNoteDraft
+        | AppKey::ToggleTodo(_)
+        | AppKey::SaveNotes => Some(notes::key(state, key)),
         _ => None,
     }
 }
@@ -5552,14 +5529,6 @@ fn save_environment_source(state: &mut AppState, environment_open: bool) -> Vec<
     }]
 }
 
-fn paste_note_draft(state: &mut AppState, text: &str) -> Vec<Effect> {
-    if let Some(editor) = state.note_editor.as_mut() {
-        editor.draft.push_str(text);
-        editor.error = None;
-    }
-    Vec::new()
-}
-
 /// The environment editor when it owns input and accepts edits (no read or save
 /// in flight).
 fn editable_environment(
@@ -5570,16 +5539,6 @@ fn editable_environment(
         .environment_editor
         .as_mut()
         .filter(|editor| environment_open && !editor.is_busy())
-}
-
-fn open_notes(state: &mut AppState) -> Vec<Effect> {
-    let Some(target) = state.active_target() else {
-        return Vec::new();
-    };
-    state.overlay = Some(Overlay::Notes);
-    state.environment_editor = None;
-    state.note_editor = Some(NoteEditor::loading(target));
-    vec![Effect::LoadNotes { target }]
 }
 
 /// The scope named by the `env` command's argument. No argument edits this
@@ -5616,43 +5575,6 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
         path: None,
         filter: PreviewFileFilter::All,
     }]
-}
-
-fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
-    let Some(editor) = state
-        .note_editor
-        .as_mut()
-        .filter(|_| state.overlay == Some(Overlay::Notes))
-    else {
-        return Vec::new();
-    };
-    let draft = editor.draft.trim();
-    match editor.section {
-        NoteSection::Note => {
-            editor.scratchpad.note = if draft.is_empty() {
-                None
-            } else {
-                Some(draft.to_owned())
-            };
-        }
-        NoteSection::Todos if !draft.is_empty() => editor
-            .scratchpad
-            .todos
-            .push(usagi_core::domain::note::SessionTodo::new(draft)),
-        NoteSection::Decisions if !draft.is_empty() => {
-            editor
-                .scratchpad
-                .decisions
-                .push(usagi_core::domain::note::SessionDecision::new(
-                    chrono::Utc::now(),
-                    draft,
-                ));
-        }
-        NoteSection::Todos | NoteSection::Decisions => {}
-    }
-    editor.draft.clear();
-    editor.error = None;
-    Vec::new()
 }
 
 fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {

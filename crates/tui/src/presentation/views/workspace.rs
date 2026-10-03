@@ -168,6 +168,8 @@ pub struct ProjectedSession {
     pub last_modified: DateTime<Utc>,
     /// note scratchpad に表示できる内容があるか。icon の幅は常に予約する。
     pub has_notes: bool,
+    /// Free-form session memo for the read-only Switch preview.
+    pub memo: Option<String>,
     /// dismissed を除いた PR の件数。表示 glyph は global icon mode から決める。
     pub pr_count: usize,
     /// True while daemon-owned removal is pending.
@@ -211,6 +213,7 @@ impl ProjectedSession {
             cwd: record.root.clone(),
             last_modified: record.last_active_or_created(),
             has_notes: !record.notes.is_empty(),
+            memo: record.notes.note.clone(),
             pr_count: visible_pr_links(&record.prs),
             removing: false,
             agent_resume: None,
@@ -367,6 +370,7 @@ pub struct HomeProjection {
     /// Whether an explicit or forced Closeup action modal covers the right pane
     /// this frame. Empty Closeup remains a plain pane until Enter opens it.
     closeup_action_visible: bool,
+    foreground_overlay: Option<Overlay>,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
     unread_decision_ids: std::collections::BTreeSet<usagi_core::domain::id::UserDecisionId>,
@@ -642,6 +646,10 @@ pub(crate) fn project_sessions(
                         .and_then(|projection| projection.parent_session_id);
                 }
             }
+            if let Some((_, notes)) = state.saved_notes().filter(|(saved_id, _)| *saved_id == *id) {
+                session.memo.clone_from(&notes.note);
+                session.has_notes = !notes.is_empty();
+            }
             Some(session)
         })
         .collect()
@@ -724,6 +732,7 @@ impl HomeProjection {
                 crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
             ) && state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Closeup),
+            foreground_overlay: state.overlay(),
             // Same rule as the modals above. The reducer keeps this one's draft
             // across a foreground change, so only the projection hides it.
             decision_overlay: state
@@ -1252,6 +1261,7 @@ impl HomeProjection {
             && self.director_drawer.is_none()
             && self.root_terminal_drawer.is_none()
             && !self.closeup_action_visible
+            && self.foreground_overlay.is_none()
             && self.overview_modal.is_none()
             && self.pr_overlay.is_none()
             && self.preview_overlay.is_none()
@@ -1286,6 +1296,12 @@ impl HomeProjection {
                 .map_or("No session selected", |session| session.label.as_str()),
             None => "No session selected",
         }
+    }
+
+    /// Visible label of one stable session, including unavailable fallback.
+    #[must_use]
+    pub fn label_for_session(&self, session: SessionId) -> &str {
+        self.session_label(Some(session))
     }
 }
 
@@ -2810,7 +2826,7 @@ fn home_left_pane(
     }
     let footer = match home.mode {
         HomeMode::Switch => {
-            "[switch] ←→ project / ↑↓ select / Enter closeup / Ctrl-X force remove / Ctrl-? help"
+            "[switch] ←→ project / ↑↓ select / Enter closeup / n memo / Ctrl-X force remove / Ctrl-? help"
         }
         HomeMode::Closeup => {
             "[closeup] a agent / t terminal / Enter actions / Ctrl-O controls / Ctrl-? help"
@@ -3376,6 +3392,58 @@ fn home_session_continuation_marker(selected: bool, current: bool) -> String {
 }
 
 fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
+    let mut rows = home_right_pane_content(height, width, home);
+    if home.mode != HomeMode::Switch {
+        return rows;
+    }
+    let Selection::Target(Target::Session(id)) = home.selected else {
+        return rows;
+    };
+    let Some(session) = home
+        .sessions
+        .iter()
+        .find(|session| session.id == id && session.lifecycle == SessionLifecycle::Available)
+    else {
+        return rows;
+    };
+    let mut preview = vec![Style::new().dim().paint(
+        if session.memo.as_deref().is_some_and(|memo| !memo.is_empty()) {
+            " ✎ Memo · n: edit"
+        } else {
+            " n: add memo"
+        },
+    )];
+    if let Some(memo) = &session.memo {
+        let lines = memo.lines().take(4).collect::<Vec<_>>();
+        for (index, line) in lines.iter().take(3).enumerate() {
+            let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
+            let suffix = if index == 2 && lines.len() > 3 {
+                " …"
+            } else {
+                ""
+            };
+            preview.push(
+                Style::new()
+                    .dim()
+                    .paint(&widgets::clip_to_width(&format!(" {line}{suffix}"), width)),
+            );
+        }
+    }
+    // This is a read-only layer over Switch's terminal preview. Keep its PTY
+    // geometry unchanged as the cursor moves between sessions with different notes.
+    let budget = height.saturating_sub(4).min(preview.len());
+    let start = height.saturating_sub(1 + budget);
+    for (row, line) in rows
+        .iter_mut()
+        .skip(start)
+        .zip(preview.into_iter().take(budget))
+    {
+        *row = widgets::clip_to_width(&line, width);
+    }
+    rows
+}
+
+fn home_right_pane_content(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
     let mode = match home.mode {
         HomeMode::Switch => "Switch",
         HomeMode::Closeup => "Closeup",
@@ -3584,6 +3652,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{home_right_pane, home_right_pane_content};
     #[test]
     fn organization_order_preserves_siblings_orphans_and_cycles() {
         use super::{SessionRoleProjection, organization_order};
@@ -3996,6 +4065,7 @@ mod tests {
                 session("tui", Some("UI work"), SessionOrigin::Human),
                 session("daemon", None, SessionOrigin::Mcp),
             ],
+            session_notes: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         };
@@ -4009,6 +4079,66 @@ mod tests {
         assert_eq!(
             with_footer_gap(Vec::new(), 1, "footer".to_string()),
             vec!["footer"]
+        );
+    }
+
+    #[test]
+    fn switch_memo_preview_follows_cursor_and_preserves_pane_dimensions() {
+        let [first, second] = std::array::from_fn(|_| SessionId::new());
+        let mut state = AppState::home(WorkspaceId::new(), vec![first, second]);
+        let mut rows = vec![
+            projected_session(first, "first", "/work/first"),
+            projected_session(second, "second", "/work/second"),
+        ];
+        rows[0].memo =
+            Some("一行目\u{1b}[2J\u{1b}]52;c;payload\u{7}\n二行目\n三行目\n隠れた四行目".into());
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        let raw = home_right_pane(20, 50, &home).join("\n");
+        assert!(!raw.contains("\u{1b}[2J") && !raw.contains("\u{1b}]52") && !raw.contains('\u{7}'));
+        let text = home_right_pane(20, 50, &home)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("一行目") && text.contains("三行目 …"));
+        assert!(!text.contains("隠れた四行目"));
+        for height in [0, 1, 5, 8, 20] {
+            let content = home_right_pane_content(height, 50, &home);
+            let preview = home_right_pane(height, 50, &home);
+            assert_eq!(preview.len(), content.len());
+            assert!(
+                preview
+                    .iter()
+                    .all(|line| widgets::display_width(line) <= 50)
+            );
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        let text = home_right_pane(20, 50, &home).join("\n");
+        assert!(text.contains("n: add memo"));
+        assert!(!text.contains("一行目"));
+        assert_eq!(state.active(), Some(first));
+        rows[1].lifecycle = SessionLifecycle::Failed;
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        assert!(
+            !home_right_pane(20, 50, &home)
+                .join("\n")
+                .contains("n: add memo")
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        assert!(
+            !home_right_pane(20, 50, &home)
+                .join("\n")
+                .contains("n: add memo")
+        );
+        let mut closeup = home;
+        closeup.mode = HomeMode::Closeup;
+        closeup.selected = Selection::Target(Target::Session(first));
+        assert!(
+            !home_right_pane(20, 50, &closeup)
+                .join("\n")
+                .contains("一行目")
         );
     }
 
@@ -4050,6 +4180,7 @@ mod tests {
             cwd: PathBuf::from(cwd),
             last_modified: now(),
             has_notes: false,
+            memo: None,
             pr_count: 0,
             removing: false,
             agent_resume: None,

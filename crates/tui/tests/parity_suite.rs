@@ -75,6 +75,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
             .unwrap()
             .with_timezone(&Utc),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,

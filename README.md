@@ -98,6 +98,9 @@ Clone は `e`、全体の Config は `c` から開きます。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 
+Switch では選択中の session の [メモ](document/03-tui.md#session-memo) をプレビューし、`n` で編集できます。
+`Ctrl-S` で保存した内容は、その session の Agent も MCP の `session_note_get` から読めます。
+
 不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
 [孤立資源の削除](document/01-overview.md#孤立資源の削除)を参照してください。
 

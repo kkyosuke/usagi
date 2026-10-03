@@ -23,6 +23,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
+- [Session memo](#session-memo)
 - [Overview と modal](#overview-と-modal)
 - [session garden](#session-garden)
   - [Garden Action Center](#garden-action-center)
@@ -1075,6 +1076,23 @@ GIF はこの projection に含めない。diff の詳細表示や実行 shortcu
 狭幅では cursor / active marker、表示名、note icon を優先し、補足行を ANSI-safe・Unicode display width 準拠で
 clip する。viewport は session ごとの 3 行 footprint を使い、mascot の予約より選択中 row を優先する。作成中
 skeleton は session 行と同じ 3 行として、選択できる row の予算の外に確保する。
+
+## Session memo
+
+Switch の利用可能な session 行で `n` を押すと、選択中の session 名をタイトルにしたメモ編集モーダルを開く。
+既存本文を直接編集し、`Enter` は改行、矢印はカーソル移動、貼り付けは複数行に対応する。
+タブは画面上では 1 セルとして表示し、保存時は元の文字を保持する。
+`Ctrl-S` は保存成功後に元の Switch 行へ戻る。保存中は入力と再送を止め、失敗時は本文を保持してエラーを表示する。
+読み込み失敗時は `Enter` で再試行でき、読み込み完了前の保存は受け付けない。
+`Esc` は未変更なら閉じ、未保存変更があれば Save / Discard / Keep editing を選ぶ。
+`+ new session`、作成失敗、削除中の行は編集対象にならない。
+
+Switch は選択中の session のメモを右ペイン下部に最大 3 行表示する。長い行や 4 行目以降は省略する。
+空のメモは `n: add memo` を表示する。プレビューは入力を持たない表示レイヤーで、メモの有無によって PTY の
+サイズを変えない。Closeup では `Ctrl-O s` で active session のメモを明示的に開く。
+
+TUI と MCP の `session_note_get` / `session_note_update` は同じ scratchpad を使用する。
+保存先と認証境界は [MCP の scratchpad](07-mcp.md#session-scratchpad) を正本とする。
 
 ## Overview と modal
 
