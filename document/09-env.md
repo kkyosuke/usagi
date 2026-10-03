@@ -99,7 +99,8 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 - `op` は child handle の owner が新しい process group に入れて起動する。deadline 時はその owned group へ graceful
   terminate を送り、2 秒の bounded wait 後も残る場合は kill して exact child を reap する。EOF を得られない capture も
   bounded cleanup 後に cancel して両 reader を join し、`setsid` した descendant の pipe 保持で無期限に待たない。
-  未完の出力は secret value として返さず failure にする。任意 PID や owner が証明できない process は signal 対象にしない。
+  未完の出力は secret value として返さず failure にする。main child が正常終了しても、残った owned descendant への
+  terminate / kill で初めて閉じた pipe は完全な出力の証拠にしない。任意 PID や owner が証明できない process は signal 対象にしない。
 - 正常終了、非 zero、output 超過、deadline、reader failure のいずれでも stdout / stderr の両 reader を join してから
   結果を返す。片方の reader が panic または read error になっても、もう片方を detach しない。
 - `op` の認証は CLI 側の通常の仕組みに従う。`op signin` セッションに加え、env editor で平文の

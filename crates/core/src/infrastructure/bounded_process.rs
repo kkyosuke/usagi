@@ -75,6 +75,7 @@ pub struct ChildCommandOutput {
 pub enum ChildOutputError {
     SpawnFailed,
     TimedOut,
+    IncompleteOutput,
     OutputTooLarge,
     ObservationFailed,
 }
@@ -84,6 +85,7 @@ impl std::fmt::Display for ChildOutputError {
         formatter.write_str(match self {
             Self::SpawnFailed => "command could not be started",
             Self::TimedOut => "command observation timed out",
+            Self::IncompleteOutput => "command output remained incomplete after process exit",
             Self::OutputTooLarge => "command output exceeded the capture limit",
             Self::ObservationFailed => "command observation failed",
         })
@@ -156,7 +158,9 @@ fn public_output(result: Result<ChildCommandOutput, ChildOutputError>) -> ChildO
         },
         Ok(_) => ChildOutputObservation::ExitFailure,
         Err(ChildOutputError::SpawnFailed) => ChildOutputObservation::SpawnFailed,
-        Err(ChildOutputError::TimedOut) => ChildOutputObservation::TimedOut,
+        Err(ChildOutputError::TimedOut | ChildOutputError::IncompleteOutput) => {
+            ChildOutputObservation::TimedOut
+        }
         Err(ChildOutputError::OutputTooLarge) => ChildOutputObservation::OutputTooLarge,
         Err(ChildOutputError::ObservationFailed) => ChildOutputObservation::ObservationFailed,
     }
@@ -253,7 +257,7 @@ pub fn execute_command_output(
         return Err(ChildOutputError::OutputTooLarge);
     }
     if stdout.cancelled || stderr.cancelled {
-        return Err(ChildOutputError::TimedOut);
+        return Err(ChildOutputError::IncompleteOutput);
     }
     Ok(ChildCommandOutput {
         success: status.success(),
@@ -392,29 +396,29 @@ pub(crate) fn close_descendant_resources<T>(
     stderr: &thread::JoinHandle<T>,
     writer: Option<&thread::JoinHandle<Option<bool>>>,
     grace: Duration,
-) {
+) -> bool {
     let finished = || {
         stdout.is_finished()
             && stderr.is_finished()
             && writer.is_none_or(thread::JoinHandle::is_finished)
     };
     if finished() {
-        return;
+        return false;
     }
     // A probe must not daemonize. If its main process exits while a descendant
     // still owns either pipe, close that process group instead of joining a
     // reader forever.
-    signal_group(pid, libc::SIGTERM);
+    let mut signalled = signal_group(pid, libc::SIGTERM);
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         if finished() {
-            return;
+            return signalled;
         }
         thread::sleep(
             Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
         );
     }
-    signal_group(pid, libc::SIGKILL);
+    signalled |= signal_group(pid, libc::SIGKILL);
     // Even a descendant that escaped the original group must not hold a join.
     // Allow an EOF from cooperative descendants before cancelling the workers.
     let deadline = Instant::now() + grace;
@@ -423,6 +427,7 @@ pub(crate) fn close_descendant_resources<T>(
             Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
         );
     }
+    signalled
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
@@ -546,15 +551,14 @@ pub(crate) fn terminate_and_reap(child: &mut std::process::Child, grace: Duratio
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=timeout_terminates_the_process_group_and_reaps_the_child
-pub(crate) fn signal_group(pid: u32, signal: libc::c_int) {
-    if let Ok(pid) = libc::pid_t::try_from(pid) {
-        // SAFETY: the child was placed in a process group whose ID is its PID;
-        // a negative PID targets only that owned group. Signal errors are safe
-        // to ignore because the child may have exited between try_wait and kill.
-        unsafe {
-            libc::kill(-pid, signal);
-        }
-    }
+pub(crate) fn signal_group(pid: u32, signal: libc::c_int) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: the child was placed in a process group whose ID is its PID;
+    // a negative PID targets only that owned group. A missing group is normal
+    // when all processes exited before the reader workers were scheduled.
+    unsafe { libc::kill(-pid, signal) == 0 }
 }
 
 #[cfg(test)]
@@ -600,6 +604,10 @@ mod tests {
                 ChildOutputObservation::SpawnFailed,
             ),
             (ChildOutputError::TimedOut, ChildOutputObservation::TimedOut),
+            (
+                ChildOutputError::IncompleteOutput,
+                ChildOutputObservation::TimedOut,
+            ),
             (
                 ChildOutputError::OutputTooLarge,
                 ChildOutputObservation::OutputTooLarge,
@@ -805,12 +813,26 @@ mod tests {
         assert!(captured.exceeded);
         assert!(exceeded.load(Ordering::Acquire));
         assert_eq!(reader.0, 5);
+        let captured = capture(
+            &mut OpenReader {
+                first: None,
+                error: std::io::ErrorKind::Other,
+                reads: 0,
+            },
+            4,
+            &AtomicBool::new(false),
+            &AtomicBool::new(true),
+        );
+        assert!(captured.exceeded);
+        assert!(!captured.cancelled);
     }
 
     #[test]
+    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
     fn escaped_descendant_probe() {
         use std::os::fd::FromRawFd;
         struct PendingEscape(libc::pid_t);
+        #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
         impl Drop for PendingEscape {
             fn drop(&mut self) {
                 // SAFETY: this guard owns the exact forked child until the
@@ -859,6 +881,7 @@ mod tests {
     #[test]
     fn escaped_descendant_cannot_hold_capture_or_input_workers() {
         struct KillEscaped(std::path::PathBuf);
+        #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
         impl Drop for KillEscaped {
             fn drop(&mut self) {
                 if let Some(pid) = std::fs::read_to_string(&self.0)
@@ -904,22 +927,15 @@ mod tests {
                     input.len(),
                     bounded,
                 );
-                assert!(
-                    matches!(
-                        result,
-                        ChildInputExecution::TimedOut | ChildInputExecution::ObservationFailed
-                    ),
-                    "{result:?}"
-                );
+                assert_eq!(result, ChildInputExecution::TimedOut);
             } else {
                 let mut command = Command::new(&executable);
                 command
                     .args(["--exact", test, "--nocapture"])
                     .env("USAGI_BOUNDED_PIPE_HELPER", &path);
-                assert_eq!(
-                    observe_command_output(command, bounded),
-                    ChildOutputObservation::TimedOut
-                );
+                let result = execute_command_output(command, bounded);
+                assert_eq!(result, Err(ChildOutputError::IncompleteOutput));
+                assert_eq!(public_output(result), ChildOutputObservation::TimedOut);
             }
             assert!(
                 path.exists(),

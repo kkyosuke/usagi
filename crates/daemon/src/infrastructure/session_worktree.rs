@@ -529,6 +529,7 @@ mod bounded_git_tests {
         for failure in [
             ChildOutputError::SpawnFailed,
             ChildOutputError::TimedOut,
+            ChildOutputError::IncompleteOutput,
             ChildOutputError::OutputTooLarge,
             ChildOutputError::ObservationFailed,
         ] {

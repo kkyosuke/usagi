@@ -313,6 +313,16 @@ fn join_output_readers(
     }
 }
 
+fn require_complete_output(
+    forced_cleanup: bool,
+    output: Result<(CapturedOutput, CapturedOutput), String>,
+) -> Result<(CapturedOutput, CapturedOutput), String> {
+    if forced_cleanup {
+        return Err("secret resolver output required forced pipe cleanup".to_owned());
+    }
+    output
+}
+
 mod real {
     #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output,real_secret_child_cannot_leave_escaped_pipe_readers_unbounded
 
@@ -466,17 +476,21 @@ mod real {
         }
 
         fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String> {
-            if let (Some(stdout), Some(stderr)) = (&self.stdout, &self.stderr) {
+            let forced_cleanup = if let (Some(stdout), Some(stderr)) = (&self.stdout, &self.stderr)
+            {
                 close_descendant_resources(
                     self.child.id(),
                     stdout,
                     stderr,
                     None,
                     self.cleanup_grace,
-                );
-            }
+                )
+            } else {
+                false
+            };
             self.cancelled.store(true, Ordering::Release);
-            join_output_readers(&mut self.stdout, &mut self.stderr)
+            let output = join_output_readers(&mut self.stdout, &mut self.stderr);
+            super::require_complete_output(forced_cleanup, output)
         }
     }
 
@@ -577,6 +591,7 @@ mod tests {
             }
         }
         struct KillEscaped(std::path::PathBuf);
+        #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=real_secret_child_cannot_leave_escaped_pipe_readers_unbounded
         impl Drop for KillEscaped {
             fn drop(&mut self) {
                 if let Some(pid) = std::fs::read_to_string(&self.0)
@@ -642,6 +657,64 @@ mod tests {
             ),
             Ok("secret".to_owned())
         );
+    }
+
+    #[test]
+    fn forced_cleanup_never_publishes_a_partial_secret() {
+        let stdout = CapturedOutput {
+            bytes: b"partial-secret".to_vec(),
+            exceeded: false,
+        };
+        let stderr = CapturedOutput {
+            bytes: Vec::new(),
+            exceeded: false,
+        };
+        let output = Ok((stdout, stderr));
+        assert_eq!(require_complete_output(false, output.clone()), output);
+        assert_eq!(
+            require_complete_output(false, Err("reader failed".into())),
+            Err("reader failed".into())
+        );
+        for joined in [output, Err("reader failed".into())] {
+            assert_eq!(
+                require_complete_output(true, joined),
+                Err("secret resolver output required forced pipe cleanup".into())
+            );
+        }
+    }
+
+    #[test]
+    fn real_secret_child_refuses_eof_caused_by_terminating_its_descendants() {
+        struct Runner(Mutex<Option<Command>>);
+        impl ChildRunner for Runner {
+            fn spawn(&self, _: &str) -> Result<Box<dyn OwnedChild>, String> {
+                real::spawn_command(
+                    self.0.lock().unwrap().take().unwrap(),
+                    Duration::from_millis(20),
+                )
+            }
+        }
+        for script in [
+            "(sleep 30; printf rest) & printf partial",
+            "(trap '' TERM; sleep 30; printf rest) & printf partial",
+        ] {
+            let mut command = Command::new("sh");
+            command.args(["-c", script]);
+            let started = std::time::Instant::now();
+            assert_eq!(
+                run_owned_child(
+                    &Runner(Mutex::new(Some(command))),
+                    &real::SystemTime::new(),
+                    "unused",
+                    &NeverCancelled,
+                    Duration::from_secs(2),
+                    Duration::from_millis(20),
+                    Duration::from_millis(5),
+                ),
+                Err("secret resolver output required forced pipe cleanup".into())
+            );
+            assert!(started.elapsed() < Duration::from_secs(4));
+        }
     }
 
     #[test]
