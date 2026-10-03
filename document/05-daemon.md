@@ -1912,6 +1912,8 @@ nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential �
 含まない `unavailable` に正規化する。共通の bounded child runner は独立 process group を TERM、bounded grace、KILL の
 順で停止して reap する。capture と stdin worker は nonblocking pipe を使い、cleanup grace 後も
 `setsid` した descendant が pipe を保持していれば worker を cancel して join し、未完の観測を timeout として拒否する。
+cancel 後も capture 上限内の利用可能な bytes と EOF を確認する。正常終了した child の reader が遅れて実行されても、
+閉じた pipe の完全な出力を timeout にせず、開いた pipe や上限を超えて出力し続ける descendant は bounded に拒否する。
 1Password の `op read` も同じ nonblocking capture と cleanup を使い、未完の出力を secret value として返さない。
 preflight 後に owner lock を取り直し、operation idempotency、generation、
 scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の

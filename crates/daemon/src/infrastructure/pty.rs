@@ -1011,24 +1011,50 @@ mod tests {
             Geometry { cols: 80, rows: 24 },
         )
         .unwrap();
-        terminal.writer.lock().unwrap().stall_timeout = Duration::from_millis(200);
         let input = b"usagi\n".repeat(64 * 1024);
+        let observations = (|| -> std::io::Result<_> {
+            // Canonical line discipline can discard overflow on Linux. Raw
+            // input with echo disabled makes the unread queue apply pressure.
+            let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: the terminal owns this open master descriptor;
+            // tcgetattr initializes mode before it is read by cfmakeraw.
+            fcntl_outcome(unsafe { libc::tcgetattr(terminal.master_fd, mode.as_mut_ptr()) })?;
+            // SAFETY: tcgetattr succeeded, initializing this termios value.
+            let mut mode = unsafe { mode.assume_init() };
+            // SAFETY: mode is initialized and remains valid during each call.
+            unsafe {
+                libc::cfmakeraw(&raw mut mode);
+                fcntl_outcome(libc::tcsetattr(
+                    terminal.master_fd,
+                    libc::TCSANOW,
+                    &raw const mode,
+                ))?;
+            }
+            terminal.writer.lock().unwrap().stall_timeout = Duration::from_millis(200);
 
-        let started = std::time::Instant::now();
-        let error = terminal.write_all(&input).unwrap_err();
-        let first = started.elapsed();
+            let started = std::time::Instant::now();
+            let first = terminal.write_all(&input);
+            let first_elapsed = started.elapsed();
+            let started = std::time::Instant::now();
+            let second = terminal.write_all(b"x");
+            Ok((first, first_elapsed, second, started.elapsed()))
+        })();
+        // Reap before asserting either outcome, including a failed setup, so
+        // a failing regression never leaves its sleep child running.
+        terminal.terminate_reap().unwrap();
+
+        let (first, first_elapsed, second, second_elapsed) = observations.unwrap();
+        let error = first.unwrap_err();
         assert!(error.applied_prefix > 0);
         assert!(error.applied_prefix < input.len());
-        assert!(first >= Duration::from_millis(200));
+        assert!(first_elapsed >= Duration::from_millis(200));
 
-        let started = std::time::Instant::now();
         assert_eq!(
-            terminal.write_all(b"x").unwrap_err().applied_prefix,
+            second.unwrap_err().applied_prefix,
             0,
             "a stalled terminal fails later input without waiting again"
         );
-        assert!(started.elapsed() < Duration::from_millis(200));
-        terminal.terminate_reap().unwrap();
+        assert!(second_elapsed < Duration::from_millis(200));
     }
 
     #[test]

@@ -462,16 +462,21 @@ pub(crate) fn capture(
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
     let mut exceeded = false;
     let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        if cancelled.load(Ordering::Acquire) {
-            return Capture {
-                bytes: retained,
-                exceeded,
-                cancelled: true,
-            };
-        }
+    let incomplete = loop {
+        // Cancellation must not turn an already closed pipe into a timeout
+        // merely because its reader was scheduled after cleanup completed.
+        // Nonblocking reads can still establish EOF and retain ready bytes.
         let read = match reader.read(&mut buffer) {
             Ok(read) => read,
+            Err(error)
+                if cancelled.load(Ordering::Acquire)
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                break true;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(5));
@@ -487,7 +492,7 @@ pub(crate) fn capture(
             }
         };
         if read == 0 {
-            break;
+            break false;
         }
         let remaining = limit.saturating_sub(retained.len());
         let keep = remaining.min(read);
@@ -495,12 +500,17 @@ pub(crate) fn capture(
         exceeded |= keep < read;
         if exceeded {
             exceeded_signal.store(true, Ordering::Release);
+            // An escaped descendant may keep producing immediately readable
+            // output forever. The capture limit bounds draining after cancel.
+            if cancelled.load(Ordering::Acquire) {
+                break true;
+            }
         }
-    }
+    };
     Capture {
         bytes: retained,
         exceeded,
-        cancelled: false,
+        cancelled: incomplete,
     }
 }
 
@@ -694,15 +704,6 @@ mod tests {
         );
         assert_eq!(captured.bytes, b"ok");
         assert!(!captured.cancelled);
-        let cancelled = capture(
-            &mut std::io::Cursor::new(b"ignored"),
-            4,
-            &AtomicBool::new(false),
-            &AtomicBool::new(true),
-        );
-        assert!(cancelled.cancelled);
-        assert!(cancelled.bytes.is_empty());
-
         let mut writer = Writer(
             [
                 Err(std::io::ErrorKind::Interrupted.into()),
@@ -730,8 +731,101 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_capture_preserves_ready_bytes_and_closed_pipes() {
+        // The reader starts only after the owner has cancelled cleanup, as
+        // happens when a successful child's reader is delayed by scheduling.
+        for bytes in [b"".as_slice(), b"ok".as_slice(), b"full".as_slice()] {
+            let exceeded = AtomicBool::new(false);
+            let captured = capture(
+                &mut std::io::Cursor::new(bytes),
+                4,
+                &exceeded,
+                &AtomicBool::new(true),
+            );
+            assert_eq!(captured.bytes, bytes);
+            assert!(!captured.cancelled);
+            assert!(!captured.exceeded);
+            assert!(!exceeded.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn cancelled_capture_bounds_open_and_continuously_readable_pipes() {
+        struct OpenReader {
+            first: Option<Vec<u8>>,
+            error: std::io::ErrorKind,
+            reads: usize,
+        }
+        impl Read for OpenReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if let Some(bytes) = self.first.take() {
+                    buffer[..bytes.len()].copy_from_slice(&bytes);
+                    return Ok(bytes.len());
+                }
+                Err(self.error.into())
+            }
+        }
+        struct EndlessReader(usize);
+        impl Read for EndlessReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+
+        for error in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            for first in [Vec::new(), b"full".to_vec()] {
+                let mut reader = OpenReader {
+                    first: (!first.is_empty()).then(|| first.clone()),
+                    error,
+                    reads: 0,
+                };
+                let captured = capture(
+                    &mut reader,
+                    4,
+                    &AtomicBool::new(false),
+                    &AtomicBool::new(true),
+                );
+                assert_eq!(captured.bytes, first);
+                assert!(captured.cancelled);
+                assert!(!captured.exceeded);
+                assert_eq!(reader.reads, usize::from(!first.is_empty()) + 1);
+            }
+        }
+        let mut reader = EndlessReader(0);
+        let exceeded = AtomicBool::new(false);
+        let captured = capture(&mut reader, 4, &exceeded, &AtomicBool::new(true));
+        assert_eq!(captured.bytes, b"xxxx");
+        assert!(captured.cancelled);
+        assert!(captured.exceeded);
+        assert!(exceeded.load(Ordering::Acquire));
+        assert_eq!(reader.0, 5);
+    }
+
+    #[test]
     fn escaped_descendant_probe() {
         use std::os::fd::FromRawFd;
+        struct PendingEscape(libc::pid_t);
+        impl Drop for PendingEscape {
+            fn drop(&mut self) {
+                // SAFETY: this guard owns the exact forked child until the
+                // PID file hands cleanup to the invoking test's guard.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    while libc::waitpid(self.0, std::ptr::null_mut(), 0) < 0 {
+                        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         let Some(path) = std::env::var_os("USAGI_BOUNDED_PIPE_HELPER") else {
             return;
         };
@@ -753,6 +847,7 @@ mod tests {
                     libc::pause();
                 }
             }
+            let _child_cleanup = PendingEscape(pid);
             libc::close(ready[1]);
             let mut read = std::fs::File::from_raw_fd(ready[0]);
             read.read_exact(&mut [0]).unwrap();
