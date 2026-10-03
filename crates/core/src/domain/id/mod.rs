@@ -140,8 +140,8 @@ resource_id!(
     "Identity of one durable user-decision request."
 );
 
-/// Identity of one durable mutation.  It is `UUIDv7` so a producer may use its
-/// timestamp only for admission expiry of a new mutation.
+/// Identity of one durable mutation. `UUIDv7` permits admission expiry and
+/// ordered retirement fences; its timestamp is not evidence of execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OperationId(Uuid);
 

@@ -28,10 +28,23 @@ impl GitRunner for SystemGit {
     /// namespace) outranks the `-C <repo>` this passes.
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract,git_environment_confinement
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        let mut command = confined_git_command(repo);
-        command.args(args);
-        bounded_git_output(execute_command_output(command, git_policy(args)))
+        bounded_git_output(execute_command_output(
+            git_command(repo, args),
+            git_policy(args),
+        ))
     }
+}
+
+fn git_command(repo: &Path, args: &[&str]) -> Command {
+    let mut command = confined_git_command(repo);
+    command.args(args);
+    if args.starts_with(&["--no-replace-objects"]) {
+        // The immutable graph also excludes local grafts and shallow boundaries. This
+        // trusted setting must follow confinement, which strips inherited GIT_*.
+        command.env("GIT_GRAFT_FILE", "/dev/null");
+        command.env("GIT_SHALLOW_FILE", "/dev/null");
+    }
+    command
 }
 
 fn git_policy(args: &[&str]) -> ChildPolicy {
@@ -490,6 +503,26 @@ mod tests {
 #[cfg(test)]
 mod bounded_git_tests {
     use super::*;
+
+    #[test]
+    fn immutable_git_graph_disables_local_overrides_after_environment_confinement() {
+        for (args, expected) in [
+            (
+                &["--no-replace-objects", "merge-base", "base", "head"][..],
+                Some(OsStr::new("/dev/null")),
+            ),
+            (&["merge-base", "base", "head"][..], None),
+        ] {
+            let command = git_command(Path::new("/repo"), args);
+            for name in ["GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"] {
+                let configured = command
+                    .get_envs()
+                    .find(|(key, _)| *key == name)
+                    .and_then(|(_, value)| value);
+                assert_eq!(configured, expected);
+            }
+        }
+    }
 
     #[test]
     fn git_budget_bounds_observations_and_retains_nonzero_diagnostics() {

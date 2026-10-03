@@ -288,9 +288,9 @@ pub(super) fn control_workflow(
     // Admission persists the record before the launch is attempted, so a start
     // that is refused outright has to be able to undo it. Keep what the session
     // looked like before.
-    let before = store.workflow(workspace, session).map_err(unavailable)?;
-    workflow::admit(&store, workspace, session, operation, &command, issue)
-        .map_err(|error| admission_error(&error))?;
+    let before = admit_control(
+        agent, &store, workspace, session, operation, &command, issue,
+    )?;
     match command {
         WorkflowCommand::Start {
             goal,
@@ -324,10 +324,13 @@ pub(super) fn control_workflow(
                 // operation after an authentication failure. Every failure
                 // after a successful launch is reported as `Unavailable`, so a
                 // run whose Agent did start is never rolled back here.
+                // Serialize this completion with another same-ID launch, too:
+                // its final check / spawn / bind must see one stable intent.
+                let _owner = agent.lock().map_err(unavailable)?;
                 if error.retry_mode == RetryMode::Never {
-                    rollback_admission(&store, workspace, session, before.as_ref())?;
+                    rollback_admission(&store, workspace, session, operation, before.as_ref())?;
                 } else {
-                    remember_start_error(&store, workspace, session, &error.message)?;
+                    remember_start_error(&store, workspace, session, operation, &error.message)?;
                 }
                 return Err(error);
             }
@@ -341,6 +344,25 @@ pub(super) fn control_workflow(
     // The command changed the record, not the peer journal, so the answer is a
     // stored projection rather than a second replay.
     workflow::projection(&store, workspace, session).map_err(unavailable)
+}
+
+fn admit_control(
+    agent: &SharedAgentRuntime,
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+    workspace: WorkspaceId,
+    session: SessionId,
+    operation: OperationId,
+    command: &WorkflowCommand,
+    issue: Option<u32>,
+) -> Result<
+    Option<usagi_core::infrastructure::store::dispatch::workflows::WorkflowRecord>,
+    ProtocolError,
+> {
+    // Start's final check / spawn / bind uses this same owner lock. A Finish
+    // that already reconciled cannot invalidate the intent halfway through it.
+    let _owner = agent.lock().map_err(unavailable)?;
+    workflow::admit_with_previous(store, workspace, session, operation, command, issue)
+        .map_err(|error| admission_error(&error))
 }
 
 /// Reflect observed evidence in the stored run: replay the peer journal, then
@@ -591,7 +613,7 @@ pub(super) fn verify_progress(
         // Only the GitHub read is rate-limited. The git probes around it stay on
         // every pass: they are cheap, and the second one is the TOCTOU fence that
         // makes the answer trustworthy.
-        let head_sha = review.target.head_sha.as_str();
+        let target = &review.target;
         // What a real read returned, so the cache remembers only reads that
         // actually happened.
         let mut fetched: Option<(String, String)> = None;
@@ -600,7 +622,7 @@ pub(super) fn verify_progress(
         let verified = {
             let mut view = |url: &str| -> Result<String, &'static str> {
                 if let Ok(cache) = verification.lock()
-                    && let Some(output) = cache.fresh(session, head_sha, url, now_ms)
+                    && let Some(output) = cache.fresh(session, target, url, now_ms)
                 {
                     return Ok(output.to_owned());
                 }
@@ -612,7 +634,7 @@ pub(super) fn verify_progress(
                         "view".into(),
                         url.into(),
                         "--json".into(),
-                        "title,state,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,body"
+                        "title,state,baseRefOid,headRefOid,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus,body"
                             .into(),
                     ],
                     5000,
@@ -639,7 +661,7 @@ pub(super) fn verify_progress(
                 .as_ref()
                 .err()
                 .is_some_and(|reason| workflow::is_waiting(reason));
-            cache.record(session, head_sha, &url, now_ms, output, waiting);
+            cache.record(session, target, &url, now_ms, output, waiting);
         }
         publish_verification(store, workspace, session, run, verified)?;
     }
@@ -679,7 +701,7 @@ fn publish_verification(
                     }
                     Err(reason) => {
                         current.waiting_reason = Some(reason.into());
-                        if reason.contains("HEAD changed") {
+                        if reason.contains("HEAD changed") || reason.contains("PR diff changed") {
                             current.phase = usagi_core::domain::workflow::Phase::Revising;
                         }
                     }
@@ -835,6 +857,7 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
     let message = error.to_string();
     let code = match message.as_str() {
         "invalid workflow goal"
+        | "invalid workflow revision limit"
         | "workflow has not started"
         | "workflow launch is not yet admitted"
         | "reviewer is not assigned yet"
@@ -842,7 +865,10 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
         | "instruction is empty, invalid, or the journal is full" => ErrorCode::InvalidArgument,
         "session already has another workflow"
         | "instruction ID conflicts with workflow start"
-        | "instruction ID conflicts with an existing instruction" => ErrorCode::IdempotencyConflict,
+        | "instruction ID conflicts with an existing instruction"
+        | "finish ID conflicts with an existing workflow command"
+        | "workflow has already finished"
+        | "workflow operation has already retired" => ErrorCode::IdempotencyConflict,
         _ => ErrorCode::Unavailable,
     };
     ProtocolError::new(code, message)
@@ -851,7 +877,8 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
 /// Undo an admission whose start can never succeed as it stands.
 ///
 /// `before` is the record as it was immediately before `admit` ran. Reusing a
-/// previously finished record restores exactly that, archive intact.
+/// previously finished record restores that intent and archive, retaining the
+/// newer retirement fence.
 ///
 /// A start that *created* the record cannot be taken back to nothing, because
 /// the store keeps every workflow record it has ever written (`update_workflow`
@@ -864,16 +891,27 @@ fn rollback_admission(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     workspace: WorkspaceId,
     session: SessionId,
+    operation: OperationId,
     before: Option<&usagi_core::infrastructure::store::dispatch::workflows::WorkflowRecord>,
 ) -> Result<(), ProtocolError> {
     store
         .update_workflow(workspace, session, |value| {
+            let Some(current) = value.as_mut().filter(|record| {
+                record.operation == operation && record.finish.is_none() && record.run.is_none()
+            }) else {
+                return Ok(());
+            };
             if let Some(before) = before {
-                *value = Some(before.clone());
-            } else if let Some(record) = value.as_mut() {
-                record.run = None;
-                record.start_error = None;
-                record.finish = Some(record.operation);
+                let mut restored = before.clone();
+                restored.retired_through = restored.retired_through.max(current.retired_through);
+                if before.operation != operation || before.finish.is_some() {
+                    restored.retired_through = restored.retired_through.max(Some(operation));
+                }
+                *value = Some(restored);
+            } else {
+                current.start_error = None;
+                current.finish = Some(operation);
+                current.retired_through = current.retired_through.max(Some(operation));
             }
             Ok(())
         })
@@ -888,11 +926,14 @@ fn remember_start_error(
     store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
     workspace: WorkspaceId,
     session: SessionId,
+    operation: OperationId,
     message: &str,
 ) -> Result<(), ProtocolError> {
     store
         .update_workflow(workspace, session, |record| {
-            if let Some(record) = record {
+            if let Some(record) = record.as_mut().filter(|record| {
+                record.operation == operation && record.finish.is_none() && record.run.is_none()
+            }) {
                 record.start_error = Some(message.to_owned());
             }
             Ok(())
@@ -939,6 +980,8 @@ fn start(
         .prepare_workflow_readiness(&operation.to_string(), &intent, &prompt)?;
     run_agent_readiness(agent, preflight.as_ref())?;
     let mut owner = agent.lock().map_err(unavailable)?;
+    workflow::ensure_current_start(owner.dispatch_store(), workspace, session, operation)
+        .map_err(unavailable)?;
     owner.launch_workflow_after_readiness(
         &operation.to_string(),
         &intent,
@@ -1046,6 +1089,82 @@ mod tests {
     use usagi_core::infrastructure::store::dispatch::DispatchStore;
 
     #[test]
+    fn finish_admission_cannot_interleave_with_start_launch_and_binding() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let agent = super::super::tests::empty_supervisor_agent(store.clone());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let finish = OperationId::new();
+        admit_control(
+            &agent,
+            &store,
+            workspace,
+            session,
+            operation,
+            &WorkflowCommand::Start {
+                goal: "Task".into(),
+                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                revision_limit: 3,
+            },
+            None,
+        )
+        .unwrap();
+        let (interleaved, binding, finished) = std::thread::scope(|scope| {
+            // This is the production final-check / spawn / bind critical section.
+            // Declaring the guard inside the scope also releases it on failure
+            // before the scoped worker is joined.
+            let owner = agent.lock().unwrap();
+            workflow::ensure_current_start(&store, workspace, session, operation).unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let worker_agent = &agent;
+            let worker_store = &store;
+            let worker = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = admit_control(
+                    worker_agent,
+                    worker_store,
+                    workspace,
+                    session,
+                    finish,
+                    &WorkflowCommand::Finish,
+                    None,
+                );
+                finished_tx.send(result).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let early = finished_rx.recv_timeout(Duration::from_millis(200));
+            let interleaved = early.is_ok();
+            let binding = workflow::bind(
+                owner.dispatch_store(),
+                workspace,
+                session,
+                operation,
+                AgentId::new(),
+            );
+            drop(owner);
+            let finished =
+                early.unwrap_or_else(|_| finished_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+            worker.join().unwrap();
+            (interleaved, binding, finished)
+        });
+        assert!(
+            !interleaved,
+            "Finish was admitted after the final Start check"
+        );
+        binding.unwrap();
+        finished.unwrap();
+        let record = store.workflow(workspace, session).unwrap().unwrap();
+        assert_eq!(record.finish, Some(finish));
+        assert_eq!(record.finished.len(), 1);
+        assert_eq!(record.finished[0].phase, Phase::Implementing);
+    }
+
+    #[test]
     fn workflow_error_mapping_distinguishes_refusal_from_unknown_effect() {
         assert!(reject_agent_context(&serde_json::json!({})).is_ok());
         for raw in [
@@ -1076,11 +1195,13 @@ mod tests {
             "session already has another workflow",
             "instruction ID conflicts with workflow start",
             "instruction ID conflicts with an existing instruction",
+            "finish ID conflicts with an existing workflow command",
+            "workflow has already finished",
+            "workflow operation has already retired",
         ] {
-            assert_eq!(
-                admission_error(&anyhow::anyhow!(message)).code,
-                ErrorCode::IdempotencyConflict
-            );
+            let error = admission_error(&anyhow::anyhow!(message));
+            assert_eq!(error.code, ErrorCode::IdempotencyConflict);
+            assert_eq!(error.retry_mode, RetryMode::Never);
         }
         assert_eq!(
             admission_error(&anyhow::anyhow!("storage failed")).code,
@@ -1116,7 +1237,7 @@ mod tests {
         let first = OperationId::new();
         admit(retryable, first, &start("add a login form"));
         let before = store.workflow(workspace, retryable).unwrap();
-        remember_start_error(&store, workspace, retryable, "authentication needed").unwrap();
+        remember_start_error(&store, workspace, retryable, first, "authentication needed").unwrap();
         let kept = store.workflow(workspace, retryable).unwrap().unwrap();
         assert_eq!(kept.operation, first);
         assert_eq!(kept.start_error.as_deref(), Some("authentication needed"));
@@ -1129,7 +1250,7 @@ mod tests {
 
         // Undoing that same admission restores exactly what preceded it: the
         // intent is back to the shape `admit` left, without the error.
-        rollback_admission(&store, workspace, retryable, before.as_ref()).unwrap();
+        rollback_admission(&store, workspace, retryable, first, before.as_ref()).unwrap();
         let restored = store.workflow(workspace, retryable).unwrap().unwrap();
         let expected = before.as_ref().unwrap();
         assert_eq!(restored.operation, expected.operation);
@@ -1143,8 +1264,9 @@ mod tests {
         let before = store.workflow(workspace, fresh).unwrap();
         assert!(before.is_none(), "nothing preceded this start");
         let empty = workflow::projection(&store, workspace, fresh).unwrap();
-        admit(fresh, OperationId::new(), &start("add a logout form"));
-        rollback_admission(&store, workspace, fresh, before.as_ref()).unwrap();
+        let attempted = OperationId::new();
+        admit(fresh, attempted, &start("add a logout form"));
+        rollback_admission(&store, workspace, fresh, attempted, before.as_ref()).unwrap();
         let after = workflow::projection(&store, workspace, fresh).unwrap();
         assert_eq!(after.run, empty.run);
         assert_eq!(after.pending_start, empty.pending_start);
@@ -1168,8 +1290,9 @@ mod tests {
         admit(reused, OperationId::new(), &WorkflowCommand::Finish);
         let before = store.workflow(workspace, reused).unwrap();
         assert_eq!(before.as_ref().unwrap().finished.len(), 1);
-        admit(reused, OperationId::new(), &start("try again"));
-        rollback_admission(&store, workspace, reused, before.as_ref()).unwrap();
+        let attempted = OperationId::new();
+        admit(reused, attempted, &start("try again"));
+        rollback_admission(&store, workspace, reused, attempted, before.as_ref()).unwrap();
         let restored = store.workflow(workspace, reused).unwrap().unwrap();
         assert_eq!(restored.finished.len(), 1);
         assert_eq!(restored.finished[0].id, ended);
@@ -1180,6 +1303,92 @@ mod tests {
                 .is_none(),
             "the session is free again"
         );
+    }
+
+    #[test]
+    fn late_start_failure_cannot_restore_or_mark_a_different_run() {
+        use usagi_core::domain::workflow::WorkflowAgents;
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let start = WorkflowCommand::Start {
+            goal: "Task".into(),
+            agents: WorkflowAgents::default(),
+            revision_limit: 3,
+        };
+        for has_predecessor in [false, true] {
+            for later_state in 0..3 {
+                let session = SessionId::new();
+                if has_predecessor {
+                    workflow::admit(&store, workspace, session, OperationId::new(), &start, None)
+                        .unwrap();
+                    workflow::admit(
+                        &store,
+                        workspace,
+                        session,
+                        OperationId::new(),
+                        &WorkflowCommand::Finish,
+                        None,
+                    )
+                    .unwrap();
+                }
+                let slow = OperationId::new();
+                let before =
+                    workflow::admit_with_previous(&store, workspace, session, slow, &start, None)
+                        .unwrap();
+                workflow::admit(
+                    &store,
+                    workspace,
+                    session,
+                    OperationId::new(),
+                    &WorkflowCommand::Finish,
+                    None,
+                )
+                .unwrap();
+                let later = OperationId::new();
+                workflow::admit(&store, workspace, session, later, &start, None).unwrap();
+                match later_state {
+                    1 => workflow::bind(&store, workspace, session, later, AgentId::new()).unwrap(),
+                    2 => workflow::admit(
+                        &store,
+                        workspace,
+                        session,
+                        OperationId::new(),
+                        &WorkflowCommand::Finish,
+                        None,
+                    )
+                    .unwrap(),
+                    _ => {}
+                }
+                let expected =
+                    serde_json::to_value(store.workflow(workspace, session).unwrap()).unwrap();
+                rollback_admission(&store, workspace, session, slow, before.as_ref()).unwrap();
+                remember_start_error(
+                    &store,
+                    workspace,
+                    session,
+                    slow,
+                    "late authentication error",
+                )
+                .unwrap();
+                let actual =
+                    serde_json::to_value(store.workflow(workspace, session).unwrap()).unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+        // A duplicate request that fails after another attempt bound this same
+        // operation also leaves the live run untouched.
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let before =
+            workflow::admit_with_previous(&store, workspace, session, operation, &start, None)
+                .unwrap();
+        workflow::bind(&store, workspace, session, operation, AgentId::new()).unwrap();
+        rollback_admission(&store, workspace, session, operation, before.as_ref()).unwrap();
+        remember_start_error(&store, workspace, session, operation, "late error").unwrap();
+        let current = store.workflow(workspace, session).unwrap().unwrap();
+        assert!(current.run.is_some());
+        assert!(current.start_error.is_none());
     }
 
     #[test]
@@ -1370,6 +1579,22 @@ mod tests {
         assert_eq!(pending.waiting_reason.as_deref(), Some("checks pending"));
         publish_verification(&store, workspace, session, &pending, Err("HEAD changed")).unwrap();
         let revising = stored(Phase::Revising);
+        store
+            .update_workflow(workspace, session, |record| {
+                record.as_mut().unwrap().run.as_mut().unwrap().phase = Phase::Verifying;
+                Ok(())
+            })
+            .unwrap();
+        let pending = stored(Phase::Verifying);
+        publish_verification(
+            &store,
+            workspace,
+            session,
+            &pending,
+            Err("PR diff changed; a new review is required"),
+        )
+        .unwrap();
+        let _ = stored(Phase::Revising);
         // A phase that changed under a running verification is not overwritten:
         // the concurrent decision (here, a stopped participant) stands.
         store

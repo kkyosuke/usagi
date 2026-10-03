@@ -159,8 +159,8 @@ pub const FINISHED_LIMIT: usize = 5;
 /// came before, and small enough that `FINISHED_LIMIT` of them stay cheap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FinishedRun {
-    /// The operation that started the run, so a stale retry of it is refused
-    /// instead of resurrecting finished work.
+    /// The operation that started the displayed run. Durable replay rejection
+    /// is kept independently of this bounded display archive.
     pub id: OperationId,
     pub outcome: Outcome,
     pub goal: String,

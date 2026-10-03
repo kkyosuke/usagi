@@ -335,7 +335,7 @@ impl PtyWriter for SupervisorAgentPty {
     }
 }
 
-fn empty_supervisor_agent(dispatch: DispatchStore) -> SharedAgentRuntime {
+pub(super) fn empty_supervisor_agent(dispatch: DispatchStore) -> SharedAgentRuntime {
     Arc::new(SharedAgentState {
         owner: Mutex::new(AgentRuntime::with_dispatch(
             DaemonGeneration::new(),
@@ -13201,10 +13201,10 @@ mod workflow_composition {
         ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
             Ok(usagi_core::infrastructure::git::GitOutput {
                 success: true,
-                stdout: if args[0] == "status" {
-                    String::new()
-                } else {
-                    self.0.clone()
+                stdout: match args {
+                    ["status", ..] => String::new(),
+                    ["--no-replace-objects", "merge-base", "--all", _, _] => "b".repeat(40),
+                    _ => self.0.clone(),
                 },
                 stderr: String::new(),
             })
@@ -13269,7 +13269,7 @@ mod workflow_composition {
         let url = "https://github.com/owner/repo/pull/1";
         // Checks that have not finished: the answer that used to be re-asked of
         // GitHub on every sweep and every snapshot the open tab requested.
-        let output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
+        let output = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":"b".repeat(40),"headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
         let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
         let view = usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output).unwrap();
         fixture
@@ -13338,7 +13338,7 @@ mod workflow_composition {
         // A new approved HEAD is different evidence and is never answered from
         // the previous one's cache. The inventory has to carry a PR for it, or
         // verification refuses locally before GitHub is consulted at all.
-        let moved_output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"c".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
+        let moved_output = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":"b".repeat(40),"headRefOid":"c".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"IN_PROGRESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}).to_string();
         fixture
             .inventory
             .lock()
@@ -13402,7 +13402,7 @@ mod workflow_composition {
             })
             .unwrap();
         let url = "https://github.com/owner/repo/pull/1";
-        let mut output = serde_json::json!({"title":"Task","state":"OPEN","headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
+        let mut output = serde_json::json!({"title":"Task","state":"OPEN","baseRefOid":"b".repeat(40),"headRefOid":"a".repeat(40),"isDraft":false,"reviewDecision":"APPROVED","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"});
         let identity = usagi_core::domain::pr_inventory::extract(url.as_bytes()).remove(0);
         let view =
             usagi_daemon::usecase::pr_inventory::parse_gh_pr_view(&output.to_string()).unwrap();
@@ -13517,20 +13517,37 @@ mod workflow_composition {
             ErrorCode::InvalidArgument
         );
         let operation = usagi_core::domain::id::OperationId::new();
-        assert_eq!(
-            fixture
+        for (goal, revision_limit) in [
+            (" ", usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT),
+            ("Implement feature", 0),
+            (
+                "Implement feature",
+                usagi_core::domain::workflow::MAX_REVISION_LIMIT + 1,
+            ),
+        ] {
+            let refused = fixture
                 .control(
                     operation,
                     WorkflowCommand::Start {
-                        goal: " ".into(),
+                        goal: goal.into(),
                         agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-                        revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
-                    }
+                        revision_limit,
+                    },
                 )
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidArgument
-        );
+                .unwrap_err();
+            assert_eq!(refused.code, ErrorCode::InvalidArgument);
+            assert_eq!(
+                refused.retry_mode,
+                usagi_core::infrastructure::ipc::RetryMode::Never
+            );
+            let snapshot = fixture
+                .call(DaemonRequest::WorkflowSnapshot {
+                    workspace: fixture.workspace,
+                    session: fixture.session,
+                })
+                .unwrap();
+            assert!(snapshot.run.is_none() && snapshot.pending_start.is_none());
+        }
         let command = WorkflowCommand::Start {
             goal: "Implement feature".into(),
             agents: usagi_core::domain::workflow::WorkflowAgents::default(),
