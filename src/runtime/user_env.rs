@@ -1100,6 +1100,24 @@ mod tests {
             MAX_CACHED_SECRETS
         );
 
+        // Parallel reads finish in scheduler order. Make one reference
+        // explicitly cold instead of assuming its first read finished first.
+        for generation in 0..generations {
+            write_global(
+                data.path(),
+                (0..MAX_SECRET_REFERENCES)
+                    .filter(|index| generation != 0 || *index != 0)
+                    .map(|index| {
+                        (
+                            format!("SECRET_{index}"),
+                            format!("op://Private/{generation}/{index}"),
+                        )
+                    })
+                    .collect(),
+            );
+            environment.resolved(workspace.path()).unwrap();
+        }
+
         // Relaunching the current configuration reads nothing and counts every
         // one of its references as used.
         environment.resolved(workspace.path()).unwrap();
