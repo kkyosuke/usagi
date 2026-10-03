@@ -163,18 +163,19 @@ mod tests {
 
     #[test]
     fn only_long_lived_daemon_roles_select_a_service_context() {
+        let selections = std::cell::Cell::new(0);
+        let mut select = || {
+            selections.set(selections.get() + 1);
+            Ok(())
+        };
         for command in [
             DaemonCommand::Serve { standby: false },
             DaemonCommand::Serve { standby: true },
             DaemonCommand::BootstrapBroker,
         ] {
-            let mut selected = false;
-            prepare_with(&command, &mut || {
-                selected = true;
-                Ok(())
-            })
-            .unwrap();
-            assert!(selected);
+            let before = selections.get();
+            prepare_with(&command, &mut select).unwrap();
+            assert_eq!(selections.get(), before + 1);
             assert!(prepare_with(&command, &mut || Err(io::Error::other("unavailable"))).is_err());
         }
         for command in [
@@ -182,10 +183,13 @@ mod tests {
             DaemonCommand::Status,
             DaemonCommand::Stop { force: false },
         ] {
-            prepare_with(&command, &mut || {
-                panic!("clients retain their launch context")
-            })
-            .unwrap();
+            let before = selections.get();
+            prepare_with(&command, &mut select).unwrap();
+            assert_eq!(
+                selections.get(),
+                before,
+                "clients retain their launch context"
+            );
         }
     }
 
