@@ -8,6 +8,8 @@ mod instance_lock;
 mod ipc_accept;
 mod pty;
 mod secure_path;
+#[cfg(any(target_os = "macos", test))]
+mod service_context;
 mod standby;
 mod tenant_control;
 mod workers;
@@ -2784,6 +2786,10 @@ fn run_inner(
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
     lifecycle_custody_held: bool,
 ) -> std::io::Result<()> {
+    // Select the service namespace before the broker, cached OS user lookup,
+    // or any worker can inherit a login session's bootstrap port.
+    #[cfg(target_os = "macos")]
+    service_context::prepare_with(&command, &mut service_context::real_io::select)?;
     if let Some(result) = run_broker_lifecycle_command(&command) {
         return result;
     }
