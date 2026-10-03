@@ -2750,6 +2750,70 @@ fn managed_update_sync_never_cold_starts_an_absent_or_crashed_daemon() {
     assert!(!crashed_data.join("daemon/daemon.json").exists());
 }
 
+#[test]
+fn managed_update_defers_live_agent_handoff_without_reporting_an_update_failure() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    write_restartable_codex(&bin, &agent_spawns);
+    let _daemon = start_daemon_with_source_identity(
+        repo.path(),
+        home.path(),
+        &bin,
+        Path::new("/bin/sh"),
+        &"a".repeat(64),
+    );
+    let data_dir = channel_data_dir(home.path());
+    let mut owner = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
+    wait_for_spawns(&agent_spawns, 1);
+    let old_pid = daemon_pid(&data_dir);
+    let old_locator = read_locator(&data_dir.join("daemon")).unwrap();
+
+    let sync = usagi_command(
+        home.path(),
+        Channel::Local,
+        repo.path(),
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
+    )
+    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .output()
+    .expect("managed update reports its deferred outcome");
+    assert_eq!(sync.status.code(), Some(3));
+    assert!(sync.stderr.is_empty(), "{:?}", sync.stderr);
+    let output = String::from_utf8_lossy(&sync.stdout);
+    assert!(
+        output.contains("deferred to preserve 1 Agent connection"),
+        "{output}"
+    );
+    assert!(output.contains("--restart-agents"), "{output}");
+    assert_eq!(daemon_pid(&data_dir), old_pid);
+    assert_eq!(read_locator(&data_dir.join("daemon")).unwrap(), old_locator);
+    assert!(alive(old_pid));
+
+    let legacy = usagi_command(
+        home.path(),
+        Channel::Local,
+        repo.path(),
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
+    )
+    .env_remove("USAGI_UPDATE_SYNC_OUTCOMES")
+    .output()
+    .expect("an older embedded installer can still complete an update");
+    assert!(legacy.status.success());
+    assert!(legacy.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&legacy.stdout).contains("deferred to preserve"));
+    assert_eq!(daemon_pid(&data_dir), old_pid);
+    assert_eq!(read_locator(&data_dir.join("daemon")).unwrap(), old_locator);
+    assert_eq!(
+        fs::read_to_string(&agent_spawns).unwrap().lines().count(),
+        1
+    );
+}
+
 /// A launched Agent owns a daemon-minted MCP credential before its MCP child
 /// connects. Plain replacement must preserve that authority by refusing the
 /// rollover, while the explicit Agent-restart path stops and exactly resumes it.

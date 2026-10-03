@@ -497,11 +497,12 @@ mv -f -- "$CANDIDATE" "$TARGET"
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     printf "daemon の状態を安全に同期中だよ！ぴょん\n"
     set +e
-    "$TARGET" daemon sync-after-update
+    USAGI_UPDATE_SYNC_OUTCOMES=1 "$TARGET" daemon sync-after-update
     SYNC_STATUS=$?
     set -e
     case "$SYNC_STATUS" in
         0) ;;
+        3) ;; # Binary installed; live Agent connections defer daemon replacement.
         2)
             fail "selected usagi does not support safe managed daemon synchronization; the existing daemon was left unchanged"
             ;;
@@ -545,7 +546,11 @@ printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$
 printf "\n"
 printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
-    printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
+    if [ "$SYNC_STATUS" -eq 3 ]; then
+        printf "実行中の Agent を継続するため、daemon の切り替えは保留しているよ。\n"
+    else
+        printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
+    fi
 else
     printf "daemon の build が古い場合は 'usagi daemon restart' で入れ替えてね。\n"
 fi
