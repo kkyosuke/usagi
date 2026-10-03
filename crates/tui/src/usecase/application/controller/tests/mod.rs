@@ -411,6 +411,7 @@ fn management_classifier_covers_non_key_release_navigation_and_text() {
         (KeyCode::Left, AppKey::Left),
         (KeyCode::Right, AppKey::Right),
         (KeyCode::Char('x'), AppKey::Char('x')),
+        (KeyCode::Char('\u{13}'), AppKey::SaveRoles),
     ] {
         assert_eq!(
             classify_management_input(LiveInput::Key(KeyEvent::new(

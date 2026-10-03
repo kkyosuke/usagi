@@ -180,6 +180,58 @@ fn render_controller_frame_composites_the_home_and_overlays() {
 }
 
 #[test]
+fn render_controller_frame_composites_the_selected_session_memo() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let record = SessionRecord {
+        name: "alpha".to_owned(),
+        display_name: None,
+        origin: SessionOrigin::Human,
+        started_from: None,
+        root: PathBuf::from("/work/alpha"),
+        created_at: now(),
+        last_active: None,
+        notes: Scratchpad::default(),
+        prs: Vec::new(),
+    };
+    let projected = [ProjectedSession::from_record(session, &record)];
+    let frame = |runtime: &WorkspaceRuntime| {
+        render_home_material(&home_frame_material(
+            24,
+            80,
+            runtime,
+            "atlas",
+            &projected,
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        ))
+        .join("\n")
+    };
+    let mut memo = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = memo.handle_key(Key::Char('n'));
+    let request_id = memo.state().note_editor().unwrap().request_id();
+    let loading = frame(&memo);
+    assert!(loading.contains("Memo · alpha"));
+    assert!(loading.contains("Loading"));
+    let _ = memo.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        target: Target::Session(session),
+        request_id,
+        scratchpad: Scratchpad {
+            note: Some("次の作業をここに保存".into()),
+            ..Default::default()
+        },
+    }));
+    assert!(frame(&memo).contains("次の作業をここに保存"));
+    let _ = memo.handle_key(Key::Char('x'));
+    let _ = memo.handle_key(Key::Escape);
+    assert!(frame(&memo).contains("Save changes"));
+}
+
+#[test]
 fn render_controller_frame_composites_agent_launch_failure() {
     use crate::presentation::workspace_runtime::WorkspaceRuntime;
     use crate::usecase::application::controller::{AppEvent, Notice};

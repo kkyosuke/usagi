@@ -3879,14 +3879,17 @@ fn load_workspace_notes(
             state.session_notes.entry(session.session_id)
         {
             let worktree = root.join(".usagi").join("sessions").join(&session.name);
-            let notes = usagi_core::infrastructure::session_notes::load(
+            // A damaged legacy store belongs to this session. Keep its entry
+            // uninitialized so saving cannot replace unreadable data, while
+            // other sessions and the workspace remain usable.
+            if let Ok(notes) = usagi_core::infrastructure::session_notes::load(
                 root,
                 session.session_id,
                 &session.name,
                 &worktree,
-            )
-            .map_err(io_error)?;
-            entry.insert(notes);
+            ) {
+                entry.insert(notes);
+            }
         }
     }
     Ok(state)
@@ -8483,6 +8486,81 @@ mod tests {
         assert!(state.root_notes.note.is_none());
         assert!(state.root_notes.todos.is_empty());
         assert!(state.root_notes.decisions.is_empty());
+    }
+
+    #[test]
+    fn workspace_notes_keep_sessions_usable_when_one_legacy_store_is_corrupt() {
+        use super::load_workspace_notes;
+        use usagi_core::infrastructure::store::state::WorkspaceStateStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("repo", directory.path());
+        let broken = ManagedSession::adopt_available("broken".into(), Utc::now());
+        let healthy = ManagedSession::adopt_available("healthy".into(), Utc::now());
+        let canonical = ManagedSession::adopt_available("canonical".into(), Utc::now());
+        let broken_id = broken.session_id;
+        let healthy_id = healthy.session_id;
+        let canonical_id = canonical.session_id;
+        let healthy_notes = Scratchpad {
+            note: Some("legacy memo".into()),
+            ..Default::default()
+        };
+        let canonical_notes = Scratchpad {
+            note: Some("saved memo".into()),
+            ..Default::default()
+        };
+        WorkspaceStateStore::new(directory.path())
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                session_notes: BTreeMap::from([(canonical_id, canonical_notes.clone())]),
+                ..Default::default()
+            })
+            .unwrap();
+        let broken_store =
+            WorkspaceStateStore::new(directory.path().join(".usagi/sessions/broken"));
+        std::fs::create_dir_all(broken_store.dir()).unwrap();
+        std::fs::write(broken_store.state_path(), "malformed").unwrap();
+        WorkspaceStateStore::new(directory.path().join(".usagi/sessions/healthy"))
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                root_notes: healthy_notes.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let lifecycle = LifecycleSnapshot {
+            workspace_id: WorkspaceId::new(),
+            root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            revision: 1,
+            sessions: vec![broken, healthy, canonical],
+            agent_resumes: BTreeMap::new(),
+            session_roles: BTreeMap::new(),
+        };
+
+        let notes = load_workspace_notes(directory.path(), &lifecycle).unwrap();
+        assert!(!notes.session_notes.contains_key(&broken_id));
+        assert_eq!(notes.session_notes[&healthy_id], healthy_notes);
+        assert_eq!(notes.session_notes[&canonical_id], canonical_notes);
+        // The resident refresh and initial open both keep all lifecycle rows.
+        let refreshed = session_snapshot_result("refresh", &lifecycle, &workspace).unwrap();
+        assert_eq!(
+            refreshed.session_ids.unwrap(),
+            [broken_id, healthy_id, canonical_id]
+        );
+        assert_eq!(refreshed.sessions.unwrap()[1].notes, healthy_notes);
+        let opened = FsWorkspaceLoader::runtime_snapshot(workspace, lifecycle).unwrap();
+        assert_eq!(opened.state.sessions.len(), 3);
+        assert_eq!(opened.state.sessions[2].notes, canonical_notes);
+        assert!(
+            !usagi_core::usecase::note::set_note(
+                &WorkspaceStateStore::new(directory.path()),
+                StoreTarget::Managed(broken_id),
+                "replacement",
+                Utc::now(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(broken_store.state_path()).unwrap(),
+            "malformed"
+        );
     }
 
     #[test]

@@ -133,7 +133,7 @@ fn safe_text(value: &str) -> String {
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .chars()
-        .filter(|c| *c == '\n' || presentation_character_is_safe(*c))
+        .filter(|c| matches!(*c, '\n' | '\t') || presentation_character_is_safe(*c))
         .collect()
 }
 
@@ -443,17 +443,65 @@ mod tests {
     }
     fn write(state: &mut AppState) -> (RequestId, Scratchpad) {
         let effects = update(state, AppEvent::Key(AppKey::SaveRoles));
-        let [
-            Effect::SaveNotes {
-                request_id,
-                scratchpad,
-                ..
-            },
-        ] = effects.as_slice()
-        else {
-            panic!("expected one save");
+        let editor = state.note_editor().unwrap();
+        let request_id = editor.request_id();
+        let pad = Scratchpad {
+            note: (!editor.draft().is_empty()).then(|| editor.draft().to_owned()),
+            todos: editor.scratchpad().todos.clone(),
+            decisions: editor.scratchpad().decisions.clone(),
         };
-        (*request_id, scratchpad.clone())
+        assert_eq!(
+            effects,
+            [Effect::SaveNotes {
+                target: editor.target(),
+                request_id,
+                scratchpad: pad.clone(),
+            }]
+        );
+        (request_id, pad)
+    }
+
+    #[test]
+    fn opening_and_saving_a_mcp_note_preserves_tabs_and_pasted_tabs() {
+        let (mut state, target) = state();
+        read(&mut state, target, "\t日本語\n\t次の作業");
+        assert!(!state.note_editor().unwrap().modified());
+        let _ = key(&mut state, &AppKey::Paste("\t続き".into()));
+        let (_, pad) = write(&mut state);
+        assert_eq!(pad.note.as_deref(), Some("\t日本語\n\t次の作業\t続き"));
+    }
+
+    #[test]
+    fn fresh_mcp_observation_and_session_removal_release_the_saved_preview() {
+        let (mut state, target) = state();
+        let id = target.session_id().unwrap();
+        read(&mut state, target, "saved by TUI");
+        let (request_id, pad) = write(&mut state);
+        let saved_at = chrono::Utc::now();
+        saved(&mut state, request_id, target, &pad, Some(saved_at));
+        let other = state.active.unwrap();
+        observed(&mut state, other, pad.note.as_deref(), Some(saved_at));
+        assert!(state.saved_notes().is_some());
+        observed(
+            &mut state,
+            id,
+            Some("older snapshot"),
+            Some(saved_at - chrono::Duration::seconds(1)),
+        );
+        assert!(state.saved_notes().is_some());
+        observed(&mut state, id, Some("MCP update"), Some(saved_at));
+        assert!(state.saved_notes().is_none());
+        assert_eq!(state.note_revision(), 2);
+
+        read(&mut state, target, "another TUI save");
+        let (request_id, pad) = write(&mut state);
+        saved(&mut state, request_id, target, &pad, Some(saved_at));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(vec![other])),
+        );
+        assert!(state.saved_notes().is_none());
+        assert_eq!(state.note_revision(), 4);
     }
 
     #[test]

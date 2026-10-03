@@ -6,6 +6,10 @@ use super::*;
 
 #[test]
 fn app_event_from_key_maps_ordinary_management_keys() {
+    assert_eq!(
+        app_event_from_key(Key::Char('\u{13}')),
+        Some(AppEvent::Key(AppKey::SaveRoles))
+    );
     assert_eq!(app_event_from_key(Key::Up), Some(AppEvent::Key(AppKey::Up)));
     assert_eq!(
         app_event_from_key(Key::Down),

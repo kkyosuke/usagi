@@ -30,69 +30,55 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
         return memo_body(editor, NOTES_BODY_HEIGHT, INNER_WIDTH);
     }
     let mut lines = vec![modal::caption("note · todos · decisions")];
-    let section = match editor.section() {
-        NoteSection::Note => "note",
-        NoteSection::Todos => "todos",
-        NoteSection::Decisions => "decisions",
+    let section = if editor.section() == NoteSection::Todos {
+        "todos"
+    } else {
+        "decisions"
     };
     lines.push(modal::heading(&format!("[{section}]")));
-    match editor.section() {
-        NoteSection::Note => lines.extend(
+    if editor.section() == NoteSection::Todos {
+        if editor.scratchpad().todos().is_empty() {
+            lines.push(modal::empty_notice("(no todos)"));
+        }
+        lines.extend(
             editor
                 .scratchpad()
-                .note()
-                .unwrap_or("(empty)")
-                .lines()
+                .todos()
+                .iter()
                 .take(MAX_ROWS)
-                .map(|line| modal::content_line(line, INNER_WIDTH)),
-        ),
-        NoteSection::Todos => {
-            if editor.scratchpad().todos().is_empty() {
-                lines.push(modal::empty_notice("(no todos)"));
-            }
-            lines.extend(
-                editor
-                    .scratchpad()
-                    .todos()
-                    .iter()
-                    .take(MAX_ROWS)
-                    .map(|todo| {
-                        let mark = if todo.done { "x" } else { " " };
-                        modal::content_line(&format!("[{mark}] {}", todo.text), INNER_WIDTH)
-                    }),
-            );
+                .map(|todo| {
+                    let mark = if todo.done { "x" } else { " " };
+                    modal::content_line(&format!("[{mark}] {}", todo.text), INNER_WIDTH)
+                }),
+        );
+    } else {
+        if editor.scratchpad().decisions().is_empty() {
+            lines.push(modal::empty_notice("(no decisions)"));
         }
-        NoteSection::Decisions => {
-            if editor.scratchpad().decisions().is_empty() {
-                lines.push(modal::empty_notice("(no decisions)"));
-            }
-            lines.extend(
-                editor
-                    .scratchpad()
-                    .decisions()
-                    .iter()
-                    .rev()
-                    .take(MAX_ROWS)
-                    .map(|decision| {
-                        modal::content_line(
-                            &format!(
-                                "{}  {}",
-                                decision.at.format("%Y-%m-%d %H:%M"),
-                                decision.text
-                            ),
-                            INNER_WIDTH,
-                        )
-                    }),
-            );
-        }
+        lines.extend(
+            editor
+                .scratchpad()
+                .decisions()
+                .iter()
+                .rev()
+                .take(MAX_ROWS)
+                .map(|decision| {
+                    modal::content_line(
+                        &format!(
+                            "{}  {}",
+                            decision.at.format("%Y-%m-%d %H:%M"),
+                            decision.text
+                        ),
+                        INNER_WIDTH,
+                    )
+                }),
+        );
     }
     if !editor.draft().is_empty() {
+        let draft =
+            usagi_core::domain::presentation_text::sanitize_presentation_line(editor.draft());
         lines.push(String::new());
-        lines.push(
-            Role::Warning
-                .style()
-                .paint(&format!("  draft: {}", editor.draft())),
-        );
+        lines.push(Role::Warning.style().paint(&format!("  draft: {draft}")));
     }
     if let Some(line) = error_line(editor.error().map(|error| error.message.as_str())) {
         lines.push(String::new());
@@ -142,6 +128,9 @@ fn memo_body(editor: &NoteEditor, body_height: usize, inner_width: usize) -> Vec
     let start = cursor_line.saturating_sub(max_rows - 1);
     let textarea = Role::Accent.style();
     for (index, line) in source.iter().enumerate().skip(start).take(max_rows) {
+        // The canonical sanitizer displays a tab as one stable cell without
+        // changing the draft or its UTF-8 cursor offsets.
+        let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
         let content = if index == cursor_line
             && !editor.loading_state()
             && !editor.read_failed()
@@ -160,7 +149,7 @@ fn memo_body(editor: &NoteEditor, body_height: usize, inner_width: usize) -> Vec
             }
             crate::presentation::widgets::block_caret(&line[left..], local_cursor - left, &textarea)
         } else {
-            textarea.paint(line)
+            textarea.paint(&line)
         };
         lines.push(modal::content_line(&content, inner_width));
     }
@@ -548,6 +537,65 @@ mod tests {
             );
             let frame = render_notes_over(24, 80, &base(), state.note_editor().unwrap());
             assert!(frame.join("\n").contains(expected));
+        }
+    }
+
+    #[test]
+    fn memo_scroll_and_legacy_list_drafts_survive_default_size_rendering() {
+        let session = SessionId::new();
+        let mut state = AppState::home(WorkspaceId::new(), vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
+        let request_id = state.note_editor().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::NotesLoaded {
+                request_id,
+                target: Target::Session(session),
+                scratchpad: Scratchpad {
+                    note: Some("\t日本語のメモ\n".repeat(12)),
+                    ..Default::default()
+                },
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        let top =
+            super::render_notes_for_over(0, 0, &base(), state.note_editor().unwrap(), "issue-123");
+        assert_eq!(top.len(), 24);
+        assert!(top.join("\n").contains("↓ more"));
+        assert!(top.join("\n").contains("Saved"));
+        assert!(!top.join("\n").contains('\t'));
+        for section in [NoteSection::Todos, NoteSection::Decisions] {
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::SelectNoteSection(section)),
+            );
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::SetNoteDraft("pending list item".into())),
+            );
+            let _ = update(&mut state, AppEvent::Key(AppKey::SaveNotes));
+            let request_id = state.note_editor().unwrap().request_id();
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::NotesError {
+                    request_id,
+                    target: Target::Session(session),
+                    error: SafeError {
+                        message: SafeMessage::new("Could not save notes"),
+                        error_id: "safe-notes".into(),
+                    },
+                }),
+            );
+            let frame = super::render_notes_for_over(
+                24,
+                80,
+                &base(),
+                state.note_editor().unwrap(),
+                "issue-123",
+            )
+            .join("\n");
+            assert!(frame.contains("draft: pending list item"));
+            assert!(frame.contains("Could not save notes"));
         }
     }
 

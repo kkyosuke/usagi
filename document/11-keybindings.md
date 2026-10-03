@@ -231,6 +231,7 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Scratchpad | `Ctrl-S` | 保存して閉じる |
 | Scratchpad | `Esc` | 閉じる。未保存なら保存 / 破棄 / 編集継続を選択 |
 | Scratchpad close confirmation | `←` / `→` / `Tab` / `Enter` / `Esc` | 選択 / 決定 / 編集継続 |
+| Scratchpad close confirmation | `s` / `d` / `c` | 保存 / 破棄 / 編集継続を直接選択 |
 | Daemon control | `↑` / `↓` / `←` / `→` / `Tab` | Start / Restart / Stopを選択 |
 | Daemon control | `s` / `r` / `x` | Start / Restart / Stopを直接実行 |
 | Daemon control | `Enter` / `Esc` | 選択actionを実行 / close |

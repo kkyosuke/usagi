@@ -190,9 +190,13 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 対象の ID は caller credential と利用可能な lifecycle から解決し、呼び出し側に session 名や保存先を選ばせない。
 
 最初の読み込みで旧 workspace の session レコードと旧 worktree の root scratchpad を移行する。
+旧 workspace レコードは session 名で照合するため、移行前に削除した session のレコードが残っていると、
+同名で最初に観測された session が取り込む。旧形式には incarnation を照合できる ID がない。
 メモ本文は旧 workspace 側を優先し、todo・decision は重複を除いて保持する。移行済みの空 entry は明示的なクリアを表し、
-旧メモを再取り込みしない。workspace の旧 session レコードから転送した scratchpad はクリアし、同名で再作成した
-session に引き継がせない。scratchpad は Git 追跡外の作業用情報で、session lifecycle の権威にはならない。
+旧メモを再取り込みしない。workspace の旧 session レコードから転送した scratchpad はクリアする。
+移行後は session ID で分離し、同名で再作成した session に引き継がせない。旧 worktree ストアが壊れている場合は
+その session の移行を保留し、他の session の表示・操作は継続する。scratchpad は Git 追跡外の作業用情報で、
+session lifecycle の権威にはならない。
 
 ### Agent が作成した session の authority
 
