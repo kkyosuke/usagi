@@ -68,6 +68,121 @@ fn app_event_from_key_maps_ordinary_management_keys() {
     );
 }
 
+#[test]
+fn memo_save_updates_cached_rows_until_persistence_is_observed_then_follows_mcp_edits() {
+    let workspace = WorkspaceId::new();
+    let id = SessionId::new();
+    let target = Target::Session(id);
+    let initial = state("memo");
+    let records = initial.sessions.clone();
+    let view = WorkspaceView::with_runtime_ids(ws("memo"), initial, vec![id]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![id]);
+    let effects = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+    assert!(
+        matches!(effects.as_slice(), [Effect::LoadNotes { target: found, .. }] if *found == target)
+    );
+    let request_id = runtime.state().note_editor().unwrap().request_id();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        request_id,
+        target,
+        scratchpad: Scratchpad::default(),
+    }));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Paste("保存したメモ".into())));
+    let effects = runtime.apply_event(AppEvent::Key(AppKey::SaveRoles));
+    let [
+        Effect::SaveNotes {
+            request_id,
+            scratchpad,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected save")
+    };
+    let saved = scratchpad.clone();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesSaved {
+        updated_at: None,
+        request_id: *request_id,
+        target,
+        scratchpad: saved.clone(),
+    }));
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert_eq!(runtime.state().note_revision(), 1);
+    let projected = crate::presentation::project_controller_sessions(&ui, runtime.state());
+    assert_eq!(projected[0].memo.as_deref(), Some("保存したメモ"));
+    assert!(projected[0].has_notes);
+    let mut observed = records;
+    observed[0].notes = saved;
+    ui.workspace
+        .replace_sessions_with_runtime_ids(observed.clone(), vec![id]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert!(runtime.state().saved_notes().is_none());
+    assert_eq!(runtime.state().note_revision(), 2);
+    observed[0].notes.note = Some("MCP update".into());
+    ui.workspace
+        .replace_sessions_with_runtime_ids(observed, vec![id]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert_eq!(
+        crate::presentation::project_controller_sessions(&ui, runtime.state())[0]
+            .memo
+            .as_deref(),
+        Some("MCP update")
+    );
+}
+
+#[test]
+fn a_newer_mcp_memo_replaces_the_save_acknowledgement_even_before_the_next_snapshot() {
+    let id = SessionId::new();
+    let target = Target::Session(id);
+    let initial = state("memo-race");
+    let mut records = initial.sessions.clone();
+    let view = WorkspaceView::with_runtime_ids(ws("memo-race"), initial, vec![id]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![id]);
+    let saved_at = now();
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+    let request_id = runtime.state().note_editor().unwrap().request_id();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        request_id,
+        target,
+        scratchpad: Scratchpad::default(),
+    }));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Paste("TUI save".into())));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::SaveRoles));
+    let request_id = runtime.state().note_editor().unwrap().request_id();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesSaved {
+        request_id,
+        target,
+        updated_at: Some(saved_at),
+        scratchpad: Scratchpad {
+            note: Some("TUI save".into()),
+            ..Default::default()
+        },
+    }));
+    ui.notes_updated_at = Some(saved_at - chrono::Duration::seconds(1));
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert!(runtime.state().saved_notes().is_some());
+    records[0].notes.note = Some("MCP won".into());
+    crate::presentation::session_commands::adopt_session_snapshot(
+        &mut ui,
+        SessionCommandResult {
+            sessions: Some(records),
+            session_ids: Some(vec![id]),
+            notes_updated_at: Some(saved_at + chrono::Duration::seconds(1)),
+            ..SessionCommandResult::message("notes refreshed")
+        },
+    );
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert!(runtime.state().saved_notes().is_none());
+    assert_eq!(
+        crate::presentation::project_controller_sessions(&ui, runtime.state())[0]
+            .memo
+            .as_deref(),
+        Some("MCP won")
+    );
+}
+
 /// A resize is a redraw, never an inventory refresh. It reaches the reducer
 /// as the same mascot tick as a wake-up, while the real dimensions come from
 /// `term.size()` at the head of the frame; the daemon lanes are not involved
@@ -207,8 +322,12 @@ fn backend_host_and_explicit_error_adapters_cover_the_full_route_matrix() {
     assert_eq!(actions.try_iter().count(), 10);
 
     for effect in [
-        Effect::LoadNotes { target },
+        Effect::LoadNotes {
+            target,
+            request_id: usagi_core::domain::id::RequestId::new(),
+        },
         Effect::SaveNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target,
             scratchpad: Scratchpad::default(),
         },
@@ -742,6 +861,7 @@ fn closeup_environment_editor_is_composited_over_home() {
         cwd: "/work/alpha".into(),
         last_modified: now(),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,
@@ -919,6 +1039,7 @@ fn refresh_requests_coalesce_onto_one_published_snapshot() {
             session_lifecycles: None,
             session_roles: None,
             revision: Some(7),
+            notes_updated_at: None,
         })]))),
     };
 
@@ -967,6 +1088,7 @@ fn refresh_requests_coalesce_onto_one_published_snapshot() {
             session_lifecycles: None,
             session_roles: None,
             revision: Some(8),
+            notes_updated_at: None,
         }));
     crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
     assert!(ui.workspace.sessions().is_empty());
@@ -1002,6 +1124,7 @@ fn a_failed_or_stale_lane_observation_never_rewrites_the_adopted_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(3),
+                notes_updated_at: None,
             }),
             Err("later daemon failure".to_owned()),
         ]))),
@@ -3096,7 +3219,7 @@ fn switch_reorder_projects_rows_and_does_not_resync_on_every_frame() {
     let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![a, b]);
     let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
-    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('N')));
     assert_eq!(runtime.state().sessions(), &[b, a]);
     for _ in 0..2 {
         assert!(crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]).is_empty());

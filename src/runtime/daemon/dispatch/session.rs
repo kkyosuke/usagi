@@ -454,7 +454,25 @@ pub(super) fn dispatch_session_action(
         | SessionAction::DecisionList
         | SessionAction::DecisionLog => {
             let scope = caller_scope()?;
-            let body = scratchpad::read_or_write(action, payload, &scope.path)?;
+            let workspace = bound.tenant.root();
+            let name = scope
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(SessionRuntimeError::ScopeUnavailable)?;
+            usagi_core::infrastructure::session_notes::load(
+                workspace,
+                scope.session_id,
+                name,
+                &scope.path,
+            )
+            .map_err(|_| SessionRuntimeError::Storage)?;
+            let body = scratchpad::read_or_write(
+                action,
+                payload,
+                workspace,
+                usagi_core::usecase::note::Target::Managed(scope.session_id),
+            )?;
             reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
         }
         SessionAction::DelegateBrief => reply(delegate_brief(context, operation_id, payload)?),

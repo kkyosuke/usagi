@@ -186,6 +186,7 @@ fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
         session_lifecycles: None,
         session_roles: None,
         revision: Some(1),
+        notes_updated_at: None,
     };
     let mut term = CacheInvalidationTerminal::scripted([
         Key::Other,
@@ -252,6 +253,7 @@ fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
         session_lifecycles: None,
         session_roles: None,
         revision: Some(1),
+        notes_updated_at: None,
     };
     let lane = RecordingPrLane::default();
     let mut factory = PrLaneBackendFactory {
@@ -392,6 +394,7 @@ fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         ws("empty"),
         WorkspaceState {
             sessions: Vec::new(),
+            session_notes: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         },
@@ -480,6 +483,7 @@ fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_por
             ws("empty"),
             WorkspaceState {
                 sessions: Vec::new(),
+                session_notes: std::collections::BTreeMap::new(),
                 root_notes: Scratchpad::default(),
                 updated_at: now(),
             },
@@ -1018,6 +1022,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(2),
+                notes_updated_at: None,
             }),
             completion: crate::presentation::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
@@ -1044,6 +1049,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(1),
+                notes_updated_at: None,
             }),
             completion: crate::presentation::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
@@ -1120,6 +1126,7 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
         session_lifecycles: None,
         session_roles: None,
         revision: None,
+        notes_updated_at: None,
     });
     let completion = crate::presentation::SessionBackendCompletion::Create {
         token,
@@ -1401,6 +1408,7 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         session_lifecycles: None,
         session_roles: None,
         revision: None,
+        notes_updated_at: None,
     });
     let completion = crate::presentation::SessionBackendCompletion::Remove {
         session: SessionId::new(),
@@ -1959,7 +1967,7 @@ fn session_command_result_message_carries_no_projection() {
 fn switch_session_reorder_invalidates_row_cache_and_redraws_immediately() {
     reset_projection_build_counts();
     let mut term = CacheInvalidationTerminal::scripted([
-        Key::Char('n'),
+        Key::Char('N'),
         Key::Other,
         Key::CtrlQ,
         Key::Char('y'),

@@ -76,6 +76,7 @@ fn render_controller_frame_composites_the_home_and_overlays() {
         cwd: "/work/alpha".into(),
         last_modified: now(),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,

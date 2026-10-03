@@ -549,13 +549,19 @@ struct UnavailableBackendPort;
 
 #[cfg(test)]
 impl BackendTargetStorePort for UnavailableBackendPort {
-    fn load_notes(&mut self, _: Target, completions: Completions) {
+    fn load_notes(
+        &mut self,
+        _: Target,
+        _: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    ) {
         unavailable_completion(&completions, "notes are unavailable");
     }
     fn save_notes(
         &mut self,
         _: Target,
         _: usagi_core::domain::note::Scratchpad,
+        _: usagi_core::domain::id::RequestId,
         completions: Completions,
     ) {
         unavailable_completion(&completions, "notes are unavailable");
@@ -1191,6 +1197,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         // A focused palette / create form intercepts these before the
         // reducer, so caret motion never reaches this navigation branch.
         Key::LineStart | Key::Home | Key::Char('\u{1}') => AppKey::CtrlA,
+        Key::Char('\u{13}') => AppKey::SaveRoles,
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
@@ -1559,6 +1566,7 @@ struct HomeFrameMaterial {
     agent_launch_error: Option<String>,
     /// Failed-delete session label and focused Yes/No answer.
     force_remove_confirmation: Option<(String, bool)>,
+    note_editor: Option<crate::usecase::application::controller::NoteEditor>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
     role_editor: Option<crate::usecase::application::controller::RoleEditor>,
     /// Minute-resolution wall clock behind relative session labels. Garden

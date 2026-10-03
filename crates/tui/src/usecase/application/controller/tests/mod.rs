@@ -1,5 +1,9 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
+fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
+    notes::key(state, &AppKey::CommitNoteDraft)
+}
+
 mod closeup;
 mod director;
 mod garden;
@@ -1171,8 +1175,15 @@ fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
     let mut backend = FakeControllerBackend::default();
 
     let effects = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
-    assert_eq!(effects, vec![Effect::LoadNotes { target }]);
+    assert_eq!(
+        effects,
+        vec![Effect::LoadNotes {
+            target,
+            request_id: state.note_editor().unwrap().request_id()
+        }]
+    );
     backend.push_event(BackendEvent::NotesLoaded {
+        request_id: state.note_editor().unwrap().request_id(),
         target,
         scratchpad: Scratchpad {
             note: Some("before".to_owned()),
@@ -1193,9 +1204,10 @@ fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
     let _ = update(&mut state, AppEvent::Key(AppKey::CommitNoteDraft));
     let queued_saves = update(&mut state, AppEvent::Key(AppKey::SaveNotes));
     assert!(
-        matches!(&queued_saves[..], [Effect::SaveNotes { target: saved_target, scratchpad }] if *saved_target == target && scratchpad.todos.len() == 2 && scratchpad.todos[0].done)
+        matches!(&queued_saves[..], [Effect::SaveNotes { target: saved_target, scratchpad, .. }] if *saved_target == target && scratchpad.todos.len() == 2 && scratchpad.todos[0].done)
     );
     backend.push_event(BackendEvent::NotesError {
+        request_id: state.note_editor().unwrap().request_id(),
         target,
         error: SafeError {
             message: SafeMessage::new("Could not save notes"),
@@ -1209,6 +1221,9 @@ fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
         note.error().unwrap().message.as_str(),
         "Could not save notes"
     );
+
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('d')));
 
     let effects = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
     assert_eq!(
@@ -1718,9 +1733,17 @@ fn paste_is_inserted_into_every_reducer_owned_home_input() {
 
     let mut notes = AppState::home(workspace, vec![session]);
     let _ = update(&mut notes, AppEvent::Key(AppKey::OpenNotes));
+    let request_id = notes.note_editor().unwrap().request_id();
     let _ = update(
         &mut notes,
-        AppEvent::Key(AppKey::SetNoteDraft("before ".to_owned())),
+        AppEvent::Backend(BackendEvent::NotesLoaded {
+            request_id,
+            target: Target::Session(session),
+            scratchpad: Scratchpad {
+                note: Some("before ".into()),
+                ..Scratchpad::default()
+            },
+        }),
     );
     let _ = update(
         &mut notes,
@@ -2198,10 +2221,20 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     );
     for event in [
         BackendEvent::NotesLoaded {
+            request_id: state
+                .note_editor()
+                .map_or_else(usagi_core::domain::id::RequestId::new, |editor| {
+                    editor.request_id()
+                }),
             target: Target::Session(session),
             scratchpad: Scratchpad::default(),
         },
         BackendEvent::NotesError {
+            request_id: state
+                .note_editor()
+                .map_or_else(usagi_core::domain::id::RequestId::new, |editor| {
+                    editor.request_id()
+                }),
             target: Target::Session(session),
             error: safe_error("notes"),
         },
@@ -2276,7 +2309,8 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     ] {
         let editor = state.note_editor.as_mut().unwrap();
         editor.section = section;
-        editor.draft.clear();
+        editor.source.replace("");
+        editor.phase = notes::NotePhase::Ready;
         assert!(commit_note_draft(&mut state).is_empty());
     }
 
@@ -2412,7 +2446,8 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     ] {
         let editor = state.note_editor.as_mut().unwrap();
         editor.section = section;
-        editor.draft = draft.into();
+        editor.source.replace(draft);
+        editor.phase = notes::NotePhase::Ready;
         let _ = commit_note_draft(&mut state);
     }
     state.preview_overlay = None;
@@ -2438,9 +2473,15 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.active = Some(session);
     state.overlay = Some(Overlay::Closeup);
     let _ = submit_closeup(&mut state, "close invalid");
+    let request_id = state
+        .note_editor()
+        .map_or_else(usagi_core::domain::id::RequestId::new, |editor| {
+            editor.request_id()
+        });
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::NotesLoaded {
+            request_id,
             target: Target::Root(WorkspaceId::new()),
             scratchpad: Scratchpad::default(),
         }),

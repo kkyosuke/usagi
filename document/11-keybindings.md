@@ -8,8 +8,14 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 [3. TUI](03-tui.md)に対応表を複製しない。画面遷移と各操作の詳細は TUI 仕様を参照する。本書は
 キーボード入力だけを対象とし、クリック、ドラッグ、ホイールは TUI 仕様を正本とする。
 
+## この文書の読み方
+
+基本の操作は前半の prefix と画面別の表を参照し、端末への入力転送と特殊なキーの解釈は後半で確認する。
+画面間で共有するキーと例外を一つの正本に保つため、この文書にまとめる。
+
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [割り振り規則](#割り振り規則)
 - [全画面共通](#全画面共通)
 - [workspace 共通コマンド](#workspace-共通コマンド)
@@ -159,10 +165,11 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | surface | 入力 | 動作 |
 |---|---|---|
 | Switch | `↑` / `↓` | session row選択 |
-| Switch | `p` / `n` | 選択中のsessionを1行上 / 下へ並べ替え（端では停止） |
+| Switch | `P` / `N` | 選択中のsessionを1行上 / 下へ並べ替え（端では停止） |
 | Switch | `←` / `→` | 前 / 次のproject tab |
 | Switch | `Enter` / `t` | session Closeup、または選択したnew session |
 | Switch | `Ctrl-A` / `Home` | new session form |
+| Switch | `n` | 選択中 session の memo 編集 |
 | Switch | `:` | Overview palette |
 | Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
 | Switch | `Ctrl-X` | 選択sessionのforce remove（未コミットworktreeと未マージbranchを破棄）。選択中の `failed/integrity` orphan sessionはpurgeも付ける |
@@ -218,7 +225,12 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Preview file finder | 文字 / paste / `Backspace` | fuzzy filter編集 |
 | Preview file finder | `↑` / `↓` / `Enter` / `Esc` | file選択 / preview / close |
 | Preview document | `↑` / `↓` / `Esc` | scroll / file一覧へ戻る |
-| Scratchpad | paste / `Esc` | draftへ追記 / close |
+| Scratchpad | 文字 / paste | メモ本文を編集（複数行 paste 対応） |
+| Scratchpad | 矢印 / `Home` | メモのカーソル移動 |
+| Scratchpad | `Enter` | 改行。読み込み失敗時は再試行 |
+| Scratchpad | `Ctrl-S` | 保存して閉じる |
+| Scratchpad | `Esc` | 閉じる。未保存なら保存 / 破棄 / 編集継続を選択 |
+| Scratchpad close confirmation | `←` / `→` / `Tab` / `Enter` / `Esc` | 選択 / 決定 / 編集継続 |
 | Daemon control | `↑` / `↓` / `←` / `→` / `Tab` | Start / Restart / Stopを選択 |
 | Daemon control | `s` / `r` / `x` | Start / Restart / Stopを直接実行 |
 | Daemon control | `Enter` / `Esc` | 選択actionを実行 / close |

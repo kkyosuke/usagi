@@ -1845,10 +1845,13 @@ fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
     state.route = Route::Home(HomeMode::Closeup);
     assert!(update_management_key(&mut state, AppKey::CtrlA).is_empty());
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-    for key in [AppKey::OpenNotes, AppKey::OpenPrs] {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
-        assert_eq!(state.overlay(), None);
-    }
+    assert!(update(&mut state, AppEvent::Key(AppKey::OpenPrs)).is_empty());
+    assert_eq!(state.overlay(), None);
+    // Switch's memo uses the surviving cursor even without an active pane.
+    assert!(
+        matches!(update(&mut state, AppEvent::Key(AppKey::OpenNotes)).as_slice(), [Effect::LoadNotes { target: Target::Session(id), .. }] if *id == session)
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
     let request_id = state.preview_overlay().unwrap().request_id();
     assert_eq!(
@@ -1939,18 +1942,18 @@ fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
     let [a, b, c, new] = std::array::from_fn(|_| SessionId::new());
     let mut state = AppState::home(workspace, vec![a, b, c]);
     assert_eq!(state.session_order_revision(), 0);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('p'))).is_empty());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Char('P'))).is_empty());
     assert_eq!(state.session_order_revision(), 0);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Char('N'))).is_empty());
     assert_eq!(state.sessions(), &[b, a, c]);
     assert_eq!(state.selected(), Selection::Target(Target::Session(a)));
     assert_eq!(state.active(), Some(a));
     assert_eq!(state.session_order_revision(), 1);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert_eq!(state.sessions(), &[b, c, a]);
     assert_eq!(state.session_order_revision(), 2);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('P')));
     assert_eq!(state.sessions(), &[b, a, c]);
     let _ = update(
         &mut state,
@@ -1969,7 +1972,7 @@ fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
         AppEvent::Backend(BackendEvent::Sessions(vec![])),
     );
     assert!(state.sessions().is_empty());
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert!(state.sessions().is_empty());
 }
 
@@ -1985,22 +1988,22 @@ fn session_reorder_is_inert_outside_switch_session_rows() {
         Selection::Target(Target::Session(SessionId::new())),
     ] {
         state.selected = selection;
-        for key in ['p', 'n'] {
+        for key in ['P', 'N'] {
             let _ = update(&mut state, AppEvent::Key(AppKey::Char(key)));
             assert_eq!(state.sessions(), &[a, b]);
         }
     }
     state.selected = Selection::Target(Target::Session(a));
     state.route = Route::Home(HomeMode::Closeup);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert_eq!(state.sessions(), &[a, b]);
     state.route = Route::Home(HomeMode::Switch);
     state.overlay = Some(Overlay::Overview);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert_eq!(state.sessions(), &[a, b]);
     state.overlay = None;
     let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert_eq!(state.sessions(), &[a, b]);
     assert_eq!(state.session_order_revision(), 0);
 }
@@ -2012,14 +2015,14 @@ fn session_reorder_clears_pointer_pair_and_handles_single_row() {
     let mut state = sized_home(workspace, vec![a, b], 100, 30);
     let _ = click_at(&mut state, 5, 2, 1_000);
     assert!(state.pending_session_click.is_some());
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert!(state.pending_session_click.is_none());
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::Sessions(vec![a])),
     );
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('P')));
     assert_eq!(state.sessions(), &[a]);
     assert_eq!(state.session_order_revision(), 1);
 }
@@ -2036,7 +2039,7 @@ fn session_favorites_stay_with_identity_after_reordering_and_refresh() {
             std::collections::BTreeSet::from([second]),
         )),
     );
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('P')));
     assert_eq!(state.sessions(), &[second, first]);
     assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
     assert_eq!(state.active(), Some(first));

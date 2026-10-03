@@ -110,7 +110,7 @@ pub(super) struct FrameMaterialKey {
     pub(super) height: usize,
     pub(super) width: usize,
     pub(super) controller: (u64, u64),
-    pub(super) sessions: (u64, Option<SessionId>, u64, u64),
+    pub(super) sessions: (u64, Option<SessionId>, u64, u64, u64),
     pub(super) shell: u64,
     pub(super) metrics: u64,
     pub(super) terminal: (u64, u64, u64, u64),
@@ -259,6 +259,11 @@ pub(super) fn home_frame_material_shared(
             .agent_launch_error()
             .map(|error| error.message.clone()),
         force_remove_confirmation,
+        note_editor: runtime
+            .state()
+            .note_editor()
+            .filter(|_| runtime.state().overlay() == Some(Overlay::Notes))
+            .cloned(),
         environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
         // Garden canonicalization happens only after every composition-owned
@@ -350,6 +355,23 @@ pub(super) fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> 
                 heading,
                 "Previous removal failed. Changes may be discarded.",
             ),
+        );
+    }
+    render_home_editors(material, frame)
+}
+
+fn render_home_editors(material: &HomeFrameMaterial, frame: Vec<String>) -> Vec<String> {
+    if let Some(editor) = &material.note_editor {
+        let label = editor
+            .target()
+            .session_id()
+            .map_or("workspace", |id| material.projection.label_for_session(id));
+        return super::views::scratchpad_modal::render_notes_for_over(
+            material.height,
+            material.width,
+            &frame,
+            editor,
+            label,
         );
     }
     if let Some(editor) = &material.environment_editor {
@@ -840,7 +862,7 @@ pub(super) fn drive_workspace_controller(
     let mut drawn_material: Option<HomeFrameMaterial> = None;
     // Owned daemon row/path material is rebuilt only when its authoritative
     // inputs change. The cache never feeds commands back into the controller.
-    let mut session_material_key: Option<(u64, Option<SessionId>, u64, u64)> = None;
+    let mut session_material_key: Option<(u64, Option<SessionId>, u64, u64, u64)> = None;
     let mut sessions: Arc<[ProjectedSession]> = Arc::from([]);
     let mut metrics_sessions = Vec::new();
     let mut terminal_material_key: Option<(Option<TerminalRef>, u64, u64, Geometry)> = None;
@@ -1238,6 +1260,7 @@ pub(super) fn drive_workspace_controller(
             ui.removing_session,
             runtime.state().session_pr_revision(),
             runtime.state().session_order_revision(),
+            runtime.state().note_revision(),
         );
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {

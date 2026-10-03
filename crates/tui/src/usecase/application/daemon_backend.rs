@@ -196,9 +196,20 @@ pub trait TargetStorePort {
         unavailable(&completions, "Session favorites are unavailable.");
     }
     /// Read a target's scratchpad.
-    fn load_notes(&mut self, target: Target, completions: Completions);
+    fn load_notes(
+        &mut self,
+        target: Target,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    );
     /// Persist an edited scratchpad.
-    fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions);
+    fn save_notes(
+        &mut self,
+        target: Target,
+        scratchpad: Scratchpad,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    );
     /// Read one scope's environment bindings, plus what it inherits.
     fn load_environment(&mut self, scope: EnvScope, completions: Completions);
     /// Persist one scope's environment bindings.
@@ -601,10 +612,17 @@ impl DaemonBackend {
                 self.store
                     .toggle_session_favorite(session, self.completions());
             }
-            Effect::LoadNotes { target } => self.store.load_notes(target, self.completions()),
-            Effect::SaveNotes { target, scratchpad } => {
+            Effect::LoadNotes { target, request_id } => {
                 self.store
-                    .save_notes(target, scratchpad, self.completions());
+                    .load_notes(target, request_id, self.completions());
+            }
+            Effect::SaveNotes {
+                target,
+                scratchpad,
+                request_id,
+            } => {
+                self.store
+                    .save_notes(target, scratchpad, request_id, self.completions());
             }
             Effect::LoadEnvironment { scope } => {
                 self.store.load_environment(scope, self.completions());
@@ -917,17 +935,30 @@ mod tests {
     }
 
     impl TargetStorePort for FakeStore {
-        fn load_notes(&mut self, target: Target, completions: Completions) {
+        fn load_notes(
+            &mut self,
+            target: Target,
+            request_id: usagi_core::domain::id::RequestId,
+            completions: Completions,
+        ) {
             self.loaded_notes.push(target);
             completions.emit(AppEvent::Backend(BackendEvent::NotesLoaded {
+                request_id,
                 target,
                 scratchpad: Scratchpad::default(),
             }));
         }
 
-        fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions) {
+        fn save_notes(
+            &mut self,
+            target: Target,
+            scratchpad: Scratchpad,
+            request_id: usagi_core::domain::id::RequestId,
+            completions: Completions,
+        ) {
             self.saved_notes.push((target, scratchpad));
             completions.emit(AppEvent::Backend(BackendEvent::NotesError {
+                request_id,
                 target,
                 error: SafeError {
                     message: SafeMessage::new("disk full"),
@@ -1286,13 +1317,17 @@ mod tests {
     fn load_and_save_notes_reflux_backend_events() {
         let mut backend = backend();
         let target = Target::Root(WorkspaceId::new());
-        backend.dispatch(Effect::LoadNotes { target });
+        backend.dispatch(Effect::LoadNotes {
+            target,
+            request_id: usagi_core::domain::id::RequestId::new(),
+        });
         assert!(matches!(
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::NotesLoaded { target: loaded, .. })]
                 if *loaded == target
         ));
         backend.dispatch(Effect::SaveNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target,
             scratchpad: Scratchpad::default(),
         });
@@ -1581,6 +1616,7 @@ mod tests {
             workspace: WorkspaceId::new(),
         });
         backend.dispatch(Effect::LoadNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target: Target::Root(WorkspaceId::new()),
         });
         let events = backend.drain_events();
