@@ -1795,6 +1795,51 @@ fn supervisor_control_errors_distinguish_refusal_from_unknown_effect() {
 
 #[cfg(unix)]
 #[test]
+fn shutdown_ends_a_readiness_probe_before_its_budget() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let program = fixture.path().join("codex");
+    let pid_file = fixture.path().join("pid");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\necho $$ >> '{}'\nexec sleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let script = program.to_string_lossy().into_owned();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let readiness = Arc::new(SystemAgentReadiness::new(Arc::clone(&shutdown)));
+    // A budget far beyond the test: only shutdown can end this probe in time.
+    let bounds = ReadinessBounds {
+        timeout: Duration::from_secs(30),
+        output_limit: 16 * 1024,
+    };
+    let probe = {
+        let readiness = Arc::clone(&readiness);
+        std::thread::spawn(move || readiness.ready_command("codex", "/bin/sh", &[&script], bounds))
+    };
+    let started = Instant::now();
+    while !pid_file.is_file() && started.elapsed() < Duration::from_secs(5) {
+        std::thread::yield_now();
+    }
+    assert!(pid_file.is_file(), "fixture readiness child started");
+
+    let requested = Instant::now();
+    shutdown.store(true, Ordering::Release);
+    assert_eq!(probe.join().unwrap(), AgentReadiness::Unavailable);
+    assert!(
+        requested.elapsed() < Duration::from_secs(5),
+        "shutdown waited for the readiness budget: {:?}",
+        requested.elapsed()
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1815,6 +1860,7 @@ fn readiness_timeout_coalesces_and_reaps_the_exact_child() {
         state: Mutex::new(ReadinessState::default()),
         completed: Condvar::new(),
         terminate_grace: Duration::from_millis(50),
+        abort: Arc::new(AtomicBool::new(false)),
     });
     let bounds = ReadinessBounds {
         timeout: Duration::from_millis(150),
@@ -1905,6 +1951,7 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
                 output_limit: 256 * 1024,
             },
             grace,
+            &AtomicBool::new(false),
         ),
         AgentReadiness::Ready
     );
@@ -1919,6 +1966,7 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
                 output_limit: 256 * 1024,
             },
             grace,
+            &AtomicBool::new(false),
         ),
         AgentReadiness::Unavailable
     );
@@ -1932,9 +1980,57 @@ fn readiness_probe_is_bounded_by_its_own_products_budget_not_a_shared_one() {
                 output_limit: 64,
             },
             grace,
+            &AtomicBool::new(false),
         ),
         AgentReadiness::Unavailable
     );
+}
+
+#[test]
+fn readiness_failures_are_named_by_a_closed_reason() {
+    for (observation, reasons) in [
+        (ChildObservation::Success("ok".to_owned()), [None, None]),
+        (ChildObservation::EmptyOutput, [None, None]),
+        (
+            ChildObservation::SpawnFailed,
+            [Some("spawn_failed"), Some("spawn_failed")],
+        ),
+        (
+            ChildObservation::ExitFailure,
+            [Some("exit_failure"), Some("exit_failure")],
+        ),
+        (
+            ChildObservation::TimedOut,
+            [Some("timed_out"), Some("shutdown")],
+        ),
+        (
+            ChildObservation::OutputTooLarge,
+            [Some("output_too_large"), Some("output_too_large")],
+        ),
+        (
+            ChildObservation::InvalidOutput,
+            [Some("invalid_output"), Some("invalid_output")],
+        ),
+        (
+            ChildObservation::ObservationFailed,
+            [Some("observation_failed"), Some("observation_failed")],
+        ),
+    ] {
+        // A concurrent shutdown changes only the cancelled/timed-out probe,
+        // not a known spawn, exit, capture, or decoding failure.
+        for (shutdown_requested, reason) in [false, true].into_iter().zip(reasons) {
+            assert_eq!(
+                readiness_failure_reason(&observation, shutdown_requested),
+                reason,
+                "{observation:?}, shutdown={shutdown_requested}"
+            );
+            assert_eq!(
+                readiness_from_observation(&observation) == AgentReadiness::Ready,
+                reason.is_none(),
+                "{observation:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3096,6 +3192,7 @@ fn daemon_activity(
             &children,
             RuntimeHydration::Empty,
             GENERIC_TERMINAL_LIMIT,
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap(),
         supervisor: Arc::new(Mutex::new(SupervisorRuntime::new(&data.join("daemon")))),
