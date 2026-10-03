@@ -66,7 +66,7 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
     // `header` and the history rows below already sanitized every untrusted
     // fragment before painting it, so nothing re-sanitizes them here: that pass
     // would strip the SGR this pane is drawn with.
-    let mut rows = header.into_iter().take(header_height).collect::<Vec<_>>();
+    let mut rows = visible_header(header, header_height, panel.run.is_none());
     let history = history(panel);
     // Clamp to the viewport, not just to the row count. `rows - 1` alone leaves
     // every offset past `rows - history_height` drawing a part-empty window, so
@@ -92,6 +92,28 @@ pub fn render(height: usize, width: usize, panel: &WorkflowPanel) -> Vec<String>
     rows.into_iter()
         .map(|line| pad_to_width(&clip_to_width(&line, width), width))
         .collect()
+}
+
+/// Keep the focused start field in view while preserving the status when two
+/// or more header rows fit. Started runs retain their status-first layout.
+fn visible_header(header: Vec<String>, height: usize, follow_focus: bool) -> Vec<String> {
+    let focused = follow_focus
+        .then(|| {
+            let marker = Role::Accent.style().bold().paint(">");
+            header.iter().position(|row| row.starts_with(&marker))
+        })
+        .flatten();
+    if let Some(focused) = focused.filter(|focused| *focused >= height && height > 0) {
+        let pinned = usize::from(height > 1);
+        let first = (focused + 1).saturating_sub(height - pinned);
+        header[..pinned]
+            .iter()
+            .chain(header[first..first + height - pinned].iter())
+            .cloned()
+            .collect()
+    } else {
+        header.into_iter().take(height).collect()
+    }
 }
 
 /// The fixed bottom block: what the draft is addressed to, the draft itself,
@@ -589,6 +611,29 @@ mod tests {
         assert!(plain(&render(20, 100, &panel)).contains("Current owner: claude"));
         panel.run.as_mut().unwrap().phase = usagi_core::domain::workflow::Phase::Reviewing;
         assert!(plain(&render(20, 100, &panel)).contains("Current owner: codex"));
+    }
+
+    #[test]
+    fn compact_start_form_keeps_each_focused_field_visible() {
+        let mut panel = WorkflowPanel::default();
+        for (field, label) in [
+            (None, "Goal:"),
+            (Some(0), "Planner:"),
+            (Some(1), "Implementer:"),
+            (Some(2), "Reviewer:"),
+            (Some(3), "Revisions:"),
+        ] {
+            panel.agent_field = field;
+            for height in 1..=8 {
+                let rows = render(height, 90, &panel);
+                assert_eq!(rows.len(), height);
+                let focused = rows
+                    .iter()
+                    .map(|row| strip(row))
+                    .any(|row| row.starts_with('>') && row.contains(label));
+                assert!(focused, "{label} must remain visible at height {height}");
+            }
+        }
     }
 
     #[test]

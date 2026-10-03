@@ -4,6 +4,124 @@
 
 use super::*;
 
+struct MemoFavorites(BTreeSet<SessionId>);
+
+impl crate::presentation::BackendTargetStorePort for MemoFavorites {
+    fn toggle_session_favorite(&mut self, session: SessionId, completions: Completions) {
+        if !self.0.remove(&session) {
+            self.0.insert(session);
+        }
+        completions.emit(AppEvent::Backend(BackendEvent::SessionFavorites(
+            self.0.clone(),
+        )));
+    }
+    fn load_notes(&mut self, target: Target, request_id: RequestId, completions: Completions) {
+        completions.emit(AppEvent::Backend(BackendEvent::NotesLoaded {
+            target,
+            request_id,
+            scratchpad: Scratchpad::default(),
+        }));
+    }
+    fn save_notes(
+        &mut self,
+        target: Target,
+        scratchpad: Scratchpad,
+        request_id: RequestId,
+        completions: Completions,
+    ) {
+        completions.emit(AppEvent::Backend(BackendEvent::NotesSaved {
+            target,
+            request_id,
+            scratchpad,
+            updated_at: None,
+        }));
+    }
+    fn load_environment(&mut self, _: EnvScope, _: Completions) {}
+    fn save_environment(&mut self, _: EnvScope, _: Vec<EnvironmentEntry>, _: Completions) {}
+}
+
+#[test]
+fn memo_and_favorite_completions_update_the_interactive_cached_rows() {
+    struct Factory;
+    impl crate::presentation::ControllerBackendFactory for Factory {
+        fn create(
+            &mut self,
+            snapshot: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> crate::presentation::ControllerBackendComposition {
+            let mut base = PrLaneBackendFactory {
+                lane: RecordingPrLane::default(),
+                session_refresh: Some(Box::new(crate::presentation::UnavailableSessionRefreshPort)),
+            };
+            let mut composition = crate::presentation::ControllerBackendFactory::create(
+                &mut base,
+                snapshot,
+                host.clone(),
+            );
+            composition.backend = DaemonBackend::new(
+                Box::new(host.clone()),
+                Box::new(host),
+                Box::new(MemoFavorites(BTreeSet::new())),
+                Box::new(UnavailableBackendPort),
+            );
+            composition
+        }
+    }
+    let mut terminal = FakeTerminal::with_keys(&[
+        Key::Char('n'),
+        Key::Other,
+        Key::Paste("saved memo".into()),
+        Key::Char('\u{13}'),
+        Key::Other,
+        Key::Escape,
+        Key::Other,
+        Key::Char('f'),
+        Key::Other,
+        Key::Char('f'),
+        Key::Other,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    let snapshot = snapshot("favorite");
+    let label = snapshot.state.sessions[0].name.clone();
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut terminal, snapshot, &mut Factory).unwrap(),
+        Exit::Quit
+    );
+    let frames = terminal
+        .frames
+        .iter()
+        .map(|frame| {
+            frame
+                .iter()
+                .map(|line| strip_ansi(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    let marked = format!("★ {label}");
+    assert!(!frames[0].contains(&marked));
+    let first_marked = frames
+        .iter()
+        .position(|frame| frame.contains(&marked))
+        .expect("favorite completion must refresh the interactive row cache");
+    let first_saved = frames
+        .iter()
+        .position(|frame| frame.contains("Memo · n: edit") && frame.contains("saved memo"))
+        .expect("memo completion must refresh the Switch preview cache");
+    assert!(
+        first_saved < first_marked,
+        "memo completion must refresh before another favorite change"
+    );
+    assert!(frames[first_marked].contains("saved memo"));
+    assert!(
+        frames[first_marked + 1..]
+            .iter()
+            .any(|frame| !frame.contains(&marked) && frame.contains("saved memo")),
+        "unfavorite completion must remove the cached star and preserve the memo"
+    );
+}
+
 #[test]
 fn app_event_from_key_maps_ordinary_management_keys() {
     assert_eq!(

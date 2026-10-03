@@ -1887,6 +1887,7 @@ fn session_favorites_follow_hover_and_change_only_after_successful_save() {
         vec![Effect::ToggleSessionFavorite { session: second }]
     );
     assert!(!state.is_favorite(second));
+    assert_eq!(state.session_favorites_revision(), 0);
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::SessionFavorites(
@@ -1894,6 +1895,14 @@ fn session_favorites_follow_hover_and_change_only_after_successful_save() {
         )),
     );
     assert!(state.is_favorite(second));
+    assert_eq!(state.session_favorites_revision(), 1);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([second]),
+        )),
+    );
+    assert_eq!(state.session_favorites_revision(), 1);
     assert!(!state.is_favorite(first));
     let _ = update(
         &mut state,
@@ -1907,6 +1916,7 @@ fn session_favorites_follow_hover_and_change_only_after_successful_save() {
         )),
     );
     assert!(!state.is_favorite(second));
+    assert_eq!(state.session_favorites_revision(), 2);
     assert_eq!(state.sessions(), &[first, second]);
 }
 
