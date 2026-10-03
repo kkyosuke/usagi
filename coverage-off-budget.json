@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 562,
+  "total": 563,
   "owners": {
     "core": 15,
-    "daemon": 378,
+    "daemon": 379,
     "root-cli": 41,
     "tui": 128
   },
@@ -86,6 +86,7 @@
     "src/runtime/daemon/ipc_accept.rs": 19,
     "src/runtime/daemon/pty.rs": 11,
     "src/runtime/daemon/secure_path.rs": 3,
+    "src/runtime/daemon/service_context.rs": 1,
     "src/runtime/daemon/standby.rs": 18,
     "src/runtime/daemon/tenant_control.rs": 5,
     "src/runtime/daemon/tests.rs": 1,

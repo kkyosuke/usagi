@@ -310,6 +310,22 @@ recovery、runtime state の hydrate、serve する workspace の adopt を経�
 > 書かれると、そちらを原因として表示することがある。表示される理由が状況と噛み合わないときは
 > log 全体を確認する。
 
+### macOS の service context
+
+macOS では `daemon serve`（active / standby）と bootstrap broker が worker を起動する前に、effective UID の
+per-user Background bootstrap namespace を選ぶ。process group の分離だけでは起動元の login namespace を
+引き継ぐため、logout 後も生存する daemon の子 process が OS ユーザー情報や DNS を参照できなくなる。
+kernel の bootstrap port と libSystem の cached port を同じ namespace に揃え、Agent・generic Terminal・broker からの
+cold start へ引き継ぐ。通常の CLI / TUI client は呼び出し元の service context を保持する。
+
+namespace を解決・設定できない場合は理由を返して起動を中止する。元の login namespace で起動を続行しない。
+UID / GID、cwd、terminal environment、daemon の process-start identity と lifecycle fence は従来の契約に従う。
+
+旧 daemon が起動元の namespace を失った場合、PTY 内の SSH は `No user exists for uid 501` のように失敗する。
+binary の更新や既存 PTY を保持する seamless rollover では、その PTY の service context は修復されない。
+実行中の Agent / Terminal を終了し、新しい login の外側の端末から `usagi daemon stop`、`usagi daemon start` を順に
+実行して daemon と端末を作り直す。
+
 ### sandbox bootstrap broker
 
 active daemon は workspace fence を取得して IPC endpoint を bind した後、同じ executable path、runtime mode、canonical workspace を
