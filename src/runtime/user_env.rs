@@ -394,11 +394,12 @@ impl<R> Drop for PreparedEnvironment<'_, R> {
             .prepared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(values) = prepared.get_mut(&self.key) {
-            values.retain(|value| !Arc::ptr_eq(value, &self.values));
-            if values.is_empty() {
-                prepared.remove(&self.key);
-            }
+        let values = prepared
+            .get_mut(&self.key)
+            .expect("a live preparation guard keeps its snapshot registered");
+        values.retain(|value| !Arc::ptr_eq(value, &self.values));
+        if values.is_empty() {
+            prepared.remove(&self.key);
         }
     }
 }
