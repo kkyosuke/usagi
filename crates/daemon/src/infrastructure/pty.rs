@@ -1011,7 +1011,9 @@ mod tests {
             Geometry { cols: 80, rows: 24 },
         )
         .unwrap();
-        let input = b"usagi\n".repeat(64 * 1024);
+        // Fill the kernel flip buffers as well as the line discipline queue:
+        // Linux can accept hundreds of KiB without the slave reading input.
+        let input = vec![b'x'; 8 * 1024 * 1024];
         let observations = (|| -> std::io::Result<_> {
             // Canonical line discipline can discard overflow on Linux. Raw
             // input with echo disabled makes the unread queue apply pressure.
@@ -1021,15 +1023,12 @@ mod tests {
             fcntl_outcome(unsafe { libc::tcgetattr(terminal.master_fd, mode.as_mut_ptr()) })?;
             // SAFETY: tcgetattr succeeded, initializing this termios value.
             let mut mode = unsafe { mode.assume_init() };
-            // SAFETY: mode is initialized and remains valid during each call.
-            unsafe {
-                libc::cfmakeraw(&raw mut mode);
-                fcntl_outcome(libc::tcsetattr(
-                    terminal.master_fd,
-                    libc::TCSANOW,
-                    &raw const mode,
-                ))?;
-            }
+            // SAFETY: mode was initialized by tcgetattr and is writable.
+            unsafe { libc::cfmakeraw(&raw mut mode) };
+            // SAFETY: this owned terminal and initialized mode remain valid.
+            fcntl_outcome(unsafe {
+                libc::tcsetattr(terminal.master_fd, libc::TCSANOW, &raw const mode)
+            })?;
             terminal.writer.lock().unwrap().stall_timeout = Duration::from_millis(200);
 
             let started = std::time::Instant::now();
