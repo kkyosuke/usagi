@@ -694,12 +694,20 @@ mod tests {
                 )
             }
         }
-        for script in [
-            "(sleep 30; printf rest) & printf partial",
-            "(trap '' TERM; sleep 30; printf rest) & printf partial",
-        ] {
+        let temporary = tempfile::tempdir().unwrap();
+        for (index, script) in [
+            "(printf ready > \"$1\"; sleep 30; printf rest) & while [ ! -e \"$1\" ]; do sleep 0.01; done; printf partial",
+            "(trap '' TERM; printf ready > \"$1\"; sleep 30; printf rest) & while [ ! -e \"$1\" ]; do sleep 0.01; done; printf partial",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut command = Command::new("sh");
-            command.args(["-c", script]);
+            // Main-process exit follows the descendant's signal setup, so
+            // the second case must survive TERM and require KILL for EOF.
+            command
+                .args(["-c", script, "secret-output-fixture"])
+                .arg(temporary.path().join(format!("ready-{index}")));
             let started = std::time::Instant::now();
             assert_eq!(
                 run_owned_child(
