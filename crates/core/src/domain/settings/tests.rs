@@ -240,11 +240,13 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
 
 #[test]
 fn each_probe_carries_the_bounds_its_own_product_needs() {
-    // A credential read answers immediately and prints almost nothing, so the
-    // providers that only read a token share one small budget.
+    // A credential read prints almost nothing, so the providers that only read
+    // a token share one small capture bound. Their budget still covers a slow
+    // process start-up: `claude auth status` alone takes over a second on a
+    // busy host, and a two-second budget refused healthy launches.
     for model in [DefaultModel::Claude, DefaultModel::OpenAi] {
         let probe = model.readiness_command();
-        assert_eq!(probe.timeout(), Duration::from_secs(2), "{model:?}");
+        assert_eq!(probe.timeout(), Duration::from_secs(10), "{model:?}");
         assert_eq!(probe.output_limit(), 16 * 1024, "{model:?}");
     }
     // `agy models` starts Antigravity's language server and lists the models of

@@ -2,6 +2,7 @@
 
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::AtomicBool;
 
 use usagi_daemon::usecase::lock_watch::{LockTarget, LockWatchTiming};
 
@@ -81,15 +82,26 @@ pub(super) struct SystemAgentReadiness {
     pub(super) state: Mutex<ReadinessState>,
     pub(super) completed: Condvar,
     pub(super) terminate_grace: Duration,
+    /// The daemon's shutdown flag. A probe runs on a client worker that
+    /// shutdown joins, so a probe still inside its budget must end as soon as
+    /// shutdown begins rather than when the budget does.
+    pub(super) abort: Arc<AtomicBool>,
 }
 
-impl Default for SystemAgentReadiness {
-    fn default() -> Self {
+impl SystemAgentReadiness {
+    pub(super) fn new(abort: Arc<AtomicBool>) -> Self {
         Self {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
+            abort,
         }
+    }
+}
+
+impl Default for SystemAgentReadiness {
+    fn default() -> Self {
+        Self::new(Arc::new(AtomicBool::new(false)))
     }
 }
 
@@ -155,7 +167,13 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
+        let result = bounded_readiness_command(
+            program,
+            arguments,
+            bounds,
+            self.terminate_grace,
+            &self.abort,
+        );
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };

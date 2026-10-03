@@ -549,6 +549,7 @@ pub(super) fn open_agent_runtime(
     children: &Arc<SpawnedChildren>,
     hydration: RuntimeHydration,
     terminal_limit: usize,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<SharedAgentRuntime> {
     let state = open_runtime_state(data_dir, generation, children, terminal_limit)?;
     let snapshot = match hydration {
@@ -574,7 +575,7 @@ pub(super) fn open_agent_runtime(
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
-    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::default());
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::new(shutdown));
     let sandbox_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());

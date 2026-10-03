@@ -1581,9 +1581,12 @@ fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
         "owner operations waited for readiness"
     );
 
+    // Shutdown must cancel the in-flight probe and reap its child without
+    // waiting for the longer provider deadline. This also proves that the
+    // shipping daemon passes its own shutdown flag to the readiness runner.
     assert!(
         daemon.terminate_and_wait(Duration::from_secs(5)),
-        "shutdown waited without bound for readiness"
+        "shutdown waited for the readiness deadline instead of cancelling the probe"
     );
     for launch in launches {
         let _ = launch.join().unwrap();
