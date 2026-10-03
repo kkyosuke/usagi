@@ -3480,6 +3480,14 @@ fn admit_agent_dispatch_request(
         _ => None,
     };
     run_agent_readiness(agent, preflight.as_ref())?;
+    let workspace = match request {
+        AgentDispatchRequest::Launch(_, intent) => intent.workspace,
+        AgentDispatchRequest::Goal(_, intent) => intent.workspace,
+        AgentDispatchRequest::Resume(_, target)
+        | AgentDispatchRequest::RepairResume(_, target, _) => target.workspace_id,
+        _ => unreachable!("maintenance was handled before readiness"),
+    };
+    let _environment = agent.prepare_environment(workspace, preflight.is_some())?;
     let reserved_goal = match request {
         AgentDispatchRequest::Goal(operation_id, intent) => Some(
             reserve_goal_supervisor_run(
@@ -4409,6 +4417,7 @@ pub(super) fn dispatch_agent_after_preflight(
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
         .prepare_dispatch_readiness(operation_id, intent)?;
     run_agent_readiness(agent, preflight.as_ref())?;
+    let _environment = agent.prepare_environment(intent.workspace, preflight.is_some())?;
     let mut agent = agent
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?;

@@ -348,6 +348,7 @@ pub(super) fn empty_supervisor_agent(dispatch: DispatchStore) -> SharedAgentRunt
             dispatch,
         )),
         readiness: Arc::new(SystemAgentReadiness::default()),
+        launch_environment: None,
     })
 }
 
@@ -7575,6 +7576,79 @@ fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
 }
 
 #[test]
+fn launch_environment_preparation_uses_no_agent_owner_and_requires_an_available_workspace() {
+    use usagi_core::domain::settings::LocalSettings;
+    use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let sessions = Arc::new(Mutex::new(
+        SessionRuntime::open(
+            root.clone(),
+            &temporary.path().join("sessions"),
+            DaemonGeneration::new(),
+            AlwaysSuccessfulGit,
+            PermissiveSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    let workspace = serde_json::from_value(
+        sessions.lock().unwrap().snapshot().unwrap()["workspace_id"].clone(),
+    )
+    .unwrap();
+    let workspaces = one_workspace(
+        &temporary.path().join("tenants"),
+        &root,
+        sessions,
+        workspace,
+    );
+    let environment = Arc::new(UserEnvironment::new(
+        temporary.path().join("settings"),
+        OpCli,
+    ));
+    WorkspaceSettingsStore::new(&root)
+        .save(&LocalSettings {
+            env: BTreeMap::from([("VALUE".into(), "prepared".into())]),
+            ..LocalSettings::default()
+        })
+        .unwrap();
+    let mut agent = empty_supervisor_agent(DispatchStore::new(temporary.path().join("dispatch")));
+    Arc::get_mut(&mut agent).unwrap().launch_environment =
+        Some(super::agent::LaunchEnvironmentSource {
+            environment: Arc::clone(&environment),
+            workspaces,
+        });
+    let owner = agent.lock().unwrap();
+    // A held owner cannot prevent settings preparation, and replay skips it.
+    assert!(
+        agent
+            .prepare_environment(workspace, false)
+            .unwrap()
+            .is_none()
+    );
+    let preparation = agent.prepare_environment(workspace, true).unwrap().unwrap();
+    assert_eq!(environment.prepared(&root).unwrap()["VALUE"], "prepared");
+    drop(preparation);
+    assert!(matches!(
+        environment.prepared(&root),
+        Err(user_env::UserEnvironmentError::NotPrepared)
+    ));
+    assert!(
+        matches!(agent.prepare_environment(WorkspaceId::new(), true), Err(error) if error.code == ErrorCode::Unavailable)
+    );
+    WorkspaceSettingsStore::new(&root)
+        .save(&LocalSettings {
+            env: BTreeMap::from([("PATH".into(), "refused".into())]),
+            ..LocalSettings::default()
+        })
+        .unwrap();
+    assert!(
+        matches!(agent.prepare_environment(workspace, true), Err(error) if error.code == ErrorCode::InvalidArgument)
+    );
+    drop(owner);
+}
+
+#[test]
 fn saved_environment_reaches_terminal_and_agent_with_workspace_precedence() {
     use usagi_core::domain::settings::{LocalSettings, Settings};
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -7605,6 +7679,7 @@ fn saved_environment_reaches_terminal_and_agent_with_workspace_precedence() {
         .unwrap();
 
     let configured = Arc::new(UserEnvironment::new(data.path().to_path_buf(), OpCli));
+    let _preparation = configured.prepare(workspace.path()).unwrap();
     let request = TerminalLaunchRequest {
         profile_id: TerminalProfileId::new("login-shell").unwrap(),
         scope: TerminalLaunchScope {
@@ -11947,6 +12022,7 @@ mod workflow_composition {
             let agent = Arc::new(SharedAgentState {
                 owner: Mutex::new(owner),
                 readiness: Arc::new(Ready(ready)),
+                launch_environment: None,
             });
             let inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
                 PrInventoryStore::new(directory.path().join("prs")),

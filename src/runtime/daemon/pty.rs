@@ -67,7 +67,7 @@ impl TerminalProfileResolver for TrustedLoginShell {
             return Ok(resolved);
         };
         let workspace_root = self.launch_workspace_root(request)?;
-        let user = environment.resolved(&workspace_root).map_err(|_| {
+        let user = environment.prepared(&workspace_root).map_err(|_| {
             usagi_core::domain::terminal_launch::TerminalLaunchValidationError::InvalidEnvironment
         })?;
         with_user_environment(resolved, &user)
@@ -660,6 +660,7 @@ pub(super) struct SharedTerminal(
             >,
         >,
     >,
+    pub(super) Option<super::agent::LaunchEnvironmentSource>,
 );
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
@@ -672,6 +673,22 @@ impl usagi_daemon::usecase::terminal_owner::TerminalOwner for SharedTerminal {
         usagi_daemon::usecase::terminal_owner::TerminalResponse,
         usagi_core::infrastructure::ipc::ProtocolError,
     > {
+        let _environment = match (&self.1, &request) {
+            (Some(source), usagi_core::infrastructure::ipc::TerminalRequest::Launch { intent }) => {
+                // Validate the exact managed scope before any secret approval;
+                // the owner validates it again immediately before spawning.
+                SharedTerminalScopeResolver(Arc::clone(&source.workspaces))
+                    .resolve_available_scope(&intent.request.scope)
+                    .map_err(|_| {
+                        usagi_core::infrastructure::ipc::ProtocolError::new(
+                            usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
+                            "requested terminal scope is unavailable",
+                        )
+                    })?;
+                Some(source.prepare(intent.request.scope.workspace_id)?)
+            }
+            _ => None,
+        };
         self.0
             .lock()
             .map_err(|_| {

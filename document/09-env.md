@@ -45,7 +45,7 @@ editor は 1 行 1 binding の `NAME=value` を受け取り、保存時に次の
 
 ### workspace が bind できない変数
 
-次の名前は workspace binding から拒否する。判定は launch admission で secret 解決より前に行う。
+次の名前は workspace binding から拒否する。前後の空白を除いた名前で判定し、launch admission で secret 解決より前に拒否する。
 global binding は利用者が管理する trusted baseline として扱い、この拒否対象には含めない。
 
 | 変数 | 拒否する理由 |
@@ -92,6 +92,11 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 平文の値は解決を要さずそのまま注入する。`op://` の値だけを 1Password CLI（`op read --no-newline`）で
 解決する。
 
+- 解決は Agent / Terminal の owner lock を取る前に行う。起動要求ごとに一時スナップショットを作り、
+  provision は同じ thread・workspace の値だけを読み、要求の終了時にスナップショットを外す。
+  未準備の provision は外部コマンドを実行せず拒否する。値を durable record や IPC へ渡さない。
+- secret cache の lock は memory の参照・更新中だけ保持する。同じ credential・scope・参照の並行要求は
+  1 件の進行中 read を共有し、別参照や secret を使わない起動をその read の待ちに巻き込まない。
 - 解決は最大 4 worker の bounded queue で行う（1 参照 = 1 subprocess）。1 件あたり 30 秒の deadline を持つ。
   binding の結果は完了順でなく名前順へ戻して merge する。
 - `op` の stdout / stderr は stream ごとに最大 64 KiB だけ保持する。実行中は上限後も nonblocking pipe を drain して
