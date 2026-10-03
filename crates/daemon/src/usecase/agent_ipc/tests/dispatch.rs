@@ -964,11 +964,19 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
     assert_eq!(delivery.delivered_to, caller);
     assert_eq!(delivery.worker.session_id, Some(session));
     assert!(delivery.accepted);
-    assert_eq!(runtime.session_phase(session), AgentPhase::Ended);
+    assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Running,
+        "a completion MCP call does not finish the provider's active turn"
+    );
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Ended)
+        .unwrap();
     assert_eq!(
         runtime.workspace_agent_statuses(workspace).unwrap()[&session],
         AgentStatus::Idle,
-        "the first completion must clear its running activity"
+        "the lifecycle Stop clears its running activity"
     );
     let wake = runtime
         .dispatch_store()

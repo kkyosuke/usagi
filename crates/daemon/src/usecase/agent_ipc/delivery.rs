@@ -335,10 +335,6 @@ impl AgentRuntime {
                 },
             )
             .map_err(map_dispatch_storage_error)?;
-        // Clear the activity of this completed turn at its first inbox commit.
-        // A duplicate must preserve any newer prompt's lifecycle report.
-        self.reported_phases
-            .insert(runtime.agent_runtime_id, AgentPhase::Ended);
         self.reconcile_report_status(&binding, kind)?;
         Ok(true)
     }
