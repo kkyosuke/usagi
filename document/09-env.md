@@ -94,11 +94,12 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 
 - 解決は最大 4 worker の bounded queue で行う（1 参照 = 1 subprocess）。1 件あたり 30 秒の deadline を持つ。
   binding の結果は完了順でなく名前順へ戻して merge する。
-- `op` の stdout / stderr は stream ごとに最大 64 KiB だけ保持する。上限後も pipe は EOF まで drain して child を
-  backpressure で停止させず、どちらかが上限を超えた binding は raw output を返さない安全な failure として落とす。
-- deadline を超えた `op` は、その child handle の owner が exact child だけへ graceful terminate を送り、2 秒の bounded wait
-  後も残る場合は kill する。その後は wait/reap と stdout / stderr reader の join を終えてから failure を返す。任意 PID や
-  owner が証明できない process は signal 対象にしない。
+- `op` の stdout / stderr は stream ごとに最大 64 KiB だけ保持する。実行中は上限後も nonblocking pipe を drain して
+  child を backpressure で停止させず、どちらかが上限を超えた binding は raw output を返さない安全な failure として落とす。
+- `op` は child handle の owner が新しい process group に入れて起動する。deadline 時はその owned group へ graceful
+  terminate を送り、2 秒の bounded wait 後も残る場合は kill して exact child を reap する。EOF を得られない capture も
+  bounded cleanup 後に cancel して両 reader を join し、`setsid` した descendant の pipe 保持で無期限に待たない。
+  未完の出力は secret value として返さず failure にする。任意 PID や owner が証明できない process は signal 対象にしない。
 - 正常終了、非 zero、output 超過、deadline、reader failure のいずれでも stdout / stderr の両 reader を join してから
   結果を返す。片方の reader が panic または read error になっても、もう片方を detach しない。
 - `op` の認証は CLI 側の通常の仕組みに従う。`op signin` セッションに加え、env editor で平文の

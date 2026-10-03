@@ -66,6 +66,7 @@ pub(super) fn dispatch_session_action(
     use usagi_core::infrastructure::store::issue::IssueStore;
     use usagi_core::usecase::issue;
     use usagi_daemon::usecase::agent_ipc::PromptMode;
+    use usagi_daemon::usecase::session_runtime::perform_status;
 
     let bound = context.bound;
     let teardown = context.teardown;
@@ -168,11 +169,15 @@ pub(super) fn dispatch_session_action(
                         .created_session_ids(caller)
                 })
                 .transpose()?;
-            let mut status = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .handle(action, operation_id, payload)?;
+            let mut status = if action == SessionAction::Status {
+                perform_status(bound.sessions(), &SystemGit, operation_id)?
+            } else {
+                bound
+                    .sessions()
+                    .lock()
+                    .map_err(|_| SessionRuntimeError::Storage)?
+                    .handle(action, operation_id, payload)?
+            };
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let store = runtime.dispatch_store();
             let agents = store.agents().map_err(|_| SessionRuntimeError::Storage)?;

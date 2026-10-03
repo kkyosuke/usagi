@@ -417,6 +417,122 @@ impl OrphanRemoveIntent {
     }
 }
 
+/// Observes Git status using a lifecycle snapshot captured under the session
+/// lock. Every Git command runs after releasing that lock, so a stalled status
+/// cannot block scope resolution, session list, or launch admission.
+///
+/// # Errors
+///
+/// Returns a safe storage error if the snapshot or Git observation fails.
+pub fn perform_status(
+    runtime: &Mutex<SessionRuntime>,
+    git: &dyn GitRunner,
+    operation_id: &str,
+) -> Result<SessionReply, SessionRuntimeError> {
+    let plan = runtime
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .status_plan()?;
+    plan.observe(git, operation_id)
+}
+
+struct SessionStatusPlan {
+    state: WorkspaceLifecycleState,
+    repo_root: PathBuf,
+    data_home: PathBuf,
+}
+
+impl SessionStatusPlan {
+    fn observe(
+        &self,
+        git: &dyn GitRunner,
+        operation_id: &str,
+    ) -> Result<SessionReply, SessionRuntimeError> {
+        let state = &self.state;
+        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
+            &self.data_home,
+            &self.repo_root,
+        )
+        .ok();
+        let base = git
+            .run(&self.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        if !base.success {
+            return Err(SessionRuntimeError::Storage);
+        }
+        let base = base.stdout.trim();
+        let sessions = state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .map(|session| {
+                let root = self
+                    .repo_root
+                    .join(STATE_DIR)
+                    .join(SESSIONS_DIR)
+                    .join(&session.name);
+                let porcelain = git
+                    .run(&root, &["status", "--porcelain"])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let branch = git
+                    .run(&root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let merged = git
+                    .run(&root, &["merge-base", "--is-ancestor", "HEAD", base])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                if !porcelain.success || !branch.success {
+                    return Err(SessionRuntimeError::Storage);
+                }
+                let dirty = !porcelain.stdout.trim().is_empty();
+                let merged = merged.success;
+                let status = if dirty {
+                    "dirty"
+                } else if merged {
+                    "synced"
+                } else {
+                    "local"
+                };
+                Ok(SessionStatusItem {
+                    name: session.name.clone(),
+                    session_id: session.session_id,
+                    role_id: session.role_id.clone(),
+                    role_summary: session.role_id.as_ref().and_then(|id| {
+                        catalog
+                            .as_ref()?
+                            .roles
+                            .get(id)
+                            .map(|role| role.summary.clone())
+                    }),
+                    lifecycle: session.lifecycle,
+                    parent_session_id: session.parent_session_id,
+                    worktrees: vec![SessionWorktreeStatus {
+                        path: root,
+                        branch: branch.stdout.trim().to_owned(),
+                        status: status.to_owned(),
+                        dirty,
+                        merged,
+                    }],
+                    runtime: unobserved_runtime(&session.name),
+                })
+            })
+            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+        let body = serde_json::to_value(SessionStatusSnapshot {
+            workspace_id: state.workspace_id,
+            revision: state.state_revision,
+            sessions,
+        })
+        .map_err(|_| SessionRuntimeError::Storage)?;
+        Ok(SessionReply {
+            operation_id: operation_id.to_owned(),
+            revision: state.state_revision,
+            body,
+        })
+    }
+}
+
 /// Creates a session while holding the shared session lock only for the fast
 /// durable transitions. The heavy Git worktree build runs with the lock
 /// released so concurrent reads (session list, terminal poll, user-decision
@@ -957,93 +1073,16 @@ impl SessionRuntime {
         }
     }
 
+    fn status_plan(&self) -> Result<SessionStatusPlan, SessionRuntimeError> {
+        Ok(SessionStatusPlan {
+            state: self.state()?,
+            repo_root: self.repo_root.clone(),
+            data_home: self.data_home.clone(),
+        })
+    }
+
     fn status(&self, operation_id: &str) -> Result<SessionReply, SessionRuntimeError> {
-        let state = self.state()?;
-        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
-            &self.data_home,
-            &self.repo_root,
-        )
-        .ok();
-        let base = self
-            .git
-            .run(&self.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .map_err(|_| SessionRuntimeError::Storage)?;
-        if !base.success {
-            return Err(SessionRuntimeError::Storage);
-        }
-        let base = base.stdout.trim();
-        let sessions = state
-            .sessions
-            .iter()
-            .filter(|session| {
-                session.lifecycle
-                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-            })
-            .map(|session| {
-                let root = self
-                    .repo_root
-                    .join(STATE_DIR)
-                    .join(SESSIONS_DIR)
-                    .join(&session.name);
-                let porcelain = self
-                    .git
-                    .run(&root, &["status", "--porcelain"])
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                let branch = self
-                    .git
-                    .run(&root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                let merged = self
-                    .git
-                    .run(&root, &["merge-base", "--is-ancestor", "HEAD", base])
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                if !porcelain.success || !branch.success {
-                    return Err(SessionRuntimeError::Storage);
-                }
-                let dirty = !porcelain.stdout.trim().is_empty();
-                let merged = merged.success;
-                let status = if dirty {
-                    "dirty"
-                } else if merged {
-                    "synced"
-                } else {
-                    "local"
-                };
-                Ok(SessionStatusItem {
-                    name: session.name.clone(),
-                    session_id: session.session_id,
-                    role_id: session.role_id.clone(),
-                    role_summary: session.role_id.as_ref().and_then(|id| {
-                        catalog
-                            .as_ref()?
-                            .roles
-                            .get(id)
-                            .map(|role| role.summary.clone())
-                    }),
-                    lifecycle: session.lifecycle,
-                    parent_session_id: session.parent_session_id,
-                    worktrees: vec![SessionWorktreeStatus {
-                        path: root,
-                        branch: branch.stdout.trim().to_owned(),
-                        status: status.to_owned(),
-                        dirty,
-                        merged,
-                    }],
-                    runtime: unobserved_runtime(&session.name),
-                })
-            })
-            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
-        let body = serde_json::to_value(SessionStatusSnapshot {
-            workspace_id: state.workspace_id,
-            revision: state.state_revision,
-            sessions,
-        })
-        .map_err(|_| SessionRuntimeError::Storage)?;
-        Ok(SessionReply {
-            operation_id: operation_id.to_owned(),
-            revision: state.state_revision,
-            body,
-        })
+        self.status_plan()?.observe(self.git.as_ref(), operation_id)
     }
 
     /// Resolves an available session by its public name to its stable identity.

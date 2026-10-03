@@ -1420,12 +1420,17 @@ fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
 /// # Errors
 ///
 /// Returns an error when the node cannot be created, verified, or locked.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
 pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<fs::File> {
+    lock_private_node_within(daemon, name, SETUP_LOCK_WAIT)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store,contended_private_node_lock_is_bounded_and_preserves_the_owner
+fn lock_private_node_within(daemon: &Path, name: &str, wait: Duration) -> io::Result<fs::File> {
+    let deadline = Instant::now() + wait;
     let path = daemon.join(name);
     // The directory fd is a bootstrap lock for creating or repairing the lock
     // file itself.
-    let directory = lock_setup_directory(daemon, true)?;
+    let directory = lock_setup_directory_within(daemon, true, wait)?;
     let file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -1451,7 +1456,22 @@ pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<fs::Fil
     drop(directory);
     #[cfg(test)]
     pause_locator_lock_after_setup();
-    FileExt::lock_exclusive(&file)?;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "private daemon state is locked by another process",
+                    ));
+                }
+                thread::sleep(SETUP_LOCK_POLL.min(remaining));
+            }
+            Err(error) => return Err(error),
+        }
+    }
     #[cfg(test)]
     pause_locator_lock_before_verify();
     verify_locked_private_file(&path, &file, SOCKET_MODE)?;
@@ -3841,6 +3861,27 @@ mod tests {
         FileExt::unlock(&held).unwrap();
         drop(held);
         drop(lock_setup_directory_within(&daemon, false, wait).unwrap());
+    }
+
+    #[test]
+    fn contended_private_node_lock_is_bounded_and_preserves_the_owner() {
+        let temp = TempDir::new().unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        for name in [LOCATOR_LOCK, "generations.lock"] {
+            let owner = lock_private_node(&daemon, name).unwrap();
+            let identity = owner.metadata().unwrap().ino();
+            let wait = Duration::from_millis(40);
+            let started = Instant::now();
+            let error = lock_private_node_within(&daemon, name, wait).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            assert!(started.elapsed() >= wait);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(fs::metadata(daemon.join(name)).unwrap().ino(), identity);
+            drop(owner);
+            let next = lock_private_node_within(&daemon, name, wait).unwrap();
+            assert_eq!(next.metadata().unwrap().ino(), identity);
+        }
     }
 
     #[test]

@@ -391,8 +391,8 @@ request 送信前に lane を確立できなかった場合は effect が確定�
 ### bootstrap section の bounded wait
 
 connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、**cold-start authority を持つ** client は `bootstrap.lock` の
-cross-process section を取る。この section と、private directory の setup section（`ensure_private_dir` が親
-ディレクトリに取る flock）は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
+cross-process section を取る。この section、private directory の setup section（`ensure_private_dir` が親
+ディレクトリに取る flock）、`current.lock` と `generations.lock` は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
 ディレクトリはマシン全体で共有されるため、blocking にすると MCP server / CLI / rollover のいずれかが section に
 いる間、UI 経路の接続確立が無期限に待ってしまう。保持したまま wedge したプロセスがいれば永久に待つ。
 
@@ -404,6 +404,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|
 | `bootstrap.lock` | readiness ceiling（40 × 50ms = 2s）＋ spawn margin 3s | section は 1 回の `connect_or_start` を跨いで保持され、最悪ケースは cold start（lifecycle child の spawn ＋ readiness 探索） | typed `bootstrap_contended` |
+| `current.lock` / `generations.lock` | setup section と inode lock を合わせて 2s | locator publication / registry CAS は短い永続化 section。停止・停止状態の holder に期限なく待たない | `would_block`。lock inode と既存の locator / registry は保持する |
 | `lifecycle.lock` | 65s | planned rollover の standby verification 30s と commit 後 serving hydration 30s に launch/output margin 5s を加える | `would_block` の IO error。stop/restart は update と交差せず失敗する |
 | private directory setup | 2s | 1 ディレクトリの作成 / 修復だけなので、健全な保持者は microsecond 単位で去る | `would_block` の IO error |
 
@@ -1009,6 +1010,10 @@ migration は次のとおりで、いずれも fail closed である。
 | canonical な client incarnation を申告しない peer が `input_operation` を送る | `unauthenticated` で拒否する。ledger を scope できないため、後の「replay」が二度目の write になり得る |
 
 #### daemon 側の ledger
+
+PTY input の 1 回の write は、部分的に進み続ける場合も含めて 2 秒で打ち切る。queue の readiness 待ちと
+`Interrupted` の retry は同じ残り時間を使い、進捗では deadline を延長しない。打ち切り時は実際に適用した
+prefix byte 数を返し、下記 ledger へ final として記録するため、途中まで届いた入力を成功や未適用に読み替えない。
 
 daemon は `(client incarnation, input_operation)` を key に、**terminal registry 全体で 1 つの** bounded ledger を持つ。
 terminal ごとに分けないのは、同じ operation identity を別 terminal へ再利用したとき、fresh write ではなく conflict として

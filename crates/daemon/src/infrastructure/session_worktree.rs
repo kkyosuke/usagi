@@ -4,6 +4,11 @@ use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use usagi_core::infrastructure::bounded_process::{
+    ChildCommandOutput, ChildOutputError, ChildPolicy, execute_command_output,
+};
 
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, add_worktree, confined_git_command, delete_branch, remove_worktree,
@@ -23,13 +28,39 @@ impl GitRunner for SystemGit {
     /// namespace) outranks the `-C <repo>` this passes.
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract,git_environment_confinement
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        let output = confined_git_command(repo).args(args).output()?;
-        Ok(GitOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        let mut command = confined_git_command(repo);
+        command.args(args);
+        bounded_git_output(execute_command_output(command, git_policy(args)))
     }
+}
+
+fn git_policy(args: &[&str]) -> ChildPolicy {
+    let observation = args.first().is_some_and(|argument| {
+        matches!(
+            *argument,
+            "status" | "rev-parse" | "merge-base" | "symbolic-ref" | "rev-list"
+        )
+    }) || args.starts_with(&["worktree", "list"]);
+    ChildPolicy {
+        timeout: if observation {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(30)
+        },
+        terminate_grace: Duration::from_millis(100),
+        output_limit: 8 * 1024 * 1024,
+    }
+}
+
+fn bounded_git_output(
+    result: Result<ChildCommandOutput, ChildOutputError>,
+) -> anyhow::Result<GitOutput> {
+    let output = result?;
+    Ok(GitOutput {
+        success: output.success,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 /// Filesystem boundary used by the daemon composition root.
@@ -452,5 +483,44 @@ mod tests {
                 .to_string()
                 .contains("exit status: 7")
         );
+    }
+}
+
+#[cfg(test)]
+mod bounded_git_tests {
+    use super::*;
+
+    #[test]
+    fn git_budget_bounds_observations_and_retains_nonzero_diagnostics() {
+        assert_eq!(
+            git_policy(&["status", "--porcelain"]).timeout,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            git_policy(&["worktree", "list"]).timeout,
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            git_policy(&["worktree", "add"]).timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(git_policy(&[]).output_limit, 8 * 1024 * 1024);
+        let result = bounded_git_output(Ok(ChildCommandOutput {
+            success: false,
+            stdout: vec![0xff],
+            stderr: b"branch already exists".to_vec(),
+        }))
+        .unwrap();
+        assert!(!result.success);
+        assert_eq!(result.stdout, "\u{fffd}");
+        assert_eq!(result.stderr, "branch already exists");
+        for failure in [
+            ChildOutputError::SpawnFailed,
+            ChildOutputError::TimedOut,
+            ChildOutputError::OutputTooLarge,
+            ChildOutputError::ObservationFailed,
+        ] {
+            assert!(bounded_git_output(Err(failure)).is_err());
+        }
     }
 }
