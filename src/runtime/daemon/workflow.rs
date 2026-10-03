@@ -1199,10 +1199,9 @@ mod tests {
             "workflow has already finished",
             "workflow operation has already retired",
         ] {
-            assert_eq!(
-                admission_error(&anyhow::anyhow!(message)).code,
-                ErrorCode::IdempotencyConflict
-            );
+            let error = admission_error(&anyhow::anyhow!(message));
+            assert_eq!(error.code, ErrorCode::IdempotencyConflict);
+            assert_eq!(error.retry_mode, RetryMode::Never);
         }
         assert_eq!(
             admission_error(&anyhow::anyhow!("storage failed")).code,

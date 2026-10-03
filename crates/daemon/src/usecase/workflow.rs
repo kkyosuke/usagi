@@ -42,7 +42,16 @@ pub fn admit_with_previous(
             WorkflowCommand::Instruct { recipient, body } => {
                 let record = value.as_mut().context("workflow has not started")?;
                 ensure!(record.finish.is_none(), "workflow has already finished");
-                ensure_not_retired(record, operation)?;
+                // A legacy active run may retain an accepted ID below its
+                // archive fence. Only a new instruction crosses that fence;
+                // enqueue still checks a known ID's exact original payload.
+                let known_instruction = record
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.instructions.iter().any(|item| item.id == operation));
+                if !known_instruction {
+                    ensure_not_retired(record, operation)?;
+                }
                 ensure!(
                     record.operation != operation,
                     "instruction ID conflicts with workflow start"
@@ -105,7 +114,7 @@ pub fn admit_with_previous(
 }
 
 /// Refuse an old human command even when the display archive was pruned. Legacy
-/// records derive the fence from every retained ID before their next admission.
+/// records derive the fence from retained ended-command IDs before a new admission.
 fn ensure_not_retired(record: &WorkflowRecord, operation: OperationId) -> Result<()> {
     let retired = record.retired_bound();
     ensure!(
@@ -1220,6 +1229,103 @@ mod tests {
             assert_eq!(current.operation, next);
             assert_eq!(current.version, WorkflowRecord::VERSION);
             assert_eq!(current.retired_through, Some(id(retained_max)));
+        }
+    }
+
+    #[test]
+    fn legacy_live_instruction_retries_survive_archive_fence_migration() {
+        use usagi_core::domain::workflow::Delivery;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(directory.path());
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let agent = AgentId::new();
+        let id =
+            |last| OperationId::parse(&format!("018ff000-0000-7000-8000-{last:012x}")).unwrap();
+        let path = directory
+            .path()
+            .join("workflows")
+            .join(workspace.as_str())
+            .join(format!("{}.json", session.as_str()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = serde_json::json!({
+            "version":1,"operation":id(1),"goal":"Current task","finish":null,
+            "initial_notified":true,"cursor":null,"finished":[{
+                "id":id(5),"outcome":"stopped","goal":"Previous task",
+                "phase":"starting","issue":null,"pr_url":null
+            }],"run":{
+                "id":id(1),"session":session,"goal":"Current task","implementer":agent,
+                "reviewer":null,"phase":"implementing","revision_limit":3,
+                "revisions":0,"review":null,"waiting_reason":null,
+                "instructions":[{"id":id(2),"requested_recipient":"implementer",
+                    "recipient":agent,"body":"Accepted instruction","delivery":"notified"}]
+            }
+        });
+        let command = WorkflowCommand::Instruct {
+            recipient: Recipient::Implementer,
+            body: "Accepted instruction".into(),
+        };
+        let start = WorkflowCommand::Start {
+            goal: "Current task".into(),
+            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+            revision_limit: 3,
+        };
+        let apply = |number, command: &WorkflowCommand| {
+            admit(&store, workspace, session, id(number), command, None)
+        };
+        for migrate_first in [false, true] {
+            std::fs::write(&path, legacy.to_string()).unwrap();
+            if migrate_first {
+                store
+                    .update_workflow(workspace, session, |_| Ok(()))
+                    .unwrap();
+            }
+            apply(2, &command).unwrap();
+            let record = store.workflow(workspace, session).unwrap().unwrap();
+            assert_eq!(record.version, WorkflowRecord::VERSION);
+            assert_eq!(record.retired_through, Some(id(5)));
+            let run = record.run.unwrap();
+            assert_eq!(run.instructions.len(), 1);
+            assert_eq!(run.instructions[0].delivery, Delivery::Notified);
+            apply(1, &start).unwrap();
+            assert_eq!(
+                apply(3, &command).unwrap_err().to_string(),
+                "workflow operation has already retired"
+            );
+            for changed in [
+                WorkflowCommand::Instruct {
+                    recipient: Recipient::Implementer,
+                    body: "Changed payload".into(),
+                },
+                WorkflowCommand::Instruct {
+                    recipient: Recipient::Reviewer,
+                    body: "Accepted instruction".into(),
+                },
+            ] {
+                assert_eq!(
+                    apply(2, &changed).unwrap_err().to_string(),
+                    "instruction ID conflicts with an existing instruction"
+                );
+            }
+            assert_eq!(
+                apply(2, &WorkflowCommand::Finish).unwrap_err().to_string(),
+                "finish ID conflicts with an existing workflow command"
+            );
+            assert_eq!(
+                apply(2, &start).unwrap_err().to_string(),
+                "session already has another workflow"
+            );
+            apply(6, &command).unwrap();
+            apply(7, &WorkflowCommand::Finish).unwrap();
+            assert_eq!(
+                apply(2, &start).unwrap_err().to_string(),
+                "workflow operation has already retired"
+            );
+            assert_eq!(
+                apply(2, &command).unwrap_err().to_string(),
+                "workflow has already finished"
+            );
         }
     }
 

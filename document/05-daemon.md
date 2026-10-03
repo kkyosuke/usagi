@@ -1386,6 +1386,8 @@ Start / Instruct / Finish は同じ operation ID を別の command に使えな�
 異なる producer が同じ millisecond に生成した ID や時計が戻った producer の ID は、新しく発行したものでも
 境界以下になり得る。発行時刻だけでは受理を保証せず、その場合も `idempotency_conflict` を返す。
 現行 Finish の同じ ID の再送は成功のまま応答し、現行 Start / Instruct の再送は元の内容との一致を要求する。
+旧 record の稼働中 run に受理済みの Instruct ID が境界以下でも、同じ宛先・本文の再送は成功し、別の内容や
+command への使い回しは拒否する。この扱いで境界以下の新しい指示を受理することはない。
 旧 version 1 record は残っている終了 ID と、終了済み intent に残る Start / Instruct ID の最大値から拒否境界を
 引き継ぎ、保存時に version 2 へ移行する。
 旧 daemon は version 2 を拒否するため、新 field を消して拒否境界を失うことはない。
