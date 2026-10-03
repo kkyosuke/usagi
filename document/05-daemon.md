@@ -1034,11 +1034,13 @@ usagi doctor
 | 起点 | 既存の絶対 path。実行ユーザーが所有し、owner の読み書き・検索を許可し、group/world 書き込みと特殊 permission bit が無い directory に限る |
 | 起点より上 | 所有者の検査を環境提供側へ委ねる。親から起点を差し替えられない環境でだけ指定する |
 | symlink / `..` | 起点までの symlink と `..`、起点以下の symlink を拒否する |
-| 管理領域 | すべての private directory は起点以下に限る。起点自体は作成・chmod せず、setup 前後に同じ inode と権限を確認する |
+| 管理領域 | data home 側の private directory chain は起点以下に限る。起点自体は作成・chmod せず、setup 前後に同じ inode と権限を確認する |
 | private directory / socket | 従来どおり実行ユーザー所有と `0700` / `0600` を要求する |
 
-`USAGI_HOME` は保存先、`USAGI_TRUST_ROOT` は検査境界であり、役割が異なる。workspace fence も検査対象なので、
-adopt する workspace と data home の両方を含む起点を選ぶ。設定が空・不正・起点外の場合は起動を拒否する。
+`USAGI_HOME` は保存先、`USAGI_TRUST_ROOT` は検査境界であり、役割が異なる。起点は data home を含む directory を選ぶ。
+workspace fence の `<workspace>/.usagi/daemon` はこの設定の対象外で、親の `<workspace>/.usagi` が実行ユーザー所有かつ
+group/world 書き込み不可であることを従来どおり直接検査する。設定が空・不正・起点外の場合は起動を拒否する。
+macOS の `/tmp` や `/var` は symlink なので、起点には `/private/...` の実 path を指定する。
 daemon、client、MCP child で同じ設定を使う。managed Agent の MCP 環境へ daemon が転送し、
 `daemon install-service` は設定時の値を systemd / launchd 定義へ保存する。
 workspace の env binding から検査境界を上書きすることはできない。

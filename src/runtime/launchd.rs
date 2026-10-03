@@ -388,6 +388,19 @@ mod tests {
             .kind(),
             std::io::ErrorKind::InvalidInput
         );
+        // A boundary that cannot be spelled is refused rather than written lossily.
+        assert_eq!(
+            super::render_with_trust_root(
+                Path::new("/opt/usagi"),
+                Path::new("/tmp/log"),
+                &home,
+                Path::new(WORKSPACE),
+                Some(invalid),
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

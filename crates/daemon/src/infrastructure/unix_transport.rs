@@ -2105,9 +2105,12 @@ fn open_trust_root(root: &Path, requested: &Path) -> io::Result<(PathBuf, fs::Fi
 
 fn verify_private_chain_prefixes_from(path: &Path, root: Option<&Path>) -> io::Result<()> {
     let mut prefix = root.map_or_else(PathBuf::new, Path::to_path_buf);
+    // `open_trust_root` has already proven that `root` is an ancestor of
+    // `path`; a non-ancestor would only restart the walk at `/`, which checks
+    // more, never less.
     let suffix = root
-        .map_or(Ok(path), |root| path.strip_prefix(root))
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
     for component in suffix.components() {
         prefix.push(component);
         match fs::symlink_metadata(&prefix) {
