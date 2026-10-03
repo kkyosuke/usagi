@@ -333,12 +333,69 @@ mod tests {
     }
 
     #[cfg(unix)]
+    type FifoProbeResult = std::result::Result<(), String>;
+
+    #[cfg(unix)]
+    fn complete_fifo_lock_probe(
+        path: &Path,
+        completed: std::result::Result<FifoProbeResult, mpsc::RecvTimeoutError>,
+        received: &mpsc::Receiver<FifoProbeResult>,
+        worker: thread::JoinHandle<()>,
+    ) -> std::result::Result<FifoProbeResult, mpsc::RecvTimeoutError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        if completed.is_ok() {
+            worker.join().unwrap();
+            return completed;
+        }
+        // Keep both FIFO ends alive until the worker is reaped, including when
+        // its completion receive times out.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        let writer = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .unwrap();
+        let result = received.recv_timeout(Duration::from_secs(5));
+        let joined = worker.join();
+        drop(writer);
+        joined.unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_probe_cleanup_unblocks_and_reaps_a_read_only_open() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".lock");
+        let native = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), 0o400) }, 0);
+        let reader_path = path.clone();
+        let (finished, received) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let file = File::open(reader_path).unwrap();
+            drop(file);
+            finished.send(Ok(())).unwrap();
+        });
+        let result = complete_fifo_lock_probe(
+            &path,
+            Err(mpsc::RecvTimeoutError::Timeout),
+            &received,
+            reader,
+        );
+        assert_eq!(result.unwrap(), Ok(()));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn fifo_lock_files_are_rejected_without_blocking_the_read_only_fallback() {
         use std::cell::Cell;
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::OpenOptionsExt;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -369,23 +426,7 @@ mod tests {
             let completed = received.recv_timeout(Duration::from_secs(1));
             let stalled = completed.is_err();
             cancelled.store(true, Ordering::Release);
-            let result = if stalled {
-                // Unblock a regressing readonly open before asserting. Keep
-                // both FIFO ends alive until the cancelled acquisition returns.
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-                let writer = File::options()
-                    .read(true)
-                    .write(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(&path)
-                    .unwrap();
-                let result = received.recv_timeout(Duration::from_secs(5));
-                drop(writer);
-                result
-            } else {
-                completed
-            };
-            worker.join().unwrap();
+            let result = complete_fifo_lock_probe(&path, completed, &received, worker);
             entered.unwrap();
             assert!(
                 !stalled,

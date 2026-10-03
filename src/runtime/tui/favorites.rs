@@ -112,6 +112,71 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[cfg(unix)]
+    fn reap_fifo_lock_worker(
+        path: &Path,
+        needs_release: bool,
+        shutdown: JoinHandle<()>,
+    ) -> std::thread::Result<()> {
+        use std::fs::{self, File};
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let release = if needs_release {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            Some(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let joined = shutdown.join();
+        drop(release);
+        joined
+    }
+
+    #[cfg(unix)]
+    fn write_fifo_preferences(path: &Path) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        writer.write_all(br#"{"sessions":[]}"#)
+    }
+
+    #[cfg(unix)]
+    fn release_fifo_preferences(
+        requested: bool,
+        path: &Path,
+        timeout: Duration,
+        write: &mut dyn FnMut(&Path) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        if !requested {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match write(path) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ENXIO)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     #[test]
     fn slow_storage_keeps_dispatch_responsive_and_toggles_ordered() {
         let (started, observed) = mpsc::channel();
@@ -250,11 +315,44 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn fifo_store_lock_fails_without_a_writer_and_workspace_drop_reaps_the_worker() {
+    fn fifo_lock_fixture_cleanup_reaps_a_waiting_worker() {
         use std::ffi::CString;
         use std::fs::{self, File};
         use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::FileTypeExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join(".lock");
+        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o400) }, 0);
+        let reader_path = path.clone();
+        let (started, observed) = mpsc::channel();
+        let worker = SessionFavoritesWorker::with_runner(move |_, _| {
+            started.send(()).unwrap();
+            let _reader = File::open(&reader_path)?;
+            Ok(BTreeSet::new())
+        });
+        let (completions, events) = Completions::channel();
+        worker.dispatch(None, completions);
+        let started = observed.recv_timeout(Duration::from_secs(5));
+        let shutdown = std::thread::spawn(move || drop(worker));
+        let joined = reap_fifo_lock_worker(&path, true, shutdown);
+
+        joined.unwrap();
+        started.unwrap();
+        assert!(matches!(
+            events.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::SessionFavorites(_))
+        ));
+        assert!(fs::metadata(path).unwrap().file_type().is_fifo());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_store_lock_fails_without_a_writer_and_workspace_drop_reaps_the_worker() {
+        use std::ffi::CString;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
         use usagi_core::infrastructure::paths::project_data_dir;
         use usagi_core::infrastructure::persistence::store_lock::StoreLock;
 
@@ -278,21 +376,7 @@ mod tests {
 
         // Release a regressing read-only open before asserting, keeping both
         // FIFO ends alive until the worker and its shutdown thread have joined.
-        let release = if event.is_err() || stopped.is_err() {
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-            Some(
-                File::options()
-                    .read(true)
-                    .write(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(&path)
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
-        shutdown.join().unwrap();
-        drop(release);
+        reap_fifo_lock_worker(&path, event.is_err() || stopped.is_err(), shutdown).unwrap();
 
         assert!(
             matches!(event, Ok(AppEvent::Backend(BackendEvent::Notice(_)))),
@@ -308,11 +392,7 @@ mod tests {
     #[test]
     fn fifo_preferences_fail_without_a_writer_and_workspace_drop_reaps_the_worker() {
         use std::ffi::CString;
-        use std::fs::OpenOptions;
-        use std::io::Write;
         use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::time::Instant;
         use usagi_core::infrastructure::paths::project_data_dir;
 
         let workspace = tempfile::tempdir().unwrap();
@@ -326,26 +406,12 @@ mod tests {
         // assertion, then join both the cleanup writer and shutdown thread.
         let (release, requested) = mpsc::channel();
         let cleanup = std::thread::spawn(move || -> std::io::Result<()> {
-            if !requested.recv().unwrap_or(false) {
-                return Ok(());
-            }
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                match OpenOptions::new()
-                    .write(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(&path)
-                {
-                    Ok(mut writer) => return writer.write_all(br#"{"sessions":[]}"#),
-                    Err(error)
-                        if error.raw_os_error() == Some(libc::ENXIO)
-                            && Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
+            release_fifo_preferences(
+                requested.recv().unwrap_or(false),
+                &path,
+                Duration::from_secs(5),
+                &mut write_fifo_preferences,
+            )
         });
         let worker = SessionFavoritesWorker::new(workspace.path());
         let (completions, events) = Completions::channel();
@@ -371,6 +437,91 @@ mod tests {
         assert!(
             stopped.is_ok(),
             "workspace drop must reap its favorites worker"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_preferences_cleanup_writes_and_closes_before_reaping_a_reader() {
+        use std::ffi::CString;
+        use std::fs::OpenOptions;
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("session-favorites.json");
+        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let held_writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let mut reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) },
+            0
+        );
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let result = reader.read_to_string(&mut text);
+            (result, text)
+        });
+        let released = release_fifo_preferences(
+            true,
+            &path,
+            Duration::from_secs(5),
+            &mut write_fifo_preferences,
+        );
+        drop(held_writer);
+        let (read, text) = reader.join().unwrap();
+
+        released.unwrap();
+        read.unwrap();
+        assert_eq!(text, r#"{"sessions":[]}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_preferences_cleanup_retries_only_missing_readers_within_its_budget() {
+        use std::cell::Cell;
+        use std::collections::VecDeque;
+
+        let path = Path::new("unused-fifo");
+        let calls = Cell::new(0);
+        let mut results =
+            VecDeque::from([Err(std::io::Error::from_raw_os_error(libc::ENXIO)), Ok(())]);
+        let mut write = |_: &Path| {
+            calls.set(calls.get() + 1);
+            results.pop_front().unwrap()
+        };
+        assert!(release_fifo_preferences(false, path, Duration::from_secs(5), &mut write).is_ok());
+        assert_eq!(calls.get(), 0);
+        assert!(release_fifo_preferences(true, path, Duration::from_secs(5), &mut write).is_ok());
+        assert_eq!(calls.get(), 2);
+
+        let mut permanent = |_: &Path| Err(std::io::Error::from_raw_os_error(libc::EACCES));
+        assert_eq!(
+            release_fifo_preferences(true, path, Duration::from_secs(5), &mut permanent)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EACCES)
+        );
+        let mut unavailable = |_: &Path| Err(std::io::Error::from_raw_os_error(libc::ENXIO));
+        assert_eq!(
+            release_fifo_preferences(true, path, Duration::ZERO, &mut unavailable)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ENXIO)
         );
     }
 
