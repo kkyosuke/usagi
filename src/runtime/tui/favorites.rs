@@ -248,6 +248,76 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fifo_preferences_fail_without_a_writer_and_workspace_drop_reaps_the_worker() {
+        use std::ffi::CString;
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::time::Instant;
+        use usagi_core::infrastructure::paths::project_data_dir;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = project_data_dir(workspace.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session-favorites.json");
+        let fifo = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+        // A failing implementation blocks in open/read. Release it before any
+        // assertion, then join both the cleanup writer and shutdown thread.
+        let (release, requested) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || -> std::io::Result<()> {
+            if !requested.recv().unwrap_or(false) {
+                return Ok(());
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&path)
+                {
+                    Ok(mut writer) => return writer.write_all(br#"{"sessions":[]}"#),
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ENXIO)
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        });
+        let worker = SessionFavoritesWorker::new(workspace.path());
+        let (completions, events) = Completions::channel();
+        worker.dispatch(None, completions);
+        let event = events.recv_timeout(Duration::from_secs(1));
+        let (finished, joined) = mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            drop(worker);
+            let _ = finished.send(());
+        });
+        let stopped = joined.recv_timeout(Duration::from_secs(1));
+        let release_sent = release.send(event.is_err() || stopped.is_err());
+        let released = cleanup.join();
+        let shutdown = shutdown.join();
+
+        release_sent.unwrap();
+        released.unwrap().unwrap();
+        shutdown.unwrap();
+        assert!(
+            matches!(event, Ok(AppEvent::Backend(BackendEvent::Notice(_)))),
+            "FIFO preferences must report failure without a writer"
+        );
+        assert!(
+            stopped.is_ok(),
+            "workspace drop must reap its favorites worker"
+        );
+    }
+
     #[test]
     fn shutdown_cancels_queued_work_and_reaps_the_running_worker() {
         let (started, observed) = mpsc::channel();

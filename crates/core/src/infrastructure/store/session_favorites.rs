@@ -1,9 +1,11 @@
 //! User-owned session favorites, separate from daemon lifecycle authority.
 
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::id::SessionId;
@@ -31,11 +33,40 @@ impl SessionFavoritesStore {
     /// Read favorites, treating a missing file as an empty preference set.
     ///
     /// # Errors
-    /// Returns an error if the file cannot be read or decoded, or uses a newer schema.
+    /// Returns an error if the file is not regular, cannot be read or decoded,
+    /// or uses a newer schema.
     pub fn load(&self) -> Result<BTreeSet<SessionId>> {
-        let favorites: Favorites =
-            json_file::read_supported_version(&self.dir.join("session-favorites.json"))?
-                .unwrap_or_default();
+        let path = self.dir.join("session-favorites.json");
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A FIFO must not wait for a writer before its type can be checked.
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeSet::new());
+            }
+            Err(error) => {
+                return Err(error).context(format!("failed to read {}", path.display()));
+            }
+        };
+        // Inspect and read the same descriptor so a path replacement cannot
+        // substitute a pipe or device after validation.
+        anyhow::ensure!(
+            file.metadata()
+                .context(format!("failed to inspect {}", path.display()))?
+                .is_file(),
+            "session favorites is not a regular file: {}",
+            path.display()
+        );
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .context(format!("failed to read {}", path.display()))?;
+        let favorites: Favorites = json_file::decode_supported_version(&path, &text)?;
         Ok(favorites.sessions)
     }
 
@@ -164,5 +195,50 @@ mod tests {
         assert!(store.load().is_err());
         assert!(store.toggle(SessionId::new()).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+    }
+
+    #[test]
+    fn legacy_preferences_remain_readable_and_invalid_utf8_is_preserved() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        std::fs::create_dir_all(&store.dir).unwrap();
+        let path = store.dir.join("session-favorites.json");
+        let session = SessionId::new();
+        let legacy = serde_json::json!({"sessions": [session]});
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        assert_eq!(store.load().unwrap(), BTreeSet::from([session]));
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.toggle(session).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), [0xff]);
+    }
+
+    #[test]
+    fn directory_preferences_are_rejected_without_replacing_the_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        let path = store.dir.join("session-favorites.json");
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.toggle(SessionId::new()).is_err());
+        assert!(path.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unopenable_preference_path_is_rejected_without_replacing_it() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        std::fs::create_dir_all(&store.dir).unwrap();
+        let path = store.dir.join("session-favorites.json");
+        symlink("session-favorites.json", &path).unwrap();
+        assert!(store.load().is_err());
+        assert!(store.toggle(SessionId::new()).is_err());
+        assert_eq!(
+            std::fs::read_link(path).unwrap(),
+            Path::new("session-favorites.json")
+        );
     }
 }
