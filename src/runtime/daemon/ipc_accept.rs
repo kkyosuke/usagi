@@ -980,7 +980,7 @@ pub(super) fn start_ipc_accept_loop(
                                 let mut owner =
                                     SharedTerminalOwner::with_visibility_and_retention(
                                         SharedAgent { runtime: agent_owner },
-                                        SharedTerminal(Arc::clone(&terminal)),
+                                        SharedTerminal(Arc::clone(&terminal), agent_launch.launch_environment.clone()),
                                         visibility,
                                         retention,
                                     );

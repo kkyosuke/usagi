@@ -348,6 +348,7 @@ pub(super) fn empty_supervisor_agent(dispatch: DispatchStore) -> SharedAgentRunt
             dispatch,
         )),
         readiness: Arc::new(SystemAgentReadiness::default()),
+        launch_environment: None,
     })
 }
 
@@ -7575,6 +7576,244 @@ fn integration_and_system_prompt_precede_resume_and_durable_prompt() {
 }
 
 #[test]
+fn launch_environment_preparation_uses_no_agent_owner_and_requires_an_available_workspace() {
+    use usagi_core::domain::settings::LocalSettings;
+    use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let sessions = Arc::new(Mutex::new(
+        SessionRuntime::open(
+            root.clone(),
+            &temporary.path().join("sessions"),
+            DaemonGeneration::new(),
+            AlwaysSuccessfulGit,
+            PermissiveSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    let workspace = serde_json::from_value(
+        sessions.lock().unwrap().snapshot().unwrap()["workspace_id"].clone(),
+    )
+    .unwrap();
+    let workspaces = one_workspace(
+        &temporary.path().join("tenants"),
+        &root,
+        sessions,
+        workspace,
+    );
+    let environment = Arc::new(UserEnvironment::new(
+        temporary.path().join("settings"),
+        OpCli,
+    ));
+    WorkspaceSettingsStore::new(&root)
+        .save(&LocalSettings {
+            env: BTreeMap::from([("VALUE".into(), "prepared".into())]),
+            ..LocalSettings::default()
+        })
+        .unwrap();
+    let mut agent = empty_supervisor_agent(DispatchStore::new(temporary.path().join("dispatch")));
+    Arc::get_mut(&mut agent).unwrap().launch_environment =
+        Some(super::agent::LaunchEnvironmentSource {
+            environment: Arc::clone(&environment),
+            workspaces,
+        });
+    let owner = agent.lock().unwrap();
+    // A held owner cannot prevent settings preparation, and replay skips it.
+    assert!(
+        agent
+            .prepare_environment(workspace, false)
+            .unwrap()
+            .is_none()
+    );
+    let preparation = agent.prepare_environment(workspace, true).unwrap().unwrap();
+    assert_eq!(environment.prepared(&root).unwrap()["VALUE"], "prepared");
+    drop(preparation);
+    assert!(matches!(
+        environment.prepared(&root),
+        Err(user_env::UserEnvironmentError::NotPrepared)
+    ));
+    assert!(
+        matches!(agent.prepare_environment(WorkspaceId::new(), true), Err(error) if error.code == ErrorCode::Unavailable)
+    );
+    WorkspaceSettingsStore::new(&root)
+        .save(&LocalSettings {
+            env: BTreeMap::from([("PATH".into(), "refused".into())]),
+            ..LocalSettings::default()
+        })
+        .unwrap();
+    assert!(
+        matches!(agent.prepare_environment(workspace, true), Err(error) if error.code == ErrorCode::InvalidArgument)
+    );
+    drop(owner);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Restored producer replay and a refused fresh launch share one owner fixture.
+fn terminal_launch_replay_survives_invalid_current_environment_settings() {
+    use usagi_core::domain::id::OperationId;
+    use usagi_core::domain::settings::LocalSettings;
+    use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
+    use usagi_daemon::usecase::terminal_owner::{
+        TerminalOwner, TerminalRequestContext, TerminalResponse,
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let sessions = Arc::new(Mutex::new(
+        SessionRuntime::open(
+            root.clone(),
+            &temporary.path().join("sessions"),
+            DaemonGeneration::new(),
+            AlwaysSuccessfulGit,
+            PermissiveSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    let snapshot = sessions.lock().unwrap().snapshot().unwrap();
+    let workspace = serde_json::from_value(snapshot["workspace_id"].clone()).unwrap();
+    let scope = TerminalLaunchScope {
+        workspace_id: workspace,
+        session_id: None,
+        worktree_id: serde_json::from_value(snapshot["root_worktree_id"].clone()).unwrap(),
+    };
+    let workspaces = one_workspace(
+        &temporary.path().join("tenants"),
+        &root,
+        sessions,
+        workspace,
+    );
+    WorkspaceSettingsStore::new(&root)
+        .save(&LocalSettings {
+            env: BTreeMap::from([("PATH".into(), "refused".into())]),
+            ..LocalSettings::default()
+        })
+        .unwrap();
+    let environment = Arc::new(UserEnvironment::new(
+        temporary.path().join("settings"),
+        OpCli,
+    ));
+    let source = super::agent::LaunchEnvironmentSource {
+        environment: Arc::clone(&environment),
+        workspaces: Arc::clone(&workspaces),
+    };
+    assert!(
+        matches!(source.prepare(workspace), Err(error) if error.code == ErrorCode::InvalidArgument)
+    );
+
+    let generation = DaemonGeneration::new();
+    let mut record = reserved_terminal_record(generation);
+    record.terminal.workspace_id = workspace;
+    record.terminal.session_id = None;
+    record.terminal.worktree_id = scope.worktree_id;
+    record.operation.workspace_id = workspace;
+    record.operation.session_id = None;
+    let mut intent = TerminalLaunchIntent {
+        request: TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope,
+        },
+        geometry: TerminalGeometry { cols: 80, rows: 24 },
+        launch_operation: Some(record.operation.operation_id),
+    };
+    let profile = LoginShellProfile::new(BTreeMap::new(), root.clone());
+    record.launch = profile.resolve(&intent.request).unwrap().snapshot;
+    record.launch_digest = Some(intent.canonical_digest());
+    let expected = record.terminal.clone();
+    let (pty, _observations) = DaemonPty::new(
+        Arc::new(TerminalPipelineMetrics::default()),
+        Arc::new(SpawnedChildren::default()),
+        Arc::new(ShutdownRequest::new()),
+    );
+    let (snapshot, _) = TerminalStoreSnapshot {
+        records: vec![record],
+        ..TerminalStoreSnapshot::default()
+    }
+    .reconcile_after_daemon_restart()
+    .unwrap();
+    let runtime = GenericTerminalRuntime::from_snapshot(
+        generation,
+        TrustedLoginShell {
+            profile,
+            environment: Some(Arc::clone(&environment)),
+            workspaces: Some(Arc::clone(&workspaces)),
+            workspace_root: root,
+        },
+        ShardedTerminalStore::new(sharded_state(temporary.path(), generation)),
+        pty,
+        SharedTerminalScopeResolver(workspaces),
+        snapshot,
+    )
+    .unwrap();
+    let mut terminal = SharedTerminal(Arc::new(Mutex::new(runtime)), Some(source));
+    let context = TerminalRequestContext {
+        connection: ConnectionId::new(),
+        client: ClientId::new(),
+        request: RequestId::new(),
+    };
+    assert!(matches!(
+        terminal.handle(context, TerminalRequest::Launch { intent: intent.clone() }).unwrap(),
+        TerminalResponse::Launch { terminal, replayed: true, .. } if terminal == expected
+    ));
+    intent.request.profile_id = TerminalProfileId::new("unknown-profile").unwrap();
+    assert_eq!(
+        terminal
+            .handle(
+                context,
+                TerminalRequest::Launch {
+                    intent: intent.clone()
+                }
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    intent.launch_operation = Some(OperationId::new());
+    intent.request.profile_id = TerminalProfileId::new("login-shell").unwrap();
+    assert_eq!(
+        terminal
+            .handle(context, TerminalRequest::Launch { intent })
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+}
+
+#[test]
+fn terminal_profile_validation_does_not_require_environment_preparation() {
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let configured = Arc::new(UserEnvironment::new(data.path().to_path_buf(), OpCli));
+    let mut request = TerminalLaunchRequest {
+        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+        scope: TerminalLaunchScope {
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        },
+    };
+    let terminal = TrustedLoginShell {
+        workspaces: None,
+        profile: LoginShellProfile::new(BTreeMap::new(), workspace.path().to_path_buf()),
+        environment: Some(Arc::clone(&configured)),
+        workspace_root: workspace.path().to_path_buf(),
+    };
+    terminal.validate_request(&request).unwrap();
+    assert!(matches!(
+        configured.prepared(workspace.path()),
+        Err(user_env::UserEnvironmentError::NotPrepared)
+    ));
+    request.profile_id = TerminalProfileId::new("unknown-profile").unwrap();
+    assert!(matches!(
+        terminal.validate_request(&request),
+        Err(
+            usagi_core::domain::terminal_launch::TerminalLaunchValidationError::UnknownProfile { .. }
+        )
+    ));
+}
+
+#[test]
 fn saved_environment_reaches_terminal_and_agent_with_workspace_precedence() {
     use usagi_core::domain::settings::{LocalSettings, Settings};
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
@@ -7605,6 +7844,7 @@ fn saved_environment_reaches_terminal_and_agent_with_workspace_precedence() {
         .unwrap();
 
     let configured = Arc::new(UserEnvironment::new(data.path().to_path_buf(), OpCli));
+    let _preparation = configured.prepare(workspace.path()).unwrap();
     let request = TerminalLaunchRequest {
         profile_id: TerminalProfileId::new("login-shell").unwrap(),
         scope: TerminalLaunchScope {
@@ -11947,6 +12187,7 @@ mod workflow_composition {
             let agent = Arc::new(SharedAgentState {
                 owner: Mutex::new(owner),
                 readiness: Arc::new(Ready(ready)),
+                launch_environment: None,
             });
             let inventory = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
                 PrInventoryStore::new(directory.path().join("prs")),

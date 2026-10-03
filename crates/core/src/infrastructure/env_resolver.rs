@@ -121,6 +121,7 @@ where
         for _ in 0..worker_count {
             let jobs = Arc::clone(&jobs_rx);
             let outcomes = Arc::clone(&outcomes);
+            let requested = &requested;
             scope.spawn(move || {
                 loop {
                     let job = jobs
@@ -129,7 +130,11 @@ where
                         .recv();
                     let Ok((index, reference)) = job else { break };
                     let outcome = catch_unwind(AssertUnwindSafe(|| {
-                        resolver.read_with_service_account_token(&reference, service_account_token)
+                        resolver.read_binding(
+                            &requested[index].0,
+                            &reference,
+                            service_account_token,
+                        )
                     }))
                     .unwrap_or_else(|_| Err("secret read thread panicked".to_owned()));
                     outcomes

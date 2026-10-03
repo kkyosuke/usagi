@@ -979,6 +979,7 @@ fn start(
         .map_err(unavailable)?
         .prepare_workflow_readiness(&operation.to_string(), &intent, &prompt)?;
     run_agent_readiness(agent, preflight.as_ref())?;
+    let _environment = agent.prepare_environment(workspace, preflight.is_some())?;
     let mut owner = agent.lock().map_err(unavailable)?;
     workflow::ensure_current_start(owner.dispatch_store(), workspace, session, operation)
         .map_err(unavailable)?;

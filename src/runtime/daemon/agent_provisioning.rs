@@ -1168,7 +1168,7 @@ pub(super) fn configured_environment(
 ) -> Result<BTreeMap<String, String>, user_env::UserEnvironmentError> {
     environment.map_or_else(
         || Ok(BTreeMap::new()),
-        |environment| environment.resolved(workspace_root),
+        |environment| environment.prepared(workspace_root),
     )
 }
 
