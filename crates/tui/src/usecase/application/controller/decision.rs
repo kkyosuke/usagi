@@ -148,14 +148,11 @@ pub(super) fn update_decision_editor(
                 .saturating_add(8)
                 .min(usagi_core::domain::user_decision::UserDecisionPolicy::DIAGRAM_MAX_BYTES);
         }
-        AppKey::Tab if editor.decision.allow_comment && !editor.decision.options.is_empty() => {
+        AppKey::Tab
+            if !editor.decision.options.is_empty()
+                && (editor.decision.allow_comment || editor.decision.allow_freeform) =>
+        {
             composition::cycle_input(editor);
-        }
-        AppKey::Tab if multiple && editor.decision.allow_freeform => {
-            editor.input_freeform = !editor.input_freeform;
-            editor.follow_freeform = editor.input_freeform;
-            editor.scroll_offset = None;
-            editor.error = None;
         }
         AppKey::Char(' ') if multiple && !editor.input_freeform && !editor.input_comment => {
             toggle_decision_option(editor);
@@ -201,24 +198,15 @@ pub(super) fn update_decision_editor(
                 follow_decision_freeform(editor);
             }
         }
-        AppKey::Char(ch)
-            if editor.decision.allow_freeform
-                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
-        {
+        AppKey::Char(ch) if editor.decision.allow_freeform && editor.input_freeform => {
             editor.freeform.push(ch);
             follow_decision_freeform(editor);
         }
-        AppKey::Backspace
-            if editor.decision.allow_freeform
-                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
-        {
+        AppKey::Backspace if editor.decision.allow_freeform && editor.input_freeform => {
             editor.freeform.pop();
             follow_decision_freeform(editor);
         }
-        AppKey::Paste(text)
-            if editor.decision.allow_freeform
-                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
-        {
+        AppKey::Paste(text) if editor.decision.allow_freeform && editor.input_freeform => {
             paste_decision_freeform(editor, &text);
         }
         AppKey::SubmitDecision | AppKey::Enter => {
@@ -234,6 +222,7 @@ fn follow_decision_freeform(editor: &mut DecisionEditor) {
     editor.scroll_offset = None;
     editor.follow_freeform = true;
     editor.input_freeform = true;
+    editor.input_comment = false;
     editor.error = None;
 }
 
@@ -276,9 +265,7 @@ fn submit_decision(
         });
         return Vec::new();
     };
-    if editor.decision.selection_limits.is_some()
-        && let UserDecisionAnswer::Options { option_ids, .. } = &answer
-    {
+    if let UserDecisionAnswer::Options { option_ids, .. } = &answer {
         let (min, max) = editor.decision.selection_bounds();
         if !(min..=max).contains(&option_ids.len()) {
             editor.error = Some(SafeError {

@@ -43,6 +43,15 @@ pub(super) fn wrapped_rows(text: &str, prefix: &str, width: usize) -> Vec<String
 }
 
 pub(super) fn heading_rows(text: &str, prefix: &str, width: usize) -> Vec<String> {
+    styled_heading_rows(text, prefix, width, super::Style::new().bold())
+}
+
+pub(super) fn styled_heading_rows(
+    text: &str,
+    prefix: &str,
+    width: usize,
+    style: super::Style,
+) -> Vec<String> {
     let prefix = widgets::clip_to_width(prefix, width.saturating_sub(2));
     let indent = " ".repeat(widgets::display_width(&prefix));
     wrapped_rows(text, &indent, width)
@@ -50,16 +59,18 @@ pub(super) fn heading_rows(text: &str, prefix: &str, width: usize) -> Vec<String
         .enumerate()
         .map(|(index, line)| {
             let marker = if index == 0 { &prefix } else { &indent };
-            format!(
-                "{marker}{}",
-                super::Style::new().bold().paint(&line[indent.len()..])
-            )
+            format!("{marker}{}", style.paint(&line[indent.len()..]))
         })
         .collect()
 }
 
 /// Keep neutral outlines visible; accent the whole outline of the focused section.
-pub(super) fn card(inner_width: usize, rows: &[String], focused: bool) -> Vec<String> {
+pub(super) fn titled_card(
+    inner_width: usize,
+    rows: &[String],
+    title: &str,
+    focused: bool,
+) -> Vec<String> {
     if border_rows(inner_width) == 0 {
         return rows
             .iter()
@@ -71,13 +82,19 @@ pub(super) fn card(inner_width: usize, rows: &[String], focused: bool) -> Vec<St
     } else {
         super::Style::new()
     };
-    let frame = modal::compact_boxed("", content_width(inner_width), rows);
+    let frame = modal::compact_boxed(title, content_width(inner_width), rows);
     frame
         .iter()
         .enumerate()
         .map(|(index, line)| {
             let line = if index == 0 || index + 1 == frame.len() {
-                border.paint(line)
+                border.paint(
+                    &line
+                        .replace('┌', "╭")
+                        .replace('┐', "╮")
+                        .replace('└', "╰")
+                        .replace('┘', "╯"),
+                )
             } else {
                 // Style the edges separately so a styled label's reset cannot
                 // erase the focus outline on the right side.

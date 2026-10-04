@@ -1,7 +1,9 @@
 //! Durable user-decision list and answer editor overlays.
 
+mod choices;
 mod composition;
 mod context;
+mod controls;
 mod layout;
 
 use usagi_core::domain::user_decision::UserDecisionSelectionMode;
@@ -63,49 +65,9 @@ fn editor_rows(
     let mut focus = rows.len()..rows.len();
     let mut anchor = rows.len();
     let border_rows = layout::border_rows(inner_width);
-    let content_width = layout::content_width(inner_width);
-    for (index, option) in decision.options.iter().enumerate() {
-        let focused = index == editor.selected_option()
-            && !editor.input_freeform()
-            && !editor.input_comment();
-        let marker = if multiple {
-            format!(
-                "{} {} ",
-                modal::selection_marker(focused),
-                if editor.option_checked(&option.id) {
-                    Role::Success.style().bold().paint("[x]")
-                } else {
-                    "[ ]".to_owned()
-                }
-            )
-        } else {
-            format!("{} ", modal::selection_marker(focused))
-        };
-        let label = if decision
-            .recommendation
-            .as_ref()
-            .is_some_and(|rec| rec.option_ids.contains(&option.id))
-        {
-            format!("{} [recommended]", option.label)
-        } else {
-            option.label.clone()
-        };
-        let mut card = layout::heading_rows(&label, &marker, content_width);
-        let indent = " ".repeat(widgets::display_width(&marker));
-        if let Some(description) = &option.description {
-            card.extend(layout::wrapped_rows(description, &indent, content_width));
-        }
-        for (prefix, points) in [("Pro: ", &option.pros), ("Con: ", &option.cons)] {
-            for point in points {
-                card.extend(layout::wrapped_rows(
-                    point,
-                    &format!("{indent}{prefix}"),
-                    content_width,
-                ));
-            }
-        }
+    for index in 0..decision.options.len() {
         let start = rows.len();
-        rows.extend(layout::card(inner_width, &card, focused));
+        rows.extend(choices::rows(editor, index, inner_width));
         if index == editor.selected_option() {
             focus = start..rows.len();
             anchor = start + border_rows;
@@ -140,52 +102,7 @@ fn editor_rows(
         |offset| layout::manual_window(rows.len(), offset, capacity),
     );
     let mut body = modal::scroll_window(&rows, start, end);
-    body.extend(editor_footer(editor, multiple));
-    body
-}
-
-fn editor_footer(
-    editor: &crate::usecase::application::controller::DecisionEditor,
-    multiple: bool,
-) -> Vec<String> {
-    let decision = editor.decision();
-    let mut body = Vec::new();
-    if decision.options.is_empty() {
-        let action = if decision.require_confirmation {
-            "review"
-        } else {
-            "submit"
-        };
-        return vec![modal::footer(&format!(
-            "Enter: {action}  Esc: back  PgUp/PgDn: scroll"
-        ))];
-    }
-    if decision.allow_comment || decision.require_confirmation {
-        return composition::editor_footer(editor, multiple);
-    }
-    if multiple {
-        let count = decision
-            .options
-            .iter()
-            .filter(|option| editor.option_checked(&option.id))
-            .count();
-        body.push(modal::footer(
-            "↑↓: move  Space: check  Enter: submit  Esc: back",
-        ));
-        let (min, max) = decision.selection_bounds();
-        body.push(modal::footer(&format!(
-            "{count} selected ({min}-{max})  {}PgUp/PgDn: scroll",
-            if decision.allow_freeform {
-                "Tab: choices/freeform  "
-            } else {
-                ""
-            }
-        )));
-    } else {
-        body.push(modal::footer(
-            "↑↓: select  PgUp/PgDn: scroll  Enter: submit  Esc: back",
-        ));
-    }
+    body.extend(controls::editor_footer(editor, inner_width));
     body
 }
 
@@ -275,9 +192,10 @@ fn list_body(
             &marker,
             layout::content_width(inner_width),
         );
-        rows.extend(layout::card(
+        rows.extend(layout::titled_card(
             inner_width,
             &card,
+            controls::kind(decision),
             index == overlay.selected(),
         ));
         if index == overlay.selected() {
@@ -287,8 +205,17 @@ fn list_body(
     }
     let (start, end) = layout::focus_window(rows.len(), focus, anchor, capacity);
     let mut body = modal::scroll_window(&rows, start, end);
-    body.push(String::new());
-    body.push(modal::footer("↑↓: select   Enter: open   Esc: close"));
+    body.push(modal::content_line(
+        &format!("{} pending", decisions.len()),
+        inner_width,
+    ));
+    body.push(modal::content_line(
+        &format!(
+            "{}  ↑↓: select  Esc: close",
+            Role::Accent.style().bold().reverse().paint(" Enter: open ")
+        ),
+        inner_width,
+    ));
     body
 }
 
@@ -433,8 +360,8 @@ mod tests {
                 editor_rows(state.decision_overlay().unwrap().editor().unwrap(), 70, 100)
             };
             let rows = body(&state);
-            assert_eq!(rows.iter().filter(|row| row.contains('┌')).count(), 4);
-            assert_eq!(rows.iter().filter(|row| row.contains('└')).count(), 4);
+            assert_eq!(rows.iter().filter(|row| row.contains('╭')).count(), 4);
+            assert_eq!(rows.iter().filter(|row| row.contains('╰')).count(), 4);
             let first = rows.iter().position(|row| row.contains("Safe")).unwrap();
             let second = rows.iter().position(|row| row.contains("Second")).unwrap();
             assert!(
@@ -452,7 +379,7 @@ mod tests {
                     .iter()
                     .any(|row| row.contains("Con: Tradeoff"))
             );
-            assert!(rows[first..second].iter().any(|row| row.contains('└')));
+            assert!(rows[first..second].iter().any(|row| row.contains('╰')));
             assert!(rows[first - 1].contains("\u{1b}[1;36m"));
             assert!(!rows[second - 1].contains("\u{1b}[1;36m"));
             let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
@@ -509,7 +436,7 @@ mod tests {
         assert!(body.contains("Second"));
         assert!(body.contains("SECOND_DESCRIPTION"));
         assert!(body.contains("SECOND_TRADEOFF"));
-        assert!(body.contains('└'));
+        assert!(body.contains('╰'));
         assert!(body.contains("Enter: submit"));
     }
 
@@ -527,7 +454,7 @@ mod tests {
             for focused in [false, true] {
                 let rows =
                     layout::wrapped_rows("Benefit", "      Pro: ", layout::content_width(width));
-                let card = layout::card(width, &rows, focused);
+                let card = layout::titled_card(width, &rows, "", focused);
                 assert!(card.iter().all(|row| widgets::display_width(row) <= width));
             }
             assert!(
@@ -636,6 +563,304 @@ mod tests {
             assert!(frame(&state).contains("TAIL_FREEFORM"));
             let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
             assert!(frame(&state).contains("workspace root: Choose"));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Keep the transition matrix and resulting answer checks together.
+    fn tab_hints_match_each_transition_and_keep_selection_separate_from_focus() {
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+        for mode in [
+            UserDecisionSelectionMode::Single,
+            UserDecisionSelectionMode::Multiple,
+        ] {
+            for comment in [false, true] {
+                for freeform in [false, true] {
+                    let workspace = WorkspaceId::new();
+                    let mut request = decision(workspace, None);
+                    request.expires_at = None;
+                    request.selection_mode = mode;
+                    request.allow_comment = comment;
+                    request.allow_freeform = freeform;
+                    let mut state = AppState::home(workspace, Vec::new());
+                    let _ = update(
+                        &mut state,
+                        AppEvent::Backend(BackendEvent::Decisions {
+                            workspace,
+                            decisions: vec![request],
+                        }),
+                    );
+                    if mode == UserDecisionSelectionMode::Multiple {
+                        let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
+                    }
+                    let _ = update(
+                        &mut state,
+                        AppEvent::Key(AppKey::Paste("ignored in choices".into())),
+                    );
+                    assert_eq!(
+                        state
+                            .decision_overlay()
+                            .unwrap()
+                            .editor()
+                            .unwrap()
+                            .freeform(),
+                        ""
+                    );
+                    for _ in 0..1 + usize::from(comment) + usize::from(freeform) {
+                        let editor = state.decision_overlay().unwrap().editor().unwrap();
+                        assert!(!(editor.input_comment() && editor.input_freeform()));
+                        let body = widgets::strip_ansi(&editor_rows(editor, 70, 200).join("\n"));
+                        if editor.input_freeform() {
+                            assert!(body.contains("custom answer only"));
+                            assert!(!body.contains("● Safe"));
+                            if comment {
+                                assert!(body.contains("Not included with freeform"));
+                            }
+                        } else {
+                            assert!(body.contains(if mode == UserDecisionSelectionMode::Single {
+                                "● Safe"
+                            } else {
+                                "[x] Safe"
+                            }));
+                            assert!(body.contains("Selected"));
+                        }
+                        let next = controls::next_field(editor);
+                        let frame = widgets::strip_ansi(
+                            &render_over(
+                                11,
+                                80,
+                                &[],
+                                state.decision_overlay().unwrap(),
+                                state.decisions(),
+                                &BTreeMap::new(),
+                            )
+                            .join("\n"),
+                        );
+                        if let Some(next) = next {
+                            assert!(frame.contains(&format!("Tab: {next}")));
+                        } else {
+                            assert!(!frame.contains("Tab:"));
+                        }
+                        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+                        let editor = state.decision_overlay().unwrap().editor().unwrap();
+                        assert_eq!(editor.input_comment(), next == Some("Comment"));
+                        assert_eq!(editor.input_freeform(), next == Some("Freeform"));
+                        if editor.input_comment() && editor.comment().is_empty() {
+                            let _ = update(&mut state, AppEvent::Key(AppKey::Paste("Note".into())));
+                        } else if editor.input_freeform() && editor.freeform().is_empty() {
+                            let _ = update(&mut state, AppEvent::Key(AppKey::Char('X')));
+                        }
+                    }
+                    let expected = if mode == UserDecisionSelectionMode::Multiple {
+                        UserDecisionAnswer::Options {
+                            option_ids: vec!["safe".into()],
+                            comment: comment.then(|| "Note".into()),
+                        }
+                    } else {
+                        UserDecisionAnswer::Option {
+                            option_id: "safe".into(),
+                            comment: comment.then(|| "Note".into()),
+                        }
+                    };
+                    assert!(
+                        matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(), [crate::usecase::application::controller::Effect::ResolveDecision {answer, ..}] if answer == &expected)
+                    );
+                    if freeform {
+                        if comment {
+                            let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+                        }
+                        let _ = update(
+                            &mut state,
+                            AppEvent::Key(AppKey::SetDecisionFreeform("Other".into())),
+                        );
+                        let _ = update(&mut state, AppEvent::Key(AppKey::Char('!')));
+                        assert!(
+                            !state
+                                .decision_overlay()
+                                .unwrap()
+                                .editor()
+                                .unwrap()
+                                .input_comment()
+                        );
+                        assert!(
+                            matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(), [crate::usecase::application::controller::Effect::ResolveDecision {answer: UserDecisionAnswer::Freeform {text}, ..}] if text == "Other!")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn active_inputs_show_a_caret_for_empty_exact_width_and_multiline_cjk_drafts() {
+        use crate::presentation::frame::INPUT_CURSOR_MARKER;
+        for comment in [false, true] {
+            for width in [20, 36, 80] {
+                let inner = modal::modal_inner_width(
+                    width,
+                    scaled(width, MIN_INNER_WIDTH, MAX_INNER_WIDTH),
+                );
+                let prefix = if comment {
+                    "> comment (optional): "
+                } else {
+                    "> freeform: "
+                };
+                for value in [
+                    String::new(),
+                    "x".repeat(
+                        layout::content_width(inner).saturating_sub(widgets::display_width(prefix)),
+                    ),
+                    "日本語の入力\n".repeat(20) + "END",
+                ] {
+                    let workspace = WorkspaceId::new();
+                    let mut request = decision(workspace, None);
+                    request.expires_at = None;
+                    request.allow_comment = comment;
+                    if !comment {
+                        request.options.clear();
+                    }
+                    let mut state = AppState::home(workspace, Vec::new());
+                    let _ = update(
+                        &mut state,
+                        AppEvent::Backend(BackendEvent::Decisions {
+                            workspace,
+                            decisions: vec![request],
+                        }),
+                    );
+                    if comment {
+                        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+                    }
+                    let _ = update(&mut state, AppEvent::Key(AppKey::Paste(value.clone())));
+                    let rows = editor_rows(
+                        state.decision_overlay().unwrap().editor().unwrap(),
+                        inner,
+                        200,
+                    );
+                    assert_eq!(
+                        rows.iter()
+                            .flat_map(|row| row.chars())
+                            .filter(|ch| *ch == INPUT_CURSOR_MARKER)
+                            .count(),
+                        1
+                    );
+                    assert!(rows.iter().all(|row| widgets::display_width(row) <= inner));
+                    if !value.is_empty() {
+                        assert!(
+                            widgets::strip_ansi(&rows.join("\n"))
+                                .contains(if value.ends_with("END") { "END" } else { "xxx" })
+                        );
+                    }
+                    let frame = render_over(
+                        11,
+                        width,
+                        &[],
+                        state.decision_overlay().unwrap(),
+                        state.decisions(),
+                        &BTreeMap::new(),
+                    );
+                    assert!(frame.iter().any(|row| row.contains(INPUT_CURSOR_MARKER)));
+                    assert!(frame.iter().all(|row| widgets::display_width(row) == width));
+                    assert!(frame.join("\n").contains("Esc"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_list_identifies_answer_kinds_and_opens_the_freeform_request() {
+        use crate::usecase::application::controller::Effect;
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+
+        let workspace = WorkspaceId::new();
+        let mut requests = vec![
+            decision(workspace, None),
+            decision(workspace, None),
+            decision(workspace, None),
+        ];
+        for request in &mut requests {
+            request.expires_at = None;
+        }
+        requests[0].title = "Pick one".into();
+        requests[1].title = "Pick several".into();
+        requests[1].selection_mode = UserDecisionSelectionMode::Multiple;
+        requests[2].title = "Write an answer".into();
+        requests[2].options.clear();
+        let freeform_id = requests[2].decision_id;
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: requests,
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let frame = widgets::strip_ansi(
+            &render_over(
+                24,
+                80,
+                &[],
+                state.decision_overlay().unwrap(),
+                state.decisions(),
+                &BTreeMap::new(),
+            )
+            .join("\n"),
+        );
+        for (kind, title) in [
+            ("Single choice", "Pick one"),
+            ("Multiple choice", "Pick several"),
+            ("Freeform only", "Write an answer"),
+        ] {
+            let start = frame.find(kind).unwrap();
+            assert!(frame[start..].lines().nth(1).unwrap().contains(title));
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let editor = state.decision_overlay().unwrap().editor().unwrap();
+        assert_eq!(editor.decision().decision_id, freeform_id);
+        assert!(editor.input_freeform());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("My answer".into())));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::ResolveDecision {
+                decision_id,
+                answer: UserDecisionAnswer::Freeform { text },
+                ..
+            }] if *decision_id == freeform_id && text == "My answer"
+        ));
+    }
+
+    #[test]
+    fn empty_answers_explain_the_required_input_or_selection_count() {
+        for freeform in [false, true] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            if freeform {
+                request.options.clear();
+            } else {
+                request.selection_mode = UserDecisionSelectionMode::Multiple;
+            }
+            let mut state = AppState::home(workspace, Vec::new());
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![request],
+                }),
+            );
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            let editor = state.decision_overlay().unwrap().editor().unwrap();
+            assert!(
+                editor_rows(editor, 70, 100)
+                    .join("\n")
+                    .contains(if freeform {
+                        "Write a freeform answer"
+                    } else {
+                        "Choose 1-1 options (0 selected)"
+                    })
+            );
         }
     }
 
@@ -767,7 +992,7 @@ mod tests {
                 assert!(!initial.contains("comment"));
                 assert!(!initial.contains("choices"));
                 assert!(!initial.contains("↑↓"));
-                assert!(initial.contains("\u{1b}[1;36m┌"));
+                assert!(initial.contains("\u{1b}[1;36m╭"));
                 for key in [
                     AppKey::Char('A'),
                     AppKey::Up,
@@ -1175,7 +1400,7 @@ mod tests {
         let editor = state.decision_overlay().unwrap().editor().unwrap();
         assert_eq!(editor.scroll_offset(), None);
         let body = editor_body(editor, 70).join("\n");
-        assert!(body.contains("select a valid answer"));
+        assert!(body.contains("Choose 1-1 options (0 selected)"));
         assert!(body.contains("PgUp/PgDn"));
         assert!(body.contains("0 selected"));
     }
@@ -1536,7 +1761,7 @@ mod tests {
             }
             let body =
                 editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
-            assert!(body.contains("Tab: choices/comment"));
+            assert!(body.contains("Tab: Choices"));
             assert!(body.contains("Enter: submit"));
             assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
             let _ = update(&mut state, AppEvent::Key(AppKey::Paste("x".repeat(2049))));
