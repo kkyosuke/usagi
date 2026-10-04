@@ -236,6 +236,32 @@ fn render_controller_frame_composites_the_selected_session_memo() {
     let _ = memo.handle_key(Key::Char('x'));
     let _ = memo.handle_key(Key::Escape);
     assert!(frame(&memo).contains("Save changes"));
+
+    // Closeup has no preview card: keep its explicit memo action centered.
+    let mut closeup = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = closeup.apply_event(AppEvent::Key(AppKey::Enter));
+    let _ = closeup.apply_event(AppEvent::LivePaneAvailability(true));
+    let _ = closeup.apply_event(AppEvent::Key(AppKey::OpenNotes));
+    let request_id = closeup.state().note_editor().unwrap().request_id();
+    let _ = closeup.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        target: Target::Session(session),
+        request_id,
+        scratchpad: Scratchpad {
+            note: Some("Closeup memo".into()),
+            ..Default::default()
+        },
+    }));
+    let centered = frame(&closeup);
+    assert!(centered.contains("Closeup memo"));
+    let border = centered
+        .lines()
+        .find(|line| line.contains("Memo · alpha"))
+        .unwrap();
+    let plain = crate::presentation::widgets::strip_ansi(border);
+    assert_eq!(
+        crate::presentation::widgets::display_width(plain.split('┌').next().unwrap()),
+        7
+    );
 }
 
 #[test]
