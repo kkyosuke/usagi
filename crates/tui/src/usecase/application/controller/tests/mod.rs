@@ -1663,6 +1663,7 @@ fn paste_is_inserted_into_every_reducer_owned_home_input() {
         }),
     );
     let _ = update(&mut decisions, AppEvent::Key(AppKey::Enter));
+    let _ = update(&mut decisions, AppEvent::Key(AppKey::Tab));
     let _ = update(
         &mut decisions,
         AppEvent::Key(AppKey::Paste("free form".to_owned())),
@@ -2035,6 +2036,9 @@ fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft()
     request.options.push(second);
     let mut editor = DecisionEditor::new(request.clone());
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('x'));
+    assert!(!editor.input_freeform);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Tab);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('x'));
     assert!(editor.input_freeform);
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Down);
     assert!(!editor.input_freeform);
@@ -2050,6 +2054,7 @@ fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft()
         }]
     );
     assert_eq!(editor.freeform, "x");
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Tab);
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('y'));
     assert_eq!(
         decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),

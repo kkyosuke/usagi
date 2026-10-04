@@ -312,9 +312,12 @@ impl Context {
             ],
             Self::DecisionAnswer => &[
                 ("↑ / ↓", "select option"),
+                ("Space", "check / uncheck multiple-choice option"),
+                ("Tab", "switch choices / comment / freeform (when allowed)"),
                 ("PgUp / PgDn", "scroll prompt"),
-                ("type / paste", "edit freeform answer"),
-                ("Enter / Esc", "submit / back to list"),
+                ("type / paste", "edit the active comment / freeform field"),
+                ("Enter", "review / submit the current answer"),
+                ("Esc", "edit from review / back to list"),
             ],
             Self::Organization => &[
                 ("↑ / ↓", "select conversation"),

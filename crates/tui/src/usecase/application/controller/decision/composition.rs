@@ -14,8 +14,10 @@ pub(super) fn cycle_input(editor: &mut DecisionEditor) {
         editor.input_freeform = editor.decision.allow_freeform;
     } else if editor.input_freeform {
         editor.input_freeform = false;
-    } else {
+    } else if editor.decision.allow_comment {
         editor.input_comment = true;
+    } else {
+        editor.input_freeform = editor.decision.allow_freeform;
     }
     editor.scroll_offset = None;
     editor.follow_freeform = editor.input_freeform;
@@ -37,6 +39,13 @@ pub(super) fn edit_comment(editor: &mut DecisionEditor, key: &AppKey) -> bool {
 }
 
 fn valid_answer(editor: &mut DecisionEditor, answer: &UserDecisionAnswer) -> bool {
+    if matches!(answer, UserDecisionAnswer::Freeform { text } if text.trim().is_empty()) {
+        editor.error = Some(SafeError {
+            message: SafeMessage::new("Write a freeform answer before continuing."),
+            error_id: "decision-empty-freeform".into(),
+        });
+        return false;
+    }
     if editor
         .decision
         .validate_answer(answer, chrono::Utc::now())
