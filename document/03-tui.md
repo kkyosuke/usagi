@@ -435,7 +435,7 @@ Overview、Closeup action、PR、preview、text、notes、
 environment、pending user decision、session 作成失敗 dialog は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
 
-Switch の session 行で `f` を押すと、お気に入り登録・解除を切り替える。お気に入りは名前の前に `★` を表示する。
+Switch の session 行で `f` を押すと、お気に入り登録・解除を切り替える。お気に入りは名前の前に黄色の `★` を表示する。
 登録は workspace ごとのローカル設定として session の固有 ID に紐づき、再起動後も保持する。同名の session を
 作り直しても引き継がない。既存の親子階層・並び順を保ち、保存に失敗した場合は通知して表示を変更しない。
 読込・保存は順序を保つ背景 worker で処理し、ロック待ち中も入力と再描画を続ける。保存成功の結果を受け取った次の

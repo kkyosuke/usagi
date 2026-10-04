@@ -248,6 +248,21 @@ fn organization_label(session: &ProjectedSession) -> String {
     )
 }
 
+/// Paint the favorite marker independently, restoring the row style after it.
+fn paint_organization_label(session: &ProjectedSession, label: &str, style: Style) -> String {
+    if session.favorite
+        && let Some((prefix, suffix)) = label.split_once('★')
+    {
+        return format!(
+            "{}{}{}",
+            style.paint(prefix),
+            style.fg(Role::Favorite.color()).paint("★"),
+            style.paint(suffix),
+        );
+    }
+    style.paint(label)
+}
+
 pub(crate) fn role_identity(role: &str) -> String {
     match role {
         "director" => format!("{DIRECTOR_ICON} Director"),
@@ -2953,7 +2968,7 @@ fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> us
     home_row_height(row)
 }
 
-/// Paint a Home sidebar row label with the established colour precedence.
+/// Resolve a Home sidebar row label's established colour precedence.
 ///
 /// `+ new session` is a Success (green) affordance in every mode:
 /// resolve it before the generic accent branches so the Switch cursor only adds
@@ -2962,30 +2977,24 @@ fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> us
 /// shared inactive dim, and Closeup keeps it Success but unbolded. Every other
 /// row keeps the established order: selected cursor (accent bold) → Switch
 /// inactive dim → current (accent bold) → plain accent.
-fn home_row_label(
-    row: Selection,
-    label: &str,
-    selected: bool,
-    current: bool,
-    mode: HomeMode,
-) -> String {
+fn home_row_label_style(row: Selection, selected: bool, current: bool, mode: HomeMode) -> Style {
     if matches!(row, Selection::NewSession) {
         return if selected {
-            Role::Success.style().bold().paint(label)
+            Role::Success.style().bold()
         } else if mode == HomeMode::Switch {
-            Style::new().dim().paint(label)
+            Style::new().dim()
         } else {
-            Role::Success.style().paint(label)
+            Role::Success.style()
         };
     }
     if selected {
-        Role::Accent.style().bold().paint(label)
+        Role::Accent.style().bold()
     } else if mode == HomeMode::Switch {
-        Style::new().dim().paint(label)
+        Style::new().dim()
     } else if current {
-        Role::Accent.style().bold().paint(label)
+        Role::Accent.style().bold()
     } else {
-        Role::Accent.style().paint(label)
+        Role::Accent.style()
     }
 }
 
@@ -3010,11 +3019,12 @@ fn home_failed_row_lines(
         &organization_label(session),
         label_width.saturating_sub(widgets::display_width(&badge)),
     );
-    let label = if selected {
-        Role::Danger.style().bold().paint(&clipped)
+    let style = if selected {
+        Role::Danger.style().bold()
     } else {
-        Role::Danger.style().dim().paint(&clipped)
+        Role::Danger.style().dim()
     };
+    let label = paint_organization_label(session, &clipped, style);
     let marker = home_row_marker(row, selected, current, icon_mode);
     if session.failure_stage == Some(FailureStage::Delete) {
         let first = widgets::pad_to_width(&format!("{marker} {label}{badge}"), width);
@@ -3099,6 +3109,11 @@ fn home_row_lines_at(
         let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
         let badge = role_badge(session);
         let label = widgets::shimmer_text_with(&organization_label(session), frame, wave);
+        let label = if session.favorite {
+            label.replacen('★', &Role::Favorite.style().paint("★"), 1)
+        } else {
+            label
+        };
         let marker = home_row_marker(row, selected, false, home.icon_mode);
         return vec![
             widgets::pad_to_width(
@@ -3140,7 +3155,11 @@ fn home_row_lines_at(
     } else {
         label.to_string()
     };
-    let label = home_row_label(row, &label, selected, current, home.mode);
+    let style = home_row_label_style(row, selected, current, home.mode);
+    let label = session.map_or_else(
+        || style.paint(&label),
+        |session| paint_organization_label(session, &label, style),
+    );
     let first = if let Some(session) = session {
         // Keep the note column stable without showing an unexplained placeholder.
         let note = if session.has_notes { "✎" } else { " " };
@@ -4327,14 +4346,54 @@ mod tests {
             &mut state,
             AppEvent::Backend(BackendEvent::SessionFavorites(BTreeSet::from([session]))),
         );
-        let home = HomeProjection::from_state(&state, "work", &[row]);
+        let mut home = HomeProjection::from_state(&state, "work", &[row]);
         assert_eq!(home.sessions[0].label, "builder");
         assert_eq!(super::organization_label(&home.sessions[0]), "★ builder");
         let mut nested = home.sessions[0].clone();
         nested.organization_depth = 2;
         assert_eq!(super::organization_label(&nested), "  └─ ★ builder");
         let rendered = render_home_at(30, 100, &home, Utc::now()).join("\n");
-        assert!(rendered.contains("★ builder"));
+        assert!(widgets::strip_ansi(&rendered).contains("★ builder"));
+        home.sessions = Arc::from([nested]);
+        let row = Selection::Target(Target::Session(session));
+        for (mode, selected, current, style) in [
+            (HomeMode::Switch, true, false, Role::Accent.style().bold()),
+            (HomeMode::Switch, false, true, Style::new().dim()),
+            (HomeMode::Closeup, false, true, Role::Accent.style().bold()),
+            (HomeMode::Closeup, false, false, Role::Accent.style()),
+        ] {
+            home.mode = mode;
+            home.selected = if selected { row } else { Selection::NewSession };
+            home.active = current.then_some(session);
+            let lines = home_row_lines_at(30, &home, row, SidebarDiffColumns::default(), 0, now());
+            assert!(lines[0].contains(&style.fg(Color::Yellow).paint("★")));
+            assert!(lines[0].contains(&style.paint("  └─ ")));
+            assert!(lines[0].contains(&style.paint(" builder")));
+            assert!(widgets::strip_ansi(&lines[0]).contains("  └─ ★ builder"));
+            assert_eq!(display_width(&lines[0]), 30);
+        }
+        Arc::make_mut(&mut home.sessions)[0].lifecycle = SessionLifecycle::Failed;
+        home.mode = HomeMode::Switch;
+        home.selected = row;
+        let failed = home_row_lines_at(30, &home, row, SidebarDiffColumns::default(), 0, now());
+        assert!(failed[0].contains(&Style::new().fg(Color::Yellow).bold().paint("★")));
+        assert!(failed[0].contains(&Role::Danger.style().bold().paint(" builder")));
+
+        Arc::make_mut(&mut home.sessions)[0].removing = true;
+        for frame in 0..8 {
+            home.mascot_tick = frame * 4;
+            let removing =
+                home_row_lines_at(30, &home, row, SidebarDiffColumns::default(), 0, now());
+            assert!(removing[0].contains(&Style::new().fg(Color::Yellow).paint("★")));
+            assert!(widgets::strip_ansi(&removing[0]).contains("  └─ ★ builder"));
+        }
+        let session = &mut Arc::make_mut(&mut home.sessions)[0];
+        session.removing = false;
+        session.lifecycle = SessionLifecycle::Available;
+        let clipped = home_row_lines_at(7, &home, row, SidebarDiffColumns::default(), 0, now());
+        assert!(!clipped[0].contains('★'));
+        assert!(!clipped[0].contains(";33m"));
+        assert_eq!(display_width(&clipped[0]), 7);
     }
 
     /// Build a Home projection with the given lifecycle and Agent phase.
