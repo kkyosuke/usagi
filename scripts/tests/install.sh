@@ -266,7 +266,7 @@ if grep -q 'left unchanged' "$CASE_DIR/err"; then
     exit 1
 fi
 
-prepare_case managed-update-deferred-for-live-agents
+prepare_case managed-update-deferred-for-live-connections
 USAGI_SYNC_STATUS=3
 export USAGI_SYNC_STATUS
 run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"
@@ -274,6 +274,7 @@ unset USAGI_SYNC_STATUS
 [ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
 grep -q 'v1.0.0 から v2.0.0' "$CASE_DIR/out"
 grep -q 'daemon の切り替えは保留' "$CASE_DIR/out"
+grep -q '現在の接続を維持' "$CASE_DIR/out"
 [ ! -s "$CASE_DIR/err" ]
 if grep -q 'daemon の build を同期した' "$CASE_DIR/out"; then
     echo "deferred synchronization incorrectly reported a serving successor" >&2
