@@ -229,6 +229,8 @@ pub enum Role {
     Danger,
     /// 警告・注意: 通知・待機状態・一時的なヒント。
     Warning,
+    /// お気に入り: session 名の前に表示する星。
+    Favorite,
     /// 装飾アクセント: マスコット・遊びのハイライト・副次的なカウント。
     Feature,
     /// 情報: 新着アイテム・ハイパーリンク。
@@ -243,7 +245,7 @@ impl Role {
             Role::Accent => Color::Cyan,
             Role::Success => Color::Green,
             Role::Danger => Color::Red,
-            Role::Warning => Color::Yellow,
+            Role::Warning | Role::Favorite => Color::Yellow,
             Role::Feature => Color::Ansi256(FEATURE_PINK_256),
             Role::Info => Color::Ansi256(INFO_256),
         }
@@ -361,6 +363,7 @@ mod tests {
         assert_eq!(Role::Success.color(), Color::Green);
         assert_eq!(Role::Danger.color(), Color::Red);
         assert_eq!(Role::Warning.color(), Color::Yellow);
+        assert_eq!(Role::Favorite.color(), Color::Yellow);
         assert_eq!(Role::Feature.color(), Color::Ansi256(FEATURE_PINK_256));
         assert_eq!(Role::Info.color(), Color::Ansi256(INFO_256));
     }

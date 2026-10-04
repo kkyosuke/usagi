@@ -50,7 +50,7 @@ Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](docu
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
 logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
 よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
-保存中も操作でき、登録・解除の結果は星の表示へ反映されます。
+保存中も操作でき、登録・解除の結果は session 一覧のお気に入りマーカーへ反映されます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
 質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。選択への補足コメントや、送信前の確認画面も利用できます。
