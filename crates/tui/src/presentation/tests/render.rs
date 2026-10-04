@@ -215,6 +215,13 @@ fn render_controller_frame_composites_the_selected_session_memo() {
     let _ = memo.handle_key(Key::Char('n'));
     let request_id = memo.state().note_editor().unwrap().request_id();
     let loading = frame(&memo);
+    let border = loading
+        .lines()
+        .position(|line| line.contains("Memo · alpha"))
+        .unwrap();
+    assert_eq!(border, 5, "editor starts at the preview's top border");
+    assert_eq!(loading.lines().filter(|line| line.contains('┌')).count(), 1);
+    assert!(loading.contains("Shared with agent"));
     assert!(loading.contains("Memo · alpha"));
     assert!(loading.contains("Loading"));
     let _ = memo.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {

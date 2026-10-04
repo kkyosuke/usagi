@@ -593,7 +593,7 @@ impl Tool for SessionNoteUpdate {
         "session_note_update"
     }
     fn description(&self) -> &'static str {
-        "現在のセッションの作業メモを書き換えるときに使う。空文字を渡すとクリアする。自セッション内限定。"
+        "現在のセッションの作業メモを書き換えるときに使う。TUI に表示される人と agent の共有メモなので、ログ全文ではなく要点を1項目1行で記載し、日本語で40文字程度を目安に意味の区切りで改行する。既存の人のメモを意図せず消さないよう、先に session_note_get で内容を確認する。空文字を渡すとクリアする。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"note":{"type":"string"}},"required":["note"]}"#

@@ -672,6 +672,12 @@ pub(crate) fn project_sessions(
 }
 
 impl HomeProjection {
+    /// The Home surface whose pane geometry this projection describes.
+    #[must_use]
+    pub const fn mode(&self) -> HomeMode {
+        self.mode
+    }
+
     /// `state` を snapshot 表示情報へ安全に結合する。
     ///
     /// state にある ID だけをその順番で採用する。欠損した表示情報は描画せず、controller
@@ -3436,6 +3442,33 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     rows
 }
 
+/// Replace the Switch memo preview in place while preserving sidebar and tab chrome.
+#[must_use]
+pub fn render_memo_editor_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    editor: &crate::usecase::application::controller::NoteEditor,
+    label: &str,
+) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    let top = CHROME_ROWS + widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
+    let available = height.saturating_sub(top + widgets::live_terminal::FOOTER_ROWS);
+    if split.right < 40 || available < 8 {
+        return super::scratchpad_modal::render_notes_for_over(height, width, base, editor, label);
+    }
+    let card = super::scratchpad_modal::memo_card(editor, split.right, available, label);
+    let mut frame = base.to_vec();
+    for (row, line) in frame.iter_mut().skip(top).zip(card) {
+        *row = format!(
+            "{}\x1b[0m{line}\x1b[0m",
+            widgets::modal::columns(row, 0, split.left + 1)
+        );
+    }
+    frame
+}
+
 fn home_memo_preview(
     memo: Option<&str>,
     width: usize,
@@ -3458,12 +3491,23 @@ fn home_memo_preview(
     };
     let inner_width = width - 4;
     let body_limit = budget.saturating_sub(2).min(3);
-    let title = Role::Accent
-        .style()
-        .bold()
-        .paint(&format!("{} Memo · n: edit", icon_set(icon_mode).note));
+    let title = Role::Accent.style().bold().paint(&format!(
+        "{} Memo · n: edit · shared with agent",
+        icon_set(icon_mode).note
+    ));
     let mut body = Vec::new();
-    let lines = memo.lines().take(body_limit + 1).collect::<Vec<_>>();
+    let lines = memo
+        .lines()
+        .flat_map(|line| {
+            let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                widgets::wrap_to_width(&line, inner_width)
+            }
+        })
+        .take(body_limit + 1)
+        .collect::<Vec<_>>();
     for (index, line) in lines.iter().take(body_limit).enumerate() {
         let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
         let suffix = if index + 1 == body_limit && lines.len() > body_limit {
@@ -3684,6 +3728,56 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{home_right_pane, home_right_pane_content};
+    #[test]
+    fn memo_preview_wraps_long_lines_and_editor_keeps_preview_geometry() {
+        use super::{home_memo_preview, render_memo_editor_over};
+        use crate::usecase::application::controller::{
+            AppEvent, AppKey, AppState, BackendEvent, update,
+        };
+        let preview = home_memo_preview(Some("日本語の長文です\n\n次"), 16, IconMode::Text, 10);
+        let plain = preview
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("日本語の長文"));
+        assert!(plain.contains("です"));
+        let id = SessionId::new();
+        let mut state = AppState::home(WorkspaceId::new(), vec![id]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
+        let request_id = state.note_editor().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::NotesLoaded {
+                target: Target::Session(id),
+                request_id,
+                scratchpad: Scratchpad {
+                    note: Some("original".into()),
+                    ..Default::default()
+                },
+            }),
+        );
+        for (height, width) in [(24, 100), (10, 40), (24, 50)] {
+            let base = vec![".".repeat(width); height];
+            let rendered = render_memo_editor_over(
+                height,
+                width,
+                &base,
+                state.note_editor().unwrap(),
+                "alpha",
+            );
+            assert_eq!(rendered.len(), height);
+            assert!(rendered.iter().all(|line| display_width(line) <= width));
+            assert!(rendered.join("\n").contains("Memo"));
+            if width == 100 {
+                assert_eq!(&rendered[..5], &base[..5]);
+                assert_eq!(rendered.last(), base.last());
+                assert!(rendered[5].starts_with(&".".repeat(37)));
+                assert!(rendered[5].contains("Memo · alpha"));
+            }
+        }
+    }
+
     #[test]
     fn organization_order_preserves_siblings_orphans_and_cycles() {
         use super::{SessionRoleProjection, organization_order};
