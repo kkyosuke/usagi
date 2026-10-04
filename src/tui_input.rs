@@ -215,58 +215,15 @@ where
             event
         };
         if event == Event::Key(KeyEvent::new(CrosstermKeyCode::Esc, KeyModifiers::NONE)) {
-            return self.recover_mouse_report(event).map(Some);
+            return recover_mouse_report(
+                &mut self.source,
+                &mut self.pending_terminal,
+                &mut self.pending_escape,
+                event,
+            )
+            .map(Some);
         }
         Ok(Some(event))
-    }
-
-    /// Recover only a complete SGR mouse report. Other Escape sequences,
-    /// literal text, paste, and incomplete candidates are replayed unchanged.
-    fn recover_mouse_report(&mut self, escape: Event) -> io::Result<Event> {
-        let deadline = self.source.now() + MOUSE_REPORT_GRACE;
-        let mut buffered = VecDeque::new();
-        let mut report = String::new();
-        for _ in 0..MOUSE_REPORT_MAX_CHARS {
-            let timeout = deadline.saturating_duration_since(self.source.now());
-            let event = match poll_source(&mut self.source, timeout) {
-                Ok(Some(event)) => event,
-                Ok(None) => break,
-                Err(error) => {
-                    self.pending_terminal.push_back(escape);
-                    self.pending_terminal.extend(buffered);
-                    return Err(error);
-                }
-            };
-            if event == escape {
-                // Replay the first Escape and its text before trying this new
-                // Escape. Its mouse tail remains in the source for decoding.
-                self.pending_escape = Some(event);
-                break;
-            }
-            buffered.push_back(event.clone());
-            let Event::Key(KeyEvent {
-                code: CrosstermKeyCode::Char(character),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            }) = event
-            else {
-                break;
-            };
-            // Legacy terminal parsers set Shift on uppercase M, while a split
-            // report's payload has no keyboard modifier identity of its own.
-            if !(modifiers.is_empty() || character == 'M' && modifiers == KeyModifiers::SHIFT) {
-                break;
-            }
-            report.push(character);
-            match sgr_mouse::parse_report(&report) {
-                Ok(Some(mouse)) => return Ok(Event::Mouse(mouse)),
-                Ok(None) => {}
-                Err(()) => break,
-            }
-        }
-        self.pending_terminal.extend(buffered);
-        Ok(escape)
     }
 
     /// Fold an immediately-ready wheel burst or passive motion to its latest cell. The first
@@ -344,6 +301,60 @@ where
         }
         Ok(event)
     }
+}
+
+/// Recover only a complete SGR mouse report. Other Escape sequences,
+/// literal text, paste, and incomplete candidates are replayed unchanged.
+fn recover_mouse_report(
+    source: &mut dyn CrosstermEventSource,
+    pending_terminal: &mut VecDeque<Event>,
+    pending_escape: &mut Option<Event>,
+    escape: Event,
+) -> io::Result<Event> {
+    let deadline = source.now() + MOUSE_REPORT_GRACE;
+    let mut buffered = VecDeque::new();
+    let mut report = String::new();
+    for _ in 0..MOUSE_REPORT_MAX_CHARS {
+        let timeout = deadline.saturating_duration_since(source.now());
+        let event = match poll_source(source, timeout) {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(error) => {
+                pending_terminal.push_back(escape);
+                pending_terminal.extend(buffered);
+                return Err(error);
+            }
+        };
+        if event == escape {
+            // Replay the first Escape and its text before trying this new
+            // Escape. Its mouse tail remains in the source for decoding.
+            *pending_escape = Some(event);
+            break;
+        }
+        buffered.push_back(event.clone());
+        let Event::Key(KeyEvent {
+            code: CrosstermKeyCode::Char(character),
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        }) = event
+        else {
+            break;
+        };
+        // Legacy terminal parsers set Shift on uppercase M, while a split
+        // report's payload has no keyboard modifier identity of its own.
+        if !(modifiers.is_empty() || character == 'M' && modifiers == KeyModifiers::SHIFT) {
+            break;
+        }
+        report.push(character);
+        match sgr_mouse::parse_report(&report) {
+            Ok(Some(mouse)) => return Ok(Event::Mouse(mouse)),
+            Ok(None) => {}
+            Err(()) => break,
+        }
+    }
+    pending_terminal.extend(buffered);
+    Ok(escape)
 }
 
 fn poll_source(
