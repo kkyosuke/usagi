@@ -1008,8 +1008,8 @@ fn agent_admissions_and_finals_carry_their_operation_and_semantic_digest() {
     assert_eq!(completed.semantic_digest, admitted.semantic_digest);
     assert_eq!(completed.terminal, admitted.terminal);
     assert_eq!(
-        runtime.operation_outcome(&operation),
-        Some(Ok(completed)),
+        runtime.launch(&operation, &launch_intent, &fake_scope),
+        Ok(completed),
         "a reconnecting client reads exactly the same final"
     );
 
@@ -1058,9 +1058,9 @@ fn process_local_operation_replay_is_bounded_without_retaining_intent_text() {
         }
     }
     assert_eq!(runtime.operations.len(), 2);
-    assert!(runtime.operation_outcome(&operations[0]).is_none());
-    assert!(runtime.operation_outcome(&operations[1]).is_some());
-    assert!(runtime.operation_outcome(&operations[2]).is_some());
+    assert!(!runtime.operations.contains_key(&operations[0]));
+    assert!(runtime.operations.contains_key(&operations[1]));
+    assert!(runtime.operations.contains_key(&operations[2]));
 
     let long_intent = "private prompt ".repeat(1_000);
     let digested = OperationId::new().to_string();
@@ -1214,7 +1214,7 @@ fn session_close_removes_the_agent_from_runtime_inventory_and_replay() {
             .is_empty()
     );
     assert!(runtime.managed_session_ids().is_empty());
-    assert_eq!(runtime.operation_outcome(&operation), None);
+    assert!(!runtime.operations.contains_key(&operation));
     assert!(runtime.mcp_callers.is_empty());
     assert!(runtime.reported_phases.is_empty());
 }
@@ -2244,10 +2244,6 @@ fn resend_replays_and_conflicting_intent_is_rejected_without_second_spawn() {
         .launch(&operation, &launch_intent, &fake_scope)
         .unwrap();
     assert_eq!(first, second);
-    assert_eq!(
-        runtime.operation_outcome(&operation).unwrap().unwrap(),
-        first
-    );
 
     let mut conflict = launch_intent.clone();
     conflict.profile = Some(AgentProfileId::new("codex").unwrap());
