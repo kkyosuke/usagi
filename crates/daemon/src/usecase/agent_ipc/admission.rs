@@ -25,6 +25,7 @@ impl AgentRuntime {
         &self,
         agent: AgentId,
         launched: AgentLaunchOrigin,
+        fresh_identity: bool,
     ) -> Result<AgentLaunchProvenance, ProtocolError> {
         let previous = self
             .dispatch
@@ -34,7 +35,8 @@ impl AgentRuntime {
             .filter(|run| run.agent_id == agent)
             .max_by_key(|run| (run.started_at, run.run_id));
         let created = match previous {
-            None => Some(launched.clone()),
+            None if fresh_identity => Some(launched.clone()),
+            None => None,
             Some(run) => self
                 .coordinator
                 .snapshot()
@@ -157,6 +159,11 @@ impl AgentRuntime {
                 .into_iter()
                 .collect(),
         };
+        let fresh_identity = self
+            .dispatch
+            .agent(worker.agent_id)
+            .map_err(map_dispatch_storage_error)?
+            .is_none();
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
@@ -170,6 +177,7 @@ impl AgentRuntime {
                     operation_id: operation,
                     at: Utc::now(),
                 },
+                fresh_identity,
             )?),
         };
         let credential = OperationId::new().to_string();
@@ -597,6 +605,16 @@ impl AgentRuntime {
                 .collect(),
         };
         let credential = OperationId::new().to_string();
+        // Agent identities survive dispatch-run retention. Capture existence
+        // before upsert so an adopted legacy identity or a collected history
+        // cannot be mistaken for a freshly minted Agent.
+        let existing_agents = self
+            .dispatch
+            .agents()
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .map(|agent| agent.agent_id)
+            .collect::<BTreeSet<_>>();
         let mut worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
@@ -623,6 +641,7 @@ impl AgentRuntime {
                     operation_id: operation,
                     at: Utc::now(),
                 },
+                !existing_agents.contains(&worker.agent_id),
             )?),
         };
         worker.status = AgentStatus::Starting;

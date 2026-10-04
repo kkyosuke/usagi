@@ -77,6 +77,17 @@ fn mcp_launches_retain_the_authenticated_caller_and_actual_entrypoint() {
             agent: selected,
             prompt: "Review the task".into(),
         };
+        let planned = (entrypoint == AgentLaunchEntry::AgentHandoff)
+            .then(|| {
+                agent.plan_peer_worker(
+                    &operation.to_string(),
+                    intent.workspace,
+                    &caller,
+                    &dispatch.agent,
+                )
+            })
+            .transpose()
+            .unwrap();
         let preflight = agent
             .prepare_dispatch_readiness(&operation.to_string(), &dispatch)
             .unwrap();
@@ -87,7 +98,7 @@ fn mcp_launches_retain_the_authenticated_caller_and_actual_entrypoint() {
                 intent.session.unwrap(),
                 &scope,
                 preflight.as_ref(),
-                None,
+                planned.as_ref(),
                 entrypoint,
             )
             .unwrap();
@@ -101,6 +112,10 @@ fn mcp_launches_retain_the_authenticated_caller_and_actual_entrypoint() {
             .as_ref()
             .unwrap();
         assert_eq!(provenance.launched.source, AgentLaunchSource::Mcp);
+        assert_eq!(
+            provenance.created.as_ref().unwrap().source,
+            AgentLaunchSource::Mcp
+        );
         assert_eq!(provenance.launched.entrypoint, entrypoint);
         assert_eq!(provenance.launched.caller, Some(caller.clone()));
         let worker = agent
@@ -278,6 +293,121 @@ fn legacy_wire_record_remains_unknown_after_a_fresh_manual_conversation() {
         .agent_id;
     agent.launch(&second.to_string(), &intent, &scope).unwrap();
     let provenance = agent.agent_launch_provenance(intent.workspace).unwrap()[&worker]
+        .clone()
+        .unwrap();
+    assert_eq!(provenance.created, None);
+    assert_eq!(provenance.launched.source, AgentLaunchSource::Manual);
+}
+
+#[test]
+fn collected_dispatch_history_keeps_a_reused_agent_creator_unknown() {
+    for via_mcp in [false, true] {
+        let mut agent = runtime();
+        let intent = intent(None);
+        let scope = FakeScope(Ok(scope()));
+        let first = OperationId::new();
+        let admitted = agent.launch(&first.to_string(), &intent, &scope).unwrap();
+        let worker = agent
+            .dispatch
+            .binding(first)
+            .unwrap()
+            .unwrap()
+            .worker
+            .agent_id;
+        agent.exit(&admitted.terminal, 0).unwrap();
+
+        // Age-based retention removes the old run and its admission/binding,
+        // while the dispatchable Agent identity deliberately survives.
+        let mut old = agent.dispatch.run(first).unwrap().unwrap();
+        old.ended_at = Some(Utc::now() - chrono::Duration::days(366));
+        agent.dispatch.upsert_run(old).unwrap();
+        for _ in 0..32 {
+            agent
+                .dispatch
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id: AgentId::new(),
+                    prompt: String::new(),
+                    started_at: Utc::now(),
+                    ended_at: Some(Utc::now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
+        assert_eq!(agent.dispatch.run(first).unwrap(), None);
+        assert!(agent.dispatch.agent(worker).unwrap().is_some());
+        let next = OperationId::new();
+        let admitted = if via_mcp {
+            agent
+                .dispatch(
+                    &next.to_string(),
+                    &DispatchIntent {
+                        workspace: intent.workspace,
+                        session_name: "worker".into(),
+                        caller: CallerRef {
+                            session_id: None,
+                            agent_id: AgentId::new(),
+                        },
+                        agent: DispatchAgentIntent::Existing { agent_id: worker },
+                        prompt: "Another task".into(),
+                    },
+                    intent.session.unwrap(),
+                    &scope,
+                )
+                .unwrap()
+        } else {
+            agent.launch(&next.to_string(), &intent, &scope).unwrap()
+        };
+        assert_eq!(
+            agent
+                .dispatch
+                .binding(next)
+                .unwrap()
+                .unwrap()
+                .worker
+                .agent_id,
+            worker
+        );
+        let inventory = agent.inventory(intent.workspace);
+        let provenance = inventory
+            .runtimes
+            .iter()
+            .find(|item| item.runtime.terminal == admitted.terminal)
+            .unwrap()
+            .launch_provenance
+            .as_ref()
+            .unwrap();
+        assert_eq!(provenance.created, None);
+        assert_eq!(
+            provenance.launched.source,
+            if via_mcp {
+                AgentLaunchSource::Mcp
+            } else {
+                AgentLaunchSource::Manual
+            }
+        );
+    }
+}
+
+#[test]
+fn existing_legacy_idle_agent_without_runs_keeps_creation_unknown() {
+    let mut agent = runtime();
+    let intent = intent(None);
+    let worker = agent
+        .dispatch
+        .upsert_agent_by_runtime_model(
+            intent.workspace,
+            intent.session,
+            AgentProfileId::new("claude").unwrap(),
+            ModelSelector::new("default").unwrap(),
+        )
+        .unwrap();
+    assert!(agent.dispatch.runs().unwrap().is_empty());
+    let operation = OperationId::new();
+    agent
+        .launch(&operation.to_string(), &intent, &FakeScope(Ok(scope())))
+        .unwrap();
+    let provenance = agent.agent_launch_provenance(intent.workspace).unwrap()[&worker.agent_id]
         .clone()
         .unwrap();
     assert_eq!(provenance.created, None);
