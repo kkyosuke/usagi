@@ -11657,6 +11657,7 @@ fn fence_client_hello(capabilities: Vec<String>) -> usagi_core::infrastructure::
     };
     ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId(ClientId::new().as_str()),
+        surface: None,
         connection_nonce: "fence".to_owned(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {
@@ -12364,6 +12365,7 @@ mod workflow_composition {
                         clock: &StoppedClock(0),
                     },
                     bound: &self.bound,
+                    launch_client: None,
                 },
                 usagi_core::infrastructure::ipc::RequestId("workflow-test".into()),
                 request,
@@ -13481,6 +13483,10 @@ mod workflow_composition {
                 revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
             Some(742),
+            usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+            ),
         )
         .unwrap();
         assert_eq!(started.run.unwrap().id, operation);
@@ -13495,12 +13501,72 @@ mod workflow_composition {
             usagi_core::domain::id::OperationId::new(),
             WorkflowCommand::Finish,
             None,
+            usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+            ),
         )
         .unwrap();
         assert!(ended.run.is_none());
         assert_eq!(ended.finished.len(), 1);
         assert_eq!(ended.finished[0].id, operation);
         assert_eq!(ended.finished[0].issue, Some(742));
+    }
+
+    #[test]
+    fn workflow_start_keeps_authenticated_actor_and_client_evidence() {
+        use usagi_core::domain::agent::{
+            AgentClientSurface, AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource, CallerRef,
+        };
+        for via_mcp in [false, true] {
+            let fixture = Fixture::new();
+            let operation = usagi_core::domain::id::OperationId::new();
+            let caller = via_mcp.then_some(CallerRef {
+                session_id: None,
+                agent_id: usagi_core::domain::id::AgentId::new(),
+            });
+            let caller_operation = via_mcp.then_some(usagi_core::domain::id::OperationId::new());
+            let client = AgentLaunchClient {
+                surface: Some(if via_mcp {
+                    AgentClientSurface::Mcp
+                } else {
+                    AgentClientSurface::Tui
+                }),
+                client_id: "public-workflow-client".into(),
+                connection_id: "public-workflow-connection".into(),
+                request_id: "public-workflow-request".into(),
+                peer_pid: 4321,
+            };
+            let started = workflow::control_workflow(
+                &fixture.agent,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                operation,
+                WorkflowCommand::Start {
+                    goal: "Update the docs".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
+                },
+                None,
+                dispatch::launch_context(
+                    AgentLaunchSource::Workflow,
+                    AgentLaunchEntry::WorkflowStart,
+                    Some(&client),
+                    caller.as_ref(),
+                    caller_operation,
+                ),
+            )
+            .unwrap();
+            assert_eq!(started.run.unwrap().id, operation);
+            let inventory = fixture.agent.lock().unwrap().inventory(fixture.workspace);
+            let audit = inventory.runtimes[0].launch_provenance.as_ref().unwrap();
+            assert_eq!(audit.launched.source, AgentLaunchSource::Workflow);
+            assert_eq!(audit.launched.workflow_id, Some(operation));
+            assert_eq!(audit.launched.caller, caller);
+            assert_eq!(audit.launched.caller_operation_id, caller_operation);
+            assert_eq!(audit.launched.client, Some(client));
+        }
     }
 
     #[test]
@@ -15479,4 +15545,44 @@ fn a_recorded_panic_names_the_thread_it_happened_on() {
 
     let anonymous = panic_report("boom", "somewhere", None, "", 123, &current_build());
     assert!(anonymous.contains("\nthread: <unnamed>\n"), "{anonymous}");
+}
+
+#[test]
+fn launch_audit_keeps_authenticated_caller_independent_of_reported_surface() {
+    use usagi_core::domain::agent::{
+        AgentClientSurface, AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource, CallerRef,
+    };
+    let client = AgentLaunchClient {
+        surface: Some(AgentClientSurface::Tui),
+        client_id: "client".into(),
+        connection_id: "connection".into(),
+        request_id: "request".into(),
+        peer_pid: 4321,
+    };
+    let caller = CallerRef {
+        session_id: Some(SessionId::new()),
+        agent_id: usagi_core::domain::id::AgentId::new(),
+    };
+    let operation = usagi_core::domain::id::OperationId::new();
+    let context = dispatch::launch_context(
+        AgentLaunchSource::Mcp,
+        AgentLaunchEntry::AgentHandoff,
+        Some(&client),
+        Some(&caller),
+        Some(operation),
+    );
+    assert_eq!(context.source, AgentLaunchSource::Mcp);
+    assert_eq!(context.entrypoint, AgentLaunchEntry::AgentHandoff);
+    assert_eq!(context.caller, Some(caller));
+    assert_eq!(context.caller_operation_id, Some(operation));
+    assert_eq!(context.client, Some(client));
+    let legacy = dispatch::launch_context(
+        AgentLaunchSource::Manual,
+        AgentLaunchEntry::Agent,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(legacy.client, None);
+    assert_eq!(legacy.caller_operation_id, None);
 }

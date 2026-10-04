@@ -16,7 +16,7 @@ use super::{
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
     SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, best_effort_merged_pr_head,
     bind_delegated_supervisor_dispatch, clean_orphan_session_resources,
-    dispatch_agent_after_preflight, perform_compensating_remove, perform_create,
+    dispatch_agent_after_preflight, launch_context, perform_compensating_remove, perform_create,
     perform_delegated_create, perform_remove_with_merged_head,
     reconcile_pending_supervisor_promotions, record_session_lineage,
     require_stable_supervisor_fence, require_supervisor_reservation_presence, scratchpad,
@@ -135,7 +135,10 @@ pub(super) fn dispatch_session_action(
     {
         return Err(SessionRuntimeError::ScopeUnavailable);
     }
-    let caller = authenticated_caller.as_ref().map(|caller| &caller.caller);
+    let (caller, caller_operation) = match authenticated_caller.as_ref() {
+        Some(authenticated) => (Some(&authenticated.caller), Some(authenticated.run_id)),
+        None => (None, None),
+    };
     let target_session = |name: &str| {
         let sessions = bound
             .sessions()
@@ -159,6 +162,27 @@ pub(super) fn dispatch_session_action(
     };
 
     match action {
+        SessionAction::Agents => {
+            let workspace = bound_workspace()?;
+            let sessions = bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?;
+            let visible = caller
+                .map(|caller| sessions.created_session_ids(caller))
+                .transpose()?;
+            let snapshot = sessions.snapshot()?;
+            drop(sessions);
+            let inventory = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .inventory(workspace);
+            reply(named_agent_inventory(
+                &snapshot,
+                inventory,
+                visible.as_ref(),
+            ))
+        }
         SessionAction::List | SessionAction::Status | SessionAction::Overview => {
             let visible = caller
                 .map(|caller| {
@@ -401,6 +425,13 @@ pub(super) fn dispatch_session_action(
                         .map_err(|_| SessionRuntimeError::InvalidRequest)?,
                     command,
                     issue,
+                    launch_context(
+                        usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                        usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+                        context.launch_client,
+                        caller,
+                        caller_operation,
+                    ),
                 ),
             }
             .map_err(workflow::refusal)?;
@@ -1098,6 +1129,13 @@ fn delegate_brief(
         id,
         &scope,
         reserved_worker.as_ref(),
+        launch_context(
+            usagi_core::domain::agent::AgentLaunchSource::Mcp,
+            usagi_core::domain::agent::AgentLaunchEntry::SessionDelegateBrief,
+            context.launch_client,
+            Some(&dispatch_intent.caller),
+            Some(parent_dispatch_run),
+        ),
     );
     let admission = match admission {
         Ok(admission) => admission,
@@ -1271,6 +1309,47 @@ pub(in crate::runtime::daemon) fn reconcile_orphan_delegations(
         .count()
 }
 
+/// Read-only audit projection. Session names are presentation metadata and never
+/// replace stable runtime/creator identities for filtering or authorization.
+fn named_agent_inventory(
+    snapshot: &serde_json::Value,
+    inventory: usagi_core::domain::agent::AgentInventory,
+    visible: Option<&std::collections::BTreeSet<SessionId>>,
+) -> serde_json::Value {
+    let names = snapshot
+        .get("sessions")
+        .and_then(serde_json::Value::as_array);
+    let rows = inventory
+        .runtimes
+        .into_iter()
+        .filter(|item| {
+            visible.is_none_or(|visible| {
+                item.runtime
+                    .session_id
+                    .is_some_and(|id| visible.contains(&id))
+            })
+        })
+        .map(|item| {
+            let name = item
+                .runtime
+                .session_id
+                .and_then(|id| {
+                    names.and_then(|names| {
+                        names.iter().find(|session| {
+                            session.get("session_id") == Some(&serde_json::json!(id))
+                        })
+                    })
+                })
+                .and_then(|session| session.get("name"))
+                .cloned();
+            let mut row = serde_json::json!(item);
+            row["session_name"] = name.unwrap_or(serde_json::Value::Null);
+            row
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({"workspace_id": inventory.workspace_id, "runtimes": rows})
+}
+
 pub(super) enum AgentDispatchRequest {
     Launch(String, usagi_core::infrastructure::ipc::AgentLaunchIntent),
     Goal(String, usagi_core::infrastructure::ipc::AgentGoalIntent),
@@ -1292,4 +1371,84 @@ pub(super) enum AgentDispatchRequest {
     ),
     Resume(String, usagi_core::domain::agent::AgentResumeTarget),
     RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use usagi_core::domain::agent::{
+        AgentInventory, AgentRuntimeInventoryItem, AgentRuntimeInventoryState,
+    };
+    use usagi_core::domain::id::{
+        AgentContinuationRef, AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, TerminalId,
+        TerminalRef, WorktreeId,
+    };
+
+    #[test]
+    fn audit_inventory_names_sessions_and_keeps_authority_filters() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let foreign = SessionId::new();
+        let operation = usagi_core::domain::id::OperationId::new();
+        let agent = usagi_core::domain::id::AgentId::new();
+        let item = |session_id| {
+            let terminal = TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id,
+                worktree_id: WorktreeId::new(),
+            };
+            AgentRuntimeInventoryItem {
+                operation_id: Some(operation),
+                agent_id: Some(agent),
+                runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal, session_id).unwrap(),
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+                launch_provenance: None,
+            }
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![item(None), item(Some(session)), item(Some(foreign))],
+            resumable: Vec::new(),
+        };
+        let snapshot = serde_json::json!({"sessions":[{"session_id":session,"name":"working"},{"session_id":foreign,"name":"other"}]});
+        let all = named_agent_inventory(&snapshot, inventory.clone(), None);
+        assert_eq!(all["runtimes"].as_array().unwrap().len(), 3);
+        assert_eq!(all["runtimes"][0]["session_name"], serde_json::Value::Null);
+        assert_eq!(all["runtimes"][1]["session_name"], "working");
+        assert_eq!(
+            all["runtimes"][1]["operation_id"],
+            serde_json::json!(operation)
+        );
+        assert_eq!(all["runtimes"][1]["agent_id"], serde_json::json!(agent));
+        assert!(all["runtimes"][1]["launch_provenance"].is_null());
+        let owned = BTreeSet::from([session]);
+        let limited = named_agent_inventory(&snapshot, inventory.clone(), Some(&owned));
+        assert_eq!(limited["runtimes"].as_array().unwrap().len(), 1);
+        assert_eq!(limited["runtimes"][0]["session_name"], "working");
+        let unnamed = named_agent_inventory(&serde_json::json!({}), inventory.clone(), None);
+        assert!(
+            unnamed["runtimes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["session_name"].is_null())
+        );
+        let missing_name = named_agent_inventory(
+            &serde_json::json!({"sessions":[{"session_id":session}]}),
+            inventory,
+            None,
+        );
+        assert!(
+            missing_name["runtimes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["session_name"].is_null())
+        );
+    }
 }

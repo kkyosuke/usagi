@@ -626,13 +626,28 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
             .code,
         ErrorCode::InvalidArgument
     );
+    let before_invalid_repair = runtime.coordinator.snapshot();
+    assert_eq!(
+        runtime
+            .resume_with_current_integration(
+                "not-an-operation-id",
+                &target,
+                target.adapter_revision,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+    assert_eq!(runtime.coordinator.snapshot(), before_invalid_repair);
     assert_eq!(
         runtime
             .admit_resume_exact(
-                &initial_operation.to_string(),
+                initial_operation,
                 &target,
                 &resume_semantic_key(&target),
                 &FakeScope(Ok(resolved.clone())),
+                None,
                 None,
             )
             .unwrap_err()
@@ -1079,6 +1094,18 @@ fn session_workflow_launch_rechecks_readiness_and_embeds_exact_prompt() {
         .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
         .unwrap();
     assert_eq!(first, replay);
+    let provenance = runtime.inventory(intent.workspace).runtimes[0]
+        .launch_provenance
+        .clone()
+        .unwrap();
+    assert_eq!(
+        provenance.launched.source,
+        usagi_core::domain::agent::AgentLaunchSource::Workflow
+    );
+    assert_eq!(
+        provenance.launched.entrypoint,
+        usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart
+    );
     assert!(
         runtime
             .prepare_workflow_readiness(&operation, &intent, "changed")

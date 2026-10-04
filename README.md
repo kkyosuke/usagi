@@ -102,6 +102,9 @@ Clone は `e`、全体の Config は `c` から開きます。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。
 中断 Agent の Closeup でも、Ctrl+C は[終了確認](document/03-tui.md)を通します。
+Agent タブと daemon の状態画面では、手動・MCP・Workflow の作成元を表示します。
+同じ session に複数の Agent がある場合は `usagi session agents` で、各 runtime の作成時刻・起動操作・呼び出し元を調べられます。
+記録の読み方と過去データの扱いは [Agent の作成元と起動記録](document/05-daemon.md#agent-の作成元と起動記録)を参照してください。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
 スクロールなどのマウス操作で届く制御列が分割されても、[TUI の端末入力](document/03-tui.md)で復元し、座標の数値が文字入力へ混ざるのを防ぎます。

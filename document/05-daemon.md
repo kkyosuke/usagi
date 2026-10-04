@@ -25,6 +25,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
 - [agent ownership](#agent-ownership)
+  - [Agent の作成元と起動記録](#agent-の作成元と起動記録)
 - [final retention と aggregate GC](#final-retention-と-aggregate-gc)
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
@@ -1776,6 +1777,71 @@ Run を終端化する。成功応答は `supervisor_run_id` を含み、再送�
 credential の durable form は `daemon_minted_ephemeral` という provenance だけである。opaque secret 自体は
 dispatch registry、runtime snapshot、IPC、terminal journal、log のいずれにも保存しない。daemon restart では
 in-memory caller registry が空になるため、旧 credential は必ず失効する。
+
+### Agent の作成元と起動記録
+
+本節が Agent の作成元を調べるための `launch_provenance` の正本である。daemon は runtime reservation と一緒に、
+spawn より先にこの記録を保存する。prompt の内容や client が指定した source から起動元を推測しない。
+
+| field | 内容 |
+|---|---|
+| `agent_id` | 作成・再利用された Agent の ID。runtime ID と区別し、caller の Agent ID と照合する |
+| `created` | 同じ Agent identity の最初の作成記録。既存 Agent の再利用・handoff・exact resume でも保持する |
+| `launched` | この runtime を起動した操作。再開時は再開を要求した側の記録になる |
+| 各記録の `source` / `entrypoint` | 信頼された daemon 入口が決める分類と操作名 |
+| 各記録の `operation_id` / `at` | 起動を受理した operation ID と UTC 時刻。同じ operation の retry は元の記録を返す |
+| 各記録の `caller` | MCP から起動（Workflow 開始を含む）・再開を要求した認証済み Agent の `agent_id` と `session_id`。workspace root の caller は `session_id: null`。人や daemon 自身の操作は `caller: null` |
+| 各記録の `caller_operation_id` | MCP credential から解決した呼び出し元の実行 ID。caller の最新 run を推測して補わない |
+| 各記録の `client` | 要求した IPC client の `surface`、`client_id`、`connection_id`、`request_id`、OS が観測した `peer_pid` |
+| 各記録の `workflow_id` | Workflow 起動の operation ID。MCP による子 Agent 起動と exact resume にも引き継ぐ |
+
+| `source` | 起動経路と `entrypoint` |
+|---|---|
+| `manual` | TUI / CLI の `agent`、Goal 起動 `agent_goal`、明示再開 `session_resume`、integration repair `integration_repair` |
+| `mcp` | `session_dispatch`、同一 session の `agent_handoff`、`session_delegate_brief` による即時起動、および認証済み Agent による再開 |
+| `workflow` | workflow lane の step 起動 `workflow_start`。Workflow を開始した面にかかわらず、step の実行元はこの lane である |
+| `daemon` | daemon restart に伴う再開 `daemon_restart`。integration revision の更新を伴う場合も同じ分類 |
+| `unknown` | 認証済み caller を持たない旧 IPC の直接 dispatch `legacy_dispatch`。接続情報と起動対象の Agent ID を記録するが、要求内の caller ID を認証済みの証拠として採用しない |
+
+旧 IPC の直接 dispatch は既存の起動と dispatch binding の互換を保つが、監査記録の `caller` と `caller_operation_id` は
+空のままにする。新しい MCP tool の認証済み dispatch と区別でき、TUI の作成元は **Unknown** と表示する。
+
+`session_delegate_issue` は prompt を queue へ保存するだけなので、この時点では runtime の起動記録を作らない。
+後で人が `agent` を実行した場合、起動元は `manual` であり、仕事を委譲した caller は既存の dispatch binding に残る。
+
+`usagi session agents` は現在の workspace の root / session runtime を session 名とともに JSON で列挙する。
+例えば同じ session の `created.source: manual` と `created.source: mcp` を区別し、MCP の `caller.agent_id` と
+`caller_operation_id`、`operation_id`、`at` から作成の経緯を追える。各 retained runtime の `launched` を比較すれば、その後の再開も確認できる。
+各 runtime 行の top-level `operation_id` は保持された durable operation の ID、`agent_id` は dispatch binding または
+保存済みの起動記録から確認した Agent ID である。`launch_provenance` のない旧 runtime でも既知の ID を返し、
+子 Agent の caller から親の実行を照合できる。根拠がない Agent ID は省略し、作成元を推測しない。
+`client.surface` は usagi client が hello に付ける `tui` / `cli` / `mcp` の自己申告で、認証や `source` の判定には使わない。
+旧 client は `surface: null` になる。socket peer の PID と daemon 発行の接続 ID は接続時の観測であり、
+manual の操作はこれらと client ID で区別する。同じ OS ユーザーの人名までは特定しない。
+Workflow の `workflow_id` は `WorkflowRun.id` と同じ値であり、開始した面と実行 lane を別々に確認できる。
+MCP の `agent_peers` / `session_get` / `agent_list` / `agent_get` も、各 Agent の最新 run に対応する optional な
+`launch_provenance` を返す。既存の session creator authority による可視範囲を広げない。
+
+調査時は workspace 内で次の command を実行し、取得時点の一覧を保存する。
+
+```bash
+usagi session agents > agents-audit.json
+```
+
+| 確認したいこと | 記録の辿り方 |
+|---|---|
+| 同じ session の Agent が増えた | `runtime.session_id` / `session_name` と `state` を確認し、異なる top-level `agent_id` の `created` を比較する。終了した runtime の履歴と実行中を分ける |
+| 誰が MCP で起動したか | `created.caller.agent_id` と `created.caller_operation_id` に一致する親の top-level `agent_id` / `operation_id` を探す。作成元の記録がない旧 runtime や別 session の caller も、既知の ID で照合する |
+| TUI / CLI のどの要求か | `created.client.surface` / `peer_pid` / `client_id` / `connection_id` / `request_id` と `created.at` を確認する |
+| Workflow による起動か | `created.source` と `workflow_id` を確認し、Workflow snapshot の `run.id` と照合する。MCP 経由のレビュー Agent は source が `mcp` でも Workflow ID で繋がる |
+| 再開で runtime だけが増えたか | 同じ `agent_id`、`continuation`、`resumed_from` と `launched.entrypoint` を照合する。元の `created` は再開でも変わらない |
+
+記録を持たない旧バージョンの runtime は `launch_provenance` が欠け、作成元は **Unknown** と表示する。
+その Agent を再利用・再開すると `launched` は記録するが、`created: null` を保持する。元の記録が retention で
+失われた場合も、新しい起動元を作成元として補わない。履歴は [final retention と aggregate GC](#final-retention-と-aggregate-gc)
+および session teardown の対象であり、無期限の監査ログではない。親 runtime が回収されても子の記録に
+caller ID と親の operation ID は残るが、回収済みの親の詳細は取得できない。必要な履歴は調査時点で JSON を保存する。provider の native conversation ID、credential、
+prompt 本文はこの記録に含めない。
 
 ### Provider-native conversation resume
 

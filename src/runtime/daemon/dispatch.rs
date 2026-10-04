@@ -8,6 +8,25 @@ mod scratchpad;
 pub(super) mod session;
 
 use session::{AgentDispatchRequest, authorize_delegation, dispatch_session_action};
+use usagi_core::domain::agent::{AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource};
+use usagi_daemon::usecase::agent_ipc::AgentLaunchContext;
+
+/// Metadata from the admitted connection; presentation labels confer no authority.
+pub(super) fn launch_context(
+    source: AgentLaunchSource,
+    entrypoint: AgentLaunchEntry,
+    client: Option<&AgentLaunchClient>,
+    caller: Option<&usagi_core::domain::agent::CallerRef>,
+    caller_operation_id: Option<usagi_core::domain::id::OperationId>,
+) -> AgentLaunchContext {
+    AgentLaunchContext {
+        source,
+        entrypoint,
+        client: client.cloned(),
+        caller: caller.cloned(),
+        caller_operation_id,
+    }
+}
 
 use super::{
     AgentAdmission, AgentDecisionWaker, AgentProfileId, AgentReadiness, AgentReadinessPreflight,
@@ -37,6 +56,7 @@ pub(super) struct DispatchToolContext<'a> {
     pub(super) pr_inventory: &'a SharedPrInventory,
     pub(super) decisions: &'a UserDecisionStore,
     pub(super) supervisor: &'a SharedSupervisorRuntime,
+    pub(super) launch_client: Option<&'a AgentLaunchClient>,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
@@ -313,6 +333,17 @@ pub(super) fn dispatch_agent_tool(
         }
         let caller = authenticated.caller;
         let store = runtime.dispatch_store().clone();
+        let launch_provenance = if matches!(
+            action,
+            DispatchToolAction::AgentPeers
+                | DispatchToolAction::SessionGet
+                | DispatchToolAction::AgentList
+                | DispatchToolAction::AgentGet
+        ) {
+            runtime.agent_launch_provenance(workspace)?
+        } else {
+            std::collections::BTreeMap::new()
+        };
         drop(runtime);
         if matches!(
             action,
@@ -321,7 +352,7 @@ pub(super) fn dispatch_agent_tool(
                 | DispatchToolAction::AgentMessages
                 | DispatchToolAction::AgentMessageAck
         ) {
-            let response = usagi_daemon::usecase::peer_messages::handle(
+            let mut response = usagi_daemon::usecase::peer_messages::handle(
                 &store,
                 workspace,
                 &caller,
@@ -329,6 +360,19 @@ pub(super) fn dispatch_agent_tool(
                 action,
                 payload,
             )?;
+            if let Some(peers) = response
+                .get_mut("agents")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for peer in peers {
+                    let id = peer
+                        .get("agent_id")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<AgentId>(value).ok());
+                    peer["launch_provenance"] =
+                        serde_json::json!(id.and_then(|id| launch_provenance.get(&id)));
+                }
+            }
             if action == DispatchToolAction::AgentMessage
                 && let Some(recipient) = response
                     .get("message")
@@ -617,6 +661,17 @@ pub(super) fn dispatch_agent_tool(
                     session_id,
                     &scope,
                     reserved_worker.as_ref(),
+                    launch_context(
+                        AgentLaunchSource::Mcp,
+                        if handoff {
+                            AgentLaunchEntry::AgentHandoff
+                        } else {
+                            AgentLaunchEntry::SessionDispatch
+                        },
+                        context.launch_client,
+                        Some(&dispatch_intent.caller),
+                        Some(parent_dispatch_run),
+                    ),
                 );
                 let admission = match admission {
                     Ok(admission) => admission,
@@ -704,7 +759,7 @@ pub(super) fn dispatch_agent_tool(
                         "caller did not create the target session",
                     ));
                 }
-                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id == Some(session_id)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?, "launch_provenance": launch_provenance.get(&item.agent_id)}))).collect::<Result<Vec<_>, ProtocolError>>()?;
                 let session_metadata = snapshot
                     .get("sessions")
                     .and_then(serde_json::Value::as_array)
@@ -750,7 +805,7 @@ pub(super) fn dispatch_agent_tool(
                     .map_err(|_| {
                         ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent status")
                     })?;
-                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id.is_some_and(|id| owned_sessions.contains(&id)) && session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?}))).collect::<Result<Vec<_>, ProtocolError>>()?;
+                let agents = store.agents_in_workspace(workspace).map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "dispatch state is unavailable"))?.into_iter().filter(|item| item.session_id.is_some_and(|id| owned_sessions.contains(&id)) && session.is_none_or(|id| item.session_id == Some(id)) && status.is_none_or(|value| item.status == value)).map(|item| Ok(serde_json::json!({"agent_id": item.agent_id, "session_id": item.session_id, "runtime": item.runtime, "model": item.model, "status": item.status, "task": task_for(item.agent_id)?, "launch_provenance": launch_provenance.get(&item.agent_id)}))).collect::<Result<Vec<_>, ProtocolError>>()?;
                 Ok((ResponseOutcome::Ok, serde_json::json!({"agents": agents})))
             }
             DispatchToolAction::AgentGet => {
@@ -784,7 +839,7 @@ pub(super) fn dispatch_agent_tool(
                     .collect::<Vec<_>>();
                 Ok((
                     ResponseOutcome::Ok,
-                    serde_json::json!({"agent": item, "runs": runs}),
+                    serde_json::json!({"agent": item, "runs": runs, "launch_provenance": launch_provenance.get(&item.agent_id)}),
                 ))
             }
             DispatchToolAction::AgentComplete | DispatchToolAction::AgentFail => {
@@ -2506,6 +2561,7 @@ pub(super) fn dispatch_dispatch(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
+    launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
@@ -2555,7 +2611,21 @@ pub(super) fn dispatch_dispatch(
     })();
     let result = session_id.and_then(|session_id| {
         let scope = bound.scope_resolver();
-        dispatch_agent_after_preflight(agent, &operation_id, &intent, session_id, &scope, None)
+        dispatch_agent_after_preflight(
+            agent,
+            &operation_id,
+            &intent,
+            session_id,
+            &scope,
+            None,
+            launch_context(
+                AgentLaunchSource::Unknown,
+                AgentLaunchEntry::LegacyDispatch,
+                Some(launch_client),
+                None,
+                None,
+            ),
+        )
     });
     match result {
         Ok(admission) => envelope(
@@ -2938,6 +3008,7 @@ pub(super) struct SessionDispatchContext<'a> {
     pub(super) verification: &'a SharedVerificationCache,
     pub(super) verification_clock: &'a SystemClock,
     pub(super) supervisor: &'a SharedSupervisorRuntime,
+    pub(super) launch_client: Option<&'a AgentLaunchClient>,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
@@ -3126,6 +3197,7 @@ pub(super) fn session_response_envelope(
                 SessionAction::Remove => Some("session.removed"),
                 SessionAction::Clean
                 | SessionAction::Sleep
+                | SessionAction::Agents
                 | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
@@ -3441,6 +3513,8 @@ fn admit_agent_dispatch_request(
     supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
     request: &AgentDispatchRequest,
+    resume_caller: Option<&usagi_daemon::usecase::agent_ipc::AuthenticatedDispatchCaller>,
+    launch_client: &AgentLaunchClient,
 ) -> Result<AgentDispatchAdmission, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let preflight = agent
@@ -3500,34 +3574,83 @@ fn admit_agent_dispatch_request(
         ),
         _ => None,
     };
-    let admission_result =
-        agent
-            .lock()
-            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-            .and_then(|mut owner| match request {
-                AgentDispatchRequest::Launch(operation_id, intent) => {
-                    owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
-                }
-                AgentDispatchRequest::Goal(operation_id, intent) => owner
-                    .launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref()),
-                AgentDispatchRequest::Resume(operation_id, target) => owner
-                    .resume_exact_after_readiness(operation_id, target, scope, preflight.as_ref()),
-                AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
-                    .resume_with_current_integration_after_readiness(
-                        operation_id,
-                        target,
-                        *revision,
-                        scope,
-                        preflight.as_ref(),
+    let (resume_source, resume_actor, resume_operation) = match resume_caller {
+        Some(authenticated) => (
+            AgentLaunchSource::Mcp,
+            Some(&authenticated.caller),
+            Some(authenticated.run_id),
+        ),
+        None => (AgentLaunchSource::Manual, None, None),
+    };
+    let admission_result = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|mut owner| match request {
+            AgentDispatchRequest::Launch(operation_id, intent) => owner
+                .launch_from_after_readiness(
+                    operation_id,
+                    intent,
+                    scope,
+                    preflight.as_ref(),
+                    launch_context(
+                        AgentLaunchSource::Manual,
+                        AgentLaunchEntry::Agent,
+                        Some(launch_client),
+                        None,
+                        None,
                     ),
-                AgentDispatchRequest::Inventory(_)
-                | AgentDispatchRequest::WorkspaceObservation(_)
-                | AgentDispatchRequest::Diagnose(_, _)
-                | AgentDispatchRequest::PlanRestart(_, _)
-                | AgentDispatchRequest::Restart(_, _, _, _) => {
-                    unreachable!("handled before readiness")
-                }
-            });
+                ),
+            AgentDispatchRequest::Goal(operation_id, intent) => owner
+                .launch_goal_from_after_readiness(
+                    operation_id,
+                    intent,
+                    scope,
+                    preflight.as_ref(),
+                    launch_context(
+                        AgentLaunchSource::Manual,
+                        AgentLaunchEntry::AgentGoal,
+                        Some(launch_client),
+                        None,
+                        None,
+                    ),
+                ),
+            AgentDispatchRequest::Resume(operation_id, target) => owner
+                .resume_from_after_readiness(
+                    operation_id,
+                    target,
+                    scope,
+                    preflight.as_ref(),
+                    launch_context(
+                        resume_source,
+                        AgentLaunchEntry::SessionResume,
+                        Some(launch_client),
+                        resume_actor,
+                        resume_operation,
+                    ),
+                ),
+            AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
+                .resume_with_current_integration_from_after_readiness(
+                    operation_id,
+                    target,
+                    *revision,
+                    scope,
+                    preflight.as_ref(),
+                    launch_context(
+                        resume_source,
+                        AgentLaunchEntry::IntegrationRepair,
+                        Some(launch_client),
+                        resume_actor,
+                        resume_operation,
+                    ),
+                ),
+            AgentDispatchRequest::Inventory(_)
+            | AgentDispatchRequest::WorkspaceObservation(_)
+            | AgentDispatchRequest::Diagnose(_, _)
+            | AgentDispatchRequest::PlanRestart(_, _)
+            | AgentDispatchRequest::Restart(_, _, _, _) => {
+                unreachable!("handled before readiness")
+            }
+        });
     let admission = match admission_result {
         Ok(admission) => admission,
         Err(error) => {
@@ -4185,6 +4308,7 @@ pub(super) fn dispatch_agent(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
+    launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
@@ -4247,6 +4371,7 @@ pub(super) fn dispatch_agent(
             hello,
         );
     };
+    let mut resume_caller = None;
     let ownership = caller_context.map(|caller_context| {
         use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
 
@@ -4276,6 +4401,7 @@ pub(super) fn dispatch_agent(
                 "agent caller does not belong to this workspace",
             ));
         }
+        resume_caller = Some(authenticated.clone());
         let requested_workspace = match &request {
             AgentDispatchRequest::Inventory(requested) => *requested,
             AgentDispatchRequest::Resume(_, target) => target.workspace_id,
@@ -4338,7 +4464,14 @@ pub(super) fn dispatch_agent(
     }
     // The first owner visit captures immutable facts, the provider command runs
     // after its guard is dropped, and the second visit repeats every fence.
-    let result = admit_agent_dispatch_request(agent, supervisor, &scope, &request);
+    let result = admit_agent_dispatch_request(
+        agent,
+        supervisor,
+        &scope,
+        &request,
+        resume_caller.as_ref(),
+        launch_client,
+    );
     match result {
         Ok(result) => {
             let supervisor_run_id = result.supervisor_run_id;
@@ -4406,6 +4539,7 @@ pub(super) fn dispatch_agent_after_preflight(
     session: SessionId,
     scope: &dyn SessionScopeResolver,
     planned_worker: Option<&usagi_core::domain::agent::Agent>,
+    context: AgentLaunchContext,
 ) -> Result<
     usagi_daemon::usecase::agent_ipc::AgentAdmission,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -4420,19 +4554,15 @@ pub(super) fn dispatch_agent_after_preflight(
     let mut agent = agent
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?;
-    match planned_worker {
-        Some(worker) => agent.dispatch_planned_after_readiness(
-            operation_id,
-            intent,
-            session,
-            scope,
-            preflight.as_ref(),
-            worker,
-        ),
-        None => {
-            agent.dispatch_after_readiness(operation_id, intent, session, scope, preflight.as_ref())
-        }
-    }
+    agent.dispatch_from_after_readiness(
+        operation_id,
+        intent,
+        session,
+        scope,
+        preflight.as_ref(),
+        planned_worker,
+        context,
+    )
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential

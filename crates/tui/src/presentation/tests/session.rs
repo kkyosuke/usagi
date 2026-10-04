@@ -1536,6 +1536,9 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
                 runtimes: initial_pairs
                     .iter()
                     .map(|(terminal, continuation)| AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
+                        launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             terminal.clone(),
@@ -1587,6 +1590,9 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
             agents: Ok(AgentInventory {
                 workspace_id: workspace,
                 runtimes: vec![AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(
                         AgentRuntimeId::new(),
                         root_open_terminal.clone(),

@@ -12,8 +12,9 @@ use usagi_core::{
             ProviderResumePhase, ProviderResumeReason,
         },
         id::{
-            AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef,
-            DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+            AgentContinuationRef, AgentId, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef,
+            DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId,
+            WorktreeId,
         },
     },
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
@@ -207,6 +208,9 @@ fn exact_resume_inventory_round_trips_only_public_resource_fences() {
     let inventory = AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: Some(OperationId::new()),
+            agent_id: Some(AgentId::new()),
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(runtime_id, terminal, Some(session)).unwrap(),
             continuation,
             state: AgentRuntimeInventoryState::Interrupted,
@@ -227,6 +231,16 @@ fn exact_resume_inventory_round_trips_only_public_resource_fences() {
         serde_json::from_str::<AgentInventory>(&encoded).unwrap(),
         inventory
     );
+    let mut legacy = serde_json::to_value(&inventory).unwrap();
+    let row = legacy["runtimes"][0].as_object_mut().unwrap();
+    row.remove("operation_id");
+    row.remove("agent_id");
+    let legacy: AgentInventory = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.runtimes[0].operation_id, None);
+    assert_eq!(legacy.runtimes[0].agent_id, None);
+    let legacy = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy["runtimes"][0].get("operation_id").is_none());
+    assert!(legacy["runtimes"][0].get("agent_id").is_none());
     for forbidden in [
         "native_session_id",
         "argv",

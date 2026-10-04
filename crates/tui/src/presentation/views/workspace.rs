@@ -616,8 +616,10 @@ fn project_garden_sessions(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomePaneTab {
     label: String,
+    base_label: String,
     selected: bool,
     pending: bool,
+    agent_terminal: Option<TerminalRef>,
 }
 
 /// Join daemon-observed row material with controller-owned ordering, PR and
@@ -943,8 +945,16 @@ impl HomeProjection {
             .iter()
             .map(|tab| HomePaneTab {
                 label: pane_tab_label(tab),
+                base_label: pane_tab_label(tab),
                 selected: pane_tab_selected(tab, pane.selected()),
                 pending: matches!(tab, PaneTab::Pending(_)),
+                agent_terminal: match tab {
+                    PaneTab::Live(pane) if pane.kind == PaneKind::Agent => {
+                        Some(pane.terminal.clone())
+                    }
+                    PaneTab::Interrupted(pane) => Some(pane.tab.last_terminal.clone()),
+                    _ => None,
+                },
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
@@ -1042,6 +1052,22 @@ impl HomeProjection {
         interrupted: Option<&BTreeMap<AgentContinuationRef, TerminalRef>>,
     ) {
         if let Some(inventory) = inventory {
+            for tab in &mut self.pane_tabs {
+                if let Some(terminal) = &tab.agent_terminal {
+                    let provenance = inventory
+                        .runtimes
+                        .iter()
+                        .find(|item| item.runtime.terminal.fences(terminal))
+                        .and_then(|item| item.launch_provenance.as_ref());
+                    tab.label = format!(
+                        "{} [{}]",
+                        tab.base_label,
+                        daemon_modal::origin_label(provenance)
+                    );
+                }
+            }
+        }
+        if let Some(inventory) = inventory {
             // Present runtimes per session, from the one observation that also
             // decides the Closeup tab strip.
             let mut present: BTreeMap<SessionId, Vec<(AgentRuntimeId, AgentPhase)>> =
@@ -1128,6 +1154,7 @@ impl HomeProjection {
                         scope,
                         runtime_id: short_id(&item.runtime.agent_runtime_id.to_string()),
                         state: item.state,
+                        origin: daemon_modal::origin_label(item.launch_provenance.as_ref()),
                     }
                 })
                 .collect()
@@ -4313,6 +4340,93 @@ mod tests {
     }
 
     #[test]
+    fn agent_tabs_show_their_creator_using_exact_runtime_fences() {
+        use crate::usecase::application::pane::LivePane;
+        use usagi_core::domain::agent::{
+            AgentLaunchEntry, AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource,
+        };
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mcp = runtime_ref(workspace, session);
+        let manual = runtime_ref(workspace, session);
+        let missing = runtime_ref(workspace, session);
+        let shell = runtime_ref(workspace, session);
+        let mut foreign = missing.clone();
+        foreign.terminal.daemon_generation = DaemonGeneration::new();
+        let pane = PaneState::with_live(
+            PaneSelection::None,
+            vec![
+                LivePane {
+                    terminal: mcp.terminal.clone(),
+                    kind: PaneKind::Agent,
+                },
+                LivePane {
+                    terminal: manual.terminal.clone(),
+                    kind: PaneKind::Agent,
+                },
+                LivePane {
+                    terminal: missing.terminal.clone(),
+                    kind: PaneKind::Agent,
+                },
+                LivePane {
+                    terminal: shell.terminal,
+                    kind: PaneKind::Terminal,
+                },
+            ],
+        );
+        let item = |runtime, source| {
+            let origin = AgentLaunchOrigin {
+                source,
+                entrypoint: AgentLaunchEntry::Agent,
+                caller: None,
+                caller_operation_id: None,
+                client: None,
+                workflow_id: None,
+                operation_id: OperationId::new(),
+                at: now(),
+            };
+            AgentRuntimeInventoryItem {
+                runtime,
+                operation_id: None,
+                agent_id: None,
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+                launch_provenance: Some(AgentLaunchProvenance {
+                    agent_id: None,
+                    created: Some(origin.clone()),
+                    launched: origin,
+                }),
+            }
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                item(mcp, AgentLaunchSource::Mcp),
+                item(manual, AgentLaunchSource::Manual),
+                item(foreign, AgentLaunchSource::Mcp),
+            ],
+            resumable: Vec::new(),
+        };
+        let state = AppState::home(workspace, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            &[projected_session(session, "worker", "/work")],
+        )
+        .with_pane(&pane);
+        assert_eq!(home.pane_tabs[0].label, "Agent");
+        let mut home = home.with_agent_inventory(Some(&inventory));
+        assert_eq!(home.pane_tabs[0].label, "Agent [MCP]");
+        assert_eq!(home.pane_tabs[1].label, "Agent [Manual]");
+        assert_eq!(home.pane_tabs[2].label, "Agent [Unknown]");
+        assert_eq!(home.pane_tabs[3].label, "Terminal");
+        home.apply_agent_inventory(Some(&inventory), None);
+        assert_eq!(home.pane_tabs[0].label, "Agent [MCP]");
+    }
+
+    #[test]
     fn session_favorites_project_a_star_without_changing_labels_or_hierarchy() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -4682,12 +4796,18 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: waiting,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: live,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
@@ -4733,6 +4853,9 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
+                launch_provenance: None,
                 runtime,
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Interrupted,
@@ -4785,6 +4908,9 @@ mod tests {
             runtimes: [live.clone(), history.clone(), dismissed, superseded.clone()]
                 .into_iter()
                 .map(|runtime| AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     state: if runtime == live {
                         AgentRuntimeInventoryState::Live
                     } else {
@@ -6360,6 +6486,9 @@ mod tests {
         let root = AgentRuntimeRef::new(AgentRuntimeId::new(), root_terminal, None)
             .expect("a root runtime owns a root terminal");
         let item = |runtime, state| AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime,
             continuation: AgentContinuationRef::new(),
             state,
@@ -6459,12 +6588,18 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: closed,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Exited,
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: live.clone(),
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
@@ -6517,6 +6652,9 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
+                launch_provenance: None,
                 runtime: closed,
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Reclaimed,
@@ -6994,6 +7132,9 @@ mod tests {
             (
                 runtime_id,
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(runtime_id, terminal, session_id).unwrap(),
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
@@ -7024,12 +7165,12 @@ mod tests {
         assert!(frame.contains("daemon build —"));
         assert!(frame.contains("16/16  saturated"));
         assert!(frame.contains(&format!(
-            "root  live  #{}",
+            "root  [Unknown]  live  #{}",
             short_id(&runtime_id.to_string())
         )));
-        assert!(frame.contains("known-session  live"));
+        assert!(frame.contains("known-session  [Unknown]  live"));
         assert!(frame.contains(&format!(
-            "session #{}  live",
+            "session #{}  [Unknown]  live",
             short_id(&missing_session.to_string())
         )));
         assert!(frame.contains("Lifecycle actions (non-force)"));
@@ -9017,8 +9158,10 @@ mod tests {
         let mut switch = HomeProjection::from_state(&state, "actual", &[projected]);
         switch.pane_tabs.push(super::HomePaneTab {
             label: "terminal".into(),
+            base_label: "terminal".into(),
             selected: true,
             pending: false,
+            agent_terminal: None,
         });
         switch = switch.with_terminal_view(Some(TerminalViewProjection {
             total_rows: 40,
@@ -9056,8 +9199,10 @@ mod tests {
             let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
             home.pane_tabs.push(super::HomePaneTab {
                 label: "agent".into(),
+                base_label: "agent".into(),
                 selected: true,
                 pending: true,
+                agent_terminal: None,
             });
             home.preview_phase = TargetPhase::Waiting;
             home.pane_error = Some("agent launch failed".into());
@@ -9092,8 +9237,10 @@ mod tests {
             let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
             home.pane_tabs.push(super::HomePaneTab {
                 label: "workflow".into(),
+                base_label: "workflow".into(),
                 selected: true,
                 pending: false,
+                agent_terminal: None,
             });
             home.workflow_selected = true;
             for height in [7, 8, 10, 11, 12, 20] {

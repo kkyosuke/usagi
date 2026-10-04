@@ -108,6 +108,82 @@ pub struct CallerRef {
     pub agent_id: AgentId,
 }
 
+/// Daemon-observed launch origin. Credentials and provider IDs never belong in
+/// this audit vocabulary; MCP callers are the authenticated public identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchSource {
+    /// The legacy IPC dispatch carries no authenticated initiating Agent.
+    Unknown,
+    Manual,
+    Mcp,
+    Workflow,
+    Daemon,
+}
+
+/// Trusted entry point which requested a runtime, rather than its prompt text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchEntry {
+    LegacyDispatch,
+    Agent,
+    AgentGoal,
+    SessionDispatch,
+    AgentHandoff,
+    SessionDelegateBrief,
+    SessionResume,
+    IntegrationRepair,
+    WorkflowStart,
+    DaemonRestart,
+}
+
+/// The cooperating IPC client reports its presentation surface. This is
+/// diagnostic context, never authority for the daemon's launch classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentClientSurface {
+    Tui,
+    Cli,
+    Mcp,
+}
+
+/// Connection evidence captured by the daemon when a launch is requested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchClient {
+    pub surface: Option<AgentClientSurface>,
+    pub client_id: String,
+    pub connection_id: String,
+    pub request_id: String,
+    /// Kernel-observed socket peer, rather than a PID supplied in the request.
+    pub peer_pid: u32,
+}
+
+/// Immutable audit event recorded before spawning an Agent process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchOrigin {
+    pub source: AgentLaunchSource,
+    pub entrypoint: AgentLaunchEntry,
+    pub caller: Option<CallerRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_operation_id: Option<OperationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<AgentLaunchClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<OperationId>,
+    pub operation_id: OperationId,
+    pub at: DateTime<Utc>,
+}
+
+/// Agent creation and this runtime launch are separate facts. Reusing or
+/// resuming a legacy Agent retains an unknown creation origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    pub created: Option<AgentLaunchOrigin>,
+    pub launched: AgentLaunchOrigin,
+}
+
 /// The worker side of a durable dispatch binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerRef {
@@ -451,11 +527,20 @@ pub enum AgentRuntimeInventoryState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRuntimeInventoryItem {
     pub runtime: AgentRuntimeRef,
+    /// Known durable operation, independent of optional legacy launch audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+    /// Exact Agent identity from a retained binding or launch audit, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     pub continuation: AgentContinuationRef,
     pub state: AgentRuntimeInventoryState,
     /// Exact source from which this runtime was resumed, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<AgentResumeSourceId>,
+    /// Missing on older records; absence must not be inferred as manual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_provenance: Option<AgentLaunchProvenance>,
 }
 
 /// Deterministic workspace-wide inventory for root and managed-session Agents.
