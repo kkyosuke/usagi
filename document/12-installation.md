@@ -86,6 +86,8 @@ usagi update -v
 ```
 
 更新後の CLI は次回起動から使われるため、起動中の TUI は終了して開き直す。
+Agent の MCP client も再接続し、新しい `usagi mcp` process から tool 一覧と guide を取得する。
+既存の MCP server は更新前のバイナリで動き続けるため、daemon の切り替えだけでは tool 一覧と guide は更新されない。
 実行中の Agent が daemon の切り替えを妨げる場合も binary の更新は成功し、切り替えの保留を表示する。
 複数プロジェクトを保持し、いずれかに実行中の端末や Agent が残る場合も切り替えを保留するため、更新後も各プロジェクトを
 開き直せる。保留中は既存 daemon と端末への接続を維持し、それらの終了後に `usagi daemon restart` で切り替える。

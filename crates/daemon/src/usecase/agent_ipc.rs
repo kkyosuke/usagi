@@ -857,26 +857,6 @@ impl AgentRuntime {
         }
     }
 
-    /// Returns the durable outcome of a previously admitted operation, so a
-    /// reconnecting client can replay the same accepted/final result.
-    #[must_use]
-    pub fn operation_outcome(
-        &self,
-        operation_id: &str,
-    ) -> Option<Result<AgentAdmission, ProtocolError>> {
-        self.operations
-            .get(operation_id)
-            .map(|operation| operation.outcome.clone())
-    }
-
-    /// Resolves the exact retained Agent runtime admitted by one durable
-    /// operation. This internal join remains available after the process-local
-    /// replay cache ages out. Durable hydration rejects duplicate ownership.
-    #[must_use]
-    pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
-        self.coordinator.runtime_for_operation(operation_id)
-    }
-
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch
