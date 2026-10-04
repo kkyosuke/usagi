@@ -18,14 +18,18 @@ def definition(source, name):
 
 
 source = Path(sys.argv[1]).read_text()
+released_pid_declaration = next(
+    line for line in source.splitlines() if line.startswith("readonly LEGACY_RELEASED_PID=")
+)
 functions = "\n".join(definition(source, name) for name in (
     "cleanup", "fail", "process_is_live", "read_lock_metadata", "read_lock_pid",
     "lock_owner_alive", "read_lock_ticket",
-    "wait_for_update_lock", "acquire_lock",
+    "wait_for_update_lock", "publish_legacy_pid", "wait_for_legacy_lock", "acquire_lock",
 ))
 functions += "\n" + definition(source, "read_lock_ticket").replace(
     "read_lock_ticket()", "observed_read_lock_ticket()", 1
 )
+traps = "\n".join(line for line in source.splitlines() if line.startswith("trap "))
 
 bootstrap = r"""
 set -euo pipefail
@@ -38,8 +42,7 @@ LOCK_HELD=0
 LOCK_ATTEMPTS=0
 STAGE_DIR=""
 SELECTOR_ACTIVE=0
-""" + functions + r"""
-trap cleanup EXIT HUP INT TERM
+""" + released_pid_declaration + "\n" + functions + "\n" + traps + r"""
 read_lock_ticket() {
     local value status=0
     value="$(observed_read_lock_ticket "$1")" || status=$?
@@ -53,6 +56,10 @@ read_lock_ticket() {
     return "$status"
 }
 kill() {
+    if [ "$1" = -0 ] && [ "${REUSED_PID:-}" = "$2" ]; then
+        # Model an unrelated long-lived process taking a released PID.
+        return 0
+    fi
     if [ -n "${LIVENESS_ERROR:-}" ]; then
         printf '%s\n' "$LIVENESS_ERROR" >&2
         return 1
@@ -63,6 +70,12 @@ mv() {
     local destination="" value
     for value in "$@"; do destination=$value; done
     case "${destination##*/}" in
+        pid)
+            if [ "${BREADCRUMB_BARRIER:-0}" -eq 1 ]; then
+                touch "$COORD/breadcrumb-ready-$ROLE"
+                while [ ! -e "$COORD/breadcrumb-$ROLE" ]; do command sleep 0.01; done
+            fi
+            ;;
         owner.*)
             command mv "$@"
             printf '%s\n' "$destination" > "$COORD/node-$ROLE"
@@ -85,6 +98,12 @@ rm() {
     local destination="" value
     for value in "$@"; do destination=$value; done
     case "${destination##*/}" in
+        pid)
+            if [ "${ADMISSION_BARRIER:-0}" -eq 1 ]; then
+                touch "$COORD/admission-ready-$ROLE"
+                while [ ! -e "$COORD/admission-$ROLE" ]; do command sleep 0.01; done
+            fi
+            ;;
         .retired.*)
             if [ "${RETIRE_BARRIER:-0}" -eq 1 ]; then
                 printf '%s\n' "$destination" > "$COORD/retired-node-$ROLE"
@@ -132,6 +151,14 @@ acquire_lock
 [ "$LOCK_HELD" -eq 1 ]
 mkdir "$COORD/critical" || fail "two live update lock holders"
 touch "$COORD/acquired-$ROLE"
+if [ "${PUBLISH_LEGACY_PID:-0}" -eq 1 ]; then
+    if [ "${LEGACY_PUBLISH_BARRIER:-0}" -eq 1 ]; then
+        touch "$COORD/legacy-publish-ready-$ROLE"
+        while [ ! -e "$COORD/legacy-publish-$ROLE" ]; do command sleep 0.01; done
+    fi
+    publish_legacy_pid
+    touch "$COORD/legacy-published-$ROLE"
+fi
 while [ ! -e "$COORD/release-$ROLE" ]; do command sleep 0.01; done
 rmdir "$COORD/critical"
 """
@@ -167,6 +194,15 @@ rm -rf -- "$1"
         child = subprocess.Popen([
             "/bin/bash", "-c", script, "legacy", str(lock), str(self.coord),
         ], start_new_session=True)
+        self.children.append(child)
+        return child
+
+    def launch_legacy_acquirer(self):
+        child = subprocess.Popen([
+            "/bin/bash", str(Path(__file__).parent / "fixtures/install-legacy-lock.sh"),
+            str(self.home), str(self.coord),
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
         self.children.append(child)
         return child
 
@@ -221,7 +257,7 @@ def ticket_publication_and_retirement_after_a_failed_read(root):
             if retire:
                 publishing.terminate()
                 case.signal("ticket-b")
-                case.finish(publishing)
+                case.finish(publishing, 128 + signal.SIGTERM)
                 assert not case.node("b").exists()
             else:
                 case.signal("ticket-b")
@@ -457,7 +493,7 @@ def legacy_and_empty_root(root):
         case.signal("release-a")
         case.finish(waiting)
         assert lock.is_dir(), "new lock root must remain stable"
-        # The root has no pid or participants after normal release.
+        # The stable root retains a recoverable, never-live marker after release.
         unpublished = lock / ".prepare.crashed-without-pid"
         unpublished.mkdir()
         for index, value in enumerate(("", "0\n", "invalid\n")):
@@ -465,11 +501,12 @@ def legacy_and_empty_root(root):
             role = f"b{index}"
             again = case.launch(role)
             case.await_marker(f"acquired-{role}")
+            assert not (lock / "pid").exists(), "active nodes must not publish a stale legacy PID"
             case.signal(f"release-{role}")
             case.finish(again)
         assert unpublished.is_dir(), "unpublished nodes are inert"
         assert lock.stat().st_mode & 0o777 == 0o700
-        assert not (lock / "pid").exists(), "legacy metadata must not invite stale root deletion"
+        assert (lock / "pid").read_text().strip() == "2147483647"
     finally:
         case.close()
 
@@ -501,6 +538,151 @@ def legacy_fixture_failure_cleanup_reaps_the_unreleased_child(root):
     assert reaped, "failure cleanup left the legacy fixture running"
 
 
+def new_legacy_new_updates_remain_usable(root):
+    case = Case(root, "new-legacy-new-updates")
+    try:
+        first = case.launch("new-before-downgrade")
+        case.await_marker("acquired-new-before-downgrade")
+        case.signal("release-new-before-downgrade")
+        case.finish(first)
+        lock = case.home / "update.lock"
+        assert lock.is_dir(), "new cleanup must preserve the stable root"
+        assert not list(lock.glob("owner.*"))
+        legacy = case.launch_legacy_acquirer()
+        case.await_marker("acquired-legacy")
+        assert (lock / "pid").read_text().strip() == str(legacy.pid)
+        waiting = case.launch("new-after-upgrade")
+        case.await_marker("waiting-new-after-upgrade")
+        assert not (case.coord / "acquired-new-after-upgrade").exists()
+        case.signal("release-legacy")
+        case.finish(legacy)
+        case.await_marker("acquired-new-after-upgrade")
+        case.signal("release-new-after-upgrade")
+        case.finish(waiting)
+        assert lock.is_dir() and not list(lock.glob("owner.*"))
+    finally:
+        case.close()
+
+
+def queued_or_cancelled_owners_do_not_enable_legacy_entry(root):
+    for cancel_waiter in (False, True):
+        case = Case(root, "legacy-during-" + ("cancelled" if cancel_waiter else "queued"))
+        try:
+            first = case.launch("a")
+            case.await_marker("acquired-a")
+            second = case.launch("b")
+            case.await_marker("waiting-b")
+            if cancel_waiter:
+                second.terminate()
+                case.finish(second, 128 + signal.SIGTERM)
+                holder, role = first, "a"
+            else:
+                case.signal("release-a")
+                case.finish(first)
+                case.await_marker("acquired-b")
+                holder, role = second, "b"
+            legacy = case.launch_legacy_acquirer()
+            assert "another usagi update" in case.finish(legacy, 1)
+            assert case.node(role).is_dir(), "legacy recovery deleted a live owner"
+            assert holder.poll() is None and (case.coord / "critical").is_dir()
+            case.signal(f"release-{role}")
+            case.finish(holder)
+        finally:
+            case.close()
+
+
+def late_publication_clears_a_breadcrumb_before_admission(root):
+    case = Case(root, "late-breadcrumb")
+    try:
+        first = case.launch("a", BREADCRUMB_BARRIER=1)
+        case.await_marker("acquired-a")
+        case.signal("release-a")
+        case.await_marker("breadcrumb-ready-a")
+        second = case.launch("b")
+        case.await_marker("waiting-b")
+        assert not (case.coord / "acquired-b").exists()
+        case.signal("breadcrumb-a")
+        case.finish(first)
+        case.await_marker("acquired-b")
+        legacy = case.launch_legacy_acquirer()
+        assert "another usagi update" in case.finish(legacy, 1)
+        assert case.node("b").is_dir()
+        case.signal("release-b")
+        case.finish(second)
+    finally:
+        case.close()
+
+
+def committed_holder_preserves_queued_or_cancelled_owners(root):
+    for cancel_waiter in (False, True):
+        case = Case(root, "committed-" + ("cancelled" if cancel_waiter else "queued"))
+        try:
+            first = case.launch("a", PUBLISH_LEGACY_PID=1, LEGACY_PUBLISH_BARRIER=1)
+            case.await_marker("legacy-publish-ready-a")
+            second = case.launch("b", PUBLISH_LEGACY_PID=1, ADMISSION_BARRIER=1)
+            case.await_marker("waiting-b")
+            case.signal("legacy-publish-a")
+            case.await_marker("legacy-published-a")
+            if cancel_waiter:
+                second.terminate()
+                case.finish(second, 128 + signal.SIGTERM)
+                assert (case.home / "update.lock/pid").read_text().strip() == str(first.pid)
+                holder, role = first, "a"
+            else:
+                case.signal("release-a")
+                case.finish(first)
+                # Pause immediately before B's final metadata removal, while
+                # its published owner is still queued and A has fully exited.
+                case.await_marker("admission-ready-b")
+                holder, role = second, "b"
+            legacy = case.launch_legacy_acquirer()
+            deadline = time.monotonic() + 15
+            while legacy.poll() is None and not (case.coord / "acquired-legacy").exists():
+                assert time.monotonic() < deadline, "legacy neither acquired nor timed out"
+                time.sleep(0.005)
+            if (case.coord / "acquired-legacy").exists():
+                case.signal("release-legacy")
+                case.finish(legacy)
+                raise AssertionError("legacy recovery deleted a live queued owner")
+            assert "another usagi update" in case.finish(legacy, 1)
+            assert case.node(role).is_dir() and holder.poll() is None
+            if not cancel_waiter:
+                case.signal("admission-b")
+                case.await_marker("legacy-published-b")
+            case.signal(f"release-{role}")
+            case.finish(holder)
+            assert (case.home / "update.lock/pid").read_text().strip() == "2147483647"
+            legacy = case.launch_legacy_acquirer()
+            case.await_marker("acquired-legacy")
+            case.signal("release-legacy")
+            case.finish(legacy)
+            assert not (case.home / "update.lock").exists()
+        finally:
+            case.close()
+
+
+def solo_cleanup_does_not_confuse_pid_reuse_with_an_update(root):
+    for restricted_probe in (False, True):
+        case = Case(root, "solo-pid-reuse-" + ("restricted" if restricted_probe else "normal"))
+        try:
+            first = case.launch("a", PUBLISH_LEGACY_PID=1)
+            case.await_marker("legacy-published-a")
+            case.signal("release-a")
+            case.finish(first)
+            options = {"LIVENESS_ERROR": "Operation not permitted"} if restricted_probe else {}
+            second = case.launch("b", FAST_WAIT=1, REUSED_PID=first.pid, **options)
+            case.await_marker("acquired-b")
+            case.signal("release-b")
+            case.finish(second)
+            legacy = case.launch_legacy_acquirer()
+            case.await_marker("acquired-legacy")
+            case.signal("release-legacy")
+            case.finish(legacy)
+            assert not (case.home / "update.lock").exists()
+        finally:
+            case.close()
+
+
 def invalid_ticket_and_timeout(root):
     for label, ticket, expected in (
         ("overflow", "2147483646", "ticket limit"),
@@ -526,7 +708,10 @@ def invalid_ticket_and_timeout(root):
 
 
 def symlinks_and_signal_cleanup(root):
-    for label in ("root-symlink", "node-symlink", "signal-while-waiting"):
+    for label, interrupted in (("root-symlink", None), ("node-symlink", None),
+                               ("hup-while-waiting", signal.SIGHUP),
+                               ("int-while-waiting", signal.SIGINT),
+                               ("term-while-waiting", signal.SIGTERM)):
         case = Case(root, label)
         try:
             outside = case.root / "unrelated"
@@ -547,11 +732,11 @@ def symlinks_and_signal_cleanup(root):
                     (live / "pid").write_text(str(os.getpid()) + "\n")
                     (live / "ticket").write_text("1\n")
             child = case.launch("a")
-            if label == "signal-while-waiting":
+            if interrupted is not None:
                 case.await_marker("waiting-a")
                 assert case.node("a").is_dir()
-                child.terminate()
-                case.finish(child)
+                child.send_signal(interrupted)
+                case.finish(child, 128 + interrupted)
                 assert live.is_dir() and not case.node("a").exists()
             else:
                 assert "symlink" in case.finish(child, 1)
@@ -611,6 +796,11 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
     root = Path(temporary)
     for test in (concurrent_stale_recovery, late_lower_pid, crash_in_choosing,
                  legacy_and_empty_root,
+                 new_legacy_new_updates_remain_usable,
+                 queued_or_cancelled_owners_do_not_enable_legacy_entry,
+                 late_publication_clears_a_breadcrumb_before_admission,
+                 committed_holder_preserves_queued_or_cancelled_owners,
+                 solo_cleanup_does_not_confuse_pid_reuse_with_an_update,
                  legacy_fixture_failure_cleanup_reaps_the_unreleased_child,
                  invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,

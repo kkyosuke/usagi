@@ -1207,12 +1207,16 @@ mod tests {
         assert_eq!(out, b"installed\n");
         assert_eq!(err, b"warning\n");
 
-        let status =
-            execute_self_update_with(&request, &mut Vec::new(), &mut Vec::new(), &mut |_, _| {
-                Ok(process_output(7, b"", b"failed\n"))
-            })
+        for code in [7_u8, 129, 130, 143] {
+            let status = execute_self_update_with(
+                &request,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut |_, _| Ok(process_output(i32::from(code), b"", b"failed\n")),
+            )
             .unwrap();
-        assert_eq!(status, std::process::ExitCode::from(7));
+            assert_eq!(status, std::process::ExitCode::from(code));
+        }
 
         let launch_error =
             execute_self_update_with(&request, &mut Vec::new(), &mut Vec::new(), &mut |_, _| {

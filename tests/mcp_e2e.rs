@@ -2554,7 +2554,7 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"fixture-worker","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"commits":["abc123"],"changed_files":["fixture.rs"],"verification":"fixture green"}}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"verification":"fixture green"}}}}' \
   | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
     );
@@ -2635,7 +2635,9 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["run_id"], admission["run_id"]);
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
-    assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    assert_eq!(message["result"]["commits"], json!([]));
+    assert_eq!(message["result"]["changed_files"], json!([]));
+    assert_eq!(message["result"]["verification"], "fixture green");
     let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
     let next_cursor = page["next_cursor"].as_u64().unwrap();
     let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));

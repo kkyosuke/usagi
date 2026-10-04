@@ -7,6 +7,7 @@ readonly USAGI_DIR="${USAGI_HOME:-$HOME/.usagi}"
 readonly BIN_DIR="$USAGI_DIR/bin"
 readonly TARGET="$BIN_DIR/usagi"
 readonly LOCK_DIR="$USAGI_DIR/update.lock"
+readonly LEGACY_RELEASED_PID=2147483647
 
 STAGE_DIR=""
 LOCK_HELD=0
@@ -16,7 +17,10 @@ SELECTOR_ACTIVE=0
 SELECT_VERSION=0
 
 cleanup() {
-    local status=$? retired
+    local status=$? retired node alone=1 legacy_owner
+    trap - EXIT
+    trap '' HUP INT TERM
+    set +e
     if [ "$SELECTOR_ACTIVE" -eq 1 ]; then
         printf '\033[?25h' > /dev/tty 2>/dev/null || true
         SELECTOR_ACTIVE=0
@@ -25,6 +29,26 @@ cleanup() {
         rm -rf -- "$STAGE_DIR"
     fi
     if [ -n "$LOCK_NODE" ] && [ -d "$LOCK_NODE" ]; then
+        # Publish compatibility metadata while the held node still fences late
+        # participants. A waiter must never overwrite another holder's PID.
+        if [ "$LOCK_HELD" -eq 1 ]; then
+            for node in "$LOCK_DIR"/owner.*; do
+                [ -d "$node" ] && [ "$node" != "$LOCK_NODE" ] || continue
+                [ ! -L "$node" ] || { alone=0; break; }
+                if lock_owner_alive "$node"; then alone=0; break; fi
+            done
+            if [ "$alone" -eq 1 ]; then
+                # This exceeds supported Linux/macOS PID limits. A completed
+                # update must not become busy when its actual PID is reused.
+                printf '%s\n' "$LEGACY_RELEASED_PID" > "$LOCK_NODE/legacy.pid"
+                publish_legacy_pid
+            elif legacy_owner="$(read_lock_pid "$LOCK_DIR")" &&
+                [ "$legacy_owner" = "$$" ]; then
+                # Retire our compatibility PID before handing off the node,
+                # so legacy recovery cannot delete a queued new participant.
+                rm -f -- "$LOCK_DIR/pid"
+            fi
+        fi
         # Retire atomically before removing metadata so another participant
         # cannot mistake a partially removed live node for a malformed owner.
         retired="$LOCK_DIR/.retired.${LOCK_NODE##*/}"
@@ -34,7 +58,10 @@ cleanup() {
     fi
     exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
     echo "Error: $*" >&2
@@ -269,15 +296,13 @@ wait_for_update_lock() {
     sleep 0.1
 }
 
-acquire_lock() {
-    local node candidate name maximum=0 ticket owner blocked legacy_owner owner_pid
-    LOCK_ATTEMPTS=0
-    mkdir -p -- "$USAGI_DIR"
-    chmod 700 "$USAGI_DIR"
-    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
-    mkdir -p -m 700 -- "$LOCK_DIR"
-    chmod 700 "$LOCK_DIR"
+publish_legacy_pid() {
+    mv -f -- "$LOCK_NODE/legacy.pid" "$LOCK_DIR/pid"
+}
 
+wait_for_legacy_lock() {
+    local legacy_owner
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
     # Respect an existing legacy owner. Empty or invalid legacy roots are
     # recovered without deleting the directory or any newer participant.
     while true; do
@@ -287,7 +312,7 @@ acquire_lock() {
             continue
         fi
         case "$legacy_owner" in
-            ''|0|*[!0-9]*) break ;;
+            ''|0|*[!0-9]*|"$LEGACY_RELEASED_PID") break ;;
         esac
         process_is_live "$legacy_owner" || break
         # Keep the observed PID until it exits: legacy cleanup removes pid
@@ -296,20 +321,33 @@ acquire_lock() {
             wait_for_update_lock
         done
     done
-    # Do not leave a dead legacy pid that invites an older installer to delete
-    # this stable root after new owners have published their nodes.
-    rm -f -- "$LOCK_DIR/pid"
+    # Only the admitted bakery owner removes metadata. An earlier observer
+    # must not delete a newer holder's PID after its cached owner has exited.
+}
+
+acquire_lock() {
+    local node candidate name maximum=0 ticket owner blocked owner_pid
+    LOCK_ATTEMPTS=0
+    mkdir -p -- "$USAGI_DIR"
+    chmod 700 "$USAGI_DIR"
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
+    mkdir -p -m 700 -- "$LOCK_DIR"
+    chmod 700 "$LOCK_DIR"
+
+    wait_for_legacy_lock
     [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
     mkdir -p -m 700 -- "$LOCK_DIR"
     chmod 700 "$LOCK_DIR"
 
     LOCK_NODE="$(mktemp -d "$LOCK_DIR/.prepare.$$.XXXXXXXX")"
     printf '%s\n' "$$" > "$LOCK_NODE/pid"
+    printf '%s\n' "$$" > "$LOCK_NODE/legacy.pid"
     : > "$LOCK_NODE/choosing"
     name=${LOCK_NODE##*/}
     candidate="$LOCK_DIR/owner.${name#.prepare.}"
     mv -- "$LOCK_NODE" "$candidate"
     LOCK_NODE=$candidate
+    wait_for_legacy_lock
 
     # Publish choosing before reading tickets. An earlier participant waits
     # for this doorway to close, including when concurrent tickets are equal.
@@ -375,6 +413,8 @@ acquire_lock() {
         [ "$blocked" -ne 0 ] || break
         wait_for_update_lock
     done
+    wait_for_legacy_lock
+    rm -f -- "$LOCK_DIR/pid"
     [ -d "$LOCK_NODE" ] || fail "update lock owner disappeared"
     LOCK_HELD=1
 }
@@ -488,6 +528,9 @@ OLD_VERSION="$(read_version "$TARGET")"
 
 # STAGE_DIR is below BIN_DIR, so this rename stays on one filesystem. POSIX
 # rename either replaces TARGET atomically or leaves its bytes and mode intact.
+# Publish the held PID before commit so even SIGKILL after a downgrade leaves
+# metadata that the older embedded installer can recover on its next update.
+publish_legacy_pid
 mv -f -- "$CANDIDATE" "$TARGET"
 
 # A managed self-update holds update.lock until the exact installed artifact
