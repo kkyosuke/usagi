@@ -26,7 +26,6 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
 use usagi_core::domain::settings::IconMode;
-use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::infrastructure::ipc::{AgentConcurrency, BuildIdentity, DaemonMetrics};
@@ -48,7 +47,6 @@ use crate::presentation::views::root_terminal_drawer::{
     self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
 };
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
-use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, WorkRunProjection};
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
@@ -381,8 +379,6 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
-    workflow_panel: Option<crate::usecase::application::workflow::WorkflowPanel>,
-    workflow_selected: bool,
     /// Workspace transition progress replaces only the right-pane content.
     /// The project bar and cached session sidebar remain stable around it.
     content_loading: Option<ContentLoading>,
@@ -444,10 +440,9 @@ pub struct HomeProjection {
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
     /// Frontmost Director mode drawer material, including its explicit route,
-    /// Workflow-specific Organization or Work Runs projection and optional
+    /// Director Organization projection and optional
     /// Console terminal.
     director_drawer: Option<DirectorDrawerProjection>,
-    work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
     root_terminal_drawer: Option<RootTerminalDrawerProjection>,
 }
@@ -744,8 +739,6 @@ impl HomeProjection {
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
-            workflow_panel: preview.and_then(|session| state.workflow_panel(session).cloned()),
-            workflow_selected: false,
             content_loading: None,
             // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
@@ -808,7 +801,6 @@ impl HomeProjection {
             director_drawer: state
                 .director_drawer_open()
                 .then(DirectorDrawerProjection::default),
-            work_runs: WorkRunProjection::default(),
             root_terminal_drawer: state
                 .root_terminal_drawer_open()
                 .then(RootTerminalDrawerProjection::default),
@@ -936,10 +928,6 @@ impl HomeProjection {
     /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
     #[must_use]
     pub fn with_pane(mut self, pane: &PaneState) -> Self {
-        self.workflow_selected = pane.tabs().iter().any(|tab| {
-            matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow)
-                && pane_tab_selected(tab, pane.selected())
-        });
         self.pane_tabs = pane
             .tabs()
             .iter()
@@ -1227,14 +1215,6 @@ impl HomeProjection {
         self
     }
 
-    /// Attach the shared daemon-owned Work Run observation without deriving a
-    /// second ordering, progress count, or freshness interpretation for Home.
-    #[must_use]
-    pub fn with_work_runs(mut self, runs: WorkRunProjection) -> Self {
-        self.work_runs = runs;
-        self
-    }
-
     /// Replace the open root-terminal drawer's presentation material without
     /// allowing runtime inventory to open the surface implicitly.
     #[must_use]
@@ -1292,18 +1272,14 @@ impl HomeProjection {
 
     /// Whether the right pane owns keyboard input on this frame.
     ///
-    /// Only a Closeup route whose selected tab is a live terminal or the
-    /// Workflow form, with no foreground surface over it, receives input. Every
-    /// other frame leaves the pane's scroll, tab, selection, and copy controls
-    /// inert, so the pane is drawn dim to say so: Switch (the sidebar
-    /// navigates), a pending or interrupted tab (no live terminal), an open
-    /// overlay or action modal, and an open Director drawer (its root
-    /// conversation owns input). The Workflow tab has no terminal, but its goal
-    /// and instruction composer take every key, so dimming it drew the one
-    /// surface the person is typing into as if it were inactive.
+    /// A Closeup route receives input when its selected tab is a live terminal
+    /// and no foreground surface covers it. The pane is drawn dim on other
+    /// frames: Switch routes input to the sidebar, pending or interrupted tabs
+    /// have no live terminal, and overlays, action modals, or conversation
+    /// drawers own input while open.
     fn right_pane_focused(&self) -> bool {
         self.mode == HomeMode::Closeup
-            && (self.terminal_view.is_some() || self.workflow_selected)
+            && self.terminal_view.is_some()
             && self.director_drawer.is_none()
             && self.root_terminal_drawer.is_none()
             && !self.closeup_action_visible
@@ -1397,17 +1373,14 @@ fn pane_tab_label(tab: &PaneTab) -> String {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Ready(ready) => match ready.kind {
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
             PaneKind::Terminal | PaneKind::Agent => "Pane".to_owned(),
         },
     }
@@ -2087,7 +2060,7 @@ fn mascot_metrics_with_icon_mode(
 /// Both numbers come from the daemon's own admission authority
 /// ([`DaemonMetrics::agent_concurrency`]); this view never counts runtimes itself
 /// and never restates the daemon's limit. It is the **Agent** pool, not the
-/// generic terminal capacity and not a supervisor run's concurrency.
+/// generic terminal capacity.
 ///
 /// `None` means the daemon reported nothing (a peer older than metrics schema 3),
 /// which is drawn as a dash so it cannot be read as an idle `0`.
@@ -2724,53 +2697,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
             width,
         );
     }
-    let Some(run) = home.work_runs.primary() else {
-        if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
-            return widgets::clip_to_width(
-                &Role::Warning
-                    .style()
-                    .bold()
-                    .paint("  ⚠ Work Run progress unavailable"),
-                width,
-            );
-        }
-        return header_spacer(width);
-    };
-    let progress = WorkRunProgress::from_run(run);
-    let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
-    let observation = if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
-        "⚠ Stale work"
-    } else if matches!(
-        run.state,
-        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
-    ) {
-        "⚠ Action needed"
-    } else {
-        "● Active work"
-    };
-    let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
-    widgets::clip_to_width(
-        &format!(
-            "  {observation} {label} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
-            work_run_state_label(run.state),
-            progress.succeeded_tasks,
-            progress.total_tasks,
-            progress.active_agents,
-            progress.max_agents,
-        ),
-        width,
-    )
-}
-
-const fn work_run_state_label(state: SupervisorRunState) -> &'static str {
-    match state {
-        SupervisorRunState::Planning => "Planning",
-        SupervisorRunState::Running | SupervisorRunState::Verifying => "Working",
-        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => "Waiting for you",
-        SupervisorRunState::Succeeded => "Completed",
-        SupervisorRunState::Failed => "Failed",
-        SupervisorRunState::Cancelled => "Cancelled",
-    }
+    header_spacer(width)
 }
 
 fn home_left_pane(
@@ -3463,7 +3390,6 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     let memo = session.memo.as_deref().filter(|memo| !memo.is_empty());
     let live_terminal = home.content_loading.is_none()
         && !home.pane_tabs.is_empty()
-        && !home.workflow_selected
         && home.terminal_view.is_some();
     let content_top = if home.content_loading.is_some() || home.pane_tabs.is_empty() {
         1
@@ -3482,7 +3408,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         )
     } else {
         // Keep room for the tab chrome, agent/detail and feedback rows, and
-        // footer. Empty, loading and Workflow views also retain their status.
+        // footer. Empty and loading views also retain their status.
         height.saturating_sub(7 + gap)
     };
     let preview = home_memo_preview(memo, width, home.icon_mode, budget);
@@ -3612,15 +3538,7 @@ fn home_right_pane_content(height: usize, width: usize, home: &HomeProjection) -
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
-    if home.workflow_selected {
-        let mut rows = vec![chrome[0].clone(), chrome[1].clone()];
-        rows.extend(super::workflow::render(
-            height.saturating_sub(4),
-            width,
-            &home.workflow_panel.clone().unwrap_or_default(),
-        ));
-        return with_footer_gap(rows, height, footer);
-    }
+
     if let Some(view) = &home.terminal_view {
         // A focused live terminal renders daemon PTY output below the tab strip,
         // sharing the legacy viewport window and surfacing terminal feedback in
@@ -3807,20 +3725,18 @@ mod tests {
         DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
         HomeProjection, IconMode, LEFT_WIDTH, MEBIBYTE, MEMORY_ICON, PR_ICON, PR_RESERVE_WIDTH,
         ProjectedSession, SESSION_CURSOR_ICON, SESSION_ROW_LINES, SIDECAR_GUTTER,
-        SidebarDiffColumns, TerminalViewProjection, UNREPORTED, WorkRunProjection, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
-        home_row_height, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, right_pane_tab_at, role_identity,
-        root_terminal_available_width, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
+        SidebarDiffColumns, TerminalViewProjection, UNREPORTED, Workspace, abnormal_daemon_speech,
+        create_skeleton_lines, feedback_label, format_memory, garden_click_at, garden_fits,
+        garden_frame, garden_tick, health_badge, health_reason_label, home_header_action_at,
+        home_header_layout, home_left_pane, home_notice_banner, home_row_height, home_row_lines_at,
+        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
+        pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
+        right_pane_tab_at, role_identity, root_terminal_available_width, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
         self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
-        WorkRunControlProjection,
     };
     use crate::presentation::views::root_terminal_drawer::{
         self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
@@ -3855,10 +3771,6 @@ mod tests {
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::role::RoleId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
-    use usagi_core::domain::supervisor::{
-        ArtifactContract, ExecutionPolicy, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
-        TaskId, TaskQuery, TaskState,
-    };
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
@@ -3868,119 +3780,6 @@ mod tests {
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::usecase::session_state::SessionStateCounts;
-
-    #[test]
-    #[allow(clippy::too_many_lines)] // One banner matrix keeps every Work Run priority and availability state comparable.
-    fn home_banner_surfaces_the_highest_priority_work_run() {
-        let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let mut run = SupervisorRunQuery {
-            supervisor_run_id: SupervisorRunId::new(),
-            state_revision: 1,
-            state: SupervisorRunState::Running,
-            terminal_at: None,
-            terminal_reason: None,
-            display_label: Some("Ship Work Run".into()),
-            root_agent_id: None,
-            policy: ExecutionPolicy::default(),
-            escalation: None,
-            tasks: Vec::new(),
-            provenance: Vec::new(),
-        };
-        run.tasks = [
-            TaskState::Succeeded,
-            TaskState::Dispatched,
-            TaskState::Running,
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, state)| TaskQuery {
-            task_id: TaskId::new(format!("task-{index}")).unwrap(),
-            parent_task_id: None,
-            dependencies: BTreeSet::new(),
-            instruction_digest: format!("digest-{index}"),
-            required_artifact_contract: ArtifactContract::default(),
-            attempt: 1,
-            generation: 1,
-            assigned_dispatch_run: None,
-            verification_attempt: 0,
-            verification_retry_at: None,
-            state,
-        })
-        .collect();
-        let home = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::fresh(vec![run.clone()]));
-        let banner = widgets::strip_ansi(&home_notice_banner(100, &home));
-        assert!(banner.contains("Active work"));
-        assert!(banner.contains("Working"));
-        assert!(banner.contains("1/3 tasks"));
-        assert!(banner.contains("2/4 agents"));
-        assert!(banner.contains("Director for details"));
-
-        let mut action_run = run.clone();
-        action_run.state = SupervisorRunState::WaitingForDecision;
-        let action_home = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::fresh(vec![action_run]));
-        assert!(
-            widgets::strip_ansi(&home_notice_banner(100, &action_home)).contains("Action needed")
-        );
-
-        let states = [
-            SupervisorRunState::Planning,
-            SupervisorRunState::Running,
-            SupervisorRunState::Verifying,
-            SupervisorRunState::WaitingForDecision,
-            SupervisorRunState::Escalated,
-            SupervisorRunState::Succeeded,
-            SupervisorRunState::Failed,
-            SupervisorRunState::Cancelled,
-        ];
-        assert_eq!(
-            states.map(work_run_state_label),
-            [
-                "Planning",
-                "Working",
-                "Working",
-                "Waiting for you",
-                "Waiting for you",
-                "Completed",
-                "Failed",
-                "Cancelled",
-            ]
-        );
-        let sorted = HomeProjection::from_state(&state, "work", &[]).with_work_runs(
-            WorkRunProjection::fresh(
-                states
-                    .into_iter()
-                    .map(|state| SupervisorRunQuery {
-                        supervisor_run_id: SupervisorRunId::new(),
-                        state,
-                        ..run.clone()
-                    })
-                    .collect(),
-            ),
-        );
-        assert!(matches!(
-            sorted.work_runs.runs()[0].state,
-            SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
-        ));
-        assert!(matches!(
-            sorted.work_runs.runs().last().unwrap().state,
-            SupervisorRunState::Succeeded | SupervisorRunState::Cancelled
-        ));
-
-        let cached_home = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::fresh(vec![run]).unavailable());
-        let cached_banner = widgets::strip_ansi(&home_notice_banner(100, &cached_home));
-        assert!(cached_banner.contains("Stale work"));
-        assert!(!cached_banner.contains("● Active work"));
-
-        let unavailable = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::default().unavailable());
-        assert!(
-            widgets::strip_ansi(&home_notice_banner(100, &unavailable))
-                .contains("Work Run progress unavailable")
-        );
-    }
 
     #[test]
     fn ordered_frame_projection_reuses_owned_session_git_and_terminal_components() {
@@ -4382,7 +4181,6 @@ mod tests {
                 caller: None,
                 caller_operation_id: None,
                 client: None,
-                workflow_id: None,
                 operation_id: OperationId::new(),
                 at: now(),
             };
@@ -5543,10 +5341,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
             focused: true,
-            goal_driven: false,
-            route: crate::usecase::application::controller::DirectorRoute::Console(
-                crate::usecase::application::controller::DirectorConsoleParent::Organization,
-            ),
+            route: crate::usecase::application::controller::DirectorRoute::Console,
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
@@ -5562,8 +5357,6 @@ mod tests {
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::default(),
-            work_runs: WorkRunProjection::default(),
-            work_run_control: WorkRunControlProjection::default(),
         };
 
         let closed_state = AppState::home(workspace, Vec::new());
@@ -9008,62 +8801,6 @@ mod tests {
     }
 
     #[test]
-    fn home_workflow_tab_projects_native_progress_and_composer() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let target = Target::Session(session);
-        let operation = OperationId::new();
-        let mut pane = PaneState::new(PaneSelection::Target(target));
-        let _ = reduce(
-            &mut pane,
-            PaneEvent::Request {
-                operation,
-                target,
-                kind: PaneKind::Workflow,
-            },
-        );
-        let _ = reduce(&mut pane, PaneEvent::Resolved { operation });
-        let _ = reduce(
-            &mut pane,
-            PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(operation))),
-        );
-        let state = AppState::home(workspace, vec![session]);
-        let mut home = HomeProjection::from_state(
-            &state,
-            "repo",
-            &[projected_session(session, "login", "/work/login")],
-        )
-        .with_pane(&pane);
-        assert!(home.workflow_selected);
-        // The form takes every key in Closeup, so it is drawn at full
-        // brightness there; Switch still dims the preview it navigates past.
-        home.mode = HomeMode::Switch;
-        assert!(!home.right_pane_focused());
-        home.mode = HomeMode::Closeup;
-        assert!(home.right_pane_focused());
-        let empty = super::home_right_pane(20, 80, &home);
-        assert_eq!(empty.len(), 20);
-        assert!(empty.iter().any(|row| strip(row).contains("Not started")));
-        let mut panel = crate::usecase::application::workflow::WorkflowPanel {
-            run: Some(crate::usecase::application::workflow::fixture_run(session)),
-            ..Default::default()
-        };
-        panel.draft.replace("Add regression tests");
-        home.workflow_panel = Some(panel);
-        let running = super::home_right_pane(20, 80, &home);
-        assert!(
-            running
-                .iter()
-                .any(|row| strip(row).contains("Current owner: codex"))
-        );
-        assert!(
-            running
-                .iter()
-                .any(|row| strip(row).contains("Add regression tests"))
-        );
-    }
-
-    #[test]
     fn home_right_pane_renders_live_terminal_viewport_and_feedback() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
@@ -9222,40 +8959,6 @@ mod tests {
                             "n: add memo"
                         }));
                     }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn switch_memo_preserves_workflow_status_with_or_without_a_memo() {
-        let session = SessionId::new();
-        let state = AppState::home(WorkspaceId::new(), vec![session]);
-        for memo in [None, Some(""), Some("次の作業")] {
-            let mut projected = projected_session(session, "session", "/work/session");
-            projected.memo = memo.map(str::to_owned);
-            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
-            home.pane_tabs.push(super::HomePaneTab {
-                label: "workflow".into(),
-                base_label: "workflow".into(),
-                selected: true,
-                pending: false,
-                agent_terminal: None,
-            });
-            home.workflow_selected = true;
-            for height in [7, 8, 10, 11, 12, 20] {
-                let rows = home_right_pane(height, 80, &home);
-                let text = strip(&rows.join("\n"));
-                assert_eq!(rows.len(), height);
-                assert!(text.contains("Not started"));
-                assert!(text.contains("Ctrl+S: start"));
-                assert!(text.ends_with("[Switch] preview pane"));
-                if height == 20 {
-                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
-                        "次の作業"
-                    } else {
-                        "n: add memo"
-                    }));
                 }
             }
         }
@@ -9478,12 +9181,7 @@ mod tests {
             target,
             kind: PaneKind::Terminal,
         };
-        for kind in [
-            PaneKind::Terminal,
-            PaneKind::Agent,
-            PaneKind::Diff,
-            PaneKind::Workflow,
-        ] {
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
             let mut item = pending;
             item.kind = kind;
             let tab = PaneTab::Pending(item);
@@ -9502,12 +9200,7 @@ mod tests {
             terminal_id: TerminalId::new(),
             daemon_generation: DaemonGeneration::new(),
         };
-        for kind in [
-            PaneKind::Terminal,
-            PaneKind::Agent,
-            PaneKind::Diff,
-            PaneKind::Workflow,
-        ] {
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
             assert!(
                 !pane_tab_label(&PaneTab::Live(
                     crate::usecase::application::pane::LivePane {

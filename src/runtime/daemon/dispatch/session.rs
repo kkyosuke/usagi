@@ -10,17 +10,13 @@
 //! for the four the daemon module's own recovery and tests call, `pub(super)`
 //! for what only the dispatch table calls, and private for the rest.
 
-use super::super::workflow;
 use super::{
-    AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore, ErrorLog,
+    AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore,
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
     SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, best_effort_merged_pr_head,
-    bind_delegated_supervisor_dispatch, clean_orphan_session_resources,
-    dispatch_agent_after_preflight, launch_context, perform_compensating_remove, perform_create,
-    perform_delegated_create, perform_remove_with_merged_head,
-    reconcile_pending_supervisor_promotions, record_session_lineage,
-    require_stable_supervisor_fence, require_supervisor_reservation_presence, scratchpad,
-    session_id_by_name, supervisor_error,
+    clean_orphan_session_resources, dispatch_agent_after_preflight, launch_context,
+    perform_compensating_remove, perform_create, perform_delegated_create,
+    perform_remove_with_merged_head, record_session_lineage, scratchpad, session_id_by_name,
 };
 
 pub(super) fn session_organization(
@@ -72,8 +68,6 @@ pub(super) fn dispatch_session_action(
     let teardown = context.teardown;
     let agent = context.agent;
     let pr_inventory = context.pr_inventory;
-    let verification = context.verification;
-    let verification_clock = context.verification_clock;
 
     let authenticated_caller = payload
         .get("_caller_credential")
@@ -135,10 +129,9 @@ pub(super) fn dispatch_session_action(
     {
         return Err(SessionRuntimeError::ScopeUnavailable);
     }
-    let (caller, caller_operation) = match authenticated_caller.as_ref() {
-        Some(authenticated) => (Some(&authenticated.caller), Some(authenticated.run_id)),
-        None => (None, None),
-    };
+    let caller = authenticated_caller
+        .as_ref()
+        .map(|authenticated| &authenticated.caller);
     let target_session = |name: &str| {
         let sessions = bound
             .sessions()
@@ -354,88 +347,6 @@ pub(super) fn dispatch_session_action(
                 "reported_to": delivery.delivered_to,
                 "delivered_to": "inbox"
             }))
-        }
-        // The workflow control plane is the human's, so these tools carry the
-        // same ownership rule as the rest: a caller reaches a session it
-        // created, never the one it is running inside. That is what keeps a
-        // workflow's own Agents from driving their own workflow.
-        SessionAction::WorkflowStatus
-        | SessionAction::WorkflowStart
-        | SessionAction::WorkflowInstruct
-        | SessionAction::WorkflowFinish => {
-            let name = string("name")?;
-            let session = target_session(name)?;
-            let workspace = bound_workspace()?;
-            if caller.is_some_and(|caller| caller.session_id == Some(session)) {
-                return Err(SessionRuntimeError::PermissionDenied);
-            }
-            // A start may name a backlog issue instead of spelling the goal.
-            // The issue body becomes the goal, and the run keeps the reference
-            // the PR will have to name.
-            let issue = workflow::requested_issue(payload)?;
-            let command = match action {
-                SessionAction::WorkflowStatus => None,
-                SessionAction::WorkflowStart => {
-                    let goal = match issue {
-                        Some(number) => {
-                            workflow::issue_goal(bound, number).map_err(workflow::refusal)?
-                        }
-                        None => string("goal")?.to_owned(),
-                    };
-                    let remembered = workflow::remembered_defaults(agent, workspace);
-                    Some(usagi_core::domain::workflow::WorkflowCommand::Start {
-                        goal,
-                        agents: workflow::requested_agents(payload, remembered.agents)
-                            .ok_or(SessionRuntimeError::InvalidRequest)?,
-                        revision_limit: workflow::requested_revision_limit(
-                            payload,
-                            remembered.revision_limit,
-                        )
-                        .ok_or(SessionRuntimeError::InvalidRequest)?,
-                    })
-                }
-                SessionAction::WorkflowFinish => {
-                    Some(usagi_core::domain::workflow::WorkflowCommand::Finish)
-                }
-                _ => Some(usagi_core::domain::workflow::WorkflowCommand::Instruct {
-                    recipient: workflow::requested_recipient(payload)
-                        .ok_or(SessionRuntimeError::InvalidRequest)?,
-                    body: string("body")?.to_owned(),
-                }),
-            };
-            let snapshot = match command {
-                None => workflow::advance(
-                    agent,
-                    pr_inventory,
-                    super::super::workflow::Verification {
-                        cache: verification,
-                        clock: verification_clock,
-                    },
-                    &bound.scope_resolver(),
-                    workspace,
-                    session,
-                    workflow::Attention::Requested,
-                ),
-                Some(command) => workflow::control_workflow(
-                    agent,
-                    bound,
-                    workspace,
-                    session,
-                    usagi_core::domain::id::OperationId::parse(operation_id)
-                        .map_err(|_| SessionRuntimeError::InvalidRequest)?,
-                    command,
-                    issue,
-                    launch_context(
-                        usagi_core::domain::agent::AgentLaunchSource::Workflow,
-                        usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
-                        context.launch_client,
-                        caller,
-                        caller_operation,
-                    ),
-                ),
-            }
-            .map_err(workflow::refusal)?;
-            reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {
             let (name, id) = if payload.get("name").is_some() {
@@ -912,7 +823,6 @@ fn delegate_brief(
     let bound = context.bound;
     let teardown = context.teardown;
     let agent = context.agent;
-    let supervisor = context.supervisor;
 
     let brief = required_payload_string(payload, "brief")?;
     let suffix = operation_id
@@ -930,7 +840,7 @@ fn delegate_brief(
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
     let credential = required_payload_string(payload, "_caller_credential")?;
-    let (workspace, parent_dispatch_run, caller, repository_root) = {
+    let (workspace, caller, repository_root, parent_dispatch_run) = {
         let agent_runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
         let authenticated = agent_runtime
             .mcp_dispatch_context(credential)
@@ -952,33 +862,11 @@ fn delegate_brief(
         sessions.authorize_create_or_reuse(&name, &authenticated.caller)?;
         (
             workspace,
-            authenticated.run_id,
             authenticated.caller,
             sessions.repository_root().to_path_buf(),
+            authenticated.run_id,
         )
     };
-    let supervision_at_preflight = supervisor
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .supervision_fence(parent_dispatch_run)
-        .map_err(|_| SessionRuntimeError::Storage)?;
-    if supervision_at_preflight.is_some() {
-        agent
-            .lock()
-            .map_err(|_| SessionRuntimeError::Storage)?
-            .require_same_dispatch_runtime(
-                workspace,
-                &caller,
-                &DispatchAgentIntent::New {
-                    runtime: runtime.clone(),
-                    model: model.clone(),
-                },
-            )
-            .map_err(|error| SessionRuntimeError::AgentFailure {
-                code: error.code,
-                message: error.message,
-            })?;
-    }
     let _delegation_permit = authorize_delegation(
         bound,
         agent,
@@ -1041,80 +929,7 @@ fn delegate_brief(
         sessions.retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
     }
     let selected = DispatchAgentIntent::New { runtime, model };
-    let reserved_worker = if supervision_at_preflight.is_some() {
-        let planned = agent
-            .lock()
-            .map_err(|_| {
-                usagi_core::infrastructure::ipc::ProtocolError::new(
-                    usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
-                    "agent owner is unavailable",
-                )
-            })
-            .and_then(|runtime| runtime.plan_dispatch_worker(workspace, id, &selected));
-        match planned {
-            Ok(worker) => Some(worker),
-            Err(error) => {
-                return Err(compensate_delegation(
-                    bound.sessions(),
-                    teardown,
-                    id,
-                    &name,
-                    operation_id,
-                    error,
-                ));
-            }
-        }
-    } else {
-        None
-    };
     let scope = bound.scope_resolver();
-    let reservation = (|| {
-        let runtime = supervisor.lock().map_err(|_| {
-            usagi_core::infrastructure::ipc::ProtocolError::new(
-                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
-                "supervisor runtime is unavailable",
-            )
-        })?;
-        let supervision_before_reservation = runtime
-            .supervision_fence(parent_dispatch_run)
-            .map_err(supervisor_error)?;
-        require_stable_supervisor_fence(
-            supervision_at_preflight.as_ref(),
-            supervision_before_reservation.as_ref(),
-        )?;
-        let reservation = if let Some(reserved_worker) = reserved_worker.as_ref() {
-            runtime
-                .reserve_delegated_dispatch_for_session(
-                    parent_dispatch_run,
-                    operation_id,
-                    prompt.clone(),
-                    id,
-                    reserved_worker,
-                    &name,
-                    chrono::Utc::now(),
-                )
-                .map_err(supervisor_error)?
-        } else {
-            None
-        };
-        let supervision_after_reservation = runtime
-            .supervision_fence(parent_dispatch_run)
-            .map_err(supervisor_error)?;
-        require_stable_supervisor_fence(
-            supervision_at_preflight.as_ref(),
-            supervision_after_reservation.as_ref(),
-        )?;
-        require_supervisor_reservation_presence(
-            supervision_at_preflight.as_ref(),
-            reservation.is_some(),
-        )?;
-        Ok(reservation)
-    })()
-    .map_err(|error| {
-        compensate_delegation(bound.sessions(), teardown, id, &name, operation_id, error)
-    })?;
-    let supervised = reservation.is_some();
-    let prompt = reservation.map_or(prompt, |reservation| reservation.prompt);
     let dispatch_intent = DispatchIntent {
         workspace,
         session_name: name.clone(),
@@ -1128,7 +943,7 @@ fn delegate_brief(
         &dispatch_intent,
         id,
         &scope,
-        reserved_worker.as_ref(),
+        None,
         launch_context(
             usagi_core::domain::agent::AgentLaunchSource::Mcp,
             usagi_core::domain::agent::AgentLaunchEntry::SessionDelegateBrief,
@@ -1140,16 +955,6 @@ fn delegate_brief(
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
-            if supervised
-                && error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
-                && let Ok(runtime) = supervisor.lock()
-                && let Err(failure) =
-                    runtime.fail_reserved_delegated_dispatch(operation_id, chrono::Utc::now())
-            {
-                ErrorLog::record(&format!(
-                    "delegated Supervisor failure reconciliation deferred: {failure}"
-                ));
-            }
             return Err(compensate_delegation(
                 bound.sessions(),
                 teardown,
@@ -1160,22 +965,7 @@ fn delegate_brief(
             ));
         }
     };
-    if supervised
-        && let Err(error) = bind_delegated_supervisor_dispatch(
-            supervisor,
-            &admission.operation_id,
-            &admission.runtime,
-        )
-    {
-        // The child Agent is already durable; exact-operation reconciliation
-        // finishes the promotion without asking the caller to retry the spawn.
-        ErrorLog::record(&format!("delegated Supervisor promotion deferred: {error}"));
-        if let Err(reconcile) = reconcile_pending_supervisor_promotions(supervisor, agent) {
-            ErrorLog::record(&format!(
-                "delegated Supervisor promotion reconciliation deferred: {reconcile}"
-            ));
-        }
-    }
+
     Ok(serde_json::json!({
         "name": name,
         "session_id": id,
@@ -1352,7 +1142,6 @@ fn named_agent_inventory(
 
 pub(super) enum AgentDispatchRequest {
     Launch(String, usagi_core::infrastructure::ipc::AgentLaunchIntent),
-    Goal(String, usagi_core::infrastructure::ipc::AgentGoalIntent),
     Inventory(WorkspaceId),
     WorkspaceObservation(WorkspaceId),
     Diagnose(

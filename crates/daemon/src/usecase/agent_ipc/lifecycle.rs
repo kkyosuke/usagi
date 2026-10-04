@@ -2,16 +2,16 @@
 
 use anyhow::Result;
 
+use super::dispatch_operation_id;
 use super::{
-    AgentAdmission, AgentCapability, AgentGoalIntent, AgentId, AgentIntegrationRevision,
-    AgentLaunchIntent, AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime,
-    AgentRuntimeRef, BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan,
-    DaemonRestartInterruptionError, ErrorCode, OperationId, ProtocolError,
-    ProviderCaptureProvenance, ProviderKind, ProviderResumeReason, SessionId, SessionScopeResolver,
-    autonomous_goal_prompt, dispatch_operation_id, expected_integration_revisions,
-    goal_semantic_key, holds_live_or_unknown_agent, is_resume_source_state,
-    map_dispatch_storage_error, map_runtime_error, provider_matches_profile,
-    repair_resume_semantic_key, resume_semantic_key, resume_target, semantic_key, validate_goal,
+    AgentAdmission, AgentCapability, AgentId, AgentIntegrationRevision, AgentLaunchIntent,
+    AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime, AgentRuntimeRef,
+    BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan, DaemonRestartInterruptionError,
+    ErrorCode, OperationId, ProtocolError, ProviderCaptureProvenance, ProviderKind,
+    ProviderResumeReason, SessionId, SessionScopeResolver, expected_integration_revisions,
+    holds_live_or_unknown_agent, is_resume_source_state, map_dispatch_storage_error,
+    map_runtime_error, provider_matches_profile, repair_resume_semantic_key, resume_semantic_key,
+    resume_target, semantic_key,
 };
 
 impl AgentRuntime {
@@ -28,37 +28,6 @@ impl AgentRuntime {
                 return Err(ProtocolError::new(
                     ErrorCode::IdempotencyConflict,
                     "operation id was reused with a different agent launch",
-                ));
-            }
-            return Ok(None);
-        }
-        OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent operation id must be a canonical operation identifier",
-            )
-        })?;
-        let profile = intent
-            .profile
-            .clone()
-            .unwrap_or_else(|| self.default_profile.clone());
-        self.readiness_ticket(profile).map(Some)
-    }
-
-    /// Goal-driven counterpart whose idempotency meaning includes the exact
-    /// objective while reusing the ordinary profile readiness proof.
-    pub fn prepare_goal_launch_readiness(
-        &self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
-        validate_goal(intent)?;
-        let semantic = goal_semantic_key(intent);
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing.conflicts_with(&semantic) {
-                return Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "operation id was reused with a different goal launch",
                 ));
             }
             return Ok(None);
@@ -166,41 +135,6 @@ impl AgentRuntime {
         let current = self.prepare_launch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
         self.launch_from(operation_id, intent, scope, context)
-    }
-
-    /// Admit an opt-in goal launch after the same owner-external readiness
-    /// check used by classic launches.
-    pub fn launch_goal_after_readiness(
-        &mut self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-        scope: &dyn SessionScopeResolver,
-        preflight: Option<&AgentReadinessPreflight>,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        self.launch_goal_from_after_readiness(
-            operation_id,
-            intent,
-            scope,
-            preflight,
-            super::AgentLaunchContext::new(
-                usagi_core::domain::agent::AgentLaunchSource::Manual,
-                usagi_core::domain::agent::AgentLaunchEntry::AgentGoal,
-            ),
-        )
-    }
-
-    /// Launch with connection evidence captured at the daemon boundary.
-    pub fn launch_goal_from_after_readiness(
-        &mut self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-        scope: &dyn SessionScopeResolver,
-        preflight: Option<&AgentReadinessPreflight>,
-        context: super::AgentLaunchContext,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        let current = self.prepare_goal_launch_readiness(operation_id, intent)?;
-        self.validate_readiness(preflight, current.as_ref())?;
-        self.launch_goal_from(operation_id, intent, scope, context)
     }
 
     /// Exact-resume counterpart of [`Self::launch_after_readiness`].
@@ -319,69 +253,7 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit(operation_id, intent, scope, None, &semantic_key, context);
-        self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
-        outcome
-    }
-
-    /// Launch one workspace-root Director with the autonomous work contract as
-    /// its initial prompt. This is a separate entry point so classic launch
-    /// cannot accidentally inherit goal semantics.
-    pub fn launch_goal(
-        &mut self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-        scope: &dyn SessionScopeResolver,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        self.launch_goal_from(
-            operation_id,
-            intent,
-            scope,
-            super::AgentLaunchContext::new(
-                usagi_core::domain::agent::AgentLaunchSource::Manual,
-                usagi_core::domain::agent::AgentLaunchEntry::AgentGoal,
-            ),
-        )
-    }
-
-    /// Launch with connection evidence captured at the daemon boundary.
-    pub fn launch_goal_from(
-        &mut self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-        scope: &dyn SessionScopeResolver,
-        context: super::AgentLaunchContext,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        validate_goal(intent)?;
-        let semantic_key = goal_semantic_key(intent);
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing.conflicts_with(&semantic_key) {
-                return Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "operation id was reused with a different goal launch",
-                ));
-            }
-            return existing.outcome.clone();
-        }
-        let launch = AgentLaunchIntent {
-            workspace: intent.workspace,
-            session: None,
-            profile: intent.profile.clone(),
-        };
-        let runtime = intent
-            .profile
-            .as_ref()
-            .unwrap_or(&self.default_profile)
-            .as_str();
-        let prompt = autonomous_goal_prompt(&intent.goal, runtime);
-        let outcome = self.admit(
-            operation_id,
-            &launch,
-            scope,
-            Some(&prompt),
-            &semantic_key,
-            context,
-        );
+        let outcome = self.admit(operation_id, intent, scope, &semantic_key, context);
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }

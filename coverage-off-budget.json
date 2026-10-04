@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 565,
+  "total": 537,
   "owners": {
     "core": 16,
-    "daemon": 379,
+    "daemon": 357,
     "root-cli": 41,
-    "tui": 129
+    "tui": 123
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -39,7 +39,6 @@
     "crates/tui/src/presentation/tests/restore.rs": 1,
     "crates/tui/src/presentation/tests/session.rs": 1,
     "crates/tui/src/presentation/tests/terminal.rs": 1,
-    "crates/tui/src/presentation/tests/work_run.rs": 1,
     "crates/tui/src/presentation/tests/workspace_rows.rs": 1,
     "crates/tui/src/presentation/views/cleanup_modal.rs": 1,
     "crates/tui/src/presentation/views/create_session_error_modal.rs": 1,
@@ -59,7 +58,6 @@
     "crates/tui/src/usecase/application/controller/tests/pointer.rs": 1,
     "crates/tui/src/usecase/application/controller/tests/pr.rs": 1,
     "crates/tui/src/usecase/application/controller/tests/session.rs": 1,
-    "crates/tui/src/usecase/application/controller/tests/workflow.rs": 1,
     "crates/tui/src/usecase/application/daemon_backend.rs": 1,
     "crates/tui/src/usecase/application/pane.rs": 1,
     "crates/tui/src/usecase/application/pr.rs": 1,
@@ -74,13 +72,13 @@
     "src/runtime/clean.rs": 19,
     "src/runtime/cli.rs": 10,
     "src/runtime/clipboard.rs": 1,
-    "src/runtime/daemon.rs": 87,
-    "src/runtime/daemon/agent.rs": 20,
+    "src/runtime/daemon.rs": 84,
+    "src/runtime/daemon/agent.rs": 18,
     "src/runtime/daemon/agent_provisioning.rs": 25,
     "src/runtime/daemon/agent_provisioning/agy.rs": 2,
     "src/runtime/daemon/agent_provisioning/agy/security.rs": 1,
     "src/runtime/daemon/broker.rs": 12,
-    "src/runtime/daemon/dispatch.rs": 41,
+    "src/runtime/daemon/dispatch.rs": 24,
     "src/runtime/daemon/dispatch/session.rs": 8,
     "src/runtime/daemon/instance_lock.rs": 13,
     "src/runtime/daemon/ipc_accept.rs": 19,
@@ -97,8 +95,7 @@
     "src/runtime/platform_child_reaper.rs": 3,
     "src/runtime/systemd.rs": 1,
     "src/runtime/terminal_pump.rs": 1,
-    "src/runtime/tui.rs": 64,
-    "src/runtime/tui/workflow.rs": 3,
+    "src/runtime/tui.rs": 63,
     "src/tui_input.rs": 4,
     "src/tui_input/sgr_mouse.rs": 1
   }

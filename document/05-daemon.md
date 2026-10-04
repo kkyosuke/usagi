@@ -20,15 +20,12 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
 - [background worker の待ち方](#background-worker-の待ち方)
-- [workflow lane](#workflow-lane)
 - [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
 - [agent ownership](#agent-ownership)
   - [Agent の作成元と起動記録](#agent-の作成元と起動記録)
 - [final retention と aggregate GC](#final-retention-と-aggregate-gc)
-- [supervisor scheduler](#supervisor-scheduler)
-- [supervisor policy and verification](#supervisor-policy-and-verification)
 - [metrics observer](#metrics-observer)
 - [cross-process generation authority](#cross-process-generation-authority)
 - [owner-generation runtime shard と global resource allocator](#owner-generation-runtime-shard-と-global-resource-allocator)
@@ -36,7 +33,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 
 ## この文書の読み方
 
-前半は session と daemon process の lifecycle・永続化、中盤は background worker、terminal、Agent、supervisor の所有権、
+前半は session と daemon process の lifecycle・永続化、中盤は background worker、terminal、Agent の所有権、
 後半は metrics と cross-process generation の handoff・回収契約を扱う。IPC の wire、request payload、client retry を調べる
 場合は [4. daemon IPC](04-ipc.md) を先に参照し、本書では daemon が保持する state と effect の境界を確認する。
 
@@ -472,8 +469,7 @@ error で正当な daemon を終了させないためであり、終了根拠に
 data directory が消えている場合は record を読まずに（＝tree に触れずに）喪失を判定する。
 
 喪失後の cleanup は通常の retirement path を通る。ただし data directory がすでに消えている場合、endpoint retirement と
-record clear は **no-op として成功**する（解放した tree を lock 取得のために再作成しない）。client が 0 でも live PTY と
-supervisor schedule を所有するため、idle timeout は終了根拠として採用しない（[13. daemon singleton と session
+record clear は **no-op として成功**する（解放した tree を lock 取得のために再作成しない）。client が 0 でも live PTY を所有するため、idle timeout は終了根拠として採用しない（[13. daemon singleton と session
 teardown](proposals/13-daemon-singleton-and-teardown.md) はこの契約を採用した設計判断の履歴であり、現行契約の正本は本節）。
 
 IPC endpoint は `serve` が lock を取得して exact process-owner record を登録した後に、明示的な ready hook からだけ公開する。
@@ -856,7 +852,6 @@ N 回の操作で累積 I/O が O(N²) になり、週単位で動かす daemon 
 | dispatch registry | `dispatch.json` と `dispatch-workspaces.json` は各 2 MiB。終了済み run は 256 件、365 日を超えた履歴を古い順に破棄し、byte pressure でも最新 32 件を replay 用に残す | `Preparing` / `Running` の run と、その binding・admission。Agent record は履歴ではなく relaunch が再利用する identity なので対象外 |
 | caller inbox | 1 caller あたり 4 MiB / 4096 件、ACK 済み 256 件、履歴 365 日。query page は最大 100 件 | 未 ACK の報告。count / byte 上限を保護対象だけで満たす append は既存報告を落とさず capacity error で拒否する |
 | `user-decisions.json` | 終了済み 256 件。未応答は workspace あたり 128 件、daemon 全体で 256 件まで | pending の decision と、未 ACK の outbox event が参照する record |
-| `supervisor-runs/` | 終了済み run 128 件。各 run の journal は 4,096 event で compact し最新 2,048 event と offset index を保持（snapshot / journal / index / checkpoint をまとめて削除） | `Planning` / `Running` / `WaitingForDecision` / `Verifying` の run。compact 済み event ID は固定長 tombstone で再適用を拒否 |
 
 未応答 decision は落とせない（応答を待っている呼び出し元が居る）ため、workspace または daemon 全体の上限に達した
 場合は**既存を捨てずに新しい要求を拒否する**。daemon 全体の上限は、retire と adopt を繰り返した workspace ごとの
@@ -953,7 +948,7 @@ generation を含むすべての daemon がその workspace を「別 daemon が
 | 条件 | 理由 |
 |---|---|
 | handoff が durable になっている | `draining` という role だけでは足りない。[admission fence](#admission-fence) の barrier は registry commit の**前**に `draining` へ移り、commit しなければ `active` へ戻る。その窓で返すと、`active` に戻った process が自分の起動 workspace を失う |
-| 自分の仕事が無い | 遊休 sweep と同じ fail-closed な観測。稼働中の generic terminal・Agent runtime・supervisor・未完了 lifecycle work のいずれかがあれば、あるいは観測できなければ保持する |
+| 自分の仕事が無い | 遊休 sweep と同じ fail-closed な観測。稼働中の generic terminal・Agent runtime・未完了 lifecycle work のいずれかがあれば、あるいは観測できなければ保持する |
 | 単一インスタンス lock が同じ descriptor を共有していない | `$USAGI_HOME` が workspace の配下にあると 2 つの guard は同じ inode になる（[2 段 fence](#単一-daemon-の-2-段-fence)）。fence を返すと単一インスタンス lock も一緒に落ちるので、この場合は process 寿命まで保持する |
 
 遊休 sweep の「registry の外に保持者が居ない」は条件にしない。起動 workspace の tenant handle は process 寿命で
@@ -1275,8 +1270,6 @@ daemon は想定外の失敗を検出した境界で `<data-dir>/logs/error-YYYY
   最外周で通常の process error に変換して終了する。thread 名を残すのは、配布 binary の backtrace が frame 名を持たない
   場合でも「どの worker が落ちたか」を残すためである（長命 worker はすべて名前付きで spawn する）。配布 profile が
   symbol table を残す理由は [6. 開発規約](06-conventions.md#リリース)を参照する。
-- 周期的な Supervisor recovery は lane ごとに同じ safe error が続く間は最初の 1 件だけを記録する。成功を一度観測した後の
-  再発、または error 内容が変化した場合は新しい transition として記録する。
 - daemon は lock の停止と client worker の枯渇を、接続の拒否が始まる前に記録する（下表）。
 
 | 観測 | 記録する時点 | 記録しない時点 |
@@ -1337,7 +1330,6 @@ tick の長さに依存しない。
 | session teardown | 1 s | finalization に失敗している間だけ teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
 | decision maintenance | 250 ms | 期限切れの decision が `Pending` として読める残り時間 |
 | retention GC | 30 s | idle 時に age budget と最小可視 TTL を反映するまでの遅れ（[final retention と aggregate GC](#final-retention-と-aggregate-gc)） |
-| workflow lane | 10 s | workflow の進行（peer 証拠の反映・queued 指示の再配送・PR 検証）が次に進むまでの遅れ（[workflow lane](#workflow-lane)） |
 
 IPC accept は tick を持たない。listener の readiness descriptor と、shutdown 要求を写した descriptor を
 `poll(2)` で同時に待つため、接続が来るまで wakeup は発生しない。lifecycle owner も同じく park し、
@@ -1352,101 +1344,6 @@ shutdown は 1 秒以内に観測される。lifecycle owner は `daemon.lock` �
 stale recovery も singleton が生きているので owner を回収できない。1 秒の backstop はこの状態を防ぐ。
 この読み直しは idle の間も 1 秒に 1 回の timer wakeup として残るため、上の「意図した tick の回数」には
 この 2 つの待ち手の backstop も含まれる。
-
-## workflow lane
-
-session workflow の進行を所有するのはこの常駐 lane である。client の要求は進行の条件ではない。
-
-lane は tick ごとに保存済み workflow record を列挙し、各 run について次を 1 回行う。
-
-| 段階 | 内容 |
-|---|---|
-| reconcile | peer message journal を cursor から読み、証拠に一致する phase / review だけを進める |
-| 担当の生存確認 | 担当 Agent が停止していれば判断待ちへ落とし、復帰を確認できれば元の phase へ戻す |
-| 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
-| 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・レビュー済み base と実 PR diff の一致・承認 HEAD に対する PR の checks 成功を要求する） |
-
-次の record は読み飛ばす。読み飛ばした record は書き換えないため、1 件あたりのコストは record を
-1 回読むことだけになる。
-
-| 読み飛ばす record | 理由 |
-|---|---|
-| worktree を解決できない session（削除済み、この daemon が保持していない workspace） | 進める対象が無い |
-| Agent を束ねられないまま開始に失敗した intent（`run` が無い） | 人間の再試行を待つ |
-
-`PR ready` に到達した run も他と同じく sweep する。そこから改めてレビューを依頼でき、そこで出した指示も
-配送先へ届ける必要があるためである。ただし**無人の sweep は `PR ready` の PR を再検証しない**。完了した
-PR を tick ごとに GitHub へ照会し続け、ブランチが動いた瞬間に工程を降格させてしまうからである。画面を
-開いている人の request は従来どおり再検証し、古くなった承認を無効化する。
-
-検証のうち **GitHub への `gh pr view` だけは、承認済み base / HEAD の組ごとにキャッシュする**。lane の tick と
-画面を開いている人の polling は同じ run を繰り返し検証するため、キャッシュが無いと同じ答えを何度も
-GitHub に聞くことになる。キャッシュの窓は 15 秒から始まり、答えが「まだ待ち」（`Waiting …`）の間は
-倍々に伸びて 5 分で頭打ちになる。承認済み base / HEAD か対象 PR が変わったときは hit せず、run が検証対象の phase
-（`Checking PR` / `PR ready`）から外れたときに破棄する。無人の sweep が `PR ready` を
-再検証しないのは検証を省くだけで、キャッシュは破棄しない（破棄すると lane の tick が
-実質の間隔になり、窓の意味が無くなる）。保持する session 数にも上限を設ける。窓の中でも **worktree の HEAD 一致と未コミット変更なしの判定はローカルで毎回行う**。
-PR の観測前後に両方を確認し、観測中に未コミット変更が生じた場合も `PR ready` に進めない。
-未追跡 file は `--untracked-files=all` で列挙し、利用者の `status.showUntrackedFiles` 設定に左右されない。
-PR の `baseRefOid` と承認済み HEAD の merge-base が、レビューに記録された base SHA と一致することも要求する。
-merge-base の計算は local replace ref・legacy graft file・local shallow 境界を無効にし、GitHub が保持する
-元の commit graph を検証する。shallow clone で必要な object が無ければ、部分的な graph から承認を推測せず保留する。
-ベースブランチの先端が進んでも merge-base が同じなら承認は有効だが、空の範囲や別の PR diff に対する承認は
-`PR ready` の証拠にならない。base の欠落・不正な SHA・ローカルに無い Git object・複数の merge-base は保留し、
-diff の変更は再レビューを要求する。merged PR でも保存済みの base と head を検証する。
-open PR は checks 成功に加えて GitHub の `mergeStateStatus` が `CLEAN` または `HAS_HOOKS` であることを要求する。
-必須 check の未出現などで `BLOCKED`、基点更新待ちの `BEHIND`、不明・欠落を含むその他の状態は待機とし、
-既に出現した checks だけの成功で `PR ready` に進めない。merged PR は merge state の再確定を要求しない。
-安価であり、かつ検証の TOCTOU fence でもあるためである。キャッシュは daemon process の生存期間だけ
-保持し、lane と client 要求で 1 つを共有する。
-
-1 件の失敗は他の run の進行を止めない。daemon の停止要求は sweep の途中でも観測し、残りは次の起動へ残す。
-
-進めた run が**人を待つ状態**になったとき、lane は desktop 通知を 1 回出す。対象は次の 2 つだけで、
-Agent の手番は通知しない。
-
-| 状態 | 通知 |
-|---|---|
-| 判断待ち | `usagi: workflow needs you` と、goal の 1 行目・待ち理由 |
-| PR 準備完了 | `usagi: PR ready` と、goal の 1 行目・検証した PR の URL |
-
-record は「どの状態を通知済みか」を保持するため、同じ状態に留まっている間は再通知しない。復帰して
-再び同じ状態になった場合は改めて通知する。通知すべき状態が変わらない tick では record を書き換えない。
-通知は best-effort で、通知にも記録にも失敗した場合はその tick を諦め、run の進行と他の run の sweep は
-止めない。
-TUI の起動有無に依存しないのは、daemon が利用者と同じ権限で動いているためである。
-
-Workflow request のうち snapshot はこの pass をそのまま通り、control（開始・指示）は reconcile の直後に
-受理して PR 検証を挟まない。GitHub が一時的に読めないことが指示の拒否理由にならないようにするためで、
-検証は次の sweep か次の snapshot が行う。
-
-どの request も reconcile は 1 回だけ通る。control は自分が適用した記録変更を保存済み projection として
-返し、journal を二重に replay しない。
-
-開始時の前状態は admission と同じ store lock 内で取得する。readiness が lock の外で失敗した場合の rollback と
-error 保存は、その Start ID が今も未起動・未終了の intent である場合だけ適用する。待っている間に終了・再開始・
-起動された run を、古い開始要求の完了で上書きしない。外部 readiness から戻った launch も現行 Start を確認する。
-現行 Start の最終確認・Agent 起動・run の binding は同じ owner lock 内で行い、control admission と開始失敗の
-保存もその lock で直列化する。Finish が最終確認と binding の間に割り込んで、記録されない Agent を起動しない。
-
-Start / Instruct / Finish は同じ operation ID を別の command に使えない。終了済み要求の拒否情報は最大 5 件の
-表示履歴とは別に、record の固定サイズの `retired_through`（UUIDv7 の最大終了済み command ID）へ保存する。
-終了時には Start・全 Instruct・Finish ID を取り込み、履歴の件数制限・容量削減・daemon restart でも失わない。
-次の新しい command は UUIDv7 の全体順序でこの値より大きい ID を使う必要があり、境界以下の ID は拒否する。
-異なる producer が同じ millisecond に生成した ID や時計が戻った producer の ID は、新しく発行したものでも
-境界以下になり得る。発行時刻だけでは受理を保証せず、その場合も `idempotency_conflict` を返す。
-現行 Finish の同じ ID の再送は成功のまま応答し、現行 Start / Instruct の再送は元の内容との一致を要求する。
-旧 record の稼働中 run に受理済みの Instruct ID が境界以下でも、同じ宛先・本文の再送は成功し、別の内容や
-command への使い回しは拒否する。この扱いで境界以下の新しい指示を受理することはない。
-旧 version 1 record は残っている終了 ID と、終了済み intent に残る Start / Instruct ID の最大値から拒否境界を
-引き継ぎ、保存時に version 2 へ移行する。
-旧 daemon は version 2 を拒否するため、新 field を消して拒否境界を失うことはない。
-更新前に既に削除された ID 自体の復元は行わない。
-
-decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
-atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
-`user_decision_request` は pending record の作成後すぐ応答するため、人間待ちの connection waiter は持たない。
-resolve / cancel / expire は durable state と outbox を更新し、caller が get で terminal state を観測したとき ACK する。
 
 ## session teardown worker
 
@@ -1557,7 +1454,7 @@ process-local 2,097,152 cell（概算 64 MiB）の実使用量 budget で bound 
 trim 行数を counter に計上する。新規登録の可視 grid が process-local の残りに収まらないときは、拒否する前に
 同じ registry の screen から古い scrollback を回収する。回収は終了済み terminal を先に、次に保持量の大きい
 live terminal の順で行い、可視 grid は回収しない。終了済み terminal の screen は retention が回収するまで残るため、
-回収が無いと Agent を繰り返し起動する session（Workflow の計画・レビュー担当など）が上限を履歴で埋め、以降の
+回収が無いと Agent を繰り返し起動する session が上限を履歴で埋め、以降の
 起動がすべて拒否される。回収しても収まらない Agent 起動は `resource_exhausted` として報告し、stale な参照とは区別する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
 
@@ -1763,19 +1660,6 @@ process-local の operation replay cache は canonical intent 本文を複製せ
 対応する runtime record が aggregate final retention から消えた maintenance pass で通常の cache budget に戻る。
 MCP caller credential と報告 phase は runtime の正常終了時にも即時破棄し、session close まで残さない。
 
-通常の `Agent` launch と opt-in の `AgentGoal` launch はこの同じ transaction を使うが、request と semantic key は
-別である。`AgentGoal` は workspace root だけを対象にし、非空かつ 16 KiB 以下の Goal を固定 operating contract と結合して
-`LaunchRequest.initial_prompt` に保存する。semantic key は workspace、profile、root scope に Goal の長さと本文を加えるため、
-同じ operation / Goal の retry は同じ admission を replay し、別 Goal は spawn 前に `idempotency_conflict` になる。
-readiness と semantic conflict の検証後、daemon は workspace 所有 `SupervisorRun` と review-ready PR artifact contract を持つ
-root task を Agent spawn より先に予約する。続いて同じ operation ID で Agent を durable admission し、その exact runtime fence を
-root provenance へ束縛する。確定的な pre-spawn failure は予約済み Run を `Failed` へ収束させる。spawn の成否が不明な場合、または
-Agent admission 後の束縛に失敗した場合は新しい Agent を起動させる error response を返さず、予約済み `supervisor_run_id` と admission を
-返す。daemon startup と Agent observer は Agent operation の durable outcome だけを使い、成功なら同じ provenance を束縛し、確定失敗なら
-Run を終端化する。成功応答は `supervisor_run_id` を含み、再送は既存 Agent admission と同じ Run へ収束する。
-同 scope に既存の queued prompt がある場合はどちらを実行するか推測せず拒否する。通常 launch は従来どおり queued prompt
-だけを consume し、Goal mode の有効化・無効化で classic Agent admission の意味は変わらない。
-
 credential の durable form は `daemon_minted_ephemeral` という provenance だけである。opaque secret 自体は
 dispatch registry、runtime snapshot、IPC、terminal journal、log のいずれにも保存しない。daemon restart では
 in-memory caller registry が空になるため、旧 credential は必ず失効する。
@@ -1792,21 +1676,20 @@ spawn より先にこの記録を保存する。prompt の内容や client が�
 | `launched` | この runtime を起動した操作。再開時は再開を要求した側の記録になる |
 | 各記録の `source` / `entrypoint` | 信頼された daemon 入口が決める分類と操作名 |
 | 各記録の `operation_id` / `at` | 起動を受理した operation ID と UTC 時刻。同じ operation の retry は元の記録を返す |
-| 各記録の `caller` | MCP から起動（Workflow 開始を含む）・再開を要求した認証済み Agent の `agent_id` と `session_id`。workspace root の caller は `session_id: null`。人や daemon 自身の操作は `caller: null` |
+| 各記録の `caller` | MCP から起動・再開を要求した認証済み Agent の `agent_id` と `session_id`。workspace root の caller は `session_id: null`。人や daemon 自身の操作は `caller: null` |
 | 各記録の `caller_operation_id` | MCP credential から解決した呼び出し元の実行 ID。caller の最新 run を推測して補わない |
 | 各記録の `client` | 要求した IPC client の `surface`、`client_id`、`connection_id`、`request_id`、OS が観測した `peer_pid` |
-| 各記録の `workflow_id` | Workflow 起動の operation ID。MCP による子 Agent 起動と exact resume にも引き継ぐ |
 
 | `source` | 起動経路と `entrypoint` |
 |---|---|
-| `manual` | TUI / CLI の `agent`、Goal 起動 `agent_goal`、明示再開 `session_resume`、integration repair `integration_repair` |
+| `manual` | TUI / CLI の `agent`、明示再開 `session_resume`、integration repair `integration_repair` |
 | `mcp` | `session_dispatch`、同一 session の `agent_handoff`、`session_delegate_brief` による即時起動、および認証済み Agent による再開 |
-| `workflow` | workflow lane の step 起動 `workflow_start`。Workflow を開始した面にかかわらず、step の実行元はこの lane である |
 | `daemon` | daemon restart に伴う再開 `daemon_restart`。integration revision の更新を伴う場合も同じ分類 |
 | `unknown` | 認証済み caller を持たない旧 IPC の直接 dispatch `legacy_dispatch`。接続情報と起動対象の Agent ID を記録するが、要求内の caller ID を認証済みの証拠として採用しない |
 
 旧 IPC の直接 dispatch は既存の起動と dispatch binding の互換を保つが、監査記録の `caller` と `caller_operation_id` は
 空のままにする。新しい MCP tool の認証済み dispatch と区別でき、TUI の作成元は **Unknown** と表示する。
+保存済みデータの旧分類や未知の分類は `unknown` として読み込み、作成元を推測しない。
 
 `session_delegate_issue` は prompt を queue へ保存するだけなので、この時点では runtime の起動記録を作らない。
 後で人が `agent` を実行した場合、起動元は `manual` であり、仕事を委譲した caller は既存の dispatch binding に残る。
@@ -1820,7 +1703,6 @@ spawn より先にこの記録を保存する。prompt の内容や client が�
 `client.surface` は usagi client が hello に付ける `tui` / `cli` / `mcp` の自己申告で、認証や `source` の判定には使わない。
 旧 client は `surface: null` になる。socket peer の PID と daemon 発行の接続 ID は接続時の観測であり、
 manual の操作はこれらと client ID で区別する。同じ OS ユーザーの人名までは特定しない。
-Workflow の `workflow_id` は `WorkflowRun.id` と同じ値であり、開始した面と実行 lane を別々に確認できる。
 MCP の `agent_peers` / `session_get` / `agent_list` / `agent_get` も、各 Agent の最新 run に対応する optional な
 `launch_provenance` を返す。既存の session creator authority による可視範囲を広げない。
 
@@ -1835,7 +1717,6 @@ usagi session agents > agents-audit.json
 | 同じ session の Agent が増えた | `runtime.session_id` / `session_name` と `state` を確認し、異なる top-level `agent_id` の `created` を比較する。終了した runtime の履歴と実行中を分ける |
 | 誰が MCP で起動したか | `created.caller.agent_id` と `created.caller_operation_id` に一致する親の top-level `agent_id` / `operation_id` を探す。作成元の記録がない旧 runtime や別 session の caller も、既知の ID で照合する |
 | TUI / CLI のどの要求か | `created.client.surface` / `peer_pid` / `client_id` / `connection_id` / `request_id` と `created.at` を確認する |
-| Workflow による起動か | `created.source` と `workflow_id` を確認し、Workflow snapshot の `run.id` と照合する。MCP 経由のレビュー Agent は source が `mcp` でも Workflow ID で繋がる |
 | 再開で runtime だけが増えたか | 同じ `agent_id`、`continuation`、`resumed_from` と `launched.entrypoint` を照合する。元の `created` は再開でも変わらない |
 
 記録を持たない旧バージョンの runtime は `launch_provenance` が欠け、作成元は **Unknown** と表示する。
@@ -2245,129 +2126,6 @@ retained / reserved の件数と byte、最古 final の age、soft pressure の
 byte、emergency eviction 数、予約超過 byte、忘れた marker 数を公開する。いずれも件数・byte・秒だけで、terminal
 output、argv、provider-native ID は含まない。
 
-## supervisor scheduler
-
-daemon は connection ごとではなく一つの `SupervisorRuntime` を所有する。completion、failure、
-NoReport、起動時 reconcile、明示 wake は対象 run の有限な tick を起動する。加えて daemon-lifetime の
-`SupervisorRecovery` worker が durable deadline と未収束effectだけを周期的に再評価する。client connection は
-recovery の生存条件ではなく、tick は新しいworkerを推測してspawnしない。
-
-Supervisor run の全 start variant は、workspace、artifact contract / repository、worker profile / semantic digest、
-caller dispatch fence を一つの typed start request に組み立ててから、単一の durable start transaction へ渡す。
-独立した positional `Option` 群は使わないため、profile と digest、workspace と caller dispatch など異なる意味の値を
-呼出順で取り違えない。IPC accept lifetime も同様に、tenant、terminal、Agent、projection、metrics、Supervisor、shutdown を
-一つの composition context として所有し、accept 関数の引数順を service wiring の契約にしない。
-
-supervisor の durable caller は socket の `ConnectionId` ではない。daemon 発行の live MCP credential から検証した
-root/session と Agent scope を、handshake の client incarnation と束縛した descriptor を semantic retry と全 ownership
-check が共用する。同じ client の再接続と process 内 generation rollover は authority を維持する。foreign incarnation、
-foreign scope、credential の欠落・偽造・失効は effect-zero の `ownership_unknown` となる。credential registry は
-process-local であるため daemon restart は明示的な失効境界であり、durable run と scheduler は継続する一方、control は
-新しい credential が同じ caller scope と client incarnation の組を証明するまで fail-closed になる。
-
-新規 run は上記caller ownershipとは別に、admission時にdaemonが検証した `WorkspaceId` をsnapshotへ保存する。
-local TUIの `supervisor_snapshot` はこの値がconnection workspaceと一致するrunだけを返す。workspace fieldを持たない
-旧snapshotは推測で補完せず非表示にする。TUI projectionは最大16件、512 KiB以下に制限し、観測がscheduler tickや
-control authorityを発生させることはない。
-
-人が行うcancel / escalation decisionはAgent credentialを受け取るMCP surfaceと分離した
-`supervisor_control`を通る。requestの`WorkspaceId`はconnection workspaceと完全一致させ、対象runの保存済み
-workspaceも一致した場合だけcommandを適用する。commandはcore domainのtagged enumが正本であり、任意JSON fieldや
-caller文字列からauthorityを組み立てない。daemonは`OperationId`とcommand全体のSHA-256 semantic digestを
-`supervisor-scheduler.json`へ先に予約する。cancel / escalation decision はそのIDをevent IDとしてaggregateへCAS適用する。
-応答断後の再送は同じeventを返し、同じIDを別run・別reason・別decisionへ再利用すると`idempotency_conflict`でeffect zeroになる。
-
-終了済み履歴のdeleteも同じcontrol reservationを使うが、aggregate eventは追加しない。daemonはstore lock内でworkspace ownership、
-`Succeeded` / `Failed` / `Cancelled`、観測済みstate revisionを再検証し、journal、journal index、checkpoint、snapshot、derived list
-entryを削除してexact Run ID / revisionのreceiptを返す。初回のunknown Runは拒否し、reservation保存後に応答を失った同一operationの
-replayだけはsnapshot消失後も同じreceiptへ収束する。active / `Escalated` / stale Runは削除せず、worker停止や他Runへのfallbackも
-行わない。
-
-tick は dispatch run ID と supervisor provenance を照合して terminal fact を reducer event として保存する。
-child terminal 後に parent が `Running` なら `AwaitingDecision` に遷移し、parent provenance と child run、
-safe completion summary、DAG state、decision generation を含む wake reservation を durable に保存してから
-parent wake effect を実行する。reservation は child run と parent generation で一意なので、duplicate event、
-ACK loss、daemon restart は同じ wake を二重に作らない。wake 成功後は parent task を `Running` へ戻し、同じ child の
-terminal fact を次の tick が再観測しても配送済み reservation の確認後は parent を再び待機へ戻さない。複数 wake の一件が
-失敗しても後続を配送し、成功分を永続化してから最初の失敗を報告する。parent runtime の再解決・restart は wake adapter が
-保存済み provenance だけを使って行い、session 名から target を推測しない。
-
-同じ terminal fact の確定時に、scheduler は exact task generation と dispatch runへfenceしたhandoff contextも
-`SupervisorRun` snapshotへ保存する。contextはworkerが明示したcompletion summaryとstructured resultのうち、PR、
-commit、変更file、verificationのcompactな参照だけであり、provider conversationやterminal transcriptを複製しない。
-summaryは1 KiB、artifact参照は2 KiB、1 runは新しい64件までに制限する。control文字とbidi文字を除去し、同じdispatch
-runのreconcileは同じentryへ収束する。handoff contextはinternal durable stateであり、redaction-safeなrun queryには
-含めない。
-
-tick 時点で `Ready` task に dispatch reservation が無い場合は、scheduler が生存しているように見える
-`Running` を維持しない。runtime/model selector または admission が worker run を割り当てなかったことを示す
-`DispatchFailure` event と resume/cancel の durable escalation を保存する。operator は events/get から停止理由を
-観測でき、selector を修復するまで自動 retry は行わない。ただし Goal root と delegated Agent の spawn 前に durable 保存した
-promotion reservation は未割り当て task ではなく、束縛または確定失敗を待つ task なのでこの escalation から除外する。
-旧 daemon がこの promotion window で作った同じ task/reason の synthetic escalation だけは、success/failure reconciliation が
-resume してから束縛または終端化する。human/policy escalation は自動解除しない。
-
-`supervisor-scheduler.json` は16 MiBのserialized/read上限を持ち、start reservation の semantic material は固定長の
-SHA-256 digestだけを保存する。旧形式の可変長semantic keyはbounded read後にdigestへ一度だけ移行する。
-start reservation を最大256件、wake reservationを最大512件、human control
-reservationを最大512件に制限する。終了runのstart/controlと配送済みwakeは固定長tombstoneへ移してretryを
-`expired`としてeffect-zeroにし、live run / 未配送wakeだけで上限へ達した場合はそれらを捨てず、新規
-start / wake / controlをcapacity errorで拒否する。
-Agent admission後・Supervisor provenance保存前にrunがcancel / failした場合、rootのstart reservationは通常の終了履歴として
-回収しない。recoveryはそのdurable operation IDをAgent recordへexact joinし、workspace / root-or-session scopeを検証して
-停止する。対応recordが存在しないか停止が完了した後にだけstart reservationをtombstoneへ移すため、容量回収との競合でも
-workerを名前やPIDから推測せず、未停止workerのoperation fenceを失わない。delegated taskもstable task markerと保存済み
-parent provenanceから同じexact joinを行う。
-ここで終了 run は `Succeeded` / `Failed` / `Cancelled` だけを指す。`Escalated` は通常eventをfenceする休止状態だが、
-人間の判断で再開できるlive stateなので、run retentionとstart reservationのどちらからも回収しない。終了判定の正本は
-core domainの `SupervisorRunState::is_finished` であり、storeとschedulerが共用する。
-Agent MCP の `supervisor_start` は root task だけを受け取り、authenticated caller の現在の dispatch と runtime fence を
-root provenanceへ束縛する。child taskは既存のsession delegation経路から動的に追加し、dispatch方法を持たない初期DAGは
-公開schemaで受け取らない。root task / instruction は16 KiB、idempotency key / policy selectorは256 bytesを上限とし、
-永続化前に検証する。Goal labelは空白を正規化した最大96 UTF-8 bytesのpresentation-safe文字列だけをsnapshotへ保存する。
-
-event journal は sequence→byte offset の derived index を持つ。`supervisor_events(after_sequence, limit)` は
-cursor の offset へ直接 seek し、最大100件の要求 page だけを read / parse する。index がない旧 journal は一度だけ
-走査して再構築し、以後は page size に比例する。compaction より古い cursor は、残存先頭へ黙って進めず
-`cursor expired` を返す。journal は4,096件で最新2,048件へ atomic compact し、replay checkpoint を先に offset 0へ
-置くことで、compact 中の crash でも current snapshot への duplicate replayだけに収束する。
-
-supervisor run list は owner / state / 作成順 / revision の derived index を使い、cursor から選んだ page の snapshot
-だけを hydrate する。index は mutation と同時に更新し、restart 後の初回 query では authoritative snapshot / journal
-から再構築する。page 全体が 512 KiB に達した場合は count limit より前でも cursor を返す。list / get / events の
-read-only response はすべて 512 KiB 以下とし、1 run の安全な projection だけで上限を超える場合は
-`resource_exhausted` として effect zero で拒否する。
-周期recoveryも同じvalidated indexから未完了run、またはworker停止が必要になり得るFailed/Cancelled runのIDだけを選び、
-成功済み履歴をhydrateしない。各tickはdispatch registryを一度だけ読み、runごとのreconcile失敗を分離して後続runとwakeを進める。
-
-## supervisor policy and verification
-
-各 `SupervisorRun` は作成時の immutable `ExecutionPolicy` snapshot を durable state に保存する。現在の既定値は dispatch 16 回、同時実行 4、親子深さ 8、retry attempt 1（fail-closed）、retry backoff 30 秒である。request ごとの上限緩和は受け取らない。
-
-`Dispatch` reducer event は policy admission と同時に dispatch reservation を保存する。dispatch budget、concurrency、depth のいずれかを超える event は worker effect へ進まず、safe evidence と resume/cancel の選択肢を持つ durable `EscalationRecord` を保存して run を `Escalated` にする。escalation を scheduler が自律的に解除することはない。
-
-failure は policy の attempt 上限内だけ `Retrying` へ遷移し、generation と `retry_at` を保存する。scheduler は deadline 後にだけ `RetryReady` event を保存するため、restart や duplicate completion は retry を早めない。run/task の cancel event は未完了 node を `Cancelled` にし、finishedまたはquiescentなrunへの late completion は reducer が拒否する。
-
-run全体のcancel、またはescalationをcancel/failで終端化した後は、Supervisor stateの変更だけで成功にしない。
-daemonはrunのworkspace、task generation、dispatch run、Agent runtime、worktree、sessionを持つ保存済みprovenanceを
-Agent ownerへ渡し、全fenceが一致したruntimeだけをdaemon所有PTY経由でterminate/reapする。workspace/session全体を
-閉じるAPIへfallbackしない。一件でも同じruntime IDのscopeが矛盾すればsignal前に全件を拒否する。Supervisor eventを
-先に永続化するため、終了signalやAgent store writeが失敗してもrunが再開することはない。`SupervisorRecovery`は
-`Cancelled` / `Failed` runから同じexact obligationを再構成し、`OrphanRunning`も再度terminateする。既にExited、GC済み、
-または以前のretry generationに属するworkerは収束済みno-opとして扱う。
-
-artifact contract は core domain の閉じた列挙型を正本とし、wire と永続化では `none` / `goal_review_ready_pr_v1` の文字列として表す。未知の contract は admission で拒否される。no-verification 以外の worker completion は `Succeeded` ではなく `Verifying` へ遷移する。worker report の PR URL は候補にすぎない。daemon は Goal worker の spawn 前に run が所有する workspace の `origin` を固定 argv の Git 呼び出しで解決して run へ保存し、idempotent admission replay では保存値だけを使う。worker completion 後は、そのrunで完了済みのroot/delegated provenanceが指すexact worktreeごとに `HEAD` を解決し、最初のprovider呼び出しより前にrepositoryと重複除去済みhead OID集合のimmutableなartifact expectationをtaskへ保存する。その後、同じ repository の canonical GitHub PR identity に対して固定 argv の `gh pr view` を実行し、PR の head OID が保存済み集合のいずれかと一致し、state が open、draft が false、checks が passing の場合だけ、redaction-safe な SHA-256 evidence digest を伴う `VerificationResult` を passed として保存する。checkが空の場合は同じ「未出現」digestを持つ2回連続の観測後だけ未設定として受理する。別 repository、別 head、closed/draft PR、failing checks は safe summary を持つ escalation になり、worker の summary や PR URL 単独では success gate を通らない。provider unavailable、invalid response、pending checks、check未出現の初回、または worktree/workspace が一時的に未保有の場合は rejection と区別した `VerificationDeferred` を保存し、5 秒から最大 5 分までの durable exponential backoff 後に再検証する。artifact rejection の Resume は expectation とverification結果をclearしてtaskをAgent再報告待ちに置き、exact live Agentへ再作業promptを配送できた場合だけ解除する。新しいcompletion reportを受けるまで同じ候補を自動再検証しない。再報告されたcanonical PR候補は2 KiB以下のinternal Supervisor factとして初回dispatch inboxとは別に永続化し、PRを作り直した場合もrestart recoveryが新候補を使う。completion inbox の commit 後に daemon が停止しても、daemon-lifetime の recovery worker が `Running` run の contracted task、exact provenance generation、terminal dispatch outcome を照合して期限到来済みの検証だけを再実行する。この remote IO は supervisor mutex と client 接続経路の外で行い、通常の観測を待たせない。未完了の supervised run は workspace retirement の blocker である。
-
-supervised root Agent が `session_dispatch` または `delegate_brief` で child Agent を起動する場合、daemon は child operation から導出する安定した task ID、durable な parent promotion reservation または束縛済み dispatch provenance、instruction、promotion reservation 時刻、予約時点の exact parent dispatch operation を Agent spawn より先に同じ `SupervisorRun` の DAG へ保存する。予約は child の workspace、exact session、planned Agent ID、runtime profile、canonical Agent admission semantic digest も固定し、Agent の新規 identity、workspace ownership、run、binding、admission は一つの store lock で初めて公開する。bind と recovery はこれらを再照合するため、同じ operation を別 request が先に使用しても誤った worker を Supervisor provenance に取り込まない。root と child は Agent spawn より前に作られた promotion reservation の時点から supervised caller として扱うため、起動済み Agent の MCP child が exact provenance の束縛より先に委譲しても classic delegation へ抜けない。この判定は再帰的な child delegation にも適用する。session 作成前の事前判定と child reservation 直前では `(SupervisorRun, task, generation)` の exact ownership fence を比較し、所有者の A→B 入れ替わりを含む変化があれば Agent spawn 前に拒否する。`delegate_brief` はこの間に作成済みの session を補償削除する。child operation は parent operation、自身以外の既存 Agent dispatch、Supervisor start、別 task と共有できず、exact reservation replay だけを許す。promotion reservation は bind 前から dispatch budget と concurrency を消費し、上限超過は Agent effect より前に durable escalation を保存する。成功後は child の exact runtime fence を束縛し、確定的な pre-spawn failure は予約 task を cancel する。spawn outcome が不明、または post-spawn binding が失敗した場合は予約を残し、daemon-lifetime の recovery worker が Agent operation の durable outcome から束縛または終端化する。root / child / grandchild の provenance 束縛前に run が cancel / fail した場合や parent が retry generation へ進んだ場合も、停止回収と遅延した child bind は child に保存した immutable parent operation を使い、起動済み worker を漏らさない。live daemon の周期回収は Agent outcome の単なる不在を確定失敗とみなさず、reserve 後に Agent owner lock を待つ request の fence を保持する。socket 受付前の startup recovery だけは hydrated Agent inventory の不在を確定とみなし、予約を終端化して停止 fence を解放する。terminal になった未束縛 child は parent run が継続中でも停止対象に残る。これにより Work Run の task/agent 集計は root だけでなく、実際に委譲された worker も同じ aggregate から導出する。`supervisor_start` も start operation と authenticated caller dispatch の join を aggregate 作成前に保存し、bind 前の crash は startup recovery または exact retryで同じ rootへ収束する。同じ authenticated dispatch は、terminal history と停止 obligation を含む retained Supervisor root/task から別 root へ移せず、別の `supervisor_start` operation は新規 run を保存する前に拒否する。
-
-Goal root の start reservation は aggregate 作成より先に workspace、artifact repository、Agent profile、canonical admission semantic digest を固定し、snapshot 作成前に crash しても mutable な Git 設定を再採用せず exact operation retry で同じ run ID を復元する。
-
-このdelegationの初期promptは、root goal、予約時点までに確定したhandoff context、今回のtask instructionを明示した
-daemon-owned snapshotである。context prefixは16 KiB以下、root goal部分は4 KiB以下に抑えて新しいreportから採用し、超過した古いreportを省略する。
-並行taskの後発completionを既に起動したpromptへ遡及反映しない。同じchild operationのretryはDAGへ保存した最初の
-promptを再利用するため、restartや後続completionでidempotencyの意味が変わらない。supervised provenanceを持たない
-classic delegationは従来どおりcallerが指定したpromptだけを受け取る。
-
 ## metrics observer
 
 daemon は metrics observer ごとに容量 1 の bounded queue を持ち、periodic tick の snapshot を
@@ -2382,8 +2140,8 @@ bounded queue への publish、drop 集計、wire snapshot はこの broker が�
 subscriber と drop count は 0 から始まる。TUI は push queue を登録せず snapshot を周期的に取得する。
 subscribe する client は再接続後に新しい observer を登録し、その queue を drain する。
 
-daemon の長寿命 worker は、maintenance 9 種（PR refresh、session teardown、custody、retention GC、draining
-collection、decision maintenance、tenant retirement、orphan cleanup、Supervisor recovery）と critical pipeline 3 種
+daemon の長寿命 worker は、maintenance 8 種（PR refresh、session teardown、custody、retention GC、draining
+collection、decision maintenance、tenant retirement、orphan cleanup）と critical pipeline 3 種
 （Agent observer、generic terminal observer、PR projection）の closed vocabulary を共有する。共通境界は panic と unexpected normal exit の両方を worker ごとの
 process-local failure bit へ記録して shared shutdown を要求し、metrics broker は endpoint retirement 前に取得された snapshot に
 失敗 worker 数を載せる。新しい daemon incarnation では count は 0 へ戻る。
@@ -2413,7 +2171,6 @@ wire 表現は [4. daemon IPC](04-ipc.md#agent-concurrency-projection) が正本
 |---|---|---|
 | Agent concurrency | 同時に admit する Agent runtime 数の上限と、その使用中 slot | **これ** |
 | generic terminal capacity | generic terminal の pool。Agent pool とは独立で合算しない | 対象外 |
-| supervisor `max_concurrency` | supervisor run の `ExecutionPolicy` が持つ dispatch の同時実行数 | 対象外 |
 
 **使用中（`in_use`）の定義は admission が数えるものと同一**である。すなわち reserved（spawn 前の予約）、
 running、reconcile 待ちの Agent runtime record を数え、sleeping / exited / reclaimed / spawn 失敗の record は数えない。
@@ -2525,7 +2282,7 @@ rollover の successor にはならない。
 
 standby は自分専用の endpoint を bind する（`SecureUnixListener::bind_private`）。この時点で `current.json` は
 変更されないため、client は旧 active を見続ける。readiness は read-only の hello 1 往復だけで、runtime store の
-reconcile / save、supervisor tick、worker 起動、spawn を一切行わない。受理するのは次を**すべて**満たす場合だけである。
+reconcile / save、worker 起動、spawn を一切行わない。受理するのは次を**すべて**満たす場合だけである。
 
 | 検証 | 拒否時の挙動 |
 |---|---|
@@ -2548,7 +2305,7 @@ standby は **何も所有しない**。この 1 点から lifecycle の差が�
 | `daemon.json` | 自分を owner として登録する | readiness 中は書かず、handoff commit 後に自分の exact identity を登録する |
 | endpoint | bind して `current.json` を publish する | `bind_private` し、old active が同じ endpoint を publish する。昇格時に socket を bind し直さない |
 | durable runtime state | 起動時に reconcile する | readiness 中は read-only hydrate。昇格後は空の自 owner shard を writer として開き、old owner shard を restart reconcile しない |
-| worker | PTY / supervisor / PR / teardown / retention を起動する | readiness 中は起動せず、昇格後に active worker 群を起動する |
+| worker | PTY / PR / teardown / retention を起動する | readiness 中は起動せず、昇格後に active worker 群を起動する |
 | custody | lock と record（[custody 喪失による self-shutdown](#custody-喪失による-self-shutdown)） | registry entry と live incumbent。昇格後も registry role/process identity を監視する |
 
 段は 7 つで、最初の refusal は**何も作る前**に置く。
@@ -3038,7 +2795,6 @@ shard を分けても、draining process が触り得る他の whole-snapshot do
 | shared writer | write mode | draining owner |
 |---|---|---|
 | `pr-inventory.json` | whole snapshot | 書かない。document へ到達する前に fence が拒否し、active generation の refresh が自分の session を再計算する |
-| supervisor state | whole snapshot | 拒否（active generation の tick が再計算する） |
 | `sessions.json` | whole snapshot | 拒否（lifecycle admission は既に閉じている） |
 | `dispatch.json` | cross-process lock 下の reducer（handoff 間で schema 不変） | 許可 |
 | `dispatch-workspaces.json` | whole snapshot | 書かない。ownership 発行と prompt queue は active の control / spawn 経路だけが更新する |

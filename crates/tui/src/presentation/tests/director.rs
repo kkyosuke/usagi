@@ -161,10 +161,12 @@ fn director_drawer_consumes_shell_pane_controls_without_background_mutation() {
             detaches: Arc::new(Mutex::new(Vec::new())),
         }),
     );
-    runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
     let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
     assert!(runtime.state().director_drawer_open());
-    assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
+    assert_eq!(
+        runtime.state().director_route(),
+        DirectorRoute::Organization
+    );
     let tabs_before = runtime.active_pane().tabs().to_vec();
     let mut controls = LiveTerminalControls::default();
     let rows = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
@@ -212,14 +214,9 @@ fn director_drawer_consumes_shell_pane_controls_without_background_mutation() {
         .unwrap()
         .tabs()
         .to_vec();
-    let launch_effects = crate::presentation::open_director_from_new_button(
-        &mut runtime,
-        &new_pointer,
-        20,
-        80,
-        crate::presentation::WorkRunControlMode::Closed,
-    )
-    .expect("the Work Runs Start button owns its pointer press");
+    let launch_effects =
+        crate::presentation::open_director_from_new_button(&mut runtime, &new_pointer, 20, 80)
+            .expect("the Director New button owns its pointer press");
     assert!(launch_effects.is_empty());
     assert!(matches!(
         runtime.state().director_new(),
@@ -494,12 +491,6 @@ fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
     assert_eq!(projected.terminal_view, Some(terminal_view));
     assert_eq!(projected.interrupted_detail, None);
 
-    runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-    let goal_projection = crate::presentation::director_drawer_projection(&ui, &runtime, None);
-    assert!(goal_projection.conversations.is_empty());
-    assert!(goal_projection.organization.is_empty());
-    runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
-
     // A live projection without control feedback still crosses the seam as
     // a projection; the adapter never converts its rows into drawer lines.
     let quiet_terminal_view = TerminalViewProjection {
@@ -740,22 +731,6 @@ fn director_projection_covers_picker_empty_and_launching_states() {
         }
     );
 
-    runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-    let _ = runtime.handle_key(Key::Char('g'));
-    let _ = runtime.handle_key(Key::Paste("o".to_owned()));
-    let _ = runtime.handle_key(Key::Backspace);
-    let goal_projection = crate::presentation::director_drawer_projection(&ui, &runtime, None);
-    assert!(goal_projection.goal_driven);
-    assert!(matches!(
-        goal_projection.new,
-        crate::presentation::DirectorNewProjection::GoalComposer {
-            selected: 1,
-            ref goal,
-            ..
-        } if goal == "g"
-    ));
-    runtime.set_work_mode(usagi_core::domain::settings::WorkMode::Classic);
-
     let _ = runtime.handle_key(Key::Escape);
     runtime.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
     let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
@@ -916,123 +891,6 @@ fn director_pointer_uses_the_drawer_viewport() {
             column: 26,
             row: 5,
         },
-    ));
-}
-
-#[test]
-fn goal_driven_work_runs_escape_closes_the_director_while_back_stays_at_root() {
-    let workspace = WorkspaceId::new();
-    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-    runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-    let runs = crate::presentation::WorkRunProjection::fresh(Vec::new());
-    let mut control = crate::presentation::WorkRunControl::default();
-    let _ = crate::presentation::handle_work_run_control_input(
-        &mut runtime,
-        &mut control,
-        &runs,
-        &Key::Live(LiveTerminalAction::WorkRuns),
-    );
-
-    let back = crate::presentation::handle_work_run_control_input(
-        &mut runtime,
-        &mut control,
-        &runs,
-        &Key::Live(LiveTerminalAction::DirectorBack),
-    )
-    .expect("Work Runs owns Director back");
-    assert_eq!(
-        back.outcome,
-        crate::presentation::WorkRunControlOutcome::Consumed
-    );
-    assert!(runtime.state().director_drawer_open());
-    assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
-
-    let escape = crate::presentation::handle_work_run_control_input(
-        &mut runtime,
-        &mut control,
-        &runs,
-        &Key::Escape,
-    )
-    .expect("Work Runs owns Escape");
-    assert_eq!(
-        escape.outcome,
-        crate::presentation::WorkRunControlOutcome::Consumed
-    );
-    assert!(!runtime.state().director_drawer_open());
-    assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
-}
-
-#[test]
-fn director_selection_rejects_placeholders_and_surfaces_intent_failure() {
-    let workspace = WorkspaceId::new();
-    let terminal = scoped_terminal_ref(workspace, None);
-    let runtime_id = AgentRuntimeId::new();
-    let continuation = AgentContinuationRef::new();
-    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-    let operation = OperationId::new();
-    let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Agent);
-    let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
-    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
-    assert!(!crate::presentation::select_director_selection(
-        TabSelection::Pending(operation),
-        &mut ui,
-        &mut runtime,
-    ));
-    assert!(!crate::presentation::select_director_selection(
-        TabSelection::Ready(operation),
-        &mut ui,
-        &mut runtime,
-    ));
-    assert!(crate::presentation::select_director_selection(
-        TabSelection::Interrupted(continuation),
-        &mut ui,
-        &mut runtime,
-    ));
-    assert!(!crate::presentation::select_director_agent(
-        runtime_id,
-        &mut ui,
-        &mut runtime,
-    ));
-
-    let _ = runtime.complete_pane(Target::Root(workspace), operation, terminal.clone());
-    ui.agent_inventory = Some(AgentInventory {
-        workspace_id: workspace,
-        runtimes: vec![AgentRuntimeInventoryItem {
-            operation_id: None,
-            agent_id: None,
-            launch_provenance: None,
-            runtime: AgentRuntimeRef::new(runtime_id, terminal.clone(), None).unwrap(),
-            continuation,
-            state: AgentRuntimeInventoryState::Live,
-            resumed_from: None,
-        }],
-        resumable: Vec::new(),
-    });
-    let mut intent = AgentTabIntent::empty(workspace);
-    intent.apply(AgentTabIntentMutation::Upsert {
-        session_id: None,
-        continuation,
-        terminal: terminal.clone(),
-        select: true,
-    });
-    ui = ui.with_agent_tab_intent(
-        workspace,
-        BTreeSet::new(),
-        Box::new(FailingIntentPort {
-            state: Arc::new(Mutex::new(intent)),
-            error: AgentTabIntentError::Unavailable,
-            attempts: Arc::new(AtomicUsize::new(0)),
-        }),
-    );
-    assert!(!crate::presentation::select_director_selection(
-        TabSelection::Live(terminal),
-        &mut ui,
-        &mut runtime,
-    ));
-    assert!(!crate::presentation::select_director_agent(
-        runtime_id,
-        &mut ui,
-        &mut runtime,
     ));
 }
 

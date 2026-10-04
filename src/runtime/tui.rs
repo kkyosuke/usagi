@@ -43,9 +43,9 @@ use usagi_core::infrastructure::ipc::TerminalInputReplayMode;
 #[cfg(test)]
 use usagi_core::infrastructure::ipc::TerminalSnapshotMode;
 use usagi_core::infrastructure::ipc::{
-    AgentGoalIntent, AgentLaunchIntent, ClientError, DaemonMetrics, DaemonReply, DaemonRequest,
-    MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction, TerminalAction,
-    TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    AgentLaunchIntent, ClientError, DaemonMetrics, DaemonReply, DaemonRequest, MetricsAction,
+    PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction, TerminalAction, TerminalGeometry,
+    TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::infrastructure::role_catalog::{
     CatalogLayer, read_layer_source, write_layer_source,
@@ -61,13 +61,12 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::session_worktree::SystemGit;
 use usagi_tui::infrastructure::daemon_reply::{
-    PrObservations, agent_goal_request, agent_inventory_request, agent_launch_request,
-    correlate_agent_goal, correlate_agent_launch, daemon_error_reason, decode_attach_screen,
-    decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_input_ack_value,
-    decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
-    decode_work_run_snapshot_reply, exact_agent_resume_request, map_terminal_error,
+    PrObservations, agent_inventory_request, agent_launch_request, correlate_agent_launch,
+    daemon_error_reason, decode_attach_screen, decode_exact_agent_resume,
+    decode_terminal_input_ack, decode_terminal_input_ack_value, decode_terminal_inventory,
+    decode_terminal_poll, exact_agent_resume_request, map_terminal_error,
     owner_of_terminal_request, pr_snapshot_events, remove_session_payload, reply_geometry,
-    terminal_inventory_matches_scope, validate_unique_session_ids, work_run_control_client_error,
+    terminal_inventory_matches_scope, validate_unique_session_ids,
 };
 use usagi_tui::infrastructure::live_input::classify_terminal_input;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
@@ -108,10 +107,6 @@ use usagi_tui::usecase::application::session_catalog::{
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
     TerminalSubscription,
-};
-use usagi_tui::usecase::application::work_run_control::WorkRunPort;
-use usagi_tui::usecase::application::work_run_control::{
-    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::application::{
@@ -1226,7 +1221,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                 root: snapshot.workspace.path.clone(),
             }),
         )
-        .with_workflow(Box::new(workflow::DaemonWorkflowPort::default()))
         .with_daemon_control(Box::new(ProductionDaemonControl {
             workspace: snapshot.workspace_id,
             root: snapshot.workspace.path.clone(),
@@ -1288,7 +1282,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             ),
             restore_connection: Box::new(restore_connection),
             garden_inventory: Box::new(DaemonGardenInventoryPort),
-            work_runs: Box::new(DaemonWorkRunPort),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort {
                 reaper: self.helper_reaper.clone(),
@@ -2128,54 +2121,6 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
 }
 
 mod favorites;
-mod workflow;
-
-struct DaemonWorkRunPort;
-
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=agent_ipc_e2e
-impl WorkRunPort for DaemonWorkRunPort {
-    fn snapshot(
-        &mut self,
-        workspace: WorkspaceId,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
-        let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::tui(),
-        )
-        .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        decode_work_run_snapshot_reply(
-            client
-                .request(
-                    usagi_core::infrastructure::ipc::DaemonRequest::SupervisorSnapshot {
-                        workspace,
-                    },
-                )
-                .map_err(|_| "Work Run progress is unavailable".to_owned())?,
-        )
-    }
-
-    fn control(
-        &mut self,
-        workspace: WorkspaceId,
-        operation_id: usagi_core::domain::id::OperationId,
-        command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-    ) -> Result<WorkRunControlResult, WorkRunControlError> {
-        let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::tui(),
-        )
-        .map_err(|_| WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned()))?;
-        decode_work_run_control_reply(
-            client
-                .request(
-                    usagi_core::infrastructure::ipc::DaemonRequest::SupervisorControl {
-                        workspace,
-                        operation_id,
-                        command,
-                    },
-                )
-                .map_err(work_run_control_client_error)?,
-        )
-    }
-}
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
 impl AgentCommandPort for DaemonAgentCommandPort {
@@ -2219,45 +2164,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         result
     }
 
-    fn launch_goal(
-        &mut self,
-        operation: usagi_core::domain::id::OperationId,
-        workspace: WorkspaceId,
-        profile: Option<usagi_core::domain::agent::AgentProfileId>,
-        goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::pane_launch(),
-        ) {
-            Ok(client) => client,
-            Err(error) => {
-                ErrorLog::record(&tui_error_entry(
-                    "Agent goal launch connect",
-                    &error.to_string(),
-                ));
-                return Err("daemon unavailable; reconnect to continue".to_owned());
-            }
-        };
-        let intent = AgentGoalIntent {
-            workspace,
-            profile,
-            goal: goal.to_owned(),
-        };
-        let reply = match client.request(agent_goal_request(operation, intent.clone())) {
-            Ok(reply) => reply,
-            Err(error) => {
-                let reason = daemon_error_reason(error);
-                ErrorLog::record(&tui_error_entry("Agent goal launch request", &reason));
-                return Err(reason);
-            }
-        };
-        let result = correlate_agent_goal(reply, operation, &intent);
-        if let Err(reason) = &result {
-            ErrorLog::record(&tui_error_entry("Agent goal launch response", reason));
-        }
-        result
-    }
-
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
     fn resume(
         &mut self,
@@ -2282,7 +2188,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         Ok(AgentPaneAdmission {
             terminal: resumed.terminal,
             continuation: resumed.continuation,
-            supervisor_run_id: None,
         })
     }
 
@@ -4710,23 +4615,21 @@ mod tests {
     const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
-        AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
-        BackendDaemonControlPort, BackendTargetStorePort, Completions, DaemonAction,
-        DaemonAgentCommandPort, DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply,
-        DaemonRequest, DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort,
-        FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
-        LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
-        ProductionBackendFactory, ProductionDaemonControl, ProductionSessionCatalogPort,
-        RepoEnvironmentStore, RoleEditorScope, SessionBranchCatalog, SessionRoleCatalog,
-        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
-        VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
-        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
-        classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
-        correlate_agent_launch, created_session_hook, daemon_control_error, daemon_control_result,
-        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
-        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
+        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, AppKey, BackendDaemonControlPort,
+        BackendTargetStorePort, Completions, DaemonAction, DaemonAgentCommandPort,
+        DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply, DaemonRequest,
+        DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort, FsSessionWorktreeScanPort,
+        FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError,
+        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
+        ProductionDaemonControl, ProductionSessionCatalogPort, RepoEnvironmentStore,
+        RoleEditorScope, SessionBranchCatalog, SessionRoleCatalog, SettingsEnvironmentStore, Start,
+        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_inventory_request,
+        agent_launch_request, child_directory_names, classify_terminal_input,
+        classify_workspace_directory, correlate_agent_launch, created_session_hook,
+        daemon_control_error, daemon_control_result, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, global_icon_mode, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, lock_pr_sessions, map_terminal_error, metrics_cadence,
         passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
@@ -4734,7 +4637,7 @@ mod tests {
         reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
         terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
         validate_workspace_directory, version_detail, version_result_from_observation,
-        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -4879,98 +4782,6 @@ mod tests {
             }) if completed_workspace == stale_workspace
                 && error.error_id == "daemon-target-stale"
         ));
-    }
-
-    #[test]
-    fn work_run_control_accepts_only_a_final_typed_reply() {
-        let run = usagi_core::domain::supervisor::SupervisorRunQuery {
-            supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId::new(),
-            state_revision: 2,
-            state: usagi_core::domain::supervisor::SupervisorRunState::Cancelled,
-            terminal_at: None,
-            terminal_reason: Some("cancelled by local operator".to_owned()),
-            display_label: Some("Controlled Goal".to_owned()),
-            root_agent_id: None,
-            policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
-            escalation: None,
-            tasks: Vec::new(),
-            provenance: Vec::new(),
-        };
-        let body = serde_json::to_value(&run).unwrap();
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Ok(body.clone())),
-            Ok(WorkRunControlResult::Updated(Box::new(run.clone())))
-        );
-        let deletion = usagi_core::domain::supervisor::SupervisorRunDeletion {
-            supervisor_run_id: run.supervisor_run_id,
-            state_revision: run.state_revision,
-        };
-        assert_eq!(
-            decode_work_run_control_reply(
-                DaemonReply::Ok(serde_json::to_value(deletion).unwrap(),)
-            ),
-            Ok(WorkRunControlResult::Deleted(deletion))
-        );
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Accepted {
-                operation_id: "durable-operation".to_owned(),
-                revision: 1,
-                body,
-            }),
-            Err(WorkRunControlError::Unconfirmed(
-                WORK_RUN_ACTION_UNCONFIRMED.to_owned()
-            ))
-        );
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Ok(serde_json::Value::Null)),
-            Err(WorkRunControlError::Unconfirmed(
-                "daemon returned an invalid Work Run deletion".to_owned()
-            ))
-        );
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Ok(
-                serde_json::json!({"state": "not-a-supervisor-state"})
-            )),
-            Err(WorkRunControlError::Unconfirmed(
-                "daemon returned an invalid Work Run result".to_owned()
-            ))
-        );
-
-        let rejection = usagi_core::infrastructure::ipc::ProtocolError::new(
-            usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
-            "the Work Run action is no longer valid",
-        );
-        assert_eq!(
-            work_run_control_client_error(ClientError::Protocol(rejection)),
-            WorkRunControlError::Rejected("the Work Run action is no longer valid".to_owned())
-        );
-        assert_eq!(
-            work_run_control_client_error(ClientError::Unavailable("lost acknowledgement".into())),
-            WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned())
-        );
-
-        let snapshot = usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
-            workspace_id: WorkspaceId::new(),
-            runs: vec![run],
-        };
-        assert_eq!(
-            decode_work_run_snapshot_reply(DaemonReply::Ok(
-                serde_json::to_value(&snapshot).unwrap()
-            )),
-            Ok(snapshot)
-        );
-        assert_eq!(
-            decode_work_run_snapshot_reply(DaemonReply::Accepted {
-                operation_id: "read-only-request".to_owned(),
-                revision: 1,
-                body: serde_json::Value::Null,
-            }),
-            Err("Work Run progress is unavailable".to_owned())
-        );
-        assert_eq!(
-            decode_work_run_snapshot_reply(DaemonReply::Ok(serde_json::Value::Null)),
-            Err("daemon returned invalid Work Run progress".to_owned())
-        );
     }
 
     #[test]
@@ -6932,24 +6743,6 @@ mod tests {
             .unwrap_err(),
             "agent launch returned an invalid continuation"
         );
-        let supervisor_run_id = usagi_core::domain::supervisor::SupervisorRunId::new();
-        let admission = decode_agent_admission(
-            &json!({
-                "terminal": terminal,
-                "supervisor_run_id": supervisor_run_id,
-            }),
-            "goal launch",
-        )
-        .unwrap();
-        assert_eq!(admission.supervisor_run_id, Some(supervisor_run_id));
-        assert_eq!(
-            decode_agent_admission(
-                &json!({"terminal": terminal, "supervisor_run_id": "invalid"}),
-                "goal launch",
-            )
-            .unwrap_err(),
-            "goal launch returned an invalid Work Run identity"
-        );
     }
 
     /// The pending pane's own operation is what reaches the daemon: the adapter
@@ -6971,55 +6764,6 @@ mod tests {
         };
         assert_eq!(operation_id, operation.to_string());
         assert_eq!(sent, intent);
-    }
-
-    #[test]
-    fn agent_goal_request_and_reply_preserve_identity_digest_and_root_scope() {
-        let operation = OperationId::new();
-        let workspace = WorkspaceId::new();
-        let intent = AgentGoalIntent {
-            workspace,
-            profile: None,
-            goal: "prepare a PR".to_owned(),
-        };
-        let DaemonRequest::AgentGoal {
-            operation_id,
-            intent: sent,
-        } = agent_goal_request(operation, intent.clone())
-        else {
-            panic!("a Work Run is an AgentGoal request")
-        };
-        assert_eq!(operation_id, operation.to_string());
-        assert_eq!(sent, intent);
-
-        let terminal = TerminalRef {
-            daemon_generation: DaemonGeneration::new(),
-            terminal_id: TerminalId::new(),
-            workspace_id: workspace,
-            session_id: None,
-            worktree_id: WorktreeId::new(),
-        };
-        let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::infrastructure::ipc::agent_goal_semantic_key(&intent),
-        );
-        let admission = correlate_agent_goal(
-            DaemonReply::Accepted {
-                operation_id: operation.to_string(),
-                revision: 1,
-                body: json!({
-                    "operation_id": operation.to_string(),
-                    "semantic_digest": digest,
-                    "terminal": terminal,
-                    "continuation": null,
-                    "resume_relation": null,
-                    "completed": false,
-                }),
-            },
-            operation,
-            &intent,
-        )
-        .unwrap();
-        assert_eq!(admission.terminal, terminal);
     }
 
     fn launch_correlation_fixture() -> (OperationId, AgentLaunchIntent, TerminalRef, String, String)
@@ -9297,7 +9041,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
-            work_mode: usagi_core::domain::settings::WorkMode::GoalDriven,
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);

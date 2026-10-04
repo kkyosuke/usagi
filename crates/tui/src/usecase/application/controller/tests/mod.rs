@@ -11,78 +11,10 @@ mod new;
 mod pointer;
 mod pr;
 mod session;
-mod workflow;
 
 use super::*;
 use crate::usecase::application::environment_source::parse_environment_source;
 use std::collections::VecDeque;
-
-#[test]
-fn a_background_read_never_swallows_the_person_s_submission() {
-    use crate::usecase::application::workflow::WorkflowJob;
-    use usagi_core::domain::workflow::{WorkflowCommand, WorkflowSnapshot};
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let mut state = AppState::home(workspace, vec![session]);
-    state.active = Some(session);
-    state.route = Route::Home(HomeMode::Closeup);
-    let _ = submit_closeup_workflow(&mut state, session, "");
-    // Opening the tab leaves a read in flight. The pane re-reads on a steady
-    // cadence, so a person who waits for it to clear waits forever.
-    assert!(state.workflow_panel(session).unwrap().loading);
-    assert_eq!(
-        state.workflow_panel(session).unwrap().freshness,
-        crate::usecase::application::workflow::WorkflowFreshness::Pending
-    );
-    let _ = update(
-        &mut state,
-        AppEvent::WorkflowInput {
-            session,
-            key: AppKey::Paste("Build login".into()),
-        },
-    );
-    let effects = update(
-        &mut state,
-        AppEvent::WorkflowInput {
-            session,
-            key: AppKey::SaveRoles,
-        },
-    );
-    let [Effect::Workflow(start)] = effects.as_slice() else {
-        panic!("the submission is dispatched, got {effects:?}");
-    };
-    assert!(
-        matches!(&start.control, Some((_, WorkflowCommand::Start { goal, .. })) if goal == "Build login")
-    );
-
-    // The read it overlapped lands without disturbing the submission.
-    let _ = update(
-        &mut state,
-        AppEvent::Backend(BackendEvent::Workflow {
-            job: WorkflowJob {
-                workspace,
-                session,
-                control: None,
-            },
-            result: Ok(Box::new(WorkflowSnapshot {
-                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-                session,
-                run: None,
-                pending_start: None,
-                finished: Vec::new(),
-                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
-            })),
-        }),
-    );
-    let panel = state.workflow_panel(session).unwrap();
-    assert!(!panel.loading);
-    assert_eq!(
-        panel.freshness,
-        crate::usecase::application::workflow::WorkflowFreshness::Observed
-    );
-    assert!(panel.submitting);
-    assert!(panel.pending.is_some());
-}
 
 /// Fake entry backend for Welcome / Open attach scenarios. It has no IO: tests
 /// inspect dispatched effects and enqueue typed completions in deterministic order.
@@ -521,81 +453,6 @@ fn table_driven_mode_and_overlay_scenarios() {
         }
         assert_eq!(state.route(), case.route, "{}", case.name);
         assert_eq!(state.overlay(), case.overlay, "{}", case.name);
-    }
-}
-
-#[test]
-fn goal_composer_edits_utf8_within_the_daemon_bound_and_discards_drafts() {
-    let workspace = WorkspaceId::new();
-    let mut state = sized_home(workspace, Vec::new(), 100, 30);
-    state.set_work_mode(WorkMode::GoalDriven);
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-
-    let _ = update(
-        &mut state,
-        AppEvent::Key(AppKey::Paste("x".repeat(MAX_WORK_GOAL_BYTES + 1))),
-    );
-    assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
-    assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('é')));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Paste("é".to_owned())));
-    assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES - 1);
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-    assert_eq!(state.director_goal(), "");
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
-    assert_eq!(state.director_goal(), "");
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
-    let _ = update(&mut state, AppEvent::Key(AppKey::CtrlC));
-    assert_eq!(state.director_goal(), "");
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
-    state.set_work_mode(WorkMode::Classic);
-    assert_eq!(state.director_goal(), "");
-}
-
-#[test]
-fn goal_composer_enter_requires_its_provider_to_be_visible() {
-    assert_eq!(
-        director_goal_composer_picker_capacity(0),
-        NORMALIZED_TERMINAL_ROWS - DIRECTOR_GOAL_COMPOSER_CHROME_ROWS
-    );
-    assert_eq!(director_goal_composer_picker_capacity(11), 0);
-    assert_eq!(director_goal_composer_picker_capacity(12), 1);
-
-    let workspace = WorkspaceId::new();
-    for (height, launches) in [(11_u16, 0_usize), (12, 1)] {
-        let mut state = AppState::home(workspace, Vec::new());
-        state.set_agent_models(
-            AvailableModels::new([DefaultModel::OpenAi]),
-            DefaultModel::OpenAi,
-        );
-        state.set_work_mode(WorkMode::GoalDriven);
-        let _ = update(&mut state, AppEvent::Resize { width: 80, height });
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::Paste("finish the PR".to_owned())),
-        );
-        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
-        assert_eq!(
-            effects
-                .iter()
-                .filter(|effect| matches!(effect, Effect::LaunchGoal { .. }))
-                .count(),
-            launches,
-            "height {height}"
-        );
-        assert_eq!(state.director_launching().is_some(), launches == 1);
-        assert_eq!(
-            matches!(state.director_new(), DirectorNew::Choosing(_)),
-            launches == 0
-        );
     }
 }
 

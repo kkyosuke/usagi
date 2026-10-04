@@ -7,7 +7,6 @@
 
 use std::time::Duration;
 
-use usagi_core::domain::settings::WorkMode;
 use usagi_core::usecase::vt_screen::MouseProtocolEncoding;
 
 /// The longest interval in which a `Ctrl-O` leader accepts its follow-up.
@@ -231,10 +230,6 @@ pub enum LiveTerminalAction {
     /// Open the Home Director mode drawer and its explicit New CLI picker
     /// (`Ctrl-O n`). Plain `n` remains terminal input without the leader.
     DirectorNew,
-    /// Open the Goal-driven Director's Work Run control surface (`Ctrl-O w`).
-    /// It is reserved behind the leader so plain `w` and `Ctrl-W` still reach
-    /// an Agent terminal.
-    WorkRuns,
     /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O Ctrl-T`,
     /// with `Ctrl-O t` retained for compatibility).
     RootTerminal,
@@ -537,13 +532,11 @@ pub(crate) struct PrefixHelpEntry {
     pub keys: &'static str,
     pub action: &'static str,
     scope: PrefixHelpScope,
-    goal_driven_only: bool,
 }
 
 const fn with_help(
     mut shortcut: PrefixShortcut,
     scope: PrefixHelpScope,
-    goal_driven_only: bool,
     keys: &'static str,
     action: &'static str,
 ) -> PrefixShortcut {
@@ -551,7 +544,6 @@ const fn with_help(
         keys,
         action,
         scope,
-        goal_driven_only,
     });
     shortcut
 }
@@ -606,21 +598,18 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),
         PrefixHelpScope::Workspace,
-        false,
         "Ctrl-O +",
         "add workspace",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),
         PrefixHelpScope::Workspace,
-        false,
         "Ctrl-O 0",
         "project / session finder",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('1') => LiveTerminalAction::ActivateWorkspace(1)),
         PrefixHelpScope::Workspace,
-        false,
         "Ctrl-O 1 … 9",
         "activate project",
     ),
@@ -636,7 +625,6 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char('a'), legacy = 1 => LiveTerminalAction::OpenCloseupModal),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O a / n",
         "actions / Director start",
     ),
@@ -648,7 +636,6 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char('p'), legacy = 16 => LiveTerminalAction::OpenPullRequests),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O p / v",
         "Pull Requests / Preview",
     ),
@@ -656,7 +643,6 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O d / s",
         "Decisions / Scratchpad",
     ),
@@ -664,18 +650,10 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char(',') => LiveTerminalAction::OpenGarden),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O , / g / t",
         "Garden / Director / Shell",
     ),
     prefix_shortcut!(KeyCode::Char('g'), legacy = 7 => LiveTerminalAction::Director),
-    with_help(
-        prefix_shortcut!(KeyCode::Char('w'), legacy = 23 => LiveTerminalAction::WorkRuns),
-        PrefixHelpScope::WorkspaceBase,
-        true,
-        "Ctrl-O w",
-        "Work Runs",
-    ),
     prefix_shortcut!(KeyCode::Char('t'), legacy = 20 => LiveTerminalAction::RootTerminal),
     prefix_shortcut!(KeyCode::Char('z'), legacy = 26 => LiveTerminalAction::RootTerminalFullHeight),
     prefix_shortcut!(KeyCode::Char('n'), legacy = 14 => LiveTerminalAction::DirectorNew),
@@ -687,16 +665,11 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
 ];
 
 /// Help rows projected from the executable leader-shortcut catalog.
-pub(crate) fn prefix_help_entries(
-    scope: PrefixHelpScope,
-    work_mode: WorkMode,
-) -> impl Iterator<Item = PrefixHelpEntry> {
+pub(crate) fn prefix_help_entries(scope: PrefixHelpScope) -> impl Iterator<Item = PrefixHelpEntry> {
     PREFIX_SHORTCUTS
         .iter()
         .filter_map(|shortcut| shortcut.help)
-        .filter(move |entry| {
-            entry.scope == scope && (!entry.goal_driven_only || work_mode == WorkMode::GoalDriven)
-        })
+        .filter(move |entry| entry.scope == scope)
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
@@ -1304,14 +1277,6 @@ mod tests {
                 action: LiveTerminalAction::RootTerminalFullHeight,
             },
             Case {
-                follow_up: key(KeyCode::Char('w')),
-                action: LiveTerminalAction::WorkRuns,
-            },
-            Case {
-                follow_up: ctrl('w'),
-                action: LiveTerminalAction::WorkRuns,
-            },
-            Case {
                 follow_up: key(KeyCode::End),
                 action: LiveTerminalAction::ScrollBottom,
             },
@@ -1361,7 +1326,6 @@ mod tests {
                 KeyCode::Char('q') => LiveTerminalAction::CloseTab
             )),
             PrefixHelpScope::WorkspaceBase,
-            true,
             "Ctrl-O q",
             "example action",
         );
@@ -1373,7 +1337,6 @@ mod tests {
                 keys: "Ctrl-O q",
                 action: "example action",
                 scope: PrefixHelpScope::WorkspaceBase,
-                goal_driven_only: true,
             })
         );
     }

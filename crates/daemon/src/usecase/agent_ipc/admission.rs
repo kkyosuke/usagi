@@ -23,20 +23,9 @@ impl AgentRuntime {
     fn provenance_for_agent(
         &self,
         agent: AgentId,
-        mut launched: AgentLaunchOrigin,
+        launched: AgentLaunchOrigin,
         fresh_identity: bool,
     ) -> Result<AgentLaunchProvenance, ProtocolError> {
-        if launched.workflow_id.is_none() {
-            launched.workflow_id = launched.caller_operation_id.and_then(|operation| {
-                self.coordinator
-                    .snapshot()
-                    .records
-                    .into_iter()
-                    .find(|record| record.operation.operation_id == operation)
-                    .and_then(|record| record.launch_provenance)
-                    .and_then(|provenance| provenance.launched.workflow_id)
-            });
-        }
         let previous = self
             .dispatch
             .runs()
@@ -413,19 +402,13 @@ impl AgentRuntime {
             runtime,
             operation: fence,
             mcp_allowed: true,
-            launch_provenance: launch_origin.map(|mut launched| {
-                launched.workflow_id = launched.workflow_id.or(source
+            launch_provenance: launch_origin.map(|launched| AgentLaunchProvenance {
+                agent_id: Some(source_binding.worker.agent_id),
+                created: source
                     .launch_provenance
                     .as_ref()
-                    .and_then(|provenance| provenance.launched.workflow_id));
-                AgentLaunchProvenance {
-                    agent_id: Some(source_binding.worker.agent_id),
-                    created: source
-                        .launch_provenance
-                        .as_ref()
-                        .and_then(|provenance| provenance.created.clone()),
-                    launched,
-                }
+                    .and_then(|provenance| provenance.created.clone()),
+                launched,
             }),
         };
         let credential = OperationId::new().to_string();
@@ -521,7 +504,6 @@ impl AgentRuntime {
         operation_id: &str,
         intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
-        initial_prompt: Option<&str>,
         launch_semantic: &str,
         context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
@@ -592,21 +574,13 @@ impl AgentRuntime {
             .dispatch
             .queued_prompt(intent.workspace, intent.session)
             .map_err(map_dispatch_storage_error)?;
-        if initial_prompt.is_some() && queued.is_some() {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "workspace root already has a queued prompt",
-            ));
-        }
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
             provider_resume: None,
-            initial_prompt: initial_prompt
-                .map(str::to_owned)
-                .or_else(|| queued.as_ref().map(|item| item.prompt.clone())),
+            initial_prompt: queued.as_ref().map(|item| item.prompt.clone()),
             scope: LaunchScope {
                 workspace_id: intent.workspace,
                 session_id: intent.session,

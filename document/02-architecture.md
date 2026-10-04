@@ -83,7 +83,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │       ├── cli/             # 人間向けサブコマンド（引数解析・dispatch・結果整形）
 │   │       │   └── commands/         # サブコマンドハンドラ（store 系は core usecase 直呼び、session 系は daemon IPC）
 │   │       └── mcp/             # MCP サーバ（stdio JSON-RPC の解釈・dispatch）
-│   │           └── tools/            # tool descriptor（store 系は core usecase、session / agent / terminal / supervisor 系は daemon IPC）
+│   │           └── tools/            # tool descriptor（store 系は core usecase、session / agent / terminal 系は daemon IPC）
 │   ├── daemon/           # usagi-daemon: daemon 面
 │   │   └── src/
 │   │       ├── lib.rs
@@ -92,7 +92,6 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │       ├── usecase/         # daemon 専用ロジック（lifecycle verb、terminal/runtime・orchestration）
 │   │       │   ├── agent_ipc/   # Agent runtime の admission / delivery / dispatch / lifecycle と tests
 │       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
-│       │   ├── supervisor_runtime/ # supervisor の reservation / obligations と tests
 │   │       │   └── resources/   # owner generation ごとの runtime shard と global resource allocator
 │   │       └── infrastructure/  # daemon 専用の外部接続（Unix socket transport）
 │   │           ├── child_identity.rs # spawn した child の OS process-start / process-group identity 観測
@@ -111,7 +110,6 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │           │   ├── session_commands.rs  # Overview の session コマンド発行と完了反映
 │           │   ├── restore.rs           # pane / terminal の復元 job と対象選定
 │           │   ├── director.rs          # Director drawer / tab の選択と projection
-│           │   ├── work_run.rs          # Work run pane の入力と observation / control job
 │           │   └── garden.rs            # Garden の入力 routing と observation job
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
@@ -525,10 +523,6 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   `infrastructure::store::lifecycle::DaemonLifecycleStore` に分ける。後者を保持して reducer 結果を永続化するのは daemon の command handler
   だけであり、TUI / CLI / MCP は IPC command を通じて要求する。repository-local な `state.json` の session record は
   managed state として解釈・採用せず、daemon lifecycle store だけを権威にする。notes 等の UI metadata は lifecycle とは独立して扱う。
-- supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
-  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と compacting event journal、
-  offset index、replay checkpoint を保持し、lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
-  event producer であり、domain/store はそれらを解釈しない。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない
@@ -579,7 +573,7 @@ domain は常に内側に留まる。
 全 manifest の usagi dependency と `domain` / `usecase` / `infrastructure` の production Rust AST を走査して強制する。
 コメントや `#[cfg(test)]` の fake は production 依存として数えない。
 
-ルート合成 adapter が TUI の application port（`WorkspaceLoader`、workspace create effect、Work Run control など）を
+ルート合成 adapter が TUI の application port（`WorkspaceLoader`、workspace create effect など）を
 実装するときは `usagi_tui::usecase::application` の定義元を直接 import する。`presentation` はこれらを互換 re-export
 しない。これにより adapter が描画面を経由して usecase 境界へ依存しているように見える逆向きの API を作らず、公開名の
 所有場所と依存行列を一致させる。
@@ -682,9 +676,9 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
 | daemon IPC の request/reply 語彙、client connection state machine、planned restart 中の request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | request / reply の wire 契約は `crates/core/src/infrastructure/ipc/request.rs`（`ipc` が re-export するので呼び手の import path は `infrastructure::ipc`）、接続 state machine・retry・deadline は同じ層の `client.rs`、session observation reply は `session_snapshot.rs`、generation routing は `owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/tui/src/usecase/application/daemon_health.rs`。TUI-local な sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は同層の `metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
-| TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden / Work Run 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
+| TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
-| daemon usecase の巨大 module の内訳 | `agent_ipc`（受け入れ判定 `admission` / prompt・report の `delivery` / worker 計画の `dispatch` / 起動・再開の `lifecycle`）と `supervisor_runtime`（予約の `reservation` / worker stop・artifact・promotion の `obligations`）は bounded context ごとの子 module に分ける。各 module の test は同じ階層の `tests.rs` に置き、production と同居させない |
+| daemon usecase の巨大 module の内訳 | `agent_ipc`（受け入れ判定 `admission` / prompt・report の `delivery` / worker 計画の `dispatch` / 起動・再開の `lifecycle`）は bounded context ごとの子 module に分ける。各 module の test は同じ階層の `tests.rs` に置き、production と同居させない |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
@@ -1286,7 +1280,7 @@ server lifetime 中は変わらないため、設定、PATH、CLI install/uninst
 `session_complete` は引き続き利用できる。
 
 `crates/cli` の `mcp/` は、エージェント向けの tool 面（IF）を持つ。CLI が人間向けの
-`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session / agent / terminal / supervisor の tool を JSON-RPC で
+`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session / agent / terminal の tool を JSON-RPC で
 公開する（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。CLI の
 `Run` トレイトに対応する metadata の一様化を `Tool` と `ToolDescriptor` で行う。
 
@@ -1298,13 +1292,13 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
                                      ┌─────────────────────────────────┴──────────────────────────────┐
                                      ▼                                                                ▼
                          Store route ─► Tool::call ─► core store usecase       daemon route ─► core IPC client
-                         （issue / memory）                                  （session / agent / terminal / supervisor）
+                         （issue / memory）                                  （session / agent / terminal）
 ```
 
 - **`Tool` トレイト**: `name` / `description` / `input_schema`（`tools/list` に載る IF）と
   `call`（Store route の実行）を持つ。`call` は既定が未実装スタブで、issue / memory の store tool だけが
   core usecase を呼ぶ実装へオーバーライドする。tool は **系統ごとにファイル**（`mcp/tools/issue.rs` /
-  `memory.rs` / `session.rs` / `terminal.rs` / `supervisor.rs`）に置き、各 tool が 1 struct として実装する。
+  `memory.rs` / `session.rs` / `terminal.rs`）に置き、各 tool が 1 struct として実装する。
 - **レジストリと dispatch**: 各系統の `tools()` が tool struct と typed `ToolRoute` を同じ式で
   `ToolDescriptor` にし、`tools::registry()` は descriptor を連結する。tool 名を再解釈する文字列 `match` は持たず、
   route を付けていない `Box<dyn Tool>` は registry の要素型になれない。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
@@ -1315,7 +1309,7 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
   応答エンベロープの整形は `mcp/protocol.rs` に集約する。`initialize` と `tools/list` は実際に
   応答し、`tools/call` は tool を名前で引いて store または daemon の実行経路へ送る。tool または
   daemon の失敗は JSON-RPC エラーに変換する。配布 version は合成ルートが `serve` に注入する。
-- issue / memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal / supervisor tool は
+- issue / memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal tool は
   core IPC client を介して daemon の usecase へ委譲する。共有ロジックは
   `usagi-core`、daemon-owned effect は `usagi-daemon` に置く（[入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)）。
 

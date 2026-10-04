@@ -1440,9 +1440,9 @@ impl TerminalRegistry {
     ///
     /// A growing screen takes whatever the process ceiling leaves, and nothing
     /// hands it back until that screen is forgotten. Exited screens are kept
-    /// until retention evicts them, so a session that keeps launching Agents —
-    /// a workflow's planner and reviewer turns — filled the ceiling with
-    /// history nobody is reading, and every later launch was refused. Exited
+    /// until retention evicts them, so repeated Agent launches filled the
+    /// ceiling with history nobody is reading, and every later launch was
+    /// refused. Exited
     /// screens give up their history first, then the largest live ones; no
     /// visible grid is touched, so a screen stays drawable.
     fn reclaim_screen_cells(&mut self, needed: u64) {

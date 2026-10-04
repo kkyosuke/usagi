@@ -18,13 +18,13 @@ use super::{
     AgentRuntime, AgentTerminalActor, AgyAdapter, Arc, BTreeSet, BackgroundWorker, ClaudeAdapter,
     ClientPolicy, ClientWorkspace, CodexAdapter, ConnectionWorkspace, CurrentLocatorFile,
     DECISION_MAINTENANCE_TICK, DEFAULT_GENERATION_LIMIT, DaemonRequest, DaemonRestartAgent,
-    DaemonRestartAgentPlan, DecisionWake, DecisionWaker, DefaultModel, Deserialize, DiscardJournal,
-    DispatchStore, Duration, ErrorLog, FailureTransitionLog, FileWorkspaceFences,
-    GenerationRegistry, GenerationRegistryFile, GenerationRole, Geometry, LeaseClass, LockResult,
-    Mutex, MutexGuard, OpenedTenant, OperationId, PENDING_DAEMON_AGENT_RESTART_MAX_BYTES,
+    DaemonRestartAgentPlan, DefaultModel, Deserialize, DiscardJournal, DispatchStore, Duration,
+    ErrorLog, FailureTransitionLog, FileWorkspaceFences, GenerationRegistry,
+    GenerationRegistryFile, GenerationRole, Geometry, LeaseClass, LockResult, Mutex, MutexGuard,
+    OpenedTenant, OperationId, PENDING_DAEMON_AGENT_RESTART_MAX_BYTES,
     PENDING_DAEMON_AGENT_RESTART_SCHEMA, PENDING_DAEMON_AGENT_RESTART_TICK, Path, PathBuf,
-    PromptMode, RootAgentRuntime, RootClaudeProvisioner, RootCodexProvisioner, RuntimeHydration,
-    Serialize, SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime, SharedSessionRuntime,
+    RootAgentRuntime, RootClaudeProvisioner, RootCodexProvisioner, RuntimeHydration, Serialize,
+    SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime, SharedSessionRuntime,
     SharedUserEnvironment, ShutdownRequest, SpawnProvision, SpawnedChildren, SyncSender,
     SystemAgentReadiness, TenantRegistry, TenantRuntimeOpener, TerminalOutcome,
     TerminalPipelineMetrics, TrySendError, UserDecisionStore, Workspaces, Write,
@@ -324,62 +324,6 @@ impl usagi_daemon::usecase::lock_watch::ProbeTarget for AgentOwnerLock {
         };
         drop(agent.lock());
         true
-    }
-}
-
-pub(super) struct AgentDecisionWaker<'a> {
-    pub(super) agent: &'a SharedAgentRuntime,
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-impl DecisionWaker for AgentDecisionWaker<'_> {
-    fn wake(&mut self, wake: &DecisionWake) -> anyhow::Result<()> {
-        let prompt = format!(
-            "Supervisor child {} finished ({:?}). Re-open the durable task tree, verify and aggregate the child result, then continue the parent decision. Summary: {}",
-            wake.child_run_id, wake.outcome.kind, wake.outcome.summary
-        );
-        let mut runtime = self
-            .agent
-            .lock()
-            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?;
-        if runtime
-            .prompt_run(wake.parent.dispatch_run_id, &prompt)
-            .is_ok()
-        {
-            return Ok(());
-        }
-        let binding = runtime
-            .dispatch_store()
-            .binding(wake.parent.dispatch_run_id)?
-            .ok_or_else(|| anyhow::anyhow!("parent dispatch binding is unavailable"))?;
-        let workspace = runtime
-            .dispatch_store()
-            .workspace_for_agent(binding.worker.agent_id)?
-            .ok_or_else(|| anyhow::anyhow!("parent workspace is unavailable"))?;
-        if runtime
-            .prompt(
-                workspace,
-                binding.worker.session_id,
-                &prompt,
-                PromptMode::Live,
-            )
-            .is_ok()
-        {
-            return Ok(());
-        }
-        runtime
-            .queue_prompt_for_next_launch(workspace, binding.worker.session_id, &prompt)
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-        Ok(())
-    }
-}
-
-pub(super) struct DeferredDecisionWaker;
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
-impl DecisionWaker for DeferredDecisionWaker {
-    fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
-        anyhow::bail!("parent agent wake is deferred until the agent owner is available")
     }
 }
 

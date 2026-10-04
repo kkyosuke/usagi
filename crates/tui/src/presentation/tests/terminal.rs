@@ -70,10 +70,7 @@ fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
         app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
         Some(AppEvent::Key(AppKey::OpenDirectorNew))
     );
-    assert_eq!(
-        app_event_from_key(Key::Live(LiveTerminalAction::WorkRuns)),
-        Some(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
-    );
+
     assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
         Some(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
@@ -586,7 +583,6 @@ fn every_pane_launch_request_carries_its_own_pending_operation() {
     let mut pending = std::collections::HashMap::new();
 
     let root_agent = OperationId::new();
-    let root_goal = OperationId::new();
     let session_agent = OperationId::new();
     let session_terminal = OperationId::new();
     let planned = [
@@ -599,20 +595,6 @@ fn every_pane_launch_request_carries_its_own_pending_operation() {
                 workspace,
                 session: None,
                 profile: None,
-                goal: None,
-                resume: false,
-            },
-        ),
-        (
-            Target::Root(workspace),
-            root_goal,
-            "goal",
-            crate::presentation::PaneLaunch::Agent {
-                operation: root_goal,
-                workspace,
-                session: None,
-                profile: None,
-                goal: Some("prepare the PR".to_owned()),
                 resume: false,
             },
         ),
@@ -664,12 +646,12 @@ fn every_pane_launch_request_carries_its_own_pending_operation() {
             "the pane promoted the terminal its own operation was answered with"
         );
     }
-    assert_eq!(requests.lock().unwrap().len(), 4);
+    assert_eq!(requests.lock().unwrap().len(), 3);
     assert!(pending.is_empty());
 }
 
 #[test]
-fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
+fn root_host_action_creates_one_root_pending_pane() {
     let workspace = WorkspaceId::new();
     let operation = OperationId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
@@ -684,7 +666,6 @@ fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
             session: None,
             operation_id: operation,
             profile: None,
-            goal: Some("prepare a PR".to_owned()),
         }))
         .unwrap();
 
@@ -709,9 +690,8 @@ fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
         [crate::presentation::PaneLaunch::Agent {
             operation: actual,
             session: None,
-            goal: Some(goal),
             ..
-        }] if *actual == operation && goal == "prepare a PR"
+        }] if *actual == operation
     ));
 }
 
@@ -762,7 +742,6 @@ fn out_of_order_and_late_completions_never_cross_or_revive_a_pane() {
                     result: Ok(AgentPaneAdmission {
                         terminal,
                         continuation: None,
-                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -885,7 +864,6 @@ fn a_stale_completion_neither_frees_admission_nor_completes_another_pane() {
                 result: Ok(AgentPaneAdmission {
                     terminal: stale_terminal,
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -950,7 +928,6 @@ fn successful_pane_completions_persist_focus_and_select_agent_tabs() {
                 result: Ok(AgentPaneAdmission {
                     terminal: agent_terminal.clone(),
                     continuation: Some(continuation),
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -1936,7 +1913,6 @@ fn close_tab_live_action_cancels_the_focused_pending_launch() {
         workspace,
         session: Some(session),
         profile: None,
-        goal: None,
         resume: false,
     });
     let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
@@ -2608,50 +2584,6 @@ fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
         0,
         0,
     ));
-}
-
-#[test]
-fn a_press_on_the_workflow_tab_beside_a_live_agent_is_not_a_terminal_press() {
-    // Starting a workflow launches an Agent tab in the same session, so the
-    // session holds a live tab while the person still reads the Workflow tab.
-    // A press there used to find live input wanted but no terminal selected,
-    // and the TUI panicked out of the raw-mode screen.
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let terminal = live_terminal_ref(workspace, session);
-    let (ui, mut runtime) = focused_live_pane(
-        workspace,
-        session,
-        terminal.clone(),
-        Box::new(ScriptedAgentPort {
-            terminal,
-            subscription: 9,
-            replay: b"hello".to_vec(),
-            poll_error: None,
-            detaches: Arc::new(Mutex::new(Vec::new())),
-        }),
-    );
-    runtime.on_effect(&Effect::OpenWorkflow { session });
-    assert!(runtime.wants_live_input());
-    assert!(runtime.focused_terminal().is_none());
-    let mut controls = LiveTerminalControls::default();
-    assert!(!handle_terminal_pointer(
-        &ui,
-        &runtime,
-        &mut controls,
-        &mut FakeTerminal::default(),
-        &mut RecordingBrowser::default(),
-        20,
-        80,
-        1,
-        0,
-        PointerEvent {
-            kind: PointerKind::Down,
-            column: 37,
-            row: 5,
-        },
-    ));
-    assert!(!controls.has_selection());
 }
 
 #[test]

@@ -105,8 +105,6 @@ pub struct LaunchAgentRequest {
     pub operation_id: OperationId,
     /// Optional Agent profile; `None` uses the daemon default.
     pub profile: Option<AgentProfileId>,
-    /// Present only for the opt-in goal-driven Director launch.
-    pub goal: Option<String>,
 }
 
 /// Explicit provider-native resume request derived from
@@ -425,7 +423,6 @@ pub enum Flow {
 ///
 /// [`drain_events`]: Self::drain_events
 pub struct DaemonBackend {
-    workflow: Option<Box<dyn super::workflow::WorkflowPort>>,
     sessions: Box<dyn SessionLifecyclePort>,
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
@@ -448,7 +445,6 @@ impl DaemonBackend {
     ) -> Self {
         let (completions_tx, completions_rx) = mpsc::channel();
         Self {
-            workflow: None,
             sessions,
             agent,
             store,
@@ -482,12 +478,6 @@ impl DaemonBackend {
         self
     }
 
-    #[must_use]
-    pub fn with_workflow(mut self, port: Box<dyn super::workflow::WorkflowPort>) -> Self {
-        self.workflow = Some(port);
-        self
-    }
-
     /// Run one reducer-issued effect against its owning port.
     ///
     /// Returns [`Flow::Exit`] for [`Effect::Detach`] and [`Flow::Leave`] for
@@ -499,26 +489,6 @@ impl DaemonBackend {
     #[allow(clippy::too_many_lines)] // This exhaustive adapter keeps every controller effect visibly mapped to exactly one port.
     pub fn dispatch(&mut self, effect: Effect) -> Flow {
         match effect {
-            Effect::Workflow(job) => {
-                let completions = self.completions();
-                if let Some(port) = self.workflow.as_mut() {
-                    port.dispatch(job, completions);
-                } else {
-                    completions.emit(AppEvent::Backend(
-                        super::controller::BackendEvent::Workflow {
-                            job,
-                            result: Err(super::workflow::WorkflowError {
-                                message: "Workflow backend is unavailable".into(),
-                                unconfirmed: false,
-                            }),
-                        },
-                    ));
-                }
-            }
-            // The Workflow tab is shell-local and owns no daemon operation, so
-            // this executor has nothing to run: the pane registry takes the
-            // intent when the reducer produces it (`WorkspaceRuntime`).
-            Effect::OpenWorkflow { .. } => {}
             Effect::CreateSession {
                 workspace,
                 token,
@@ -566,19 +536,6 @@ impl DaemonBackend {
                 session,
                 operation_id,
                 profile,
-                goal: None,
-            }),
-            Effect::LaunchGoal {
-                workspace,
-                operation_id,
-                profile,
-                goal,
-            } => self.agent.launch_agent(LaunchAgentRequest {
-                workspace,
-                session: None,
-                operation_id,
-                profile,
-                goal: Some(goal),
             }),
             Effect::ResumeAgent {
                 workspace,
@@ -729,56 +686,6 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
 
-    #[test]
-    fn workflow_backend_routes_snapshots_and_explicit_unavailability() {
-        use crate::usecase::application::workflow::{WorkflowJob, WorkflowPort};
-        struct FakeWorkflow;
-        impl WorkflowPort for FakeWorkflow {
-            fn dispatch(&mut self, job: WorkflowJob, completions: Completions) {
-                let snapshot = usagi_core::domain::workflow::WorkflowSnapshot {
-                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-                    session: job.session,
-                    run: None,
-                    pending_start: None,
-                    finished: Vec::new(),
-                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
-                };
-                completions.emit(AppEvent::Backend(
-                    super::super::controller::BackendEvent::Workflow {
-                        job,
-                        result: Ok(Box::new(snapshot)),
-                    },
-                ));
-            }
-        }
-        let mut backend = backend();
-        let job = WorkflowJob {
-            workspace: WorkspaceId::new(),
-            session: SessionId::new(),
-            control: None,
-        };
-        assert_eq!(
-            backend.dispatch(Effect::OpenWorkflow {
-                session: job.session
-            }),
-            Flow::Continue
-        );
-        backend.dispatch(Effect::Workflow(job.clone()));
-        assert!(matches!(
-            backend.drain_events().as_slice(),
-            [AppEvent::Backend(
-                super::super::controller::BackendEvent::Workflow { result: Err(_), .. }
-            )]
-        ));
-        let mut backend = backend.with_workflow(Box::new(FakeWorkflow));
-        backend.dispatch(Effect::Workflow(job));
-        assert!(matches!(
-            backend.drain_events().as_slice(),
-            [AppEvent::Backend(
-                super::super::controller::BackendEvent::Workflow { result: Ok(_), .. }
-            )]
-        ));
-    }
     use crate::usecase::application::controller::{
         BackendEvent, Notice, OperationResult, SafeError, SafeMessage,
     };
@@ -1251,7 +1158,7 @@ mod tests {
             Box::new(FakeStore::default()),
             Box::new(FakeWorkspaceCommands::default()),
         );
-        let goal_workspace = WorkspaceId::new();
+        let root_workspace = WorkspaceId::new();
         assert_eq!(
             backend.dispatch(Effect::LaunchAgent {
                 workspace: WorkspaceId::new(),
@@ -1262,11 +1169,11 @@ mod tests {
             Flow::Continue
         );
         assert_eq!(
-            backend.dispatch(Effect::LaunchGoal {
-                workspace: goal_workspace,
+            backend.dispatch(Effect::LaunchAgent {
+                workspace: root_workspace,
+                session: None,
                 operation_id: OperationId::new(),
                 profile: None,
-                goal: "prepare a PR".to_owned(),
             }),
             Flow::Continue
         );
@@ -1304,12 +1211,11 @@ mod tests {
         assert!(backend.drain_events().is_empty());
         assert!(matches!(
             launches.lock().unwrap().as_slice(),
-            [LaunchAgentRequest { goal: None, .. }, LaunchAgentRequest {
+            [LaunchAgentRequest { session: Some(_), .. }, LaunchAgentRequest {
                 workspace,
                 session: None,
-                goal: Some(goal),
                 ..
-            }] if *workspace == goal_workspace && goal == "prepare a PR"
+            }] if *workspace == root_workspace
         ));
     }
 
@@ -1664,7 +1570,6 @@ mod tests {
             session: Some(session),
             operation_id,
             profile: None,
-            goal: None,
         };
         assert_eq!(launch.clone(), launch);
         assert!(format!("{launch:?}").contains("LaunchAgentRequest"));

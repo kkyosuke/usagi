@@ -166,51 +166,6 @@ fn new_validation_reports_every_required_clone_and_existing_field() {
 }
 
 #[test]
-fn goal_driven_new_requires_one_goal_and_emits_only_the_goal_launch() {
-    let workspace = WorkspaceId::new();
-    let mut state = sized_home(workspace, Vec::new(), 100, 30);
-    state.set_agent_models(
-        AvailableModels::new([DefaultModel::OpenAi]),
-        DefaultModel::OpenAi,
-    );
-    state.set_work_mode(WorkMode::GoalDriven);
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    assert_eq!(state.director_goal(), "");
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-    for character in "目的を実装する".chars() {
-        let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
-    }
-    let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
-    let [
-        Effect::LaunchGoal {
-            workspace: actual,
-            operation_id,
-            profile: Some(profile),
-            goal,
-        },
-    ] = effects.as_slice()
-    else {
-        panic!("goal confirmation must emit one launch: {effects:?}");
-    };
-    assert_eq!(*actual, workspace);
-    assert_eq!(profile.as_str(), "codex");
-    assert_eq!(goal, "目的を実装する");
-    assert_eq!(state.director_goal(), "");
-    assert!(state.director_launching().is_some());
-    let run = SupervisorRunId::new();
-    let _ = update(
-        &mut state,
-        AppEvent::DirectorLaunchFinished {
-            operation: *operation_id,
-            supervisor_run_id: Some(run),
-            succeeded: true,
-        },
-    );
-    assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
-}
-
-#[test]
 fn agent_launch_failure_opens_a_dismissible_error_dialog() {
     let (workspace, session, _) = ids();
     for dismiss in [AppKey::Escape, AppKey::Enter, AppKey::CtrlC] {

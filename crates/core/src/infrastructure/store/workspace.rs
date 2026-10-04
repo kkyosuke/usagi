@@ -371,7 +371,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
-            work_mode: crate::domain::settings::WorkMode::GoalDriven,
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -383,6 +382,35 @@ mod tests {
         storage.save_settings(&settings).unwrap();
         assert_eq!(storage.load_settings().unwrap(), settings);
         assert!(storage.dir().join(SETTINGS_FILE).is_file());
+    }
+
+    #[test]
+    fn old_workflow_setting_preserves_global_defaults_and_is_not_saved() {
+        let (_dir, storage) = temp_storage();
+        let expected = Settings {
+            default_model: crate::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
+            team_template: crate::domain::settings::TeamTemplate::Flat,
+            env: [("PROJECT".to_owned(), "usagi".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Settings::default()
+        };
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy["work_mode"] = serde_json::json!("goal-driven");
+        fs::create_dir_all(storage.dir()).unwrap();
+        fs::write(
+            storage.dir().join(SETTINGS_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert_eq!(loaded, expected);
+        storage.save_settings(&loaded).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(storage.dir().join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert!(saved.get("work_mode").is_none());
+        assert_eq!(storage.load_settings().unwrap(), expected);
     }
 
     #[test]

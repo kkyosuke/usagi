@@ -551,30 +551,6 @@ fn daemon_repair_resume_records_restart_without_changing_the_manual_creator() {
     assert_eq!(provenance.launched.source, AgentLaunchSource::Daemon);
 }
 
-#[test]
-fn human_goal_launch_records_the_manual_goal_entrypoint() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let workspace = WorkspaceId::new();
-    let operation = OperationId::new().to_string();
-    agent
-        .launch_goal(
-            &operation,
-            &AgentGoalIntent {
-                workspace,
-                profile: None,
-                goal: "Update the docs".into(),
-            },
-            &FakeScope(Ok(scope())),
-        )
-        .unwrap();
-    let inventory = agent.inventory(workspace);
-    let provenance = inventory.runtimes[0].launch_provenance.as_ref().unwrap();
-    assert_eq!(provenance.launched.source, AgentLaunchSource::Manual);
-    assert_eq!(provenance.launched.entrypoint, AgentLaunchEntry::AgentGoal);
-}
-
 fn audit_client(surface: AgentClientSurface) -> AgentLaunchClient {
     AgentLaunchClient {
         surface: Some(surface),
@@ -643,7 +619,6 @@ fn legacy_dispatch_records_connection_without_authenticating_the_wire_caller() {
     assert_eq!(audit.launched.entrypoint, AgentLaunchEntry::LegacyDispatch);
     assert_eq!(audit.launched.caller, None);
     assert_eq!(audit.launched.caller_operation_id, None);
-    assert_eq!(audit.launched.workflow_id, None);
     assert_eq!(audit.launched.client, Some(client));
     assert_eq!(audit.created.as_ref(), Some(&audit.launched));
     let binding = agent.dispatch.binding(operation).unwrap().unwrap();
@@ -733,153 +708,96 @@ fn manual_connection_evidence_is_durable_and_a_retry_cannot_rewrite_its_creator(
 }
 
 #[test]
-#[allow(clippy::too_many_lines)] // One lifetime verifies Workflow -> MCP -> exact-resume audit continuity.
-fn workflow_and_its_mcp_workers_retain_one_workflow_identity_across_resume() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let worktree = tempfile::tempdir().unwrap();
-    let scope = FakeScope(Ok(configured_scope(worktree.path())));
-    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let intent = intent(None);
-    let director = OperationId::new();
-    agent
-        .launch(
-            &director.to_string(),
-            &AgentLaunchIntent {
-                workspace: intent.workspace,
-                session: None,
-                profile: None,
-            },
-            &scope,
-        )
-        .unwrap();
-    let credential = agent
-        .mcp_callers
-        .iter()
-        .find(|(_, caller)| caller.operation == director)
-        .unwrap()
-        .0
-        .clone();
-    let actor = agent.mcp_dispatch_context(&credential).unwrap();
-    let workflow = OperationId::new();
-    let prompt = "Implement and request a peer review";
-    let ticket = agent
-        .prepare_workflow_readiness(&workflow.to_string(), &intent, prompt)
-        .unwrap();
-    agent
-        .launch_workflow_from_after_readiness(
-            &workflow.to_string(),
-            &intent,
-            prompt,
-            &scope,
-            ticket.as_ref(),
-            AgentLaunchContext {
-                client: Some(audit_client(AgentClientSurface::Mcp)),
-                caller: Some(actor.caller.clone()),
-                caller_operation_id: Some(actor.run_id),
-                ..AgentLaunchContext::new(
-                    AgentLaunchSource::Workflow,
-                    AgentLaunchEntry::WorkflowStart,
-                )
-            },
-        )
-        .unwrap();
-    let parent = agent.dispatch.binding(workflow).unwrap().unwrap().worker;
-    let parent_caller = CallerRef {
-        agent_id: parent.agent_id,
-        session_id: parent.session_id,
-    };
-    let dispatch = DispatchIntent {
-        workspace: intent.workspace,
-        session_name: "worker".into(),
-        caller: parent_caller.clone(),
-        agent: DispatchAgentIntent::New {
-            runtime: AgentProfileId::new("claude").unwrap(),
-            model: ModelSelector::new("test").unwrap(),
-        },
-        prompt: "Review the task".into(),
-    };
-    let operation = OperationId::new();
-    let ticket = agent
-        .prepare_dispatch_readiness(&operation.to_string(), &dispatch)
-        .unwrap();
-    let worker = agent
-        .dispatch_from_after_readiness(
-            &operation.to_string(),
-            &dispatch,
-            intent.session.unwrap(),
-            &scope,
-            ticket.as_ref(),
-            None,
-            AgentLaunchContext {
-                client: Some(audit_client(AgentClientSurface::Mcp)),
-                caller_operation_id: Some(workflow),
-                ..AgentLaunchContext::new(AgentLaunchSource::Mcp, AgentLaunchEntry::AgentHandoff)
-            },
-        )
-        .unwrap();
-    let inventory = agent.inventory(intent.workspace);
-    let parent_audit = inventory
-        .runtimes
-        .iter()
-        .find(|item| item.launch_provenance.as_ref().unwrap().agent_id == Some(parent.agent_id))
-        .unwrap()
-        .launch_provenance
-        .as_ref()
-        .unwrap();
-    assert_eq!(parent_audit.launched.workflow_id, Some(workflow));
-    assert_eq!(parent_audit.launched.caller, Some(actor.caller));
-    assert_eq!(parent_audit.launched.caller_operation_id, Some(director));
-    assert_eq!(parent_audit.launched.source, AgentLaunchSource::Workflow);
-    let worker_audit = inventory
-        .runtimes
-        .iter()
-        .find(|item| item.runtime.terminal == worker.terminal)
-        .unwrap()
-        .launch_provenance
-        .as_ref()
-        .unwrap();
-    assert_eq!(worker_audit.launched.workflow_id, Some(workflow));
-    assert_eq!(worker_audit.launched.caller, Some(parent_caller));
-    assert_eq!(worker_audit.launched.caller_operation_id, Some(workflow));
-    assert_eq!(worker_audit.launched.source, AgentLaunchSource::Mcp);
-    let credential = agent
-        .mcp_callers
-        .iter()
-        .find(|(_, caller)| caller.operation == operation)
-        .unwrap()
-        .0
-        .clone();
-    agent
-        .report_agent_phase_with_session(
-            &credential,
-            AgentPhase::Ready,
-            Some(ProviderSessionId::new("private-workflow-conversation").unwrap()),
-        )
-        .unwrap();
-    agent.exit(&worker.terminal, 0).unwrap();
-    let target = agent
-        .inventory(intent.workspace)
-        .resumable
-        .iter()
-        .find(|item| item.runtime_id == worker.runtime.agent_runtime_id)
-        .unwrap()
-        .target
-        .clone()
-        .unwrap();
-    let resumed = agent
-        .resume_exact(&OperationId::new().to_string(), &target, &scope)
-        .unwrap();
-    let resumed_audit = agent
-        .inventory(intent.workspace)
-        .runtimes
-        .into_iter()
-        .find(|item| item.runtime.terminal == resumed.terminal)
-        .unwrap()
-        .launch_provenance
-        .unwrap();
-    assert_eq!(resumed_audit.agent_id, worker_audit.agent_id);
-    assert_eq!(resumed_audit.created, worker_audit.created);
-    assert_eq!(resumed_audit.launched.source, AgentLaunchSource::Manual);
-    assert_eq!(resumed_audit.launched.workflow_id, Some(workflow));
+fn removed_origin_fields_do_not_prevent_hydration_or_exact_resume() {
+    for (source, entrypoint, expected_source) in [
+        ("workflow", "workflow_start", AgentLaunchSource::Unknown),
+        ("manual", "agent_goal", AgentLaunchSource::Manual),
+        (
+            "future_source",
+            "future_entrypoint",
+            AgentLaunchSource::Unknown,
+        ),
+    ] {
+        let mut agent = codex_runtime();
+        let intent = intent(Some("codex"));
+        let scope = FakeScope(Ok(scope()));
+        let created = OperationId::new();
+        let admission = agent.launch(&created.to_string(), &intent, &scope).unwrap();
+        let credential = agent.mcp_callers.keys().next().unwrap().clone();
+        agent
+            .capture_codex_session(
+                &credential,
+                ProviderSessionId::new("retained-conversation").unwrap(),
+            )
+            .unwrap();
+        agent.exit(&admission.terminal, 0).unwrap();
+        let before = agent.coordinator.snapshot();
+        let mut encoded = serde_json::to_value(&before).unwrap();
+        for event in ["created", "launched"] {
+            let origin = &mut encoded["records"][0]["launch_provenance"][event];
+            origin["source"] = serde_json::json!(source);
+            origin["entrypoint"] = serde_json::json!(entrypoint);
+            origin["workflow_id"] = serde_json::json!(created);
+        }
+        let restored: RuntimeStoreSnapshot = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.records[0].runtime, before.records[0].runtime);
+        assert_eq!(restored.records[0].operation, before.records[0].operation);
+        assert_eq!(
+            restored.records[0].resume_source,
+            before.records[0].resume_source
+        );
+        let original = restored.records[0]
+            .launch_provenance
+            .as_ref()
+            .unwrap()
+            .created
+            .clone();
+        let origin = original.as_ref().unwrap();
+        assert_eq!(origin.source, expected_source);
+        assert_eq!(origin.entrypoint, AgentLaunchEntry::Unknown);
+        assert_eq!(origin.operation_id, created);
+        assert_eq!(
+            origin.at,
+            before.records[0]
+                .launch_provenance
+                .as_ref()
+                .unwrap()
+                .created
+                .as_ref()
+                .unwrap()
+                .at
+        );
+        assert!(
+            !serde_json::to_string(&restored)
+                .unwrap()
+                .contains("workflow_id")
+        );
+        agent.coordinator = RuntimeCoordinator::hydrate(restored, 16, 64 * 1024, 64).unwrap();
+        let target = agent.inventory(intent.workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let operation = OperationId::new();
+        let resumed = agent
+            .resume_exact(&operation.to_string(), &target, &scope)
+            .unwrap();
+        let inventory = agent.inventory(intent.workspace);
+        let audit = inventory
+            .runtimes
+            .iter()
+            .find(|item| item.runtime.terminal == resumed.terminal)
+            .unwrap()
+            .launch_provenance
+            .as_ref()
+            .unwrap();
+        assert_eq!(audit.created, original);
+        assert_eq!(audit.launched.source, AgentLaunchSource::Manual);
+        assert_eq!(audit.launched.entrypoint, AgentLaunchEntry::SessionResume);
+        assert_eq!(audit.launched.operation_id, operation);
+        assert!(
+            !serde_json::to_string(&inventory)
+                .unwrap()
+                .contains("workflow_id")
+        );
+    }
 }

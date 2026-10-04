@@ -60,35 +60,6 @@ fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
     assert_eq!(runtime.focused_terminal(), None);
 }
 
-#[test]
-fn goal_pane_launch_rejects_a_managed_session_before_calling_the_port() {
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let operation = OperationId::new();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let outcome = crate::presentation::run_pane_launch(
-        &IdentityRecordingLaunchPort(Arc::clone(&requests)),
-        crate::presentation::PaneLaunch::Agent {
-            operation,
-            workspace,
-            session: Some(session),
-            profile: None,
-            goal: Some("invalid scope".to_owned()),
-            resume: false,
-        },
-        terminal_geometry(20, 80),
-    );
-
-    assert!(matches!(
-        outcome,
-        crate::presentation::PaneLaunchOutcome::Agent {
-            operation: actual,
-            result: Err(ref reason),
-        } if actual == operation && reason.contains("workspace-root scope")
-    ));
-    assert!(requests.lock().unwrap().is_empty());
-}
-
 /// #551 acceptance. The frame loop must be "non-blocking drain → projection
 /// → draw → input" and nothing else: neither a wake-up tick nor a resize may
 /// reach a daemon lane, and no frame may spawn a session worker. Both used

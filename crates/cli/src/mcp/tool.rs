@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::Path;
 
 use serde_json::Value;
-use usagi_core::infrastructure::ipc::{DispatchToolAction, SessionAction, SupervisorToolAction};
+use usagi_core::infrastructure::ipc::{DispatchToolAction, SessionAction};
 
 /// Descriptor-owned execution destination. A route cannot be advertised without
 /// being attached to the same descriptor as its metadata and policy.
@@ -15,7 +15,6 @@ pub enum ToolRoute {
     AgentInventory,
     AgentResume,
     Dispatch(DispatchToolAction),
-    Supervisor(SupervisorToolAction),
 }
 
 /// Repository authority used by a store-backed tool.
@@ -31,7 +30,6 @@ pub enum CallerPolicy {
     Public,
     SessionCredential,
     AgentCredential,
-    DaemonProvenance,
 }
 
 /// The single source of truth consumed by both `tools/list` and `tools/call`.
@@ -110,16 +108,6 @@ impl ToolDescriptor {
             Box::new(tool),
             ToolRoute::Dispatch(action),
             CallerPolicy::AgentCredential,
-        )
-    }
-
-    /// Registers a daemon-provenance supervisor tool.
-    #[must_use]
-    pub fn supervisor(tool: impl Tool + 'static, action: SupervisorToolAction) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::Supervisor(action),
-            CallerPolicy::DaemonProvenance,
         )
     }
 
@@ -438,7 +426,7 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
 /// 各 tool は wire 上の名前・説明・入力スキーマ（`tools/list` に載る IF）を知る。実行先と
 /// caller policy は、この tool を包む [`ToolDescriptor`] が所有する。Store route の issue /
 /// memory tool だけが [`Tool::call`] を core usecase の adapter として実装し、daemon route の
-/// session / agent / terminal / supervisor tool は serve loop が core IPC client へ送る。
+/// session / agent / terminal tool は serve loop が core IPC client へ送る。
 pub trait Tool {
     /// wire 上の tool 名（例: `"issue_create"`）。
     fn name(&self) -> &'static str;

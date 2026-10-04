@@ -113,12 +113,12 @@ pub struct CallerRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLaunchSource {
-    /// The legacy IPC dispatch carries no authenticated initiating Agent.
-    Unknown,
     Manual,
     Mcp,
-    Workflow,
     Daemon,
+    /// Legacy or unrecognized classifications carry no inferred authority.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Trusted entry point which requested a runtime, rather than its prompt text.
@@ -127,14 +127,14 @@ pub enum AgentLaunchSource {
 pub enum AgentLaunchEntry {
     LegacyDispatch,
     Agent,
-    AgentGoal,
     SessionDispatch,
     AgentHandoff,
     SessionDelegateBrief,
     SessionResume,
     IntegrationRepair,
-    WorkflowStart,
     DaemonRestart,
+    #[serde(other)]
+    Unknown,
 }
 
 /// The cooperating IPC client reports its presentation surface. This is
@@ -168,8 +168,6 @@ pub struct AgentLaunchOrigin {
     pub caller_operation_id: Option<OperationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<AgentLaunchClient>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_id: Option<OperationId>,
     pub operation_id: OperationId,
     pub at: DateTime<Utc>,
 }

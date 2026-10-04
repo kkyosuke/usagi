@@ -14,8 +14,8 @@ use std::time::Duration;
 use crate::domain::clock::MonotonicClock;
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::infrastructure::ipc::request::{
-    ClientError, DaemonReply, DaemonRequest, SessionAction, SupervisorToolAction, TenantAction,
-    TerminalAction, TuiUserDecisionAction,
+    ClientError, DaemonReply, DaemonRequest, SessionAction, TenantAction, TerminalAction,
+    TuiUserDecisionAction,
 };
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, Capability, ClientHello, ClientId, ClientWorkspace, DaemonGeneration,
@@ -36,10 +36,9 @@ use crate::domain::pr_inventory::PrInventory;
 use crate::domain::session_lifecycle::AgentPhase;
 #[cfg(test)]
 use crate::infrastructure::ipc::request::{
-    AgentConcurrency, AgentGoalIntent, AgentLaunchIntent, DaemonMetrics, DaemonRestartAgents,
-    DispatchToolAction, McpCallerContext, MetricsAction, PrAction, PrRequest, PrSnapshot,
-    TerminalGeometry, TerminalLaunchIntent, agent_goal_semantic_key, agent_launch_semantic_key,
-    agent_resume_semantic_key, decode_pr_snapshot,
+    AgentConcurrency, AgentLaunchIntent, DaemonMetrics, DaemonRestartAgents, DispatchToolAction,
+    McpCallerContext, MetricsAction, PrAction, PrRequest, PrSnapshot, TerminalGeometry,
+    TerminalLaunchIntent, agent_launch_semantic_key, agent_resume_semantic_key, decode_pr_snapshot,
 };
 #[cfg(test)]
 use crate::infrastructure::ipc::{OWNER_GENERATION_ROUTING_CAPABILITY, WORKSPACE_FENCE_CAPABILITY};
@@ -969,8 +968,6 @@ impl RetryEligibility {
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
-            | DaemonRequest::SupervisorSnapshot { .. }
-            | DaemonRequest::WorkflowSnapshot { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::PlanDaemonRestartAgents { .. }
             | DaemonRequest::Tenant {
@@ -1002,15 +999,6 @@ impl RetryEligibility {
                     Self::NoCrossConnectionEvidence
                 }
             }
-            DaemonRequest::SupervisorTool { action, .. } => {
-                if supervisor_action_is_read_only(*action) {
-                    Self::ReadOnly
-                } else if supervisor_action_is_durable_operation(*action) {
-                    Self::DurableOperation
-                } else {
-                    Self::NoCrossConnectionEvidence
-                }
-            }
             DaemonRequest::UserDecision { action, .. } => {
                 if user_decision_action_is_read_only(*action) {
                     Self::ReadOnly
@@ -1019,10 +1007,7 @@ impl RetryEligibility {
                 }
             }
             DaemonRequest::Rollover { .. }
-            | DaemonRequest::SupervisorControl { .. }
-            | DaemonRequest::WorkflowControl { .. }
             | DaemonRequest::Agent { .. }
-            | DaemonRequest::AgentGoal { .. }
             | DaemonRequest::ResumeAgent { .. }
             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
@@ -1058,7 +1043,6 @@ const fn session_action_is_read_only(action: SessionAction) -> bool {
             | SessionAction::NoteGet
             | SessionAction::TodoList
             | SessionAction::DecisionList
-            | SessionAction::WorkflowStatus
     )
 }
 
@@ -1067,28 +1051,7 @@ const fn session_action_is_durable_operation(action: SessionAction) -> bool {
     // lifecycle mutations (create/remove across daemon restarts). Other
     // mutating actions stay fail-closed until their server-backed durable
     // contract is proven.
-    matches!(
-        action,
-        SessionAction::Create
-            | SessionAction::Remove
-            // A workflow command is admitted by the producer's operation ID, so
-            // retrying a lost response resumes the same run instead of starting
-            // a second one.
-            | SessionAction::WorkflowStart
-            | SessionAction::WorkflowInstruct
-            | SessionAction::WorkflowFinish
-    )
-}
-
-const fn supervisor_action_is_read_only(action: SupervisorToolAction) -> bool {
-    matches!(
-        action,
-        SupervisorToolAction::Get | SupervisorToolAction::List | SupervisorToolAction::Events
-    )
-}
-
-const fn supervisor_action_is_durable_operation(action: SupervisorToolAction) -> bool {
-    matches!(action, SupervisorToolAction::Start)
+    matches!(action, SessionAction::Create | SessionAction::Remove)
 }
 
 const fn user_decision_action_is_read_only(action: TuiUserDecisionAction) -> bool {
@@ -2439,13 +2402,6 @@ mod deadline_and_retry_tests {
                 root: None,
                 force: false,
             },
-            // Reading a workflow reconciles evidence the resident lane would
-            // reconcile anyway, so re-reading it changes nothing a caller owns.
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowStatus,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
             DaemonRequest::Session {
                 action: SessionAction::Agents,
                 operation_id: "read-only-audit".into(),
@@ -2497,12 +2453,6 @@ mod deadline_and_retry_tests {
                 payload: session_payload(),
                 caller_context: None,
             },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::List,
-                operation_id: String::new(),
-                payload: session_payload(),
-                caller_context: None,
-            },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::List,
                 payload: session_payload(),
@@ -2524,42 +2474,11 @@ mod deadline_and_retry_tests {
                 operation_id: "op".into(),
                 payload: session_payload(),
             },
-            // A workflow command is admitted by the producer's operation ID, so
-            // a lost response resumes the same run instead of starting another.
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowStart,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowInstruct,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowFinish,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::Dispatch,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
-            },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::Start,
-                operation_id: "op".into(),
-                payload: session_payload(),
-                caller_context: None,
-            },
-            DaemonRequest::SupervisorControl {
-                workspace: WorkspaceId::new(),
-                operation_id: OperationId::new(),
-                command: crate::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
-                    supervisor_run_id: crate::domain::supervisor::SupervisorRunId::new(),
-                    reason: "operator cancelled".into(),
-                },
             },
             DaemonRequest::Agent {
                 operation_id: "op".into(),
@@ -2567,14 +2486,6 @@ mod deadline_and_retry_tests {
                     workspace: WorkspaceId::new(),
                     session: None,
                     profile: None,
-                },
-            },
-            DaemonRequest::AgentGoal {
-                operation_id: "op".into(),
-                intent: AgentGoalIntent {
-                    workspace: WorkspaceId::new(),
-                    profile: None,
-                    goal: "prepare a PR".to_owned(),
                 },
             },
         ];
@@ -2605,12 +2516,6 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentInboxAck,
-                operation_id: "op".into(),
-                payload: session_payload(),
-                caller_context: None,
-            },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::Cancel,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
@@ -3240,37 +3145,6 @@ mod deadline_and_retry_tests {
             },
         ] {
             assert_ne!(key, agent_launch_semantic_key(&other), "{other:?}");
-        }
-    }
-
-    #[test]
-    fn the_agent_goal_semantic_key_covers_the_exact_goal_and_root_launch() {
-        let intent = AgentGoalIntent {
-            workspace: WorkspaceId::new(),
-            profile: None,
-            goal: "目的を実装する".to_owned(),
-        };
-        let key = agent_goal_semantic_key(&intent);
-        assert_eq!(key, agent_goal_semantic_key(&intent));
-        assert!(key.contains("workspace-root"));
-        assert!(key.contains(&format!("goal:{}", intent.goal.len())));
-        assert!(key.ends_with(&intent.goal));
-
-        for other in [
-            AgentGoalIntent {
-                goal: "別の目的".to_owned(),
-                ..intent.clone()
-            },
-            AgentGoalIntent {
-                workspace: WorkspaceId::new(),
-                ..intent.clone()
-            },
-            AgentGoalIntent {
-                profile: Some(AgentProfileId::new("codex").unwrap()),
-                ..intent
-            },
-        ] {
-            assert_ne!(key, agent_goal_semantic_key(&other));
         }
     }
 

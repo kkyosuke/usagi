@@ -37,7 +37,6 @@ pub(crate) fn origin_label(provenance: Option<&AgentLaunchProvenance>) -> &'stat
     {
         Some(AgentLaunchSource::Manual) => "Manual",
         Some(AgentLaunchSource::Mcp) => "MCP",
-        Some(AgentLaunchSource::Workflow) => "Workflow",
         Some(AgentLaunchSource::Daemon) => "Daemon",
         Some(AgentLaunchSource::Unknown) | None => "Unknown",
     }
@@ -206,7 +205,6 @@ mod origin_tests {
             (AgentLaunchSource::Unknown, "Unknown"),
             (AgentLaunchSource::Manual, "Manual"),
             (AgentLaunchSource::Mcp, "MCP"),
-            (AgentLaunchSource::Workflow, "Workflow"),
             (AgentLaunchSource::Daemon, "Daemon"),
         ] {
             let origin = AgentLaunchOrigin {
@@ -215,7 +213,6 @@ mod origin_tests {
                 caller: None,
                 caller_operation_id: None,
                 client: None,
-                workflow_id: None,
                 operation_id: OperationId::new(),
                 at: chrono::Utc::now(),
             };

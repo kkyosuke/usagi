@@ -1,4 +1,4 @@
-# 提案: supervisor の user decision request と durable な回答配送
+# 提案: user decision request と durable な回答配送
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [agent dispatch MCP](08-agent-dispatch-mcp.md)
 

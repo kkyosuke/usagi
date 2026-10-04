@@ -5,22 +5,6 @@
 use super::*;
 
 #[test]
-fn workflow_panels_follow_authoritative_session_removal() {
-    let workspace = WorkspaceId::new();
-    let first = SessionId::new();
-    let second = SessionId::new();
-    let mut state = AppState::home(workspace, vec![first, second]);
-    state.workflows.entry(first).or_default();
-    state.workflows.entry(second).or_default();
-    let _ = update(
-        &mut state,
-        AppEvent::Backend(BackendEvent::Sessions(vec![second])),
-    );
-    assert!(state.workflow_panel(first).is_none());
-    assert!(state.workflow_panel(second).is_some());
-}
-
-#[test]
 fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() {
     let workspace = WorkspaceId::new();
     let active = SessionId::new();

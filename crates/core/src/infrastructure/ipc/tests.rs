@@ -23,6 +23,30 @@ impl io::Write for BadWriter {
 /// The workspace root the fixture daemon owns.
 const TRUSTED_ROOT: &str = "/workspace/root";
 
+#[test]
+fn removed_workflow_requests_are_rejected() {
+    for kind in [
+        "workflow_snapshot",
+        "workflow_control",
+        "agent_goal",
+        "supervisor_tool",
+        "supervisor_snapshot",
+        "supervisor_control",
+    ] {
+        let error = serde_json::from_value::<DaemonRequest>(json!({"kind": kind})).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+    for action in [
+        "workflow_start",
+        "workflow_status",
+        "workflow_instruct",
+        "workflow_finish",
+    ] {
+        let error = serde_json::from_value::<SessionAction>(json!(action)).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+}
+
 fn build() -> BuildIdentity {
     build_identity("1", "abc", "test", "debug", &"a".repeat(64))
 }

@@ -292,7 +292,7 @@ impl Drop for StandbyAcceptLifetime {
 ///
 /// Everything the active [`IpcReady`] does that a standby must not do is simply
 /// absent here: no locator publication, no runtime store reconcile or save, no
-/// PTY / supervisor / PR / teardown worker, no spawn. What remains is a socket
+/// PTY / PR / teardown worker, no spawn. What remains is a socket
 /// that completes a readiness handshake and refuses every request through the
 /// role admission fence.
 pub(super) struct StandbyIpc<'a> {
@@ -481,7 +481,7 @@ impl Drop for StandbyIpc<'_> {
 /// Serve a standby's private endpoint.
 ///
 /// The loop is deliberately not [`start_ipc_accept_loop`]: that one owns a
-/// session runtime, a terminal runtime, an Agent runtime, a supervisor and a
+/// session runtime, a terminal runtime, an Agent runtime and a
 /// PR projector, and a standby owns none of them. Every admitted connection here
 /// gets a handshake and then a typed refusal.
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=a_standby_registers_beside_the_active_generation_without_publishing_a_locator
