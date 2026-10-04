@@ -411,7 +411,11 @@ fn welcome_entry_renders_the_welcome_screen() {
         let out = stdout(&output);
         assert!(out.contains("USAGI"), "args={args:?}");
         assert!(out.contains("Open / add projects"), "args={args:?}");
-        assert!(out.contains("q Quit"), "args={args:?}");
+        assert!(
+            out.lines()
+                .any(|line| line.contains("Config") && line.contains("Quit")),
+            "args={args:?}"
+        );
         assert!(output.stderr.is_empty(), "args={args:?}");
     }
     stop_daemon(&home);
