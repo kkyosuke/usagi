@@ -7,6 +7,7 @@ readonly USAGI_DIR="${USAGI_HOME:-$HOME/.usagi}"
 readonly BIN_DIR="$USAGI_DIR/bin"
 readonly TARGET="$BIN_DIR/usagi"
 readonly LOCK_DIR="$USAGI_DIR/update.lock"
+readonly LEGACY_RELEASED_PID=2147483647
 
 STAGE_DIR=""
 LOCK_HELD=0
@@ -37,9 +38,9 @@ cleanup() {
                 if lock_owner_alive "$node"; then alone=0; break; fi
             done
             if [ "$alone" -eq 1 ]; then
-                # The commit path may already have moved the prepared copy.
-                [ -f "$LOCK_NODE/legacy.pid" ] ||
-                    cp -- "$LOCK_NODE/pid" "$LOCK_NODE/legacy.pid"
+                # This exceeds supported Linux/macOS PID limits. A completed
+                # update must not become busy when its actual PID is reused.
+                printf '%s\n' "$LEGACY_RELEASED_PID" > "$LOCK_NODE/legacy.pid"
                 publish_legacy_pid
             elif legacy_owner="$(read_lock_pid "$LOCK_DIR")" &&
                 [ "$legacy_owner" = "$$" ]; then
@@ -311,7 +312,7 @@ wait_for_legacy_lock() {
             continue
         fi
         case "$legacy_owner" in
-            ''|0|*[!0-9]*) break ;;
+            ''|0|*[!0-9]*|"$LEGACY_RELEASED_PID") break ;;
         esac
         process_is_live "$legacy_owner" || break
         # Keep the observed PID until it exits: legacy cleanup removes pid

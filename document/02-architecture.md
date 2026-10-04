@@ -980,7 +980,10 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
   atomic binary rename の前に保持中の PID を legacy `pid` metadata として公開するため、旧版への切り替え後に
   SIGKILL で終了しても次の旧方式 installer は終了済み PID を確認して root を回収できる。
-  置換前後の cleanup は、lock を保持し、他の live / unknown owner がいない場合だけ legacy PID を残す。
+  置換前後の cleanup は、lock を保持し、他の live / unknown owner がいない場合だけ recovery marker
+  `2147483647` を公開する。この値は [Linux の PID 上限](https://github.com/torvalds/linux/blob/master/include/linux/threads.h)と
+  [macOS の PID 上限](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_internal.h)より大きいため、
+  通常終了した PID の再利用で次の更新が停止しない。新方式は marker を認識して待機せず、旧方式は死亡 PID として回収する。
   他の owner がいる場合は、自身の PID と一致する legacy metadata を node の退役前に除去するため、通常の
   handoff 中に旧方式が待機者を stale owner ごと削除しない。公開も退役前に行い、待機者は holder の PID を上書きしない。
   新方式は admission 前に legacy PID を再確認するため、late publication にも終了待ちを適用する。metadata の削除は

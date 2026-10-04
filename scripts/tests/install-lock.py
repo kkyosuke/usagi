@@ -18,6 +18,9 @@ def definition(source, name):
 
 
 source = Path(sys.argv[1]).read_text()
+released_pid_declaration = next(
+    line for line in source.splitlines() if line.startswith("readonly LEGACY_RELEASED_PID=")
+)
 functions = "\n".join(definition(source, name) for name in (
     "cleanup", "fail", "process_is_live", "read_lock_metadata", "read_lock_pid",
     "lock_owner_alive", "read_lock_ticket",
@@ -39,7 +42,7 @@ LOCK_HELD=0
 LOCK_ATTEMPTS=0
 STAGE_DIR=""
 SELECTOR_ACTIVE=0
-""" + functions + "\n" + traps + r"""
+""" + released_pid_declaration + "\n" + functions + "\n" + traps + r"""
 read_lock_ticket() {
     local value status=0
     value="$(observed_read_lock_ticket "$1")" || status=$?
@@ -53,6 +56,10 @@ read_lock_ticket() {
     return "$status"
 }
 kill() {
+    if [ "$1" = -0 ] && [ "${REUSED_PID:-}" = "$2" ]; then
+        # Model an unrelated long-lived process taking a released PID.
+        return 0
+    fi
     if [ -n "${LIVENESS_ERROR:-}" ]; then
         printf '%s\n' "$LIVENESS_ERROR" >&2
         return 1
@@ -486,7 +493,7 @@ def legacy_and_empty_root(root):
         case.signal("release-a")
         case.finish(waiting)
         assert lock.is_dir(), "new lock root must remain stable"
-        # The stable root retains only a recoverable legacy PID after release.
+        # The stable root retains a recoverable, never-live marker after release.
         unpublished = lock / ".prepare.crashed-without-pid"
         unpublished.mkdir()
         for index, value in enumerate(("", "0\n", "invalid\n")):
@@ -499,7 +506,7 @@ def legacy_and_empty_root(root):
             case.finish(again)
         assert unpublished.is_dir(), "unpublished nodes are inert"
         assert lock.stat().st_mode & 0o777 == 0o700
-        assert (lock / "pid").read_text().strip() == str(again.pid)
+        assert (lock / "pid").read_text().strip() == "2147483647"
     finally:
         case.close()
 
@@ -644,7 +651,29 @@ def committed_holder_preserves_queued_or_cancelled_owners(root):
                 case.await_marker("legacy-published-b")
             case.signal(f"release-{role}")
             case.finish(holder)
-            assert (case.home / "update.lock/pid").read_text().strip() == str(holder.pid)
+            assert (case.home / "update.lock/pid").read_text().strip() == "2147483647"
+            legacy = case.launch_legacy_acquirer()
+            case.await_marker("acquired-legacy")
+            case.signal("release-legacy")
+            case.finish(legacy)
+            assert not (case.home / "update.lock").exists()
+        finally:
+            case.close()
+
+
+def solo_cleanup_does_not_confuse_pid_reuse_with_an_update(root):
+    for restricted_probe in (False, True):
+        case = Case(root, "solo-pid-reuse-" + ("restricted" if restricted_probe else "normal"))
+        try:
+            first = case.launch("a", PUBLISH_LEGACY_PID=1)
+            case.await_marker("legacy-published-a")
+            case.signal("release-a")
+            case.finish(first)
+            options = {"LIVENESS_ERROR": "Operation not permitted"} if restricted_probe else {}
+            second = case.launch("b", FAST_WAIT=1, REUSED_PID=first.pid, **options)
+            case.await_marker("acquired-b")
+            case.signal("release-b")
+            case.finish(second)
             legacy = case.launch_legacy_acquirer()
             case.await_marker("acquired-legacy")
             case.signal("release-legacy")
@@ -771,6 +800,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
                  queued_or_cancelled_owners_do_not_enable_legacy_entry,
                  late_publication_clears_a_breadcrumb_before_admission,
                  committed_holder_preserves_queued_or_cancelled_owners,
+                 solo_cleanup_does_not_confuse_pid_reuse_with_an_update,
                  legacy_fixture_failure_cleanup_reaps_the_unreleased_child,
                  invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,
