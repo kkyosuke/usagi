@@ -105,7 +105,7 @@ Clone は `e`、全体の Config は `c` から開きます。
 [キーバインド](document/11-keybindings.md) を参照してください。
 スクロールなどのマウス操作で届く制御列が分割されても、[TUI の端末入力](document/03-tui.md)で復元し、座標の数値が文字入力へ混ざるのを防ぎます。
 
-Switch では選択中の session の [メモ](document/03-tui.md#session-memo) をプレビューし、`n` で編集できます。
+Switch では選択中の session の [メモ](document/03-tui.md#session-memo) が右ペイン上部に表示され、`n` で編集できます。
 `Ctrl-S` で保存した内容は、その session の Agent も MCP の `session_note_get` から読めます。
 
 不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
