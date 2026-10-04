@@ -1205,19 +1205,40 @@ fn create_private_locator_temp(daemon: &Path) -> io::Result<(PathBuf, fs::File)>
 /// Returns an error when the path exists but is not a safe private file, or
 /// cannot be read.
 pub(crate) fn read_private_bytes_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(PRIVATE_FILE_FLAGS | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    verify_open_private_file(&file, SOCKET_MODE)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    read_private_bytes_with(&mut || {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(PRIVATE_FILE_FLAGS | libc::O_NONBLOCK)
+            .open(path)
+    })
+}
+
+fn read_private_bytes_with(
+    open: &mut dyn FnMut() -> io::Result<fs::File>,
+) -> io::Result<Option<Vec<u8>>> {
+    for _ in 0..3 {
+        let mut file = match open() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = verify_open_private_file(&file, SOCKET_MODE) {
+            // A writer can atomically replace the path after open but before
+            // fstat. Discard that unlinked snapshot and validate a fresh open;
+            // never read its bytes or relax the single-link ownership check.
+            if file.metadata()?.nlink() == 0 {
+                continue;
+            }
+            return Err(error);
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        return Ok(Some(bytes));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "private daemon state was repeatedly replaced while opening it",
+    ))
 }
 
 fn verify_published_file(path: &Path, expected: &fs::File) -> io::Result<()> {
@@ -2673,6 +2694,105 @@ fn effective_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_state_read_reopens_an_inode_unlinked_by_atomic_replacement() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        write_private_file(&daemon, "state.json", ".state.tmp.", b"old").unwrap();
+        let path = daemon.join("state.json");
+        let mut opens = 0;
+        let bytes = read_private_bytes_with(&mut || {
+            opens += 1;
+            let file = fs::File::open(&path)?;
+            if opens == 1 {
+                write_private_file(&daemon, "state.json", ".state.tmp.", b"new")?;
+                assert_eq!(file.metadata()?.nlink(), 0);
+            }
+            Ok(file)
+        })
+        .expect("a private atomic replacement must not be reported as unsafe ownership");
+        assert_eq!(bytes, Some(b"new".to_vec()));
+        assert_eq!(opens, 2);
+    }
+
+    #[test]
+    fn private_state_read_bounds_replaced_inode_retries() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        write_private_file(&daemon, "state.json", ".state.tmp.", b"old").unwrap();
+        let path = daemon.join("state.json");
+        let unlinked = fs::File::open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let mut opens = 0;
+        let error = read_private_bytes_with(&mut || {
+            opens += 1;
+            unlinked.try_clone()
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(opens, 3);
+    }
+
+    #[test]
+    fn private_state_read_refuses_unsafe_replacements_without_retrying_them() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let path = daemon.join("state.json");
+        for hard_link in [false, true] {
+            write_private_file(&daemon, "state.json", ".state.tmp.", b"old").unwrap();
+            let mut opens = 0;
+            let error = read_private_bytes_with(&mut || {
+                opens += 1;
+                let file = fs::File::open(&path)?;
+                if opens == 1 {
+                    write_private_file(&daemon, "state.json", ".state.tmp.", b"unsafe")?;
+                    if hard_link {
+                        fs::hard_link(&path, daemon.join("alias"))?;
+                    } else {
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+                    }
+                }
+                Ok(file)
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(opens, 2);
+        }
+    }
+
+    #[test]
+    fn private_state_read_preserves_absence_and_open_errors() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        assert!(
+            read_private_bytes_if_present(&temp.path().join("absent"))
+                .unwrap()
+                .is_none()
+        );
+        let mut opens = 0;
+        let error = read_private_bytes_with(&mut || {
+            opens += 1;
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "refused"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(opens, 1);
+    }
+
+    #[test]
+    fn private_state_read_reports_io_errors_after_validation() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        write_private_file(&daemon, "state.json", ".state.tmp.", b"state").unwrap();
+        let path = daemon.join("state.json");
+        assert!(
+            read_private_bytes_with(&mut || OpenOptions::new().write(true).open(&path)).is_err()
+        );
+    }
 
     #[test]
     fn peer_pid_validation_rejects_non_process_targets() {
