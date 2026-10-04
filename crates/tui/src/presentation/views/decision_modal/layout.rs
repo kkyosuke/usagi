@@ -6,12 +6,11 @@ use super::{Role, modal, widgets};
 use usagi_core::domain::presentation_text::sanitize_presentation_line;
 
 pub(super) fn content_width(inner_width: usize) -> usize {
-    let border_width = if inner_width < modal::BODY_INDENT_WIDTH + 6 {
-        0
-    } else {
-        4
-    };
-    inner_width.saturating_sub(modal::BODY_INDENT_WIDTH + border_width)
+    inner_width.saturating_sub(modal::BODY_INDENT_WIDTH + border_rows(inner_width) * 4)
+}
+
+pub(super) fn border_rows(inner_width: usize) -> usize {
+    usize::from(inner_width >= modal::BODY_INDENT_WIDTH + 6)
 }
 
 /// Prefixes may contain trusted styles; measure their terminal cells, not bytes.
@@ -60,7 +59,7 @@ pub(super) fn heading_rows(text: &str, prefix: &str, width: usize) -> Vec<String
 
 /// Keep neutral outlines visible; accent the whole outline of the focused section.
 pub(super) fn card(inner_width: usize, rows: &[String], focused: bool) -> Vec<String> {
-    if inner_width < modal::BODY_INDENT_WIDTH + 6 {
+    if border_rows(inner_width) == 0 {
         return rows
             .iter()
             .map(|line| modal::content_line(line, inner_width))
@@ -93,11 +92,19 @@ pub(super) fn card(inner_width: usize, rows: &[String], focused: bool) -> Vec<St
         .collect()
 }
 
-/// Show a complete focused card when it fits; start at its top when it does not.
-pub(super) fn focus_window(len: usize, focus: Range<usize>, capacity: usize) -> (usize, usize) {
+/// Show a complete card when it fits, or its top when it does not. A one-row
+/// viewport prioritizes the label or input tail over a decorative border.
+pub(super) fn focus_window(
+    len: usize,
+    focus: Range<usize>,
+    anchor: usize,
+    capacity: usize,
+) -> (usize, usize) {
     let visible = len.min(capacity);
     let start = if focus.len() <= visible {
         focus.end.saturating_sub(visible)
+    } else if visible == 1 {
+        anchor
     } else {
         focus.start
     }

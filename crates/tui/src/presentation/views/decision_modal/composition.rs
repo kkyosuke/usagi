@@ -4,16 +4,30 @@ use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
 pub(super) fn comment_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
+    input_rows(
+        "comment (optional)",
+        editor.comment(),
+        editor.input_comment(),
+        width,
+    )
+}
+
+pub(super) fn freeform_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
+    input_rows(
+        "freeform",
+        editor.freeform(),
+        editor.input_freeform(),
+        width,
+    )
+}
+
+fn input_rows(label: &str, value: &str, focused: bool, width: usize) -> Vec<String> {
     let rows = layout::wrapped_rows(
-        &format!(
-            "{}comment (optional): {}",
-            if editor.input_comment() { "> " } else { "" },
-            editor.comment()
-        ),
+        &format!("{}{label}: {value}", if focused { "> " } else { "" }),
         "",
         layout::content_width(width),
     );
-    layout::card(width, &rows, editor.input_comment())
+    layout::card(width, &rows, focused)
 }
 
 pub(super) fn editor_footer(editor: &DecisionEditor, multiple: bool) -> Vec<String> {

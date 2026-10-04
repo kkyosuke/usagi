@@ -498,17 +498,18 @@ impl DecisionEditor {
     fn new(decision: UserDecision) -> Self {
         let scroll_offset =
             (!decision.context.is_empty() || decision.recommendation.is_some()).then_some(0);
+        let input_freeform = decision.options.is_empty() && decision.allow_freeform;
         Self {
             decision,
             selected_option: 0,
             checked_options: BTreeSet::new(),
             context_column: 0,
-            input_freeform: false,
+            input_freeform,
             input_comment: false,
             comment: String::new(),
             confirmation: None,
             scroll_offset,
-            follow_freeform: false,
+            follow_freeform: input_freeform,
             freeform: String::new(),
             error: None,
         }
