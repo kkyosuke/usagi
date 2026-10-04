@@ -46,11 +46,11 @@ pub(super) fn editor_footer(editor: &DecisionEditor, width: usize) -> Vec<String
         "Enter Esc".to_owned()
     } else if width < 50 {
         format!(
-            "Enter:{action} Esc {}",
+            "Enter:{action} Esc{}",
             if decision.options.is_empty() {
                 ""
             } else {
-                "↑↓"
+                " ↑↓"
             }
         )
     } else {
@@ -62,6 +62,11 @@ pub(super) fn editor_footer(editor: &DecisionEditor, width: usize) -> Vec<String
                 ""
             }
         )
+    };
+    let summary = if decision.allow_comment && !decision.options.is_empty() {
+        format!("{summary}  ·  Tab: fields (keep choice)")
+    } else {
+        summary
     };
     vec![modal::footer(&summary), modal::footer(&hints)]
         .into_iter()

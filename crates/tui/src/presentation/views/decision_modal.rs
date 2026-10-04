@@ -650,7 +650,7 @@ mod tests {
                             .join("\n"),
                         );
                         assert!(frame.contains("↑↓ move"));
-                        assert!(!frame.contains("Tab:"));
+                        assert_eq!(frame.contains("Tab:"), comment);
                         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
                         let editor = state.decision_overlay().unwrap().editor().unwrap();
                         assert_eq!(editor.input_comment(), next == Some("Comment"));

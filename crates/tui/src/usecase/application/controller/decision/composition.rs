@@ -38,6 +38,10 @@ pub(super) fn move_input(editor: &mut DecisionEditor, forward: bool) {
     let last = options + comment + usize::from(editor.decision.allow_freeform) - 1;
     let next = if forward {
         current.saturating_add(1).min(last)
+    } else if current == options {
+        // Tab can leave any option for an input field. Return to that answer,
+        // rather than silently replacing it with the last option in the list.
+        editor.selected_option
     } else {
         current.saturating_sub(1)
     };

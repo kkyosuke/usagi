@@ -2048,7 +2048,7 @@ fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft()
             workspace,
             decision_id: request.decision_id,
             answer: UserDecisionAnswer::Option {
-                option_id: "second".into(),
+                option_id: request.options[0].id.clone(),
                 comment: None,
             },
         }]
@@ -2622,6 +2622,44 @@ fn decision_arrows_traverse_choices_comment_and_freeform_without_losing_drafts()
                         || multiple
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn decision_inputs_return_to_each_selected_answer_without_changing_it() {
+    for comment in [false, true] {
+        for selected in 0..3 {
+            let workspace = WorkspaceId::new();
+            let mut request = pending_decision(workspace);
+            request.allow_comment = comment;
+            request.allow_freeform = true;
+            request.options = (0..3)
+                .map(|index| {
+                    let mut option = request.options[0].clone();
+                    option.id = format!("answer-{index}");
+                    option
+                })
+                .collect();
+            let mut editor = DecisionEditor::new(request);
+            editor.selected_option = selected;
+            update_decision_editor(workspace, &mut editor, AppKey::Tab);
+            update_decision_editor(workspace, &mut editor, AppKey::Paste("draft".into()));
+            if comment {
+                assert!(
+                    matches!(update_decision_editor(workspace, &mut editor, AppKey::Enter).as_slice(),
+                    [Effect::ResolveDecision {answer: UserDecisionAnswer::Option {option_id, comment: Some(note)}, ..}]
+                    if option_id == &format!("answer-{selected}") && note == "draft")
+                );
+            }
+            update_decision_editor(workspace, &mut editor, AppKey::Up);
+            assert_eq!(editor.selected_option, selected);
+            assert!(!editor.input_comment && !editor.input_freeform);
+            assert!(
+                matches!(update_decision_editor(workspace, &mut editor, AppKey::Enter).as_slice(),
+                [Effect::ResolveDecision {answer: UserDecisionAnswer::Option {option_id, ..}, ..}]
+                if option_id == &format!("answer-{selected}"))
+            );
         }
     }
 }
