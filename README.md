@@ -92,6 +92,7 @@ session 作成直後の環境構築は、開いた workspace の Overview から
 `Session setup` を編集するか、`.usagi/config.toml` の
 [`[session].setup_commands`](document/05-daemon.md#session-作成後の-setup-command) に直接設定できます。
 
+Welcome のメニューは角括弧なしで表示し、選択中の項目を色と太字で示します。
 次回からは `usagi` の Welcome で `Enter` を押すと、前回の project タブ構成と選択中の project を開けます。
 `o` の Open / add projects では登録済み project・Recent・Directory を切り替え、複数 project の選択や既存ディレクトリの追加ができます。
 Clone は `e`、全体の Config は `c` から開きます。

@@ -1,7 +1,7 @@
 //! Welcome: resume the last project deck or choose projects to open.
 
 use crate::presentation::layouts::mascot_screen;
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::widgets;
 use chrono::{DateTime, Utc};
 use usagi_core::domain::recent::{LastProjectSet, Recent};
@@ -216,17 +216,21 @@ impl Default for Welcome {
     }
 }
 
+/// Welcome actions are plain text; focus changes styling without moving labels.
+fn menu_text(label: &str, selected: bool) -> String {
+    let style = if selected {
+        Role::Accent.style().bold()
+    } else {
+        Style::new().fg(Color::White).dim()
+    };
+    style.paint(label)
+}
+
 fn menu_row(item: &MenuItem, selected: bool, width: usize) -> String {
-    let label_width = width.saturating_sub(4);
-    let label = widgets::pad_to_width(item.label, label_width.saturating_sub(2));
-    widgets::clip_to_width(
-        &widgets::button::choice_button(
-            &format!("{label} {}", item.key),
-            label_width,
-            selected,
-            Role::Accent,
-        ),
-        width,
+    let label = widgets::pad_to_width(item.label, width.saturating_sub(6));
+    menu_text(
+        &widgets::clip_to_width(&format!("  {label} {}  ", item.key), width),
+        selected,
     )
 }
 
@@ -294,11 +298,12 @@ pub fn render(
         .enumerate()
         .filter(|(_, item)| matches!(item.key, 'c' | 'q'))
         .map(|(index, item)| {
-            widgets::button::choice_button(
-                &format!("{} {}", item.key, item.label),
-                widgets::display_width("c Config"),
+            menu_text(
+                &widgets::pad_to_width(
+                    &format!("{} {}", item.key, item.label),
+                    widgets::display_width("c Config"),
+                ),
                 index == welcome.selected_index,
-                Role::Accent,
             )
         })
         .collect::<Vec<_>>()
@@ -439,6 +444,7 @@ mod tests {
                         .collect::<Vec<_>>()
                 };
                 let original = plain(render(height, width, &welcome, Utc::now()));
+                assert!(original.iter().all(|line| !line.contains(['[', ']'])));
                 for _ in 0..welcome.items().len() {
                     welcome.select_next();
                     assert_eq!(plain(render(height, width, &welcome, Utc::now())), original);
@@ -447,8 +453,8 @@ mod tests {
         }
         let welcome = Welcome::empty();
         let item = &welcome.items()[0];
-        assert!(menu_row(item, true, 48).starts_with("\u{1b}[1;36m[ "));
-        assert!(menu_row(item, false, 48).starts_with("\u{1b}[2;37m[ "));
-        assert!(widgets::strip_ansi(&menu_row(item, false, 48)).ends_with("o ]"));
+        assert!(menu_row(item, true, 48).starts_with("\u{1b}[1;36m  "));
+        assert!(menu_row(item, false, 48).starts_with("\u{1b}[2;37m  "));
+        assert!(widgets::strip_ansi(&menu_row(item, false, 48)).ends_with("o  "));
     }
 }
