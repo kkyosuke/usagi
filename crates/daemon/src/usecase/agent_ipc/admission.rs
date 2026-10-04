@@ -178,23 +178,19 @@ impl AgentRuntime {
             .agent(worker.agent_id)
             .map_err(map_dispatch_storage_error)?
             .is_none();
+        if context.source == AgentLaunchSource::Mcp {
+            context.caller = Some(caller.clone());
+        } else {
+            context.caller = None;
+            context.caller_operation_id = None;
+        }
+        let provenance =
+            self.provenance_for_agent(worker.agent_id, context.origin(operation), fresh_identity)?;
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
             mcp_allowed: true,
-            launch_provenance: Some(self.provenance_for_agent(
-                worker.agent_id,
-                {
-                    if context.source == AgentLaunchSource::Mcp {
-                        context.caller = Some(caller.clone());
-                    } else {
-                        context.caller = None;
-                        context.caller_operation_id = None;
-                    }
-                    context.origin(operation)
-                },
-                fresh_identity,
-            )?),
+            launch_provenance: Some(provenance),
         };
         let credential = OperationId::new().to_string();
         let mut reserved_worker = worker.clone();
@@ -274,19 +270,13 @@ impl AgentRuntime {
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
     pub(super) fn admit_resume_exact(
         &mut self,
-        operation_id: &str,
+        operation: OperationId,
         target: &AgentResumeTarget,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
         repair_revision: Option<u32>,
         launch_origin: Option<AgentLaunchOrigin>,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let operation = OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent resume operation id must be canonical",
-            )
-        })?;
         if self
             .dispatch
             .admission(operation)
@@ -424,12 +414,10 @@ impl AgentRuntime {
             operation: fence,
             mcp_allowed: true,
             launch_provenance: launch_origin.map(|mut launched| {
-                if launched.workflow_id.is_none() {
-                    launched.workflow_id = source
-                        .launch_provenance
-                        .as_ref()
-                        .and_then(|provenance| provenance.launched.workflow_id);
-                }
+                launched.workflow_id = launched.workflow_id.or(source
+                    .launch_provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.launched.workflow_id));
                 AgentLaunchProvenance {
                     agent_id: Some(source_binding.worker.agent_id),
                     created: source
@@ -512,7 +500,7 @@ impl AgentRuntime {
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
         Ok(AgentAdmission {
-            operation_id: operation_id.to_owned(),
+            operation_id: operation.to_string(),
             revision: 1,
             runtime: authorization.runtime.clone(),
             terminal,
@@ -652,15 +640,14 @@ impl AgentRuntime {
             // Ordinary launches must not steal a live peer's identity either.
             worker.agent_id = AgentId::new();
         }
+        let fresh_identity = !existing_agents.contains(&worker.agent_id);
+        let provenance =
+            self.provenance_for_agent(worker.agent_id, context.origin(operation), fresh_identity)?;
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
             mcp_allowed: true,
-            launch_provenance: Some(self.provenance_for_agent(
-                worker.agent_id,
-                context.origin(operation),
-                !existing_agents.contains(&worker.agent_id),
-            )?),
+            launch_provenance: Some(provenance),
         };
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);

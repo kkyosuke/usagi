@@ -1740,13 +1740,11 @@ mod tests {
             )
             .unwrap();
             let mut frames = Cursor::new(client.stream.output);
-            let Bootstrap::ClientHello(hello) =
-                read_json_frame::<Bootstrap>(&mut frames, 1_048_576)
-                    .unwrap()
-                    .unwrap()
-            else {
-                panic!("the first frame must be a hello");
-            };
+            let hello = read_json_frame::<serde_json::Value>(&mut frames, 1_048_576)
+                .unwrap()
+                .unwrap();
+            assert_eq!(hello["kind"], "client_hello");
+            let hello: ClientHello = serde_json::from_value(hello).unwrap();
             assert_eq!(hello.surface, Some(surface));
             let mut legacy = serde_json::to_value(&hello).unwrap();
             legacy.as_object_mut().unwrap().remove("surface");

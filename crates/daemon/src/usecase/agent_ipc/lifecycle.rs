@@ -638,14 +638,8 @@ impl AgentRuntime {
         }
         let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         let origin = context.origin(operation);
-        let outcome = self.admit_resume_exact(
-            operation_id,
-            target,
-            &semantic_key,
-            scope,
-            None,
-            Some(origin),
-        );
+        let outcome =
+            self.admit_resume_exact(operation, target, &semantic_key, scope, None, Some(origin));
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -692,16 +686,14 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         let outcome = self.admit_resume_exact(
-            operation_id,
+            operation,
             target,
             &semantic_key,
             scope,
             Some(expected_revision),
-            Some(
-                context
-                    .origin(OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?),
-            ),
+            Some(context.origin(operation)),
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
