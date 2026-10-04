@@ -565,23 +565,18 @@ impl<'a> ConfirmationView<'a> {
 pub fn choice_buttons(selected: usize, choices: &[(&str, Role)]) -> String {
     let label_width = choices
         .iter()
-        .map(|(label, _)| label.chars().count())
+        .map(|(label, _)| display_width(label))
         .max()
         .unwrap_or(0);
-    // `dim` alone inherits the terminal's current foreground colour. Give idle
-    // labels an explicit white base so focus changes cannot leave a stale
-    // success/danger colour behind.
-    let idle = Style::new().fg(Color::White).dim();
     let mut row = String::new();
     for (index, (label, role)) in choices.iter().enumerate() {
-        let text = format!("[ {label:<label_width$} ]");
-        let style = if index == selected {
-            role.style().bold()
-        } else {
-            idle
-        };
         row.push_str("  ");
-        row.push_str(&style.paint(&text));
+        row.push_str(&super::button::choice_button(
+            label,
+            label_width,
+            index == selected,
+            *role,
+        ));
     }
     row
 }
@@ -889,6 +884,18 @@ mod tests {
         // The affirmative carries the danger SGR; the idle negative stays white.
         assert!(buttons.contains("\u{1b}[1;31m[ remove ]"));
         assert!(buttons.contains("\u{1b}[2;37m[ keep   ]"));
+    }
+
+    #[test]
+    fn choice_buttons_align_unicode_labels_by_display_cells() {
+        let choices = [("保存", Role::Success), ("keep", Role::Warning)];
+        for selected in 0..choices.len() {
+            assert_eq!(
+                strip_ansi(&super::choice_buttons(selected, &choices)),
+                "  [ 保存 ]  [ keep ]"
+            );
+        }
+        assert!(super::choice_buttons(0, &[]).is_empty());
     }
 
     #[test]

@@ -217,19 +217,17 @@ impl Default for Welcome {
 }
 
 fn menu_row(item: &MenuItem, selected: bool, width: usize) -> String {
-    let cursor = if selected { ">" } else { " " };
-    let label = widgets::clip_to_width(item.label, width.saturating_sub(5));
-    let padding = width.saturating_sub(widgets::display_width(&label) + 3);
-    let row = format!(
-        "{cursor} {label}{}{key}",
-        " ".repeat(padding),
-        key = item.key
-    );
-    if selected {
-        Role::Accent.style().bold().paint(&row)
-    } else {
-        row
-    }
+    let label_width = width.saturating_sub(4);
+    let label = widgets::pad_to_width(item.label, label_width.saturating_sub(2));
+    widgets::clip_to_width(
+        &widgets::button::choice_button(
+            &format!("{label} {}", item.key),
+            label_width,
+            selected,
+            Role::Accent,
+        ),
+        width,
+    )
 }
 
 /// One column of primary actions; Config and Quit stay at the foot of the screen.
@@ -296,21 +294,12 @@ pub fn render(
         .enumerate()
         .filter(|(_, item)| matches!(item.key, 'c' | 'q'))
         .map(|(index, item)| {
-            let text = format!(
-                "{} {} {}",
-                if index == welcome.selected_index {
-                    ">"
-                } else {
-                    " "
-                },
-                item.key,
-                item.label
-            );
-            if index == welcome.selected_index {
-                Role::Accent.style().bold().paint(&text)
-            } else {
-                Style::new().dim().paint(&text)
-            }
+            widgets::button::choice_button(
+                &format!("{} {}", item.key, item.label),
+                widgets::display_width("c Config"),
+                index == welcome.selected_index,
+                Role::Accent,
+            )
         })
         .collect::<Vec<_>>()
         .join("    ");
@@ -436,5 +425,30 @@ mod tests {
             assert!(frame[height - 2].contains("Config"));
             assert!(frame[height - 2].contains("Quit"));
         }
+    }
+
+    #[test]
+    fn changing_selection_only_changes_style_and_keeps_all_labels_in_place() {
+        for recent in [Vec::new(), vec![self::recent("alpha")]] {
+            for (height, width) in [(24, 80), (16, 40), (10, 32), (40, 120), (4, 3)] {
+                let mut welcome = Welcome::new(recent.clone());
+                let plain = |frame: Vec<String>| {
+                    frame
+                        .iter()
+                        .map(|line| widgets::strip_ansi(line))
+                        .collect::<Vec<_>>()
+                };
+                let original = plain(render(height, width, &welcome, Utc::now()));
+                for _ in 0..welcome.items().len() {
+                    welcome.select_next();
+                    assert_eq!(plain(render(height, width, &welcome, Utc::now())), original);
+                }
+            }
+        }
+        let welcome = Welcome::empty();
+        let item = &welcome.items()[0];
+        assert!(menu_row(item, true, 48).starts_with("\u{1b}[1;36m[ "));
+        assert!(menu_row(item, false, 48).starts_with("\u{1b}[2;37m[ "));
+        assert!(widgets::strip_ansi(&menu_row(item, false, 48)).ends_with("o ]"));
     }
 }
