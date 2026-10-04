@@ -513,7 +513,7 @@ if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     set -e
     case "$SYNC_STATUS" in
         0) ;;
-        3) ;; # Binary installed; live Agent connections defer daemon replacement.
+        3) ;; # Binary installed; live connections defer daemon replacement.
         2)
             fail "selected usagi does not support safe managed daemon synchronization; the existing daemon was left unchanged"
             ;;
@@ -558,7 +558,7 @@ printf "\n"
 printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     if [ "$SYNC_STATUS" -eq 3 ]; then
-        printf "実行中の Agent を継続するため、daemon の切り替えは保留しているよ。\n"
+        printf "現在の接続を維持するため、daemon の切り替えは保留しているよ。\n"
     else
         printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
     fi

@@ -2750,6 +2750,292 @@ fn managed_update_sync_never_cold_starts_an_absent_or_crashed_daemon() {
     assert!(!crashed_data.join("daemon/daemon.json").exists());
 }
 
+/// A successor hydrates only its startup workspace. While the predecessor
+/// keeps a generic PTY, its other workspace fences cannot move to that
+/// successor, so managed update must leave the whole owner active.
+#[test]
+#[allow(clippy::too_many_lines)] // One real multi-workspace update and PTY continuity contract.
+fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_live() {
+    let _serial = serial();
+    let first = fixture_repo();
+    let second = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let shell = bin.join("fixture-shell");
+    let shell_spawns = home.path().join("shell-spawn-count");
+    write_shell(&shell, &shell_spawns);
+    let mut old_daemon =
+        start_daemon_with_source_identity(first.path(), home.path(), &bin, &shell, &"a".repeat(64));
+    let data_dir = channel_data_dir(home.path());
+    let mut first_client = client(&data_dir);
+    let (workspace, session, worktree) = available_scope(&mut first_client);
+    let selected_second = usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+        root: usagi_core::infrastructure::paths::wire_workspace_root(
+            fs::canonicalize(second.path()).unwrap(),
+        ),
+    };
+    let mut second_client = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        selected_second.clone(),
+    )
+    .expect("the same owner adopts the second workspace");
+    let second_scope = available_scope(&mut second_client);
+    assert_ne!(workspace, second_scope.0);
+    let DaemonReply::Ok(launched) = first_client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .unwrap()
+    else {
+        panic!("generic terminal launch is synchronous");
+    };
+    let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+    let subscription = attach(&mut first_client, &terminal);
+    wait_for_spawns(&shell_spawns, 1);
+    let children_before = live_process_identities(&data_dir);
+    let old_pid = daemon_pid(&data_dir);
+    let registry_before = read_registry_document(&data_dir).unwrap().unwrap();
+    let sync_cwd = short_dir("managed-update-cwd-");
+    let synchronized = usagi_command(
+        home.path(),
+        Channel::Local,
+        sync_cwd.path(),
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
+    )
+    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .output()
+    .unwrap();
+    let output = String::from_utf8_lossy(&synchronized.stdout);
+    assert_eq!(
+        synchronized.status.code(),
+        Some(3),
+        "{output}{}",
+        String::from_utf8_lossy(&synchronized.stderr)
+    );
+    assert!(
+        output.contains("deferred to preserve 2 workspace connection(s)"),
+        "{output}"
+    );
+    assert!(!output.contains("installed build is current and serving"));
+    assert_eq!(daemon_pid(&data_dir), old_pid);
+    assert_eq!(
+        read_registry_document(&data_dir).unwrap().unwrap(),
+        registry_before,
+        "deferral must not create a standby or commit a handoff"
+    );
+    assert_eq!(live_process_identities(&data_dir), children_before);
+
+    // The next installed binary can open both projects immediately, through
+    // both the CLI's bound declaration and the TUI's selected declaration.
+    for (repo, workspace) in [(&first, workspace), (&second, second_scope.0)] {
+        let workspace_id = workspace.to_string();
+        let listed = usagi_command(
+            home.path(),
+            Channel::Local,
+            repo.path(),
+            &[
+                "session".as_ref(),
+                "resume-inventory".as_ref(),
+                workspace_id.as_ref(),
+            ],
+        )
+        .output()
+        .unwrap();
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+    }
+    let mut reopened = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        selected_second.clone(),
+    )
+    .expect("the second project still opens without a workspace ownership conflict");
+    assert_eq!(daemon_pid(&data_dir), old_pid);
+    wait_for_terminal_text(&mut reopened, &terminal, "shell-ready");
+    first_client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Input,
+            payload: serde_json::to_value(TerminalRequest::Input {
+                terminal,
+                subscription,
+                input_seq: 0,
+                input_operation: Some(OperationId::new()),
+                bytes: b"finish-multi-workspace-update\n".to_vec(),
+            })
+            .unwrap(),
+        })
+        .expect("the original connection still delivers input to the same PTY");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert_no_daemon_panic(&data_dir, "waiting for the preserved PTY to finish");
+        let DaemonReply::Ok(body) = reopened
+            .request(DaemonRequest::Tenant {
+                action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
+                root: None,
+                force: false,
+            })
+            .unwrap()
+        else {
+            panic!("tenant inventory is synchronous");
+        };
+        let inventory: usagi_core::infrastructure::ipc::TenantInventory =
+            serde_json::from_value(body).unwrap();
+        if inventory
+            .tenants
+            .iter()
+            .all(|tenant| tenant.live_runtimes == 0)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the preserved PTY did not finish"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read_to_string(&shell_spawns).unwrap().lines().count(),
+        1
+    );
+    drop((first_client, second_client, reopened));
+
+    // Once nothing is live, both fences leave with the old process. Updating
+    // must now complete rather than defer just because two projects are open.
+    let synchronized = usagi_command(
+        home.path(),
+        Channel::Local,
+        sync_cwd.path(),
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
+    )
+    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .output()
+    .unwrap();
+    assert!(
+        synchronized.status.success(),
+        "{}{}\n{}",
+        String::from_utf8_lossy(&synchronized.stdout),
+        String::from_utf8_lossy(&synchronized.stderr),
+        daemon_error_log(&data_dir),
+    );
+    assert!(
+        String::from_utf8_lossy(&synchronized.stdout)
+            .contains("installed build is current and serving")
+    );
+    assert_ne!(daemon_pid(&data_dir), old_pid);
+    let mut successor_second = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        selected_second,
+    )
+    .expect("the idle predecessor released the second project's workspace fence");
+    assert_eq!(available_scope(&mut successor_second).0, second_scope.0);
+    drop(successor_second);
+    daemon_fixture::reap(home.path());
+    let _ = old_daemon.terminate_and_wait(Duration::from_secs(2));
+}
+
+#[test]
+fn managed_update_defers_multi_workspace_agents_without_suggesting_a_handoff() {
+    let _serial = serial();
+    let first = fixture_repo();
+    let second = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    write_restartable_codex(&bin, &agent_spawns);
+    let _daemon = start_daemon_with_source_identity(
+        first.path(),
+        home.path(),
+        &bin,
+        Path::new("/bin/sh"),
+        &"a".repeat(64),
+    );
+    let data_dir = channel_data_dir(home.path());
+    let mut owner = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
+    wait_for_spawns(&agent_spawns, 1);
+    let mut second_client = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                fs::canonicalize(second.path()).unwrap(),
+            ),
+        },
+    )
+    .unwrap();
+    assert_ne!(available_scope(&mut second_client).0, workspace);
+    let old_pid = daemon_pid(&data_dir);
+    let old_registry = read_registry_document(&data_dir).unwrap().unwrap();
+    let old_children = live_process_identities(&data_dir);
+
+    let sync = usagi_command(
+        home.path(),
+        Channel::Local,
+        second.path(),
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
+    )
+    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .output()
+    .unwrap();
+    let output = String::from_utf8_lossy(&sync.stdout);
+    assert_eq!(
+        sync.status.code(),
+        Some(3),
+        "{output}{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    assert!(
+        output.contains("deferred to preserve 2 workspace connection(s)"),
+        "{output}"
+    );
+    assert!(!output.contains("--restart-agents"), "{output}");
+    assert!(output.contains("finish live runtimes"), "{output}");
+    assert_eq!(daemon_pid(&data_dir), old_pid);
+    assert_eq!(
+        read_registry_document(&data_dir).unwrap().unwrap(),
+        old_registry
+    );
+    assert_eq!(live_process_identities(&data_dir), old_children);
+    assert_eq!(
+        fs::read_to_string(&agent_spawns).unwrap().lines().count(),
+        1
+    );
+}
+
 #[test]
 fn managed_update_defers_live_agent_handoff_without_reporting_an_update_failure() {
     let _serial = serial();
