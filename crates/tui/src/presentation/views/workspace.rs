@@ -381,8 +381,6 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
-    workflow_panel: Option<crate::usecase::application::workflow::WorkflowPanel>,
-    workflow_selected: bool,
     /// Workspace transition progress replaces only the right-pane content.
     /// The project bar and cached session sidebar remain stable around it.
     content_loading: Option<ContentLoading>,
@@ -742,8 +740,6 @@ impl HomeProjection {
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
-            workflow_panel: preview.and_then(|session| state.workflow_panel(session).cloned()),
-            workflow_selected: false,
             content_loading: None,
             // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
@@ -934,10 +930,6 @@ impl HomeProjection {
     /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
     #[must_use]
     pub fn with_pane(mut self, pane: &PaneState) -> Self {
-        self.workflow_selected = pane.tabs().iter().any(|tab| {
-            matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow)
-                && pane_tab_selected(tab, pane.selected())
-        });
         self.pane_tabs = pane
             .tabs()
             .iter()
@@ -1265,18 +1257,14 @@ impl HomeProjection {
 
     /// Whether the right pane owns keyboard input on this frame.
     ///
-    /// Only a Closeup route whose selected tab is a live terminal or the
-    /// Workflow form, with no foreground surface over it, receives input. Every
-    /// other frame leaves the pane's scroll, tab, selection, and copy controls
-    /// inert, so the pane is drawn dim to say so: Switch (the sidebar
-    /// navigates), a pending or interrupted tab (no live terminal), an open
-    /// overlay or action modal, and an open Director drawer (its root
-    /// conversation owns input). The Workflow tab has no terminal, but its goal
-    /// and instruction composer take every key, so dimming it drew the one
-    /// surface the person is typing into as if it were inactive.
+    /// A Closeup route receives input when its selected tab is a live terminal
+    /// and no foreground surface covers it. The pane is drawn dim on other
+    /// frames: Switch routes input to the sidebar, pending or interrupted tabs
+    /// have no live terminal, and overlays, action modals, or conversation
+    /// drawers own input while open.
     fn right_pane_focused(&self) -> bool {
         self.mode == HomeMode::Closeup
-            && (self.terminal_view.is_some() || self.workflow_selected)
+            && self.terminal_view.is_some()
             && self.director_drawer.is_none()
             && self.root_terminal_drawer.is_none()
             && !self.closeup_action_visible
@@ -1370,17 +1358,14 @@ fn pane_tab_label(tab: &PaneTab) -> String {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Ready(ready) => match ready.kind {
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
             PaneKind::Terminal | PaneKind::Agent => "Pane".to_owned(),
         },
     }
@@ -3436,7 +3421,6 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     let memo = session.memo.as_deref().filter(|memo| !memo.is_empty());
     let live_terminal = home.content_loading.is_none()
         && !home.pane_tabs.is_empty()
-        && !home.workflow_selected
         && home.terminal_view.is_some();
     let content_top = if home.content_loading.is_some() || home.pane_tabs.is_empty() {
         1
@@ -3455,7 +3439,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         )
     } else {
         // Keep room for the tab chrome, agent/detail and feedback rows, and
-        // footer. Empty, loading and Workflow views also retain their status.
+        // footer. Empty and loading views also retain their status.
         height.saturating_sub(7 + gap)
     };
     let preview = home_memo_preview(memo, width, home.icon_mode, budget);
@@ -3585,15 +3569,7 @@ fn home_right_pane_content(height: usize, width: usize, home: &HomeProjection) -
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
-    if home.workflow_selected {
-        let mut rows = vec![chrome[0].clone(), chrome[1].clone()];
-        rows.extend(super::workflow::render(
-            height.saturating_sub(4),
-            width,
-            &home.workflow_panel.clone().unwrap_or_default(),
-        ));
-        return with_footer_gap(rows, height, footer);
-    }
+
     if let Some(view) = &home.terminal_view {
         // A focused live terminal renders daemon PTY output below the tab strip,
         // sharing the legacy viewport window and surfacing terminal feedback in
@@ -8867,62 +8843,6 @@ mod tests {
     }
 
     #[test]
-    fn home_workflow_tab_projects_native_progress_and_composer() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let target = Target::Session(session);
-        let operation = OperationId::new();
-        let mut pane = PaneState::new(PaneSelection::Target(target));
-        let _ = reduce(
-            &mut pane,
-            PaneEvent::Request {
-                operation,
-                target,
-                kind: PaneKind::Workflow,
-            },
-        );
-        let _ = reduce(&mut pane, PaneEvent::Resolved { operation });
-        let _ = reduce(
-            &mut pane,
-            PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(operation))),
-        );
-        let state = AppState::home(workspace, vec![session]);
-        let mut home = HomeProjection::from_state(
-            &state,
-            "repo",
-            &[projected_session(session, "login", "/work/login")],
-        )
-        .with_pane(&pane);
-        assert!(home.workflow_selected);
-        // The form takes every key in Closeup, so it is drawn at full
-        // brightness there; Switch still dims the preview it navigates past.
-        home.mode = HomeMode::Switch;
-        assert!(!home.right_pane_focused());
-        home.mode = HomeMode::Closeup;
-        assert!(home.right_pane_focused());
-        let empty = super::home_right_pane(20, 80, &home);
-        assert_eq!(empty.len(), 20);
-        assert!(empty.iter().any(|row| strip(row).contains("Not started")));
-        let mut panel = crate::usecase::application::workflow::WorkflowPanel {
-            run: Some(crate::usecase::application::workflow::fixture_run(session)),
-            ..Default::default()
-        };
-        panel.draft.replace("Add regression tests");
-        home.workflow_panel = Some(panel);
-        let running = super::home_right_pane(20, 80, &home);
-        assert!(
-            running
-                .iter()
-                .any(|row| strip(row).contains("Current owner: codex"))
-        );
-        assert!(
-            running
-                .iter()
-                .any(|row| strip(row).contains("Add regression tests"))
-        );
-    }
-
-    #[test]
     fn home_right_pane_renders_live_terminal_viewport_and_feedback() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
@@ -9077,38 +8997,6 @@ mod tests {
                             "n: add memo"
                         }));
                     }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn switch_memo_preserves_workflow_status_with_or_without_a_memo() {
-        let session = SessionId::new();
-        let state = AppState::home(WorkspaceId::new(), vec![session]);
-        for memo in [None, Some(""), Some("次の作業")] {
-            let mut projected = projected_session(session, "session", "/work/session");
-            projected.memo = memo.map(str::to_owned);
-            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
-            home.pane_tabs.push(super::HomePaneTab {
-                label: "workflow".into(),
-                selected: true,
-                pending: false,
-            });
-            home.workflow_selected = true;
-            for height in [7, 8, 10, 11, 12, 20] {
-                let rows = home_right_pane(height, 80, &home);
-                let text = strip(&rows.join("\n"));
-                assert_eq!(rows.len(), height);
-                assert!(text.contains("Not started"));
-                assert!(text.contains("Ctrl+S: start"));
-                assert!(text.ends_with("[Switch] preview pane"));
-                if height == 20 {
-                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
-                        "次の作業"
-                    } else {
-                        "n: add memo"
-                    }));
                 }
             }
         }
@@ -9331,12 +9219,7 @@ mod tests {
             target,
             kind: PaneKind::Terminal,
         };
-        for kind in [
-            PaneKind::Terminal,
-            PaneKind::Agent,
-            PaneKind::Diff,
-            PaneKind::Workflow,
-        ] {
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
             let mut item = pending;
             item.kind = kind;
             let tab = PaneTab::Pending(item);
@@ -9355,12 +9238,7 @@ mod tests {
             terminal_id: TerminalId::new(),
             daemon_generation: DaemonGeneration::new(),
         };
-        for kind in [
-            PaneKind::Terminal,
-            PaneKind::Agent,
-            PaneKind::Diff,
-            PaneKind::Workflow,
-        ] {
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
             assert!(
                 !pane_tab_label(&PaneTab::Live(
                     crate::usecase::application::pane::LivePane {

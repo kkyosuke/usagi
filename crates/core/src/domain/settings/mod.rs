@@ -469,7 +469,7 @@ impl DefaultModel {
 /// Availability is observed by the composition root as one snapshot (without
 /// executing provider CLIs) and injected, so every surface that offers a
 /// provider — the Config screen, the Closeup `agent -m` picker and completion,
-/// the Director launch picker, and the Session Workflow tab's participants —
+/// and the Director launch picker —
 /// offers exactly the same set. A provider qualifies when its
 /// [`command`](DefaultModel::command) is on `PATH`; `usagi_core::infrastructure::runtime_model::observe_available_models`
 /// is the one place that decides it.

@@ -1207,7 +1207,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 59);
+        assert_eq!(tools.len(), 55);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1253,7 +1253,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 48);
+        assert_eq!(names.len(), 44);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -1362,9 +1362,20 @@ mod tests {
 
     #[test]
     fn tools_call_unknown_tool_is_method_not_found() {
-        let v = call(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#)
-            .unwrap();
-        assert_eq!(v["error"]["code"], -32601);
+        for name in [
+            "nope",
+            "workflow_start",
+            "workflow_status",
+            "workflow_instruct",
+            "workflow_finish",
+        ] {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": {"name": name}
+            });
+            let response = call(&request.to_string()).unwrap();
+            assert_eq!(response["error"]["code"], -32601, "{name}");
+        }
     }
 
     #[test]
@@ -1969,9 +1980,6 @@ mod tests {
             "session_decision_log",
             "session_delegate_issue",
             "session_delegate_brief",
-            "workflow_start",
-            "workflow_status",
-            "workflow_instruct",
         ] {
             // `session_delegate_brief` advertises only runtime/model selectors,
             // so its arguments are satisfiable only against a snapshot that has

@@ -25,5 +25,4 @@ pub mod splash;
 pub mod text_overlay;
 pub mod welcome;
 pub mod work_run;
-pub mod workflow;
 pub mod workspace;

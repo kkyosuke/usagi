@@ -35,7 +35,6 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
   - [session 状態別件数](#session-状態別件数)
   - [Agent concurrency](#agent-concurrency)
 - [Closeup pane](#closeup-pane)
-- [Session Workflow タブ](#session-workflow-タブ)
 - [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)
 - [Closeup 入力の拒否表示](#closeup-入力の拒否表示)
 - [Closeup Agent の手動確認](#closeup-agent-の手動確認)
@@ -197,8 +196,7 @@ Home を開く入口は direct workspace、Welcome の再開、Open の選択、
 `DaemonBackend` と同一の port set を使う。Home controller が発行した Effect は
 `DaemonBackend::dispatch` だけが解釈し、session / Agent / terminal、notes / environment、workspace command、
 decision、PR snapshot / preview、browser、desktop notification へ振り分ける。別の screen-graph executor や
-production fallback stub は持たない。dispatch が受け取っても実行対象を持たない effect は
-[Session Workflow タブ](#session-workflow-タブ)の 1 件だけである。
+production fallback stub は持たない。
 
 composition が一つの接続として保持する Agent runtime adapter は aggregate だが、利用側へは用途別の境界を渡す。pane launch worker は
 `PaneLaunchCommandPort`、live terminal session は `TerminalStreamPort`、session refresh は `SessionRefreshPort` だけを見る。
@@ -1104,7 +1102,7 @@ Switch の利用可能な session 行で `n` を押すと、選択中の session
 Switch は選択中の session のメモを右ペイン上部のタブ直下に、枠付きのプレビューとして最大 3 行重ねて表示する。
 本文は通常の明るさで表示し、背後の端末プレビューを dim にする。長い行や 4 行目以降は省略する。
 空のメモはタブ下の余白に `n: add memo` の案内だけを表示する。
-端末以外のプレビューでは Agent の状態・エラー、Workflow、読み込み表示をメモの下に配置する。
+端末以外のプレビューでは Agent の状態・エラー、読み込み表示をメモの下に配置する。
 高さが足りないときは状態表示を優先してメモを省略する。
 note icon はノート形で、Icons の Text 設定では `▤` を使う。
 プレビューは入力を持たない表示レイヤーで、メモの有無によって PTY の
@@ -2242,139 +2240,6 @@ tab-less Closeup の action modal に戻る。TUI の Agent / terminal daemon �
 の異常と、画面全体へ返る未処理の IO error も同じログへ action と safe reason を記録する。request body、argv、
 環境変数、provider 出力は記録しない。
 
-## Session Workflow タブ
-
-この節が session 内の Workflow UI の正本である。Team は session 間の割当を扱い、Workflow は
-選択した session の同じ worktree 内で実装・レビューを進める。Workflow を開いても Team、role、
-session creator、worktree は変更しない。単独実行には既存の `agent` を使う。
-
-Closeup action の `workflow` は、その session の非端末 Workflow タブを開く。既に開いている場合は
-同じタブを選択し、重複して作らない。進捗の取得を待たずにタブを表示し、取得中や取得失敗もタブ内に表示する。
-取得中の表示は最初の 1 回だけで、以降の定期取得は取得済みの工程表示をそのまま保つ。
-タブを開くだけでは Agent を起動しない。
-
-このタブは daemon operation を持たない TUI-local な pane である。terminal や Agent のように
-起動完了がタブを確定させる経路が無いため、pane registry への反映は Home runtime が reducer の
-出力を受け取った時点で行う。`DaemonBackend::dispatch` はこの effect も受け取るが、実行する port を
-持たない no-op として扱う。
-
-```text
-Team
-├─ Session A
-│  └─ Workflow: 実装＋レビュー
-│     ├─ Planner: 計画
-│     ├─ Implementer: 実装
-│     └─ Reviewer: レビュー
-└─ Session B
-   └─ 単独 Agent
-```
-
-| 領域 | 表示・操作 |
-|---|---|
-| 上段 | 工程、判断待ち・エラーの理由、goal、担当、修正回数、issue、PR、レビュー対象 SHA |
-| 中央 | Workflow の履歴。PageUp / PageDown でスクロールし、Shift-End で最新位置へ戻る |
-| 下段 | 開始後は追加指示の複数行入力。開始前はキー操作の案内だけを表示する |
-| 開始前のフォーム | 先頭の Goal（依頼の複数行入力）に続けて Planner・Implementer・Reviewer と修正回数の上限を個別に選択。Tab で各欄を移動し、左右キーで選ぶ |
-| 宛先 | 自動（現在の担当）・選択した実行者・レビュー担当。Tab で切り替える |
-
-上段の行順は、pane が狭いときに残すべきものから並べる。工程の次に判断待ち・エラーの理由を置き、
-その下に run そのものを説明する行（goal、担当、修正回数、issue、PR、レビュー対象 SHA）を置く。
-run を説明する行が、run が止まっている理由を画面外へ押し出すことはない。
-goal は改行を ` / ` に畳んで 1 行で表示する。担当行は現在の担当に続けて Planner / Implementer / Reviewer を
-併記するため、実行中でも開始時の組合せが画面から消えない。`PR ready` に達した run は PR の URL を上段に表示する。
-
-開始前のフォームでは、Goal を担当欄と同じ列に並べ、値の開始位置を揃える。focus のある欄だけが行頭の `>` と
-反転表示のラベルを持ち、入力 caret は Goal に focus があるときだけ表示する。Goal が空で focus が無いときは
-入力先であることを示す案内を表示する。Workflow タブを選択した Closeup では右ペインを dim にせず、
-live terminal と同じ明るさで表示する。
-高さの小さい pane では開始フォームが focus に追従し、選択中の欄を常に表示する。
-
-Enter は改行、Ctrl-S は開始／送信、矢印・Home / End・Delete / Backspace は入力編集である。
-履歴には workflow の session で交わされたメッセージをすべて残す。工程を動かしたメッセージだけでなく、
-計画担当が返した計画や実装中の通常のやり取りも記録するため、実装が続いている間も履歴が伸び続ける。
-各エントリは時刻・発言者・メッセージ種別を持ち、工程または review を動かしたエントリには印を付けて区別する。
-時刻は閲覧者のタイムゾーンで `HH:MM` と表示し、時刻を持たない旧レコードは `--:--` と表示して桁を揃える。
-保持数は 100 件、本文は 512 文字までで、超過分は古い順に落とす。
-
-履歴のスクロールは PageUp / PageDown で、履歴の先頭で止まる。表示窓は常に埋まるところまでしか戻らないため、
-スクロールで履歴欄が空白になることはない。Shift-End は 1 操作で履歴を最新位置へ戻す。
-Home / End / Delete の入力欄での挙動は変えない。履歴の操作は開始前のフォームに focus がある間も受け付ける。
-最新位置にいる間だけ新着エントリに追従し、過去を読んでいる間は新着が届いても表示位置を動かさない。
-読んでいる位置は行の identity で覚えるため、保持上限を超えて古い行が捨てられても表示位置は動かない。
-読んでいた行自体が捨てられた場合は、残っている最も古い行まで戻る。
-Ctrl-S は背景の定期取得を待たない。送信を止めるのは配送中の送信だけである。
-開始前のフォームは Planner・Implementer・Reviewer の `< 担当 >` と修正回数の `< 回数 >` を同じ桁から並べ、
-選択中の欄だけカーソルを付ける。修正回数の上限は 1〜10 の範囲で選び、既定値は 3 である。範囲外の値は受理しない。
-担当の組合せと同じく、開始できた上限を workspace 単位で保存して次回の初期値に使う。上限は開始後には変更しない。
-MCP の `workflow_start` も同じ範囲で `revision_limit` を受け取り、省略時は workspace が保存した値を使う。
-起動時の固定指示にも選んだ上限をそのまま書くため、指示文と daemon が実際に止まる回数は一致する。
-入力下書きは session ごとに保持し、配送中に追記した内容は先行する送信の完了で消さない。
-Ctrl-O の session／tab 切替と PR 一覧の操作は維持する。生の Agent 出力は各 Agent タブで確認する。
-
-担当候補は Claude、Codex、Gemini（`agy`）のうち、この環境で起動できるものだけである
-（判定は [Closeup の agent CLI 選択](#closeup-の-agent-cli-選択)が正本）。初回は計画・実行が Codex、レビューが Claude
-だが、その provider を起動できない環境では起動できる provider へ置き換えて表示・送信する。候補が 0 件なら担当は変更できない。
-開始できた担当の組合せをワークスペース単位で保存し、次の session や再起動後の初期候補に使う。保存された組合せが
-起動できない provider を含む場合も同じ置き換えを行うため、開始前の担当欄が起動できない provider を示すことはない。
-開始後と結果未確定の再試行中は担当を変更せず、実行中の run は開始した組合せをそのまま表示する。
-
-開始は daemon に依頼し、選択した実行者の実行環境・認証の確認を経て起動する。既に別の Agent が
-動いている session では開始を拒否し、既存 Agent を勝手に使い回さない。この拒否は同じ依頼を送り直しても
-覆らないため、開始 intent を session に残さず取り消す。起動していない開始は終了済み run の一覧にも残さない。
-session は次の開始を受け付ける状態に戻り、担当と依頼を選び直せる。
-実行者は先に計画担当を起動し、編集を伴わない計画の返答を待ってから実装する。計画担当とレビュー担当は別 Agent とする。
-計画・レビュー担当の起動は同じ session の認証済み handoff を使うため、runtime/model allowlist と
-既存の role・実行数上限が適用される。
-
-進捗は daemon の保存済み状態から取得する。レビュー判定は対象の依頼 ID と commit SHA に結び付く。
-レビュー中に実装が更新された場合も、同じ担当への新しい依頼 ID でレビュー対象を差し替えられる。
-差し替え前の遅れた判定は工程を進めず、修正回数も増やさない。新しいレビューでは以前の PR URL と待ち理由を消す。
-追加指示は受理時点の exact Agent 宛先に固定し、工程変更後に別の担当へ付け替えない。
-配送先の実行も元の担当または明示的な再開履歴に限定する。停止済み Agent の ID を再利用した
-別起動には送らず、指示を待機状態に保つ。
-受理済みの指示は `queued`、端末への通知が確認できた指示は `notified`、配送結果を確定できない指示は
-`delivery unconfirmed` と表示する。端末への書き込み成功だけで処理済みとはみなさない。
-応答を失った送信は同じ操作 ID で再試行し、二重の開始や指示を作らない。
-認証失敗など、条件を整えれば同じ依頼のまま成功しうる失敗では開始待ちの操作を保存し、画面を開き直すと
-元の依頼と再試行操作を復元する。送り直しても覆らない拒否だけを取り消す。起動に成功したあとの失敗は
-常に再試行可能として扱うため、Agent が起動済みの run を取り消すことはない。
-判断待ちと PR 準備完了は daemon が desktop 通知で知らせる（[workflow lane](05-daemon.md#workflow-lane)が正本）。
-同じ状態に留まっている間は再通知しない。
-担当 Agent が終了・中断した場合は判断待ちと理由を表示する。別 Agent の起動を担当の復帰とは
-みなさず、既存の Agent 回復操作で同じ実行系統が再開したことを照合する。
-
-Closeup action の `workflow finish` は、その session の run を終了する。終了は保存済みの状態だけを変え、
-**担当 Agent を終了させず、worktree も削除しない**（不要になった Agent は従来の Agent 操作で閉じる）。
-`PR ready` で終了した run は完了、それ以外の工程で終了した run は中止として記録する。起動できないまま
-開始待ちになっている intent も同じ操作で畳める。終了後は workflow の記録が session を押さえなくなるため、新しい開始を受け付ける。
-ただし終了は Agent を残すので、前の run の Agent が動いている間は
-「既に別の Agent が動いている session では開始を拒否する」規則が先に効く。
-新しい run を始めるには、その Agent を閉じてからにする。
-終了した run は goal・終了時の工程・結果・issue・PR を最大 5 件まで保持し、古いものから捨てる。
-履歴欄の先頭に `[completed] <goal> (PR ready) <PR URL>` の形で表示し（PR を残さず終わった run は URL を省く）、
-run がある間は上段の末尾でこの操作を案内する。
-起動できないまま開始待ちになった intent がエラーを抱えている間も同じ末尾で案内する。この状態の Ctrl-S は
-同じ操作 ID の再送にしかならないため、案内が無いと畳む手段が画面から消える。
-案内は上段で最も低い優先度を持ち、pane が狭いときは待ち理由・レビュー対象 SHA・エラーより先に落ちる。
-応答を失った終了は同じ操作 ID で再送し、二重に終了しない。終了済みの run への追加指示と、
-別の操作 ID による 2 度目の終了は拒否する。
-
-タブを閉じても daemon の作業は中止しない。再度 `workflow` を開くと保存済みの進捗を取得する。
-進行そのものは daemon の常駐 lane が所有するため、タブを閉じていても、別の session を見ていても、
-TUI を終了していても進む（[workflow lane](05-daemon.md#workflow-lane)が正本）。開いている画面の
-polling は同じ進行の pass を通して最新の状態を受け取る。polling は直前の取得が完了してから次を出し、
-その間隔は 1 秒程度を上限とする（pane を開いている間 daemon の read を frame ごとに積まない）。
-Workflow は PR の自動マージや session/worktree の削除を行わない。
-実装・レビューの進行は起動時の固定指示と同一 session の handoff に従う。修正回数は開始前に選んだ上限を
-指示するが、プロセスを強制停止する上限ではない。
-
-issue 番号から開始した run は、その issue を参照として保持し、工程表示に `Issue: #<番号>` を出す。
-起動時の指示には [PR 規約](06-conventions.md#プルリクエスト)の `Internal-Issue` と issue の `done` 同期を
-含め、`PR ready` の判定でも daemon が独立に検証する。PR 本文は GitHub が返したものを、issue の status は
-session worktree の issue store を読んで確かめ、実装担当の報告は使わない。どちらかが欠けていれば
-`PR ready` にはならず、不足を待ち理由として表示する。issue の書き込みは従来どおり session worktree の
-中だけで行う。
-
 ## Closeup の agent CLI 選択
 
 Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI を選ぶ。この節が v2 の agent CLI 選択の正本である。
@@ -2388,7 +2253,7 @@ Closeup の `agent` は `-m`（長形式 `--model`）で起動する agent CLI �
 
 - **候補は起動できる CLI だけ**である。合成ルートは起動時に provider CLI を実行せず、executable の PATH lookup
   だけで `AvailableModels` snapshot を一度作り、process lifetime を通して
-  Config、Closeup、Director、[Session Workflow タブ](#session-workflow-タブ)の担当欄に同じ値を注入する。Action menu の
+  Config、Closeup、Director に同じ値を注入する。Action menu の
   展開行・Tab 補完・submit 時の検証はすべて同じ集合を使う。候補にならない CLI は表示・補完せず、直接入力しても
   `that agent CLI is not installed` として拒否する（daemon へ request を送らない）。
   - snapshot は process lifetime を通して固定である。CLI の install を反映するには TUI を起動し直す。

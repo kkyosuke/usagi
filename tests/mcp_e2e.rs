@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 60);
+    assert_eq!(tools.len(), 56);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -120,6 +120,16 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
     }
     assert!(names.contains("terminal_list"));
     assert!(names.contains("terminal_read"));
+    for name in [
+        "workflow_start",
+        "workflow_status",
+        "workflow_instruct",
+        "workflow_finish",
+    ] {
+        assert!(!names.contains(name), "removed tool is advertised: {name}");
+        let response = mcp.tool(name, &json!({"name": "removed-workflow"}));
+        assert_eq!(response["error"]["code"], -32601, "{response}");
+    }
 }
 
 #[test]
@@ -131,7 +141,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 49);
+    assert_eq!(names.len(), 45);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -421,258 +431,6 @@ fn production_session_pr_resolves_the_authenticated_caller_when_name_is_omitted(
     let explicit = mcp.tool("session_pr", &json!({"name":"named-pr-target"}));
     assert_eq!(explicit["error"]["code"], -32603, "{explicit}");
     assert!(has_permission_denied(&explicit));
-}
-
-#[test]
-fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start() {
-    let mut mcp = McpHarness::start();
-    assert!(mcp.tool("session_create", &json!({"name":"workflow-target"}))["error"].is_null());
-
-    // A workflow that has not started reports no run rather than an error, so a
-    // coordinator can poll before and after starting one.
-    let status = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
-    assert!(status.get("error").is_none(), "{status}");
-    let status = tool_text(&status);
-    assert!(status["run"].is_null(), "{status}");
-    assert!(status["agents"]["implementer"].is_string(), "{status}");
-
-    // An unknown session is refused before any workflow record is created.
-    let missing = mcp.tool("workflow_status", &json!({"name":"no-such-session"}));
-    assert!(missing.get("error").is_some(), "{missing}");
-
-    // The control plane belongs to the human: an Agent may drive a session it
-    // created, but never the one it is running inside.
-    drop(mcp.launch_caller());
-    let own = mcp.tool(
-        "workflow_start",
-        &json!({"name":"mcp-caller","goal":"drive myself"}),
-    );
-    assert!(has_permission_denied(&own), "{own}");
-    // The refusal is the caller's own session, not the tool: a session this
-    // Agent did not create is refused by the same ownership rule.
-    let foreign = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
-    assert!(has_permission_denied(&foreign), "{foreign}");
-}
-
-#[test]
-// One run's whole life — launch, instruct, finish, restart — shares a single
-// daemon and fixture Agent. Splitting it would spin up a second heavy E2E, and
-// those are deliberately serialized because contention makes them fail falsely.
-#[allow(clippy::too_many_lines)]
-fn production_workflow_start_launches_the_remembered_participants() {
-    let mut mcp = McpHarness::start();
-    // Claude proves readiness with `auth status`; the implementer then stays
-    // alive so the run has a live participant to bind to.
-    mcp.replace_fixture_agent(
-        "claude",
-        r#"#!/bin/sh
-if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
-sleep 30
-"#,
-    );
-    assert!(mcp.tool("session_create", &json!({"name":"workflow-run"}))["error"].is_null());
-
-    // Nobody is named, so the start uses what this workspace remembers. The
-    // default implementer is Codex; remembering Claude is what proves the
-    // workspace answer reached the launch rather than the product default.
-    let defaults = mcp.data_dir().join("daemon/workflows").join(
-        tool_text(&mcp.tool("session_list", &json!({})))["workspace_id"]
-            .as_str()
-            .unwrap(),
-    );
-    fs::create_dir_all(&defaults).unwrap();
-    fs::write(
-        defaults.join("defaults.json"),
-        r#"{"planner":"claude","implementer":"claude","reviewer":"codex"}"#,
-    )
-    .unwrap();
-
-    let started = mcp.tool(
-        "workflow_start",
-        &json!({"name":"workflow-run","goal":"add a login form"}),
-    );
-    assert!(started.get("error").is_none(), "{started}");
-    let started = tool_text(&started);
-    assert_eq!(started["run"]["goal"], "add a login form");
-    assert_eq!(started["run"]["agents"]["implementer"], "claude");
-    assert_eq!(started["run"]["phase"], "implementing");
-
-    // The same call is one operation: repeating it answers with the same run
-    // instead of starting a second one.
-    let again = mcp.tool(
-        "workflow_start",
-        &json!({"name":"workflow-run","goal":"add a login form"}),
-    );
-    assert!(again.get("error").is_some(), "{again}");
-
-    // An instruction reaches the run and is remembered durably.
-    let instructed = mcp.tool(
-        "workflow_instruct",
-        &json!({"name":"workflow-run","body":"cover the error path","recipient":"implementer"}),
-    );
-    assert!(instructed.get("error").is_none(), "{instructed}");
-    let instructed = tool_text(&instructed);
-    assert_eq!(
-        instructed["run"]["instructions"][0]["body"],
-        "cover the error path"
-    );
-
-    // An unknown participant spelling is refused rather than silently defaulted.
-    assert!(
-        mcp.tool(
-            "workflow_start",
-            &json!({"name":"workflow-run","goal":"x","reviewer":"nobody"}),
-        )
-        .get("error")
-        .is_some()
-    );
-
-    // Finishing ends the run. It is not `Ready`, so it is recorded as stopped
-    // with the phase it was abandoned in, and the session keeps its worktree.
-    let worktree = mcp.workspace().join(".usagi/sessions/workflow-run");
-    assert!(worktree.join(".git").exists());
-    // `session_status` is the one view of Agent liveness a human caller can
-    // read: `agent_list` needs Agent provenance, which this caller has not got.
-    let status_of = |mcp: &mut McpHarness| {
-        tool_text(&mcp.tool("session_status", &json!({})))["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|session| session["name"] == "workflow-run")
-            .map(|session| session["agent_status"].clone())
-    };
-    let before = status_of(&mut mcp).expect("the session is listed while it carries the run");
-    // Comparing before and after would also hold if the fixture's own sleep had
-    // already elapsed — and would then hide the very regression this checks for.
-    // A run that gets this far with a dead Agent is a fixture that is too short
-    // for this machine, and saying so is better than passing vacuously.
-    assert!(
-        before != "exited" && before != "failed" && !before.is_null(),
-        "the fixture Agent has to outlive the run's setup, but was {before}"
-    );
-    let finished = mcp.tool("workflow_finish", &json!({"name":"workflow-run"}));
-    assert!(finished.get("error").is_none(), "{finished}");
-    let finished = tool_text(&finished);
-    assert!(finished["run"].is_null(), "{finished}");
-    assert!(finished["pending_start"].is_null(), "{finished}");
-    assert_eq!(finished["finished"][0]["outcome"], "stopped");
-    assert_eq!(finished["finished"][0]["goal"], "add a login form");
-    assert_eq!(finished["finished"][0]["phase"], "implementing");
-
-    // The run's Agent is untouched and so is the worktree: finishing is a
-    // change to the workflow record and nothing else.
-    // The status has to be *unchanged*, not merely non-terminal: a killed Agent
-    // is still reported, as `exited`, so presence alone would pass through the
-    // regression. Comparing two readings around the one call is true regardless
-    // of how long the run took to reach here.
-    let after = status_of(&mut mcp);
-    assert_eq!(
-        after,
-        Some(before),
-        "finishing a run leaves the Agent that carried it exactly as it was"
-    );
-    assert!(
-        worktree.join(".git").exists(),
-        "finishing a run never removes the session worktree"
-    );
-
-    // Finishing again is refused, and so is instructing a run that is over.
-    assert!(
-        mcp.tool("workflow_finish", &json!({"name":"workflow-run"}))
-            .get("error")
-            .is_some()
-    );
-    assert!(
-        mcp.tool(
-            "workflow_instruct",
-            &json!({"name":"workflow-run","body":"one more thing"}),
-        )
-        .get("error")
-        .is_some()
-    );
-
-    // The workflow record no longer holds the session: a new start gets past
-    // "session already has another workflow" and is stopped only by the
-    // separate, pre-existing rule that one session runs one Agent at a time.
-    // Finishing deliberately leaves that Agent alive, so closing it stays the
-    // person's move — but the run that was wedging the session is gone.
-    let restarted = mcp.tool(
-        "workflow_start",
-        &json!({"name":"workflow-run","goal":"add a logout form"}),
-    );
-    let refusal = restarted["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        refusal.contains("existing Agent"),
-        "the record is free and only the live Agent refuses: {restarted}"
-    );
-    assert!(
-        !refusal.contains("another workflow"),
-        "the finished run must not still own the session: {restarted}"
-    );
-
-    // And the archive is what the session reports while it waits. The refused
-    // start left no trace at all: no pending intent to freeze the pane on, and
-    // no archived row, so retrying cannot push real history out of the bounded
-    // archive.
-    let idle = tool_text(&mcp.tool("workflow_status", &json!({"name":"workflow-run"})));
-    assert!(idle["run"].is_null(), "{idle}");
-    assert!(
-        idle["pending_start"].is_null(),
-        "a refused start must not keep holding the session: {idle}"
-    );
-    assert_eq!(idle["finished"][0]["goal"], "add a login form");
-    assert_eq!(idle["finished"].as_array().unwrap().len(), 1);
-}
-
-#[test]
-fn production_workflow_start_from_an_issue_renders_the_goal_and_keeps_the_reference() {
-    let mut mcp = McpHarness::start();
-    mcp.replace_fixture_agent(
-        "codex",
-        r#"#!/bin/sh
-if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
-sleep 30
-"#,
-    );
-    // Issue writes are refused at the workspace root by design, so the backlog
-    // entry is placed the way a merged PR leaves it.
-    let number = 742_u64;
-    let issues = mcp.workspace().join(".usagi/issues");
-    fs::create_dir_all(&issues).unwrap();
-    fs::write(
-        issues.join(format!("{number}-close-the-loop.md")),
-        format!(
-            "---\nnumber: {number}\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n"
-        ),
-    )
-    .unwrap();
-    assert!(mcp.tool("session_create", &json!({"name":"issue-run"}))["error"].is_null());
-
-    let started = mcp.tool(
-        "workflow_start",
-        &json!({"name":"issue-run","issue":number}),
-    );
-    assert!(started.get("error").is_none(), "{started}");
-    let started = tool_text(&started);
-    // The issue body becomes the goal, and the run keeps the reference the PR
-    // will have to name.
-    let goal = started["run"]["goal"].as_str().unwrap();
-    assert!(goal.contains("fix(daemon): close the loop"), "{goal}");
-    assert!(goal.contains("reproduce and fix"), "{goal}");
-    assert_eq!(started["run"]["issue"], json!(number));
-
-    // A goal is required when no issue is named.
-    let neither = mcp.tool("workflow_start", &json!({"name":"issue-run"}));
-    assert!(neither.get("error").is_some(), "{neither}");
-    // An issue that does not exist is refused before a run is created.
-    assert!(
-        mcp.tool(
-            "workflow_start",
-            &json!({"name":"issue-run","issue":number + 1000}),
-        )
-        .get("error")
-        .is_some()
-    );
 }
 
 #[test]

@@ -130,16 +130,6 @@ pub enum DaemonRequest {
     /// Read the redaction-safe durable Work Runs owned by the connection's
     /// workspace. This TUI-only observation never accepts an Agent credential.
     SupervisorSnapshot { workspace: WorkspaceId },
-    WorkflowSnapshot {
-        workspace: WorkspaceId,
-        session: SessionId,
-    },
-    WorkflowControl {
-        workspace: WorkspaceId,
-        session: SessionId,
-        operation_id: OperationId,
-        command: crate::domain::workflow::WorkflowCommand,
-    },
     /// Mutate one durable Supervisor Run through the workspace-bound human
     /// control plane. The daemon verifies the requested workspace against the
     /// connection and replays the command by its durable operation identity.
@@ -665,15 +655,6 @@ pub enum SessionAction {
     DecisionLog,
     DelegateIssue,
     DelegateBrief,
-    /// Start the session's implementation/review workflow on behalf of the
-    /// human who is running this MCP client.
-    WorkflowStart,
-    /// Read one session's workflow progress.
-    WorkflowStatus,
-    /// Send one durable instruction to a running workflow.
-    WorkflowInstruct,
-    /// End one session's workflow so the session can start another.
-    WorkflowFinish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

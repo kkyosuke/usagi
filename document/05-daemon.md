@@ -20,7 +20,6 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
 - [background worker の待ち方](#background-worker-の待ち方)
-- [workflow lane](#workflow-lane)
 - [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
@@ -1334,7 +1333,6 @@ tick の長さに依存しない。
 | session teardown | 1 s | finalization に失敗している間だけ teardown を再試行する間隔。受理は即座に worker を起こす（[session teardown worker](#session-teardown-worker)） |
 | decision maintenance | 250 ms | 期限切れの decision が `Pending` として読める残り時間 |
 | retention GC | 30 s | idle 時に age budget と最小可視 TTL を反映するまでの遅れ（[final retention と aggregate GC](#final-retention-と-aggregate-gc)） |
-| workflow lane | 10 s | workflow の進行（peer 証拠の反映・queued 指示の再配送・PR 検証）が次に進むまでの遅れ（[workflow lane](#workflow-lane)） |
 
 IPC accept は tick を持たない。listener の readiness descriptor と、shutdown 要求を写した descriptor を
 `poll(2)` で同時に待つため、接続が来るまで wakeup は発生しない。lifecycle owner も同じく park し、
@@ -1349,101 +1347,6 @@ shutdown は 1 秒以内に観測される。lifecycle owner は `daemon.lock` �
 stale recovery も singleton が生きているので owner を回収できない。1 秒の backstop はこの状態を防ぐ。
 この読み直しは idle の間も 1 秒に 1 回の timer wakeup として残るため、上の「意図した tick の回数」には
 この 2 つの待ち手の backstop も含まれる。
-
-## workflow lane
-
-session workflow の進行を所有するのはこの常駐 lane である。client の要求は進行の条件ではない。
-
-lane は tick ごとに保存済み workflow record を列挙し、各 run について次を 1 回行う。
-
-| 段階 | 内容 |
-|---|---|
-| reconcile | peer message journal を cursor から読み、証拠に一致する phase / review だけを進める |
-| 担当の生存確認 | 担当 Agent が停止していれば判断待ちへ落とし、復帰を確認できれば元の phase へ戻す |
-| 配送 | `queued` の指示を、受理時点の exact な担当とその認可済み実行系統にだけ再配送する |
-| 検証 | 承認済み HEAD に対する PR の独立検証（レビュー承認後の phase のみ。worktree HEAD 一致・未コミット変更なし・レビュー済み base と実 PR diff の一致・承認 HEAD に対する PR の checks 成功を要求する） |
-
-次の record は読み飛ばす。読み飛ばした record は書き換えないため、1 件あたりのコストは record を
-1 回読むことだけになる。
-
-| 読み飛ばす record | 理由 |
-|---|---|
-| worktree を解決できない session（削除済み、この daemon が保持していない workspace） | 進める対象が無い |
-| Agent を束ねられないまま開始に失敗した intent（`run` が無い） | 人間の再試行を待つ |
-
-`PR ready` に到達した run も他と同じく sweep する。そこから改めてレビューを依頼でき、そこで出した指示も
-配送先へ届ける必要があるためである。ただし**無人の sweep は `PR ready` の PR を再検証しない**。完了した
-PR を tick ごとに GitHub へ照会し続け、ブランチが動いた瞬間に工程を降格させてしまうからである。画面を
-開いている人の request は従来どおり再検証し、古くなった承認を無効化する。
-
-検証のうち **GitHub への `gh pr view` だけは、承認済み base / HEAD の組ごとにキャッシュする**。lane の tick と
-画面を開いている人の polling は同じ run を繰り返し検証するため、キャッシュが無いと同じ答えを何度も
-GitHub に聞くことになる。キャッシュの窓は 15 秒から始まり、答えが「まだ待ち」（`Waiting …`）の間は
-倍々に伸びて 5 分で頭打ちになる。承認済み base / HEAD か対象 PR が変わったときは hit せず、run が検証対象の phase
-（`Checking PR` / `PR ready`）から外れたときに破棄する。無人の sweep が `PR ready` を
-再検証しないのは検証を省くだけで、キャッシュは破棄しない（破棄すると lane の tick が
-実質の間隔になり、窓の意味が無くなる）。保持する session 数にも上限を設ける。窓の中でも **worktree の HEAD 一致と未コミット変更なしの判定はローカルで毎回行う**。
-PR の観測前後に両方を確認し、観測中に未コミット変更が生じた場合も `PR ready` に進めない。
-未追跡 file は `--untracked-files=all` で列挙し、利用者の `status.showUntrackedFiles` 設定に左右されない。
-PR の `baseRefOid` と承認済み HEAD の merge-base が、レビューに記録された base SHA と一致することも要求する。
-merge-base の計算は local replace ref・legacy graft file・local shallow 境界を無効にし、GitHub が保持する
-元の commit graph を検証する。shallow clone で必要な object が無ければ、部分的な graph から承認を推測せず保留する。
-ベースブランチの先端が進んでも merge-base が同じなら承認は有効だが、空の範囲や別の PR diff に対する承認は
-`PR ready` の証拠にならない。base の欠落・不正な SHA・ローカルに無い Git object・複数の merge-base は保留し、
-diff の変更は再レビューを要求する。merged PR でも保存済みの base と head を検証する。
-open PR は checks 成功に加えて GitHub の `mergeStateStatus` が `CLEAN` または `HAS_HOOKS` であることを要求する。
-必須 check の未出現などで `BLOCKED`、基点更新待ちの `BEHIND`、不明・欠落を含むその他の状態は待機とし、
-既に出現した checks だけの成功で `PR ready` に進めない。merged PR は merge state の再確定を要求しない。
-安価であり、かつ検証の TOCTOU fence でもあるためである。キャッシュは daemon process の生存期間だけ
-保持し、lane と client 要求で 1 つを共有する。
-
-1 件の失敗は他の run の進行を止めない。daemon の停止要求は sweep の途中でも観測し、残りは次の起動へ残す。
-
-進めた run が**人を待つ状態**になったとき、lane は desktop 通知を 1 回出す。対象は次の 2 つだけで、
-Agent の手番は通知しない。
-
-| 状態 | 通知 |
-|---|---|
-| 判断待ち | `usagi: workflow needs you` と、goal の 1 行目・待ち理由 |
-| PR 準備完了 | `usagi: PR ready` と、goal の 1 行目・検証した PR の URL |
-
-record は「どの状態を通知済みか」を保持するため、同じ状態に留まっている間は再通知しない。復帰して
-再び同じ状態になった場合は改めて通知する。通知すべき状態が変わらない tick では record を書き換えない。
-通知は best-effort で、通知にも記録にも失敗した場合はその tick を諦め、run の進行と他の run の sweep は
-止めない。
-TUI の起動有無に依存しないのは、daemon が利用者と同じ権限で動いているためである。
-
-Workflow request のうち snapshot はこの pass をそのまま通り、control（開始・指示）は reconcile の直後に
-受理して PR 検証を挟まない。GitHub が一時的に読めないことが指示の拒否理由にならないようにするためで、
-検証は次の sweep か次の snapshot が行う。
-
-どの request も reconcile は 1 回だけ通る。control は自分が適用した記録変更を保存済み projection として
-返し、journal を二重に replay しない。
-
-開始時の前状態は admission と同じ store lock 内で取得する。readiness が lock の外で失敗した場合の rollback と
-error 保存は、その Start ID が今も未起動・未終了の intent である場合だけ適用する。待っている間に終了・再開始・
-起動された run を、古い開始要求の完了で上書きしない。外部 readiness から戻った launch も現行 Start を確認する。
-現行 Start の最終確認・Agent 起動・run の binding は同じ owner lock 内で行い、control admission と開始失敗の
-保存もその lock で直列化する。Finish が最終確認と binding の間に割り込んで、記録されない Agent を起動しない。
-
-Start / Instruct / Finish は同じ operation ID を別の command に使えない。終了済み要求の拒否情報は最大 5 件の
-表示履歴とは別に、record の固定サイズの `retired_through`（UUIDv7 の最大終了済み command ID）へ保存する。
-終了時には Start・全 Instruct・Finish ID を取り込み、履歴の件数制限・容量削減・daemon restart でも失わない。
-次の新しい command は UUIDv7 の全体順序でこの値より大きい ID を使う必要があり、境界以下の ID は拒否する。
-異なる producer が同じ millisecond に生成した ID や時計が戻った producer の ID は、新しく発行したものでも
-境界以下になり得る。発行時刻だけでは受理を保証せず、その場合も `idempotency_conflict` を返す。
-現行 Finish の同じ ID の再送は成功のまま応答し、現行 Start / Instruct の再送は元の内容との一致を要求する。
-旧 record の稼働中 run に受理済みの Instruct ID が境界以下でも、同じ宛先・本文の再送は成功し、別の内容や
-command への使い回しは拒否する。この扱いで境界以下の新しい指示を受理することはない。
-旧 version 1 record は残っている終了 ID と、終了済み intent に残る Start / Instruct ID の最大値から拒否境界を
-引き継ぎ、保存時に version 2 へ移行する。
-旧 daemon は version 2 を拒否するため、新 field を消して拒否境界を失うことはない。
-更新前に既に削除された ID 自体の復元は行わない。
-
-decision maintenance の tick は、期限到来が無ければ **store lock も durable write も行わない**。判定は
-atomically replaced な document の lock-free read で行い、実際に期限切れがあるときだけ lock を取って書く。
-`user_decision_request` は pending record の作成後すぐ応答するため、人間待ちの connection waiter は持たない。
-resolve / cancel / expire は durable state と outbox を更新し、caller が get で terminal state を観測したとき ACK する。
 
 ## session teardown worker
 
@@ -1554,7 +1457,7 @@ process-local 2,097,152 cell（概算 64 MiB）の実使用量 budget で bound 
 trim 行数を counter に計上する。新規登録の可視 grid が process-local の残りに収まらないときは、拒否する前に
 同じ registry の screen から古い scrollback を回収する。回収は終了済み terminal を先に、次に保持量の大きい
 live terminal の順で行い、可視 grid は回収しない。終了済み terminal の screen は retention が回収するまで残るため、
-回収が無いと Agent を繰り返し起動する session（Workflow の計画・レビュー担当など）が上限を履歴で埋め、以降の
+回収が無いと Agent を繰り返し起動する session が上限を履歴で埋め、以降の
 起動がすべて拒否される。回収しても収まらない Agent 起動は `resource_exhausted` として報告し、stale な参照とは区別する。checkpoint payload が frame budget を超える場合も payload 側の古い scrollback を
 落として収め、可視 grid だけでも収まらないときは部分的な screen を返さず fail closed とする。
 

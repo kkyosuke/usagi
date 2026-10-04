@@ -10,7 +10,6 @@
 //! for the four the daemon module's own recovery and tests call, `pub(super)`
 //! for what only the dispatch table calls, and private for the rest.
 
-use super::super::workflow;
 use super::{
     AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore, ErrorLog,
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
@@ -72,8 +71,6 @@ pub(super) fn dispatch_session_action(
     let teardown = context.teardown;
     let agent = context.agent;
     let pr_inventory = context.pr_inventory;
-    let verification = context.verification;
-    let verification_clock = context.verification_clock;
 
     let authenticated_caller = payload
         .get("_caller_credential")
@@ -330,81 +327,6 @@ pub(super) fn dispatch_session_action(
                 "reported_to": delivery.delivered_to,
                 "delivered_to": "inbox"
             }))
-        }
-        // The workflow control plane is the human's, so these tools carry the
-        // same ownership rule as the rest: a caller reaches a session it
-        // created, never the one it is running inside. That is what keeps a
-        // workflow's own Agents from driving their own workflow.
-        SessionAction::WorkflowStatus
-        | SessionAction::WorkflowStart
-        | SessionAction::WorkflowInstruct
-        | SessionAction::WorkflowFinish => {
-            let name = string("name")?;
-            let session = target_session(name)?;
-            let workspace = bound_workspace()?;
-            if caller.is_some_and(|caller| caller.session_id == Some(session)) {
-                return Err(SessionRuntimeError::PermissionDenied);
-            }
-            // A start may name a backlog issue instead of spelling the goal.
-            // The issue body becomes the goal, and the run keeps the reference
-            // the PR will have to name.
-            let issue = workflow::requested_issue(payload)?;
-            let command = match action {
-                SessionAction::WorkflowStatus => None,
-                SessionAction::WorkflowStart => {
-                    let goal = match issue {
-                        Some(number) => {
-                            workflow::issue_goal(bound, number).map_err(workflow::refusal)?
-                        }
-                        None => string("goal")?.to_owned(),
-                    };
-                    let remembered = workflow::remembered_defaults(agent, workspace);
-                    Some(usagi_core::domain::workflow::WorkflowCommand::Start {
-                        goal,
-                        agents: workflow::requested_agents(payload, remembered.agents)
-                            .ok_or(SessionRuntimeError::InvalidRequest)?,
-                        revision_limit: workflow::requested_revision_limit(
-                            payload,
-                            remembered.revision_limit,
-                        )
-                        .ok_or(SessionRuntimeError::InvalidRequest)?,
-                    })
-                }
-                SessionAction::WorkflowFinish => {
-                    Some(usagi_core::domain::workflow::WorkflowCommand::Finish)
-                }
-                _ => Some(usagi_core::domain::workflow::WorkflowCommand::Instruct {
-                    recipient: workflow::requested_recipient(payload)
-                        .ok_or(SessionRuntimeError::InvalidRequest)?,
-                    body: string("body")?.to_owned(),
-                }),
-            };
-            let snapshot = match command {
-                None => workflow::advance(
-                    agent,
-                    pr_inventory,
-                    super::super::workflow::Verification {
-                        cache: verification,
-                        clock: verification_clock,
-                    },
-                    &bound.scope_resolver(),
-                    workspace,
-                    session,
-                    workflow::Attention::Requested,
-                ),
-                Some(command) => workflow::control_workflow(
-                    agent,
-                    bound,
-                    workspace,
-                    session,
-                    usagi_core::domain::id::OperationId::parse(operation_id)
-                        .map_err(|_| SessionRuntimeError::InvalidRequest)?,
-                    command,
-                    issue,
-                ),
-            }
-            .map_err(workflow::refusal)?;
-            reply(serde_json::to_value(snapshot).map_err(|_| SessionRuntimeError::Storage)?)
         }
         SessionAction::Pr => {
             let (name, id) = if payload.get("name").is_some() {

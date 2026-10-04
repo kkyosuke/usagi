@@ -1044,66 +1044,6 @@ fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
 }
 
 #[test]
-fn session_workflow_launch_rechecks_readiness_and_embeds_exact_prompt() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let intent = intent(None);
-    let operation = OperationId::new().to_string();
-    let prompt = "workflow task";
-    let scope = FakeScope(Ok(scope()));
-    for invalid in ["", "\0", " "] {
-        assert!(
-            runtime
-                .prepare_workflow_readiness(&operation, &intent, invalid)
-                .is_err()
-        );
-    }
-    assert!(
-        runtime
-            .prepare_workflow_readiness("invalid", &intent, prompt)
-            .is_err()
-    );
-    let preflight = runtime
-        .prepare_workflow_readiness(&operation, &intent, prompt)
-        .unwrap();
-    assert!(
-        runtime
-            .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
-            .is_err()
-    );
-    let first = runtime
-        .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, preflight.as_ref())
-        .unwrap();
-    let replay = runtime
-        .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
-        .unwrap();
-    assert_eq!(first, replay);
-    assert!(
-        runtime
-            .prepare_workflow_readiness(&operation, &intent, "changed")
-            .is_err()
-    );
-    assert_eq!(
-        runtime.coordinator.snapshot().records[0]
-            .launch
-            .request
-            .initial_prompt
-            .as_deref(),
-        Some(prompt)
-    );
-    let other = OperationId::new().to_string();
-    let preflight = runtime
-        .prepare_workflow_readiness(&other, &intent, prompt)
-        .unwrap();
-    assert!(
-        runtime
-            .launch_workflow_after_readiness(&other, &intent, prompt, &scope, preflight.as_ref())
-            .is_err()
-    );
-}
-
-#[test]
 fn goal_readiness_defaults_profile_and_rejects_semantic_conflict() {
     let fixture = tempfile::tempdir().unwrap();
     std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
@@ -1308,44 +1248,4 @@ fn same_model_launches_and_exact_resume_preserve_each_peer_identity() {
         .notify_peer(workspace, session, second_agent)
         .unwrap();
     assert_eq!(pty(&runtime).selected.as_ref(), Some(&resumed.terminal));
-    assert_eq!(
-        runtime.workflow_operation_lineage(second_operation),
-        vec![second_operation, resumed_operation]
-    );
-    assert_eq!(
-        runtime.workflow_live_operation(second_operation),
-        Some(resumed_operation)
-    );
-    assert_eq!(
-        runtime.workflow_operation_lineage(first_operation),
-        vec![first_operation]
-    );
-    assert!(
-        runtime
-            .workflow_operation_lineage(OperationId::new())
-            .is_empty()
-    );
-    runtime.exit(&resumed.terminal, 0).unwrap();
-    assert_eq!(
-        runtime.workflow_operation_lineage(second_operation),
-        vec![second_operation, resumed_operation]
-    );
-    assert_eq!(runtime.workflow_live_operation(second_operation), None);
-    assert_eq!(runtime.workflow_live_operation(OperationId::new()), None);
-    let snapshot = runtime.coordinator.snapshot();
-    for replacement in [AgentRuntimeId::new(), resumed.runtime.agent_runtime_id] {
-        let mut broken = snapshot.clone();
-        broken
-            .records
-            .iter_mut()
-            .find(|record| record.operation.operation_id == resumed_operation)
-            .unwrap()
-            .superseded_by = Some(replacement);
-        // Missing/cyclic replacement data cannot invent another admitted
-        // operation or loop forever, even before hydration rejects it.
-        assert_eq!(
-            AgentRuntime::workflow_lineage(&broken, second_operation),
-            vec![second_operation, resumed_operation]
-        );
-    }
 }

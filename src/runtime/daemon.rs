@@ -14,7 +14,6 @@ mod service_context;
 mod standby;
 mod tenant_control;
 mod workers;
-mod workflow;
 
 pub(crate) use managed_update::{ManagedUpdateSync, sync_after_update};
 
@@ -881,13 +880,6 @@ type SharedTerminalRuntime = Arc<
 /// document, so a draining process's PTY observation cannot lose an update.
 type SharedPrInventory = Arc<Mutex<OutputPrProjector<FencedPrInventory<PrInventoryStore>>>>;
 
-/// Process-lifetime cache of workflow PR verification reads.
-///
-/// The resident lane and every client request share one handle, because they
-/// verify the same runs: without that sharing an open tab and the sweep would
-/// each keep their own copy and the GitHub reads would simply double.
-type SharedVerificationCache = Arc<Mutex<usagi_daemon::usecase::workflow::VerificationCache>>;
-
 /// How often the PR refresh worker claims due work.
 ///
 /// This bounds how quickly a freshly detected PR gets its title and state, and
@@ -955,10 +947,6 @@ const CLIENT_NOFILE_TARGET: u64 =
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
 const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
-/// Workflow progress is measured in Agent turns, so the resident lane sweeps
-/// slowly: often enough that a finished review reaches the human in seconds,
-/// rarely enough that an idle run costs one journal read per sweep.
-const WORKFLOW_LANE_TICK: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy)]
 struct GhProcess;
 
@@ -2154,112 +2142,6 @@ fn pending_daemon_agent_restart_path(data_dir: &Path) -> PathBuf {
     data_dir
         .join("daemon")
         .join(PENDING_DAEMON_AGENT_RESTART_FILE)
-}
-
-/// The daemon's own desktop notice for a workflow that needs a human.
-///
-/// The TUI notifies about decisions it observes, but a workflow reaches
-/// `Needs attention` or `PR ready` whether or not anyone has usagi open — which
-/// is the whole point of the resident lane. The daemon runs as the same user, so
-/// it raises the notice itself and the moment survives a closed TUI.
-struct PlatformWorkflowNotifier {
-    reaper: crate::runtime::platform_child_reaper::PlatformChildReaper,
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=platform_child_reaper_reaps_short_helpers_around_a_long_lived_child
-impl workflow::AttentionNotifier for PlatformWorkflowNotifier {
-    fn notify(&self, title: &str, body: &str) {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = std::process::Command::new("osascript");
-            command
-                .arg("-e")
-                .arg("on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run")
-                .arg("--")
-                .arg(title)
-                .arg(body);
-            command
-        } else if cfg!(target_os = "linux") {
-            let mut command = std::process::Command::new("notify-send");
-            // `--` first: a goal line that starts with `-` is text, not a flag.
-            command
-                .arg("--app-name=usagi")
-                .arg("--")
-                .arg(title)
-                .arg(body);
-            command
-        } else {
-            return;
-        };
-        let _ = self.reaper.spawn(&mut command);
-    }
-}
-
-/// Starts the resident lane that carries stored workflow runs forward without a
-/// client connection.
-///
-/// Reconcile, queued-instruction delivery and PR verification used to run only
-/// inside a Workflow request, which made progress a property of what the user
-/// happened to be looking at. This lane owns that progress instead; the request
-/// path keeps the same pass so an open tab still answers with fresh state.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_resident_workflow_lane_advances_a_run_without_any_client_request
-fn start_workflow_lane(
-    agent: SharedAgentRuntime,
-    pr_inventory: SharedPrInventory,
-    verification: SharedVerificationCache,
-    verification_clock: Arc<SystemClock>,
-    workspaces: Workspaces,
-    shutdown: Arc<ShutdownRequest>,
-    tick: Duration,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let sweeping = Arc::clone(&shutdown);
-    let mut failures = FailureTransitionLog::default();
-    let notifier = PlatformWorkflowNotifier {
-        reaper: crate::runtime::platform_child_reaper::PlatformChildReaper::default(),
-    };
-    spawn_workflow_lane(
-        Box::new(move || {
-            let scope = SharedScopeResolver(Arc::clone(&workspaces));
-            let failure = workflow::sweep(
-                &agent,
-                &pr_inventory,
-                workflow::Verification {
-                    cache: &verification,
-                    clock: verification_clock.as_ref(),
-                },
-                &scope,
-                &notifier,
-                &|| sweeping.is_requested(),
-            )
-            .err()
-            .map(|error| format!("workflow lane sweep deferred: {}", error.message));
-            if let Some(entry) = failures.changed(failure) {
-                ErrorLog::record(&entry);
-            }
-        }),
-        shutdown,
-        tick,
-    )
-}
-
-/// The lane loop, with the sweep injected so a test can drive it without a
-/// daemon, a PTY, or a store.
-fn spawn_workflow_lane(
-    mut sweep: Box<dyn FnMut() + Send>,
-    shutdown: Arc<ShutdownRequest>,
-    tick: Duration,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
-        .name("usagi-workflow-lane".to_owned())
-        .spawn(move || {
-            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::WorkflowLane);
-            while !shutdown.is_requested() {
-                sweep();
-                if shutdown.wait_for_tick(tick) {
-                    break;
-                }
-            }
-            worker_health.finish_planned();
-        })
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch

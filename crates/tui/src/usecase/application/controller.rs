@@ -184,18 +184,6 @@ pub enum RoleEditorScope {
 
 pub const ROLE_EDITOR_VIEWPORT_LINES: usize = 14;
 
-/// Frame ticks between two background Workflow snapshot reads.
-///
-/// The composition root wakes this reducer every 16ms, so gating the read on
-/// `mascot_tick % 10` ran a daemon round trip roughly six times a second for as
-/// long as a Workflow tab stayed selected — the per-frame inventory flood #551
-/// removed from the session and decision lanes, left behind on this one. It
-/// also kept `loading` set most of the time, which is what made the header
-/// flicker and, until the guard moved, swallowed Ctrl+S. Counting from the
-/// *completion* of the previous read keeps the lane single-flight and puts its
-/// steady cadence in the same one-second band as the resident lanes.
-const WORKFLOW_SNAPSHOT_TICKS: u64 = 60;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleEditor {
     scope: RoleEditorScope,
@@ -1142,7 +1130,6 @@ pub struct AppState {
     note_revision: u64,
     environment_editor: Option<EnvironmentEditor>,
     role_editor: Option<RoleEditor>,
-    workflows: std::collections::BTreeMap<SessionId, super::workflow::WorkflowPanel>,
     daemon_control: DaemonControlState,
     decisions: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
@@ -1395,7 +1382,6 @@ impl AppState {
             note_revision: 0,
             environment_editor: None,
             role_editor: None,
-            workflows: std::collections::BTreeMap::new(),
             daemon_control: DaemonControlState::default(),
             decisions: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
@@ -1572,10 +1558,6 @@ impl AppState {
         self.role_editor.as_ref()
     }
 
-    #[must_use]
-    pub fn workflow_panel(&self, session: SessionId) -> Option<&super::workflow::WorkflowPanel> {
-        self.workflows.get(&session)
-    }
     /// Current selection, pending action, and safe result in the daemon modal.
     #[must_use]
     pub const fn daemon_control(&self) -> &DaemonControlState {
@@ -2375,12 +2357,6 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    WorkflowEdit {
-        session: SessionId,
-        edit: super::workflow::WorkflowEdit,
-    },
-    /// Input captured by the selected native workflow pane, never by a PTY.
-    WorkflowInput { session: SessionId, key: AppKey },
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
     /// The runtime's current live-pane availability, sampled on every event.
@@ -2555,13 +2531,6 @@ impl From<RuntimeEvent<BackendEvent>> for AppEvent {
 pub enum BackendEvent {
     /// Persisted workspace-local session favorites.
     SessionFavorites(std::collections::BTreeSet<SessionId>),
-    Workflow {
-        job: super::workflow::WorkflowJob,
-        result: Result<
-            Box<usagi_core::domain::workflow::WorkflowSnapshot>,
-            super::workflow::WorkflowError,
-        >,
-    },
     /// stable identity で表した session snapshot。
     Sessions(Vec<SessionId>),
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
@@ -2724,11 +2693,6 @@ pub enum Effect {
     LoadSessionFavorites,
     /// Toggle one exact session under the preference store lock.
     ToggleSessionFavorite {
-        session: SessionId,
-    },
-    Workflow(super::workflow::WorkflowJob),
-    /// Select the session's non-terminal workflow tab without launching an Agent.
-    OpenWorkflow {
         session: SessionId,
     },
     /// Ask the pane owner to move its stable tab selection without exposing tab
@@ -2966,13 +2930,11 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
 #[must_use]
 fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
-        AppEvent::WorkflowEdit { session, edit } => update_workflow_edit(state, session, edit),
         AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
             state.pending_session_click = None;
             update_key(state, key)
         }
-        AppEvent::WorkflowInput { session, key } => update_workflow_input(state, session, key),
         AppEvent::RetainedPaneActivated(target) => update_retained_pane_activated(state, target),
         AppEvent::LivePaneAvailability(has_live_pane) => {
             update_live_pane_availability(state, has_live_pane)
@@ -3119,35 +3081,6 @@ fn update_retained_pane_activated(state: &mut AppState, target: Target) -> Vec<E
     Vec::new()
 }
 
-fn update_workflow_edit(
-    state: &mut AppState,
-    session: SessionId,
-    edit: super::workflow::WorkflowEdit,
-) -> Vec<Effect> {
-    if state.active != Some(session)
-        || state.overlay.is_some()
-        || state.workspace_drawer_focus.is_some()
-        || state.route != Route::Home(HomeMode::Closeup)
-        || !state.session_can_use(session)
-    {
-        return Vec::new();
-    }
-    if let Some(panel) = state.workflows.get_mut(&session) {
-        match edit {
-            // Reading the history is not editing the draft, so it stays
-            // available while the start form owns the caret.
-            super::workflow::WorkflowEdit::HistoryLatest => panel.show_latest_history(),
-            // The draft edits are exactly what the start form takes the caret
-            // away from.
-            _ if panel.run.is_none() && panel.agent_field.is_some() => {}
-            super::workflow::WorkflowEdit::Start => panel.draft.move_edge(false),
-            super::workflow::WorkflowEdit::End => panel.draft.move_edge(true),
-            super::workflow::WorkflowEdit::Delete => panel.draft.delete_forward(),
-        }
-    }
-    Vec::new()
-}
-
 fn update_live_pane_availability(state: &mut AppState, has_live_pane: bool) -> Vec<Effect> {
     // The runtime samples this level on every event; only an actual edge
     // may move the grace one-shot or the Closeup overlay. A repeated
@@ -3175,23 +3108,7 @@ fn update_tick(state: &mut AppState) -> Vec<Effect> {
     state
         .pr_merge_celebrations
         .retain(|_, until| state.mascot_tick <= *until);
-    let tick = state.mascot_tick;
-    if let Some(session) = state.active
-        && state.session_can_use(session)
-        && let Some(panel) = state.workflows.get_mut(&session)
-        && !panel.loading
-        && !panel.submitting
-        && tick >= panel.snapshot_due_tick
-    {
-        panel.loading = true;
-        vec![Effect::Workflow(super::workflow::WorkflowJob {
-            workspace: state.workspace,
-            session,
-            control: None,
-        })]
-    } else {
-        Vec::new()
-    }
+    Vec::new()
 }
 
 fn update_director_launch_finished(
@@ -3313,96 +3230,10 @@ fn update_pane_tab_availability(
     Vec::new()
 }
 
-fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) -> Vec<Effect> {
-    if state.active != Some(session)
-        || !state.sessions.contains(&session)
-        || !state.session_can_use(session)
-        || state.overlay.is_some()
-        || state.workspace_drawer_focus().is_some()
-        || state.route != Route::Home(HomeMode::Closeup)
-    {
-        return Vec::new();
-    }
-    let available = state.available_models;
-    let panel = state.workflows.entry(session).or_default();
-    panel.restrict_agents(available);
-    if panel.run.is_none() && panel.agent_field.is_some() {
-        match key {
-            AppKey::Left => {
-                panel.cycle_agent(false, available);
-                return Vec::new();
-            }
-            AppKey::Right => {
-                panel.cycle_agent(true, available);
-                return Vec::new();
-            }
-            // Reading the history is not editing the draft, so the scroll keys
-            // stay live while the start form owns the caret — the same rule
-            // `WorkflowEdit::HistoryLatest` follows, and what the pane's hint and
-            // `document/11-keybindings.md` promise.
-            AppKey::Tab | AppKey::SaveRoles | AppKey::PageUp | AppKey::PageDown => {}
-            _ => return Vec::new(),
-        }
-    }
-    match key {
-        AppKey::Char(character) => panel.draft.insert(&character.to_string()),
-        AppKey::Paste(text) => panel.draft.paste(&text),
-        AppKey::Enter => panel.draft.newline(),
-        AppKey::Backspace => panel.draft.backspace(),
-        AppKey::Left => panel.draft.move_cursor(false),
-        AppKey::Right => panel.draft.move_cursor(true),
-        AppKey::Up => panel.draft.move_vertical(false),
-        AppKey::Down => panel.draft.move_vertical(true),
-        AppKey::Tab => panel.cycle_recipient(),
-        AppKey::PageUp => panel.scroll_history(true),
-        AppKey::PageDown => panel.scroll_history(false),
-        AppKey::SaveRoles => {
-            // A background snapshot read is not the person's request,
-            // so it must not swallow this one. Only a submission still
-            // in flight owns the panel.
-            if panel.submitting {
-                return Vec::new();
-            }
-            if panel.pending.is_none() {
-                let body = panel.draft.value().to_owned();
-                if body.trim().is_empty() || body.len() > 16 * 1024 || body.contains('\0') {
-                    panel.error = Some("Enter a non-empty instruction of at most 16 KiB".into());
-                    return Vec::new();
-                }
-                let command = if panel.run.is_some() {
-                    usagi_core::domain::workflow::WorkflowCommand::Instruct {
-                        recipient: panel
-                            .recipient
-                            .unwrap_or(usagi_core::domain::workflow::Recipient::Automatic),
-                        body,
-                    }
-                } else {
-                    usagi_core::domain::workflow::WorkflowCommand::Start {
-                        goal: body,
-                        agents: panel.agents,
-                        revision_limit: panel.revision_limit,
-                    }
-                };
-                panel.pending = Some((OperationId::new(), command));
-            }
-            panel.submitting = true;
-            panel.error = None;
-            return vec![Effect::Workflow(super::workflow::WorkflowJob {
-                workspace: state.workspace,
-                session,
-                control: panel.pending.clone(),
-            })];
-        }
-        _ => {}
-    }
-    Vec::new()
-}
-
 /// update backend event.
 fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
     match event {
         BackendEvent::SessionFavorites(favorites) => update_session_favorites(state, favorites),
-        BackendEvent::Workflow { job, result } => update_workflow_backend(state, job, result),
         BackendEvent::Decisions {
             workspace,
             decisions,
@@ -3586,9 +3417,6 @@ fn update_session_snapshot(state: &mut AppState, mut sessions: Vec<SessionId>) -
         state.note_revision = state.note_revision.saturating_add(1);
     }
     state
-        .workflows
-        .retain(|session, _| state.sessions.contains(session));
-    state
         .runtimes
         // A workspace-root runtime (no session) is always retained; a
         // session runtime is dropped when its session is gone.
@@ -3659,101 +3487,6 @@ fn update_session_lifecycles(
     }
     reconcile_cleanup_queue(state);
     reconcile_remove_queue(state);
-    Vec::new()
-}
-
-fn update_workflow_backend(
-    state: &mut AppState,
-    job: super::workflow::WorkflowJob,
-    result: Result<
-        Box<usagi_core::domain::workflow::WorkflowSnapshot>,
-        super::workflow::WorkflowError,
-    >,
-) -> Vec<Effect> {
-    if job.workspace != state.workspace || !state.sessions.contains(&job.session) {
-        return Vec::new();
-    }
-    let tick = state.mascot_tick;
-    let available = state.available_models;
-    let Some(panel) = state.workflows.get_mut(&job.session) else {
-        return Vec::new();
-    };
-    if let Some(control) = &job.control {
-        if panel.pending.as_ref() != Some(control) {
-            return Vec::new();
-        }
-        panel.submitting = false;
-    } else {
-        panel.loading = false;
-        panel.snapshot_due_tick = tick.saturating_add(WORKFLOW_SNAPSHOT_TICKS);
-    }
-    match result {
-        Ok(snapshot) if snapshot.session == job.session => {
-            panel.freshness = super::workflow::WorkflowFreshness::Observed;
-            if !panel.agents_edited && panel.pending.is_none() {
-                panel.agents = snapshot.agents;
-                panel.revision_limit = snapshot.revision_limit;
-            }
-            if let Some(start) = snapshot.pending_start {
-                // A background read can now land while the person's own
-                // submission is in flight, so the saved intent must not
-                // repaint the agents they just chose or bring back the
-                // error that submission already cleared. A control
-                // response has set `submitting` false above, so this
-                // only holds back the overlapping read.
-                if !panel.submitting {
-                    panel.agents = start.agents;
-                    panel.revision_limit = start.revision_limit;
-                }
-                if panel.pending.is_none() {
-                    if panel.draft.value().is_empty() {
-                        panel.draft.paste(&start.goal);
-                    }
-                    panel.pending = Some((
-                        start.operation_id,
-                        usagi_core::domain::workflow::WorkflowCommand::Start {
-                            goal: start.goal,
-                            agents: start.agents,
-                            revision_limit: start.revision_limit,
-                        },
-                    ));
-                }
-                if !panel.submitting {
-                    panel.error = start.error;
-                }
-            }
-            panel.run = snapshot.run;
-            panel.finished = snapshot.finished;
-            panel.anchor_history();
-            if panel.pending.is_none() {
-                panel.error = None;
-            }
-            if let Some((_, command)) = job.control {
-                // Finishing carries no draft, so nothing it submitted
-                // could have consumed one.
-                let body = match command {
-                    usagi_core::domain::workflow::WorkflowCommand::Start { goal, .. } => Some(goal),
-                    usagi_core::domain::workflow::WorkflowCommand::Instruct { body, .. } => {
-                        Some(body)
-                    }
-                    usagi_core::domain::workflow::WorkflowCommand::Finish => None,
-                };
-                panel.submitted(body.as_deref());
-                panel.pending = None;
-            }
-        }
-        Ok(_) => panel.error = Some("Workflow response belongs to another session".into()),
-        Err(error) => {
-            if job.control.is_some() && !error.unconfirmed {
-                panel.pending = None;
-            }
-            panel.error = Some(error.message);
-        }
-    }
-    // The daemon keeps the previous run's choices as the next start's
-    // defaults, and a machine that lost a CLI (or never configured a
-    // provider's credential) must not be offered them again.
-    panel.restrict_agents(available);
     Vec::new()
 }
 
@@ -5919,9 +5652,6 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         // `env` owns the workspace-scoped editor rather than a per-session effect,
         // so it opens the editor and returns before the shared dismiss/notice tail.
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
-        closeup::Command::Workflow { arguments } => {
-            return submit_closeup_workflow(state, active_session, &arguments);
-        }
     };
     if effect.is_some() {
         dismiss_closeup_action_modal(state);
@@ -5940,65 +5670,6 @@ fn submit_empty_closeup_shortcut(state: &mut AppState, input: &str) -> Vec<Effec
     state.overlay = Some(Overlay::Closeup);
     state.closeup_action_forced = false;
     submit_closeup(state, input)
-}
-
-/// `workflow` opens the tab; `workflow finish` also ends the run it shows.
-///
-/// Finishing always opens the tab first: the daemon owns the decision, so its
-/// refusal — nothing to finish, or already finished — has to land somewhere the
-/// person is looking.
-fn submit_closeup_workflow(
-    state: &mut AppState,
-    session: SessionId,
-    arguments: &str,
-) -> Vec<Effect> {
-    let finish = match arguments.trim() {
-        "" => false,
-        "finish" => true,
-        _ => {
-            state.notice = Some(Notice::new("workflow accepts only `finish`"));
-            return Vec::new();
-        }
-    };
-    let workspace = state.workspace;
-    let available = state.available_models;
-    let panel = state.workflows.entry(session).or_default();
-    panel.restrict_agents(available);
-    let mut control = None;
-    let mut dispatch = false;
-    if finish {
-        // A request already in flight owns the panel. Otherwise resend a finish
-        // whose answer was lost rather than minting a second one, exactly as a
-        // resent instruction does.
-        if !panel.submitting {
-            if !matches!(
-                panel.pending,
-                Some((_, usagi_core::domain::workflow::WorkflowCommand::Finish))
-            ) {
-                panel.pending = Some((
-                    OperationId::new(),
-                    usagi_core::domain::workflow::WorkflowCommand::Finish,
-                ));
-            }
-            panel.submitting = true;
-            panel.error = None;
-            control.clone_from(&panel.pending);
-            dispatch = true;
-        }
-    } else if !panel.loading && !panel.submitting {
-        panel.loading = true;
-        dispatch = true;
-    }
-    dismiss_closeup_action_modal(state);
-    let mut effects = vec![Effect::OpenWorkflow { session }];
-    if dispatch {
-        effects.push(Effect::Workflow(super::workflow::WorkflowJob {
-            workspace,
-            session,
-            control,
-        }));
-    }
-    effects
 }
 
 /// Normalize the two supported terminal forms at the controller boundary.

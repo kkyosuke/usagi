@@ -44,9 +44,6 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
-Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
-計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
-進捗の確認と追加指示も同じタブで行えます。
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
 logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
 よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
@@ -87,7 +84,7 @@ TUI が開いたら、次の順に進めます。
 
 1. `+ new session` から作業名と base branch を選ぶ。
 2. 作成した session で `agent` または `terminal` を実行する。
-3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。Workflow はレビュー中の更新にも追従し、PR 検証では未追跡ファイルと GitHub のマージ要件も確認する。
+3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。
 
 session 作成直後の環境構築は、開いた workspace の Overview から `config` を実行して
 `Session setup` を編集するか、`.usagi/config.toml` の
