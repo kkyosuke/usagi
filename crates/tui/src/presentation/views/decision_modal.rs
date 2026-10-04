@@ -137,11 +137,7 @@ fn editor_rows(
 
     let (start, end) = editor.scroll_offset().map_or_else(
         || layout::focus_window(rows.len(), focus, anchor, capacity),
-        |offset| {
-            let start = offset.min(rows.len().saturating_sub(capacity));
-            let end = start.saturating_add(capacity).min(rows.len());
-            (start, end)
-        },
+        |offset| layout::manual_window(rows.len(), offset, capacity),
     );
     let mut body = modal::scroll_window(&rows, start, end);
     body.extend(editor_footer(editor, multiple));
@@ -640,6 +636,106 @@ mod tests {
             assert!(frame(&state).contains("TAIL_FREEFORM"));
             let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
             assert!(frame(&state).contains("workspace root: Choose"));
+        }
+    }
+
+    #[test]
+    fn paging_keeps_all_editor_and_review_card_rows_reachable_in_short_terminals() {
+        for (multiple, freeform, long) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, false),
+            (false, true, true),
+        ] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            request.allow_comment = multiple;
+            request.allow_freeform = freeform;
+            request.require_confirmation = true;
+            if freeform {
+                request.options.clear();
+            } else if multiple {
+                request.selection_mode = UserDecisionSelectionMode::Multiple;
+                request.options[0].description = Some("Detail ".repeat(30) + "DETAIL_END");
+                let mut second = request.options[0].clone();
+                second.id = "second".into();
+                second.label = "Second".into();
+                request.options.push(second);
+            }
+            let mut state = AppState::home(workspace, Vec::new());
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![request],
+                }),
+            );
+            if multiple {
+                for key in [
+                    AppKey::Char(' '),
+                    AppKey::Down,
+                    AppKey::Char(' '),
+                    AppKey::Tab,
+                    AppKey::Paste("Comment ".repeat(30) + "COMMENT_END"),
+                ] {
+                    let _ = update(&mut state, AppEvent::Key(key));
+                }
+            } else if freeform {
+                let text = if long {
+                    "日本語の回答 ".repeat(30) + "ANSWER_END"
+                } else {
+                    "Short answer".into()
+                };
+                let _ = update(&mut state, AppEvent::Key(AppKey::Paste(text)));
+            }
+            for review in [false, true] {
+                if review {
+                    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                    assert!(
+                        state
+                            .decision_overlay()
+                            .unwrap()
+                            .editor()
+                            .unwrap()
+                            .confirmation()
+                            .is_some()
+                    );
+                }
+                let full =
+                    editor_rows(state.decision_overlay().unwrap().editor().unwrap(), 70, 256);
+                let expected = full
+                    .iter()
+                    .map(|row| widgets::strip_ansi(row))
+                    .filter(|row| row.contains('│'))
+                    .collect::<Vec<_>>();
+                assert!(!expected.is_empty());
+                for height in [11, 12, 16, 24] {
+                    for key in [AppKey::PageDown, AppKey::PageUp] {
+                        let mut seen = String::new();
+                        for page in 0..=full.len() {
+                            let frame = render_over(
+                                height,
+                                80,
+                                &[],
+                                state.decision_overlay().unwrap(),
+                                state.decisions(),
+                                &BTreeMap::new(),
+                            );
+                            seen.push_str(&widgets::strip_ansi(&frame.join("\n")));
+                            if page < full.len() {
+                                let _ = update(&mut state, AppEvent::Key(key.clone()));
+                            }
+                        }
+                        for row in &expected {
+                            assert!(
+                                seen.contains(row.trim()),
+                                "unreachable card row at height={height}, review={review}, key={key:?}: {row}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

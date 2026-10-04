@@ -178,11 +178,21 @@ pub(super) fn update_decision_editor(
             editor.error = None;
         }
         AppKey::PageUp => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
+            editor.scroll_offset = Some(
+                editor
+                    .scroll_offset
+                    .unwrap_or_default()
+                    .saturating_sub(DecisionEditor::SCROLL_STEP),
+            );
             editor.follow_freeform = false;
         }
         AppKey::PageDown => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
+            editor.scroll_offset = Some(
+                editor
+                    .scroll_offset
+                    .unwrap_or_default()
+                    .saturating_add(DecisionEditor::SCROLL_STEP),
+            );
             editor.follow_freeform = false;
         }
         AppKey::SetDecisionFreeform(text) => {

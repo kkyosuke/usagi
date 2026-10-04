@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use super::{Role, modal, widgets};
+use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::presentation_text::sanitize_presentation_line;
 
 pub(super) fn content_width(inner_width: usize) -> usize {
@@ -110,4 +111,12 @@ pub(super) fn focus_window(
     }
     .min(len.saturating_sub(visible));
     (start, start + visible)
+}
+
+/// A page must not skip content when the viewport holds fewer than eight rows.
+pub(super) fn manual_window(len: usize, offset: usize, capacity: usize) -> (usize, usize) {
+    let offset = (offset / DecisionEditor::SCROLL_STEP)
+        .saturating_mul(capacity.min(DecisionEditor::SCROLL_STEP));
+    let start = offset.min(len.saturating_sub(capacity));
+    (start, start.saturating_add(capacity).min(len))
 }

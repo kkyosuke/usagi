@@ -102,15 +102,17 @@ pub(super) fn confirmation_body(
                 .map(|line| Role::Danger.style().paint(&line)),
         );
     }
-    let offset = editor.scroll_offset().unwrap_or_else(|| {
-        if editor.error().is_some() {
-            rows.len()
-        } else {
-            0
-        }
-    });
-    let start = offset.min(rows.len().saturating_sub(capacity));
-    let end = (start + capacity).min(rows.len());
+    let (start, end) = editor.scroll_offset().map_or_else(
+        || {
+            let start = if editor.error().is_some() {
+                rows.len().saturating_sub(capacity)
+            } else {
+                0
+            };
+            (start, start.saturating_add(capacity).min(rows.len()))
+        },
+        |offset| layout::manual_window(rows.len(), offset, capacity),
+    );
     let mut body = modal::scroll_window(&rows, start, end);
     body.push(modal::footer("Enter: send  Esc: edit  PgUp/PgDn: scroll"));
     body
