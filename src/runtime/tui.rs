@@ -9672,6 +9672,6 @@ mod tests {
             &std::collections::BTreeMap::new(),
             None,
         );
-        assert!(frame.join("\n").contains('✎'));
+        assert!(frame.join("\n").contains('\u{f249}'));
     }
 }
