@@ -16,7 +16,7 @@ SELECTOR_ACTIVE=0
 SELECT_VERSION=0
 
 cleanup() {
-    local status=$? retired node alone=1
+    local status=$? retired node alone=1 legacy_owner
     trap - EXIT
     trap '' HUP INT TERM
     set +e
@@ -30,14 +30,22 @@ cleanup() {
     if [ -n "$LOCK_NODE" ] && [ -d "$LOCK_NODE" ]; then
         # Publish compatibility metadata while the held node still fences late
         # participants. A waiter must never overwrite another holder's PID.
-        if [ "$LOCK_HELD" -eq 1 ] && [ -f "$LOCK_NODE/legacy.pid" ]; then
+        if [ "$LOCK_HELD" -eq 1 ]; then
             for node in "$LOCK_DIR"/owner.*; do
                 [ -d "$node" ] && [ "$node" != "$LOCK_NODE" ] || continue
                 [ ! -L "$node" ] || { alone=0; break; }
                 if lock_owner_alive "$node"; then alone=0; break; fi
             done
             if [ "$alone" -eq 1 ]; then
-                mv -f -- "$LOCK_NODE/legacy.pid" "$LOCK_DIR/pid"
+                # The commit path may already have moved the prepared copy.
+                [ -f "$LOCK_NODE/legacy.pid" ] ||
+                    cp -- "$LOCK_NODE/pid" "$LOCK_NODE/legacy.pid"
+                publish_legacy_pid
+            elif legacy_owner="$(read_lock_pid "$LOCK_DIR")" &&
+                [ "$legacy_owner" = "$$" ]; then
+                # Retire our compatibility PID before handing off the node,
+                # so legacy recovery cannot delete a queued new participant.
+                rm -f -- "$LOCK_DIR/pid"
             fi
         fi
         # Retire atomically before removing metadata so another participant
@@ -287,6 +295,10 @@ wait_for_update_lock() {
     sleep 0.1
 }
 
+publish_legacy_pid() {
+    mv -f -- "$LOCK_NODE/legacy.pid" "$LOCK_DIR/pid"
+}
+
 wait_for_legacy_lock() {
     local legacy_owner
     [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
@@ -517,7 +529,7 @@ OLD_VERSION="$(read_version "$TARGET")"
 # rename either replaces TARGET atomically or leaves its bytes and mode intact.
 # Publish the held PID before commit so even SIGKILL after a downgrade leaves
 # metadata that the older embedded installer can recover on its next update.
-mv -f -- "$LOCK_NODE/legacy.pid" "$LOCK_DIR/pid"
+publish_legacy_pid
 mv -f -- "$CANDIDATE" "$TARGET"
 
 # A managed self-update holds update.lock until the exact installed artifact

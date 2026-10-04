@@ -980,8 +980,9 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
   atomic binary rename の前に保持中の PID を legacy `pid` metadata として公開するため、旧版への切り替え後に
   SIGKILL で終了しても次の旧方式 installer は終了済み PID を確認して root を回収できる。
-  rename 前の正常 cleanup は、lock を保持し、他の live / unknown owner がいない場合だけ legacy PID を残す。
-  この公開は自分の owner node を retire する前に行い、待機者の cleanup は他の holder の PID を上書きしない。
+  置換前後の cleanup は、lock を保持し、他の live / unknown owner がいない場合だけ legacy PID を残す。
+  他の owner がいる場合は、自身の PID と一致する legacy metadata を node の退役前に除去するため、通常の
+  handoff 中に旧方式が待機者を stale owner ごと削除しない。公開も退役前に行い、待機者は holder の PID を上書きしない。
   新方式は admission 前に legacy PID を再確認するため、late publication にも終了待ちを適用する。metadata の削除は
   bakery で admission された process だけが行い、先行する観測者が後続 holder の新しい PID を消さない。
   公開前の crash と空の共有 root は admission を妨げない。lock root / owner node の symlink は拒否し、待機は約 60 秒を上限とする。
@@ -992,7 +993,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   同じ node の公開済み ticket を再読して最大値へ取り込み、atomic に retire 済みなら飛ばす。
   PID probe の C locale で `No such process` を確認した場合だけ死亡とみなす。旧方式の公開済み live PID は process が cleanup を終えて
   終了するまで待ち、残った legacy PID metadata は bakery admission 後の critical section へ入る直前に除去する。直列化と stale 回収の保証は新方式同士に適用する。
-  旧方式の PID 公開前の空 root と、既に stale PID を読んだ旧 process による共有 root の削除は新方式から制御できないため、
+  旧方式の PID 公開前の空 root、SIGKILL で cleanup されなかった holder と新方式の待機者の共存、
+  既に stale PID を読んだ旧 process による共有 root の削除は新方式から制御できないため、
   異なる方式の installer を並行実行しない。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
   出るツール呼び出しを拒否）と、Antigravity / Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`

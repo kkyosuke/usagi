@@ -21,7 +21,7 @@ source = Path(sys.argv[1]).read_text()
 functions = "\n".join(definition(source, name) for name in (
     "cleanup", "fail", "process_is_live", "read_lock_metadata", "read_lock_pid",
     "lock_owner_alive", "read_lock_ticket",
-    "wait_for_update_lock", "wait_for_legacy_lock", "acquire_lock",
+    "wait_for_update_lock", "publish_legacy_pid", "wait_for_legacy_lock", "acquire_lock",
 ))
 functions += "\n" + definition(source, "read_lock_ticket").replace(
     "read_lock_ticket()", "observed_read_lock_ticket()", 1
@@ -91,6 +91,12 @@ rm() {
     local destination="" value
     for value in "$@"; do destination=$value; done
     case "${destination##*/}" in
+        pid)
+            if [ "${ADMISSION_BARRIER:-0}" -eq 1 ]; then
+                touch "$COORD/admission-ready-$ROLE"
+                while [ ! -e "$COORD/admission-$ROLE" ]; do command sleep 0.01; done
+            fi
+            ;;
         .retired.*)
             if [ "${RETIRE_BARRIER:-0}" -eq 1 ]; then
                 printf '%s\n' "$destination" > "$COORD/retired-node-$ROLE"
@@ -138,6 +144,14 @@ acquire_lock
 [ "$LOCK_HELD" -eq 1 ]
 mkdir "$COORD/critical" || fail "two live update lock holders"
 touch "$COORD/acquired-$ROLE"
+if [ "${PUBLISH_LEGACY_PID:-0}" -eq 1 ]; then
+    if [ "${LEGACY_PUBLISH_BARRIER:-0}" -eq 1 ]; then
+        touch "$COORD/legacy-publish-ready-$ROLE"
+        while [ ! -e "$COORD/legacy-publish-$ROLE" ]; do command sleep 0.01; done
+    fi
+    publish_legacy_pid
+    touch "$COORD/legacy-published-$ROLE"
+fi
 while [ ! -e "$COORD/release-$ROLE" ]; do command sleep 0.01; done
 rmdir "$COORD/critical"
 """
@@ -592,6 +606,54 @@ def late_publication_clears_a_breadcrumb_before_admission(root):
         case.close()
 
 
+def committed_holder_preserves_queued_or_cancelled_owners(root):
+    for cancel_waiter in (False, True):
+        case = Case(root, "committed-" + ("cancelled" if cancel_waiter else "queued"))
+        try:
+            first = case.launch("a", PUBLISH_LEGACY_PID=1, LEGACY_PUBLISH_BARRIER=1)
+            case.await_marker("legacy-publish-ready-a")
+            second = case.launch("b", PUBLISH_LEGACY_PID=1, ADMISSION_BARRIER=1)
+            case.await_marker("waiting-b")
+            case.signal("legacy-publish-a")
+            case.await_marker("legacy-published-a")
+            if cancel_waiter:
+                second.terminate()
+                case.finish(second, 128 + signal.SIGTERM)
+                assert (case.home / "update.lock/pid").read_text().strip() == str(first.pid)
+                holder, role = first, "a"
+            else:
+                case.signal("release-a")
+                case.finish(first)
+                # Pause immediately before B's final metadata removal, while
+                # its published owner is still queued and A has fully exited.
+                case.await_marker("admission-ready-b")
+                holder, role = second, "b"
+            legacy = case.launch_legacy_acquirer()
+            deadline = time.monotonic() + 15
+            while legacy.poll() is None and not (case.coord / "acquired-legacy").exists():
+                assert time.monotonic() < deadline, "legacy neither acquired nor timed out"
+                time.sleep(0.005)
+            if (case.coord / "acquired-legacy").exists():
+                case.signal("release-legacy")
+                case.finish(legacy)
+                raise AssertionError("legacy recovery deleted a live queued owner")
+            assert "another usagi update" in case.finish(legacy, 1)
+            assert case.node(role).is_dir() and holder.poll() is None
+            if not cancel_waiter:
+                case.signal("admission-b")
+                case.await_marker("legacy-published-b")
+            case.signal(f"release-{role}")
+            case.finish(holder)
+            assert (case.home / "update.lock/pid").read_text().strip() == str(holder.pid)
+            legacy = case.launch_legacy_acquirer()
+            case.await_marker("acquired-legacy")
+            case.signal("release-legacy")
+            case.finish(legacy)
+            assert not (case.home / "update.lock").exists()
+        finally:
+            case.close()
+
+
 def invalid_ticket_and_timeout(root):
     for label, ticket, expected in (
         ("overflow", "2147483646", "ticket limit"),
@@ -708,6 +770,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
                  new_legacy_new_updates_remain_usable,
                  queued_or_cancelled_owners_do_not_enable_legacy_entry,
                  late_publication_clears_a_breadcrumb_before_admission,
+                 committed_holder_preserves_queued_or_cancelled_owners,
                  legacy_fixture_failure_cleanup_reaps_the_unreleased_child,
                  invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,
