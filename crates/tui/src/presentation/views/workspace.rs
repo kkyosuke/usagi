@@ -3433,31 +3433,82 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     else {
         return rows;
     };
-    // Place a readable card below the tab chrome, over the dim terminal. Its
-    // display never changes PTY geometry or takes input away from the sidebar.
-    let start = widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
-    let budget = height.saturating_sub(start + widgets::live_terminal::FOOTER_ROWS);
-    if width < 4 || budget < 2 {
+    let memo = session.memo.as_deref().filter(|memo| !memo.is_empty());
+    let live_terminal = home.content_loading.is_none()
+        && !home.pane_tabs.is_empty()
+        && !home.workflow_selected
+        && home.terminal_view.is_some();
+    let content_top = if home.content_loading.is_some() || home.pane_tabs.is_empty() {
+        1
+    } else {
+        2
+    };
+    let start = if memo.is_some() {
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP
+    } else {
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP - 1
+    };
+    let gap = start.saturating_sub(content_top);
+    let budget = if live_terminal {
+        height.saturating_sub(
+            widgets::live_terminal::RIGHT_PANE_CONTENT_TOP + widgets::live_terminal::FOOTER_ROWS,
+        )
+    } else {
+        // Keep room for the tab chrome, agent/detail and feedback rows, and
+        // footer. Empty, loading and Workflow views also retain their status.
+        height.saturating_sub(7 + gap)
+    };
+    let preview = home_memo_preview(memo, width, home.icon_mode, budget);
+    if preview.is_empty() {
         return rows;
     }
-    let Some(memo) = session.memo.as_deref().filter(|memo| !memo.is_empty()) else {
-        // An empty memo only needs a hint in the blank chrome row. Leave the
-        // terminal's output intact, including behind foreground drawers.
-        rows[start - 1] = Style::new()
-            .fg(Color::White)
-            .dim()
-            .paint(&widgets::clip_to_width(
-                &format!(" {} n: add memo", icon_set(home.icon_mode).note),
-                width,
-            ));
-        return rows;
+    if live_terminal {
+        // Overlay only the terminal body; its viewport and PTY geometry stay
+        // unchanged. The empty-memo hint uses the blank chrome row instead.
+        for (row, line) in rows.iter_mut().skip(start).zip(preview) {
+            *row = line;
+        }
+    } else {
+        // Other layouts carry status rather than disposable terminal output.
+        // Compose them below the memo, letting their own renderer fit the body.
+        rows = dim_inactive_right_pane(
+            !home.right_pane_focused(),
+            home_right_pane_content(height - gap - preview.len(), width, home),
+        );
+        drop(rows.splice(
+            content_top..content_top,
+            std::iter::repeat_n(String::new(), gap).chain(preview),
+        ));
+    }
+    rows
+}
+
+fn home_memo_preview(
+    memo: Option<&str>,
+    width: usize,
+    icon_mode: IconMode,
+    budget: usize,
+) -> Vec<String> {
+    if width < 4 || budget < if memo.is_some() { 3 } else { 1 } {
+        return Vec::new();
+    }
+    let Some(memo) = memo else {
+        return vec![
+            Style::new()
+                .fg(Color::White)
+                .dim()
+                .paint(&widgets::clip_to_width(
+                    &format!(" {} n: add memo", icon_set(icon_mode).note),
+                    width,
+                )),
+        ];
     };
     let inner_width = width - 4;
     let body_limit = budget.saturating_sub(2).min(3);
     let title = Role::Accent
         .style()
         .bold()
-        .paint(&format!("{} Memo · n: edit", icon_set(home.icon_mode).note));
+        .paint(&format!("{} Memo · n: edit", icon_set(icon_mode).note));
     let mut body = Vec::new();
     let lines = memo.lines().take(body_limit + 1).collect::<Vec<_>>();
     for (index, line) in lines.iter().take(body_limit).enumerate() {
@@ -3472,11 +3523,10 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             inner_width,
         )));
     }
-    let preview = widgets::modal::compact_boxed(&title, inner_width, &body);
-    for (row, line) in rows.iter_mut().skip(start).zip(preview) {
-        *row = format!("\u{1b}[0m{line}\u{1b}[0m");
-    }
-    rows
+    widgets::modal::compact_boxed(&title, inner_width, &body)
+        .into_iter()
+        .map(|line| format!("\u{1b}[0m{line}\u{1b}[0m"))
+        .collect()
 }
 
 fn home_right_pane_content(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
@@ -8994,6 +9044,114 @@ mod tests {
             .1;
         assert!(memo_row.contains("\u{1b}[37m次の作業"));
         assert!(!memo_row.contains("\u{1b}[2m"));
+    }
+
+    #[test]
+    fn switch_memo_preserves_agent_phase_resume_detail_and_errors_without_terminal() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業\nテストを確認する")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_tabs.push(super::HomePaneTab {
+                label: "agent".into(),
+                selected: true,
+                pending: true,
+            });
+            home.preview_phase = TargetPhase::Waiting;
+            home.pane_error = Some("agent launch failed".into());
+            for detail in [None, Some("interrupted — Ctrl-O r resumes it")] {
+                home.pane_detail = detail.map(str::to_owned);
+                for height in [7, 8, 10, 11, 12, 20] {
+                    let rows = home_right_pane(height, 80, &home);
+                    let text = strip(&rows.join("\n"));
+                    assert_eq!(rows.len(), height);
+                    assert!(text.contains(&format!("agent: {}", detail.unwrap_or("waiting"))));
+                    assert!(text.contains("feedback: agent launch failed"));
+                    assert!(text.ends_with("[Switch] preview pane"));
+                    if height == 20 {
+                        assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                            "次の作業"
+                        } else {
+                            "n: add memo"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switch_memo_preserves_workflow_status_with_or_without_a_memo() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_tabs.push(super::HomePaneTab {
+                label: "workflow".into(),
+                selected: true,
+                pending: false,
+            });
+            home.workflow_selected = true;
+            for height in [7, 8, 10, 11, 12, 20] {
+                let rows = home_right_pane(height, 80, &home);
+                let text = strip(&rows.join("\n"));
+                assert_eq!(rows.len(), height);
+                assert!(text.contains("Not started"));
+                assert!(text.contains("Ctrl+S: start"));
+                assert!(text.ends_with("[Switch] preview pane"));
+                if height == 20 {
+                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                        "次の作業"
+                    } else {
+                        "n: add memo"
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switch_memo_preserves_empty_pane_captions_and_loading_label() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_error = Some("session unavailable".into());
+            for loading in [None, Some(super::ContentLoading::Pending)] {
+                home.content_loading = loading;
+                for height in [7, 8, 10, 11, 12, 20] {
+                    let rows = home_right_pane(height, 80, &home);
+                    let text = strip(&rows.join("\n"));
+                    assert_eq!(rows.len(), height);
+                    assert!(text.ends_with("[Switch] preview pane"));
+                    if home.content_loading.is_none() {
+                        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
+                        assert!(text.contains("feedback: session unavailable"));
+                    }
+                }
+            }
+            home = home.with_content_loading("Opening session", 3);
+            for height in [7, 8, 10, 11, 12, 20] {
+                let rows = home_right_pane(height, 80, &home);
+                let text = strip(&rows.join("\n"));
+                assert_eq!(rows.len(), height);
+                assert!(text.contains("Opening session"));
+                assert!(text.ends_with("[Switch] preview pane"));
+                if height == 20 {
+                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                        "次の作業"
+                    } else {
+                        "n: add memo"
+                    }));
+                }
+            }
+        }
     }
 
     #[test]
