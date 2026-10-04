@@ -1,18 +1,33 @@
 //! Comment entry and answer review rendering.
-use super::{modal, wrapped_content_lines};
+use super::{Role, layout, modal, wrapped_content_lines};
 use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
 pub(super) fn comment_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
-    wrapped_content_lines(
-        &format!(
-            "{}comment (optional): {}",
-            if editor.input_comment() { "> " } else { "" },
-            editor.comment()
-        ),
-        "",
+    input_rows(
+        "comment (optional)",
+        editor.comment(),
+        editor.input_comment(),
         width,
     )
+}
+
+pub(super) fn freeform_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
+    input_rows(
+        "freeform",
+        editor.freeform(),
+        editor.input_freeform(),
+        width,
+    )
+}
+
+fn input_rows(label: &str, value: &str, focused: bool, width: usize) -> Vec<String> {
+    let rows = layout::wrapped_rows(
+        &format!("{}{label}: {value}", if focused { "> " } else { "" }),
+        "",
+        layout::content_width(width),
+    );
+    layout::card(width, &rows, focused)
 }
 
 pub(super) fn editor_footer(editor: &DecisionEditor, multiple: bool) -> Vec<String> {
@@ -58,8 +73,12 @@ pub(super) fn confirmation_body(
     width: usize,
     capacity: usize,
 ) -> Vec<String> {
-    let mut rows = wrapped_content_lines("Review answer", "", width);
+    let mut rows = wrapped_content_lines("Review answer", "", width)
+        .into_iter()
+        .map(|line| Role::Accent.style().bold().paint(&line))
+        .collect::<Vec<_>>();
     rows.extend(wrapped_content_lines(&editor.decision().title, "", width));
+    rows.push(String::new());
     match answer {
         UserDecisionAnswer::Option { option_id, .. } => {
             add_choice(&mut rows, editor, option_id, width);
@@ -70,24 +89,30 @@ pub(super) fn confirmation_body(
             }
         }
         UserDecisionAnswer::Freeform { text } => {
-            rows.extend(wrapped_content_lines(text, "Answer: ", width));
+            add_card(&mut rows, text, "Answer: ", width);
         }
     }
     if let Some(comment) = answer.comment() {
-        rows.extend(wrapped_content_lines(comment, "Comment: ", width));
+        add_card(&mut rows, comment, "Comment: ", width);
     }
     if let Some(error) = editor.error() {
-        rows.extend(wrapped_content_lines(error.message.as_str(), "", width));
+        rows.extend(
+            wrapped_content_lines(error.message.as_str(), "", width)
+                .into_iter()
+                .map(|line| Role::Danger.style().paint(&line)),
+        );
     }
-    let offset = editor.scroll_offset().unwrap_or_else(|| {
-        if editor.error().is_some() {
-            rows.len()
-        } else {
-            0
-        }
-    });
-    let start = offset.min(rows.len().saturating_sub(capacity));
-    let end = (start + capacity).min(rows.len());
+    let (start, end) = editor.scroll_offset().map_or_else(
+        || {
+            let start = if editor.error().is_some() {
+                rows.len().saturating_sub(capacity)
+            } else {
+                0
+            };
+            (start, start.saturating_add(capacity).min(rows.len()))
+        },
+        |offset| layout::manual_window(rows.len(), offset, capacity),
+    );
     let mut body = modal::scroll_window(&rows, start, end);
     body.push(modal::footer("Enter: send  Esc: edit  PgUp/PgDn: scroll"));
     body
@@ -100,9 +125,13 @@ fn add_choice(rows: &mut Vec<String>, editor: &DecisionEditor, id: &str, width: 
         .iter()
         .find(|option| option.id == id)
         .map_or(id, |option| option.label.as_str());
-    rows.extend(wrapped_content_lines(
-        &format!("{label} [{id}]"),
-        "Choice: ",
+    add_card(rows, &format!("{label} [{id}]"), "Choice: ", width);
+}
+
+fn add_card(rows: &mut Vec<String>, text: &str, prefix: &str, width: usize) {
+    rows.extend(layout::card(
         width,
+        &layout::wrapped_rows(text, prefix, layout::content_width(width)),
+        false,
     ));
 }

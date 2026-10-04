@@ -481,10 +481,17 @@ submit は stable option ID または空でない許可済み freeform を送る
 
 modal は端末の幅・高さの 4/5 に広がる（内幅 70〜120 桁、本文 18〜40 行。本文は上下 1 行ずつ背景を残す高さまで縮む）。
 decision の title、prompt、option label/description、freeform は modal 幅で折り返す。表示域を超える editor の
-内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の行へ表示を戻す。
+内容は `PageUp` / `PageDown` で読み進め、`↑` / `↓` による option 選択へ戻ると選択中の枠へ表示を戻す。
+選択肢はラベル・説明・メリット・注意点を一つの枠にまとめる。ラベルは太字、フォーカス中の枠は accent 色で強調し、
+複数選択のチェックは success 色で表示する。説明は本文と同じ明るさで描く。未回答一覧の各質問、補足コメント、自由入力、
+送信前確認の各回答も個別の枠で区切る。枠が表示域に収まる場合は全体を表示し、長い選択肢は枠の先頭から読み進める。
+本文が1行しか表示できない端末では、選択肢のラベル・質問タイトル・編集中の入力末尾を枠線より優先して表示する。
+編集・送信前確認の PgUp/PgDn は表示域の行数以内で移動し、低い端末でも途中の本文を飛び越えない。
 freeform を入力・削除・paste した場合は入力欄へ表示を移し、長い prompt や option の後でも編集中の文字を表示する。
 単一選択でも送信するのは現在選択中の欄の回答である。自由入力から矢印で選択肢へ戻った場合は選択 ID を送信し、
 自由入力の下書きは次に入力を再開するまで保持する。
+選択肢がない自由入力専用の質問は、最初から自由入力欄にフォーカスする。矢印・Tab は入力欄を離れず、
+選択肢への補足コメント欄や選択・切替の操作ヒントは表示しない。Enter で送信または送信前確認へ進む。
 
 比較表・テキスト図がある質問は、最初に説明の先頭を表示する。表はセルを折り返して列を揃え、狭い画面では
 列見出し付きの項目表示に切り替えて内容を残す。図は空白と改行を保持し、`←` / `→` で横方向へ読み進める。
@@ -1539,7 +1546,8 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 
 | shape | 対象 modal | shape helper | 共通化する部分 |
 |---|---|---|---|
-| list | Prs / Closeup / Decisions（一覧・option） / remove / Preview file finder | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
+| list | Prs / Closeup / remove / Preview file finder | `list_window` + `scroll_window` + `selection_marker` | 選択追従の viewport・カーソルマーカー・`↑/↓ N more`・行 clip |
+| decision | Decisions（一覧・option・入力・送信前確認） | 枠単位の viewport + `compact_boxed` + `scroll_window` + `selection_marker` | 項目の境界・枠単位の選択追従・折り返し・scroll indicator |
 | text-viewer | Preview document（`text_overlay`。PR error の Unavailable も） | `viewport_window` + `scroll_window` | offset 起点の読み取り専用 scroll・scroll indicator |
 | editor | Notes / Environment / Decisions（editor） | `content_line` + `caption` / `heading` + `footer` | draft 行・section 切替・error 行・footer |
 | palette | Overview / Closeup | `prompt_line` / `filter_line` + `subcommand_row` + list helper | command 入力の `❯`、マーカーなしの filter 入力、前方一致候補、inline subcommand picker、result / footer |
@@ -1551,8 +1559,7 @@ body-composition kit の 1 段上に、modal を「形（shape）」ごとの薄
 - **palette の command 入力行は `prompt_line(value, cursor)`**（danger `❯` + accent block caret）、選択肢を絞る filter 入力行は `filter_line(value, cursor)`（選択マーカーなし + accent block caret）に集約し、Overview と
   Closeup（prompt）が同じ prompt を描く。inline subcommand picker は `subcommand_row(label, selected)` に寄せる。
   subcommand の quiet な `›` は list の danger カーソルとは別に保つ。
-- **決定 modal の選択行は共通カーソルへ移行**した。旧 plain `>` を `selection_marker` の danger `›` に揃え、他の
-  list modal と同じ `content_line(format!("{marker} {label}"), inner)` で描く。
+- **決定 modal の選択カーソル**は `selection_marker` の danger `›` を使い、枠とラベルの強調とは別に現在の選択肢を示す。
 
 ### File Preview
 

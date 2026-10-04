@@ -148,7 +148,7 @@ pub(super) fn update_decision_editor(
                 .saturating_add(8)
                 .min(usagi_core::domain::user_decision::UserDecisionPolicy::DIAGRAM_MAX_BYTES);
         }
-        AppKey::Tab if editor.decision.allow_comment => {
+        AppKey::Tab if editor.decision.allow_comment && !editor.decision.options.is_empty() => {
             composition::cycle_input(editor);
         }
         AppKey::Tab if multiple && editor.decision.allow_freeform => {
@@ -160,7 +160,7 @@ pub(super) fn update_decision_editor(
         AppKey::Char(' ') if multiple && !editor.input_freeform && !editor.input_comment => {
             toggle_decision_option(editor);
         }
-        AppKey::DecisionPrevious | AppKey::Up => {
+        AppKey::DecisionPrevious | AppKey::Up if !editor.decision.options.is_empty() => {
             editor.selected_option = editor.selected_option.saturating_sub(1);
             editor.scroll_offset = None;
             editor.follow_freeform = false;
@@ -168,7 +168,7 @@ pub(super) fn update_decision_editor(
             editor.input_comment = false;
             editor.error = None;
         }
-        AppKey::DecisionNext | AppKey::Down => {
+        AppKey::DecisionNext | AppKey::Down if !editor.decision.options.is_empty() => {
             editor.selected_option =
                 (editor.selected_option + 1).min(editor.decision.options.len().saturating_sub(1));
             editor.scroll_offset = None;
@@ -178,11 +178,21 @@ pub(super) fn update_decision_editor(
             editor.error = None;
         }
         AppKey::PageUp => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
+            editor.scroll_offset = Some(
+                editor
+                    .scroll_offset
+                    .unwrap_or_default()
+                    .saturating_sub(DecisionEditor::SCROLL_STEP),
+            );
             editor.follow_freeform = false;
         }
         AppKey::PageDown => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
+            editor.scroll_offset = Some(
+                editor
+                    .scroll_offset
+                    .unwrap_or_default()
+                    .saturating_add(DecisionEditor::SCROLL_STEP),
+            );
             editor.follow_freeform = false;
         }
         AppKey::SetDecisionFreeform(text) => {

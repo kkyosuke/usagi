@@ -486,7 +486,8 @@ pub struct DecisionEditor {
     input_comment: bool,
     comment: String,
     confirmation: Option<UserDecisionAnswer>,
-    /// Explicit text viewport offset. `None` follows the active automatic anchor.
+    /// Manual scroll position in `SCROLL_STEP` increments. The view limits each
+    /// step to its capacity. `None` follows the active automatic anchor.
     scroll_offset: Option<usize>,
     /// Whether automatic scrolling follows the freeform draft instead.
     follow_freeform: bool,
@@ -495,20 +496,23 @@ pub struct DecisionEditor {
 }
 
 impl DecisionEditor {
+    pub(crate) const SCROLL_STEP: usize = 8;
+
     fn new(decision: UserDecision) -> Self {
         let scroll_offset =
             (!decision.context.is_empty() || decision.recommendation.is_some()).then_some(0);
+        let input_freeform = decision.options.is_empty() && decision.allow_freeform;
         Self {
             decision,
             selected_option: 0,
             checked_options: BTreeSet::new(),
             context_column: 0,
-            input_freeform: false,
+            input_freeform,
             input_comment: false,
             comment: String::new(),
             confirmation: None,
             scroll_offset,
-            follow_freeform: false,
+            follow_freeform: input_freeform,
             freeform: String::new(),
             error: None,
         }
