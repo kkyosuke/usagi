@@ -767,6 +767,71 @@ mod tests {
     }
 
     #[test]
+    fn pending_list_identifies_answer_kinds_and_opens_the_freeform_request() {
+        use crate::usecase::application::controller::Effect;
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+
+        let workspace = WorkspaceId::new();
+        let mut requests = vec![
+            decision(workspace, None),
+            decision(workspace, None),
+            decision(workspace, None),
+        ];
+        for request in &mut requests {
+            request.expires_at = None;
+        }
+        requests[0].title = "Pick one".into();
+        requests[1].title = "Pick several".into();
+        requests[1].selection_mode = UserDecisionSelectionMode::Multiple;
+        requests[2].title = "Write an answer".into();
+        requests[2].options.clear();
+        let freeform_id = requests[2].decision_id;
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: requests,
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let frame = widgets::strip_ansi(
+            &render_over(
+                24,
+                80,
+                &[],
+                state.decision_overlay().unwrap(),
+                state.decisions(),
+                &BTreeMap::new(),
+            )
+            .join("\n"),
+        );
+        for (kind, title) in [
+            ("Single choice", "Pick one"),
+            ("Multiple choice", "Pick several"),
+            ("Freeform only", "Write an answer"),
+        ] {
+            let start = frame.find(kind).unwrap();
+            assert!(frame[start..].lines().nth(1).unwrap().contains(title));
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let editor = state.decision_overlay().unwrap().editor().unwrap();
+        assert_eq!(editor.decision().decision_id, freeform_id);
+        assert!(editor.input_freeform());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("My answer".into())));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::ResolveDecision {
+                decision_id,
+                answer: UserDecisionAnswer::Freeform { text },
+                ..
+            }] if *decision_id == freeform_id && text == "My answer"
+        ));
+    }
+
+    #[test]
     fn empty_answers_explain_the_required_input_or_selection_count() {
         for freeform in [false, true] {
             let workspace = WorkspaceId::new();
