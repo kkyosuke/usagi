@@ -20,7 +20,7 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal,
     OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
 };
-use usagi_core::infrastructure::git::{GitRunner, delete_branch};
+use usagi_core::infrastructure::git::{GitRunner, delete_branch, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::ipc::SessionAction;
@@ -765,11 +765,30 @@ impl<G: GitRunner, I: SessionWorktreeIo> WorktreeTeardown<G, I> {
 impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, I> {
     fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
         validate_teardown_target(&self.io, teardown)?;
-        self.io
-            .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
-            .map_err(|error| error.to_string())?;
+        remove_teardown_tree(&self.git, &self.io, teardown)?;
         delete_teardown_branch(&self.git, teardown)
     }
+}
+
+/// A missing checkout or `.git` file does not prove that Git released its
+/// registration. After physical teardown, remove that exact target through the
+/// stable owning repository before any branch deletion. This also makes retry
+/// safe after an interrupted `git worktree remove` lost the checkout first.
+fn remove_teardown_tree(
+    git: &dyn GitRunner,
+    io: &dyn SessionWorktreeIo,
+    teardown: &PendingTeardown,
+) -> Result<(), String> {
+    io.remove_session_tree(git, &teardown.session_root, teardown.force)
+        .map_err(|error| error.to_string())?;
+    validate_teardown_target(io, teardown)?;
+    remove_worktree(
+        git,
+        &teardown.repository_root,
+        &teardown.session_root,
+        teardown.force,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Deletes a teardown branch outside the generic effect implementation so every
@@ -1751,21 +1770,8 @@ impl SessionRuntime {
         match self.begin_remove(RemoveKind::Requested, operation_id, payload, None)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
-                let outcome = match self.io.remove_session_tree(
-                    self.git.as_ref(),
-                    &pending.session_root,
-                    pending.force,
-                ) {
-                    Ok(()) => {
-                        // Every newly accepted removal carries branch deletion.
-                        // Legacy branch-preserving plans can only be replayed as
-                        // `Settled`, so they never reach this effect path.
-                        delete_teardown_branch(self.git.as_ref(), &pending)
-                            .map_err(anyhow::Error::msg)
-                    }
-                    Err(error) => Err(error),
-                }
-                .map_err(|error| error.to_string());
+                let outcome = remove_teardown_tree(self.git.as_ref(), self.io.as_ref(), &pending)
+                    .and_then(|()| delete_teardown_branch(self.git.as_ref(), &pending));
                 self.finish_teardown(&pending, outcome)
             }
         }
