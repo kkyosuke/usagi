@@ -472,6 +472,10 @@ Agent PTY へ自動配送する経路は持たないため、MCP client disconne
 この節が同一 session の peer handoff / message の正本である。caller credential から現在の session と Agent を復元し、
 payload に送信者や session を指定することはできない。session の creator authority は変更せず、root scope では受理しない。
 
+配信する [orchestration ガイド](../crates/cli/src/mcp/guides/orchestration.md#同じ-session-の-agent-にレビューを依頼する場合) は、
+レビュー用 peer の起動を利用者がその分担を明示した場合の手順として扱う。これは Agent への利用指針であり、
+daemon の認可条件を追加するものではない。
+
 | tool | 用途 |
 |---|---|
 | `agent_peers` | 現在の session の Agent ID、runtime、model、status と自分の ID を返す |
