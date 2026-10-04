@@ -58,6 +58,8 @@ lifecycle は [5. daemon](05-daemon.md) を参照する。全画面を横断し�
 Welcome はマスコットとロゴの下に `Open last projects`、`+ Open / add projects`、`Clone repository` を
 1 列で置き、画面下部に Config / Quit を表示する。Recent のカードと番号ショートカットは置かない。
 前回の作業があれば再開を初期選択にし、なければ Open を選ぶ。Config / Quit も上下移動で選択できる。
+各項目の `[ ]` は常に表示し、選択中だけ accent 色の太字、その他は dim にする。選択が変わっても
+ラベル・ショートカット・枠の位置を保つ。ボタンの表示規則は終了確認と共通である。
 
 Open / add projects は `Tab` で Projects / Recent / Directory を切り替える。Projects は最終利用時刻の降順、
 同時刻は名前の大文字・小文字を区別しない順に登録済み workspace を表示する。常時表示する Filter 欄は入力に合わせて
@@ -1095,8 +1097,13 @@ Switch の利用可能な session 行で `n` を押すと、選択中の session
 `Esc` は未変更なら閉じ、未保存変更があれば Save / Discard / Keep editing を選ぶ。
 `+ new session`、作成失敗、削除中の行は編集対象にならない。
 
-Switch は選択中の session のメモを右ペイン下部に最大 3 行表示する。長い行や 4 行目以降は省略する。
-空のメモは `n: add memo` を表示する。プレビューは入力を持たない表示レイヤーで、メモの有無によって PTY の
+Switch は選択中の session のメモを右ペイン上部のタブ直下に、枠付きのプレビューとして最大 3 行重ねて表示する。
+本文は通常の明るさで表示し、背後の端末プレビューを dim にする。長い行や 4 行目以降は省略する。
+空のメモはタブ下の余白に `n: add memo` の案内だけを表示する。
+端末以外のプレビューでは Agent の状態・エラー、Workflow、読み込み表示をメモの下に配置する。
+高さが足りないときは状態表示を優先してメモを省略する。
+note icon はノート形で、Icons の Text 設定では `▤` を使う。
+プレビューは入力を持たない表示レイヤーで、メモの有無によって PTY の
 サイズを変えない。Closeup では `Ctrl-O s` で active session のメモを明示的に開く。
 
 TUI と MCP の `session_note_get` / `session_note_update` は同じ scratchpad を使用する。
