@@ -26,6 +26,7 @@ functions = "\n".join(definition(source, name) for name in (
 functions += "\n" + definition(source, "read_lock_ticket").replace(
     "read_lock_ticket()", "observed_read_lock_ticket()", 1
 )
+traps = "\n".join(line for line in source.splitlines() if line.startswith("trap "))
 
 bootstrap = r"""
 set -euo pipefail
@@ -38,8 +39,7 @@ LOCK_HELD=0
 LOCK_ATTEMPTS=0
 STAGE_DIR=""
 SELECTOR_ACTIVE=0
-""" + functions + r"""
-trap cleanup EXIT HUP INT TERM
+""" + functions + "\n" + traps + r"""
 read_lock_ticket() {
     local value status=0
     value="$(observed_read_lock_ticket "$1")" || status=$?
@@ -221,7 +221,7 @@ def ticket_publication_and_retirement_after_a_failed_read(root):
             if retire:
                 publishing.terminate()
                 case.signal("ticket-b")
-                case.finish(publishing)
+                case.finish(publishing, 128 + signal.SIGTERM)
                 assert not case.node("b").exists()
             else:
                 case.signal("ticket-b")
@@ -457,7 +457,7 @@ def legacy_and_empty_root(root):
         case.signal("release-a")
         case.finish(waiting)
         assert lock.is_dir(), "new lock root must remain stable"
-        # The root has no pid or participants after normal release.
+        # The stable root retains only a recoverable legacy PID after release.
         unpublished = lock / ".prepare.crashed-without-pid"
         unpublished.mkdir()
         for index, value in enumerate(("", "0\n", "invalid\n")):
@@ -465,11 +465,12 @@ def legacy_and_empty_root(root):
             role = f"b{index}"
             again = case.launch(role)
             case.await_marker(f"acquired-{role}")
+            assert not (lock / "pid").exists(), "active nodes must not publish a stale legacy PID"
             case.signal(f"release-{role}")
             case.finish(again)
         assert unpublished.is_dir(), "unpublished nodes are inert"
         assert lock.stat().st_mode & 0o777 == 0o700
-        assert not (lock / "pid").exists(), "legacy metadata must not invite stale root deletion"
+        assert (lock / "pid").read_text().strip() == str(again.pid)
     finally:
         case.close()
 
@@ -501,6 +502,38 @@ def legacy_fixture_failure_cleanup_reaps_the_unreleased_child(root):
     assert reaped, "failure cleanup left the legacy fixture running"
 
 
+def new_legacy_new_updates_remain_usable(root):
+    case = Case(root, "new-legacy-new-updates")
+    try:
+        first = case.launch("new-before-downgrade")
+        case.await_marker("acquired-new-before-downgrade")
+        case.signal("release-new-before-downgrade")
+        case.finish(first)
+        lock = case.home / "update.lock"
+        assert lock.is_dir(), "new cleanup must preserve the stable root"
+        assert (lock / "pid").read_text().strip() == str(first.pid)
+        assert not list(lock.glob("owner.*"))
+        legacy = subprocess.Popen([
+            "/bin/bash", str(Path(__file__).parent / "fixtures/install-legacy-lock.sh"),
+            str(case.home), str(case.coord),
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        case.children.append(legacy)
+        case.await_marker("acquired-legacy")
+        assert (lock / "pid").read_text().strip() == str(legacy.pid)
+        waiting = case.launch("new-after-upgrade")
+        case.await_marker("waiting-new-after-upgrade")
+        assert not (case.coord / "acquired-new-after-upgrade").exists()
+        case.signal("release-legacy")
+        case.finish(legacy)
+        case.await_marker("acquired-new-after-upgrade")
+        case.signal("release-new-after-upgrade")
+        case.finish(waiting)
+        assert lock.is_dir() and not list(lock.glob("owner.*"))
+    finally:
+        case.close()
+
+
 def invalid_ticket_and_timeout(root):
     for label, ticket, expected in (
         ("overflow", "2147483646", "ticket limit"),
@@ -526,7 +559,10 @@ def invalid_ticket_and_timeout(root):
 
 
 def symlinks_and_signal_cleanup(root):
-    for label in ("root-symlink", "node-symlink", "signal-while-waiting"):
+    for label, interrupted in (("root-symlink", None), ("node-symlink", None),
+                               ("hup-while-waiting", signal.SIGHUP),
+                               ("int-while-waiting", signal.SIGINT),
+                               ("term-while-waiting", signal.SIGTERM)):
         case = Case(root, label)
         try:
             outside = case.root / "unrelated"
@@ -547,11 +583,11 @@ def symlinks_and_signal_cleanup(root):
                     (live / "pid").write_text(str(os.getpid()) + "\n")
                     (live / "ticket").write_text("1\n")
             child = case.launch("a")
-            if label == "signal-while-waiting":
+            if interrupted is not None:
                 case.await_marker("waiting-a")
                 assert case.node("a").is_dir()
-                child.terminate()
-                case.finish(child)
+                child.send_signal(interrupted)
+                case.finish(child, 128 + interrupted)
                 assert live.is_dir() and not case.node("a").exists()
             else:
                 assert "symlink" in case.finish(child, 1)
@@ -611,6 +647,7 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
     root = Path(temporary)
     for test in (concurrent_stale_recovery, late_lower_pid, crash_in_choosing,
                  legacy_and_empty_root,
+                 new_legacy_new_updates_remain_usable,
                  legacy_fixture_failure_cleanup_reaps_the_unreleased_child,
                  invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,

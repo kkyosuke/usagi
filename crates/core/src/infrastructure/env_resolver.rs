@@ -332,7 +332,8 @@ mod real {
     #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output,real_secret_child_cannot_leave_escaped_pipe_readers_unbounded
 
     use crate::infrastructure::bounded_process::{
-        capture, close_descendant_resources, nonblocking, signal_group, terminate_and_reap,
+        capture, child_exited, close_descendant_resources, nonblocking, signal_group,
+        terminate_and_reap,
     };
     use std::io::Read;
     use std::os::fd::AsRawFd;
@@ -415,6 +416,8 @@ mod real {
             stderr: Some(stderr),
             cancelled,
             cleanup_grace,
+            group_closed: false,
+            forced_cleanup: false,
         }))
     }
 
@@ -442,9 +445,27 @@ mod real {
         stderr: Option<OutputReader>,
         cancelled: Arc<AtomicBool>,
         cleanup_grace: Duration,
+        group_closed: bool,
+        forced_cleanup: bool,
     }
 
     impl SystemChild {
+        fn close_group(&mut self) {
+            if self.group_closed {
+                return;
+            }
+            if let (Some(stdout), Some(stderr)) = (&self.stdout, &self.stderr) {
+                self.forced_cleanup = close_descendant_resources(
+                    self.child.id(),
+                    stdout,
+                    stderr,
+                    None,
+                    self.cleanup_grace,
+                );
+            }
+            self.group_closed = true;
+        }
+
         fn exit(status: std::process::ExitStatus) -> ChildExit {
             ChildExit {
                 success: status.success(),
@@ -455,6 +476,14 @@ mod real {
 
     impl OwnedChild for SystemChild {
         fn try_wait(&mut self) -> Result<Option<ChildExit>, String> {
+            if !self.group_closed {
+                if !child_exited(&self.child)
+                    .map_err(|_| "could not observe secret resolver".to_owned())?
+                {
+                    return Ok(None);
+                }
+                self.close_group();
+            }
             self.child
                 .try_wait()
                 .map(|status| status.map(Self::exit))
@@ -474,6 +503,7 @@ mod real {
         }
 
         fn wait(&mut self) -> Result<ChildExit, String> {
+            self.close_group();
             self.child
                 .wait()
                 .map(Self::exit)
@@ -481,21 +511,9 @@ mod real {
         }
 
         fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String> {
-            let forced_cleanup = if let (Some(stdout), Some(stderr)) = (&self.stdout, &self.stderr)
-            {
-                close_descendant_resources(
-                    self.child.id(),
-                    stdout,
-                    stderr,
-                    None,
-                    self.cleanup_grace,
-                )
-            } else {
-                false
-            };
             self.cancelled.store(true, Ordering::Release);
             let output = join_output_readers(&mut self.stdout, &mut self.stderr);
-            super::require_complete_output(forced_cleanup, output)
+            super::require_complete_output(self.forced_cleanup, output)
         }
     }
 

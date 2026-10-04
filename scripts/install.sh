@@ -17,6 +17,9 @@ SELECT_VERSION=0
 
 cleanup() {
     local status=$? retired
+    trap - EXIT
+    trap '' HUP INT TERM
+    set +e
     if [ "$SELECTOR_ACTIVE" -eq 1 ]; then
         printf '\033[?25h' > /dev/tty 2>/dev/null || true
         SELECTOR_ACTIVE=0
@@ -29,12 +32,20 @@ cleanup() {
         # cannot mistake a partially removed live node for a malformed owner.
         retired="$LOCK_DIR/.retired.${LOCK_NODE##*/}"
         if mv -- "$LOCK_NODE" "$retired" 2>/dev/null; then
+            # Older embedded installers reclaim a directory only when its
+            # legacy PID is dead. Leave our exiting PID as an atomic breadcrumb
+            # so a sequential downgrade/update can recover this stable root.
+            # New participants still retire only their own nodes.
+            mv -f -- "$retired/pid" "$LOCK_DIR/pid"
             rm -rf -- "$retired"
         fi
     fi
     exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
     echo "Error: $*" >&2

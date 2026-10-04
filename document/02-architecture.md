@@ -448,6 +448,12 @@ snapshotをstrictにparseし、filename/frontmatter不一致・prefix欠落・�
 session worktree adapter、issue number authority の repository resolver）は
 `confined_git_command(repo)` だけで command を組み立てる。
 
+session worktree adapter の Git 観測は core の `infrastructure::bounded_process` を使う。
+この共通 runner と secret resolver は、direct child の終了を `waitid(WNOWAIT)` で観測し、
+PID を保持したまま process group を TERM / KILL で終了させてから reap する。
+親だけが TERM で終了した場合や、子孫が stdout / stderr を閉じた場合も group cleanup を省略しない。
+capture worker の自然な EOF を先に確認するため、通常の完了と forced pipe cleanup を区別できる。
+
 `-C <repo>` は scope の宣言にならない。Git は repository・index・object database・config を
 `GIT_*` 環境変数から先に解決するため、継承した `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` /
 `GIT_OBJECT_DIRECTORY` / `GIT_COMMON_DIR` や `GIT_CONFIG_COUNT` 経由の config injection は、
@@ -966,6 +972,9 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   [Lamport の bakery algorithm](https://lamport.azurewebsites.net/pubs/bakery.pdf) に従う choosing / ticket と
   `(ticket, PID)` の順序で admission を決め、ticket は 2147483646 を上限として overflow 前に拒否する。
   stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
+  retire が完了した process は自身の終了直前の PID を legacy `pid` metadata として atomic に残す。
+  次の旧方式 installer は終了済み PID を確認して root を回収できるため、旧版への切り替え後の再更新も可能である。
+  新方式はこの metadata を通常の legacy PID として扱い、共有 root を削除しない。
   公開前の crash と空の共有 root は admission を妨げない。lock root / owner node の symlink は拒否し、待機は約 60 秒を上限とする。
   PID の再利用、permission denial、判別できない liveness probe failure は live owner として保守的に待つ。
   公開済み PID / ticket は通常ファイルで固定し、symlink・FIFO・device・directory を読まない。new owner の PID が

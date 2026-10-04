@@ -334,6 +334,10 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
+`agent_complete` の任意の `result` は、`pr` / `commits` / `changed_files` /
+`verification` をすべて省略できる。省略した `commits` / `changed_files` は空配列として保存するため、
+`{"verification":"cargo test"}` だけの報告も受理する。配列への `null` や型が異なる値は拒否する。
+
 Director Work からの `session_dispatch` / `session_delegate_brief` は、認証済み caller の profile runtime と同じ
 runtime の worker だけを受理する。この制約は prompt 上の指示ではなく daemon が session 作成前に検証する hard invariant
 であり、新規 selector の `runtime` と既存 Agent の保存済み runtime の両方へ適用する。model は同じ runtime 内で workspace

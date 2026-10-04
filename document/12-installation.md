@@ -93,7 +93,12 @@ live Agent を含む daemon の安全な引き継ぎと拒否条件は
 [planned replacement](05-daemon.md#planned-replacement)を正本とする。
 
 同じ保存先への更新は順番に実行する。更新 process が crash しても、次の更新が残った owner を回収する。
+現行 installer で旧版へ戻した後も、旧版の `usagi update` から再更新できる。
 旧版と現行版の installer を同時に使う場合の範囲は、上記の内部契約を参照する。
+
+HUP / INT / TERM による中断はそれぞれ終了コード 129 / 130 / 143 で終了し、更新成功を表示しない。
+staging と自身の lock owner は cleanup する。置換前の中断では旧 binary を維持し、置換後の daemon 同期中に
+中断した場合は導入済みの新 binary を維持する。どちらも次の `usagi update` で再試行できる。
 
 managed daemon 同期を持たない旧版から初めて更新する 1 回だけは、実行中の旧 `update` 自体を
 遡及的に変更できないため binary の差し替えだけで終了する。その場合は更新後の `usagi update` または
