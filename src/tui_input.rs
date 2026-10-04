@@ -4,10 +4,9 @@
 //! [`LiveInput`] と [`RuntimeEvent`] にする。`EventPump::next` は terminal、backend、tick
 //! をこの順に観測するため、同じ poll cycle で同時に ready だった event の順序も決定的である。
 
-#[cfg(test)]
 use std::collections::VecDeque;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, Event, KeyCode as CrosstermKeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -17,12 +16,24 @@ use usagi_tui::usecase::terminal_input::{
     PointerEvent, PointerKind, RuntimeEvent,
 };
 
+mod sgr_mouse;
+
 /// Maximum ready wheel events folded into one frame. The bound lets a sustained
 /// input stream redraw periodically instead of draining forever.
 const WHEEL_COALESCE_LIMIT: usize = 32;
 
+/// Bound Escape lookahead to two interactive frames. Crossterm can emit an
+/// isolated Escape when a tty read ends immediately before an SGR mouse tail.
+const MOUSE_REPORT_GRACE: Duration = Duration::from_millis(32);
+/// Three bounded decimal fields, their separators, and the SGR introducer/end.
+const MOUSE_REPORT_MAX_CHARS: usize = 20;
+
 /// poll/read を差し替えられる crossterm event source。
 pub trait CrosstermEventSource {
+    /// Monotonic clock used to bound Escape lookahead; fakes can fix or advance it.
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
     /// `timeout` まで terminal event を待てるか調べる。
     fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
     /// `poll` が ready を返した後の event を読む。
@@ -115,7 +126,9 @@ pub struct EventPump<S, R> {
     backend: R,
     tick_interval: Duration,
     next_tick_at: Duration,
-    pending_terminal: Option<Event>,
+    pending_terminal: VecDeque<Event>,
+    /// A second Escape encountered during lookahead has not been decoded yet.
+    pending_escape: Option<Event>,
     legacy_unix_control_aliases: bool,
 }
 
@@ -132,7 +145,8 @@ where
             backend,
             tick_interval,
             next_tick_at: now.saturating_add(tick_interval),
-            pending_terminal: None,
+            pending_terminal: VecDeque::new(),
+            pending_escape: None,
             legacy_unix_control_aliases: false,
         }
     }
@@ -189,10 +203,27 @@ where
     }
 
     fn poll_terminal(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
-        if self.pending_terminal.is_some() {
-            return Ok(self.pending_terminal.take());
+        if let Some(event) = self.pending_terminal.pop_front() {
+            return Ok(Some(event));
         }
-        poll_source(&mut self.source, timeout)
+        let event = if let Some(escape) = self.pending_escape.take() {
+            escape
+        } else {
+            let Some(event) = poll_source(&mut self.source, timeout)? else {
+                return Ok(None);
+            };
+            event
+        };
+        if event == Event::Key(KeyEvent::new(CrosstermKeyCode::Esc, KeyModifiers::NONE)) {
+            return recover_mouse_report(
+                &mut self.source,
+                &mut self.pending_terminal,
+                &mut self.pending_escape,
+                event,
+            )
+            .map(Some);
+        }
+        Ok(Some(event))
     }
 
     /// Fold an immediately-ready wheel burst or passive motion to its latest cell. The first
@@ -263,13 +294,67 @@ where
                     *notches = notches.saturating_add(next_notches);
                 }
                 _ => {
-                    self.pending_terminal = Some(raw);
+                    self.pending_terminal.push_front(raw);
                     break;
                 }
             }
         }
         Ok(event)
     }
+}
+
+/// Recover only a complete SGR mouse report. Other Escape sequences,
+/// literal text, paste, and incomplete candidates are replayed unchanged.
+fn recover_mouse_report(
+    source: &mut dyn CrosstermEventSource,
+    pending_terminal: &mut VecDeque<Event>,
+    pending_escape: &mut Option<Event>,
+    escape: Event,
+) -> io::Result<Event> {
+    let deadline = source.now() + MOUSE_REPORT_GRACE;
+    let mut buffered = VecDeque::new();
+    let mut report = String::new();
+    for _ in 0..MOUSE_REPORT_MAX_CHARS {
+        let timeout = deadline.saturating_duration_since(source.now());
+        let event = match poll_source(source, timeout) {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(error) => {
+                pending_terminal.push_back(escape);
+                pending_terminal.extend(buffered);
+                return Err(error);
+            }
+        };
+        if event == escape {
+            // Replay the first Escape and its text before trying this new
+            // Escape. Its mouse tail remains in the source for decoding.
+            *pending_escape = Some(event);
+            break;
+        }
+        buffered.push_back(event.clone());
+        let Event::Key(KeyEvent {
+            code: CrosstermKeyCode::Char(character),
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
+        }) = event
+        else {
+            break;
+        };
+        // Legacy terminal parsers set Shift on uppercase M, while a split
+        // report's payload has no keyboard modifier identity of its own.
+        if !(modifiers.is_empty() || character == 'M' && modifiers == KeyModifiers::SHIFT) {
+            break;
+        }
+        report.push(character);
+        match sgr_mouse::parse_report(&report) {
+            Ok(Some(mouse)) => return Ok(Event::Mouse(mouse)),
+            Ok(None) => {}
+            Err(()) => break,
+        }
+    }
+    pending_terminal.extend(buffered);
+    Ok(escape)
 }
 
 fn poll_source(
@@ -443,10 +528,16 @@ mod tests {
 
     use super::*;
 
-    #[derive(Default)]
     struct FakeSource {
         events: VecDeque<Event>,
         timeouts: Vec<Duration>,
+        now: Instant,
+    }
+
+    impl Default for FakeSource {
+        fn default() -> Self {
+            Self::with([])
+        }
     }
 
     impl FakeSource {
@@ -454,11 +545,16 @@ mod tests {
             Self {
                 events: events.into_iter().collect(),
                 timeouts: Vec::new(),
+                now: Instant::now(),
             }
         }
     }
 
     impl CrosstermEventSource for FakeSource {
+        fn now(&mut self) -> Instant {
+            self.now
+        }
+
         fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
             self.timeouts.push(timeout);
             Ok(!self.events.is_empty())
@@ -644,6 +740,321 @@ mod tests {
                 notches: 1,
             }))
         );
+    }
+
+    #[test]
+    fn split_mouse_report_never_reaches_the_terminal_as_text() {
+        let events = std::iter::once(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+            .chain("[<65;42;13M".chars().map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            }))
+            .chain([Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::NONE,
+            ))]);
+        let mut pump = EventPump::new(
+            FakeSource::with(events),
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 41,
+                row: 12,
+                notches: 1,
+            })
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            adapt_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::NONE,
+            )))
+            .unwrap()
+        );
+    }
+
+    fn split_report(report: &str) -> Vec<Event> {
+        std::iter::once(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)))
+            .chain(report.chars().map(|character| {
+                Event::Key(KeyEvent::new(
+                    KeyCode::Char(character),
+                    if character == 'M' {
+                        KeyModifiers::SHIFT
+                    } else {
+                        KeyModifiers::NONE
+                    },
+                ))
+            }))
+            .collect()
+    }
+
+    #[test]
+    fn recovered_mouse_reports_join_wheel_bursts_without_reordering_keys() {
+        let mut events = vec![wheel(MouseEventKind::ScrollUp, 1, 2)];
+        events.extend(split_report("[<64;42;13M"));
+        events.extend(split_report("[<64;43;14M"));
+        events.push(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend(split_report("[<65;44;15M"));
+        let mut pump = EventPump::new(
+            FakeSource::with(events),
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelUp {
+                column: 42,
+                row: 13,
+                notches: 3,
+            })
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            adapt_event(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE
+            )))
+            .unwrap()
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 43,
+                row: 14,
+                notches: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_escape_and_incomplete_reports_replay_every_event_unchanged() {
+        let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let mut cases = vec![
+            vec![escape.clone()],
+            split_report("[x"),
+            split_report("[<64;42"),
+            split_report("[<64;0;1M"),
+            vec![escape.clone(), Event::Resize(80, 24)],
+            vec![escape.clone(), Event::Paste("[<64;1;1M".into())],
+            vec![
+                escape.clone(),
+                Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL)),
+            ],
+            vec![
+                escape,
+                Event::Key(KeyEvent::new_with_kind(
+                    KeyCode::Char('['),
+                    KeyModifiers::NONE,
+                    KeyEventKind::Repeat,
+                )),
+            ],
+        ];
+        for events in &mut cases {
+            events.push(Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::NONE,
+            )));
+            let expected = events.iter().cloned().map(adapt_event).collect::<Vec<_>>();
+            let mut pump = EventPump::new(
+                FakeSource::with(events.clone()),
+                FakeEventBackend::default(),
+                TICK,
+                T0,
+            );
+            for event in expected {
+                assert_eq!(Some(pump.next(T0).unwrap()), event);
+            }
+            assert_eq!(pump.next(T0 + TICK).unwrap(), RuntimeEvent::Tick);
+        }
+    }
+
+    #[test]
+    fn mouse_lookahead_waits_for_a_delayed_tail_with_a_bounded_timeout() {
+        struct FragmentedSource {
+            events: VecDeque<Event>,
+            now: Instant,
+            timeouts: Vec<Duration>,
+        }
+        impl CrosstermEventSource for FragmentedSource {
+            fn now(&mut self) -> Instant {
+                self.now
+            }
+
+            fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+                self.timeouts.push(timeout);
+                Ok(!self.events.is_empty() && (!timeout.is_zero() || self.events.len() == 12))
+            }
+
+            fn read(&mut self) -> io::Result<Event> {
+                Ok(self.events.pop_front().unwrap())
+            }
+        }
+        let mut pump = EventPump::new(
+            FragmentedSource {
+                events: split_report("[<65;42;13M").into(),
+                now: Instant::now(),
+                timeouts: Vec::new(),
+            },
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 41,
+                row: 12,
+                notches: 1,
+            })
+        );
+        assert_eq!(pump.source.timeouts[0], Duration::ZERO);
+        assert_eq!(&pump.source.timeouts[1..12], &[MOUSE_REPORT_GRACE; 11]);
+    }
+
+    #[test]
+    fn mouse_lookahead_stops_waiting_when_the_injected_deadline_expires() {
+        struct ExpiringSource {
+            events: VecDeque<Event>,
+            now: Instant,
+            timeouts: Vec<Duration>,
+            reads: usize,
+        }
+        impl CrosstermEventSource for ExpiringSource {
+            fn now(&mut self) -> Instant {
+                self.now
+            }
+
+            fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+                self.timeouts.push(timeout);
+                Ok(!self.events.is_empty() && (self.reads == 0 || !timeout.is_zero()))
+            }
+
+            fn read(&mut self) -> io::Result<Event> {
+                self.reads += 1;
+                if self.reads == 2 {
+                    self.now += MOUSE_REPORT_GRACE;
+                }
+                Ok(self.events.pop_front().unwrap())
+            }
+        }
+        let mut pump = EventPump::new(
+            ExpiringSource {
+                events: split_report("[<65;42;13M").into(),
+                now: Instant::now(),
+                timeouts: Vec::new(),
+                reads: 0,
+            },
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            adapt_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))).unwrap()
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            adapt_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('['),
+                KeyModifiers::NONE
+            )))
+            .unwrap()
+        );
+        assert_eq!(
+            pump.source.timeouts,
+            [Duration::ZERO, MOUSE_REPORT_GRACE, Duration::ZERO]
+        );
+        assert_eq!(pump.source.reads, 2);
+    }
+
+    #[test]
+    fn a_second_escape_still_recovers_its_mouse_tail_after_replaying_the_first() {
+        for prefix in ["", "[<64;66"] {
+            let preceding = split_report(prefix);
+            let mut events = preceding.clone();
+            events.extend(split_report("[<65;66;28M"));
+            events.push(Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::NONE,
+            )));
+            let mut pump = EventPump::new(
+                FakeSource::with(events),
+                FakeEventBackend::default(),
+                TICK,
+                T0,
+            );
+            for event in preceding {
+                assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(event));
+            }
+            assert_eq!(
+                pump.next(T0).unwrap(),
+                RuntimeEvent::Input(LiveInput::WheelDown {
+                    column: 65,
+                    row: 27,
+                    notches: 1,
+                })
+            );
+            assert_eq!(
+                pump.next(T0).unwrap(),
+                adapt_event(Event::Key(KeyEvent::new(
+                    KeyCode::Char('z'),
+                    KeyModifiers::NONE
+                )))
+                .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn mouse_lookahead_errors_preserve_the_escape_and_buffered_text() {
+        struct FailingSource {
+            events: VecDeque<Event>,
+            fail_poll: bool,
+            failed: bool,
+        }
+        impl CrosstermEventSource for FailingSource {
+            fn poll(&mut self, _timeout: Duration) -> io::Result<bool> {
+                if self.events.is_empty() && self.fail_poll && !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::other("lookahead poll failed"));
+                }
+                Ok(!self.events.is_empty() || !self.failed)
+            }
+
+            fn read(&mut self) -> io::Result<Event> {
+                if let Some(event) = self.events.pop_front() {
+                    return Ok(event);
+                }
+                self.failed = true;
+                Err(io::Error::other("lookahead read failed"))
+            }
+        }
+        for fail_poll in [false, true] {
+            let events = split_report("[<64");
+            let mut pump = EventPump::new(
+                FailingSource {
+                    events: events.clone().into(),
+                    fail_poll,
+                    failed: false,
+                },
+                FakeEventBackend::default(),
+                TICK,
+                T0,
+            );
+            assert!(pump.next(T0).is_err());
+            for event in events {
+                assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(event));
+            }
+            assert_eq!(pump.next(T0 + TICK).unwrap(), RuntimeEvent::Tick);
+        }
     }
 
     #[test]

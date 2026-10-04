@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 563,
+  "total": 564,
   "owners": {
     "core": 15,
     "daemon": 379,
     "root-cli": 41,
-    "tui": 128
+    "tui": 129
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -99,6 +99,7 @@
     "src/runtime/terminal_pump.rs": 1,
     "src/runtime/tui.rs": 64,
     "src/runtime/tui/workflow.rs": 3,
-    "src/tui_input.rs": 4
+    "src/tui_input.rs": 4,
+    "src/tui_input/sgr_mouse.rs": 1
   }
 }
