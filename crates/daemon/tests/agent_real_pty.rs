@@ -1014,7 +1014,7 @@ fn real_pty_claude_launch_fails_closed_when_the_binary_is_unavailable() {
         .launch(&operation, &launch_intent, &scope)
         .unwrap_err();
     assert_eq!(replay.code, ErrorCode::Unavailable);
-    assert!(runtime.operation_outcome(&operation).unwrap().is_err());
+    assert_eq!(replay, error);
     // A terminal request for an operation that never produced a terminal is
     // simply not owned by the agent.
     let foreign = TerminalRef {
