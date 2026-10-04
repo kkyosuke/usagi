@@ -130,7 +130,13 @@ fn handle(
             operation,
             command,
             None,
-            launch_client.cloned(),
+            super::dispatch::launch_context(
+                usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+                *launch_client,
+                None,
+                None,
+            ),
         )?)
         .map_err(unavailable);
     }
@@ -275,11 +281,10 @@ pub(super) fn requested_recipient(
     }
 }
 
-/// Apply one human workflow command and answer with the stored projection.
+/// Apply one workflow command and answer with the stored projection.
 ///
-/// The IPC control request and the MCP session tool share this: both are a
-/// person asking for the same thing, and neither may reach a different
-/// admission rule than the other.
+/// The IPC control request and the MCP session tool share the same admission
+/// rule while retaining their distinct authenticated request evidence.
 #[allow(clippy::too_many_arguments)] // Connection evidence stays separate from command semantics and exact workflow fences.
 pub(super) fn control_workflow(
     agent: &SharedAgentRuntime,
@@ -289,7 +294,7 @@ pub(super) fn control_workflow(
     operation: OperationId,
     command: WorkflowCommand,
     issue: Option<u32>,
-    launch_client: Option<usagi_core::domain::agent::AgentLaunchClient>,
+    launch_context: usagi_daemon::usecase::agent_ipc::AgentLaunchContext,
 ) -> Result<usagi_core::domain::workflow::WorkflowSnapshot, ProtocolError> {
     let store = agent.lock().map_err(unavailable)?.dispatch_store().clone();
     // Reconcile immediately before admission so the command is judged against
@@ -319,7 +324,7 @@ pub(super) fn control_workflow(
                     agents,
                     revision_limit,
                     issue,
-                    launch_client,
+                    launch_context,
                 },
             ) {
                 // A start that can never succeed as it stands must not keep
@@ -961,7 +966,7 @@ struct StartIntent<'a> {
     agents: usagi_core::domain::workflow::WorkflowAgents,
     revision_limit: u8,
     issue: Option<u32>,
-    launch_client: Option<usagi_core::domain::agent::AgentLaunchClient>,
+    launch_context: usagi_daemon::usecase::agent_ipc::AgentLaunchContext,
 }
 
 fn start(
@@ -977,7 +982,7 @@ fn start(
         agents,
         revision_limit,
         issue,
-        ref launch_client,
+        ref launch_context,
     } = *intent;
     let intent = AgentLaunchIntent {
         workspace,
@@ -1003,13 +1008,7 @@ fn start(
         &prompt,
         &bound.scope_resolver(),
         preflight.as_ref(),
-        super::dispatch::launch_context(
-            usagi_core::domain::agent::AgentLaunchSource::Workflow,
-            usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
-            launch_client.as_ref(),
-            None,
-            None,
-        ),
+        launch_context.clone(),
     )?;
     let store = owner.dispatch_store();
     let binding = store

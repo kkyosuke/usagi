@@ -853,6 +853,8 @@ fn work_run_routes_confirmations_and_console_activation_without_implicit_mutatio
     ui.agent_inventory = Some(AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef::new(runtime_id, terminal, None).unwrap(),
             continuation,

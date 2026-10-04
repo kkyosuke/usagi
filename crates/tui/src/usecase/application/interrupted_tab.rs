@@ -523,6 +523,8 @@ mod tests {
 
         fn runtime(&self, state: AgentRuntimeInventoryState) -> AgentRuntimeInventoryItem {
             AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
                 launch_provenance: None,
                 runtime: AgentRuntimeRef {
                     agent_runtime_id: self.runtime_id,
@@ -824,6 +826,8 @@ mod tests {
         let managed = Scope::session(workspace);
         let lineage = Lineage::new(&managed, ProviderKind::Claude);
         let replacement = AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef {
                 agent_runtime_id: AgentRuntimeId::new(),

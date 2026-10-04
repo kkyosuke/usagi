@@ -1028,6 +1028,8 @@ mod tests {
         state: AgentRuntimeInventoryState,
     ) -> AgentRuntimeInventoryItem {
         AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef::new(
                 AgentRuntimeId::new(),
@@ -1486,6 +1488,8 @@ mod tests {
         let interrupted = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
                 launch_provenance: None,
                 runtime: AgentRuntimeRef::new(runtime_id, old, Some(session)).unwrap(),
                 continuation,

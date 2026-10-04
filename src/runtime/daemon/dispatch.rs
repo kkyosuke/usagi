@@ -2619,10 +2619,10 @@ pub(super) fn dispatch_dispatch(
             &scope,
             None,
             launch_context(
-                AgentLaunchSource::Mcp,
-                AgentLaunchEntry::SessionDispatch,
+                AgentLaunchSource::Unknown,
+                AgentLaunchEntry::LegacyDispatch,
                 Some(launch_client),
-                Some(&intent.caller),
+                None,
                 None,
             ),
         )
@@ -3574,6 +3574,14 @@ fn admit_agent_dispatch_request(
         ),
         _ => None,
     };
+    let (resume_source, resume_actor, resume_operation) = match resume_caller {
+        Some(authenticated) => (
+            AgentLaunchSource::Mcp,
+            Some(&authenticated.caller),
+            Some(authenticated.run_id),
+        ),
+        None => (AgentLaunchSource::Manual, None, None),
+    };
     let admission_result = agent
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
@@ -3613,15 +3621,11 @@ fn admit_agent_dispatch_request(
                     scope,
                     preflight.as_ref(),
                     launch_context(
-                        if resume_caller.is_some() {
-                            AgentLaunchSource::Mcp
-                        } else {
-                            AgentLaunchSource::Manual
-                        },
+                        resume_source,
                         AgentLaunchEntry::SessionResume,
                         Some(launch_client),
-                        resume_caller.map(|authenticated| &authenticated.caller),
-                        resume_caller.map(|authenticated| authenticated.run_id),
+                        resume_actor,
+                        resume_operation,
                     ),
                 ),
             AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
@@ -3632,15 +3636,11 @@ fn admit_agent_dispatch_request(
                     scope,
                     preflight.as_ref(),
                     launch_context(
-                        if resume_caller.is_some() {
-                            AgentLaunchSource::Mcp
-                        } else {
-                            AgentLaunchSource::Manual
-                        },
+                        resume_source,
                         AgentLaunchEntry::IntegrationRepair,
                         Some(launch_client),
-                        resume_caller.map(|authenticated| &authenticated.caller),
-                        resume_caller.map(|authenticated| authenticated.run_id),
+                        resume_actor,
+                        resume_operation,
                     ),
                 ),
             AgentDispatchRequest::Inventory(_)

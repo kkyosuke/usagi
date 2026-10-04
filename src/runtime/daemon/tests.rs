@@ -13483,7 +13483,10 @@ mod workflow_composition {
                 revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
             Some(742),
-            None,
+            usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+            ),
         )
         .unwrap();
         assert_eq!(started.run.unwrap().id, operation);
@@ -13498,13 +13501,72 @@ mod workflow_composition {
             usagi_core::domain::id::OperationId::new(),
             WorkflowCommand::Finish,
             None,
-            None,
+            usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+            ),
         )
         .unwrap();
         assert!(ended.run.is_none());
         assert_eq!(ended.finished.len(), 1);
         assert_eq!(ended.finished[0].id, operation);
         assert_eq!(ended.finished[0].issue, Some(742));
+    }
+
+    #[test]
+    fn workflow_start_keeps_authenticated_actor_and_client_evidence() {
+        use usagi_core::domain::agent::{
+            AgentClientSurface, AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource, CallerRef,
+        };
+        for via_mcp in [false, true] {
+            let fixture = Fixture::new();
+            let operation = usagi_core::domain::id::OperationId::new();
+            let caller = via_mcp.then_some(CallerRef {
+                session_id: None,
+                agent_id: usagi_core::domain::id::AgentId::new(),
+            });
+            let caller_operation = via_mcp.then_some(usagi_core::domain::id::OperationId::new());
+            let client = AgentLaunchClient {
+                surface: Some(if via_mcp {
+                    AgentClientSurface::Mcp
+                } else {
+                    AgentClientSurface::Tui
+                }),
+                client_id: "public-workflow-client".into(),
+                connection_id: "public-workflow-connection".into(),
+                request_id: "public-workflow-request".into(),
+                peer_pid: 4321,
+            };
+            let started = workflow::control_workflow(
+                &fixture.agent,
+                &fixture.bound,
+                fixture.workspace,
+                fixture.session,
+                operation,
+                WorkflowCommand::Start {
+                    goal: "Update the docs".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
+                },
+                None,
+                dispatch::launch_context(
+                    AgentLaunchSource::Workflow,
+                    AgentLaunchEntry::WorkflowStart,
+                    Some(&client),
+                    caller.as_ref(),
+                    caller_operation,
+                ),
+            )
+            .unwrap();
+            assert_eq!(started.run.unwrap().id, operation);
+            let inventory = fixture.agent.lock().unwrap().inventory(fixture.workspace);
+            let audit = inventory.runtimes[0].launch_provenance.as_ref().unwrap();
+            assert_eq!(audit.launched.source, AgentLaunchSource::Workflow);
+            assert_eq!(audit.launched.workflow_id, Some(operation));
+            assert_eq!(audit.launched.caller, caller);
+            assert_eq!(audit.launched.caller_operation_id, caller_operation);
+            assert_eq!(audit.launched.client, Some(client));
+        }
     }
 
     #[test]

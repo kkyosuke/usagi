@@ -14,7 +14,7 @@ use super::{
     is_resume_source_state, map_dispatch_storage_error, map_orchestration_error, map_runtime_error,
     map_scope_error,
 };
-use usagi_core::domain::agent::{AgentLaunchOrigin, AgentLaunchProvenance};
+use usagi_core::domain::agent::{AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource};
 
 impl AgentRuntime {
     /// Keep an Agent's creator through fresh conversations as well as exact
@@ -185,7 +185,12 @@ impl AgentRuntime {
             launch_provenance: Some(self.provenance_for_agent(
                 worker.agent_id,
                 {
-                    context.caller = Some(caller.clone());
+                    if context.source == AgentLaunchSource::Mcp {
+                        context.caller = Some(caller.clone());
+                    } else {
+                        context.caller = None;
+                        context.caller_operation_id = None;
+                    }
                     context.origin(operation)
                 },
                 fresh_identity,

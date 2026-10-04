@@ -4388,6 +4388,8 @@ mod tests {
             };
             AgentRuntimeInventoryItem {
                 runtime,
+                operation_id: None,
+                agent_id: None,
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Live,
                 resumed_from: None,
@@ -4794,6 +4796,8 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
                     launch_provenance: None,
                     runtime: waiting,
                     continuation: AgentContinuationRef::new(),
@@ -4801,6 +4805,8 @@ mod tests {
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
                     launch_provenance: None,
                     runtime: live,
                     continuation: AgentContinuationRef::new(),
@@ -4847,6 +4853,8 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
                 launch_provenance: None,
                 runtime,
                 continuation: AgentContinuationRef::new(),
@@ -4900,6 +4908,8 @@ mod tests {
             runtimes: [live.clone(), history.clone(), dismissed, superseded.clone()]
                 .into_iter()
                 .map(|runtime| AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
                     launch_provenance: None,
                     state: if runtime == live {
                         AgentRuntimeInventoryState::Live
@@ -6476,6 +6486,8 @@ mod tests {
         let root = AgentRuntimeRef::new(AgentRuntimeId::new(), root_terminal, None)
             .expect("a root runtime owns a root terminal");
         let item = |runtime, state| AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime,
             continuation: AgentContinuationRef::new(),
@@ -6576,6 +6588,8 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
                     launch_provenance: None,
                     runtime: closed,
                     continuation: AgentContinuationRef::new(),
@@ -6583,6 +6597,8 @@ mod tests {
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
                     launch_provenance: None,
                     runtime: live.clone(),
                     continuation: AgentContinuationRef::new(),
@@ -6636,6 +6652,8 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
                 launch_provenance: None,
                 runtime: closed,
                 continuation: AgentContinuationRef::new(),
@@ -7114,6 +7132,8 @@ mod tests {
             (
                 runtime_id,
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
                     launch_provenance: None,
                     runtime: AgentRuntimeRef::new(runtime_id, terminal, session_id).unwrap(),
                     continuation: AgentContinuationRef::new(),

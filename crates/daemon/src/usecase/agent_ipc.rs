@@ -1764,6 +1764,19 @@ impl AgentRuntime {
                     .continuation
                     .map(|continuation| AgentRuntimeInventoryItem {
                         runtime: record.runtime.clone(),
+                        operation_id: Some(record.operation.operation_id),
+                        agent_id: self
+                            .dispatch
+                            .binding(record.operation.operation_id)
+                            .ok()
+                            .flatten()
+                            .map(|binding| binding.worker.agent_id)
+                            .or_else(|| {
+                                record
+                                    .launch_provenance
+                                    .as_ref()
+                                    .and_then(|audit| audit.agent_id)
+                            }),
                         continuation,
                         state: if Self::is_failed_reservation(record, &failed) {
                             AgentRuntimeInventoryState::Unavailable

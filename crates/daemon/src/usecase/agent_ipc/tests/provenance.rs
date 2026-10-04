@@ -303,11 +303,6 @@ fn legacy_wire_record_remains_unknown_after_a_fresh_manual_conversation() {
     let restored: RuntimeStoreSnapshot = serde_json::from_value(encoded).unwrap();
     assert_eq!(restored.records[0].launch_provenance, None);
     agent.coordinator = RuntimeCoordinator::hydrate(restored, 16, 64 * 1024, 64).unwrap();
-    assert_eq!(
-        agent.inventory(intent.workspace).runtimes[0].launch_provenance,
-        None
-    );
-    let second = OperationId::new();
     let worker = agent
         .dispatch
         .binding(first)
@@ -315,6 +310,22 @@ fn legacy_wire_record_remains_unknown_after_a_fresh_manual_conversation() {
         .unwrap()
         .worker
         .agent_id;
+    let inventory = agent.inventory(intent.workspace);
+    let legacy = &inventory.runtimes[0];
+    assert_eq!(legacy.launch_provenance, None);
+    assert_eq!(legacy.operation_id, Some(first));
+    assert_eq!(legacy.agent_id, Some(worker));
+    let encoded = serde_json::to_value(&inventory).unwrap();
+    assert_eq!(
+        encoded["runtimes"][0]["operation_id"],
+        serde_json::json!(first)
+    );
+    assert_eq!(
+        encoded["runtimes"][0]["agent_id"],
+        serde_json::json!(worker)
+    );
+    assert!(encoded["runtimes"][0]["launch_provenance"].is_null());
+    let second = OperationId::new();
     agent.launch(&second.to_string(), &intent, &scope).unwrap();
     let provenance = agent.agent_launch_provenance(intent.workspace).unwrap()[&worker]
         .clone()
@@ -359,7 +370,22 @@ fn collected_dispatch_history_keeps_a_reused_agent_creator_unknown() {
                 .unwrap();
         }
         assert_eq!(agent.dispatch.run(first).unwrap(), None);
+        assert_eq!(agent.dispatch.binding(first).unwrap(), None);
         assert!(agent.dispatch.agent(worker).unwrap().is_some());
+        let known = agent.inventory(intent.workspace);
+        assert_eq!(known.runtimes[0].operation_id, Some(first));
+        assert_eq!(known.runtimes[0].agent_id, Some(worker));
+        // The audit alone still proves the identity after its binding expires.
+        // If neither durable source remains, expose only the known operation.
+        let snapshot = agent.coordinator.snapshot();
+        let mut legacy = snapshot.clone();
+        legacy.records[0].launch_provenance = None;
+        agent.coordinator = RuntimeCoordinator::hydrate(legacy, 16, 64 * 1024, 64).unwrap();
+        let unknown = agent.inventory(intent.workspace);
+        assert_eq!(unknown.runtimes[0].operation_id, Some(first));
+        assert_eq!(unknown.runtimes[0].agent_id, None);
+        assert_eq!(unknown.runtimes[0].launch_provenance, None);
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
         let next = OperationId::new();
         let admitted = if via_mcp {
             agent
@@ -560,8 +586,84 @@ fn audit_client(surface: AgentClientSurface) -> AgentLaunchClient {
 }
 
 #[test]
+fn legacy_dispatch_records_connection_without_authenticating_the_wire_caller() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let scope = FakeScope(Ok(configured_scope(worktree.path())));
+    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+    let intent = intent(None);
+    let claimed = CallerRef {
+        session_id: None,
+        agent_id: AgentId::new(),
+    };
+    let dispatch = DispatchIntent {
+        workspace: intent.workspace,
+        session_name: "worker".into(),
+        caller: claimed.clone(),
+        agent: DispatchAgentIntent::New {
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+        },
+        prompt: "Review the task".into(),
+    };
+    let operation = OperationId::new();
+    let client = audit_client(AgentClientSurface::Mcp);
+    let ticket = agent
+        .prepare_dispatch_readiness(&operation.to_string(), &dispatch)
+        .unwrap();
+    let admitted = agent
+        .dispatch_from_after_readiness(
+            &operation.to_string(),
+            &dispatch,
+            intent.session.unwrap(),
+            &scope,
+            ticket.as_ref(),
+            None,
+            AgentLaunchContext {
+                client: Some(client.clone()),
+                caller: Some(claimed.clone()),
+                caller_operation_id: Some(OperationId::new()),
+                ..AgentLaunchContext::new(
+                    AgentLaunchSource::Unknown,
+                    AgentLaunchEntry::LegacyDispatch,
+                )
+            },
+        )
+        .unwrap();
+    let audit = agent
+        .inventory(intent.workspace)
+        .runtimes
+        .into_iter()
+        .find(|item| item.runtime.terminal == admitted.terminal)
+        .unwrap()
+        .launch_provenance
+        .unwrap();
+    assert_eq!(audit.launched.source, AgentLaunchSource::Unknown);
+    assert_eq!(audit.launched.entrypoint, AgentLaunchEntry::LegacyDispatch);
+    assert_eq!(audit.launched.caller, None);
+    assert_eq!(audit.launched.caller_operation_id, None);
+    assert_eq!(audit.launched.workflow_id, None);
+    assert_eq!(audit.launched.client, Some(client));
+    assert_eq!(audit.created.as_ref(), Some(&audit.launched));
+    let binding = agent.dispatch.binding(operation).unwrap().unwrap();
+    assert_eq!(audit.agent_id, Some(binding.worker.agent_id));
+    assert_eq!(binding.caller, claimed);
+    let encoded = serde_json::to_value(&audit).unwrap();
+    assert_eq!(encoded["launched"]["source"], "unknown");
+    assert_eq!(encoded["launched"]["entrypoint"], "legacy_dispatch");
+    assert_eq!(
+        serde_json::from_value::<usagi_core::domain::agent::AgentLaunchProvenance>(encoded)
+            .unwrap(),
+        audit
+    );
+}
+
+#[test]
 fn manual_connection_evidence_is_durable_and_a_retry_cannot_rewrite_its_creator() {
-    let mut agent = runtime();
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
     let intent = intent(None);
     let scope = FakeScope(Ok(scope()));
     for surface in [
@@ -639,6 +741,26 @@ fn workflow_and_its_mcp_workers_retain_one_workflow_identity_across_resume() {
     let scope = FakeScope(Ok(configured_scope(worktree.path())));
     let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
     let intent = intent(None);
+    let director = OperationId::new();
+    agent
+        .launch(
+            &director.to_string(),
+            &AgentLaunchIntent {
+                workspace: intent.workspace,
+                session: None,
+                profile: None,
+            },
+            &scope,
+        )
+        .unwrap();
+    let credential = agent
+        .mcp_callers
+        .iter()
+        .find(|(_, caller)| caller.operation == director)
+        .unwrap()
+        .0
+        .clone();
+    let actor = agent.mcp_dispatch_context(&credential).unwrap();
     let workflow = OperationId::new();
     let prompt = "Implement and request a peer review";
     let ticket = agent
@@ -652,7 +774,9 @@ fn workflow_and_its_mcp_workers_retain_one_workflow_identity_across_resume() {
             &scope,
             ticket.as_ref(),
             AgentLaunchContext {
-                client: Some(audit_client(AgentClientSurface::Tui)),
+                client: Some(audit_client(AgentClientSurface::Mcp)),
+                caller: Some(actor.caller.clone()),
+                caller_operation_id: Some(actor.run_id),
                 ..AgentLaunchContext::new(
                     AgentLaunchSource::Workflow,
                     AgentLaunchEntry::WorkflowStart,
@@ -704,6 +828,9 @@ fn workflow_and_its_mcp_workers_retain_one_workflow_identity_across_resume() {
         .as_ref()
         .unwrap();
     assert_eq!(parent_audit.launched.workflow_id, Some(workflow));
+    assert_eq!(parent_audit.launched.caller, Some(actor.caller));
+    assert_eq!(parent_audit.launched.caller_operation_id, Some(director));
+    assert_eq!(parent_audit.launched.source, AgentLaunchSource::Workflow);
     let worker_audit = inventory
         .runtimes
         .iter()

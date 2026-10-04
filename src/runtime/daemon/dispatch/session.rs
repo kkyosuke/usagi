@@ -135,7 +135,10 @@ pub(super) fn dispatch_session_action(
     {
         return Err(SessionRuntimeError::ScopeUnavailable);
     }
-    let caller = authenticated_caller.as_ref().map(|caller| &caller.caller);
+    let (caller, caller_operation) = match authenticated_caller.as_ref() {
+        Some(authenticated) => (Some(&authenticated.caller), Some(authenticated.run_id)),
+        None => (None, None),
+    };
     let target_session = |name: &str| {
         let sessions = bound
             .sessions()
@@ -422,7 +425,13 @@ pub(super) fn dispatch_session_action(
                         .map_err(|_| SessionRuntimeError::InvalidRequest)?,
                     command,
                     issue,
-                    context.launch_client.cloned(),
+                    launch_context(
+                        usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                        usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+                        context.launch_client,
+                        caller,
+                        caller_operation,
+                    ),
                 ),
             }
             .map_err(workflow::refusal)?;
@@ -1381,6 +1390,8 @@ mod provenance_tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let foreign = SessionId::new();
+        let operation = usagi_core::domain::id::OperationId::new();
+        let agent = usagi_core::domain::id::AgentId::new();
         let item = |session_id| {
             let terminal = TerminalRef {
                 daemon_generation: DaemonGeneration::new(),
@@ -1390,6 +1401,8 @@ mod provenance_tests {
                 worktree_id: WorktreeId::new(),
             };
             AgentRuntimeInventoryItem {
+                operation_id: Some(operation),
+                agent_id: Some(agent),
                 runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal, session_id).unwrap(),
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Live,
@@ -1407,6 +1420,12 @@ mod provenance_tests {
         assert_eq!(all["runtimes"].as_array().unwrap().len(), 3);
         assert_eq!(all["runtimes"][0]["session_name"], serde_json::Value::Null);
         assert_eq!(all["runtimes"][1]["session_name"], "working");
+        assert_eq!(
+            all["runtimes"][1]["operation_id"],
+            serde_json::json!(operation)
+        );
+        assert_eq!(all["runtimes"][1]["agent_id"], serde_json::json!(agent));
+        assert!(all["runtimes"][1]["launch_provenance"].is_null());
         let owned = BTreeSet::from([session]);
         let limited = named_agent_inventory(&snapshot, inventory.clone(), Some(&owned));
         assert_eq!(limited["runtimes"].as_array().unwrap().len(), 1);

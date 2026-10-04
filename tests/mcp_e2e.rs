@@ -470,6 +470,15 @@ if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
 sleep 30
 "#,
     );
+    drop(mcp.launch_caller());
+    let caller = tool_text(&mcp.tool("agent_peers", &json!({})));
+    let caller_run = caller["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["agent_id"] == caller["self_agent_id"])
+        .unwrap()["launch_provenance"]["launched"]["operation_id"]
+        .clone();
     assert!(mcp.tool("session_create", &json!({"name":"workflow-run"}))["error"].is_null());
 
     // Nobody is named, so the start uses what this workspace remembers. The
@@ -496,6 +505,20 @@ sleep 30
     assert_eq!(started["run"]["goal"], "add a login form");
     assert_eq!(started["run"]["agents"]["implementer"], "claude");
     assert_eq!(started["run"]["phase"], "implementing");
+    let session = tool_text(&mcp.tool("session_get", &json!({"name":"workflow-run"})));
+    let audit = &session["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| {
+            agent["launch_provenance"]["launched"]["operation_id"] == started["run"]["id"]
+        })
+        .unwrap()["launch_provenance"]["launched"];
+    assert_eq!(audit["source"], "workflow");
+    assert_eq!(audit["workflow_id"], started["run"]["id"]);
+    assert_eq!(audit["caller"]["agent_id"], caller["self_agent_id"]);
+    assert_eq!(audit["caller_operation_id"], caller_run);
+    assert_eq!(audit["client"]["surface"], "mcp");
 
     // The same call is one operation: repeating it answers with the same run
     // instead of starting a second one.
@@ -1960,6 +1983,33 @@ fi
         })
         .unwrap();
     assert!(matches!(reply, DaemonReply::Accepted { .. }));
+    let DaemonReply::Accepted {
+        body: admission, ..
+    } = reply
+    else {
+        unreachable!()
+    };
+    let inventory = match client
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
+        .unwrap()
+    {
+        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+    };
+    let audit = &inventory["runtimes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["runtime"]["terminal"] == admission["terminal"])
+        .unwrap()["launch_provenance"]["created"];
+    assert_eq!(audit["source"], "unknown");
+    assert_eq!(audit["entrypoint"], "legacy_dispatch");
+    assert!(audit["caller"].is_null());
+    assert!(audit["caller_operation_id"].is_null());
+    assert_eq!(audit["client"]["surface"], "cli");
+    assert_eq!(audit["client"]["peer_pid"], std::process::id());
 
     let decision_path = mcp.data_dir().join("daemon/user-decisions.json");
     let deadline = Instant::now() + Duration::from_secs(15);

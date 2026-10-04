@@ -1065,6 +1065,8 @@ mod tests {
                     agents: AgentInventory {
                         workspace_id: workspace,
                         runtimes: vec![AgentRuntimeInventoryItem {
+                            operation_id: None,
+                            agent_id: None,
                             launch_provenance: None,
                             runtime,
                             continuation: old.continuation,
@@ -1111,6 +1113,8 @@ mod tests {
                     agents: AgentInventory {
                         workspace_id: workspace,
                         runtimes: vec![AgentRuntimeInventoryItem {
+                            operation_id: None,
+                            agent_id: None,
                             launch_provenance: None,
                             runtime: replacement_runtime,
                             continuation: old.continuation,

@@ -199,6 +199,8 @@ fn restore_worker_retries_a_cross_rpc_snapshot_race_until_refs_are_coherent() {
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), None).unwrap(),
             continuation,
@@ -477,6 +479,8 @@ fn restore_scope_change_rejects_snapshot_and_exact_duplicates_normalize_once() {
     let foreign = scoped_terminal_ref(workspace, Some(added_session));
     let continuation = AgentContinuationRef::new();
     let foreign_runtime = AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
         launch_provenance: None,
         runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), foreign, Some(added_session)).unwrap(),
         continuation,
@@ -501,6 +505,8 @@ fn restore_scope_change_rejects_snapshot_and_exact_duplicates_normalize_once() {
         live: true,
     };
     let duplicate_runtime = || AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
         launch_provenance: None,
         runtime: AgentRuntimeRef::new(
             AgentRuntimeId::new(),
@@ -731,6 +737,8 @@ fn mixed_restore_intent_failure_preserves_visible_agents_and_restores_generics()
                 workspace_id: workspace,
                 runtimes: vec![
                     AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
                         launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
@@ -743,6 +751,8 @@ fn mixed_restore_intent_failure_preserves_visible_agents_and_restores_generics()
                         resumed_from: None,
                     },
                     AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
                         launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
@@ -1013,6 +1023,8 @@ fn late_restore_leaves_runtime_and_durable_intent_bytes_unchanged() {
     let mutation_count = mutations.lock().unwrap().len();
 
     let runtime_item = |continuation, terminal: &TerminalRef| AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
         launch_provenance: None,
         runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
             .unwrap(),
@@ -1162,6 +1174,8 @@ fn cross_tui_stale_observe_omits_old_ref_then_fresh_observation_restores_replace
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),
@@ -1255,6 +1269,8 @@ fn successful_restore_retains_port_and_reconnect_reobserves_exactly_once() {
             live: true,
         }],
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),
@@ -1489,6 +1505,8 @@ fn workflow_focus_survives_agent_restore_and_explicit_agent_selection_still_work
     let agents = terminals
         .iter()
         .map(|terminal| AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
             launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),

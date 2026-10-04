@@ -113,6 +113,8 @@ pub struct CallerRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLaunchSource {
+    /// The legacy IPC dispatch carries no authenticated initiating Agent.
+    Unknown,
     Manual,
     Mcp,
     Workflow,
@@ -123,6 +125,7 @@ pub enum AgentLaunchSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentLaunchEntry {
+    LegacyDispatch,
     Agent,
     AgentGoal,
     SessionDispatch,
@@ -522,6 +525,12 @@ pub enum AgentRuntimeInventoryState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRuntimeInventoryItem {
     pub runtime: AgentRuntimeRef,
+    /// Known durable operation, independent of optional legacy launch audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+    /// Exact Agent identity from a retained binding or launch audit, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     pub continuation: AgentContinuationRef,
     pub state: AgentRuntimeInventoryState,
     /// Exact source from which this runtime was resumed, when applicable.

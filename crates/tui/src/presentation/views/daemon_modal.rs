@@ -39,7 +39,7 @@ pub(crate) fn origin_label(provenance: Option<&AgentLaunchProvenance>) -> &'stat
         Some(AgentLaunchSource::Mcp) => "MCP",
         Some(AgentLaunchSource::Workflow) => "Workflow",
         Some(AgentLaunchSource::Daemon) => "Daemon",
-        None => "Unknown",
+        Some(AgentLaunchSource::Unknown) | None => "Unknown",
     }
 }
 
@@ -203,6 +203,7 @@ mod origin_tests {
     fn origin_labels_use_creation_and_do_not_guess_legacy_metadata() {
         assert_eq!(origin_label(None), "Unknown");
         for (source, label) in [
+            (AgentLaunchSource::Unknown, "Unknown"),
             (AgentLaunchSource::Manual, "Manual"),
             (AgentLaunchSource::Mcp, "MCP"),
             (AgentLaunchSource::Workflow, "Workflow"),
