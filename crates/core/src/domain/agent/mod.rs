@@ -128,7 +128,9 @@ pub struct DispatchBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StructuredResult {
     pub pr: Option<String>,
+    #[serde(default)]
     pub commits: Vec<String>,
+    #[serde(default)]
     pub changed_files: Vec<String>,
     pub verification: Option<String>,
 }
@@ -1041,6 +1043,47 @@ mod tests {
                 serde_json::from_str::<InboxKind>(&serde_json::to_string(&kind).unwrap()).unwrap(),
                 kind
             );
+        }
+    }
+
+    #[test]
+    fn partial_structured_results_default_only_omitted_collections() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"verification": "cargo test"}),
+            serde_json::json!({"pr": "#321"}),
+            serde_json::json!({"commits": ["abc"]}),
+            serde_json::json!({"changed_files": ["fixture.rs"]}),
+        ] {
+            let result: StructuredResult = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(
+                result.commits,
+                if payload.get("commits").is_some() {
+                    vec!["abc"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                result.changed_files,
+                if payload.get("changed_files").is_some() {
+                    vec!["fixture.rs"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(result.pr.as_deref(), payload["pr"].as_str());
+            assert_eq!(
+                result.verification.as_deref(),
+                payload["verification"].as_str()
+            );
+        }
+        for invalid in [
+            serde_json::json!({"commits": null}),
+            serde_json::json!({"changed_files": "fixture.rs"}),
+            serde_json::json!({"commits": [123]}),
+        ] {
+            assert!(serde_json::from_value::<StructuredResult>(invalid).is_err());
         }
     }
 
