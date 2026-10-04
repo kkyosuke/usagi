@@ -91,6 +91,7 @@ const PR_ICON: &str = "\u{ea64}";
 const SESSION_CURSOR_ICON: &str = "\u{f0907}";
 const SWITCH_ICON: &str = "\u{f0ec}";
 const CLOSEUP_ICON: &str = "\u{f00e}";
+const NOTE_ICON: &str = "\u{f249}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IconSet {
@@ -100,6 +101,7 @@ struct IconSet {
     decision: &'static str,
     pull_request: &'static str,
     session_cursor: &'static str,
+    note: &'static str,
 }
 
 const fn icon_set(mode: IconMode) -> IconSet {
@@ -111,6 +113,7 @@ const fn icon_set(mode: IconMode) -> IconSet {
             decision: DECISION_NOTICE_ICON,
             pull_request: PR_ICON,
             session_cursor: SESSION_CURSOR_ICON,
+            note: NOTE_ICON,
         },
         IconMode::Text => IconSet {
             cpu: "CPU",
@@ -119,6 +122,7 @@ const fn icon_set(mode: IconMode) -> IconSet {
             decision: "!",
             pull_request: "PR",
             session_cursor: ">",
+            note: "▤",
         },
     }
 }
@@ -2552,10 +2556,7 @@ pub fn render_home_at(
     // height underneath, so opening it neither reflows the sidebar (the mascot
     // stays on its row) nor looks like a terminal resize.
     let split = panes::split(width, LEFT_WIDTH);
-    let right = dim_inactive_right_pane(
-        !home.right_pane_focused(),
-        home_right_pane(body_height, split.right, home),
-    );
+    let right = home_right_pane(body_height, split.right, home);
     frame.extend(panes::join(
         body_height,
         &home_left_pane(body_height, split.left, home, now),
@@ -3162,7 +3163,11 @@ fn home_row_lines_at(
     );
     let first = if let Some(session) = session {
         // Keep the note column stable without showing an unexplained placeholder.
-        let note = if session.has_notes { "✎" } else { " " };
+        let note = if session.has_notes {
+            icon_set(home.icon_mode).note
+        } else {
+            " "
+        };
         widgets::pad_to_width(
             &format!(
                 "{marker} {label}{badge}  {}",
@@ -3438,7 +3443,10 @@ fn home_session_continuation_marker(selected: bool, current: bool) -> String {
 }
 
 fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
-    let mut rows = home_right_pane_content(height, width, home);
+    let mut rows = dim_inactive_right_pane(
+        !home.right_pane_focused(),
+        home_right_pane_content(height, width, home),
+    );
     if home.mode != HomeMode::Switch {
         return rows;
     }
@@ -3452,41 +3460,100 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     else {
         return rows;
     };
-    let mut preview = vec![Style::new().dim().paint(
-        if session.memo.as_deref().is_some_and(|memo| !memo.is_empty()) {
-            " ✎ Memo · n: edit"
-        } else {
-            " n: add memo"
-        },
-    )];
-    if let Some(memo) = &session.memo {
-        let lines = memo.lines().take(4).collect::<Vec<_>>();
-        for (index, line) in lines.iter().take(3).enumerate() {
-            let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
-            let suffix = if index == 2 && lines.len() > 3 {
-                " …"
-            } else {
-                ""
-            };
-            preview.push(
-                Style::new()
-                    .dim()
-                    .paint(&widgets::clip_to_width(&format!(" {line}{suffix}"), width)),
-            );
-        }
+    let memo = session.memo.as_deref().filter(|memo| !memo.is_empty());
+    let live_terminal = home.content_loading.is_none()
+        && !home.pane_tabs.is_empty()
+        && !home.workflow_selected
+        && home.terminal_view.is_some();
+    let content_top = if home.content_loading.is_some() || home.pane_tabs.is_empty() {
+        1
+    } else {
+        2
+    };
+    let start = if memo.is_some() {
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP
+    } else {
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP - 1
+    };
+    let gap = start.saturating_sub(content_top);
+    let budget = if live_terminal {
+        height.saturating_sub(
+            widgets::live_terminal::RIGHT_PANE_CONTENT_TOP + widgets::live_terminal::FOOTER_ROWS,
+        )
+    } else {
+        // Keep room for the tab chrome, agent/detail and feedback rows, and
+        // footer. Empty, loading and Workflow views also retain their status.
+        height.saturating_sub(7 + gap)
+    };
+    let preview = home_memo_preview(memo, width, home.icon_mode, budget);
+    if preview.is_empty() {
+        return rows;
     }
-    // This is a read-only layer over Switch's terminal preview. Keep its PTY
-    // geometry unchanged as the cursor moves between sessions with different notes.
-    let budget = height.saturating_sub(4).min(preview.len());
-    let start = height.saturating_sub(1 + budget);
-    for (row, line) in rows
-        .iter_mut()
-        .skip(start)
-        .zip(preview.into_iter().take(budget))
-    {
-        *row = widgets::clip_to_width(&line, width);
+    if live_terminal {
+        // Overlay only the terminal body; its viewport and PTY geometry stay
+        // unchanged. The empty-memo hint uses the blank chrome row instead.
+        for (row, line) in rows.iter_mut().skip(start).zip(preview) {
+            *row = line;
+        }
+    } else {
+        // Other layouts carry status rather than disposable terminal output.
+        // Compose them below the memo, letting their own renderer fit the body.
+        rows = dim_inactive_right_pane(
+            !home.right_pane_focused(),
+            home_right_pane_content(height - gap - preview.len(), width, home),
+        );
+        drop(rows.splice(
+            content_top..content_top,
+            std::iter::repeat_n(String::new(), gap).chain(preview),
+        ));
     }
     rows
+}
+
+fn home_memo_preview(
+    memo: Option<&str>,
+    width: usize,
+    icon_mode: IconMode,
+    budget: usize,
+) -> Vec<String> {
+    if width < 4 || budget < if memo.is_some() { 3 } else { 1 } {
+        return Vec::new();
+    }
+    let Some(memo) = memo else {
+        return vec![
+            Style::new()
+                .fg(Color::White)
+                .dim()
+                .paint(&widgets::clip_to_width(
+                    &format!(" {} n: add memo", icon_set(icon_mode).note),
+                    width,
+                )),
+        ];
+    };
+    let inner_width = width - 4;
+    let body_limit = budget.saturating_sub(2).min(3);
+    let title = Role::Accent
+        .style()
+        .bold()
+        .paint(&format!("{} Memo · n: edit", icon_set(icon_mode).note));
+    let mut body = Vec::new();
+    let lines = memo.lines().take(body_limit + 1).collect::<Vec<_>>();
+    for (index, line) in lines.iter().take(body_limit).enumerate() {
+        let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
+        let suffix = if index + 1 == body_limit && lines.len() > body_limit {
+            " …"
+        } else {
+            ""
+        };
+        body.push(Style::new().fg(Color::White).paint(&widgets::clip_to_width(
+            &format!("{line}{suffix}"),
+            inner_width,
+        )));
+    }
+    widgets::modal::compact_boxed(&title, inner_width, &body)
+        .into_iter()
+        .map(|line| format!("\u{1b}[0m{line}\u{1b}[0m"))
+        .collect()
 }
 
 fn home_right_pane_content(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
@@ -4139,7 +4206,17 @@ mod tests {
         rows[0].memo =
             Some("一行目\u{1b}[2J\u{1b}]52;c;payload\u{7}\n二行目\n三行目\n隠れた四行目".into());
         let home = HomeProjection::from_state(&state, "work", &rows);
-        let raw = home_right_pane(20, 50, &home).join("\n");
+        let preview = home_right_pane(20, 50, &home);
+        let content = home_right_pane_content(20, 50, &home);
+        let start = widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
+        assert!(strip(&preview[start]).starts_with("┌─ "));
+        assert!(preview[start].contains("Memo · n: edit"));
+        assert!(preview[start + 1].contains("\u{1b}[37m一行目"));
+        assert!(!preview[start + 1].contains("\u{1b}[2m"));
+        assert_eq!(strip(&preview[0]), strip(&content[0]));
+        assert_eq!(strip(&preview[18]), strip(&content[18]));
+        assert_eq!(strip(&preview[19]), strip(&content[19]));
+        let raw = preview.join("\n");
         assert!(!raw.contains("\u{1b}[2J") && !raw.contains("\u{1b}]52") && !raw.contains('\u{7}'));
         let text = home_right_pane(20, 50, &home)
             .iter()
@@ -4148,15 +4225,15 @@ mod tests {
             .join("\n");
         assert!(text.contains("一行目") && text.contains("三行目 …"));
         assert!(!text.contains("隠れた四行目"));
-        for height in [0, 1, 5, 8, 20] {
-            let content = home_right_pane_content(height, 50, &home);
-            let preview = home_right_pane(height, 50, &home);
-            assert_eq!(preview.len(), content.len());
-            assert!(
-                preview
-                    .iter()
-                    .all(|line| widgets::display_width(line) <= 50)
-            );
+        for height in [0, 1, 5, 7, 8, 20] {
+            for width in [0, 1, 3, 4, 8, 50] {
+                let content = home_right_pane_content(height, width, &home);
+                let preview = home_right_pane(height, width, &home);
+                assert_eq!(preview.len(), content.len());
+                assert!(preview.iter().zip(&content).all(|(line, original)| {
+                    widgets::display_width(line) <= width.max(widgets::display_width(original))
+                }));
+            }
         }
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let home = HomeProjection::from_state(&state, "work", &rows);
@@ -4164,6 +4241,13 @@ mod tests {
         assert!(text.contains("n: add memo"));
         assert!(!text.contains("一行目"));
         assert_eq!(state.active(), Some(first));
+        rows[1].memo = Some(String::new());
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        assert!(
+            home_right_pane(20, 50, &home)
+                .join("\n")
+                .contains("n: add memo")
+        );
         rows[1].lifecycle = SessionLifecycle::Failed;
         let home = HomeProjection::from_state(&state, "work", &rows);
         assert!(
@@ -6077,7 +6161,7 @@ mod tests {
             )[0],
         );
         assert!(!first.contains('·'));
-        assert!(!first.contains('✎'));
+        assert!(!first.contains(super::icon_set(home.icon_mode).note));
 
         let mut noted = session;
         noted.has_notes = true;
@@ -6092,7 +6176,21 @@ mod tests {
                 now(),
             )[0],
         );
-        assert!(first.contains('✎'));
+        assert!(first.contains(super::icon_set(home.icon_mode).note));
+        let mut text_home = home;
+        text_home.icon_mode = IconMode::Text;
+        let first = strip(
+            &home_row_lines_at(
+                LEFT_WIDTH,
+                &text_home,
+                Selection::Target(Target::Session(session_id)),
+                SidebarDiffColumns::default(),
+                PR_RESERVE_WIDTH,
+                now(),
+            )[0],
+        );
+        assert!(first.contains('▤'));
+        assert!(!first.contains(super::NOTE_ICON));
     }
 
     #[test]
@@ -7251,6 +7349,8 @@ mod tests {
         assert_eq!(text.decision, "!");
         assert_eq!(text.session_cursor, ">");
         assert_eq!(nerd.session_cursor, super::SESSION_CURSOR_ICON);
+        assert_eq!(nerd.note, super::NOTE_ICON);
+        assert_eq!(text.note, "▤");
 
         let nerd_marker = strip(&super::home_row_marker(
             Selection::Target(Target::Session(session)),
@@ -9023,6 +9123,152 @@ mod tests {
             .cloned()
             .expect("a rendered output row");
         assert_eq!(bottom_output, "live row");
+    }
+
+    #[test]
+    fn switch_memo_card_preserves_terminal_chrome_output_and_feedback() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        let mut projected = projected_session(session, "session", "/work/session");
+        projected.memo = Some("次の作業\nテストを確認する".into());
+        let mut switch = HomeProjection::from_state(&state, "actual", &[projected]);
+        switch.pane_tabs.push(super::HomePaneTab {
+            label: "terminal".into(),
+            selected: true,
+            pending: false,
+        });
+        switch = switch.with_terminal_view(Some(TerminalViewProjection {
+            total_rows: 40,
+            rows: (0..40).map(|row| format!("terminal row {row}")).collect(),
+            row_offset: 0,
+            scroll: 0,
+            feedback: Some("copied 3 lines".to_owned()),
+        }));
+        let content = home_right_pane_content(28, 69, &switch);
+        let preview = home_right_pane(28, 69, &switch);
+        let start = widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
+        assert_eq!(preview.len(), content.len());
+        for row in (0..start).chain(start + 4..content.len()) {
+            assert_eq!(strip(&preview[row]), strip(&content[row]));
+        }
+        assert!(preview[start + 1].contains("次の作業"));
+        assert!(preview[25].contains("terminal row 39"));
+        assert!(preview[27].contains("copied 3 lines"));
+        let frame = render_home(30, 100, &switch);
+        let memo_row = frame[CHROME_ROWS + start + 1]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(memo_row.contains("\u{1b}[37m次の作業"));
+        assert!(!memo_row.contains("\u{1b}[2m"));
+    }
+
+    #[test]
+    fn switch_memo_preserves_agent_phase_resume_detail_and_errors_without_terminal() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業\nテストを確認する")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_tabs.push(super::HomePaneTab {
+                label: "agent".into(),
+                selected: true,
+                pending: true,
+            });
+            home.preview_phase = TargetPhase::Waiting;
+            home.pane_error = Some("agent launch failed".into());
+            for detail in [None, Some("interrupted — Ctrl-O r resumes it")] {
+                home.pane_detail = detail.map(str::to_owned);
+                for height in [7, 8, 10, 11, 12, 20] {
+                    let rows = home_right_pane(height, 80, &home);
+                    let text = strip(&rows.join("\n"));
+                    assert_eq!(rows.len(), height);
+                    assert!(text.contains(&format!("agent: {}", detail.unwrap_or("waiting"))));
+                    assert!(text.contains("feedback: agent launch failed"));
+                    assert!(text.ends_with("[Switch] preview pane"));
+                    if height == 20 {
+                        assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                            "次の作業"
+                        } else {
+                            "n: add memo"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switch_memo_preserves_workflow_status_with_or_without_a_memo() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_tabs.push(super::HomePaneTab {
+                label: "workflow".into(),
+                selected: true,
+                pending: false,
+            });
+            home.workflow_selected = true;
+            for height in [7, 8, 10, 11, 12, 20] {
+                let rows = home_right_pane(height, 80, &home);
+                let text = strip(&rows.join("\n"));
+                assert_eq!(rows.len(), height);
+                assert!(text.contains("Not started"));
+                assert!(text.contains("Ctrl+S: start"));
+                assert!(text.ends_with("[Switch] preview pane"));
+                if height == 20 {
+                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                        "次の作業"
+                    } else {
+                        "n: add memo"
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switch_memo_preserves_empty_pane_captions_and_loading_label() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_error = Some("session unavailable".into());
+            for loading in [None, Some(super::ContentLoading::Pending)] {
+                home.content_loading = loading;
+                for height in [7, 8, 10, 11, 12, 20] {
+                    let rows = home_right_pane(height, 80, &home);
+                    let text = strip(&rows.join("\n"));
+                    assert_eq!(rows.len(), height);
+                    assert!(text.ends_with("[Switch] preview pane"));
+                    if home.content_loading.is_none() {
+                        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
+                        assert!(text.contains("feedback: session unavailable"));
+                    }
+                }
+            }
+            home = home.with_content_loading("Opening session", 3);
+            for height in [7, 8, 10, 11, 12, 20] {
+                let rows = home_right_pane(height, 80, &home);
+                let text = strip(&rows.join("\n"));
+                assert_eq!(rows.len(), height);
+                assert!(text.contains("Opening session"));
+                assert!(text.ends_with("[Switch] preview pane"));
+                if height == 20 {
+                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                        "次の作業"
+                    } else {
+                        "n: add memo"
+                    }));
+                }
+            }
+        }
     }
 
     #[test]
