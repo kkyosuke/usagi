@@ -9134,8 +9134,10 @@ mod tests {
         let mut switch = HomeProjection::from_state(&state, "actual", &[projected]);
         switch.pane_tabs.push(super::HomePaneTab {
             label: "terminal".into(),
+            base_label: "terminal".into(),
             selected: true,
             pending: false,
+            agent_terminal: None,
         });
         switch = switch.with_terminal_view(Some(TerminalViewProjection {
             total_rows: 40,
@@ -9173,8 +9175,10 @@ mod tests {
             let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
             home.pane_tabs.push(super::HomePaneTab {
                 label: "agent".into(),
+                base_label: "agent".into(),
                 selected: true,
                 pending: true,
+                agent_terminal: None,
             });
             home.preview_phase = TargetPhase::Waiting;
             home.pane_error = Some("agent launch failed".into());
@@ -9209,8 +9213,10 @@ mod tests {
             let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
             home.pane_tabs.push(super::HomePaneTab {
                 label: "workflow".into(),
+                base_label: "workflow".into(),
                 selected: true,
                 pending: false,
+                agent_terminal: None,
             });
             home.workflow_selected = true;
             for height in [7, 8, 10, 11, 12, 20] {
