@@ -3101,6 +3101,7 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                launch_provenance: None,
                 runtime: first_runtime.clone(),
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Live,
@@ -3168,6 +3169,7 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                launch_provenance: None,
                 runtime: interrupted.clone(),
                 continuation,
                 state: AgentRuntimeInventoryState::Interrupted,

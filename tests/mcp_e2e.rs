@@ -2308,6 +2308,13 @@ exit 0
     let agents = tool_text(&mcp.tool("agent_list", &json!({})));
     assert_eq!(agents["agents"].as_array().unwrap().len(), 1);
     assert_eq!(agents["agents"][0]["agent_id"], admission["agent_id"]);
+    let provenance = &agents["agents"][0]["launch_provenance"];
+    assert_eq!(provenance["created"]["source"], "mcp");
+    assert_eq!(provenance["created"]["entrypoint"], "session_dispatch");
+    assert_eq!(
+        provenance["created"]["caller"]["agent_id"],
+        tool_text(&mcp.tool("agent_peers", &json!({})))["self_agent_id"]
+    );
     assert!(
         mcp.tool(
             "agent_get",
@@ -2396,6 +2403,10 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     let before = tool_text(&mcp.tool("agent_peers", &json!({})));
     let self_id = before["self_agent_id"].clone();
     assert_eq!(before["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        before["agents"][0]["launch_provenance"]["created"]["source"],
+        "manual"
+    );
     let handoff = mcp.tool(
         "agent_handoff",
         &json!({
@@ -2409,6 +2420,21 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     assert_ne!(admission["agent_id"], self_id);
     let peers = tool_text(&mcp.tool("agent_peers", &json!({})));
     assert_eq!(peers["agents"].as_array().unwrap().len(), 2);
+    let worker = peers["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["agent_id"] == admission["agent_id"])
+        .unwrap();
+    assert_eq!(worker["launch_provenance"]["created"]["source"], "mcp");
+    assert_eq!(
+        worker["launch_provenance"]["created"]["entrypoint"],
+        "agent_handoff"
+    );
+    assert_eq!(
+        worker["launch_provenance"]["created"]["caller"]["agent_id"],
+        self_id
+    );
     assert!(
         tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
             .as_array()

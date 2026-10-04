@@ -25,6 +25,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
 - [agent ownership](#agent-ownership)
+  - [Agent の作成元と起動記録](#agent-の作成元と起動記録)
 - [final retention と aggregate GC](#final-retention-と-aggregate-gc)
 - [supervisor scheduler](#supervisor-scheduler)
 - [supervisor policy and verification](#supervisor-policy-and-verification)
@@ -1776,6 +1777,41 @@ Run を終端化する。成功応答は `supervisor_run_id` を含み、再送�
 credential の durable form は `daemon_minted_ephemeral` という provenance だけである。opaque secret 自体は
 dispatch registry、runtime snapshot、IPC、terminal journal、log のいずれにも保存しない。daemon restart では
 in-memory caller registry が空になるため、旧 credential は必ず失効する。
+
+### Agent の作成元と起動記録
+
+本節が Agent の作成元を調べるための `launch_provenance` の正本である。daemon は runtime reservation と一緒に、
+spawn より先にこの記録を保存する。prompt の内容や client が指定した source から起動元を推測しない。
+
+| field | 内容 |
+|---|---|
+| `created` | 同じ Agent identity の最初の作成記録。既存 Agent の再利用・handoff・exact resume でも保持する |
+| `launched` | この runtime を起動した操作。再開時は再開を要求した側の記録になる |
+| 各記録の `source` / `entrypoint` | 信頼された daemon 入口が決める分類と操作名 |
+| 各記録の `operation_id` / `at` | 起動を受理した operation ID と UTC 時刻。同じ operation の retry は元の記録を返す |
+| 各記録の `caller` | MCP 起動・再開を要求した認証済み Agent の `agent_id` と `session_id`。workspace root の caller は `session_id: null`。人や daemon 自身の操作は `caller: null` |
+
+| `source` | 起動経路と `entrypoint` |
+|---|---|
+| `manual` | TUI / CLI の `agent`、Goal 起動 `agent_goal`、明示再開 `session_resume`、integration repair `integration_repair` |
+| `mcp` | `session_dispatch`、同一 session の `agent_handoff`、`session_delegate_brief` による即時起動、および認証済み Agent による再開 |
+| `workflow` | workflow lane の step 起動 `workflow_start`。Workflow を開始した面にかかわらず、step の実行元はこの lane である |
+| `daemon` | daemon restart に伴う再開 `daemon_restart`。integration revision の更新を伴う場合も同じ分類 |
+
+`session_delegate_issue` は prompt を queue へ保存するだけなので、この時点では runtime の起動記録を作らない。
+後で人が `agent` を実行した場合、起動元は `manual` であり、仕事を委譲した caller は既存の dispatch binding に残る。
+
+`usagi session agents` は現在の workspace の root / session runtime を session 名とともに JSON で列挙する。
+例えば同じ session の `created.source: manual` と `created.source: mcp` を区別し、MCP の `caller.agent_id` と
+`operation_id`、`at` から作成の経緯を追える。各 retained runtime の `launched` を比較すれば、その後の再開も確認できる。
+MCP の `agent_peers` / `session_get` / `agent_list` / `agent_get` も、各 Agent の最新 run に対応する optional な
+`launch_provenance` を返す。既存の session creator authority による可視範囲を広げない。
+
+記録を持たない旧バージョンの runtime は `launch_provenance` が欠け、作成元は **Unknown** と表示する。
+その Agent を再利用・再開すると `launched` は記録するが、`created: null` を保持する。元の記録が retention で
+失われた場合も、新しい起動元を作成元として補わない。履歴は [final retention と aggregate GC](#final-retention-と-aggregate-gc)
+および session teardown の対象であり、無期限の監査ログではない。provider の native conversation ID、credential、
+prompt 本文はこの記録に含めない。
 
 ### Provider-native conversation resume
 

@@ -476,7 +476,15 @@ impl AgentRuntime {
             ));
         }
         let semantic = format!("workflow:{}:{prompt}", semantic_key(intent));
-        let outcome = self.admit(operation_id, intent, scope, Some(prompt), &semantic);
+        let outcome = self.admit(
+            operation_id,
+            intent,
+            scope,
+            Some(prompt),
+            &semantic,
+            usagi_core::domain::agent::AgentLaunchSource::Workflow,
+            usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+        );
         self.remember_operation(operation_id, Some(&semantic), outcome.clone());
         outcome
     }
@@ -654,6 +662,31 @@ impl AgentRuntime {
             session,
             scope,
             Some(planned_worker),
+        )
+    }
+
+    /// The composition root supplies the actual tool entry point; it is never
+    /// accepted from a worker selector or prompt.
+    #[allow(clippy::too_many_arguments)] // Preserve readiness and planned worker fences while carrying the trusted audit entry.
+    pub fn dispatch_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        planned_worker: Option<&usagi_core::domain::agent::Agent>,
+        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_dispatch_readiness(operation_id, intent)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.dispatch_with_planned_worker_from(
+            operation_id,
+            intent,
+            session,
+            scope,
+            planned_worker,
+            entrypoint,
         )
     }
 
@@ -1675,6 +1708,7 @@ impl AgentRuntime {
                             runtime_inventory_state(record.state)
                         },
                         resumed_from: record.resumed_from,
+                        launch_provenance: record.launch_provenance.clone(),
                     })
             })
             .collect();
@@ -1707,6 +1741,40 @@ impl AgentRuntime {
             runtimes,
             resumable,
         }
+    }
+
+    /// Join each Agent's latest dispatch run to its durable runtime audit.
+    /// Missing legacy provenance remains unknown rather than falling back to
+    /// an older launch under a different creator.
+    ///
+    /// # Errors
+    /// Returns a storage error if dispatch history cannot be read.
+    pub fn agent_launch_provenance(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<
+        BTreeMap<AgentId, Option<usagi_core::domain::agent::AgentLaunchProvenance>>,
+        ProtocolError,
+    > {
+        let origins = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .map(|record| (record.operation.operation_id, record.launch_provenance))
+            .collect::<BTreeMap<_, _>>();
+        let mut latest = BTreeMap::<AgentId, (chrono::DateTime<Utc>, OperationId)>::new();
+        for run in self.dispatch.runs().map_err(map_dispatch_storage_error)? {
+            latest
+                .entry(run.agent_id)
+                .and_modify(|previous| *previous = (*previous).max((run.started_at, run.run_id)))
+                .or_insert((run.started_at, run.run_id));
+        }
+        Ok(latest
+            .into_iter()
+            .map(|(agent, (_, operation))| (agent, origins.get(&operation).cloned().flatten()))
+            .collect())
     }
 
     /// Projects dispatch availability together with activity reported by exact

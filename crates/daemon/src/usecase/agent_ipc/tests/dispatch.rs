@@ -1123,6 +1123,7 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
                 &dispatch.prompt,
             ),
             &FakeScope(Ok(configured_scope(worktree.path()))),
+            usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
         )
         .unwrap();
     runtime.remember_operation(

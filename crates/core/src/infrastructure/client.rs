@@ -1044,7 +1044,8 @@ impl RetryEligibility {
 const fn session_action_is_read_only(action: SessionAction) -> bool {
     matches!(
         action,
-        SessionAction::List
+        SessionAction::Agents
+            | SessionAction::List
             | SessionAction::Status
             | SessionAction::Overview
             | SessionAction::Pr
@@ -2401,6 +2402,11 @@ mod deadline_and_retry_tests {
             DaemonRequest::Session {
                 action: SessionAction::WorkflowStatus,
                 operation_id: "op".into(),
+                payload: session_payload(),
+            },
+            DaemonRequest::Session {
+                action: SessionAction::Agents,
+                operation_id: "read-only-audit".into(),
                 payload: session_payload(),
             },
             DaemonRequest::Pr {

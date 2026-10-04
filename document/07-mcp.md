@@ -510,6 +510,10 @@ payload に送信者や session を指定することはできない。session �
 | `agent_messages` | 自分が送信者または受信者の履歴を `after` / `limit`（1–100）で読む。`unread_only` は未 ACK の受信だけを返す |
 | `agent_message_ack` | 受信した `message_id` を処理済みにする。run の完了にはしない |
 
+`agent_peers` / `session_get` / `agent_list` / `agent_get` は optional な `launch_provenance` も返す。
+daemon が認証済み caller と実際の入口から記録し、request payload で source や caller を指定できない。
+調査手順と field の意味は [Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を参照。
+
 handoff は session・worktree・role assignment を新設または変更しない。新規 selector は同じ runtime/model の Agent が
 いても別 identity を作る。既存 Agent への handoff は停止中だけを受理し、自分自身・別 session・実行中 peer は拒否する。
 稼働中 peer とのやり取りには message を使う。handoff は異なる runtime を明示的に許可するが、runtime/model allowlist、

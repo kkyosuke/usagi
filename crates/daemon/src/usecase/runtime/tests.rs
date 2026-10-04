@@ -177,6 +177,7 @@ fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
         schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
         records: vec![
             DurableRuntimeRecord {
+                launch_provenance: None,
                 runtime: runtime.clone(),
                 operation: operation.clone(),
                 launch: launch.clone(),
@@ -192,6 +193,7 @@ fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
                 credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
             },
             DurableRuntimeRecord {
+                launch_provenance: None,
                 runtime,
                 operation,
                 launch,
@@ -409,6 +411,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (runtime, operation) = refs(&request);
     let launch = Resolver::default().resolve(&request).unwrap().snapshot;
     let record = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime,
         operation,
         launch,
@@ -473,6 +476,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (other_runtime, mut same_operation) = refs(&request);
     same_operation.operation_id = record.operation.operation_id;
     let duplicate_operation = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: other_runtime,
         operation: same_operation,
         ..record.clone()
@@ -494,6 +498,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     lineage_source.resume_source = Some(source_id);
     let (replacement_runtime, replacement_operation) = refs(&request);
     let mut replacement = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: replacement_runtime,
         operation: replacement_operation,
         ..record.clone()
@@ -566,6 +571,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     );
     let (competing_runtime, competing_operation) = refs(&request);
     let mut competing_replacement = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: competing_runtime,
         operation: competing_operation,
         resume_source: Some(usagi_core::domain::id::AgentResumeSourceId::new()),
@@ -614,6 +620,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let mut unfenced_source = record.clone();
     unfenced_source.superseded_by = Some(unfenced_runtime.agent_runtime_id);
     let unfenced_replacement = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: unfenced_runtime,
         operation: unfenced_operation,
         ..record.clone()
@@ -632,6 +639,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (first_runtime, first_operation) = refs(&request);
     let (second_runtime, second_operation) = refs(&request);
     let mut first_cycle = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: first_runtime,
         operation: first_operation,
         continuation: Some(continuation),
@@ -640,6 +648,7 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
         ..record.clone()
     };
     let second_cycle = DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: second_runtime,
         operation: second_operation,
         continuation: Some(continuation),
@@ -763,6 +772,7 @@ fn durable_snapshot_schema_round_trips_every_safe_outcome_and_rejects_unknown_fi
         let snapshot = RuntimeStoreSnapshot {
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: vec![DurableRuntimeRecord {
+                launch_provenance: None,
                 runtime: runtime.clone(),
                 operation: operation.clone(),
                 launch: launch.clone(),

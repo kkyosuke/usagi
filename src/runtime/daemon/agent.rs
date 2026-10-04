@@ -929,19 +929,25 @@ pub(super) fn restore_pending_daemon_agents(
             .lock()
             .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
         let resumed = if current_integration {
-            owner.resume_with_current_integration_after_readiness(
+            owner.resume_with_current_integration_from_after_readiness(
                 &item.resume_operation_id,
                 &item.agent.target,
                 item.agent.expected_revision,
                 scope,
                 preflight.as_ref(),
+                usagi_core::domain::agent::AgentLaunchSource::Daemon,
+                usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+                None,
             )
         } else {
-            owner.resume_exact_after_readiness(
+            owner.resume_from_after_readiness(
                 &item.resume_operation_id,
                 &item.agent.target,
                 scope,
                 preflight.as_ref(),
+                usagi_core::domain::agent::AgentLaunchSource::Daemon,
+                usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+                None,
             )
         };
         resumed.map_err(|error| std::io::Error::other(error.message))?;

@@ -2398,6 +2398,7 @@ fn same_tui_reopen_waits_for_fresh_observation_and_preserves_new_generic_pane() 
             agents: Ok(AgentInventory {
                 workspace_id: workspace,
                 runtimes: vec![AgentRuntimeInventoryItem {
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(
                         AgentRuntimeId::new(),
                         agent_terminal.clone(),

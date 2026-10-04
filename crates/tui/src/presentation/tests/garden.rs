@@ -17,6 +17,7 @@ fn inactive_garden_counts_follow_dismissal_and_reopen() {
         inventory: AgentInventory {
             workspace_id: beta.workspace_id,
             runtimes: vec![AgentRuntimeInventoryItem {
+                launch_provenance: None,
                 runtime: AgentRuntimeRef {
                     agent_runtime_id: runtime_id,
                     terminal: TerminalRef {
@@ -332,6 +333,7 @@ fn garden_frame_material_uses_every_open_projects_projection() {
         inventory: AgentInventory {
             workspace_id: beta.workspace_id,
             runtimes: vec![AgentRuntimeInventoryItem {
+                launch_provenance: None,
                 runtime: AgentRuntimeRef {
                     agent_runtime_id: runtime_id,
                     terminal: TerminalRef {

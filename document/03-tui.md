@@ -1823,6 +1823,9 @@ attach し、選択外または background target の tab は background のま�
 右ペインは session 名の右に tab を Chrome 風の chip として描き、その直下に active marker を置く。前面の Closeup では表示中の chip をクリックして tab を切り替えられる。click は描画と同じ表示幅・clipping で解決し、表示 index を pane reducer が所有する stable identity に変換して選択する。chip の表示順・label は表示専用であり、選択は pending / document の `OperationId` または terminal live の完全な `TerminalRef` から投影する。
 幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は固定幅のまま tab 名の文字ごとに
 低速の highlight wave を流す。
+Agent の live / interrupted chip と daemon modal の runtime 一覧には、daemon の起動記録から作成元 badge を添える。
+badge は完全な `TerminalRef` と一致した runtime からだけ投影する。分類と Unknown の意味、CLI からの詳しい調査は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を参照。
 tab が無い target は、灰色の静的うさぎと `a: agent / t: terminal / Enter: actions` の案内を、それぞれ
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。

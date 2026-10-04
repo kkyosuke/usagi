@@ -1903,6 +1903,7 @@ mod tests {
                     .into_iter()
                     .map(
                         |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
+                            launch_provenance: None,
                             runtime,
                             continuation: usagi_core::domain::id::AgentContinuationRef::new(),
                             state,

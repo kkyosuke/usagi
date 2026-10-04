@@ -13,8 +13,40 @@ use super::{
     dispatch_binding_unavailable, durable_operation_outcome, is_resume_source_state,
     map_dispatch_storage_error, map_orchestration_error, map_runtime_error, map_scope_error,
 };
+use usagi_core::domain::agent::{
+    AgentLaunchEntry, AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource,
+};
 
 impl AgentRuntime {
+    /// Keep an Agent's creator through fresh conversations as well as exact
+    /// resume. A retained legacy run or an expired audit never acquires a
+    /// guessed creation source from its next launch.
+    fn provenance_for_agent(
+        &self,
+        agent: AgentId,
+        launched: AgentLaunchOrigin,
+    ) -> Result<AgentLaunchProvenance, ProtocolError> {
+        let previous = self
+            .dispatch
+            .runs()
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .filter(|run| run.agent_id == agent)
+            .max_by_key(|run| (run.started_at, run.run_id));
+        let created = match previous {
+            None => Some(launched.clone()),
+            Some(run) => self
+                .coordinator
+                .snapshot()
+                .records
+                .into_iter()
+                .find(|record| record.operation.operation_id == run.run_id)
+                .and_then(|record| record.launch_provenance)
+                .and_then(|provenance| provenance.created),
+        };
+        Ok(AgentLaunchProvenance { created, launched })
+    }
+
     /// Frees one slot at saturation by sleeping the oldest completed turn that
     /// can be resumed exactly. Running, waiting, and merely ready Agents are
     /// never selected automatically.
@@ -61,6 +93,7 @@ impl AgentRuntime {
         caller: &CallerRef,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
+        entrypoint: AgentLaunchEntry,
     ) -> Result<AgentAdmission, ProtocolError> {
         if let Some(existing) = self
             .dispatch
@@ -128,6 +161,16 @@ impl AgentRuntime {
             runtime,
             operation: fence,
             mcp_allowed: true,
+            launch_provenance: Some(self.provenance_for_agent(
+                worker.agent_id,
+                AgentLaunchOrigin {
+                    source: AgentLaunchSource::Mcp,
+                    entrypoint,
+                    caller: Some(caller.clone()),
+                    operation_id: operation,
+                    at: Utc::now(),
+                },
+            )?),
         };
         let credential = OperationId::new().to_string();
         let mut reserved_worker = worker.clone();
@@ -212,6 +255,7 @@ impl AgentRuntime {
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
         repair_revision: Option<u32>,
+        launch_origin: Option<AgentLaunchOrigin>,
     ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| {
             ProtocolError::new(
@@ -350,6 +394,13 @@ impl AgentRuntime {
             runtime,
             operation: fence,
             mcp_allowed: true,
+            launch_provenance: launch_origin.map(|launched| AgentLaunchProvenance {
+                created: source
+                    .launch_provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.created.clone()),
+                launched,
+            }),
         };
         let credential = OperationId::new().to_string();
         // A tuple no longer identifies an Agent: same-session peers may use
@@ -451,6 +502,8 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         initial_prompt: Option<&str>,
         launch_semantic: &str,
+        source: AgentLaunchSource,
+        entrypoint: AgentLaunchEntry,
     ) -> Result<AgentAdmission, ProtocolError> {
         let profile_id = intent
             .profile
@@ -543,11 +596,6 @@ impl AgentRuntime {
                 .into_iter()
                 .collect(),
         };
-        let authorization = RuntimeAuthorization {
-            runtime,
-            operation: fence,
-            mcp_allowed: true,
-        };
         let credential = OperationId::new().to_string();
         let mut worker = self
             .dispatch
@@ -562,6 +610,21 @@ impl AgentRuntime {
             // Ordinary launches must not steal a live peer's identity either.
             worker.agent_id = AgentId::new();
         }
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+            launch_provenance: Some(self.provenance_for_agent(
+                worker.agent_id,
+                AgentLaunchOrigin {
+                    source,
+                    entrypoint,
+                    caller: None,
+                    operation_id: operation,
+                    at: Utc::now(),
+                },
+            )?),
+        };
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         // A delayed delegation carries the authenticated parent in its durable

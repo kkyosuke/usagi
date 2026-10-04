@@ -998,6 +998,7 @@ fn director_selection_rejects_placeholders_and_surfaces_intent_failure() {
     ui.agent_inventory = Some(AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(runtime_id, terminal.clone(), None).unwrap(),
             continuation,
             state: AgentRuntimeInventoryState::Live,

@@ -108,6 +108,50 @@ pub struct CallerRef {
     pub agent_id: AgentId,
 }
 
+/// Daemon-observed launch origin. Credentials and provider IDs never belong in
+/// this audit vocabulary; MCP callers are the authenticated public identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchSource {
+    Manual,
+    Mcp,
+    Workflow,
+    Daemon,
+}
+
+/// Trusted entry point which requested a runtime, rather than its prompt text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchEntry {
+    Agent,
+    AgentGoal,
+    SessionDispatch,
+    AgentHandoff,
+    SessionDelegateBrief,
+    SessionResume,
+    IntegrationRepair,
+    WorkflowStart,
+    DaemonRestart,
+}
+
+/// Immutable audit event recorded before spawning an Agent process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchOrigin {
+    pub source: AgentLaunchSource,
+    pub entrypoint: AgentLaunchEntry,
+    pub caller: Option<CallerRef>,
+    pub operation_id: OperationId,
+    pub at: DateTime<Utc>,
+}
+
+/// Agent creation and this runtime launch are separate facts. Reusing or
+/// resuming a legacy Agent retains an unknown creation origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchProvenance {
+    pub created: Option<AgentLaunchOrigin>,
+    pub launched: AgentLaunchOrigin,
+}
+
 /// The worker side of a durable dispatch binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerRef {
@@ -454,6 +498,9 @@ pub struct AgentRuntimeInventoryItem {
     /// Exact source from which this runtime was resumed, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<AgentResumeSourceId>,
+    /// Missing on older records; absence must not be inferred as manual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_provenance: Option<AgentLaunchProvenance>,
 }
 
 /// Deterministic workspace-wide inventory for root and managed-session Agents.

@@ -547,6 +547,10 @@ snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle 
 
 ## agent launch request
 
+Agent runtime inventory は optional な `launch_provenance` を含む。`session` の read-only `agents` action は
+現在の workspace の inventory に `session_name` を添えて返す。field の意味・旧 peer との互換性は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
+
 `agent` kind は daemon 所有の Agent runtime に届く。client は producer-issued `OperationId` と、`WorkspaceId` / optional `SessionId`（省略時は workspace root）/ optional profile ID だけの launch intent を送る。worktree、checkout path、profile 既定値、argv、environment、secret は wire field ではなく、daemon が [managed session scope](05-daemon.md#authority-と-lifecycle) と code-defined adapter registry から解決する。profile を省略すると daemon の既定 policy が選ぶ。
 
 設定で opt-in した goal-driven workflow は、classic の `agent` を拡張せず専用の `agent_goal` kind を使う。intent は `WorkspaceId`、optional profile ID、16 KiB 以下の非空 UTF-8 `goal` だけを持ち、managed `SessionId` は受け付けない。daemon は必ず workspace root scope を解決し、goal を code-defined autonomous work contract と組み合わせた初回 prompt として durable launch request に保存する。既存の queued initial prompt が同じ root scope にあれば上書きせず safe error にする。classic client の wire shape と「prompt なしで Agent を開く」挙動は変わらない。
