@@ -1,18 +1,19 @@
 //! Comment entry and answer review rendering.
-use super::{modal, wrapped_content_lines};
+use super::{Role, layout, modal, wrapped_content_lines};
 use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
 pub(super) fn comment_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
-    wrapped_content_lines(
+    let rows = layout::wrapped_rows(
         &format!(
             "{}comment (optional): {}",
             if editor.input_comment() { "> " } else { "" },
             editor.comment()
         ),
         "",
-        width,
-    )
+        layout::content_width(width),
+    );
+    layout::card(width, &rows, editor.input_comment())
 }
 
 pub(super) fn editor_footer(editor: &DecisionEditor, multiple: bool) -> Vec<String> {
@@ -58,8 +59,12 @@ pub(super) fn confirmation_body(
     width: usize,
     capacity: usize,
 ) -> Vec<String> {
-    let mut rows = wrapped_content_lines("Review answer", "", width);
+    let mut rows = wrapped_content_lines("Review answer", "", width)
+        .into_iter()
+        .map(|line| Role::Accent.style().bold().paint(&line))
+        .collect::<Vec<_>>();
     rows.extend(wrapped_content_lines(&editor.decision().title, "", width));
+    rows.push(String::new());
     match answer {
         UserDecisionAnswer::Option { option_id, .. } => {
             add_choice(&mut rows, editor, option_id, width);
@@ -70,14 +75,18 @@ pub(super) fn confirmation_body(
             }
         }
         UserDecisionAnswer::Freeform { text } => {
-            rows.extend(wrapped_content_lines(text, "Answer: ", width));
+            add_card(&mut rows, text, "Answer: ", width);
         }
     }
     if let Some(comment) = answer.comment() {
-        rows.extend(wrapped_content_lines(comment, "Comment: ", width));
+        add_card(&mut rows, comment, "Comment: ", width);
     }
     if let Some(error) = editor.error() {
-        rows.extend(wrapped_content_lines(error.message.as_str(), "", width));
+        rows.extend(
+            wrapped_content_lines(error.message.as_str(), "", width)
+                .into_iter()
+                .map(|line| Role::Danger.style().paint(&line)),
+        );
     }
     let offset = editor.scroll_offset().unwrap_or_else(|| {
         if editor.error().is_some() {
@@ -100,9 +109,13 @@ fn add_choice(rows: &mut Vec<String>, editor: &DecisionEditor, id: &str, width: 
         .iter()
         .find(|option| option.id == id)
         .map_or(id, |option| option.label.as_str());
-    rows.extend(wrapped_content_lines(
-        &format!("{label} [{id}]"),
-        "Choice: ",
+    add_card(rows, &format!("{label} [{id}]"), "Choice: ", width);
+}
+
+fn add_card(rows: &mut Vec<String>, text: &str, prefix: &str, width: usize) {
+    rows.extend(layout::card(
         width,
+        &layout::wrapped_rows(text, prefix, layout::content_width(width)),
+        false,
     ));
 }

@@ -2,8 +2,8 @@
 
 mod composition;
 mod context;
+mod layout;
 
-use usagi_core::domain::presentation_text::sanitize_presentation_line;
 use usagi_core::domain::user_decision::UserDecisionSelectionMode;
 
 use crate::presentation::theme::{Role, Style};
@@ -39,33 +39,14 @@ const fn scaled(available: usize, min: usize, max: usize) -> usize {
 }
 
 fn wrapped_content_lines(text: &str, prefix: &str, inner_width: usize) -> Vec<String> {
-    let width = inner_width.saturating_sub(modal::BODY_INDENT_WIDTH);
-    let continuation = " ".repeat(prefix.len());
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        let mut wrapped = widgets::wrap_to_width(
-            &sanitize_presentation_line(line),
-            width.saturating_sub(prefix.len()),
-        );
-        if wrapped.is_empty() {
-            wrapped.push(String::new());
-        }
-        for (index, segment) in wrapped.into_iter().enumerate() {
-            let indent = if index == 0 { prefix } else { &continuation };
-            rows.push(modal::content_line(
-                &format!("{indent}{segment}"),
-                inner_width,
-            ));
-        }
-    }
-    rows
-}
-
-fn wrapped_dim_lines(text: &str, prefix: &str, inner_width: usize) -> Vec<String> {
-    wrapped_content_lines(text, prefix, inner_width)
-        .into_iter()
-        .map(|line| Style::new().dim().paint(&line))
-        .collect()
+    layout::wrapped_rows(
+        text,
+        prefix,
+        inner_width.saturating_sub(modal::BODY_INDENT_WIDTH),
+    )
+    .into_iter()
+    .map(|line| modal::content_line(&line, inner_width))
+    .collect()
 }
 
 fn editor_rows(
@@ -79,34 +60,24 @@ fn editor_rows(
     let decision = editor.decision();
     let multiple = decision.selection_mode == UserDecisionSelectionMode::Multiple;
     let mut rows = editor_intro(editor, inner_width, multiple);
-    let mut selected_row = rows.len();
+    let mut focus = rows.len()..rows.len();
+    let content_width = layout::content_width(inner_width);
     for (index, option) in decision.options.iter().enumerate() {
-        if index == editor.selected_option() {
-            selected_row = rows.len();
-        }
+        let focused = index == editor.selected_option()
+            && !editor.input_freeform()
+            && !editor.input_comment();
         let marker = if multiple {
             format!(
-                "{} [{}] ",
-                modal::selection_marker(
-                    index == editor.selected_option()
-                        && !editor.input_freeform()
-                        && !editor.input_comment()
-                ),
+                "{} {} ",
+                modal::selection_marker(focused),
                 if editor.option_checked(&option.id) {
-                    "x"
+                    Role::Success.style().bold().paint("[x]")
                 } else {
-                    " "
+                    "[ ]".to_owned()
                 }
             )
         } else {
-            format!(
-                "{} ",
-                modal::selection_marker(
-                    index == editor.selected_option()
-                        && !editor.input_comment()
-                        && (!decision.allow_comment || !editor.input_freeform())
-                )
-            )
+            format!("{} ", modal::selection_marker(focused))
         };
         let label = if decision
             .recommendation
@@ -117,39 +88,49 @@ fn editor_rows(
         } else {
             option.label.clone()
         };
-        rows.extend(wrapped_content_lines(&label, &marker, inner_width));
+        let mut card = layout::heading_rows(&label, &marker, content_width);
+        let indent = " ".repeat(widgets::display_width(&marker));
         if let Some(description) = &option.description {
-            rows.extend(wrapped_dim_lines(description, "     ", inner_width));
+            card.extend(layout::wrapped_rows(description, &indent, content_width));
         }
-        for (prefix, points) in [("  Pro: ", &option.pros), ("  Con: ", &option.cons)] {
+        for (prefix, points) in [("Pro: ", &option.pros), ("Con: ", &option.cons)] {
             for point in points {
-                rows.extend(wrapped_content_lines(point, prefix, inner_width));
+                card.extend(layout::wrapped_rows(
+                    point,
+                    &format!("{indent}{prefix}"),
+                    content_width,
+                ));
             }
+        }
+        let start = rows.len();
+        rows.extend(layout::card(inner_width, &card, focused));
+        if index == editor.selected_option() {
+            focus = start..rows.len();
         }
     }
     if decision.allow_comment {
         rows.extend(composition::comment_rows(editor, inner_width));
         if editor.input_comment() {
-            selected_row = rows.len().saturating_sub(1);
+            focus = rows.len().saturating_sub(3)..rows.len();
         }
     }
     if decision.allow_freeform {
-        rows.push(String::new());
-        rows.extend(wrapped_content_lines(
+        let freeform = layout::wrapped_rows(
             &format!(
                 "{}freeform: {}",
-                if (multiple || decision.allow_comment) && editor.input_freeform() {
-                    "> "
-                } else {
-                    ""
-                },
+                if editor.input_freeform() { "> " } else { "" },
                 editor.freeform()
             ),
             "",
+            content_width,
+        );
+        rows.extend(layout::card(
             inner_width,
+            &freeform,
+            editor.input_freeform(),
         ));
         if editor.follows_freeform() {
-            selected_row = rows.len().saturating_sub(1);
+            focus = rows.len().saturating_sub(3)..rows.len();
         }
     }
     if let Some(error) = editor.error() {
@@ -158,11 +139,11 @@ fn editor_rows(
                 .into_iter()
                 .map(|line| Role::Danger.style().paint(&line)),
         );
-        selected_row = rows.len().saturating_sub(1);
+        focus = rows.len().saturating_sub(1)..rows.len();
     }
 
     let (start, end) = editor.scroll_offset().map_or_else(
-        || modal::list_window(rows.len(), selected_row, capacity),
+        || layout::focus_window(rows.len(), focus, capacity),
         |offset| {
             let start = offset.min(rows.len().saturating_sub(capacity));
             let end = start.saturating_add(capacity).min(rows.len());
@@ -281,23 +262,29 @@ fn list_body(
     if decisions.is_empty() {
         rows.push(modal::empty_notice("(none)"));
     }
-    let mut selected_row = rows.len();
+    let mut focus = rows.len()..rows.len();
     for (index, decision) in decisions.iter().enumerate() {
-        if index == overlay.selected() {
-            selected_row = rows.len();
-        }
+        let start = rows.len();
         let marker = format!("{} ", modal::selection_marker(index == overlay.selected()));
-        rows.extend(wrapped_content_lines(
+        let card = layout::heading_rows(
             &format!(
                 "{}: {}",
                 owner_label(decision, session_names),
                 decision.title
             ),
             &marker,
+            layout::content_width(inner_width),
+        );
+        rows.extend(layout::card(
             inner_width,
+            &card,
+            index == overlay.selected(),
         ));
+        if index == overlay.selected() {
+            focus = start..rows.len();
+        }
     }
-    let (start, end) = modal::list_window(rows.len(), selected_row, capacity);
+    let (start, end) = layout::focus_window(rows.len(), focus, capacity);
     let mut body = modal::scroll_window(&rows, start, end);
     body.push(String::new());
     body.push(modal::footer("↑↓: select   Enter: open   Esc: close"));
@@ -412,6 +399,188 @@ mod tests {
             answer: None,
             created_at: chrono::Utc::now(),
             resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn options_and_input_fields_have_distinct_outlines_and_focus() {
+        for mode in [
+            UserDecisionSelectionMode::Single,
+            UserDecisionSelectionMode::Multiple,
+        ] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            request.allow_comment = true;
+            request.selection_mode = mode;
+            request.options[0].pros = vec!["Benefit".into()];
+            request.options[0].cons = vec!["Tradeoff".into()];
+            let mut second = request.options[0].clone();
+            second.id = "second".into();
+            second.label = "Second".into();
+            second.description = Some("Other description".into());
+            request.options.push(second);
+            let mut state = AppState::home(workspace, Vec::new());
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![request],
+                }),
+            );
+            let body = |state: &AppState| {
+                editor_rows(state.decision_overlay().unwrap().editor().unwrap(), 70, 100)
+            };
+            let rows = body(&state);
+            assert_eq!(rows.iter().filter(|row| row.contains('┌')).count(), 4);
+            assert_eq!(rows.iter().filter(|row| row.contains('└')).count(), 4);
+            let first = rows.iter().position(|row| row.contains("Safe")).unwrap();
+            let second = rows.iter().position(|row| row.contains("Second")).unwrap();
+            assert!(
+                rows[first..second]
+                    .iter()
+                    .any(|row| row.contains("keep state"))
+            );
+            assert!(
+                rows[first..second]
+                    .iter()
+                    .any(|row| row.contains("Pro: Benefit"))
+            );
+            assert!(
+                rows[first..second]
+                    .iter()
+                    .any(|row| row.contains("Con: Tradeoff"))
+            );
+            assert!(rows[first..second].iter().any(|row| row.contains('└')));
+            assert!(rows[first - 1].contains("\u{1b}[1;36m"));
+            assert!(!rows[second - 1].contains("\u{1b}[1;36m"));
+            let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+            let rows = body(&state);
+            let comment = rows
+                .iter()
+                .position(|row| row.contains("comment (optional)"))
+                .unwrap();
+            assert!(rows[comment - 1].contains("\u{1b}[1;36m"));
+            assert!(!rows.iter().any(|row| row.contains('›')));
+            let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+            let rows = body(&state);
+            let freeform = rows
+                .iter()
+                .position(|row| row.contains("> freeform:"))
+                .unwrap();
+            assert!(rows[freeform - 1].contains("\u{1b}[1;36m"));
+        }
+    }
+
+    #[test]
+    fn focused_card_stays_complete_and_oversized_descriptions_remain_scrollable() {
+        let workspace = WorkspaceId::new();
+        let mut request = decision(workspace, None);
+        request.expires_at = None;
+        request.allow_freeform = false;
+        request.options[0].description = Some("Long detail\n".repeat(20) + "DETAIL_END");
+        let mut second = request.options[0].clone();
+        second.id = "second".into();
+        second.label = "Second".into();
+        second.description = Some("SECOND_DESCRIPTION".into());
+        second.cons = vec!["SECOND_TRADEOFF".into()];
+        request.options.push(second);
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![request],
+            }),
+        );
+        let body = |state: &AppState| {
+            editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n")
+        };
+        assert!(body(&state).contains("Safe"));
+        let mut seen = String::new();
+        for _ in 0..8 {
+            seen.push_str(&body(&state));
+            let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+        }
+        assert!(seen.contains("DETAIL_END"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let body = body(&state);
+        assert!(body.contains("Second"));
+        assert!(body.contains("SECOND_DESCRIPTION"));
+        assert!(body.contains("SECOND_TRADEOFF"));
+        assert!(body.contains('└'));
+        assert!(body.contains("Enter: submit"));
+    }
+
+    #[test]
+    fn styled_prefixes_wrap_in_terminal_cells_and_narrow_cards_keep_content() {
+        let label = "日本語の長い選択肢と説明をすべて読み取る";
+        for width in [0, 1, 2, 7, 8, 16, 32, 70, 120] {
+            let selected = layout::heading_rows(
+                label,
+                &format!("{} [ ] ", modal::selection_marker(true)),
+                width,
+            );
+            let idle = layout::heading_rows(label, "  [ ] ", width);
+            assert_eq!(selected.len(), idle.len(), "focus must not change wrapping");
+            for focused in [false, true] {
+                let rows =
+                    layout::wrapped_rows("Benefit", "      Pro: ", layout::content_width(width));
+                let card = layout::card(width, &rows, focused);
+                assert!(card.iter().all(|row| widgets::display_width(row) <= width));
+            }
+            assert!(
+                selected
+                    .iter()
+                    .all(|row| widgets::display_width(row) <= width)
+            );
+        }
+        let rows = layout::wrapped_rows("Benefit", "      Pro: ", 12).join("\n");
+        assert!(rows.contains("Pro: Benefit"));
+        assert_eq!(layout::focus_window(0, 0..0, 0), (0, 0));
+    }
+
+    #[test]
+    fn decision_list_editor_and_review_fit_small_and_large_terminals() {
+        let workspace = WorkspaceId::new();
+        let mut request = decision(workspace, None);
+        request.expires_at = None;
+        request.allow_comment = true;
+        request.require_confirmation = true;
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![request],
+            }),
+        );
+        for keys in [
+            vec![],
+            vec![AppKey::Enter],
+            vec![AppKey::Escape],
+            vec![AppKey::Escape],
+        ] {
+            for key in keys {
+                let _ = update(&mut state, AppEvent::Key(key));
+            }
+            for height in [12, 24, 50] {
+                for width in [12, 20, 36, 80, 160] {
+                    let frame = render_over(
+                        height,
+                        width,
+                        &[],
+                        state.decision_overlay().unwrap(),
+                        state.decisions(),
+                        &BTreeMap::new(),
+                    );
+                    assert_eq!(frame.len(), height);
+                    assert!(frame.iter().all(|row| widgets::display_width(row) == width));
+                    if width >= 80 {
+                        assert!(frame.join("\n").contains("Esc:"));
+                    }
+                }
+            }
         }
     }
 

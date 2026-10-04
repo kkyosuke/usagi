@@ -51,6 +51,7 @@ logout 後も端末の OS ユーザー情報・DNS の参照先を保持しま�
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
 質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。選択への補足コメントや、送信前の確認画面も利用できます。
+質問の一覧から回答・送信前確認まで、各項目を枠で区切って表示します。詳しい表示と操作は [TUI の仕様](document/03-tui.md#home-と-target) を参照してください。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール
