@@ -56,8 +56,8 @@ lifecycle は [5. daemon](05-daemon.md) を参照する。全画面を横断し�
 Welcome はマスコットとロゴの下に `Open last projects`、`+ Open / add projects`、`Clone repository` を
 1 列で置き、画面下部に Config / Quit を表示する。Recent のカードと番号ショートカットは置かない。
 前回の作業があれば再開を初期選択にし、なければ Open を選ぶ。Config / Quit も上下移動で選択できる。
-各項目の `[ ]` は常に表示し、選択中だけ accent 色の太字、その他は dim にする。選択が変わっても
-ラベル・ショートカット・枠の位置を保つ。ボタンの表示規則は終了確認と共通である。
+各項目と Config / Quit は角括弧で囲まず、選択中だけ accent 色の太字、その他は dim にする。
+選択が変わってもラベル・ショートカットの位置を保つ。
 
 Open / add projects は `Tab` で Projects / Recent / Directory を切り替える。Projects は最終利用時刻の降順、
 同時刻は名前の大文字・小文字を区別しない順に登録済み workspace を表示する。常時表示する Filter 欄は入力に合わせて
