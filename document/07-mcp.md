@@ -512,10 +512,12 @@ journal は session ごとに最大 4096 件、4 MiB 未満とし、上限では
 停止・入力失敗でもメッセージは残り、別 Agent や session queue へ転送しない。再起動・再開後も inbox を明示的に読む。
 handoff の完了報告も同一 session では保存済み caller だけへ通知する。
 
+利用者が usagi 上でレビューを分担するよう指定した場合の例:
+
 ```text
-Codex: commit → agent_handoff(Claude) → agent_message(review_request, SHA)
-Claude: agent_messages → 差分確認 → agent_message(changes_requested または approved) → ACK
-Codex: agent_messages → 修正・再 commit → 新しい review_request
+実装担当: commit → agent_handoff(指定 reviewer) → agent_message(review_request, SHA)
+reviewer: agent_messages → 差分確認 → agent_message(changes_requested または approved) → ACK
+実装担当: agent_messages → 修正・再 commit → 新しい review_request
 ```
 
 共有 worktree 内で同時編集しないよう、実装担当だけが編集・commit し、レビュー担当には変更しないことを指示する。
