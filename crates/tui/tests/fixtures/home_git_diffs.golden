@@ -2,7 +2,7 @@
 
 󰤇 alpha                             │ alpha
 | now            ↑2 ↓0 + 15 -  3    │
-|  —                               │
+|  —                               │  n: add memo
   beta                              │        (\(\
   now            ↑0 ↓1 +  4 - 40    │        (='-')
    —                               │       o(_(")(")
@@ -10,5 +10,5 @@
   (\(\                              │a: agent / t: terminal…
   (o.o)?                            │
  o(_(")(")                          │
-                                      n: add memo
+
 [switch] ←→ project / ↑↓ select / E… [Switch] preview pane
