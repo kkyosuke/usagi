@@ -68,9 +68,11 @@ client に返す session 一覧は、使用可能な `available` に加えて、
 
 `session_status` は lifecycle とその revision の snapshot を短い session lock で取得し、各 worktree の Git
 観測を lock の外で行う。観測中の session 作成・削除は次の snapshot に反映される。daemon の Git subprocess は
-status / revision / merge-base 等の観測を 2 秒、worktree 作成・撤去等の effect を 30 秒、stdout / stderr を各 8 MiB に
-制限する。deadline または capture 上限超過は storage failure として返し、他の scope 解決・一覧・launch admission を
-無期限に待たせない。完了した nonzero exit の stderr は従来の Git 診断用に保持する。
+status / revision / merge-base 等の観測を 2 秒、worktree 作成等の effect を 30 秒、stdout / stderr を各 8 MiB に
+制限する。worktree 撤去の `git worktree remove` は時間制限を持たず、daemon 所有の
+[session teardown worker](#session-teardown-worker) が完了まで待つ。長い撤去は一覧の `deleting` 行から確認でき、
+経過時間だけを理由に失敗へ遷移しない。deadline または capture 上限超過は storage failure として返す。
+完了した nonzero exit の stderr は従来の Git 診断用に保持し、process 終了後の pipe 回収には時間上限を設ける。
 
 `session create <name>` は lifecycle の reservation と Git effect の前に `.usagi/sessions/<name>` の
 存在を検査する。snapshot に未登録の stale directory や dangling symlink も占有済みとして拒否する。

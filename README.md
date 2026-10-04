@@ -111,6 +111,8 @@ Switch では選択中の session の [メモ](document/03-tui.md#session-memo) 
 
 不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
 [孤立資源の削除](document/01-overview.md#孤立資源の削除)を参照してください。
+session の削除状況は一覧から確認できます。時間のかかる worktree 撤去の扱いは
+[session teardown worker](document/05-daemon.md#session-teardown-worker)を参照してください。
 
 起動失敗や daemon の異常終了を調べる際は、[failure log](document/05-daemon.md#failure-logging)を確認してください。
 

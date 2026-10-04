@@ -4,7 +4,8 @@
 //! process group, bounded output capture, a deadline, and TERM -> KILL -> reap
 //! cleanup. Public observations are closed and never contain argv, paths,
 //! environment values, credentials, raw OS errors, or failed command output.
-//! The trusted internal execution API also preserves completed nonzero output.
+//! The trusted internal execution API also preserves completed nonzero output
+//! and can wait for long-running effects without an execution deadline.
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -139,7 +140,11 @@ pub fn observe_until(
     let mut command = Command::new(program);
     command.args(arguments);
     normalize_observation(public_output(execute_command_output_until(
-        command, policy, abort,
+        command,
+        Some(policy.timeout),
+        policy.terminate_grace,
+        policy.output_limit,
+        abort,
     )))
 }
 
@@ -198,13 +203,39 @@ pub fn execute_command_output(
     command: Command,
     policy: ChildPolicy,
 ) -> Result<ChildCommandOutput, ChildOutputError> {
-    execute_command_output_until(command, policy, &NEVER_ABORTED)
+    execute_command_output_until(
+        command,
+        Some(policy.timeout),
+        policy.terminate_grace,
+        policy.output_limit,
+        &NEVER_ABORTED,
+    )
+}
+
+/// Executes a trusted command until it exits, with bounded capture and cleanup.
+///
+/// Long-running background effects such as worktree removal must not be killed
+/// solely because their duration depends on the amount of data to remove.
+/// Output overflow still terminates the process group, and inherited pipes are
+/// reclaimed with bounded cleanup after the main process exits.
+///
+/// # Errors
+///
+/// Returns a closed failure when spawning, waiting, capture, or cleanup fails.
+pub fn execute_command_output_without_timeout(
+    command: Command,
+    terminate_grace: Duration,
+    output_limit: usize,
+) -> Result<ChildCommandOutput, ChildOutputError> {
+    execute_command_output_until(command, None, terminate_grace, output_limit, &NEVER_ABORTED)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=preserves_machine_output_bytes,normalizes_success_and_safe_failure_states,escaped_descendant_cannot_hold_capture_or_input_workers,abort_ends_the_probe_before_its_deadline
 fn execute_command_output_until(
     mut command: Command,
-    policy: ChildPolicy,
+    timeout: Option<Duration>,
+    terminate_grace: Duration,
+    output_limit: usize,
     abort: &AtomicBool,
 ) -> Result<ChildCommandOutput, ChildOutputError> {
     command
@@ -215,14 +246,14 @@ fn execute_command_output_until(
     let mut child = command.spawn().map_err(|_| ChildOutputError::SpawnFailed)?;
     let pid = child.id();
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        terminate_and_reap(&mut child, policy.terminate_grace);
+        terminate_and_reap(&mut child, terminate_grace);
         return Err(ChildOutputError::ObservationFailed);
     };
     if nonblocking(stdout.as_raw_fd())
         .and_then(|()| nonblocking(stderr.as_raw_fd()))
         .is_err()
     {
-        terminate_and_reap(&mut child, policy.terminate_grace);
+        terminate_and_reap(&mut child, terminate_grace);
         return Err(ChildOutputError::ObservationFailed);
     }
     let output_exceeded = Arc::new(AtomicBool::new(false));
@@ -233,7 +264,7 @@ fn execute_command_output_until(
         let mut stdout = stdout;
         capture(
             &mut stdout,
-            policy.output_limit,
+            output_limit,
             &stdout_exceeded,
             &stdout_cancelled,
         )
@@ -244,39 +275,41 @@ fn execute_command_output_until(
         let mut stderr = stderr;
         capture(
             &mut stderr,
-            policy.output_limit,
+            output_limit,
             &stderr_exceeded,
             &stderr_cancelled,
         )
     });
 
-    let deadline = Instant::now() + policy.timeout;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     let status = loop {
         match child_exited(&child) {
             Ok(true) => break Ok(()),
             Ok(false) if output_exceeded.load(Ordering::Acquire) => {
-                terminate_and_reap(&mut child, policy.terminate_grace);
+                terminate_and_reap(&mut child, terminate_grace);
                 break Err(ChildOutputError::OutputTooLarge);
             }
-            Ok(false) if Instant::now() < deadline && !abort.load(Ordering::Acquire) => {
-                thread::sleep(
-                    Duration::from_millis(5)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
+            Ok(false)
+                if deadline.is_none_or(|deadline| Instant::now() < deadline)
+                    && !abort.load(Ordering::Acquire) =>
+            {
+                thread::sleep(deadline.map_or(Duration::from_millis(5), |deadline| {
+                    Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now()))
+                }));
             }
             Ok(false) => {
-                terminate_and_reap(&mut child, policy.terminate_grace);
+                terminate_and_reap(&mut child, terminate_grace);
                 break Err(ChildOutputError::TimedOut);
             }
             Err(_) => {
-                terminate_and_reap(&mut child, policy.terminate_grace);
+                terminate_and_reap(&mut child, terminate_grace);
                 break Err(ChildOutputError::ObservationFailed);
             }
         }
     };
     let status = match status {
         Ok(()) => {
-            close_descendant_resources(pid, &stdout, &stderr, None, policy.terminate_grace);
+            close_descendant_resources(pid, &stdout, &stderr, None, terminate_grace);
             child.wait().or(Err(ChildOutputError::ObservationFailed))
         }
         Err(error) => Err(error),
@@ -960,12 +993,12 @@ mod tests {
             output_limit: 4096,
             ..policy()
         };
-        for with_input in [false, true] {
-            let path = temp.path().join(if with_input {
-                "input.pid"
-            } else {
-                "capture.pid"
-            });
+        for (name, with_input, without_timeout) in [
+            ("capture.pid", false, false),
+            ("capture-unlimited.pid", false, true),
+            ("input.pid", true, false),
+        ] {
+            let path = temp.path().join(name);
             let _cleanup = KillEscaped(path.clone());
             let started = Instant::now();
             if with_input {
@@ -990,7 +1023,15 @@ mod tests {
                 command
                     .args(["--exact", test, "--nocapture"])
                     .env("USAGI_BOUNDED_PIPE_HELPER", &path);
-                let result = execute_command_output(command, bounded);
+                let result = if without_timeout {
+                    execute_command_output_without_timeout(
+                        command,
+                        bounded.terminate_grace,
+                        bounded.output_limit,
+                    )
+                } else {
+                    execute_command_output(command, bounded)
+                };
                 assert_eq!(result, Err(ChildOutputError::IncompleteOutput));
                 assert_eq!(public_output(result), ChildOutputObservation::TimedOut);
             }
@@ -1099,7 +1140,13 @@ else:
                 } else {
                     let mut command = Command::new("python3");
                     command.args(["-c", script, path.to_str().unwrap(), mode]);
-                    let result = execute_command_output_until(command, bounded, &abort);
+                    let result = execute_command_output_until(
+                        command,
+                        Some(bounded.timeout),
+                        bounded.terminate_grace,
+                        bounded.output_limit,
+                        &abort,
+                    );
                     if let Some(trigger) = trigger {
                         trigger.join().unwrap();
                     }
@@ -1282,6 +1329,41 @@ else:
         );
         assert_eq!(result, ChildObservation::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn completion_execution_keeps_capture_and_cleanup_limits() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "(trap '' TERM; sleep 30) & printf 'one\\000two'; printf diagnostic >&2; exit 7",
+        ]);
+        let started = Instant::now();
+        assert_eq!(
+            execute_command_output_without_timeout(
+                command,
+                policy().terminate_grace,
+                policy().output_limit,
+            )
+            .unwrap(),
+            ChildCommandOutput {
+                success: false,
+                stdout: b"one\0two".to_vec(),
+                stderr: b"diagnostic".to_vec(),
+            }
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let mut overflow = Command::new("sh");
+        overflow.args(["-c", "trap '' TERM; yes oversized"]);
+        assert_eq!(
+            execute_command_output_without_timeout(
+                overflow,
+                policy().terminate_grace,
+                policy().output_limit,
+            ),
+            Err(ChildOutputError::OutputTooLarge)
+        );
     }
 
     #[test]
