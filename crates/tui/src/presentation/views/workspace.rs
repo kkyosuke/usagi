@@ -7048,7 +7048,7 @@ mod tests {
         )));
         assert!(frame.contains("known-session  [Unknown]  live"));
         assert!(frame.contains(&format!(
-            "session #{}  live",
+            "session #{}  [Unknown]  live",
             short_id(&missing_session.to_string())
         )));
         assert!(frame.contains("Lifecycle actions (non-force)"));
