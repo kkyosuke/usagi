@@ -30,11 +30,7 @@ pub(super) fn freeform_rows(editor: &DecisionEditor, width: usize) -> Vec<String
         } else {
             "Freeform · Alternative answer"
         },
-        if controls::next_field(editor) == Some("Comment") {
-            "Tab: Comment, then Tab: Freeform to write your answer"
-        } else {
-            "Tab: Freeform to write your answer"
-        },
+        "Move down to write your own answer",
         width,
     )
 }

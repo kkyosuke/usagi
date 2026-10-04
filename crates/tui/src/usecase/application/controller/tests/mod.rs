@@ -2040,7 +2040,7 @@ fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft()
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Tab);
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('x'));
     assert!(editor.input_freeform);
-    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Down);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Up);
     assert!(!editor.input_freeform);
     assert_eq!(
         decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
@@ -2561,4 +2561,67 @@ fn decision_confirmation_revalidates_expiry_before_sending() {
     assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
     assert!(editor.error().is_some());
     assert!(editor.confirmation().is_some());
+}
+
+#[test]
+fn decision_arrows_traverse_choices_comment_and_freeform_without_losing_drafts() {
+    for multiple in [false, true] {
+        for comment in [false, true] {
+            for freeform in [false, true] {
+                let workspace = WorkspaceId::new();
+                let mut request = pending_decision(workspace);
+                request.allow_comment = comment;
+                request.allow_freeform = freeform;
+                if multiple {
+                    request.selection_mode = UserDecisionSelectionMode::Multiple;
+                }
+                let mut second = request.options[0].clone();
+                second.id = "second".into();
+                request.options.push(second);
+                let mut editor = DecisionEditor::new(request);
+                let key = |editor: &mut DecisionEditor, key| {
+                    decision::update_decision_editor(workspace, editor, key)
+                };
+                key(&mut editor, AppKey::Up);
+                assert_eq!(editor.selected_option, 0);
+                key(&mut editor, AppKey::Down);
+                assert_eq!(editor.selected_option, 1);
+                if multiple {
+                    key(&mut editor, AppKey::Char(' '));
+                }
+                if comment {
+                    key(&mut editor, AppKey::Down);
+                    assert!(editor.input_comment);
+                    key(&mut editor, AppKey::Paste("note".into()));
+                }
+                if freeform {
+                    key(&mut editor, AppKey::Down);
+                    assert!(editor.input_freeform);
+                    key(&mut editor, AppKey::Paste("answer 🐇".into()));
+                    assert!(matches!(key(&mut editor, AppKey::Enter).as_slice(),
+                        [Effect::ResolveDecision {answer: UserDecisionAnswer::Freeform {text}, ..}] if text == "answer 🐇"));
+                }
+                key(&mut editor, AppKey::Down);
+                assert_eq!(editor.input_freeform, freeform);
+                assert_eq!(editor.input_comment, comment && !freeform);
+                if freeform {
+                    key(&mut editor, AppKey::Up);
+                }
+                if comment {
+                    assert!(editor.input_comment);
+                    assert_eq!(editor.comment, "note");
+                    key(&mut editor, AppKey::Up);
+                }
+                assert!(!editor.input_freeform && !editor.input_comment);
+                assert_eq!(editor.selected_option, 1);
+                assert_eq!(editor.freeform, if freeform { "answer 🐇" } else { "" });
+                assert_eq!(editor.option_checked("second"), multiple);
+                assert!(
+                    matches!(key(&mut editor, AppKey::Enter).as_slice(),
+                    [Effect::ResolveDecision {answer: UserDecisionAnswer::Option {option_id, ..}, ..}] if option_id == "second")
+                        || multiple
+                );
+            }
+        }
+    }
 }

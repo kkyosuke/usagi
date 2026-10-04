@@ -24,6 +24,33 @@ pub(super) fn cycle_input(editor: &mut DecisionEditor) {
     editor.error = None;
 }
 
+/// Traverse fields in their visual order without discarding any draft or checks.
+pub(super) fn move_input(editor: &mut DecisionEditor, forward: bool) {
+    let options = editor.decision.options.len();
+    let comment = usize::from(editor.decision.allow_comment);
+    let current = if editor.input_freeform {
+        options + comment
+    } else if editor.input_comment {
+        options
+    } else {
+        editor.selected_option
+    };
+    let last = options + comment + usize::from(editor.decision.allow_freeform) - 1;
+    let next = if forward {
+        current.saturating_add(1).min(last)
+    } else {
+        current.saturating_sub(1)
+    };
+    editor.input_comment = next == options && editor.decision.allow_comment;
+    editor.input_freeform = next == options + comment && editor.decision.allow_freeform;
+    if next < options {
+        editor.selected_option = next;
+    }
+    editor.follow_freeform = editor.input_freeform;
+    editor.scroll_offset = None;
+    editor.error = None;
+}
+
 pub(super) fn edit_comment(editor: &mut DecisionEditor, key: &AppKey) -> bool {
     match key {
         AppKey::Char(ch) => editor.comment.push(*ch),

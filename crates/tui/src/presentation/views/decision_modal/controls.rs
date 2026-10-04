@@ -1,6 +1,6 @@
-//! Persistent mode and action hints, including the next Tab destination.
+//! Quiet, persistent answer summaries and keyboard hints.
 
-use super::{Role, Style, modal, widgets};
+use super::{modal, widgets};
 use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionSelectionMode};
 
@@ -12,57 +12,6 @@ pub(super) fn kind(decision: &UserDecision) -> &'static str {
     } else {
         "Single choice"
     }
-}
-
-pub(super) fn next_field(editor: &DecisionEditor) -> Option<&'static str> {
-    let decision = editor.decision();
-    if decision.options.is_empty() {
-        None
-    } else if editor.input_comment() {
-        Some(if decision.allow_freeform {
-            "Freeform"
-        } else {
-            "Choices"
-        })
-    } else if editor.input_freeform() {
-        Some("Choices")
-    } else if decision.allow_comment {
-        Some("Comment")
-    } else {
-        decision.allow_freeform.then_some("Freeform")
-    }
-}
-
-fn mode_strip(editor: &DecisionEditor, width: usize) -> String {
-    let decision = editor.decision();
-    let mut modes = Vec::new();
-    for (label, active, enabled) in [
-        (
-            "Choices",
-            !editor.input_comment() && !editor.input_freeform(),
-            !decision.options.is_empty(),
-        ),
-        (
-            "Comment",
-            editor.input_comment(),
-            decision.allow_comment && !decision.options.is_empty(),
-        ),
-        ("Freeform", editor.input_freeform(), decision.allow_freeform),
-    ] {
-        if enabled && (width >= 50 || active) {
-            let style = if active {
-                Role::Accent.style().bold().reverse()
-            } else {
-                Style::new().dim()
-            };
-            modes.push(
-                widgets::button::InlineButton::new(label)
-                    .render(width, style)
-                    .line,
-            );
-        }
-    }
-    modes.join(" ")
 }
 
 pub(super) fn editor_footer(editor: &DecisionEditor, width: usize) -> Vec<String> {
@@ -83,68 +32,41 @@ pub(super) fn editor_footer(editor: &DecisionEditor, width: usize) -> Vec<String
     } else {
         "single choice".to_owned()
     };
-    let scroll = if width < 50 {
-        String::new()
-    } else {
-        Style::new().dim().paint("  PgUp/PgDn: scroll")
-    };
-    vec![
-        modal::content_line(
-            &format!("{}  {summary}{scroll}", mode_strip(editor, width)),
-            width,
-        ),
-        modal::content_line(&editor_hints(editor, width), width),
-    ]
-}
-
-fn editor_hints(editor: &DecisionEditor, width: usize) -> String {
-    let decision = editor.decision();
-    let multiple = decision.selection_mode == UserDecisionSelectionMode::Multiple;
     let action = if decision.require_confirmation {
         "review"
     } else {
         "submit"
     };
-    let mut hints = vec![
-        Role::Accent
-            .style()
-            .bold()
-            .reverse()
-            .paint(&format!(" Enter: {action} ")),
-    ];
-    if let Some(next) = next_field(editor) {
-        hints.push(Role::Info.style().bold().paint(&format!("Tab: {next}")));
-    }
-    hints.push("Esc: back".into());
-    if !decision.options.is_empty() {
-        hints.push(
-            if editor.input_comment() || editor.input_freeform() {
-                "↑↓: choices"
+    let move_hint = if decision.options.is_empty() {
+        ""
+    } else {
+        "↑↓ move  "
+    };
+    let hints = if width < 28 {
+        "Enter Esc".to_owned()
+    } else if width < 50 {
+        format!(
+            "Enter:{action} Esc {}",
+            if decision.options.is_empty() {
+                ""
             } else {
-                "↑↓: select"
+                "↑↓"
             }
-            .into(),
-        );
-        if multiple && !editor.input_comment() && !editor.input_freeform() {
-            hints.push("Space: check".into());
-        }
-    }
-    if width < 50 {
-        hints = vec![Role::Accent.style().bold().reverse().paint(&if width < 28 {
-            "Enter".to_owned()
-        } else {
-            format!("Enter:{action}")
-        })];
-        if let Some(next) = next_field(editor) {
-            hints.push(if width < 28 {
-                "Tab".into()
+        )
+    } else {
+        format!(
+            "{move_hint}{}Enter: {action}  Esc: back  PgUp/PgDn: scroll",
+            if multiple && !editor.input_comment() && !editor.input_freeform() {
+                "Space: check  "
             } else {
-                format!("Tab:{next}")
-            });
-        }
-        hints.push("Esc".into());
-    }
-    hints.join(if width < 50 { " " } else { "  " })
+                ""
+            }
+        )
+    };
+    vec![modal::footer(&summary), modal::footer(&hints)]
+        .into_iter()
+        .map(|line| widgets::clip_to_width(&line, width))
+        .collect()
 }
 
 pub(super) fn review_footer(
@@ -158,28 +80,21 @@ pub(super) fn review_footer(
         UserDecisionAnswer::Freeform { .. } => "custom answer".to_owned(),
     };
     vec![
-        modal::content_line(
-            &format!(
-                "{}  {summary}{}",
-                Role::Warning.style().bold().paint("Review · not sent"),
-                if answer.comment().is_some() {
-                    " + comment"
-                } else {
-                    ""
-                }
-            ),
-            width,
-        ),
-        modal::content_line(
-            &format!(
-                "{}  Esc: edit  PgUp/PgDn: scroll",
-                Role::Success
-                    .style()
-                    .bold()
-                    .reverse()
-                    .paint(" Enter: send ")
-            ),
-            width,
-        ),
+        modal::footer(&format!(
+            "Review · not sent  {summary}{}",
+            if answer.comment().is_some() {
+                " + comment"
+            } else {
+                ""
+            }
+        )),
+        modal::footer(if width < 50 {
+            "Enter: send  Esc: edit"
+        } else {
+            "Enter: send  Esc: edit  PgUp/PgDn: scroll"
+        }),
     ]
+    .into_iter()
+    .map(|line| widgets::clip_to_width(&line, width))
+    .collect()
 }

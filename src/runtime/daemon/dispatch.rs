@@ -1136,7 +1136,7 @@ pub(super) fn dispatch_user_decision(
                     let input = serde_json::from_value::<RequestPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
                     let decision = store
-                        .create(UserDecision {
+                        .create_with_default_expiry(UserDecision {
                             decision_id: UserDecisionId::new(),
                             owner,
                             title: input.title,
@@ -1149,12 +1149,7 @@ pub(super) fn dispatch_user_decision(
                             selection_limits: input.selection_limits,
                             selection_mode: input.selection_mode,
                             context: input.context,
-                            // An omitted deadline is finite by default so an
-                            // abandoned synchronous waiter cannot occupy a
-                            // pending slot forever.
-                            expires_at: input
-                                .expires_at
-                                .or_else(|| now.checked_add_signed(chrono::Duration::hours(24))),
+                            expires_at: input.expires_at,
                             idempotency_key: input.idempotency_key,
                             status: UserDecisionStatus::Pending,
                             answer: None,
