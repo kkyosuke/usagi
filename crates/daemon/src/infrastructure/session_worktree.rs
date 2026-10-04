@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use usagi_core::infrastructure::bounded_process::{
     ChildCommandOutput, ChildOutputError, ChildPolicy, execute_command_output,
+    execute_command_output_without_timeout,
 };
 
 use usagi_core::infrastructure::git::{
@@ -28,10 +29,7 @@ impl GitRunner for SystemGit {
     /// namespace) outranks the `-C <repo>` this passes.
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract,git_environment_confinement
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        bounded_git_output(execute_command_output(
-            git_command(repo, args),
-            git_policy(args),
-        ))
+        execute_git_command(git_command(repo, args), git_timeout(args))
     }
 }
 
@@ -47,23 +45,36 @@ fn git_command(repo: &Path, args: &[&str]) -> Command {
     command
 }
 
-fn git_policy(args: &[&str]) -> ChildPolicy {
+fn git_timeout(args: &[&str]) -> Option<Duration> {
     let args = args.strip_prefix(&["--no-replace-objects"]).unwrap_or(args);
+    // Teardown runs outside the session lock in a daemon-owned worker. A large
+    // target/ tree legitimately takes minutes, so removal must await completion.
+    if args.starts_with(&["worktree", "remove"]) {
+        return None;
+    }
     let observation = args.first().is_some_and(|argument| {
         matches!(
             *argument,
             "status" | "rev-parse" | "merge-base" | "symbolic-ref" | "rev-list"
         )
     }) || args.starts_with(&["worktree", "list"]);
-    ChildPolicy {
-        timeout: if observation {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_secs(30)
-        },
-        terminate_grace: Duration::from_millis(100),
-        output_limit: 8 * 1024 * 1024,
-    }
+    Some(Duration::from_secs(if observation { 2 } else { 30 }))
+}
+
+fn execute_git_command(command: Command, timeout: Option<Duration>) -> anyhow::Result<GitOutput> {
+    let terminate_grace = Duration::from_millis(100);
+    let output_limit = 8 * 1024 * 1024;
+    bounded_git_output(match timeout {
+        Some(timeout) => execute_command_output(
+            command,
+            ChildPolicy {
+                timeout,
+                terminate_grace,
+                output_limit,
+            },
+        ),
+        None => execute_command_output_without_timeout(command, terminate_grace, output_limit),
+    })
 }
 
 fn bounded_git_output(
@@ -527,29 +538,35 @@ mod bounded_git_tests {
     #[test]
     fn git_budget_bounds_observations_and_retains_nonzero_diagnostics() {
         assert_eq!(
-            git_policy(&["status", "--porcelain"]).timeout,
-            Duration::from_secs(2)
+            git_timeout(&["status", "--porcelain"]),
+            Some(Duration::from_secs(2))
         );
         assert_eq!(
-            git_policy(&["worktree", "list"]).timeout,
-            Duration::from_secs(2)
+            git_timeout(&["worktree", "list"]),
+            Some(Duration::from_secs(2))
         );
         assert_eq!(
-            git_policy(&[
+            git_timeout(&[
                 "--no-replace-objects",
                 "merge-base",
                 "--all",
                 "base",
                 "head"
-            ])
-            .timeout,
-            Duration::from_secs(2)
+            ]),
+            Some(Duration::from_secs(2))
         );
         assert_eq!(
-            git_policy(&["worktree", "add"]).timeout,
-            Duration::from_secs(30)
+            git_timeout(&["worktree", "add"]),
+            Some(Duration::from_secs(30))
         );
-        assert_eq!(git_policy(&[]).output_limit, 8 * 1024 * 1024);
+        assert_eq!(git_timeout(&[]), Some(Duration::from_secs(30)));
+        for args in [
+            &["worktree", "remove", "--", "/session"][..],
+            &["worktree", "remove", "--force", "--", "/session"][..],
+            &["--no-replace-objects", "worktree", "remove", "/session"][..],
+        ] {
+            assert_eq!(git_timeout(args), None);
+        }
         let result = bounded_git_output(Ok(ChildCommandOutput {
             success: false,
             stdout: vec![0xff],
@@ -568,5 +585,69 @@ mod bounded_git_tests {
         ] {
             assert!(bounded_git_output(Err(failure)).is_err());
         }
+    }
+
+    #[test]
+    fn worktree_removal_waits_past_an_effect_deadline() {
+        use std::time::Instant;
+
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, b"release");
+            }
+        }
+        fn held_command(ready: &Path, release: &Path) -> Command {
+            let mut command = Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "printf ready > \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.01; done; printf removed; printf diagnostic >&2; exit 7",
+                    "worktree-removal-fixture",
+                ])
+                .arg(ready)
+                .arg(release);
+            command
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let former_budget = Duration::from_millis(20);
+        let error = execute_git_command(
+            held_command(
+                &temp.path().join("bounded-ready"),
+                &temp.path().join("bounded-release"),
+            ),
+            Some(former_budget),
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ChildOutputError::TimedOut));
+
+        std::thread::scope(|scope| {
+            let ready = temp.path().join("removal-ready");
+            let release = temp.path().join("removal-release");
+            let command = held_command(&ready, &release);
+            let worker = scope
+                .spawn(move || execute_git_command(command, git_timeout(&["worktree", "remove"])));
+            // Release before the scope joins, including when an assertion fails.
+            let release = ReleaseOnDrop(release);
+            let ready_deadline = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() && Instant::now() < ready_deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(ready.exists(), "the removal command must have started");
+            let deadline = Instant::now() + former_budget * 2;
+            while Instant::now() < deadline {
+                assert!(
+                    !worker.is_finished(),
+                    "removal ended before it was released"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(release);
+            let output = worker.join().unwrap().unwrap();
+            assert!(!output.success);
+            assert_eq!(output.stdout, "removed");
+            assert_eq!(output.stderr, "diagnostic");
+        });
     }
 }
