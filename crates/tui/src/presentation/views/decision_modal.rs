@@ -70,7 +70,7 @@ fn editor_rows(
         rows.extend(choices::rows(editor, index, inner_width));
         if index == editor.selected_option() {
             focus = start..rows.len();
-            anchor = start + border_rows;
+            anchor = start;
         }
     }
     if decision.allow_comment && !decision.options.is_empty() {
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn options_and_input_fields_have_distinct_outlines_and_focus() {
+    fn choices_use_unboxed_rows_and_inputs_keep_distinct_focus() {
         for mode in [
             UserDecisionSelectionMode::Single,
             UserDecisionSelectionMode::Multiple,
@@ -360,8 +360,8 @@ mod tests {
                 editor_rows(state.decision_overlay().unwrap().editor().unwrap(), 70, 100)
             };
             let rows = body(&state);
-            assert_eq!(rows.iter().filter(|row| row.contains('╭')).count(), 4);
-            assert_eq!(rows.iter().filter(|row| row.contains('╰')).count(), 4);
+            assert_eq!(rows.iter().filter(|row| row.contains('╭')).count(), 2);
+            assert_eq!(rows.iter().filter(|row| row.contains('╰')).count(), 2);
             let first = rows.iter().position(|row| row.contains("Safe")).unwrap();
             let second = rows.iter().position(|row| row.contains("Second")).unwrap();
             assert!(
@@ -379,8 +379,8 @@ mod tests {
                     .iter()
                     .any(|row| row.contains("Con: Tradeoff"))
             );
-            assert!(rows[first..second].iter().any(|row| row.contains('╰')));
-            assert!(rows[first - 1].contains("\u{1b}[1;36m"));
+            assert!(!rows[first..second].iter().any(|row| row.contains('╰')));
+            assert!(rows[first].contains(&Role::Accent.style().bold().reverse().paint("Safe")));
             assert!(!rows[second - 1].contains("\u{1b}[1;36m"));
             let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
             let rows = body(&state);
@@ -436,7 +436,6 @@ mod tests {
         assert!(body.contains("Second"));
         assert!(body.contains("SECOND_DESCRIPTION"));
         assert!(body.contains("SECOND_TRADEOFF"));
-        assert!(body.contains('╰'));
         assert!(body.contains("Enter: submit"));
     }
 
@@ -568,7 +567,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // Keep the transition matrix and resulting answer checks together.
-    fn tab_hints_match_each_transition_and_keep_selection_separate_from_focus() {
+    fn tab_transitions_preserve_selection_with_quiet_arrow_hints() {
         use usagi_core::domain::user_decision::UserDecisionAnswer;
         for mode in [
             UserDecisionSelectionMode::Single,
@@ -612,19 +611,33 @@ mod tests {
                         let body = widgets::strip_ansi(&editor_rows(editor, 70, 200).join("\n"));
                         if editor.input_freeform() {
                             assert!(body.contains("custom answer only"));
-                            assert!(!body.contains("● Safe"));
+                            assert!(!body.contains("●"));
                             if comment {
                                 assert!(body.contains("Not included with freeform"));
                             }
                         } else {
                             assert!(body.contains(if mode == UserDecisionSelectionMode::Single {
-                                "● Safe"
+                                "Safe"
                             } else {
                                 "[x] Safe"
                             }));
-                            assert!(body.contains("Selected"));
+                            assert!(!body.contains("●"));
                         }
-                        let next = controls::next_field(editor);
+                        let next = if editor.input_comment() {
+                            if freeform {
+                                Some("Freeform")
+                            } else {
+                                Some("Choices")
+                            }
+                        } else if editor.input_freeform() {
+                            Some("Choices")
+                        } else if comment {
+                            Some("Comment")
+                        } else if freeform {
+                            Some("Freeform")
+                        } else {
+                            None
+                        };
                         let frame = widgets::strip_ansi(
                             &render_over(
                                 11,
@@ -636,11 +649,8 @@ mod tests {
                             )
                             .join("\n"),
                         );
-                        if let Some(next) = next {
-                            assert!(frame.contains(&format!("Tab: {next}")));
-                        } else {
-                            assert!(!frame.contains("Tab:"));
-                        }
+                        assert!(frame.contains("↑↓ move"));
+                        assert_eq!(frame.contains("Tab:"), comment);
                         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
                         let editor = state.decision_overlay().unwrap().editor().unwrap();
                         assert_eq!(editor.input_comment(), next == Some("Comment"));
@@ -865,6 +875,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Exercise paging in both editor and review with the same drafts.
     fn paging_keeps_all_editor_and_review_card_rows_reachable_in_short_terminals() {
         for (multiple, freeform, long) in [
             (false, false, false),
@@ -932,7 +943,11 @@ mod tests {
                 let expected = full
                     .iter()
                     .map(|row| widgets::strip_ansi(row))
-                    .filter(|row| row.contains('│'))
+                    .filter(|row| {
+                        ["│", "Safe", "Detail", "keep state"]
+                            .iter()
+                            .any(|text| row.contains(text))
+                    })
                     .collect::<Vec<_>>();
                 assert!(!expected.is_empty());
                 for height in [11, 12, 16, 24] {
@@ -1761,7 +1776,7 @@ mod tests {
             }
             let body =
                 editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
-            assert!(body.contains("Tab: Choices"));
+            assert!(body.contains("↑↓ move"));
             assert!(body.contains("Enter: submit"));
             assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
             let _ = update(&mut state, AppEvent::Key(AppKey::Paste("x".repeat(2049))));

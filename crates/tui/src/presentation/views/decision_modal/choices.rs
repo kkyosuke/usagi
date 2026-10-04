@@ -15,22 +15,15 @@ pub(super) fn rows(editor: &DecisionEditor, index: usize, width: usize) -> Vec<S
     } else {
         index == editor.selected_option() && !editor.input_freeform()
     };
-    let indicator = if multiple {
-        if selected { "[x]" } else { "[ ]" }
-    } else if selected {
-        "●"
+    let marker = if multiple {
+        format!(
+            "{} {} ",
+            if focused { "›" } else { " " },
+            if selected { "[x]" } else { "[ ]" }
+        )
     } else {
-        "○"
+        "  ".to_owned()
     };
-    let marker = format!(
-        "{} {} ",
-        modal::selection_marker(focused),
-        if selected {
-            Role::Success.style().bold().paint(indicator)
-        } else {
-            indicator.to_owned()
-        }
-    );
     let label = if decision
         .recommendation
         .as_ref()
@@ -40,13 +33,15 @@ pub(super) fn rows(editor: &DecisionEditor, index: usize, width: usize) -> Vec<S
     } else {
         option.label.clone()
     };
-    let content_width = layout::content_width(width);
+    let content_width = width.saturating_sub(modal::BODY_INDENT_WIDTH);
     let mut rows = layout::styled_heading_rows(
         &label,
         &marker,
         content_width,
         if focused {
             Role::Accent.style().bold().reverse()
+        } else if selected {
+            super::Style::new().bold().reverse()
         } else {
             super::Style::new().bold()
         },
@@ -64,16 +59,8 @@ pub(super) fn rows(editor: &DecisionEditor, index: usize, width: usize) -> Vec<S
             ));
         }
     }
-    let title = if multiple && focused {
-        if selected {
-            "Selected · Space to uncheck"
-        } else {
-            "Focused · Space to select"
-        }
-    } else if selected {
-        "Selected"
-    } else {
-        "Option"
-    };
-    layout::titled_card(width, &rows, title, focused)
+    rows.push(String::new());
+    rows.into_iter()
+        .map(|row| modal::content_line(&row, width))
+        .collect()
 }
