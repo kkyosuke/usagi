@@ -21,7 +21,7 @@ source = Path(sys.argv[1]).read_text()
 functions = "\n".join(definition(source, name) for name in (
     "cleanup", "fail", "process_is_live", "read_lock_metadata", "read_lock_pid",
     "lock_owner_alive", "read_lock_ticket",
-    "wait_for_update_lock", "acquire_lock",
+    "wait_for_update_lock", "wait_for_legacy_lock", "acquire_lock",
 ))
 functions += "\n" + definition(source, "read_lock_ticket").replace(
     "read_lock_ticket()", "observed_read_lock_ticket()", 1
@@ -63,6 +63,12 @@ mv() {
     local destination="" value
     for value in "$@"; do destination=$value; done
     case "${destination##*/}" in
+        pid)
+            if [ "${BREADCRUMB_BARRIER:-0}" -eq 1 ]; then
+                touch "$COORD/breadcrumb-ready-$ROLE"
+                while [ ! -e "$COORD/breadcrumb-$ROLE" ]; do command sleep 0.01; done
+            fi
+            ;;
         owner.*)
             command mv "$@"
             printf '%s\n' "$destination" > "$COORD/node-$ROLE"
@@ -167,6 +173,15 @@ rm -rf -- "$1"
         child = subprocess.Popen([
             "/bin/bash", "-c", script, "legacy", str(lock), str(self.coord),
         ], start_new_session=True)
+        self.children.append(child)
+        return child
+
+    def launch_legacy_acquirer(self):
+        child = subprocess.Popen([
+            "/bin/bash", str(Path(__file__).parent / "fixtures/install-legacy-lock.sh"),
+            str(self.home), str(self.coord),
+        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
         self.children.append(child)
         return child
 
@@ -511,14 +526,8 @@ def new_legacy_new_updates_remain_usable(root):
         case.finish(first)
         lock = case.home / "update.lock"
         assert lock.is_dir(), "new cleanup must preserve the stable root"
-        assert (lock / "pid").read_text().strip() == str(first.pid)
         assert not list(lock.glob("owner.*"))
-        legacy = subprocess.Popen([
-            "/bin/bash", str(Path(__file__).parent / "fixtures/install-legacy-lock.sh"),
-            str(case.home), str(case.coord),
-        ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True)
-        case.children.append(legacy)
+        legacy = case.launch_legacy_acquirer()
         case.await_marker("acquired-legacy")
         assert (lock / "pid").read_text().strip() == str(legacy.pid)
         waiting = case.launch("new-after-upgrade")
@@ -530,6 +539,55 @@ def new_legacy_new_updates_remain_usable(root):
         case.signal("release-new-after-upgrade")
         case.finish(waiting)
         assert lock.is_dir() and not list(lock.glob("owner.*"))
+    finally:
+        case.close()
+
+
+def queued_or_cancelled_owners_do_not_enable_legacy_entry(root):
+    for cancel_waiter in (False, True):
+        case = Case(root, "legacy-during-" + ("cancelled" if cancel_waiter else "queued"))
+        try:
+            first = case.launch("a")
+            case.await_marker("acquired-a")
+            second = case.launch("b")
+            case.await_marker("waiting-b")
+            if cancel_waiter:
+                second.terminate()
+                case.finish(second, 128 + signal.SIGTERM)
+                holder, role = first, "a"
+            else:
+                case.signal("release-a")
+                case.finish(first)
+                case.await_marker("acquired-b")
+                holder, role = second, "b"
+            legacy = case.launch_legacy_acquirer()
+            assert "another usagi update" in case.finish(legacy, 1)
+            assert case.node(role).is_dir(), "legacy recovery deleted a live owner"
+            assert holder.poll() is None and (case.coord / "critical").is_dir()
+            case.signal(f"release-{role}")
+            case.finish(holder)
+        finally:
+            case.close()
+
+
+def late_publication_clears_a_breadcrumb_before_admission(root):
+    case = Case(root, "late-breadcrumb")
+    try:
+        first = case.launch("a", BREADCRUMB_BARRIER=1)
+        case.await_marker("acquired-a")
+        case.signal("release-a")
+        case.await_marker("breadcrumb-ready-a")
+        second = case.launch("b")
+        case.await_marker("waiting-b")
+        assert not (case.coord / "acquired-b").exists()
+        case.signal("breadcrumb-a")
+        case.finish(first)
+        case.await_marker("acquired-b")
+        legacy = case.launch_legacy_acquirer()
+        assert "another usagi update" in case.finish(legacy, 1)
+        assert case.node("b").is_dir()
+        case.signal("release-b")
+        case.finish(second)
     finally:
         case.close()
 
@@ -648,6 +706,8 @@ with tempfile.TemporaryDirectory(dir=sys.argv[2]) as temporary:
     for test in (concurrent_stale_recovery, late_lower_pid, crash_in_choosing,
                  legacy_and_empty_root,
                  new_legacy_new_updates_remain_usable,
+                 queued_or_cancelled_owners_do_not_enable_legacy_entry,
+                 late_publication_clears_a_breadcrumb_before_admission,
                  legacy_fixture_failure_cleanup_reaps_the_unreleased_child,
                  invalid_ticket_and_timeout,
                  symlinks_and_signal_cleanup,

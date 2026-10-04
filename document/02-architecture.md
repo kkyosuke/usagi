@@ -978,9 +978,12 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   [Lamport の bakery algorithm](https://lamport.azurewebsites.net/pubs/bakery.pdf) に従う choosing / ticket と
   `(ticket, PID)` の順序で admission を決め、ticket は 2147483646 を上限として overflow 前に拒否する。
   stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
-  retire が完了した process は自身の終了直前の PID を legacy `pid` metadata として atomic に残す。
-  次の旧方式 installer は終了済み PID を確認して root を回収できるため、旧版への切り替え後の再更新も可能である。
-  新方式はこの metadata を通常の legacy PID として扱い、共有 root を削除しない。
+  atomic binary rename の前に保持中の PID を legacy `pid` metadata として公開するため、旧版への切り替え後に
+  SIGKILL で終了しても次の旧方式 installer は終了済み PID を確認して root を回収できる。
+  rename 前の正常 cleanup は、lock を保持し、他の live / unknown owner がいない場合だけ legacy PID を残す。
+  この公開は自分の owner node を retire する前に行い、待機者の cleanup は他の holder の PID を上書きしない。
+  新方式は admission 前に legacy PID を再確認するため、late publication にも終了待ちを適用する。metadata の削除は
+  bakery で admission された process だけが行い、先行する観測者が後続 holder の新しい PID を消さない。
   公開前の crash と空の共有 root は admission を妨げない。lock root / owner node の symlink は拒否し、待機は約 60 秒を上限とする。
   PID の再利用、permission denial、判別できない liveness probe failure は live owner として保守的に待つ。
   公開済み PID / ticket は通常ファイルで固定し、symlink・FIFO・device・directory を読まない。new owner の PID が
@@ -988,7 +991,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   空値へ変換せず待つが、読めた空値・不正値は従来の復旧対象とする。ticket の初回読取中に choosing が消えた場合は、
   同じ node の公開済み ticket を再読して最大値へ取り込み、atomic に retire 済みなら飛ばす。
   PID probe の C locale で `No such process` を確認した場合だけ死亡とみなす。旧方式の公開済み live PID は process が cleanup を終えて
-  終了するまで待ち、残った legacy PID metadata は新 owner の公開前に除去する。直列化と stale 回収の保証は新方式同士に適用する。
+  終了するまで待ち、残った legacy PID metadata は bakery admission 後の critical section へ入る直前に除去する。直列化と stale 回収の保証は新方式同士に適用する。
   旧方式の PID 公開前の空 root と、既に stale PID を読んだ旧 process による共有 root の削除は新方式から制御できないため、
   異なる方式の installer を並行実行しない。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
