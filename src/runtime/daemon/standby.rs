@@ -966,6 +966,7 @@ impl StandbyProbe for UnixStandbyProbe<'_> {
             &mut stream,
             &Bootstrap::ClientHello(ClientHello {
                 client_id: ClientId(format!("standby-readiness-{}", std::process::id())),
+                surface: None,
                 connection_nonce: format!("{}", std::process::id()),
                 expected_daemon_generation: None,
                 supported_protocols: vec![ProtocolRange {

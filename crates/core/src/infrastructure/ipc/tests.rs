@@ -53,6 +53,7 @@ fn build() -> BuildIdentity {
 fn hello() -> ClientHello {
     ClientHello {
         client_id: ClientId("client".into()),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {

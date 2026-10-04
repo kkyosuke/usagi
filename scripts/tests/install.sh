@@ -126,6 +126,10 @@ fi
 [ -n "$output" ]
 [ -z "${FAKE_CURL_LOG:-}" ] || printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 [ "$(LC_ALL=C ls -ld "$(dirname "$output")" | cut -c1-10)" = "drwx------" ] || exit 71
+if [ -n "${FAKE_CURL_WAIT_FOR:-}" ]; then
+    touch "$FAKE_CURL_READY"
+    while [ ! -e "$FAKE_CURL_WAIT_FOR" ]; do sleep 0.01; done
+fi
 if [ -n "${FAKE_CURL_GUARD:-}" ]; then
     mkdir "$FAKE_CURL_GUARD" || exit 70
     trap 'rmdir "$FAKE_CURL_GUARD"' EXIT
@@ -307,6 +311,9 @@ wait "$FIRST_PID"
 wait "$SECOND_PID"
 unset USAGI_SYNC_LOG USAGI_SYNC_WAIT_FOR
 [ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 2 ]
+
+prepare_case signal-cleanup-and-retry
+python3 "$ROOT/scripts/tests/install-signals.py" "$INSTALLER" "$HOME_DIR" "$FIXTURE_DIR" "$FAKE_BIN" "$CWD_DIR"
 
 prepare_case unsupported-linux-arm64
 cat > "$FAKE_BIN/uname" <<'SH'

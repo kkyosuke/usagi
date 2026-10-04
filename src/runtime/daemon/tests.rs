@@ -10122,6 +10122,7 @@ fn fence_client_hello(capabilities: Vec<String>) -> usagi_core::infrastructure::
     };
     ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId(ClientId::new().as_str()),
+        surface: None,
         connection_nonce: "fence".to_owned(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {
@@ -11244,4 +11245,44 @@ fn finish_lifecycle_operation(state_dir: &Path, operation: usagi_core::domain::i
     store
         .replace_if_revision(state.state_revision, &state)
         .unwrap();
+}
+
+#[test]
+fn launch_audit_keeps_authenticated_caller_independent_of_reported_surface() {
+    use usagi_core::domain::agent::{
+        AgentClientSurface, AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource, CallerRef,
+    };
+    let client = AgentLaunchClient {
+        surface: Some(AgentClientSurface::Tui),
+        client_id: "client".into(),
+        connection_id: "connection".into(),
+        request_id: "request".into(),
+        peer_pid: 4321,
+    };
+    let caller = CallerRef {
+        session_id: Some(SessionId::new()),
+        agent_id: usagi_core::domain::id::AgentId::new(),
+    };
+    let operation = usagi_core::domain::id::OperationId::new();
+    let context = dispatch::launch_context(
+        AgentLaunchSource::Mcp,
+        AgentLaunchEntry::AgentHandoff,
+        Some(&client),
+        Some(&caller),
+        Some(operation),
+    );
+    assert_eq!(context.source, AgentLaunchSource::Mcp);
+    assert_eq!(context.entrypoint, AgentLaunchEntry::AgentHandoff);
+    assert_eq!(context.caller, Some(caller));
+    assert_eq!(context.caller_operation_id, Some(operation));
+    assert_eq!(context.client, Some(client));
+    let legacy = dispatch::launch_context(
+        AgentLaunchSource::Manual,
+        AgentLaunchEntry::Agent,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(legacy.client, None);
+    assert_eq!(legacy.caller_operation_id, None);
 }

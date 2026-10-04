@@ -120,6 +120,9 @@ protocol の互換性判定には使わないが、client bootstrap は `ServerH
 daemon が現在 executable と **exact same artifact** かを確認する。client は `build.artifact.v1` capability を必須とし、
 capability を持たない旧 daemon は build tuple へ fallback せず handshake で拒否される。
 
+hello の optional な `surface` は Agent 起動の診断記録に使う。意味と記録の追い方は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
+
 `BuildIdentity` は version、commit diagnostics、full target triple、canonical `artifact` を持つ。artifact は
 `usagi-artifact-v1:<profile>:<target>:<source-id>` である。`build.rs` は Git checkout では
 commit と tracked / untracked source set、Git metadata の無い package build では package source set から
@@ -543,6 +546,10 @@ teardown 自体の結果は、この応答ではなく後続の `list` / `overvi
 snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle を含み、workspace 全体の **root `WorktreeId`**（`⌂ root` の scope 識別子）も含む。agent / terminal 起動用の checkout path は、daemon が available の完全一致 scope（managed session、または `session_id` を持たない workspace root）からだけ解決する。client が name または path を渡して scope を再探索する wire contract はない。
 
 ## agent launch request
+
+Agent runtime inventory は optional な `launch_provenance` を含む。`session` の read-only `agents` action は
+現在の workspace の inventory に `session_name` を添えて返す。field の意味・旧 peer との互換性は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
 
 `agent` kind は daemon 所有の Agent runtime に届く。client は producer-issued `OperationId` と、`WorkspaceId` / optional `SessionId`（省略時は workspace root）/ optional profile ID だけの launch intent を送る。worktree、checkout path、profile 既定値、argv、environment、secret は wire field ではなく、daemon が [managed session scope](05-daemon.md#authority-と-lifecycle) と code-defined adapter registry から解決する。profile を省略すると daemon の既定 policy が選ぶ。
 

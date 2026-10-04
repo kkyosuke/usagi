@@ -945,6 +945,9 @@ fn visible_old_ref_can_close_latest_lineage_while_fresh_observation_is_pending()
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),
             continuation,

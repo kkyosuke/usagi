@@ -2,6 +2,7 @@
 
 mod admission;
 mod dispatch;
+mod provenance;
 mod restart;
 mod resume;
 mod terminal;

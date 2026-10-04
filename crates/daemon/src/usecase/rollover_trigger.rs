@@ -379,6 +379,7 @@ mod tests {
             ConnectionId::new(),
             &ClientHello {
                 client_id: ClientId("legacy".into()),
+                surface: None,
                 connection_nonce: "nonce".into(),
                 expected_daemon_generation: None,
                 supported_protocols: Vec::new(),

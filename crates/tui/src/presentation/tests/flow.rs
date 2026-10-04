@@ -3252,6 +3252,9 @@ fn selecting_an_interrupted_rabbit_opens_the_same_unresumable_prompt() {
     ui.agent_inventory = Some(AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(runtime_id, terminal, Some(session)).unwrap(),
             continuation,
             state: AgentRuntimeInventoryState::Interrupted,

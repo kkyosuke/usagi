@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 
+use super::dispatch_operation_id;
 use super::{
     AgentAdmission, AgentCapability, AgentId, AgentIntegrationRevision, AgentLaunchIntent,
     AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime, AgentRuntimeRef,
@@ -110,9 +111,30 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_from_after_readiness(
+            operation_id,
+            intent,
+            scope,
+            preflight,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::Agent,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_launch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.launch(operation_id, intent, scope)
+        self.launch_from(operation_id, intent, scope, context)
     }
 
     /// Exact-resume counterpart of [`Self::launch_after_readiness`].
@@ -128,6 +150,21 @@ impl AgentRuntime {
         self.resume_exact(operation_id, target, scope)
     }
 
+    /// Resume with audit context derived by the authenticated daemon boundary.
+    #[allow(clippy::too_many_arguments)] // Keep the exact target and readiness ticket separate from trusted origin metadata.
+    pub fn resume_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_resume_readiness(operation_id, target)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_exact_from(operation_id, target, scope, context)
+    }
+
     /// Repair-only resume counterpart. The readiness ticket is taken from the
     /// current adapter while `target` continues to fence the old durable source.
     pub fn resume_with_current_integration_after_readiness(
@@ -138,13 +175,44 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_with_current_integration_from_after_readiness(
+            operation_id,
+            target,
+            expected_revision,
+            scope,
+            preflight,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
+            ),
+        )
+    }
+
+    /// Preserve the actual initiator when daemon restart also migrates the
+    /// provider integration revision.
+    #[allow(clippy::too_many_arguments)] // Exact repair fences and trusted audit context remain separate.
+    pub fn resume_with_current_integration_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_current_integration_resume_readiness(
             operation_id,
             target,
             expected_revision,
         )?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.resume_with_current_integration(operation_id, target, expected_revision, scope)
+        self.resume_with_current_integration_from(
+            operation_id,
+            target,
+            expected_revision,
+            scope,
+            context,
+        )
     }
 
     /// Admits one Agent launch.  The same producer `operation_id` with the same
@@ -156,6 +224,25 @@ impl AgentRuntime {
         intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_from(
+            operation_id,
+            intent,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::Agent,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_from(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic_key) {
@@ -166,7 +253,7 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit(operation_id, intent, scope, None, &semantic_key);
+        let outcome = self.admit(operation_id, intent, scope, None, &semantic_key, context);
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -390,6 +477,27 @@ impl AgentRuntime {
         target: &AgentResumeTarget,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_exact_from(
+            operation_id,
+            target,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionResume,
+            ),
+        )
+    }
+
+    /// Record the actual authenticated resume initiator while keeping the
+    /// conversation's original creation provenance in the runtime store.
+    #[allow(clippy::too_many_arguments)] // Audit context is distinct from the exact provider resume target.
+    pub fn resume_exact_from(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = resume_semantic_key(target);
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic_key) {
@@ -400,7 +508,10 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit_resume_exact(operation_id, target, &semantic_key, scope, None);
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        let origin = context.origin(operation);
+        let outcome =
+            self.admit_resume_exact(operation, target, &semantic_key, scope, None, Some(origin));
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -416,6 +527,27 @@ impl AgentRuntime {
         expected_revision: u32,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_with_current_integration_from(
+            operation_id,
+            target,
+            expected_revision,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Keep the repair revision and authenticated initiating operation distinct.
+    fn resume_with_current_integration_from(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = repair_resume_semantic_key(target, expected_revision);
         if let Some(existing) = self.operations.get(operation_id) {
             if !existing.matches(&semantic_key) {
@@ -426,12 +558,14 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         let outcome = self.admit_resume_exact(
-            operation_id,
+            operation,
             target,
             &semantic_key,
             scope,
             Some(expected_revision),
+            Some(context.origin(operation)),
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome

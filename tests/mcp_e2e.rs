@@ -1673,6 +1673,33 @@ fi
         })
         .unwrap();
     assert!(matches!(reply, DaemonReply::Accepted { .. }));
+    let DaemonReply::Accepted {
+        body: admission, ..
+    } = reply
+    else {
+        unreachable!()
+    };
+    let inventory = match client
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
+        .unwrap()
+    {
+        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+    };
+    let audit = &inventory["runtimes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["runtime"]["terminal"] == admission["terminal"])
+        .unwrap()["launch_provenance"]["created"];
+    assert_eq!(audit["source"], "unknown");
+    assert_eq!(audit["entrypoint"], "legacy_dispatch");
+    assert!(audit["caller"].is_null());
+    assert!(audit["caller_operation_id"].is_null());
+    assert_eq!(audit["client"]["surface"], "cli");
+    assert_eq!(audit["client"]["peer_pid"], std::process::id());
 
     let decision_path = mcp.data_dir().join("daemon/user-decisions.json");
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -2021,6 +2048,13 @@ exit 0
     let agents = tool_text(&mcp.tool("agent_list", &json!({})));
     assert_eq!(agents["agents"].as_array().unwrap().len(), 1);
     assert_eq!(agents["agents"][0]["agent_id"], admission["agent_id"]);
+    let provenance = &agents["agents"][0]["launch_provenance"];
+    assert_eq!(provenance["created"]["source"], "mcp");
+    assert_eq!(provenance["created"]["entrypoint"], "session_dispatch");
+    assert_eq!(
+        provenance["created"]["caller"]["agent_id"],
+        tool_text(&mcp.tool("agent_peers", &json!({})))["self_agent_id"]
+    );
     assert!(
         mcp.tool(
             "agent_get",
@@ -2109,6 +2143,10 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     let before = tool_text(&mcp.tool("agent_peers", &json!({})));
     let self_id = before["self_agent_id"].clone();
     assert_eq!(before["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        before["agents"][0]["launch_provenance"]["created"]["source"],
+        "manual"
+    );
     let handoff = mcp.tool(
         "agent_handoff",
         &json!({
@@ -2122,6 +2160,21 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     assert_ne!(admission["agent_id"], self_id);
     let peers = tool_text(&mcp.tool("agent_peers", &json!({})));
     assert_eq!(peers["agents"].as_array().unwrap().len(), 2);
+    let worker = peers["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["agent_id"] == admission["agent_id"])
+        .unwrap();
+    assert_eq!(worker["launch_provenance"]["created"]["source"], "mcp");
+    assert_eq!(
+        worker["launch_provenance"]["created"]["entrypoint"],
+        "agent_handoff"
+    );
+    assert_eq!(
+        worker["launch_provenance"]["created"]["caller"]["agent_id"],
+        self_id
+    );
     assert!(
         tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
             .as_array()
@@ -2191,7 +2244,7 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"fixture-worker","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"commits":["abc123"],"changed_files":["fixture.rs"],"verification":"fixture green"}}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"verification":"fixture green"}}}}' \
   | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
     );
@@ -2272,7 +2325,9 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["run_id"], admission["run_id"]);
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
-    assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    assert_eq!(message["result"]["commits"], json!([]));
+    assert_eq!(message["result"]["changed_files"], json!([]));
+    assert_eq!(message["result"]["verification"], "fixture green");
     let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
     let next_cursor = page["next_cursor"].as_u64().unwrap();
     let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));

@@ -3087,6 +3087,9 @@ fn closing_an_inventory_only_history_tab_persists_its_removal_without_resuming()
     let inventory = AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(
                 history.target.as_ref().unwrap().runtime_id,
                 history.last_terminal.clone(),

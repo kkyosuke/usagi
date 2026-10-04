@@ -558,6 +558,8 @@ pub struct DispatchIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionAction {
+    /// Read public Agent runtime provenance without launching or resuming.
+    Agents,
     Create,
     Remove,
     /// Stop quiescent Agents in the session while retaining exact provider

@@ -626,13 +626,28 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
             .code,
         ErrorCode::InvalidArgument
     );
+    let before_invalid_repair = runtime.coordinator.snapshot();
+    assert_eq!(
+        runtime
+            .resume_with_current_integration(
+                "not-an-operation-id",
+                &target,
+                target.adapter_revision,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+    assert_eq!(runtime.coordinator.snapshot(), before_invalid_repair);
     assert_eq!(
         runtime
             .admit_resume_exact(
-                &initial_operation.to_string(),
+                initial_operation,
                 &target,
                 &resume_semantic_key(&target),
                 &FakeScope(Ok(resolved.clone())),
+                None,
                 None,
             )
             .unwrap_err()

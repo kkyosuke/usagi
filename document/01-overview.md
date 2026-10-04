@@ -97,6 +97,7 @@ TUI の cleanup と自動回収は [3. TUI](03-tui.md) を参照する。
 | `usagi session create <name> [--role <id>] [--base <ref>]` | managed session を作る。base は fully-qualified local / remote-tracking ref |
 | `usagi session remove <name> [--force [--purge-orphan]]` | managed session の削除を daemon に要求する。診断済み integrity orphan の破棄には両 flag が必要 |
 | `usagi session sleep <name>` | 再開可能で idle な Agent の process / PTY を止め、session と会話履歴を保持する |
+| `usagi session agents` | 現在の workspace の Agent runtime を session 名・状態・作成元・起動履歴とともに JSON で列挙する |
 | `usagi session resume-inventory <workspace-id>` | root / session の再開候補を列挙する |
 | `usagi session resume-exact <target-json>` | inventory が返した secret-free target を完全一致で再開する |
 | `usagi session setup <name> <command>` | session worktree で setup command を実行する |

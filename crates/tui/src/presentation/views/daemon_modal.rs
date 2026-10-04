@@ -5,7 +5,9 @@
 //! effect だけを通る。
 
 use crate::usecase::application::daemon_health::{DaemonHealth, HealthReason};
-use usagi_core::domain::agent::AgentRuntimeInventoryState;
+use usagi_core::domain::agent::{
+    AgentLaunchProvenance, AgentLaunchSource, AgentRuntimeInventoryState,
+};
 use usagi_core::infrastructure::ipc::{BuildIdentity, DaemonMetrics};
 use usagi_core::usecase::session_state::SessionStateCounts;
 
@@ -24,6 +26,20 @@ pub(crate) struct AgentRuntimeRow {
     pub(crate) scope: String,
     pub(crate) runtime_id: String,
     pub(crate) state: AgentRuntimeInventoryState,
+    pub(crate) origin: &'static str,
+}
+
+/// Creation origin remains stable when a person later resumes an MCP worker.
+pub(crate) fn origin_label(provenance: Option<&AgentLaunchProvenance>) -> &'static str {
+    match provenance
+        .and_then(|provenance| provenance.created.as_ref())
+        .map(|origin| origin.source)
+    {
+        Some(AgentLaunchSource::Manual) => "Manual",
+        Some(AgentLaunchSource::Mcp) => "MCP",
+        Some(AgentLaunchSource::Daemon) => "Daemon",
+        Some(AgentLaunchSource::Unknown) | None => "Unknown",
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -168,9 +184,56 @@ fn runtime_line(runtime: &AgentRuntimeRow) -> String {
         AgentRuntimeInventoryState::Unavailable => "unavailable",
     };
     modal::content_line(
-        &format!("{}  {state}  #{}", runtime.scope, runtime.runtime_id),
+        &format!(
+            "{}  [{}]  {state}  #{}",
+            runtime.scope, runtime.origin, runtime.runtime_id
+        ),
         INNER_WIDTH,
     )
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use usagi_core::domain::agent::{AgentLaunchEntry, AgentLaunchOrigin};
+    use usagi_core::domain::id::OperationId;
+
+    #[test]
+    fn origin_labels_use_creation_and_do_not_guess_legacy_metadata() {
+        assert_eq!(origin_label(None), "Unknown");
+        for (source, label) in [
+            (AgentLaunchSource::Unknown, "Unknown"),
+            (AgentLaunchSource::Manual, "Manual"),
+            (AgentLaunchSource::Mcp, "MCP"),
+            (AgentLaunchSource::Daemon, "Daemon"),
+        ] {
+            let origin = AgentLaunchOrigin {
+                source,
+                entrypoint: AgentLaunchEntry::Agent,
+                caller: None,
+                caller_operation_id: None,
+                client: None,
+                operation_id: OperationId::new(),
+                at: chrono::Utc::now(),
+            };
+            let mut provenance = AgentLaunchProvenance {
+                agent_id: None,
+                created: Some(origin.clone()),
+                launched: origin,
+            };
+            provenance.launched.source = AgentLaunchSource::Manual;
+            assert_eq!(origin_label(Some(&provenance)), label);
+            provenance.created = None;
+            assert_eq!(origin_label(Some(&provenance)), "Unknown");
+        }
+        let row = AgentRuntimeRow {
+            scope: "worker".into(),
+            runtime_id: "abc12345".into(),
+            state: AgentRuntimeInventoryState::Live,
+            origin: "MCP",
+        };
+        assert!(runtime_line(&row).contains("[MCP]"));
+    }
 }
 
 fn status_line(metrics: Option<&DaemonMetrics>, health: DaemonHealth) -> String {
@@ -441,11 +504,13 @@ mod tests {
         let base = vec!["background".to_owned(); 24];
         let runtimes = vec![
             AgentRuntimeRow {
+                origin: "Unknown",
                 scope: "root".to_owned(),
                 runtime_id: "12345678".to_owned(),
                 state: AgentRuntimeInventoryState::Live,
             },
             AgentRuntimeRow {
+                origin: "Unknown",
                 scope: "review-fix".to_owned(),
                 runtime_id: "abcdef01".to_owned(),
                 state: AgentRuntimeInventoryState::Interrupted,
@@ -476,8 +541,8 @@ mod tests {
         assert!(plain.contains("Restart"));
         assert!(plain.contains("Stop"));
         assert!(plain.contains("16/16  saturated"));
-        assert!(plain.contains("root  live  #12345678"));
-        assert!(plain.contains("review-fix  interrupted  #abcdef01"));
+        assert!(plain.contains("root  [Unknown]  live  #12345678"));
+        assert!(plain.contains("review-fix  [Unknown]  interrupted  #abcdef01"));
         assert!(!plain.contains("means Agent runtimes"));
         assert!(plain.contains("Sessions 8   running 3   waiting 1   failed 2"));
     }
@@ -594,6 +659,7 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(index, (state, _))| AgentRuntimeRow {
+            origin: "Unknown",
             scope: format!("scope-{index}"),
             runtime_id: format!("runtime-{index}"),
             state,

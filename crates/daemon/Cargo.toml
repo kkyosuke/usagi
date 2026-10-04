@@ -24,7 +24,7 @@ anyhow.workspace = true
 # compare/unlink race against a replacement generation.
 fs2.workspace = true
 # Goal artifact verification hashes bounded, redaction-safe evidence before it
-# enters the supervisor journal.
+# enters the runtime journal.
 sha2.workspace = true
 
 [dev-dependencies]

@@ -252,19 +252,19 @@ fn execute_command_output_until(
 
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if output_exceeded.load(Ordering::Acquire) => {
+        match child_exited(&child) {
+            Ok(true) => break Ok(()),
+            Ok(false) if output_exceeded.load(Ordering::Acquire) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildOutputError::OutputTooLarge);
             }
-            Ok(None) if Instant::now() < deadline && !abort.load(Ordering::Acquire) => {
+            Ok(false) if Instant::now() < deadline && !abort.load(Ordering::Acquire) => {
                 thread::sleep(
                     Duration::from_millis(5)
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
             }
-            Ok(None) => {
+            Ok(false) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildOutputError::TimedOut);
             }
@@ -274,7 +274,13 @@ fn execute_command_output_until(
             }
         }
     };
-    close_descendant_resources(pid, &stdout, &stderr, None, policy.terminate_grace);
+    let status = match status {
+        Ok(()) => {
+            close_descendant_resources(pid, &stdout, &stderr, None, policy.terminate_grace);
+            child.wait().or(Err(ChildOutputError::ObservationFailed))
+        }
+        Err(error) => Err(error),
+    };
     cancelled.store(true, Ordering::Release);
     let stdout = stdout.join();
     let stderr = stderr.join();
@@ -363,16 +369,16 @@ pub fn write_stdin_bounded(
     });
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if output_exceeded.load(Ordering::Acquire) => {
+        match child_exited(&child) {
+            Ok(true) => break Ok(()),
+            Ok(false) if output_exceeded.load(Ordering::Acquire) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildInputExecution::OutputTooLarge);
             }
-            Ok(None) if Instant::now() < deadline => thread::sleep(
+            Ok(false) if Instant::now() < deadline => thread::sleep(
                 Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
             ),
-            Ok(None) => {
+            Ok(false) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildInputExecution::TimedOut);
             }
@@ -382,7 +388,19 @@ pub fn write_stdin_bounded(
             }
         }
     };
-    close_descendant_resources(pid, &stdout, &stderr, Some(&writer), policy.terminate_grace);
+    let status = match status {
+        Ok(()) => {
+            close_descendant_resources(
+                pid,
+                &stdout,
+                &stderr,
+                Some(&writer),
+                policy.terminate_grace,
+            );
+            child.wait().or(Err(ChildInputExecution::ObservationFailed))
+        }
+        Err(error) => Err(error),
+    };
     cancelled.store(true, Ordering::Release);
     let stdout = stdout.join();
     let stderr = stderr.join();
@@ -431,18 +449,22 @@ pub(crate) fn close_descendant_resources<T>(
             && stderr.is_finished()
             && writer.is_none_or(thread::JoinHandle::is_finished)
     };
-    if finished() {
-        return false;
+    // Keep the leader unreaped until group cleanup finishes so its PID cannot
+    // be reused while signalling. Let readers establish natural EOF first:
+    // signalling a zombie alone does not prove a descendant held a pipe open.
+    let deadline = Instant::now() + grace;
+    while !finished() && Instant::now() < deadline {
+        thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
-    // A probe must not daemonize. If its main process exits while a descendant
-    // still owns either pipe, close that process group instead of joining a
-    // reader forever.
+    let forced_capture_cleanup = !finished();
+    // A probe must not daemonize even after descendants close their pipes.
+    // Always send KILL before reaping the leader, including when TERM closed
+    // every stream but another descendant ignored it.
     let mut signalled = signal_group(pid, libc::SIGTERM);
     let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        if finished() {
-            return signalled;
-        }
+    while !finished() && Instant::now() < deadline {
         thread::sleep(
             Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
         );
@@ -456,7 +478,29 @@ pub(crate) fn close_descendant_resources<T>(
             Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
         );
     }
-    signalled
+    forced_capture_cleanup && signalled
+}
+
+/// Observe exit without reaping, reserving the owned PID until group cleanup.
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=closed_pipe_descendants_are_killed_before_the_leader_is_reaped
+pub(crate) fn child_exited(child: &std::process::Child) -> std::io::Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: info is writable and waitid observes only our owned child. WNOWAIT
+    // leaves its exit status available for Child::wait.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: zero initialization plus successful waitid initializes the struct;
+    // si_signo stays zero when WNOHANG observes no exited child.
+    Ok(unsafe { info.assume_init() }.si_signo != 0)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
@@ -563,15 +607,14 @@ pub(crate) fn terminate_and_reap(child: &mut std::process::Child, grace: Duratio
     signal_group(child.id(), libc::SIGTERM);
     let deadline = Instant::now() + grace;
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => {
+        match child_exited(child) {
+            Ok(false) if Instant::now() < deadline => {
                 thread::sleep(
                     Duration::from_millis(5)
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
             }
-            Ok(None) | Err(_) => break,
+            Ok(_) | Err(_) => break,
         }
     }
     signal_group(child.id(), libc::SIGKILL);
@@ -909,21 +952,6 @@ mod tests {
 
     #[test]
     fn escaped_descendant_cannot_hold_capture_or_input_workers() {
-        struct KillEscaped(std::path::PathBuf);
-        #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
-        impl Drop for KillEscaped {
-            fn drop(&mut self) {
-                if let Some(pid) = std::fs::read_to_string(&self.0)
-                    .ok()
-                    .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-                {
-                    // SAFETY: the helper recorded exactly the escaped child's PID.
-                    unsafe {
-                        libc::kill(pid, libc::SIGKILL);
-                    }
-                }
-            }
-        }
         let temp = tempfile::tempdir().unwrap();
         let executable = std::env::current_exe().unwrap();
         let test = "infrastructure::bounded_process::tests::escaped_descendant_probe";
@@ -971,6 +999,149 @@ mod tests {
                 "the helper must have escaped before the probe returned"
             );
             assert!(started.elapsed() < Duration::from_secs(4));
+        }
+    }
+
+    struct KillEscaped(std::path::PathBuf);
+    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers,closed_pipe_descendants_are_killed_before_the_leader_is_reaped
+    impl Drop for KillEscaped {
+        fn drop(&mut self) {
+            if let Some(pid) = std::fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+            {
+                // SAFETY: the fixture recorded exactly the owned descendant.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    const CLOSED_PIPE_CHILD: &str = r"
+import os, signal, sys, time
+path, mode = sys.argv[1:]
+pid = os.fork()
+if pid == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    for fd in (0, 1, 2):
+        os.close(fd)
+    with open(path + '.next', 'w') as marker:
+        marker.write(str(os.getpid()))
+    os.rename(path + '.next', path)
+    while True:
+        signal.pause()
+deadline = time.monotonic() + 5
+while not os.path.exists(path):
+    if time.monotonic() > deadline:
+        raise SystemExit(71)
+    time.sleep(0.001)
+if mode == 'exit':
+    print('done', flush=True)
+elif mode == 'overflow':
+    os.write(1, b'x' * 8192)
+    time.sleep(30)
+else:
+    time.sleep(30)
+";
+
+    #[test]
+    fn closed_pipe_descendants_are_killed_before_the_leader_is_reaped() {
+        let script = CLOSED_PIPE_CHILD;
+        let temporary = tempfile::tempdir().unwrap();
+        for with_input in [false, true] {
+            for mode in ["exit", "timeout", "overflow", "abort"] {
+                if with_input && mode == "abort" {
+                    continue; // stdin runner has a deadline and no abort flag.
+                }
+                let path = temporary.path().join(format!("{with_input}-{mode}.pid"));
+                let _cleanup = KillEscaped(path.clone());
+                let bounded = ChildPolicy {
+                    timeout: if mode == "timeout" {
+                        Duration::from_millis(300)
+                    } else {
+                        Duration::from_secs(5)
+                    },
+                    output_limit: 16,
+                    ..policy()
+                };
+                let abort = Arc::new(AtomicBool::new(false));
+                let trigger = if mode == "abort" {
+                    let path = path.clone();
+                    let abort = Arc::clone(&abort);
+                    Some(thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while !path.exists() && Instant::now() < deadline {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        abort.store(true, Ordering::Release);
+                    }))
+                } else {
+                    None
+                };
+                let started = Instant::now();
+                if with_input {
+                    let result = write_stdin_bounded(
+                        "python3",
+                        &["-c", script, path.to_str().unwrap(), mode],
+                        b"",
+                        0,
+                        bounded,
+                    );
+                    assert_eq!(
+                        result,
+                        match mode {
+                            "exit" => ChildInputExecution::Success,
+                            "overflow" => ChildInputExecution::OutputTooLarge,
+                            _ => ChildInputExecution::TimedOut,
+                        }
+                    );
+                } else {
+                    let mut command = Command::new("python3");
+                    command.args(["-c", script, path.to_str().unwrap(), mode]);
+                    let result = execute_command_output_until(command, bounded, &abort);
+                    if let Some(trigger) = trigger {
+                        trigger.join().unwrap();
+                    }
+                    match mode {
+                        "exit" => assert_eq!(result.unwrap().stdout, b"done\n"),
+                        "overflow" => assert_eq!(result, Err(ChildOutputError::OutputTooLarge)),
+                        _ => assert_eq!(result, Err(ChildOutputError::TimedOut)),
+                    }
+                }
+                assert!(started.elapsed() < Duration::from_secs(3));
+                let pid: libc::pid_t = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    // SAFETY: signal zero only observes the fixture's exact PID.
+                    let running = unsafe { libc::kill(pid, 0) == 0 };
+                    #[cfg(target_os = "linux")]
+                    let running = if running {
+                        // An orphan can be a zombie until init reaps it; it must
+                        // already have stopped executing when the runner returns.
+                        let state = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+                        state.is_ok_and(|stat| {
+                            !stat
+                                .rsplit_once(')')
+                                .unwrap()
+                                .1
+                                .trim_start()
+                                .starts_with('Z')
+                        })
+                    } else {
+                        false
+                    };
+                    if !running {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{with_input} {mode}: descendant survived"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                std::fs::remove_file(path).unwrap();
+            }
         }
     }
 
