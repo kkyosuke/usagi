@@ -167,6 +167,7 @@ impl<S: Read + Write> IpcClient<S> {
             client_required_capabilities(expected_owner.is_some(), &workspace);
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
+            surface: Some(policy.surface),
             connection_nonce,
             expected_daemon_generation: expected_owner
                 .as_ref()
@@ -610,6 +611,7 @@ mod metrics_schema_tests {
 /// mutation may only be retried with its original request/operation identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientPolicy {
+    pub surface: crate::domain::agent::AgentClientSurface,
     pub timeout_ms: u64,
     pub reconnect_attempts: u8,
 }
@@ -618,6 +620,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn tui() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Tui,
             timeout_ms: 2_000,
             reconnect_attempts: 3,
         }
@@ -636,6 +639,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn cli() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Cli,
             timeout_ms: 10_000,
             reconnect_attempts: 1,
         }
@@ -643,6 +647,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn mcp() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Mcp,
             timeout_ms: 30_000,
             reconnect_attempts: 1,
         }
@@ -658,6 +663,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn pane_launch() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Tui,
             timeout_ms: 300_000,
             reconnect_attempts: 1,
         }
@@ -1713,6 +1719,44 @@ mod tests {
                 .to_string()
                 .contains("exact daemon artifact is unknown")
         );
+    }
+
+    #[test]
+    fn hello_preserves_the_surface_and_remains_readable_without_it() {
+        use crate::domain::agent::AgentClientSurface;
+        for (policy, surface) in [
+            (ClientPolicy::tui(), AgentClientSurface::Tui),
+            (ClientPolicy::cli(), AgentClientSurface::Cli),
+            (ClientPolicy::mcp(), AgentClientSurface::Mcp),
+            (ClientPolicy::pane_launch(), AgentClientSurface::Tui),
+        ] {
+            let client = IpcClient::connect(
+                scripted(ResponseOutcome::Ok, "request"),
+                "public-client-id".into(),
+                "nonce".into(),
+                policy,
+                client_build(),
+                test_workspace(),
+            )
+            .unwrap();
+            let mut frames = Cursor::new(client.stream.output);
+            let Bootstrap::ClientHello(hello) =
+                read_json_frame::<Bootstrap>(&mut frames, 1_048_576)
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("the first frame must be a hello");
+            };
+            assert_eq!(hello.surface, Some(surface));
+            let mut legacy = serde_json::to_value(&hello).unwrap();
+            legacy.as_object_mut().unwrap().remove("surface");
+            assert_eq!(
+                serde_json::from_value::<ClientHello>(legacy)
+                    .unwrap()
+                    .surface,
+                None
+            );
+        }
     }
 
     #[test]
@@ -2998,6 +3042,7 @@ mod deadline_and_retry_tests {
 
         fn bounded_policy() -> ClientPolicy {
             ClientPolicy {
+                surface: crate::domain::agent::AgentClientSurface::Cli,
                 timeout_ms: 200,
                 reconnect_attempts: 0,
             }

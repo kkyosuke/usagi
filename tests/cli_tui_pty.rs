@@ -3314,7 +3314,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         &mut master,
         &captured,
         cold_baseline,
-        "Claude (interrupted)",
+        "Claude (interrupted) [Manual]",
     );
     send(&mut master, b"\x0f\x18");
     let dismissed = wait_for_agent_intent(home.path(), |intent| {

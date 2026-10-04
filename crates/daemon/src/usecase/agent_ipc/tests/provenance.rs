@@ -1,5 +1,7 @@
 use super::*;
-use usagi_core::domain::agent::{AgentLaunchEntry, AgentLaunchSource};
+use usagi_core::domain::agent::{
+    AgentClientSurface, AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource,
+};
 
 #[test]
 fn manual_launches_record_distinct_origins_and_replay_the_same_audit() {
@@ -20,6 +22,18 @@ fn manual_launches_record_distinct_origins_and_replay_the_same_audit() {
         assert_eq!(provenance.launched.entrypoint, AgentLaunchEntry::Agent);
         assert_eq!(provenance.launched.operation_id, operation);
         assert_eq!(provenance.launched.caller, None);
+        assert_eq!(
+            provenance.agent_id,
+            Some(
+                agent
+                    .dispatch
+                    .binding(operation)
+                    .unwrap()
+                    .unwrap()
+                    .worker
+                    .agent_id
+            )
+        );
         assert!(provenance.launched.at >= before);
     }
     agent.launch(&first.to_string(), &intent, &scope).unwrap();
@@ -99,7 +113,10 @@ fn mcp_launches_retain_the_authenticated_caller_and_actual_entrypoint() {
                 &scope,
                 preflight.as_ref(),
                 planned.as_ref(),
-                entrypoint,
+                AgentLaunchContext {
+                    caller_operation_id: Some(parent),
+                    ..AgentLaunchContext::new(AgentLaunchSource::Mcp, entrypoint)
+                },
             )
             .unwrap();
         let inventory = agent.inventory(intent.workspace);
@@ -118,6 +135,7 @@ fn mcp_launches_retain_the_authenticated_caller_and_actual_entrypoint() {
         );
         assert_eq!(provenance.launched.entrypoint, entrypoint);
         assert_eq!(provenance.launched.caller, Some(caller.clone()));
+        assert_eq!(provenance.launched.caller_operation_id, Some(parent));
         let worker = agent
             .dispatch
             .binding(operation)
@@ -125,6 +143,7 @@ fn mcp_launches_retain_the_authenticated_caller_and_actual_entrypoint() {
             .unwrap()
             .worker
             .agent_id;
+        assert_eq!(provenance.agent_id, Some(worker));
         assert_eq!(
             agent.agent_launch_provenance(intent.workspace).unwrap()[&worker].as_ref(),
             Some(provenance)
@@ -173,9 +192,14 @@ fn resume_records_the_new_initiator_and_preserves_unknown_legacy_creation() {
                 &operation.to_string(),
                 &target,
                 &scope,
-                AgentLaunchSource::Mcp,
-                AgentLaunchEntry::SessionResume,
-                Some(caller.clone()),
+                AgentLaunchContext {
+                    caller: Some(caller.clone()),
+                    caller_operation_id: Some(created),
+                    ..AgentLaunchContext::new(
+                        AgentLaunchSource::Mcp,
+                        AgentLaunchEntry::SessionResume,
+                    )
+                },
             )
             .unwrap();
         let inventory = agent.inventory(intent.workspace);
@@ -451,9 +475,7 @@ fn daemon_repair_resume_records_restart_without_changing_the_manual_creator() {
             expected_revision,
             &scope,
             preflight.as_ref(),
-            AgentLaunchSource::Daemon,
-            AgentLaunchEntry::DaemonRestart,
-            None,
+            AgentLaunchContext::new(AgentLaunchSource::Daemon, AgentLaunchEntry::DaemonRestart),
         )
         .unwrap();
     let inventory = agent.inventory(intent.workspace);
@@ -484,9 +506,7 @@ fn daemon_repair_resume_records_restart_without_changing_the_manual_creator() {
             &target,
             &scope,
             preflight.as_ref(),
-            AgentLaunchSource::Daemon,
-            AgentLaunchEntry::DaemonRestart,
-            None,
+            AgentLaunchContext::new(AgentLaunchSource::Daemon, AgentLaunchEntry::DaemonRestart),
         )
         .unwrap();
     let inventory = agent.inventory(intent.workspace);
@@ -527,4 +547,212 @@ fn human_goal_launch_records_the_manual_goal_entrypoint() {
     let provenance = inventory.runtimes[0].launch_provenance.as_ref().unwrap();
     assert_eq!(provenance.launched.source, AgentLaunchSource::Manual);
     assert_eq!(provenance.launched.entrypoint, AgentLaunchEntry::AgentGoal);
+}
+
+fn audit_client(surface: AgentClientSurface) -> AgentLaunchClient {
+    AgentLaunchClient {
+        surface: Some(surface),
+        client_id: "public-client-id".into(),
+        connection_id: "public-connection-id".into(),
+        request_id: "public-request-id".into(),
+        peer_pid: 1234,
+    }
+}
+
+#[test]
+fn manual_connection_evidence_is_durable_and_a_retry_cannot_rewrite_its_creator() {
+    let mut agent = runtime();
+    let intent = intent(None);
+    let scope = FakeScope(Ok(scope()));
+    for surface in [
+        AgentClientSurface::Tui,
+        AgentClientSurface::Cli,
+        AgentClientSurface::Mcp,
+    ] {
+        let operation = OperationId::new();
+        let client = audit_client(surface);
+        let context = AgentLaunchContext {
+            client: Some(client.clone()),
+            ..AgentLaunchContext::new(AgentLaunchSource::Manual, AgentLaunchEntry::Agent)
+        };
+        let ticket = agent
+            .prepare_launch_readiness(&operation.to_string(), &intent)
+            .unwrap();
+        let admission = agent
+            .launch_from_after_readiness(
+                &operation.to_string(),
+                &intent,
+                &scope,
+                ticket.as_ref(),
+                context,
+            )
+            .unwrap();
+        let audit = agent
+            .inventory(intent.workspace)
+            .runtimes
+            .into_iter()
+            .find(|item| item.runtime.terminal == admission.terminal)
+            .unwrap()
+            .launch_provenance
+            .unwrap();
+        assert_eq!(audit.launched.source, AgentLaunchSource::Manual);
+        assert_eq!(audit.launched.client, Some(client));
+        assert_eq!(audit.created.as_ref(), Some(&audit.launched));
+        assert_eq!(
+            audit.agent_id,
+            Some(
+                agent
+                    .dispatch
+                    .binding(operation)
+                    .unwrap()
+                    .unwrap()
+                    .worker
+                    .agent_id
+            )
+        );
+        let snapshot = agent.coordinator.snapshot();
+        let restored: RuntimeStoreSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(snapshot, restored);
+        agent
+            .launch_from_after_readiness(
+                &operation.to_string(),
+                &intent,
+                &scope,
+                None,
+                AgentLaunchContext {
+                    client: Some(audit_client(AgentClientSurface::Cli)),
+                    ..AgentLaunchContext::new(AgentLaunchSource::Manual, AgentLaunchEntry::Agent)
+                },
+            )
+            .unwrap();
+        assert_eq!(agent.coordinator.snapshot(), snapshot);
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One lifetime verifies Workflow -> MCP -> exact-resume audit continuity.
+fn workflow_and_its_mcp_workers_retain_one_workflow_identity_across_resume() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+    let worktree = tempfile::tempdir().unwrap();
+    let scope = FakeScope(Ok(configured_scope(worktree.path())));
+    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+    let intent = intent(None);
+    let workflow = OperationId::new();
+    let prompt = "Implement and request a peer review";
+    let ticket = agent
+        .prepare_workflow_readiness(&workflow.to_string(), &intent, prompt)
+        .unwrap();
+    agent
+        .launch_workflow_from_after_readiness(
+            &workflow.to_string(),
+            &intent,
+            prompt,
+            &scope,
+            ticket.as_ref(),
+            AgentLaunchContext {
+                client: Some(audit_client(AgentClientSurface::Tui)),
+                ..AgentLaunchContext::new(
+                    AgentLaunchSource::Workflow,
+                    AgentLaunchEntry::WorkflowStart,
+                )
+            },
+        )
+        .unwrap();
+    let parent = agent.dispatch.binding(workflow).unwrap().unwrap().worker;
+    let parent_caller = CallerRef {
+        agent_id: parent.agent_id,
+        session_id: parent.session_id,
+    };
+    let dispatch = DispatchIntent {
+        workspace: intent.workspace,
+        session_name: "worker".into(),
+        caller: parent_caller.clone(),
+        agent: DispatchAgentIntent::New {
+            runtime: AgentProfileId::new("claude").unwrap(),
+            model: ModelSelector::new("test").unwrap(),
+        },
+        prompt: "Review the task".into(),
+    };
+    let operation = OperationId::new();
+    let ticket = agent
+        .prepare_dispatch_readiness(&operation.to_string(), &dispatch)
+        .unwrap();
+    let worker = agent
+        .dispatch_from_after_readiness(
+            &operation.to_string(),
+            &dispatch,
+            intent.session.unwrap(),
+            &scope,
+            ticket.as_ref(),
+            None,
+            AgentLaunchContext {
+                client: Some(audit_client(AgentClientSurface::Mcp)),
+                caller_operation_id: Some(workflow),
+                ..AgentLaunchContext::new(AgentLaunchSource::Mcp, AgentLaunchEntry::AgentHandoff)
+            },
+        )
+        .unwrap();
+    let inventory = agent.inventory(intent.workspace);
+    let parent_audit = inventory
+        .runtimes
+        .iter()
+        .find(|item| item.launch_provenance.as_ref().unwrap().agent_id == Some(parent.agent_id))
+        .unwrap()
+        .launch_provenance
+        .as_ref()
+        .unwrap();
+    assert_eq!(parent_audit.launched.workflow_id, Some(workflow));
+    let worker_audit = inventory
+        .runtimes
+        .iter()
+        .find(|item| item.runtime.terminal == worker.terminal)
+        .unwrap()
+        .launch_provenance
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker_audit.launched.workflow_id, Some(workflow));
+    assert_eq!(worker_audit.launched.caller, Some(parent_caller));
+    assert_eq!(worker_audit.launched.caller_operation_id, Some(workflow));
+    assert_eq!(worker_audit.launched.source, AgentLaunchSource::Mcp);
+    let credential = agent
+        .mcp_callers
+        .iter()
+        .find(|(_, caller)| caller.operation == operation)
+        .unwrap()
+        .0
+        .clone();
+    agent
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Ready,
+            Some(ProviderSessionId::new("private-workflow-conversation").unwrap()),
+        )
+        .unwrap();
+    agent.exit(&worker.terminal, 0).unwrap();
+    let target = agent
+        .inventory(intent.workspace)
+        .resumable
+        .iter()
+        .find(|item| item.runtime_id == worker.runtime.agent_runtime_id)
+        .unwrap()
+        .target
+        .clone()
+        .unwrap();
+    let resumed = agent
+        .resume_exact(&OperationId::new().to_string(), &target, &scope)
+        .unwrap();
+    let resumed_audit = agent
+        .inventory(intent.workspace)
+        .runtimes
+        .into_iter()
+        .find(|item| item.runtime.terminal == resumed.terminal)
+        .unwrap()
+        .launch_provenance
+        .unwrap();
+    assert_eq!(resumed_audit.agent_id, worker_audit.agent_id);
+    assert_eq!(resumed_audit.created, worker_audit.created);
+    assert_eq!(resumed_audit.launched.source, AgentLaunchSource::Manual);
+    assert_eq!(resumed_audit.launched.workflow_id, Some(workflow));
 }

@@ -5,10 +5,10 @@ use anyhow::Result;
 use super::{
     AgentAdmission, AgentCapability, AgentGoalIntent, AgentId, AgentIntegrationRevision,
     AgentLaunchIntent, AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime,
-    AgentRuntimeRef, BTreeSet, CallerRef, DaemonRestartAgent, DaemonRestartAgentPlan,
+    AgentRuntimeRef, BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan,
     DaemonRestartInterruptionError, ErrorCode, OperationId, ProtocolError,
     ProviderCaptureProvenance, ProviderKind, ProviderResumeReason, SessionId, SessionScopeResolver,
-    Utc, autonomous_goal_prompt, dispatch_operation_id, expected_integration_revisions,
+    autonomous_goal_prompt, dispatch_operation_id, expected_integration_revisions,
     goal_semantic_key, holds_live_or_unknown_agent, is_resume_source_state,
     map_dispatch_storage_error, map_runtime_error, provider_matches_profile,
     repair_resume_semantic_key, resume_semantic_key, resume_target, semantic_key, validate_goal,
@@ -142,9 +142,30 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_from_after_readiness(
+            operation_id,
+            intent,
+            scope,
+            preflight,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::Agent,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_launch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.launch(operation_id, intent, scope)
+        self.launch_from(operation_id, intent, scope, context)
     }
 
     /// Admit an opt-in goal launch after the same owner-external readiness
@@ -156,9 +177,30 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_goal_from_after_readiness(
+            operation_id,
+            intent,
+            scope,
+            preflight,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::AgentGoal,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_goal_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentGoalIntent,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_goal_launch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.launch_goal(operation_id, intent, scope)
+        self.launch_goal_from(operation_id, intent, scope, context)
     }
 
     /// Exact-resume counterpart of [`Self::launch_after_readiness`].
@@ -182,13 +224,11 @@ impl AgentRuntime {
         target: &AgentResumeTarget,
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
-        source: usagi_core::domain::agent::AgentLaunchSource,
-        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
-        caller: Option<CallerRef>,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_resume_readiness(operation_id, target)?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.resume_exact_from(operation_id, target, scope, source, entrypoint, caller)
+        self.resume_exact_from(operation_id, target, scope, context)
     }
 
     /// Repair-only resume counterpart. The readiness ticket is taken from the
@@ -207,9 +247,10 @@ impl AgentRuntime {
             expected_revision,
             scope,
             preflight,
-            usagi_core::domain::agent::AgentLaunchSource::Manual,
-            usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
-            None,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
+            ),
         )
     }
 
@@ -223,9 +264,7 @@ impl AgentRuntime {
         expected_revision: u32,
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
-        source: usagi_core::domain::agent::AgentLaunchSource,
-        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
-        caller: Option<CallerRef>,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_current_integration_resume_readiness(
             operation_id,
@@ -238,9 +277,7 @@ impl AgentRuntime {
             target,
             expected_revision,
             scope,
-            source,
-            entrypoint,
-            caller,
+            context,
         )
     }
 
@@ -253,6 +290,25 @@ impl AgentRuntime {
         intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_from(
+            operation_id,
+            intent,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::Agent,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_from(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic_key) {
@@ -263,15 +319,7 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit(
-            operation_id,
-            intent,
-            scope,
-            None,
-            &semantic_key,
-            usagi_core::domain::agent::AgentLaunchSource::Manual,
-            usagi_core::domain::agent::AgentLaunchEntry::Agent,
-        );
+        let outcome = self.admit(operation_id, intent, scope, None, &semantic_key, context);
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -284,6 +332,25 @@ impl AgentRuntime {
         operation_id: &str,
         intent: &AgentGoalIntent,
         scope: &dyn SessionScopeResolver,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_goal_from(
+            operation_id,
+            intent,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::AgentGoal,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_goal_from(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentGoalIntent,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         validate_goal(intent)?;
         let semantic_key = goal_semantic_key(intent);
@@ -313,8 +380,7 @@ impl AgentRuntime {
             scope,
             Some(&prompt),
             &semantic_key,
-            usagi_core::domain::agent::AgentLaunchSource::Manual,
-            usagi_core::domain::agent::AgentLaunchEntry::AgentGoal,
+            context,
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
@@ -543,9 +609,10 @@ impl AgentRuntime {
             operation_id,
             target,
             scope,
-            usagi_core::domain::agent::AgentLaunchSource::Manual,
-            usagi_core::domain::agent::AgentLaunchEntry::SessionResume,
-            None,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionResume,
+            ),
         )
     }
 
@@ -557,9 +624,7 @@ impl AgentRuntime {
         operation_id: &str,
         target: &AgentResumeTarget,
         scope: &dyn SessionScopeResolver,
-        source: usagi_core::domain::agent::AgentLaunchSource,
-        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
-        caller: Option<CallerRef>,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = resume_semantic_key(target);
         if let Some(existing) = self.operations.get(operation_id) {
@@ -572,13 +637,7 @@ impl AgentRuntime {
             return existing.outcome.clone();
         }
         let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
-        let origin = usagi_core::domain::agent::AgentLaunchOrigin {
-            source,
-            entrypoint,
-            caller,
-            operation_id: operation,
-            at: Utc::now(),
-        };
+        let origin = context.origin(operation);
         let outcome = self.admit_resume_exact(
             operation_id,
             target,
@@ -607,9 +666,10 @@ impl AgentRuntime {
             target,
             expected_revision,
             scope,
-            usagi_core::domain::agent::AgentLaunchSource::Manual,
-            usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
-            None,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
+            ),
         )
     }
 
@@ -620,9 +680,7 @@ impl AgentRuntime {
         target: &AgentResumeTarget,
         expected_revision: u32,
         scope: &dyn SessionScopeResolver,
-        source: usagi_core::domain::agent::AgentLaunchSource,
-        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
-        caller: Option<CallerRef>,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = repair_resume_semantic_key(target, expected_revision);
         if let Some(existing) = self.operations.get(operation_id) {
@@ -640,14 +698,10 @@ impl AgentRuntime {
             &semantic_key,
             scope,
             Some(expected_revision),
-            Some(usagi_core::domain::agent::AgentLaunchOrigin {
-                source,
-                entrypoint,
-                caller,
-                operation_id: OperationId::parse(operation_id)
-                    .map_err(|_| dispatch_operation_id())?,
-                at: Utc::now(),
-            }),
+            Some(
+                context
+                    .origin(OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?),
+            ),
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome

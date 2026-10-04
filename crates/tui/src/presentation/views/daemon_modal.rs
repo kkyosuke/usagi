@@ -212,10 +212,14 @@ mod origin_tests {
                 source,
                 entrypoint: AgentLaunchEntry::Agent,
                 caller: None,
+                caller_operation_id: None,
+                client: None,
+                workflow_id: None,
                 operation_id: OperationId::new(),
                 at: chrono::Utc::now(),
             };
             let mut provenance = AgentLaunchProvenance {
+                agent_id: None,
                 created: Some(origin.clone()),
                 launched: origin,
             };

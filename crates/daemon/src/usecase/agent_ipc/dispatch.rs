@@ -113,7 +113,10 @@ impl AgentRuntime {
             session,
             scope,
             planned_worker,
-            usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Mcp,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
+            ),
         )
     }
 
@@ -125,7 +128,7 @@ impl AgentRuntime {
         session: SessionId,
         scope: &dyn SessionScopeResolver,
         planned_worker: Option<&usagi_core::domain::agent::Agent>,
-        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         if intent.prompt.is_empty() {
@@ -227,7 +230,7 @@ impl AgentRuntime {
             &intent.caller,
             &semantic,
             scope,
-            entrypoint,
+            context,
         );
         self.remember_operation(operation_id, Some(&semantic), outcome.clone());
         outcome

@@ -255,6 +255,7 @@ impl Client {
         let mut stream = UnixStream::connect(endpoint)?;
         let hello = ClientHello {
             client_id: usagi_core::infrastructure::ipc::ClientId("test-client".into()),
+            surface: None,
             connection_nonce: "nonce".into(),
             expected_daemon_generation: None,
             supported_protocols: vec![ProtocolRange {

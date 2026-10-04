@@ -8,6 +8,25 @@ mod scratchpad;
 pub(super) mod session;
 
 use session::{AgentDispatchRequest, authorize_delegation, dispatch_session_action};
+use usagi_core::domain::agent::{AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource};
+use usagi_daemon::usecase::agent_ipc::AgentLaunchContext;
+
+/// Metadata from the admitted connection; presentation labels confer no authority.
+pub(super) fn launch_context(
+    source: AgentLaunchSource,
+    entrypoint: AgentLaunchEntry,
+    client: Option<&AgentLaunchClient>,
+    caller: Option<&usagi_core::domain::agent::CallerRef>,
+    caller_operation_id: Option<usagi_core::domain::id::OperationId>,
+) -> AgentLaunchContext {
+    AgentLaunchContext {
+        source,
+        entrypoint,
+        client: client.cloned(),
+        caller: caller.cloned(),
+        caller_operation_id,
+    }
+}
 
 use super::{
     AgentAdmission, AgentDecisionWaker, AgentProfileId, AgentReadiness, AgentReadinessPreflight,
@@ -37,6 +56,7 @@ pub(super) struct DispatchToolContext<'a> {
     pub(super) pr_inventory: &'a SharedPrInventory,
     pub(super) decisions: &'a UserDecisionStore,
     pub(super) supervisor: &'a SharedSupervisorRuntime,
+    pub(super) launch_client: Option<&'a AgentLaunchClient>,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
@@ -641,11 +661,17 @@ pub(super) fn dispatch_agent_tool(
                     session_id,
                     &scope,
                     reserved_worker.as_ref(),
-                    if handoff {
-                        usagi_core::domain::agent::AgentLaunchEntry::AgentHandoff
-                    } else {
-                        usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch
-                    },
+                    launch_context(
+                        AgentLaunchSource::Mcp,
+                        if handoff {
+                            AgentLaunchEntry::AgentHandoff
+                        } else {
+                            AgentLaunchEntry::SessionDispatch
+                        },
+                        context.launch_client,
+                        Some(&dispatch_intent.caller),
+                        Some(parent_dispatch_run),
+                    ),
                 );
                 let admission = match admission {
                     Ok(admission) => admission,
@@ -2535,6 +2561,7 @@ pub(super) fn dispatch_dispatch(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
+    launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
@@ -2591,7 +2618,13 @@ pub(super) fn dispatch_dispatch(
             session_id,
             &scope,
             None,
-            usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
+            launch_context(
+                AgentLaunchSource::Mcp,
+                AgentLaunchEntry::SessionDispatch,
+                Some(launch_client),
+                Some(&intent.caller),
+                None,
+            ),
         )
     });
     match result {
@@ -2975,6 +3008,7 @@ pub(super) struct SessionDispatchContext<'a> {
     pub(super) verification: &'a SharedVerificationCache,
     pub(super) verification_clock: &'a SystemClock,
     pub(super) supervisor: &'a SharedSupervisorRuntime,
+    pub(super) launch_client: Option<&'a AgentLaunchClient>,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_create_reaches_daemon_and_durable_lifecycle
@@ -3479,7 +3513,8 @@ fn admit_agent_dispatch_request(
     supervisor: &SharedSupervisorRuntime,
     scope: &dyn SessionScopeResolver,
     request: &AgentDispatchRequest,
-    resume_caller: Option<&usagi_core::domain::agent::CallerRef>,
+    resume_caller: Option<&usagi_daemon::usecase::agent_ipc::AuthenticatedDispatchCaller>,
+    launch_client: &AgentLaunchClient,
 ) -> Result<AgentDispatchAdmission, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
     let preflight = agent
@@ -3543,25 +3578,51 @@ fn admit_agent_dispatch_request(
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
         .and_then(|mut owner| match request {
-            AgentDispatchRequest::Launch(operation_id, intent) => {
-                owner.launch_after_readiness(operation_id, intent, scope, preflight.as_ref())
-            }
-            AgentDispatchRequest::Goal(operation_id, intent) => {
-                owner.launch_goal_after_readiness(operation_id, intent, scope, preflight.as_ref())
-            }
+            AgentDispatchRequest::Launch(operation_id, intent) => owner
+                .launch_from_after_readiness(
+                    operation_id,
+                    intent,
+                    scope,
+                    preflight.as_ref(),
+                    launch_context(
+                        AgentLaunchSource::Manual,
+                        AgentLaunchEntry::Agent,
+                        Some(launch_client),
+                        None,
+                        None,
+                    ),
+                ),
+            AgentDispatchRequest::Goal(operation_id, intent) => owner
+                .launch_goal_from_after_readiness(
+                    operation_id,
+                    intent,
+                    scope,
+                    preflight.as_ref(),
+                    launch_context(
+                        AgentLaunchSource::Manual,
+                        AgentLaunchEntry::AgentGoal,
+                        Some(launch_client),
+                        None,
+                        None,
+                    ),
+                ),
             AgentDispatchRequest::Resume(operation_id, target) => owner
                 .resume_from_after_readiness(
                     operation_id,
                     target,
                     scope,
                     preflight.as_ref(),
-                    if resume_caller.is_some() {
-                        usagi_core::domain::agent::AgentLaunchSource::Mcp
-                    } else {
-                        usagi_core::domain::agent::AgentLaunchSource::Manual
-                    },
-                    usagi_core::domain::agent::AgentLaunchEntry::SessionResume,
-                    resume_caller.cloned(),
+                    launch_context(
+                        if resume_caller.is_some() {
+                            AgentLaunchSource::Mcp
+                        } else {
+                            AgentLaunchSource::Manual
+                        },
+                        AgentLaunchEntry::SessionResume,
+                        Some(launch_client),
+                        resume_caller.map(|authenticated| &authenticated.caller),
+                        resume_caller.map(|authenticated| authenticated.run_id),
+                    ),
                 ),
             AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
                 .resume_with_current_integration_from_after_readiness(
@@ -3570,13 +3631,17 @@ fn admit_agent_dispatch_request(
                     *revision,
                     scope,
                     preflight.as_ref(),
-                    if resume_caller.is_some() {
-                        usagi_core::domain::agent::AgentLaunchSource::Mcp
-                    } else {
-                        usagi_core::domain::agent::AgentLaunchSource::Manual
-                    },
-                    usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
-                    resume_caller.cloned(),
+                    launch_context(
+                        if resume_caller.is_some() {
+                            AgentLaunchSource::Mcp
+                        } else {
+                            AgentLaunchSource::Manual
+                        },
+                        AgentLaunchEntry::IntegrationRepair,
+                        Some(launch_client),
+                        resume_caller.map(|authenticated| &authenticated.caller),
+                        resume_caller.map(|authenticated| authenticated.run_id),
+                    ),
                 ),
             AgentDispatchRequest::Inventory(_)
             | AgentDispatchRequest::WorkspaceObservation(_)
@@ -4243,6 +4308,7 @@ pub(super) fn dispatch_agent(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
+    launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
@@ -4335,7 +4401,7 @@ pub(super) fn dispatch_agent(
                 "agent caller does not belong to this workspace",
             ));
         }
-        resume_caller = Some(authenticated.caller.clone());
+        resume_caller = Some(authenticated.clone());
         let requested_workspace = match &request {
             AgentDispatchRequest::Inventory(requested) => *requested,
             AgentDispatchRequest::Resume(_, target) => target.workspace_id,
@@ -4398,8 +4464,14 @@ pub(super) fn dispatch_agent(
     }
     // The first owner visit captures immutable facts, the provider command runs
     // after its guard is dropped, and the second visit repeats every fence.
-    let result =
-        admit_agent_dispatch_request(agent, supervisor, &scope, &request, resume_caller.as_ref());
+    let result = admit_agent_dispatch_request(
+        agent,
+        supervisor,
+        &scope,
+        &request,
+        resume_caller.as_ref(),
+        launch_client,
+    );
     match result {
         Ok(result) => {
             let supervisor_run_id = result.supervisor_run_id;
@@ -4467,7 +4539,7 @@ pub(super) fn dispatch_agent_after_preflight(
     session: SessionId,
     scope: &dyn SessionScopeResolver,
     planned_worker: Option<&usagi_core::domain::agent::Agent>,
-    entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+    context: AgentLaunchContext,
 ) -> Result<
     usagi_daemon::usecase::agent_ipc::AgentAdmission,
     usagi_core::infrastructure::ipc::ProtocolError,
@@ -4489,7 +4561,7 @@ pub(super) fn dispatch_agent_after_preflight(
         scope,
         preflight.as_ref(),
         planned_worker,
-        entrypoint,
+        context,
     )
 }
 

@@ -166,6 +166,47 @@ pub struct PromptDelivery {
     pub queued: bool,
 }
 
+/// Trusted launch request context assembled by the daemon boundary. The
+/// client-reported surface is evidence, not the source of caller authority.
+#[derive(Debug, Clone)]
+pub struct AgentLaunchContext {
+    pub source: usagi_core::domain::agent::AgentLaunchSource,
+    pub entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+    pub caller: Option<CallerRef>,
+    pub caller_operation_id: Option<OperationId>,
+    pub client: Option<usagi_core::domain::agent::AgentLaunchClient>,
+}
+
+impl AgentLaunchContext {
+    #[must_use]
+    pub fn new(
+        source: usagi_core::domain::agent::AgentLaunchSource,
+        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+    ) -> Self {
+        Self {
+            source,
+            entrypoint,
+            caller: None,
+            caller_operation_id: None,
+            client: None,
+        }
+    }
+
+    fn origin(self, operation: OperationId) -> usagi_core::domain::agent::AgentLaunchOrigin {
+        usagi_core::domain::agent::AgentLaunchOrigin {
+            source: self.source,
+            entrypoint: self.entrypoint,
+            caller: self.caller,
+            caller_operation_id: self.caller_operation_id,
+            client: self.client,
+            workflow_id: (self.source == usagi_core::domain::agent::AgentLaunchSource::Workflow)
+                .then_some(operation),
+            operation_id: operation,
+            at: Utc::now(),
+        }
+    }
+}
+
 /// One process-local Agent operation, replayed identically on resend/reconnect.
 /// Only the semantic digest is kept here: the durable runtime/dispatch stores
 /// own the canonical intent under their independent byte/count retention.
@@ -448,6 +489,29 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_workflow_from_after_readiness(
+            operation_id,
+            intent,
+            prompt,
+            scope,
+            preflight,
+            AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Workflow,
+                usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+            ),
+        )
+    }
+
+    /// Workflow launch with connection evidence captured at request admission.
+    pub fn launch_workflow_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        prompt: &str,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_workflow_readiness(operation_id, intent, prompt)?;
         self.validate_readiness(preflight, current.as_ref())?;
         if let Some(existing) = self.operations.get(operation_id) {
@@ -482,8 +546,7 @@ impl AgentRuntime {
             scope,
             Some(prompt),
             &semantic,
-            usagi_core::domain::agent::AgentLaunchSource::Workflow,
-            usagi_core::domain::agent::AgentLaunchEntry::WorkflowStart,
+            context,
         );
         self.remember_operation(operation_id, Some(&semantic), outcome.clone());
         outcome
@@ -676,7 +739,7 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
         planned_worker: Option<&usagi_core::domain::agent::Agent>,
-        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+        context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_dispatch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
@@ -686,7 +749,7 @@ impl AgentRuntime {
             session,
             scope,
             planned_worker,
-            entrypoint,
+            context,
         )
     }
 

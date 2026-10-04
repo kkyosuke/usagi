@@ -16,7 +16,7 @@ use super::{
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
     SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, best_effort_merged_pr_head,
     bind_delegated_supervisor_dispatch, clean_orphan_session_resources,
-    dispatch_agent_after_preflight, perform_compensating_remove, perform_create,
+    dispatch_agent_after_preflight, launch_context, perform_compensating_remove, perform_create,
     perform_delegated_create, perform_remove_with_merged_head,
     reconcile_pending_supervisor_promotions, record_session_lineage,
     require_stable_supervisor_fence, require_supervisor_reservation_presence, scratchpad,
@@ -422,6 +422,7 @@ pub(super) fn dispatch_session_action(
                         .map_err(|_| SessionRuntimeError::InvalidRequest)?,
                     command,
                     issue,
+                    context.launch_client.cloned(),
                 ),
             }
             .map_err(workflow::refusal)?;
@@ -1119,7 +1120,13 @@ fn delegate_brief(
         id,
         &scope,
         reserved_worker.as_ref(),
-        usagi_core::domain::agent::AgentLaunchEntry::SessionDelegateBrief,
+        launch_context(
+            usagi_core::domain::agent::AgentLaunchSource::Mcp,
+            usagi_core::domain::agent::AgentLaunchEntry::SessionDelegateBrief,
+            context.launch_client,
+            Some(&dispatch_intent.caller),
+            Some(parent_dispatch_run),
+        ),
     );
     let admission = match admission {
         Ok(admission) => admission,

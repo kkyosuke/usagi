@@ -4380,6 +4380,9 @@ mod tests {
                 source,
                 entrypoint: AgentLaunchEntry::Agent,
                 caller: None,
+                caller_operation_id: None,
+                client: None,
+                workflow_id: None,
                 operation_id: OperationId::new(),
                 at: now(),
             };
@@ -4389,6 +4392,7 @@ mod tests {
                 state: AgentRuntimeInventoryState::Live,
                 resumed_from: None,
                 launch_provenance: Some(AgentLaunchProvenance {
+                    agent_id: None,
                     created: Some(origin.clone()),
                     launched: origin,
                 }),

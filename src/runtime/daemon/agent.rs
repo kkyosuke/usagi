@@ -935,9 +935,10 @@ pub(super) fn restore_pending_daemon_agents(
                 item.agent.expected_revision,
                 scope,
                 preflight.as_ref(),
-                usagi_core::domain::agent::AgentLaunchSource::Daemon,
-                usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
-                None,
+                usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                    usagi_core::domain::agent::AgentLaunchSource::Daemon,
+                    usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+                ),
             )
         } else {
             owner.resume_from_after_readiness(
@@ -945,9 +946,10 @@ pub(super) fn restore_pending_daemon_agents(
                 &item.agent.target,
                 scope,
                 preflight.as_ref(),
-                usagi_core::domain::agent::AgentLaunchSource::Daemon,
-                usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
-                None,
+                usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                    usagi_core::domain::agent::AgentLaunchSource::Daemon,
+                    usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+                ),
             )
         };
         resumed.map_err(|error| std::io::Error::other(error.message))?;

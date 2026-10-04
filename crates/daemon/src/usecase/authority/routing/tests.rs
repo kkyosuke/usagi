@@ -19,6 +19,7 @@ fn client(capabilities: Vec<String>) -> ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId(
             usagi_core::domain::id::ClientId::new().as_str(),
         ),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {

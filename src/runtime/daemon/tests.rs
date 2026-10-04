@@ -11657,6 +11657,7 @@ fn fence_client_hello(capabilities: Vec<String>) -> usagi_core::infrastructure::
     };
     ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId(ClientId::new().as_str()),
+        surface: None,
         connection_nonce: "fence".to_owned(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {
@@ -12364,6 +12365,7 @@ mod workflow_composition {
                         clock: &StoppedClock(0),
                     },
                     bound: &self.bound,
+                    launch_client: None,
                 },
                 usagi_core::infrastructure::ipc::RequestId("workflow-test".into()),
                 request,
@@ -13481,6 +13483,7 @@ mod workflow_composition {
                 revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
             },
             Some(742),
+            None,
         )
         .unwrap();
         assert_eq!(started.run.unwrap().id, operation);
@@ -13494,6 +13497,7 @@ mod workflow_composition {
             fixture.session,
             usagi_core::domain::id::OperationId::new(),
             WorkflowCommand::Finish,
+            None,
             None,
         )
         .unwrap();
@@ -15479,4 +15483,44 @@ fn a_recorded_panic_names_the_thread_it_happened_on() {
 
     let anonymous = panic_report("boom", "somewhere", None, "", 123, &current_build());
     assert!(anonymous.contains("\nthread: <unnamed>\n"), "{anonymous}");
+}
+
+#[test]
+fn launch_audit_keeps_authenticated_caller_independent_of_reported_surface() {
+    use usagi_core::domain::agent::{
+        AgentClientSurface, AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource, CallerRef,
+    };
+    let client = AgentLaunchClient {
+        surface: Some(AgentClientSurface::Tui),
+        client_id: "client".into(),
+        connection_id: "connection".into(),
+        request_id: "request".into(),
+        peer_pid: 4321,
+    };
+    let caller = CallerRef {
+        session_id: Some(SessionId::new()),
+        agent_id: usagi_core::domain::id::AgentId::new(),
+    };
+    let operation = usagi_core::domain::id::OperationId::new();
+    let context = dispatch::launch_context(
+        AgentLaunchSource::Mcp,
+        AgentLaunchEntry::AgentHandoff,
+        Some(&client),
+        Some(&caller),
+        Some(operation),
+    );
+    assert_eq!(context.source, AgentLaunchSource::Mcp);
+    assert_eq!(context.entrypoint, AgentLaunchEntry::AgentHandoff);
+    assert_eq!(context.caller, Some(caller));
+    assert_eq!(context.caller_operation_id, Some(operation));
+    assert_eq!(context.client, Some(client));
+    let legacy = dispatch::launch_context(
+        AgentLaunchSource::Manual,
+        AgentLaunchEntry::Agent,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(legacy.client, None);
+    assert_eq!(legacy.caller_operation_id, None);
 }

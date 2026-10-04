@@ -3,19 +3,18 @@
 use anyhow::Result;
 
 use super::{
-    AgentAdmission, AgentAdmissionReservation, AgentCapability, AgentId, AgentLaunchIntent,
-    AgentPhase, AgentResumeRelation, AgentResumeTarget, AgentRuntime, AgentRuntimeId,
-    AgentRuntimeRef, AgentStatus, BTreeSet, CallerRef, CompletionFence, DispatchBinding,
-    DispatchCredentialProvenance, DispatchRun, ErrorCode, LaunchMode, LaunchRequest, LaunchScope,
-    McpCaller, ModelSelector, OperationId, ProtocolError, ProviderResumeReason, RunStatus,
-    RuntimeAuthorization, SessionScopeResolver, TerminalId, TerminalRef, Utc, WorkerRef,
-    agent_operation_digest, dispatch_admission_incomplete, dispatch_agent_not_found,
-    dispatch_binding_unavailable, durable_operation_outcome, is_resume_source_state,
-    map_dispatch_storage_error, map_orchestration_error, map_runtime_error, map_scope_error,
+    AgentAdmission, AgentAdmissionReservation, AgentCapability, AgentId, AgentLaunchContext,
+    AgentLaunchIntent, AgentPhase, AgentResumeRelation, AgentResumeTarget, AgentRuntime,
+    AgentRuntimeId, AgentRuntimeRef, AgentStatus, BTreeSet, CallerRef, CompletionFence,
+    DispatchBinding, DispatchCredentialProvenance, DispatchRun, ErrorCode, LaunchMode,
+    LaunchRequest, LaunchScope, McpCaller, ModelSelector, OperationId, ProtocolError,
+    ProviderResumeReason, RunStatus, RuntimeAuthorization, SessionScopeResolver, TerminalId,
+    TerminalRef, Utc, WorkerRef, agent_operation_digest, dispatch_admission_incomplete,
+    dispatch_agent_not_found, dispatch_binding_unavailable, durable_operation_outcome,
+    is_resume_source_state, map_dispatch_storage_error, map_orchestration_error, map_runtime_error,
+    map_scope_error,
 };
-use usagi_core::domain::agent::{
-    AgentLaunchEntry, AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource,
-};
+use usagi_core::domain::agent::{AgentLaunchOrigin, AgentLaunchProvenance};
 
 impl AgentRuntime {
     /// Keep an Agent's creator through fresh conversations as well as exact
@@ -24,9 +23,20 @@ impl AgentRuntime {
     fn provenance_for_agent(
         &self,
         agent: AgentId,
-        launched: AgentLaunchOrigin,
+        mut launched: AgentLaunchOrigin,
         fresh_identity: bool,
     ) -> Result<AgentLaunchProvenance, ProtocolError> {
+        if launched.workflow_id.is_none() {
+            launched.workflow_id = launched.caller_operation_id.and_then(|operation| {
+                self.coordinator
+                    .snapshot()
+                    .records
+                    .into_iter()
+                    .find(|record| record.operation.operation_id == operation)
+                    .and_then(|record| record.launch_provenance)
+                    .and_then(|provenance| provenance.launched.workflow_id)
+            });
+        }
         let previous = self
             .dispatch
             .runs()
@@ -46,7 +56,11 @@ impl AgentRuntime {
                 .and_then(|record| record.launch_provenance)
                 .and_then(|provenance| provenance.created),
         };
-        Ok(AgentLaunchProvenance { created, launched })
+        Ok(AgentLaunchProvenance {
+            agent_id: Some(agent),
+            created,
+            launched,
+        })
     }
 
     /// Frees one slot at saturation by sleeping the oldest completed turn that
@@ -95,7 +109,7 @@ impl AgentRuntime {
         caller: &CallerRef,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
-        entrypoint: AgentLaunchEntry,
+        mut context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         if let Some(existing) = self
             .dispatch
@@ -170,12 +184,9 @@ impl AgentRuntime {
             mcp_allowed: true,
             launch_provenance: Some(self.provenance_for_agent(
                 worker.agent_id,
-                AgentLaunchOrigin {
-                    source: AgentLaunchSource::Mcp,
-                    entrypoint,
-                    caller: Some(caller.clone()),
-                    operation_id: operation,
-                    at: Utc::now(),
+                {
+                    context.caller = Some(caller.clone());
+                    context.origin(operation)
                 },
                 fresh_identity,
             )?),
@@ -398,26 +409,35 @@ impl AgentRuntime {
                 .collect(),
         };
         let superseded = [source.runtime.clone()];
-        let authorization = RuntimeAuthorization {
-            runtime,
-            operation: fence,
-            mcp_allowed: true,
-            launch_provenance: launch_origin.map(|launched| AgentLaunchProvenance {
-                created: source
-                    .launch_provenance
-                    .as_ref()
-                    .and_then(|provenance| provenance.created.clone()),
-                launched,
-            }),
-        };
-        let credential = OperationId::new().to_string();
-        // A tuple no longer identifies an Agent: same-session peers may use
-        // the same provider/model. Preserve the exact source's mailbox identity.
         let source_binding = self
             .dispatch
             .binding(source.operation.operation_id)
             .map_err(map_dispatch_storage_error)?
             .ok_or_else(dispatch_binding_unavailable)?;
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+            launch_provenance: launch_origin.map(|mut launched| {
+                if launched.workflow_id.is_none() {
+                    launched.workflow_id = source
+                        .launch_provenance
+                        .as_ref()
+                        .and_then(|provenance| provenance.launched.workflow_id);
+                }
+                AgentLaunchProvenance {
+                    agent_id: Some(source_binding.worker.agent_id),
+                    created: source
+                        .launch_provenance
+                        .as_ref()
+                        .and_then(|provenance| provenance.created.clone()),
+                    launched,
+                }
+            }),
+        };
+        let credential = OperationId::new().to_string();
+        // A tuple no longer identifies an Agent: same-session peers may use
+        // the same provider/model. Preserve the exact source's mailbox identity.
         let mut worker = self
             .dispatch
             .agent_in_workspace(target.workspace_id, source_binding.worker.agent_id)
@@ -510,8 +530,7 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         initial_prompt: Option<&str>,
         launch_semantic: &str,
-        source: AgentLaunchSource,
-        entrypoint: AgentLaunchEntry,
+        context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let profile_id = intent
             .profile
@@ -634,13 +653,7 @@ impl AgentRuntime {
             mcp_allowed: true,
             launch_provenance: Some(self.provenance_for_agent(
                 worker.agent_id,
-                AgentLaunchOrigin {
-                    source,
-                    entrypoint,
-                    caller: None,
-                    operation_id: operation,
-                    at: Utc::now(),
-                },
+                context.origin(operation),
                 !existing_agents.contains(&worker.agent_id),
             )?),
         };

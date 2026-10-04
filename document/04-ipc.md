@@ -122,6 +122,9 @@ protocol の互換性判定には使わないが、client bootstrap は `ServerH
 daemon が現在 executable と **exact same artifact** かを確認する。client は `build.artifact.v1` capability を必須とし、
 capability を持たない旧 daemon は build tuple へ fallback せず handshake で拒否される。
 
+hello の optional な `surface` は Agent 起動の診断記録に使う。意味と記録の追い方は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
+
 `BuildIdentity` は version、commit diagnostics、full target triple、canonical `artifact` を持つ。artifact は
 `usagi-artifact-v1:<profile>:<target>:<source-id>` である。`build.rs` は Git checkout では
 commit と tracked / untracked source set、Git metadata の無い package build では package source set から
