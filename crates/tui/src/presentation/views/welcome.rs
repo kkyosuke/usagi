@@ -110,7 +110,7 @@ impl Welcome {
         }
         self.items.extend([
             MenuItem {
-                label: "+ Open / add projects",
+                label: "Open / add projects",
                 key: 'o',
             },
             MenuItem {
@@ -216,25 +216,46 @@ impl Default for Welcome {
     }
 }
 
-/// Welcome actions are plain text; focus changes styling without moving labels.
+/// Only action labels take the focus colour; shortcuts stay quiet.
 fn menu_text(label: &str, selected: bool) -> String {
     let style = if selected {
         Role::Accent.style().bold()
     } else {
-        Style::new().fg(Color::White).dim()
+        Style::new().fg(Color::White)
     };
     style.paint(label)
 }
 
+fn shortcut(key: char) -> String {
+    Style::new().fg(Color::White).dim().paint(&key.to_string())
+}
+
 fn menu_row(item: &MenuItem, selected: bool, width: usize) -> String {
     let label = widgets::pad_to_width(item.label, width.saturating_sub(6));
-    menu_text(
-        &widgets::clip_to_width(&format!("  {label} {}  ", item.key), width),
-        selected,
+    widgets::clip_to_width(
+        &format!("  {} {}  ", menu_text(&label, selected), shortcut(item.key)),
+        width,
     )
 }
 
-/// One column of primary actions; Config and Quit stay at the foot of the screen.
+fn utility_row(welcome: &Welcome) -> String {
+    welcome
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item.key, 'c' | 'q'))
+        .map(|(index, item)| {
+            format!(
+                "{}  {}",
+                menu_text(item.label, index == welcome.selected_index),
+                shortcut(item.key),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("     ")
+}
+
+/// A quiet launcher grouped in the upper third, with only hints at the bottom.
 #[must_use]
 pub fn render(
     raw_height: usize,
@@ -251,19 +272,37 @@ pub fn render(
             widgets::clip_to_width(line, block)
         )
     };
-    let mut body = Vec::new();
+    let spacious = height >= 20;
+    let mut content = Vec::new();
+    if spacious {
+        content.extend(widgets::icon::centered(width).iter().map(|line| {
+            Role::Feature
+                .style()
+                .paint(&widgets::clip_to_width(line, width))
+        }));
+        content.push(String::new());
+    }
+    if height >= 8 {
+        content.push(mascot_screen::centered_line(
+            width,
+            "USAGI",
+            Role::Success.style().dim(),
+        ));
+        content.push(String::new());
+    }
     for (index, item) in welcome
         .items
         .iter()
         .enumerate()
         .filter(|(_, item)| !matches!(item.key, 'c' | 'q'))
     {
-        body.push(indent(&menu_row(
+        content.push(indent(&menu_row(
             item,
             index == welcome.selected_index,
             block,
         )));
-        if item.key == 'r'
+        if height >= 10
+            && item.key == 'r'
             && let Some(last) = welcome.last_projects()
         {
             let names = last
@@ -272,65 +311,51 @@ pub fn render(
                 .map(|path| welcome.project_name(path))
                 .collect::<Vec<_>>()
                 .join(" · ");
-            body.push(indent(&Style::new().dim().paint(&format!("  {names}"))));
-            if height >= 20 && welcome.notice().is_none() {
-                body.push(indent(&Style::new().dim().paint(&format!(
-                    "  {} projects · active: {}",
-                    last.paths.len(),
-                    welcome.project_name(&last.active)
-                ))));
-            }
+            content.push(indent(
+                &Style::new()
+                    .fg(Color::White)
+                    .dim()
+                    .paint(&format!("  {names}")),
+            ));
         }
-        if height >= 20 && welcome.notice().is_none() {
-            body.push(String::new());
+        if spacious {
+            content.push(String::new());
         }
     }
+    // Reserve utilities and the footer before admitting optional notice rows.
+    let budget = height.saturating_sub(2);
+    content.truncate(budget);
     if let Some(notice) = welcome.notice() {
-        body.extend(
-            widgets::wrap_to_width(notice, width)
+        let available = budget.saturating_sub(content.len());
+        content.extend(
+            widgets::wrap_to_width(notice, block)
                 .iter()
+                .take(available)
                 .map(|line| mascot_screen::centered_line(width, line, Role::Warning.style())),
         );
     }
-    let utilities = welcome
-        .items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| matches!(item.key, 'c' | 'q'))
-        .map(|(index, item)| {
-            menu_text(
-                &widgets::pad_to_width(
-                    &format!("{} {}", item.key, item.label),
-                    widgets::display_width("c Config"),
-                ),
-                index == welcome.selected_index,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("    ");
-    let mut frame = if height >= 16 {
-        let budget = mascot_screen::body_budget(height, width).saturating_sub(2);
-        body.truncate(budget);
-        mascot_screen::render(height, width, "USAGI", FOOTER, |_| body)
-    } else {
-        let mut lines = vec![mascot_screen::centered_line(
-            width,
-            "USAGI",
-            Role::Success.style().bold(),
-        )];
-        body.truncate(height.saturating_sub(3));
-        lines.extend(body);
-        lines.resize(height.saturating_sub(1), String::new());
-        lines.push(mascot_screen::centered_line(
-            width,
-            FOOTER,
-            Style::new().dim(),
-        ));
-        lines
-    };
-    if height >= 2 {
-        frame[height - 2] = mascot_screen::centered_line(width, &utilities, Style::new());
+    if spacious && content.len() < budget {
+        content.push(String::new());
     }
+    if height >= 2 {
+        content.push(mascot_screen::centered_line(
+            width,
+            &utility_row(welcome),
+            Style::new(),
+        ));
+    }
+    // Centre the whole group near the upper third, saturating on short screens.
+    let top = (height / 3)
+        .saturating_sub(content.len() / 2)
+        .min(height.saturating_sub(content.len() + 1));
+    let mut frame = vec![String::new(); top];
+    frame.extend(content);
+    frame.resize(height.saturating_sub(1), String::new());
+    frame.push(mascot_screen::centered_line(
+        width,
+        FOOTER,
+        Style::new().fg(Color::White).dim(),
+    ));
     frame
 }
 
@@ -427,9 +452,92 @@ mod tests {
             assert!(!text.contains("Recent"));
             assert!(!text.contains("hidden"));
             assert!(text.contains("alpha"));
-            assert!(frame[height - 2].contains("Config"));
-            assert!(frame[height - 2].contains("Quit"));
+            assert!(text.contains("Config"));
+            assert!(text.contains("Quit"));
+            assert!(text.contains("Could not open project"));
         }
+    }
+
+    #[test]
+    fn launcher_groups_actions_near_the_upper_third() {
+        let mut welcome = Welcome::new(vec![recent("usagi"), recent("monica")]);
+        welcome.set_last_projects(Some(LastProjectSet {
+            paths: vec!["/tmp/usagi".into(), "/tmp/monica".into()],
+            active: "/tmp/monica".into(),
+        }));
+        for height in [24, 40, 80] {
+            let frame = render(height, 80, &welcome, Utc::now());
+            let plain: Vec<_> = frame.iter().map(|line| widgets::strip_ansi(line)).collect();
+            let first = plain.iter().position(|line| !line.is_empty()).unwrap();
+            let utilities = plain
+                .iter()
+                .position(|line| line.contains("Config"))
+                .unwrap();
+            let clone = plain
+                .iter()
+                .position(|line| line.contains("Clone repository"))
+                .unwrap();
+            assert!(usize::midpoint(first, utilities).abs_diff(height / 3) <= 1);
+            assert_eq!(utilities - clone, 3);
+            assert!(utilities < height - 2);
+            assert!(plain.last().unwrap().contains("Enter open"));
+            assert_eq!(
+                plain
+                    .iter()
+                    .filter(|line| line.contains("usagi · monica"))
+                    .count(),
+                1
+            );
+            assert!(!plain.join("\n").contains("active:"));
+            assert!(!plain.join("\n").contains("2 projects"));
+        }
+    }
+
+    #[test]
+    fn compact_frames_preserve_actions_and_bound_long_content() {
+        let mut welcome = Welcome::new(vec![recent(
+            "日本語の長いプロジェクト名".repeat(8).as_str(),
+        )]);
+        welcome.set_notice(Some("Could not open project. ".repeat(50)));
+        for height in 1..=24 {
+            for width in [1, 3, 20, 40, 80] {
+                let frame = render(height, width, &welcome, Utc::now());
+                assert_eq!(frame.len(), height);
+                assert!(
+                    frame
+                        .iter()
+                        .all(|line| widgets::display_width(line) <= width)
+                );
+                if height >= 5 && width >= 40 {
+                    let text = frame.join("\n");
+                    for label in [
+                        "Open last projects",
+                        "Open / add projects",
+                        "Clone repository",
+                        "Config",
+                        "Quit",
+                    ] {
+                        assert!(text.contains(label), "{height}x{width}: missing {label}");
+                    }
+                }
+            }
+        }
+        assert_eq!(render(0, 0, &welcome, Utc::now()).len(), 24);
+    }
+
+    #[test]
+    fn shortcuts_stay_dim_when_the_label_is_selected() {
+        let welcome = Welcome::empty();
+        let item = &welcome.items()[0];
+        let focused = menu_row(item, true, 48);
+        let idle = menu_row(item, false, 48);
+        assert!(focused.contains("\u{1b}[1;36mOpen / add projects"));
+        assert!(focused.contains(&shortcut('o')));
+        assert!(idle.contains(&shortcut('o')));
+        let mut selected = welcome.clone();
+        selected.select_prev();
+        assert!(utility_row(&selected).contains(&menu_text("Quit", true)));
+        assert!(utility_row(&selected).contains(&shortcut('q')));
     }
 
     #[test]
@@ -453,8 +561,8 @@ mod tests {
         }
         let welcome = Welcome::empty();
         let item = &welcome.items()[0];
-        assert!(menu_row(item, true, 48).starts_with("\u{1b}[1;36m  "));
-        assert!(menu_row(item, false, 48).starts_with("\u{1b}[2;37m  "));
+        assert!(menu_row(item, true, 48).contains("\u{1b}[1;36mOpen"));
+        assert!(menu_row(item, false, 48).contains("\u{1b}[37mOpen"));
         assert!(widgets::strip_ansi(&menu_row(item, false, 48)).ends_with("o  "));
     }
 }
