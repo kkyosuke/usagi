@@ -1584,6 +1584,37 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
 }
 
 #[test]
+fn production_user_decision_retry_without_deadline_is_idempotent() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let request = json!({"title":"Retry", "prompt":"Choose", "options":[{"id":"yes","label":"Yes"}], "idempotency_key":"retry-default-expiry"});
+    let first = mcp.tool("user_decision_request", &request);
+    assert!(first.get("error").is_none(), "{first}");
+    let first = tool_text(&first);
+    mcp.restart_with_credential(&credential);
+    let retry = mcp.tool("user_decision_request", &request);
+    assert!(retry.get("error").is_none(), "{retry}");
+    assert_eq!(tool_text(&retry), first);
+    assert_eq!(
+        tool_text(&mcp.tool("user_decision_list", &json!({})))["decisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut changed = request;
+    changed["prompt"] = json!("Different question");
+    let conflict = mcp.tool("user_decision_request", &changed);
+    assert!(
+        conflict["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("IdempotencyConflict")
+    );
+}
+
+#[test]
 fn production_user_decision_round_trip_reaches_the_original_caller() {
     user_decision_round_trip(false);
 }

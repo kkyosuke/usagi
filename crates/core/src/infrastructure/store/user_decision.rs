@@ -291,6 +291,24 @@ impl UserDecisionStore {
         &self,
         decision: UserDecision,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
+        self.create_inner(decision, false)
+    }
+
+    /// Apply the daemon's default deadline once, anchored to the original
+    /// creation time even when a caller retries after reconnecting.
+    pub fn create_with_default_expiry(
+        &self,
+        decision: UserDecision,
+    ) -> Result<Result<UserDecision, UserDecisionError>> {
+        let default_expiry = decision.expires_at.is_none();
+        self.create_inner(decision, default_expiry)
+    }
+
+    fn create_inner(
+        &self,
+        mut decision: UserDecision,
+        default_expiry: bool,
+    ) -> Result<Result<UserDecision, UserDecisionError>> {
         if let Err(error) = decision.validate_request() {
             return Ok(Err(error));
         }
@@ -300,6 +318,11 @@ impl UserDecisionStore {
                     item.owner == decision.owner && item.idempotency_key.as_ref() == Some(key)
                 })
             {
+                if default_expiry {
+                    decision.expires_at = existing
+                        .created_at
+                        .checked_add_signed(chrono::Duration::hours(24));
+                }
                 return if same_request(existing, &decision) {
                     Ok(existing.clone())
                 } else {
@@ -310,6 +333,11 @@ impl UserDecisionStore {
                 && state.expired_idempotency.contains(&decision.owner, key)
             {
                 return Err(UserDecisionError::IdempotencyExpired);
+            }
+            if default_expiry {
+                decision.expires_at = decision
+                    .created_at
+                    .checked_add_signed(chrono::Duration::hours(24));
             }
             // Admission is charged before the record exists, so a refusal
             // leaves the store byte-for-byte as it was.
@@ -850,6 +878,61 @@ mod tests {
                 .unwrap(),
             Err(UserDecisionError::Terminal)
         );
+    }
+
+    #[test]
+    fn default_deadline_retries_keep_original_identity_and_terminal_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let request = item();
+        let first = store
+            .create_with_default_expiry(request.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first.expires_at,
+            Some(request.created_at + chrono::Duration::hours(24))
+        );
+        let mut retry = request.clone();
+        retry.decision_id = UserDecisionId::new();
+        retry.created_at += chrono::Duration::hours(48);
+        // Reopen to exercise durable replay, not an in-memory cache.
+        let store = UserDecisionStore::new(temp.path());
+        assert_eq!(
+            store
+                .create_with_default_expiry(retry.clone())
+                .unwrap()
+                .unwrap(),
+            first
+        );
+        let terminal = store
+            .terminal(
+                first.owner.workspace_id,
+                first.decision_id,
+                UserDecisionStatus::Expired,
+                retry.created_at,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .create_with_default_expiry(retry.clone())
+                .unwrap()
+                .unwrap(),
+            terminal
+        );
+        retry.prompt.push_str("changed");
+        assert_eq!(
+            store.create_with_default_expiry(retry.clone()).unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        retry.prompt = request.prompt;
+        retry.expires_at = Some(retry.created_at + chrono::Duration::hours(1));
+        assert_eq!(
+            store.create_with_default_expiry(retry).unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        assert_eq!(store.pending(first.owner.workspace_id).unwrap().len(), 0);
     }
 
     #[test]

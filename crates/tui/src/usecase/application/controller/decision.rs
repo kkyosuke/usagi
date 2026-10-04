@@ -158,21 +158,10 @@ pub(super) fn update_decision_editor(
             toggle_decision_option(editor);
         }
         AppKey::DecisionPrevious | AppKey::Up if !editor.decision.options.is_empty() => {
-            editor.selected_option = editor.selected_option.saturating_sub(1);
-            editor.scroll_offset = None;
-            editor.follow_freeform = false;
-            editor.input_freeform = false;
-            editor.input_comment = false;
-            editor.error = None;
+            composition::move_input(editor, false);
         }
         AppKey::DecisionNext | AppKey::Down if !editor.decision.options.is_empty() => {
-            editor.selected_option =
-                (editor.selected_option + 1).min(editor.decision.options.len().saturating_sub(1));
-            editor.scroll_offset = None;
-            editor.follow_freeform = false;
-            editor.input_freeform = false;
-            editor.input_comment = false;
-            editor.error = None;
+            composition::move_input(editor, true);
         }
         AppKey::PageUp => {
             editor.scroll_offset = Some(

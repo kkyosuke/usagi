@@ -278,7 +278,8 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
 
 decision request は title 256 bytes、prompt/freeform 16 KiB、option 32 件（ID 128 bytes、label 256 bytes、description
 2 KiB）、idempotency key 256 bytes を上限とする。空の選択肢で freeform も許可しない回答不能 request、重複 option ID、
-NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は daemon が24時間を設定する。
+NUL、作成時刻以前または7日を超える deadline は durable write 前に拒否する。deadline 省略時は初回作成から24時間を設定する。同じ key・同じ内容の再送では初回の作成時刻を基準とし、
+期限・decision ID・回答状態を保持する。再送で期限を延長しない。
 MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開し、domain/store も UTF-8 byte 数で再検証する。
 上限超過は decision と outbox を作らず `InvalidArgument` になり、既存の durable document に違反があれば
 再起動後も巨大な値を再公開せず fail closed にする。
