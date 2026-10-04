@@ -392,6 +392,10 @@ alternate screen を復元する（破棄したスクロールバックは戻ら
 SGR（色・文字属性）だけに限定し、view text に混入した画面消去・カーソル移動・DEC private mode などの
 端末制御列は描画境界で破棄する。
 
+端末から届く SGR マウス制御列は、先頭の `Esc` と座標部分が別の読み取りに分かれても mouse event として
+扱い、座標を入力欄や Agent の文字入力へ流さない。復元の待機は 32ms、候補の長さは 20 文字を上限とする。
+通常の `Esc`、貼り付け、不完全な候補は元の入力順で処理する。
+
 ## Home と target
 
 Home の navigation target は managed `Session(SessionId)` である。表示名と配列 index は identity に
