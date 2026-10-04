@@ -1363,6 +1363,7 @@ client ── session_remove ──▶ IPC handler
                                     │  worker を起床させる
                         teardown worker（1 thread・直列 drain）
                               nested worktree を子から Git で除去 → session tree を除去
+                              owner repository から exact session path の登録を除去 → branch 削除
                               session lock を短時間だけ取り、outcome を確定
                                     │
 client ── session_list ─────▶ deleting 行 → 完了で消滅（失敗なら failed + 理由）
@@ -1375,10 +1376,11 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 起床 | 起動時に pending を一度導出して中断分を resume し、以後は受理通知で即時起床する。確定に失敗している間だけ 1 秒 tick で pending を再導出して retry し、待機中の tick では durable state を読まない |
 | 冪等性 | 同一 `operation_id` の再送は journal replay。`deleting` な session への新しい `operation_id` は進行中 operation を返し、teardown を二重投入しない |
 | resume | 中断された delete は `failed` に落とさず `deleting` のまま残し、次の daemon 起動で worker が再開する。teardown は「対象が無ければ成功」で冪等なので、途中まで削除された tree に安全に再実行できる |
-| 既に終端状態 | git が repository を解決できない対象と、owner の write を拒否する directory は teardown を止めない。前者は worktree の登録も branch も残っていないため no-op として進み、後者は owner の read/write/traverse を回復してから除去を再試行する。いずれも上の冪等性を実際に成り立たせるための契約であり、これが無いと該当 session は `force` でも `purge_orphan` でも永久に `failed` を繰り返す（[3 つの形](#teardown-が終端状態とみなす形)） |
+| 残存登録 | physical tree の除去後、trusted workspace root を Git の実行元にして exact session path の `git worktree remove` を再実行する。中断時に session の `.git` file や directory が先に消えても、owner repository の登録を回収してから branch 削除へ進む。登録の撤去に失敗した場合は branch を残して `failed` にする。対象外の stale worktree は prune しない |
+| 既に終端状態 | git が owner repository を解決できない対象と、owner の write を拒否する directory は teardown を止めない。前者は解決可能な repository が無いため no-op として進み、後者は owner の read/write/traverse を回復してから除去を再試行する（[終端状態と復旧](#teardown-が終端状態とみなす形)） |
 | completion fence | 確定時の state から再計算する（受理時 revision は teardown 完了時点では陳腐化している）。identity は session incarnation・attempt・受理 operation で fence され、journal の owner generation を使うため restart 後の worker も同じ operation を確定できる |
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
-| path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は Git / filesystem effect の直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら effect を一度も実行しない |
+| path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は physical tree と owner repository の登録を除去する直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら以後の effect を実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `Ctrl-X`、Closeup の `close -f`、Overview の `session remove <name> --force` と `session remove -s --force`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。plain `x` / `X` は remove 自体を送らない。`session cleanup`、`--force` を付けない Overview の `session remove`、`--purge-orphan` を伴わない CLI・MCP の force remove は対を送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
 | Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
 | generic terminal | Agent と同じ順序で、対象 `SessionId` の generic terminal も worktree 撤去より前に terminate/reap して record を除去する。session の shell terminal も worktree 内に cwd を持つ child と capacity claim を握るため、残すと `git worktree remove` が使用中で失敗し、claim は daemon の生存中ずっと pool を占有する。reap に失敗した場合は record を残して retry する。`SessionId` を持たない workspace-root terminal は対象外である |
@@ -1415,16 +1417,17 @@ client 側の表示は既存の投影で足りる。受理直後から `deleting
 
 ### teardown が終端状態とみなす形
 
-teardown の冪等性は「対象が無ければ成功」だが、対象が*残っているのに git も filesystem も扱えない*形が 3 つある。
-いずれも効果としては「もう除去すべき登録は無い」か「除去できる」に落ちるため、teardown を止めない。
+teardown の冪等性は physical tree と Git の登録の両方を対象にする。checkout が消えただけでは登録の消滅を意味しない。
+以下の状態では、owner repository から対象の登録を回収するか、残った tree を除去できる状態へ戻してから進む。
 
 | 形 | git / OS が返すもの | teardown の扱い |
 |---|---|---|
+| session の `.git` file または checkout directory が消え、owner repository の登録が残っている | branch 削除が `used by worktree` で拒否される | tree 除去後に owner repository から exact session path の `git worktree remove` を再実行して登録を回収し、その成功後だけ branch 削除へ進む |
 | worktree の administrative directory（`.git/worktrees/<name>`）が消え、tree だけ残っている | `git worktree remove` が `fatal: not a git repository: <admin dir>` | worktree の登録は既に無いため no-op として進み、tree の除去へ移る |
 | workspace root が repository でなくなっている | `git branch -d` / `-D` が `fatal: not a git repository (or any of the parent directories): .git` | 削除すべき branch を持つ repository が無いため no-op として進む |
 | session tree に owner の write を拒否する directory が含まれる | `remove_dir_all` が `PermissionDenied`（directory は自分の子の unlink を拒否する） | owner の read/write/traverse を tree 全体へ回復してから、除去をその attempt で一度だけ再試行する。mode を実際に変えられなかった場合は元の error をそのまま返す。走査は symlink を辿らず link 自体で止まる |
 
-3 つ目は session の tree 配下で動いた process が残す。owner の write を落とした directory が 1 つ残るだけで、
+owner の write を拒否する形は session の tree 配下で動いた process が残す。該当 directory が 1 つ残るだけで、
 その session は自分で自分を削除できなくなる。teardown は原因を診断せず、除去できる状態へ戻してから進む。
 
 git が repository を解決できない場合を終端状態として扱う副作用として、workspace root が repository でない

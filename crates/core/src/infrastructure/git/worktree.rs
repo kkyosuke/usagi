@@ -284,14 +284,13 @@ fn line_enables_checkout_filter(line: &str) -> bool {
 
 /// Whether `stderr` reports that git could not resolve a repository at all.
 ///
-/// A path that is not a repository holds neither a worktree registration nor a
-/// branch, so both are already in the desired end state. Teardown reaches this
-/// shape two ways: the worktree's administrative directory
+/// Teardown can reach this shape when the worktree's administrative directory
 /// (`.git/worktrees/<name>`) is gone while its tree remains, so the `.git` file
 /// inside resolves to nothing; or the workspace root itself stopped being a
-/// repository. Git then fails the whole command instead of reporting a missing
-/// worktree or branch, and treating that as an error strands the session — the
-/// removal retries forever and no path, forced or not, can ever finish it.
+/// repository. Tolerating the failed lookup lets callers remove remaining files.
+/// A lookup through a damaged checkout does not prove its owning repository has
+/// released the registration: managed teardown must also remove the exact path
+/// through that stable repository before deleting its branch.
 fn repository_unresolved(stderr: &str) -> bool {
     stderr.contains("not a git repository")
 }
@@ -301,8 +300,9 @@ fn repository_unresolved(stderr: &str) -> bool {
 /// A path git does not recognise as a worktree is already in the desired end
 /// state — a session whose worktree was never built, or a repeated removal — so
 /// it is treated as a no-op rather than an error, letting callers finish cleaning
-/// up the rest of a session. A path git cannot resolve a repository from is the
-/// same end state, for the reason [`repository_unresolved`] gives.
+/// up the rest of a session. An unresolvable repository lookup is also tolerated,
+/// but recovery must retry through the owning repository before assuming the
+/// registration is gone, for the reason [`repository_unresolved`] gives.
 ///
 /// # Errors
 ///
