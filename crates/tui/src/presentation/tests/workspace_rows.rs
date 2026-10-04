@@ -132,7 +132,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
                 workspace,
                 session,
                 profile: None,
-                goal: None,
                 resume: true,
             });
         crate::presentation::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
@@ -157,7 +156,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
             workspace,
             session: Some(session),
             profile: None,
-            goal: None,
             resume: false,
         });
     let mut pending = std::collections::HashMap::from([(operation, target)]);
@@ -231,7 +229,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
                 result: Ok(AgentPaneAdmission {
                     terminal: terminal.clone(),
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -363,7 +360,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
             workspace,
             session: Some(session),
             profile: None,
-            goal: None,
             resume: false,
         });
     ui.pane_launches
@@ -453,7 +449,6 @@ fn drawer_root_final_without_conversation_identity_fails_closed() {
                 result: Ok(AgentPaneAdmission {
                     terminal: scoped_terminal_ref(workspace, None),
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -1073,7 +1068,6 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         deck: WorkspaceDeckHelp::None,
         overlay: None,
         decision_answer_open: false,
-        work_run_mode: crate::presentation::WorkRunControlMode::Closed,
         director_new_open: false,
         director_route: DirectorRoute::Organization,
         drawer_focus: None,
@@ -1163,68 +1157,6 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         HelpContext::DecisionAnswer
     );
 
-    for (mode, expected) in [
-        (
-            crate::presentation::WorkRunControlMode::List,
-            HelpContext::WorkRuns,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::ResolveEscalation,
-            HelpContext::WorkRunEscalation,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::ConfirmCancel,
-            HelpContext::WorkRunConfirmation,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::Submitting,
-            HelpContext::WorkRunSubmitting,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::Retry,
-            HelpContext::WorkRunConfirmation,
-        ),
-    ] {
-        assert_eq!(
-            resolve_workspace_help_context(WorkspaceHelpState {
-                work_run_mode: mode,
-                director_route: DirectorRoute::WorkRuns,
-                drawer_focus: Some(WorkspaceDrawerFocus::Director),
-                ..base
-            }),
-            expected,
-            "{mode:?}"
-        );
-    }
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::List,
-            director_route: DirectorRoute::RunOverview(SupervisorRunId::new()),
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::RunOverview
-    );
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::ConfirmDelete,
-            director_route: DirectorRoute::WorkRuns,
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::WorkRunConfirmation
-    );
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::Submitting,
-            director_route: DirectorRoute::Organization,
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::WorkRunSubmitting,
-        "an in-flight action outranks the normalized Organization route"
-    );
-
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
             director_new_open: true,
@@ -1235,9 +1167,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
     );
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::Submitting,
             director_new_open: true,
-            director_route: DirectorRoute::WorkRuns,
             drawer_focus: Some(WorkspaceDrawerFocus::Terminal),
             ..base
         }),
@@ -1257,19 +1187,8 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         );
     }
     for (director_route, expected) in [
-        (
-            DirectorRoute::Console(DirectorConsoleParent::Organization),
-            HelpContext::DirectorConsole,
-        ),
-        (
-            DirectorRoute::Console(DirectorConsoleParent::RunOverview(SupervisorRunId::new())),
-            HelpContext::WorkRunConsole,
-        ),
-        (
-            DirectorRoute::RunOverview(SupervisorRunId::new()),
-            HelpContext::RunOverview,
-        ),
-        (DirectorRoute::WorkRuns, HelpContext::WorkRuns),
+        (DirectorRoute::Console, HelpContext::DirectorConsole),
+        (DirectorRoute::Organization, HelpContext::Organization),
     ] {
         assert_eq!(
             resolve_workspace_help_context(WorkspaceHelpState {

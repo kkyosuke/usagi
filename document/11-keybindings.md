@@ -93,12 +93,11 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
-| `Ctrl-O g` | Director | Director drawer toggle。初回は goal-driven = Work Runs / classic = Organization。同じ Workflow の再 open は直前 route |
+| `Ctrl-O g` | Director | Director drawer toggle。初回は Organization。再 open は直前 route |
 | `Ctrl-O b` | DirectorBack | Director 内で一階層戻る |
-| `Ctrl-O w` | WorkRuns | goal-driven の daemon-owned Work Runs を直接開く。classic では遷移しない |
 | `Ctrl-O t` | RootTerminal | workspace root Shell drawer |
 | `Ctrl-O z` | RootTerminalFullHeight | Shell drawerの高さ切替 |
-| `Ctrl-O n` | DirectorNew | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
+| `Ctrl-O n` | DirectorNew | Director の New Conversation。Shell 選択中は新しい terminal tab |
 | `Ctrl-O x` | CloseTab | 選択中pane tabの終了／取消／dismiss |
 | `Ctrl-O r` | ResumeTab | 選択済み interrupted Agent tabの再開／再試行。resume不可なら削除確認 |
 | `Ctrl-O ↑` | ScrollUp | retained outputを1行上へ |
@@ -244,20 +243,13 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Organization | `↑` / `↓` | Conversation 選択 |
 | Organization | `Enter` | 選択 Conversation の Director Console |
 | Organization | `Esc` | Director を閉じる |
-| Work Runs | `↑` / `↓` | Run 選択 |
-| Work Runs | `Enter` / `Esc` | Run Overview / Director を閉じる |
-| Work Runs | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
-| Run Overview | `Enter` / `Esc` | root Director の Console / Work Runs |
-| Run Overview | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
 | Director Console | `Ctrl-O [` / `Ctrl-O ]` | conversation 選択 |
 | Director Console | `Ctrl-O x` / `Ctrl-O r` | close / resume |
 | Director Console | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
 | Director Console | 文字 / paste / `Enter` / `Esc` / 編集キー | selected Agent PTY へ直接送る |
-| Director Console | `Ctrl-O b` | classic は Organization、goal-driven は Run Overview へ戻る |
-| New Conversation / Start Work Run | `↑` / `↓` | provider 選択 |
-| Start Work Run | 文字 / paste / `Backspace` | Goal 編集 |
-| New Conversation / Start Work Run | `Enter` / `Esc` / `Ctrl-C` | launch / 開始前 route へ戻る |
-| Work Run cancel / delete 確認 | `Enter` / `Esc` / `Ctrl-C` | confirm / cancel |
+| Director Console | `Ctrl-O b` | Organization へ戻る |
+| New Conversation | `↑` / `↓` | provider 選択 |
+| New Conversation | `Enter` / `Esc` / `Ctrl-C` | launch / 開始前 route へ戻る |
 | Root Shell | `Ctrl-O n` | terminal tab追加 |
 | Root Shell | `Ctrl-O [` / `Ctrl-O ]` | terminal tab選択 |
 | Root Shell | `Ctrl-O z` / `Ctrl-O x` | 高さ切替 / terminal終了 |

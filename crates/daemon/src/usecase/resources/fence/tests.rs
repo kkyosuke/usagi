@@ -37,7 +37,6 @@ fn a_draining_generation_defers_its_only_deferrable_writer_and_is_refused_the_re
         WriteVerdict::DeferToOutbox
     );
     for writer in [
-        SharedWriter::SupervisorState,
         SharedWriter::SessionLifecycle,
         SharedWriter::WorkspaceDispatchRegistry,
     ] {
@@ -64,7 +63,6 @@ fn the_inventory_names_every_writer_that_needs_the_fence() {
         fenced_writers(),
         vec![
             SharedWriter::PrInventory,
-            SharedWriter::SupervisorState,
             SharedWriter::SessionLifecycle,
             SharedWriter::WorkspaceDispatchRegistry
         ]
@@ -77,7 +75,6 @@ fn the_inventory_names_every_writer_that_needs_the_fence() {
         2
     );
     assert!(SharedWriter::PrInventory.is_deferrable());
-    assert!(!SharedWriter::SupervisorState.is_deferrable());
     assert_eq!(SharedWriter::CompletionInbox.mode(), WriteMode::AppendOnly);
 }
 

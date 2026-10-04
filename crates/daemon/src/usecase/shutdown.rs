@@ -181,11 +181,10 @@ pub enum BackgroundWorker {
     PrProjection,
     TenantRetirement,
     OrphanCleanup,
-    SupervisorRecovery,
 }
 
 impl BackgroundWorker {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::PrRefresh,
         Self::SessionTeardown,
         Self::Custody,
@@ -197,7 +196,6 @@ impl BackgroundWorker {
         Self::PrProjection,
         Self::TenantRetirement,
         Self::OrphanCleanup,
-        Self::SupervisorRecovery,
     ];
 
     pub const COUNT: usize = Self::ALL.len();

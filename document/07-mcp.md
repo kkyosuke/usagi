@@ -179,7 +179,6 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
-| `supervisor_start` / `supervisor_get` / `supervisor_list` / `supervisor_cancel` / `supervisor_resolve_escalation` / `supervisor_events` | daemon 発行 credential で検証した agent/session scope と handshake の client incarnation から caller provenance を導出し、その範囲で durable supervisor aggregate を作成・観測・制御する |
 
 ### Session scratchpad
 
@@ -333,21 +332,8 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
-Director Work からの `session_dispatch` / `session_delegate_brief` は、認証済み caller の profile runtime と同じ
-runtime の worker だけを受理する。この制約は prompt 上の指示ではなく daemon が session 作成前に検証する hard invariant
-であり、新規 selector の `runtime` と既存 Agent の保存済み runtime の両方へ適用する。model は同じ runtime 内で workspace
-allowlist に従って選択できる。各 child も自分の認証済み runtime を基準に同じ検証を受けるため、delegation の深さに関係なく
-異なる provider/runtime へ逸脱しない。Agent spawn 前に保存した root / child の promotion reservation も provenance 束縛前の
-supervised authority として扱うため、起動直後の MCP call や再帰 delegation がその束縛との競合で classic caller へ降格しない。
-child reservation は workspace、session、planned Agent ID、profile、canonical Agent admission semantic digest を固定し、bind と recovery でも同じ値を照合する。別 request が同じ operation を先に使った場合はその worker を取り込まず fail-closed に収束する。予約済み promotion は spawn 前から Supervisor の dispatch budget と concurrency を消費し、policy 超過は worker effect 前に durable escalation となる。
-事前判定と child reservation 直前で `(SupervisorRun, task, generation)` の exact ownership fence が変われば、A→B の所有者入れ替わりも含めて worker は起動せず、`session_delegate_brief` がこの間に
-作成した session も通常の atomic compensation で巻き戻す。
-provenance 束縛前の root / child が再帰委譲した直後に Work Run が cancel / fail しても、daemon は durable な parent
-promotion reservation に保存した immutable parent operation から各 operation の停止 fence を復元し、parent が retry generation へ進んだ後も child の束縛と起動済み worker の exact identity 回収に同じ履歴 fence を使う。live 周期回収は Agent 不在だけで予約を閉じず、socket 受付前の startup recovery だけが hydrated inventory の不在を確定とする。Goal root は Agent が一度未観測でも停止予約を保持し、reserve 後に遅れて出現した worker を後続回収で停止する。child operation は parent operation、既存 Agent dispatch、Supervisor start、別 task と共有できず、`supervisor_start` 自身も start operation と caller dispatch の join を root 作成前に永続化するため、同じ authenticated dispatch を retained Supervisor root/task から別 root へ移すこともできない。
-Supervisor provenance も promotion reservation もない classic caller はこの Work Run 固有の制約を受けず、
-従来どおり workspace allowlist 内の runtime を選べる。
-同じ session 内の明示的な `agent_handoff` はこの child-session delegation と別の入口であり、
-[Agent 間通信](#同じ-session-の-agent-間通信) の認可と exact worker fence に従う。
+`session_dispatch` / `session_delegate_brief` は workspace allowlist 内の runtime と model を選べる。
+同じ session の `agent_handoff` は [Agent 間通信](#同じ-session-の-agent-間通信) の認可と exact worker fence に従う。
 
 MCP credential の transport authority は PID 単体ではなく、kernel から得た PID・process start identity・現在の
 `ConnectionId` の lease である。transport 切断は一致する connection lease だけを外し、exact process claim と credential は
@@ -366,13 +352,6 @@ control admission を close / drain した後に process-local credential を再
 新しい process-local credential を発行する。
 この明示がない場合は、利用者が Agent を終了して `usagi daemon restart` を再実行するまで旧 daemon の
 control authority を維持する。Doctor はこの lifecycle に関与しない。
-
-callerのcurrent runが`SupervisorRun`へ束縛されている`session_dispatch` / `session_delegate_brief`では、daemonが
-root goalと確定済みchild completionのbounded handoff contextを今回のtask instructionへ前置する。raw conversationや
-terminal transcriptは含めず、workerが明示したsummaryとstructured artifact参照だけを使う。snapshotはchild operationの
-reservationと同時にDAGへ保存されるため、同じoperationのretryは後から増えたcontextを混ぜず同じ初期promptへ収束する。
-Supervisor provenanceのないclassic callerのpromptは変更しない。永続化、上限、terminal factとのfenceは
-[5. daemonのsupervisor scheduler](05-daemon.md#supervisor-scheduler)を正本とする。
 
 session 作成系は optional role selector を受け取る。`session_create` / `session_delegate_issue` /
 `session_delegate_brief` は top-level `role`、`session_dispatch` は `session.role` を使う。daemon が current catalog と
@@ -445,19 +424,6 @@ durable journal にその由来が記録されており、dispatch store にそ�
 同じ operation id での retry は二重作成しない。create は lifecycle journal から、dispatch は記録済みの結末から
 replay される。
 
-`supervisor_start` は bounded な root task を snapshot と compacting event journal に保存し、その tool を呼んだ
-authenticated Agent の exact dispatch/runtime/worktree fence を root task へ直ちに束縛する。初期 DAG は受け取らず、child は
-root Agent が既存 session delegation tool で動的に作る。同じ `idempotency_key` の再送では同じ run を返す。
-get/list/events の応答は instruction body を含まない安全な
-projection である。caller provenance は daemon 発行の live MCP credential が解決する root/session と Agent、
-および handshake で検証済みの client incarnation の組である。socket の `ConnectionId` は含めないため、同じ MCP
-process の再接続と同一 daemon process 内の generation rollover は同じ operation/run と control authority へ収束する。
-client が宣言した incarnation 単独、別 incarnation、別 root/session/Agent、未知または失効した credential は
-`ownership_unknown` となり、run と event journal を変更しない。credential registry は process-local なので daemon
-restart で明示的に失効し、restart 後は新しい credential が同じ caller scope と client incarnation の組を再び証明するまで既存 run を制御できない。
-cancel と escalation resolution は run 作成時に daemon が記録したこの caller provenance と一致する request だけを受理する。daemon は起動時と Agent completion 時に共有
-`SupervisorRuntime` を tick し、dispatch の terminal fact を aggregate へ反映する。
-
 issue / memory の store 系 tool は、`usagi-core` usecase に store root と実時計を束縛する薄い adapter である。
 daemon が起動した Agent の MCP child は、OS process lineage で claim した
 credential と同時に issue 用の exact trusted root と memory 用の workspace 共有 root を受け取り、接続中は固定する。
@@ -512,11 +478,10 @@ payload に送信者や session を指定することはできない。session �
 handoff は session・worktree・role assignment を新設または変更しない。新規 selector は同じ runtime/model の Agent が
 いても別 identity を作る。既存 Agent への handoff は停止中だけを受理し、自分自身・別 session・実行中 peer は拒否する。
 稼働中 peer とのやり取りには message を使う。handoff は異なる runtime を明示的に許可するが、runtime/model allowlist、
-実行数上限、既存 session role の delegation policy、Supervisor の budget / ownership fence は維持する。
-child session 向け `session_dispatch` / `session_delegate_brief` の同一 runtime 制約は変更しない。
+実行数上限、既存 session role の delegation policy は維持する。
 role の `max_depth` は [session 階層](10-session-roles.md) の制約であり、同じ session 内の handoff の再帰回数ではない。
 handoff でも既存の admission と同じ `caller の session depth + 1` を上限と比較するため、上限に達した session では拒否する。
-`max_concurrency` は同じ親 session の Agent 間で共有し、Supervisor の `ExecutionPolicy` は別途 task の深さと総数を制限する。
+`max_concurrency` は同じ親 session の Agent 間で共有する。
 `session_dispatch` も同じ Agent ID の live runtime を重ねて起動しない。通常の新規 selector は既存 tuple を再利用するため、
 選ばれた Agent が稼働中なら拒否する。別 identity を明示的に起動する入口は `agent_handoff` とする。
 exact resume は保存済み source binding の Agent ID を保持し、同じ runtime/model の別 peer に mailbox を付け替えない。

@@ -639,7 +639,6 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         "mod restore;",
         "mod session_commands;",
         "mod terminal_io;",
-        "mod work_run;",
         "mod workspace_io;",
     ] {
         assert!(composition.contains(module));
@@ -655,7 +654,6 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         ("restore.rs", "fn spawn_restore_job"),
         ("session_commands.rs", "fn begin_session_command"),
         ("terminal_io.rs", "fn forward_live_terminal_input"),
-        ("work_run.rs", "fn handle_work_run_list_input"),
         ("workspace_io.rs", "struct WorkspaceIoRuntime"),
     ] {
         let source = fs::read_to_string(root.join("crates/tui/src/presentation").join(module))
@@ -680,7 +678,6 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
     }
     assert!(observation.contains("struct ObservationLane"));
     assert!(!composition.contains("struct GardenObservation {"));
-    assert!(!composition.contains("struct WorkRunObservation {"));
     assert!(
         composition.lines().count() <= 10_000,
         "TUI presentation composition grew beyond its reviewable boundary"
@@ -845,13 +842,9 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
         !composition.contains("use dispatch::*;"),
         "daemon dispatch must expose an explicit composition surface"
     );
-    assert!(composition.contains("fn start_supervisor_recovery("));
-    assert!(!dispatch.contains("fn start_supervisor_recovery("));
-    assert!(!dispatch.contains("usagi-supervisor-recovery"));
     for symbol in [
         "fn dispatch_agent(",
         "fn dispatch_session(",
-        "fn dispatch_supervisor_tool(",
         "fn dispatch_user_decision(",
         "fn dispatch_metrics(",
     ] {

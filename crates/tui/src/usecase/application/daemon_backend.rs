@@ -105,8 +105,6 @@ pub struct LaunchAgentRequest {
     pub operation_id: OperationId,
     /// Optional Agent profile; `None` uses the daemon default.
     pub profile: Option<AgentProfileId>,
-    /// Present only for the opt-in goal-driven Director launch.
-    pub goal: Option<String>,
 }
 
 /// Explicit provider-native resume request derived from
@@ -538,19 +536,6 @@ impl DaemonBackend {
                 session,
                 operation_id,
                 profile,
-                goal: None,
-            }),
-            Effect::LaunchGoal {
-                workspace,
-                operation_id,
-                profile,
-                goal,
-            } => self.agent.launch_agent(LaunchAgentRequest {
-                workspace,
-                session: None,
-                operation_id,
-                profile,
-                goal: Some(goal),
             }),
             Effect::ResumeAgent {
                 workspace,
@@ -1173,7 +1158,7 @@ mod tests {
             Box::new(FakeStore::default()),
             Box::new(FakeWorkspaceCommands::default()),
         );
-        let goal_workspace = WorkspaceId::new();
+        let root_workspace = WorkspaceId::new();
         assert_eq!(
             backend.dispatch(Effect::LaunchAgent {
                 workspace: WorkspaceId::new(),
@@ -1184,11 +1169,11 @@ mod tests {
             Flow::Continue
         );
         assert_eq!(
-            backend.dispatch(Effect::LaunchGoal {
-                workspace: goal_workspace,
+            backend.dispatch(Effect::LaunchAgent {
+                workspace: root_workspace,
+                session: None,
                 operation_id: OperationId::new(),
                 profile: None,
-                goal: "prepare a PR".to_owned(),
             }),
             Flow::Continue
         );
@@ -1226,12 +1211,11 @@ mod tests {
         assert!(backend.drain_events().is_empty());
         assert!(matches!(
             launches.lock().unwrap().as_slice(),
-            [LaunchAgentRequest { goal: None, .. }, LaunchAgentRequest {
+            [LaunchAgentRequest { session: Some(_), .. }, LaunchAgentRequest {
                 workspace,
                 session: None,
-                goal: Some(goal),
                 ..
-            }] if *workspace == goal_workspace && goal == "prepare a PR"
+            }] if *workspace == root_workspace
         ));
     }
 
@@ -1586,7 +1570,6 @@ mod tests {
             session: Some(session),
             operation_id,
             profile: None,
-            goal: None,
         };
         assert_eq!(launch.clone(), launch);
         assert!(format!("{launch:?}").contains("LaunchAgentRequest"));

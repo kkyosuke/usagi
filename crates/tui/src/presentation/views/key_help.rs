@@ -7,7 +7,6 @@
 use crate::presentation::theme::{Color, Style};
 use crate::presentation::widgets::modal;
 use crate::usecase::terminal_input::{PrefixHelpScope, prefix_help_entries};
-use usagi_core::domain::settings::WorkMode;
 
 /// Frontmost interaction surface whose commands should be shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,14 +45,8 @@ pub enum Context {
     DecisionList,
     DecisionAnswer,
     Organization,
-    RunOverview,
     DirectorConsole,
-    WorkRunConsole,
     DirectorNew,
-    WorkRuns,
-    WorkRunConfirmation,
-    WorkRunSubmitting,
-    WorkRunEscalation,
     RootShell,
     Garden,
 }
@@ -95,13 +88,8 @@ impl Context {
             Self::DecisionList => "Pending decisions",
             Self::DecisionAnswer => "Decision answer",
             Self::Organization => "Organization",
-            Self::RunOverview => "Run Overview",
-            Self::DirectorConsole | Self::WorkRunConsole => "Director Console",
-            Self::DirectorNew => "New Conversation / Start Work Run",
-            Self::WorkRuns => "Work Runs",
-            Self::WorkRunConfirmation => "Work Run confirmation",
-            Self::WorkRunSubmitting => "Work Run action in progress",
-            Self::WorkRunEscalation => "Work Run escalation",
+            Self::DirectorConsole => "Director Console",
+            Self::DirectorNew => "New Conversation",
             Self::RootShell => "Workspace Shell",
             Self::Garden => "Session Garden",
         }
@@ -334,13 +322,6 @@ impl Context {
                 ("Ctrl-O n", "new conversation"),
                 ("Esc", "close Director"),
             ],
-            Self::RunOverview => &[
-                ("Enter", "open Director Console"),
-                ("Ctrl-C / Ctrl-X", "cancel / delete run"),
-                ("Esc / Ctrl-O b", "back to Work Runs"),
-                ("Ctrl-O w", "open Work Runs"),
-                ("Ctrl-O n", "start Work Run"),
-            ],
             Self::DirectorConsole => &[
                 ("type / paste / Enter / Esc", "send directly to Agent PTY"),
                 ("Ctrl-O [ / ]", "select conversation"),
@@ -350,32 +331,9 @@ impl Context {
                 ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
                 ("Ctrl-O g", "close Director"),
             ],
-            Self::WorkRunConsole => &[
-                ("type / paste / Enter / Esc", "send directly to Agent PTY"),
-                ("Ctrl-O b", "back to Run Overview"),
-                ("Ctrl-O w", "open Work Runs"),
-                ("Ctrl-O n", "start Work Run"),
-                ("Ctrl-O x / r", "close / resume"),
-                ("Ctrl-O ↑ / ↓ / End", "scroll / live bottom"),
-                ("Ctrl-O g", "close Director"),
-            ],
             Self::DirectorNew => &[
                 ("↑ / ↓", "select provider"),
-                ("type / paste", "edit goal when shown"),
                 ("Enter / Esc / Ctrl-C", "launch / cancel"),
-            ],
-            Self::WorkRuns => &[
-                ("↑ / ↓", "select run"),
-                ("Enter", "open Run Overview"),
-                ("Ctrl-C / Ctrl-X", "cancel / delete run"),
-                ("Ctrl-O n", "start Work Run"),
-                ("Esc", "close Director"),
-            ],
-            Self::WorkRunConfirmation => &[("Enter / Esc / Ctrl-C", "confirm / back")],
-            Self::WorkRunSubmitting => &[("Ctrl-O g", "close Director; action continues")],
-            Self::WorkRunEscalation => &[
-                ("arrows", "select resolution"),
-                ("Enter / Esc", "confirm / back"),
             ],
             Self::RootShell => &[
                 ("type / paste", "send to shell"),
@@ -398,24 +356,19 @@ impl Context {
     }
 }
 
-/// Stable state for a keyboard-help overlay. The context and feature mode are
+/// Stable state for a keyboard-help overlay. The context is
 /// captured when Help opens so background updates cannot change its contents;
 /// only the reader-controlled viewport offset changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct State {
     context: Context,
-    work_mode: WorkMode,
     offset: usize,
 }
 
 impl State {
     #[must_use]
-    pub const fn new(context: Context, work_mode: WorkMode) -> Self {
-        Self {
-            context,
-            work_mode,
-            offset: 0,
-        }
+    pub const fn new(context: Context) -> Self {
+        Self { context, offset: 0 }
     }
 
     #[must_use]
@@ -449,13 +402,12 @@ pub fn render_over(height: usize, width: usize, base: &[String], state: State) -
     let mut commands = context.entries().to_vec();
     if context.workspace() {
         commands.extend(
-            prefix_help_entries(PrefixHelpScope::Workspace, state.work_mode)
-                .map(|entry| (entry.keys, entry.action)),
+            prefix_help_entries(PrefixHelpScope::Workspace).map(|entry| (entry.keys, entry.action)),
         );
     }
     if context.workspace_base() {
         commands.extend(
-            prefix_help_entries(PrefixHelpScope::WorkspaceBase, state.work_mode)
+            prefix_help_entries(PrefixHelpScope::WorkspaceBase)
                 .map(|entry| (entry.keys, entry.action)),
         );
     }
@@ -538,10 +490,9 @@ fn bounded_command_rows(rows: &[String], offset: usize, capacity: usize) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{Context, State, bounded_command_rows, render_over};
-    use usagi_core::domain::settings::WorkMode;
 
     fn help(context: Context) -> State {
-        State::new(context, WorkMode::GoalDriven)
+        State::new(context)
     }
 
     #[test]
@@ -581,14 +532,8 @@ mod tests {
             Context::DecisionList,
             Context::DecisionAnswer,
             Context::Organization,
-            Context::RunOverview,
             Context::DirectorConsole,
-            Context::WorkRunConsole,
             Context::DirectorNew,
-            Context::WorkRuns,
-            Context::WorkRunConfirmation,
-            Context::WorkRunSubmitting,
-            Context::WorkRunEscalation,
             Context::RootShell,
             Context::Garden,
         ] {
@@ -657,27 +602,6 @@ mod tests {
     }
 
     #[test]
-    fn classic_help_omits_goal_only_work_runs() {
-        let classic = render_over(
-            40,
-            120,
-            &vec![String::new(); 40],
-            State::new(Context::Switch, WorkMode::Classic),
-        )
-        .join("\n");
-        let goal_driven = render_over(
-            40,
-            120,
-            &vec![String::new(); 40],
-            State::new(Context::Switch, WorkMode::GoalDriven),
-        )
-        .join("\n");
-
-        assert!(!classic.contains("Work Runs"));
-        assert!(goal_driven.contains("Work Runs"));
-    }
-
-    #[test]
     fn short_help_keeps_close_and_scroll_controls_visible() {
         let mut state = help(Context::Switch);
         let first = render_over(18, 80, &vec![String::new(); 18], state).join("\n");
@@ -689,7 +613,7 @@ mod tests {
         let last = render_over(18, 80, &vec![String::new(); 18], state).join("\n");
         assert!(last.contains("close help"));
         assert!(last.contains("↑"));
-        assert!(last.contains("Work Runs"));
+        assert!(last.contains("Garden / Director / Shell"));
     }
 
     #[test]

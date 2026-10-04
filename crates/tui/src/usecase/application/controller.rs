@@ -44,9 +44,8 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
 use usagi_core::domain::settings::{
-    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, WorkMode, format_env_bindings,
+    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, format_env_bindings,
 };
-use usagi_core::domain::supervisor::SupervisorRunId;
 use usagi_core::domain::user_decision::{
     UserDecision, UserDecisionAnswer, UserDecisionSelectionMode, UserDecisionStatus,
 };
@@ -122,8 +121,6 @@ pub enum Overlay {
 const MAX_SESSION_NAME_LEN: usize = 64;
 /// Targets that keep a preview history at once.
 const MAX_PREVIEW_RECENT_TARGETS: usize = 8;
-/// Goal composer bound. The daemon repeats this limit before admitting work.
-pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::infrastructure::ipc::MAX_AGENT_GOAL_BYTES;
 
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///
@@ -1101,7 +1098,7 @@ pub struct AppState {
     /// Home's right-anchored Director mode drawer.
     director_drawer_open: bool,
     /// Explicit screen inside the Director shell. Closing the drawer preserves
-    /// this route so reopening returns to the same stable Work Run context.
+    /// this route so reopening returns to the same conversation.
     director_route: DirectorRoute,
     /// Home's bottom-anchored workspace-root generic terminal drawer. It is
     /// independent from Director and preserves the managed Home state beneath
@@ -1117,9 +1114,6 @@ pub struct AppState {
     /// availability is injected with [`AvailableModels`]; opening and moving
     /// this picker performs no daemon work.
     director_new: DirectorNew,
-    /// Goal composer source. It is populated only in goal-driven mode and is
-    /// moved into one daemon launch effect on confirmation.
-    director_goal: String,
     /// One root launch submitted from the picker. It remains fenced until the
     /// shell reports the matching completion, so repeated Enter cannot mint a
     /// second operation while the first request is in flight.
@@ -1214,8 +1208,6 @@ pub struct AppState {
     available_models: AvailableModels,
     /// The configured provider a Closeup `agent` without `-m` launches.
     default_model: DefaultModel,
-    /// Compatibility defaults to the historical conversation picker.
-    work_mode: WorkMode,
     ctrl_c_grace: bool,
     /// Focus of the exit prompt's three buttons. Opening the overlay resets it
     /// to [`ExitChoice::Quit`], so the historical `Ctrl-Q` + `Enter` still ends
@@ -1259,58 +1251,13 @@ pub enum DirectorNew {
     Empty,
 }
 
-/// Parent restored by the Director-local back command from a Console.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DirectorConsoleParent {
-    Organization,
-    RunOverview(SupervisorRunId),
-}
-
 /// Explicit Director screen hierarchy. Transient Start/confirmation states are
 /// layered over one of these retained routes and return to it on cancellation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DirectorRoute {
     #[default]
     Organization,
-    WorkRuns,
-    RunOverview(SupervisorRunId),
-    Console(DirectorConsoleParent),
-}
-
-impl DirectorRoute {
-    /// Primary Director surface for one workspace interaction model.
-    ///
-    /// Classic work starts from the workspace organization, while goal-driven
-    /// work starts from its durable Work Run inventory. Retained routes still
-    /// win when the configured mode has not changed.
-    #[must_use]
-    const fn landing_for(mode: WorkMode) -> Self {
-        match mode {
-            WorkMode::Classic => Self::Organization,
-            WorkMode::GoalDriven => Self::WorkRuns,
-        }
-    }
-
-    /// Whether this retained route belongs to the selected workflow.
-    ///
-    /// Classic conversations and goal-driven Work Runs are separate screen
-    /// trees. A workflow switch keeps daemon-owned work alive, but never
-    /// exposes the previous workflow's route in the newly selected tree.
-    #[must_use]
-    const fn belongs_to(self, mode: WorkMode) -> bool {
-        matches!(
-            (mode, self),
-            (
-                WorkMode::Classic,
-                Self::Organization | Self::Console(DirectorConsoleParent::Organization)
-            ) | (
-                WorkMode::GoalDriven,
-                Self::WorkRuns
-                    | Self::RunOverview(_)
-                    | Self::Console(DirectorConsoleParent::RunOverview(_))
-            )
-        )
-    }
+    Console,
 }
 
 impl ExitChoice {
@@ -1374,7 +1321,6 @@ impl AppState {
             root_terminal_full_height: false,
             workspace_drawer_focus: None,
             director_new: DirectorNew::Idle,
-            director_goal: String::new(),
             director_launching: None,
             note_editor: None,
             saved_notes: None,
@@ -1429,7 +1375,6 @@ impl AppState {
             closeup_action_forced: false,
             available_models: AvailableModels::all(),
             default_model: DefaultModel::default(),
-            work_mode: WorkMode::default(),
             ctrl_c_grace: false,
             exit_choice: ExitChoice::Quit,
             force_remove_confirmation: None,
@@ -1794,40 +1739,12 @@ impl AppState {
     pub const fn default_model(&self) -> DefaultModel {
         self.default_model
     }
-    /// Configured Director interaction model.
-    #[must_use]
-    pub const fn work_mode(&self) -> WorkMode {
-        self.work_mode
-    }
-    /// Current goal composer text. Empty in classic mode and after admission.
-    #[must_use]
-    pub fn director_goal(&self) -> &str {
-        &self.director_goal
-    }
     /// Apply the observed CLI availability and the configured default provider.
     /// The composition root supplies both, so this usecase performs no PATH or
     /// settings IO of its own.
     pub const fn set_agent_models(&mut self, available: AvailableModels, default: DefaultModel) {
         self.available_models = available;
         self.default_model = default;
-    }
-
-    /// Apply the effective workspace interaction setting.
-    ///
-    /// A real mode transition selects that workflow's primary Director
-    /// surface. Re-applying the same effective setting preserves the retained
-    /// route used when the drawer is closed and reopened. Returning to classic
-    /// also drops a draft that was never submitted, but never touches a live
-    /// Agent or Work Run.
-    pub fn set_work_mode(&mut self, mode: WorkMode) {
-        if self.work_mode == mode {
-            return;
-        }
-        self.work_mode = mode;
-        self.director_route = DirectorRoute::landing_for(mode);
-        if mode == WorkMode::Classic {
-            self.director_goal.clear();
-        }
     }
 
     /// Convert the managed active session to the target vocabulary used at
@@ -2219,14 +2136,10 @@ pub enum AppKey {
     OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
-    /// Open the classic Director Organization screen.
+    /// Open the Director Organization screen.
     OpenDirectorOrganization,
-    /// Open the Work Run list directly.
-    OpenDirectorWorkRuns,
-    /// Open one stable Work Run observation.
-    OpenDirectorRunOverview(SupervisorRunId),
     /// Open the selected root Director Agent from its retained parent.
-    OpenDirectorConsole(DirectorConsoleParent),
+    OpenDirectorConsole,
     /// Move one level up inside Director without closing the drawer.
     DirectorBack,
     /// workspace scope overlay を開く。
@@ -2419,7 +2332,6 @@ pub enum AppEvent {
     /// fence against stale or replayed completions.
     DirectorLaunchFinished {
         operation: OperationId,
-        supervisor_run_id: Option<SupervisorRunId>,
         succeeded: bool,
     },
     /// One terminal open request failed after it left the reducer. The message
@@ -2782,15 +2694,6 @@ pub enum Effect {
         operation_id: OperationId,
         profile: Option<AgentProfileId>,
     },
-    /// Start a workspace-root Director with one bounded goal and the daemon's
-    /// autonomous delivery contract. Classic Agent launch remains a separate
-    /// effect and request path.
-    LaunchGoal {
-        workspace: WorkspaceId,
-        operation_id: OperationId,
-        profile: Option<AgentProfileId>,
-        goal: String,
-    },
     /// Explicit provider-native resume for an interrupted session. The daemon
     /// validates retained metadata and creates a new PTY/runtime.
     ResumeAgent {
@@ -2999,9 +2902,8 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Tick => update_tick(state),
         AppEvent::DirectorLaunchFinished {
             operation,
-            supervisor_run_id,
             succeeded,
-        } => update_director_launch_finished(state, operation, supervisor_run_id, succeeded),
+        } => update_director_launch_finished(state, operation, succeeded),
         AppEvent::RootTerminalDrawerEmptied => {
             state.root_terminal_drawer_open = false;
             state.root_terminal_full_height = false;
@@ -3015,7 +2917,6 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::DirectorDrawerEmptied => {
             state.director_drawer_open = false;
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Director) {
                 state.workspace_drawer_focus = state
                     .root_terminal_drawer_open
@@ -3114,23 +3015,12 @@ fn update_tick(state: &mut AppState) -> Vec<Effect> {
 fn update_director_launch_finished(
     state: &mut AppState,
     operation: OperationId,
-    supervisor_run_id: Option<SupervisorRunId>,
     succeeded: bool,
 ) -> Vec<Effect> {
     if state.director_launching == Some(operation) {
         state.director_launching = None;
         if succeeded {
-            state.director_route = match (state.work_mode, supervisor_run_id) {
-                (WorkMode::GoalDriven, Some(run)) => DirectorRoute::RunOverview(run),
-                (WorkMode::Classic, None) => {
-                    DirectorRoute::Console(DirectorConsoleParent::Organization)
-                }
-                // The launch belongs to the workflow active when it
-                // was submitted. A later workflow switch keeps the
-                // daemon-owned result alive without crossing the two
-                // Director screen trees.
-                (mode, _) => DirectorRoute::landing_for(mode),
-            };
+            state.director_route = DirectorRoute::Console;
         }
     }
     Vec::new()
@@ -3702,21 +3592,9 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         state.director_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
         state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
         return Vec::new();
     }
-    if matches!(key, AppKey::OpenDirectorWorkRuns)
-        && state.work_mode == WorkMode::GoalDriven
-        && state.director_launching.is_none()
-        && matches!(state.director_new, DirectorNew::Idle)
-    {
-        state.director_drawer_open = true;
-        state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
-        state.director_route = DirectorRoute::WorkRuns;
-        state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
-        return Vec::new();
-    }
+
     if matches!(key, AppKey::OpenDirectorNew) {
         state.director_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
@@ -3772,9 +3650,6 @@ pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
 /// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
 /// keeps the launch gate and the render agreeing on the geometry.
 pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 8;
-/// Goal label, input, and provider label consume three additional rows before
-/// Goal Composer can show the selected provider.
-pub(crate) const DIRECTOR_GOAL_COMPOSER_CHROME_ROWS: usize = DIRECTOR_PICKER_CHROME_ROWS + 3;
 
 /// Candidate rows the launch picker can draw at `height` terminal rows.
 ///
@@ -3791,94 +3666,10 @@ pub(crate) fn director_picker_capacity(height: usize) -> usize {
     height.saturating_sub(DIRECTOR_PICKER_CHROME_ROWS)
 }
 
-/// Provider rows the Goal Composer can draw at `height` terminal rows.
-#[must_use]
-pub(crate) fn director_goal_composer_picker_capacity(height: usize) -> usize {
-    let height = if height == 0 {
-        NORMALIZED_TERMINAL_ROWS
-    } else {
-        height
-    };
-    height.saturating_sub(DIRECTOR_GOAL_COMPOSER_CHROME_ROWS)
-}
-
-/// Whether the drawer can currently draw the highlighted candidate row. An
-/// unobserved terminal size keeps the picker usable: the renderer normalizes the
-/// same way, so the first frame is never gated on a resize event.
 fn director_picker_shows_selection(state: &AppState) -> bool {
-    state.size.is_none_or(|(_, height)| {
-        let height = usize::from(height);
-        if state.work_mode == WorkMode::GoalDriven {
-            director_goal_composer_picker_capacity(height) > 0
-        } else {
-            director_picker_capacity(height) > 0
-        }
-    })
-}
-
-/// Unicode bidi controls can reorder surrounding labels without being visible.
-/// They are not accepted in a single-field terminal composer even though Rust
-/// does not classify every one of them as a control character.
-const fn is_bidi_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
-    )
-}
-
-/// Append one paste/key stream to the Goal `SSoT`.
-///
-/// Goal Composer is a single logical field: line-breaking controls become one
-/// visible separator, all other terminal/control and bidi formatting bytes are
-/// discarded, and the daemon's byte limit is applied on UTF-8 boundaries.
-fn append_goal_text(goal: &mut String, characters: impl IntoIterator<Item = char>) {
-    let mut normalized_separator = false;
-    for character in characters {
-        let character = if character == ' ' {
-            if normalized_separator {
-                continue;
-            }
-            character
-        } else if character.is_whitespace() {
-            normalized_separator = true;
-            if goal.chars().last().is_some_and(char::is_whitespace) {
-                continue;
-            }
-            ' '
-        } else if character.is_control() || is_bidi_control(character) {
-            continue;
-        } else {
-            normalized_separator = false;
-            character
-        };
-        if goal.len() + character.len_utf8() > MAX_WORK_GOAL_BYTES {
-            break;
-        }
-        goal.push(character);
-    }
-}
-
-fn update_goal_composer_text(state: &mut AppState, key: &AppKey) -> bool {
-    if state.work_mode != WorkMode::GoalDriven
-        || !matches!(state.director_new, DirectorNew::Choosing(_))
-    {
-        return false;
-    }
-    match &key {
-        AppKey::Backspace => {
-            state.director_goal.pop();
-        }
-        AppKey::Char(character) => append_goal_text(&mut state.director_goal, [*character]),
-        AppKey::Paste(value) => {
-            append_goal_text(&mut state.director_goal, value.chars());
-        }
-        _ => return false,
-    }
-    true
+    state
+        .size
+        .is_none_or(|(_, height)| director_picker_capacity(usize::from(height)) > 0)
 }
 
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
@@ -3888,16 +3679,13 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
     if update_director_route_key(state, &key) {
         return Vec::new();
     }
-    if update_goal_composer_text(state, &key) {
-        return Vec::new();
-    }
     match (state.director_new, key) {
         (DirectorNew::Idle, AppKey::OpenDirectorNew) => {
             open_director_new(state);
             Vec::new()
         }
         (DirectorNew::Idle, AppKey::Escape) => {
-            if state.director_route == DirectorRoute::landing_for(state.work_mode) {
+            if state.director_route == DirectorRoute::Organization {
                 state.director_drawer_open = false;
                 state.workspace_drawer_focus = state
                     .root_terminal_drawer_open
@@ -3909,7 +3697,6 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
         }
         (DirectorNew::Choosing(_) | DirectorNew::Empty, AppKey::Escape | AppKey::CtrlC) => {
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             Vec::new()
         }
         (DirectorNew::Choosing(selected), AppKey::Up) => {
@@ -3941,29 +3728,18 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             Vec::new()
         }
         (DirectorNew::Choosing(selected), AppKey::Enter)
-            if state.director_launching.is_none()
-                && director_picker_shows_selection(state)
-                && (state.work_mode == WorkMode::Classic
-                    || !state.director_goal.trim().is_empty()) =>
+            if state.director_launching.is_none() && director_picker_shows_selection(state) =>
         {
             let operation_id = OperationId::new();
             state.director_new = DirectorNew::Idle;
             state.director_launching = Some(operation_id);
-            if state.work_mode == WorkMode::GoalDriven {
-                vec![Effect::LaunchGoal {
-                    workspace: state.workspace,
-                    operation_id,
-                    profile: Some(profile_for(selected)),
-                    goal: std::mem::take(&mut state.director_goal),
-                }]
-            } else {
-                vec![Effect::LaunchAgent {
-                    workspace: state.workspace,
-                    session: None,
-                    operation_id,
-                    profile: Some(profile_for(selected)),
-                }]
-            }
+
+            vec![Effect::LaunchAgent {
+                workspace: state.workspace,
+                session: None,
+                operation_id,
+                profile: Some(profile_for(selected)),
+            }]
         }
         // Empty, submitted, and unsupported drawer input are all inert. In
         // particular Enter while a root launch is fenced cannot mint a second
@@ -3997,7 +3773,6 @@ fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<E
             .root_terminal_drawer_open
             .then_some(WorkspaceDrawerFocus::Terminal);
         state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
         return Some(Vec::new());
     }
     (state.director_launching.is_some() && matches!(key, AppKey::Escape)).then(Vec::new)
@@ -4006,43 +3781,13 @@ fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<E
 fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
     match key {
         AppKey::OpenDirectorOrganization => {
-            if state.work_mode != WorkMode::Classic {
-                return true;
-            }
             state.director_route = DirectorRoute::Organization;
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             true
         }
-        AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven
-                || state.director_launching.is_some()
-                || !matches!(state.director_new, DirectorNew::Idle)
-            {
-                return true;
-            }
-            state.director_route = DirectorRoute::WorkRuns;
+        AppKey::OpenDirectorConsole => {
+            state.director_route = DirectorRoute::Console;
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
-            true
-        }
-        AppKey::OpenDirectorRunOverview(run) => {
-            if state.work_mode != WorkMode::GoalDriven {
-                return true;
-            }
-            state.director_route = DirectorRoute::RunOverview(*run);
-            state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
-            true
-        }
-        AppKey::OpenDirectorConsole(parent) => {
-            let route = DirectorRoute::Console(*parent);
-            if !route.belongs_to(state.work_mode) {
-                return true;
-            }
-            state.director_route = route;
-            state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             true
         }
         AppKey::DirectorBack => {
@@ -4058,29 +3803,15 @@ fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
 fn director_back(state: &mut AppState) {
     if !matches!(state.director_new, DirectorNew::Idle) {
         state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
         return;
     }
-    state.director_route = match (state.work_mode, state.director_route) {
-        (WorkMode::Classic, DirectorRoute::Console(DirectorConsoleParent::Organization)) => {
-            DirectorRoute::Organization
-        }
-        (WorkMode::GoalDriven, DirectorRoute::RunOverview(_)) => DirectorRoute::WorkRuns,
-        (WorkMode::GoalDriven, DirectorRoute::Console(DirectorConsoleParent::RunOverview(run))) => {
-            DirectorRoute::RunOverview(run)
-        }
-        (mode, route) if route == DirectorRoute::landing_for(mode) => route,
-        // Normalize impossible or stale cross-workflow routes instead of
-        // exposing the other workflow's screen tree.
-        (mode, _) => DirectorRoute::landing_for(mode),
-    };
+    state.director_route = DirectorRoute::Organization;
 }
 
 fn open_director_new(state: &mut AppState) {
     if state.director_launching.is_some() {
         return;
     }
-    state.director_goal.clear();
     state.director_new = if state.available_models.is_empty() {
         DirectorNew::Empty
     } else {
@@ -4970,9 +4701,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::OpenRootTerminal
         | AppKey::OpenDirectorNew
         | AppKey::OpenDirectorOrganization
-        | AppKey::OpenDirectorWorkRuns
-        | AppKey::OpenDirectorRunOverview(_)
-        | AppKey::OpenDirectorConsole(_)
+        | AppKey::OpenDirectorConsole
         | AppKey::DirectorBack
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
@@ -5000,7 +4729,6 @@ fn toggle_director_from_root_terminal(state: &mut AppState) {
     state.director_new = DirectorNew::Idle;
     if state.director_drawer_open {
         state.director_drawer_open = false;
-        state.director_goal.clear();
         return;
     }
     state.root_terminal_full_height = false;
@@ -5033,21 +4761,6 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             open_director_new(state);
             Vec::new()
         }
-        AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven
-                || state.director_launching.is_some()
-                || !matches!(state.director_new, DirectorNew::Idle)
-            {
-                return Vec::new();
-            }
-            state.root_terminal_full_height = false;
-            state.director_drawer_open = true;
-            state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
-            state.director_route = DirectorRoute::WorkRuns;
-            state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
-            Vec::new()
-        }
         AppKey::OpenRootTerminal => vec![Effect::OpenTerminal {
             target: Target::Root(state.workspace),
             operation_id: OperationId::new(),
@@ -5075,8 +4788,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenDirectorOrganization
-        | AppKey::OpenDirectorRunOverview(_)
-        | AppKey::OpenDirectorConsole(_)
+        | AppKey::OpenDirectorConsole
         | AppKey::DirectorBack
         | AppKey::OpenCloseupOverlay
         | AppKey::OpenNotes

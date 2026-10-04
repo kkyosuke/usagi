@@ -11,15 +11,12 @@
 //! for what only the dispatch table calls, and private for the rest.
 
 use super::{
-    AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore, ErrorLog,
+    AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore,
     SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
     SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, best_effort_merged_pr_head,
-    bind_delegated_supervisor_dispatch, clean_orphan_session_resources,
-    dispatch_agent_after_preflight, perform_compensating_remove, perform_create,
-    perform_delegated_create, perform_remove_with_merged_head,
-    reconcile_pending_supervisor_promotions, record_session_lineage,
-    require_stable_supervisor_fence, require_supervisor_reservation_presence, scratchpad,
-    session_id_by_name, supervisor_error,
+    clean_orphan_session_resources, dispatch_agent_after_preflight, perform_compensating_remove,
+    perform_create, perform_delegated_create, perform_remove_with_merged_head,
+    record_session_lineage, scratchpad, session_id_by_name,
 };
 
 pub(super) fn session_organization(
@@ -803,7 +800,6 @@ fn delegate_brief(
     let bound = context.bound;
     let teardown = context.teardown;
     let agent = context.agent;
-    let supervisor = context.supervisor;
 
     let brief = required_payload_string(payload, "brief")?;
     let suffix = operation_id
@@ -821,7 +817,7 @@ fn delegate_brief(
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
     let credential = required_payload_string(payload, "_caller_credential")?;
-    let (workspace, parent_dispatch_run, caller, repository_root) = {
+    let (workspace, caller, repository_root) = {
         let agent_runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
         let authenticated = agent_runtime
             .mcp_dispatch_context(credential)
@@ -843,33 +839,10 @@ fn delegate_brief(
         sessions.authorize_create_or_reuse(&name, &authenticated.caller)?;
         (
             workspace,
-            authenticated.run_id,
             authenticated.caller,
             sessions.repository_root().to_path_buf(),
         )
     };
-    let supervision_at_preflight = supervisor
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .supervision_fence(parent_dispatch_run)
-        .map_err(|_| SessionRuntimeError::Storage)?;
-    if supervision_at_preflight.is_some() {
-        agent
-            .lock()
-            .map_err(|_| SessionRuntimeError::Storage)?
-            .require_same_dispatch_runtime(
-                workspace,
-                &caller,
-                &DispatchAgentIntent::New {
-                    runtime: runtime.clone(),
-                    model: model.clone(),
-                },
-            )
-            .map_err(|error| SessionRuntimeError::AgentFailure {
-                code: error.code,
-                message: error.message,
-            })?;
-    }
     let _delegation_permit = authorize_delegation(
         bound,
         agent,
@@ -932,80 +905,7 @@ fn delegate_brief(
         sessions.retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
     }
     let selected = DispatchAgentIntent::New { runtime, model };
-    let reserved_worker = if supervision_at_preflight.is_some() {
-        let planned = agent
-            .lock()
-            .map_err(|_| {
-                usagi_core::infrastructure::ipc::ProtocolError::new(
-                    usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
-                    "agent owner is unavailable",
-                )
-            })
-            .and_then(|runtime| runtime.plan_dispatch_worker(workspace, id, &selected));
-        match planned {
-            Ok(worker) => Some(worker),
-            Err(error) => {
-                return Err(compensate_delegation(
-                    bound.sessions(),
-                    teardown,
-                    id,
-                    &name,
-                    operation_id,
-                    error,
-                ));
-            }
-        }
-    } else {
-        None
-    };
     let scope = bound.scope_resolver();
-    let reservation = (|| {
-        let runtime = supervisor.lock().map_err(|_| {
-            usagi_core::infrastructure::ipc::ProtocolError::new(
-                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
-                "supervisor runtime is unavailable",
-            )
-        })?;
-        let supervision_before_reservation = runtime
-            .supervision_fence(parent_dispatch_run)
-            .map_err(supervisor_error)?;
-        require_stable_supervisor_fence(
-            supervision_at_preflight.as_ref(),
-            supervision_before_reservation.as_ref(),
-        )?;
-        let reservation = if let Some(reserved_worker) = reserved_worker.as_ref() {
-            runtime
-                .reserve_delegated_dispatch_for_session(
-                    parent_dispatch_run,
-                    operation_id,
-                    prompt.clone(),
-                    id,
-                    reserved_worker,
-                    &name,
-                    chrono::Utc::now(),
-                )
-                .map_err(supervisor_error)?
-        } else {
-            None
-        };
-        let supervision_after_reservation = runtime
-            .supervision_fence(parent_dispatch_run)
-            .map_err(supervisor_error)?;
-        require_stable_supervisor_fence(
-            supervision_at_preflight.as_ref(),
-            supervision_after_reservation.as_ref(),
-        )?;
-        require_supervisor_reservation_presence(
-            supervision_at_preflight.as_ref(),
-            reservation.is_some(),
-        )?;
-        Ok(reservation)
-    })()
-    .map_err(|error| {
-        compensate_delegation(bound.sessions(), teardown, id, &name, operation_id, error)
-    })?;
-    let supervised = reservation.is_some();
-    let prompt = reservation.map_or(prompt, |reservation| reservation.prompt);
     let dispatch_intent = DispatchIntent {
         workspace,
         session_name: name.clone(),
@@ -1013,27 +913,11 @@ fn delegate_brief(
         agent: selected,
         prompt,
     };
-    let admission = dispatch_agent_after_preflight(
-        agent,
-        operation_id,
-        &dispatch_intent,
-        id,
-        &scope,
-        reserved_worker.as_ref(),
-    );
+    let admission =
+        dispatch_agent_after_preflight(agent, operation_id, &dispatch_intent, id, &scope, None);
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
-            if supervised
-                && error.code != usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown
-                && let Ok(runtime) = supervisor.lock()
-                && let Err(failure) =
-                    runtime.fail_reserved_delegated_dispatch(operation_id, chrono::Utc::now())
-            {
-                ErrorLog::record(&format!(
-                    "delegated Supervisor failure reconciliation deferred: {failure}"
-                ));
-            }
             return Err(compensate_delegation(
                 bound.sessions(),
                 teardown,
@@ -1044,22 +928,7 @@ fn delegate_brief(
             ));
         }
     };
-    if supervised
-        && let Err(error) = bind_delegated_supervisor_dispatch(
-            supervisor,
-            &admission.operation_id,
-            &admission.runtime,
-        )
-    {
-        // The child Agent is already durable; exact-operation reconciliation
-        // finishes the promotion without asking the caller to retry the spawn.
-        ErrorLog::record(&format!("delegated Supervisor promotion deferred: {error}"));
-        if let Err(reconcile) = reconcile_pending_supervisor_promotions(supervisor, agent) {
-            ErrorLog::record(&format!(
-                "delegated Supervisor promotion reconciliation deferred: {reconcile}"
-            ));
-        }
-    }
+
     Ok(serde_json::json!({
         "name": name,
         "session_id": id,
@@ -1195,7 +1064,6 @@ pub(in crate::runtime::daemon) fn reconcile_orphan_delegations(
 
 pub(super) enum AgentDispatchRequest {
     Launch(String, usagi_core::infrastructure::ipc::AgentLaunchIntent),
-    Goal(String, usagi_core::infrastructure::ipc::AgentGoalIntent),
     Inventory(WorkspaceId),
     WorkspaceObservation(WorkspaceId),
     Diagnose(

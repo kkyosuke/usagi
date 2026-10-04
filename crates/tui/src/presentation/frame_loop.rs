@@ -17,36 +17,33 @@ use super::{
     ProjectedSession, REGISTRY_REFRESH_INTERVAL, Receiver, Recent, RestoreJobOutcome,
     RestoreRetryState, Route, Screen, SessionBackendCompletion, SessionCommand, SessionCommandLane,
     SessionId, SessionRefreshPort, SessionWorktreeHint, SettingsPort, Start, Style, TabSelection,
-    Target, Terminal, TerminalRef, TerminalViewProjection, Utc, WORK_RUN_OBSERVATION_BACKOFF,
-    WORK_RUN_OBSERVATION_INTERVAL, Welcome, WelcomeStep, WorkMode, WorkRunControl,
-    WorkRunControlInput, WorkRunControlOutcome, WorkRunControlResult, WorkRunLaneCompletion,
-    WorkRunProjection, Workspace, WorkspaceConfigContext, WorkspaceCreateEffect,
-    WorkspaceCreateToken, WorkspaceDeck, WorkspaceDrawerFocus, WorkspaceEntryPolicy,
-    WorkspaceInputRoute, WorkspaceIoRuntime, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot,
-    WorkspaceStep, WorkspaceView, activate_focused_interrupted_tab, activate_workspace_responsive,
-    adjust_project_bar_pointer, adopt_session_command_lane,
-    apply_drawer_header_while_director_open, apply_restore_completion, begin_session_command,
-    close_exited_panes, closes_workspace_help, compose_workspace_shell_frame,
-    controller_terminal_view, deliver_carried_outcome, director_drawer_projection,
-    dismiss_pr_modal_on_project_bar_click, drain_pane_completions_into_runtime,
-    drain_pane_launches, drain_session_completions, drain_session_refresh, enqueue_pane_launch,
-    enter_workspace, enter_workspace_deck, entry_help_context, fail_terminal_launch,
-    focus_workspace_drawer_from_pointer, foreground_terminal_geometry, garden_fits,
-    garden_shell_owned_wake, handle_interrupted_removal_confirmation,
-    handle_work_run_control_input_with_ui, home_header_action_at, intercept_live_terminal_control,
-    managed_background_terminal, managed_background_terminal_geometry, new_project_notice,
-    open_director_from_new_button, open_failure_notice, open_from_registry, opens_workspace_help,
-    prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
-    prepare_workspace_deck, project_bar, project_controller_sessions, registry_contains_path,
-    relative_time_clock, remember_workspace_session_focus, remove_registry_paths, render_home,
-    render_home_at, render_missing_workspace_prompt, render_open, restore_workspace_closeup,
+    Target, Terminal, TerminalRef, TerminalViewProjection, Utc, Welcome, WelcomeStep, Workspace,
+    WorkspaceConfigContext, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
+    WorkspaceDrawerFocus, WorkspaceEntryPolicy, WorkspaceInputRoute, WorkspaceIoRuntime,
+    WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceStep, WorkspaceView,
+    activate_focused_interrupted_tab, activate_workspace_responsive, adjust_project_bar_pointer,
+    adopt_session_command_lane, apply_drawer_header_while_director_open, apply_restore_completion,
+    begin_session_command, close_exited_panes, closes_workspace_help,
+    compose_workspace_shell_frame, controller_terminal_view, deliver_carried_outcome,
+    director_drawer_projection, dismiss_pr_modal_on_project_bar_click,
+    drain_pane_completions_into_runtime, drain_pane_launches, drain_session_completions,
+    drain_session_refresh, enqueue_pane_launch, enter_workspace, enter_workspace_deck,
+    entry_help_context, fail_terminal_launch, focus_workspace_drawer_from_pointer,
+    foreground_terminal_geometry, garden_fits, garden_shell_owned_wake,
+    handle_interrupted_removal_confirmation, home_header_action_at,
+    intercept_live_terminal_control, managed_background_terminal,
+    managed_background_terminal_geometry, new_project_notice, open_director_from_new_button,
+    open_failure_notice, open_from_registry, opens_workspace_help, prepare_activation_settings,
+    prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck, project_bar,
+    project_controller_sessions, registry_contains_path, relative_time_clock,
+    remember_workspace_session_focus, remove_registry_paths, render_home, render_home_at,
+    render_missing_workspace_prompt, render_open, restore_workspace_closeup,
     restore_workspace_session_focus, retarget_drawer_chords, right_pane_tab_at, route_garden_input,
     route_pr_modal_click, route_workspace_input_before_reducer, run_workspace_config,
     save_config_responsive, save_config_source_responsive, scroll_key_help, select_right_pane_tab,
     session_name_for, sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
-    spawn_work_run_control_job, spawn_work_run_observation_job, step_config, step_new, step_open,
-    step_welcome, surface_agent_tab_intent_error, sync_runtime_sessions,
-    sync_terminal_selection_motions, visit_garden_agent, work_run_control_projection,
+    step_config, step_new, step_open, step_welcome, surface_agent_tab_intent_error,
+    sync_runtime_sessions, sync_terminal_selection_motions, visit_garden_agent,
     workspace_has_unsaved_surface, workspace_help_context, workspace_navigation_target,
     workspace_terminal_attachments,
 };
@@ -120,7 +117,6 @@ pub(super) struct FrameMaterialKey {
     /// The other projects' rabbits are draw material this loop owns, so their
     /// change has to reach the key that admits a rebuild.
     pub(super) garden_observations: u64,
-    pub(super) work_run_revision: u64,
     pub(super) now: DateTime<Utc>,
 }
 
@@ -139,7 +135,6 @@ impl FrameMaterialKey {
             && self.animation == other.animation
             && self.create_pending == other.create_pending
             && self.garden_observations == other.garden_observations
-            && self.work_run_revision == other.work_run_revision
             && self.now == other.now
     }
 }
@@ -514,21 +509,14 @@ pub(super) fn drain_controller_host_actions(
                     .session
                     .map_or(Target::Root(request.workspace), Target::Session);
                 pending_targets.insert(request.operation_id, target);
-                if let Some(goal) = &request.goal {
-                    runtime.on_effect(&Effect::LaunchGoal {
-                        workspace: request.workspace,
-                        operation_id: request.operation_id,
-                        profile: request.profile.clone(),
-                        goal: goal.clone(),
-                    });
-                } else {
-                    runtime.on_effect(&Effect::LaunchAgent {
-                        workspace: request.workspace,
-                        session: request.session,
-                        operation_id: request.operation_id,
-                        profile: request.profile.clone(),
-                    });
-                }
+
+                runtime.on_effect(&Effect::LaunchAgent {
+                    workspace: request.workspace,
+                    session: request.session,
+                    operation_id: request.operation_id,
+                    profile: request.profile.clone(),
+                });
+
                 enqueue_pane_launch(
                     ui,
                     PaneLaunch::Agent {
@@ -536,7 +524,6 @@ pub(super) fn drain_controller_host_actions(
                         workspace: request.workspace,
                         session: request.session,
                         profile: request.profile,
-                        goal: request.goal,
                         resume: false,
                     },
                 );
@@ -557,7 +544,6 @@ pub(super) fn drain_controller_host_actions(
                         workspace: request.workspace,
                         session: Some(request.session),
                         profile: None,
-                        goal: None,
                         resume: true,
                     },
                 );
@@ -726,7 +712,6 @@ pub(super) fn drive_workspace_controller(
         available_models,
         default_model,
         default_branch,
-        work_mode,
         icon_mode,
     } = entry_policy;
     deck.set_icon_mode(icon_mode);
@@ -747,7 +732,6 @@ pub(super) fn drive_workspace_controller(
     // Cross-project Garden observation. Its dedicated port is parked here while
     // no round is in flight, exactly like the restore lane's.
     let mut garden_inventory = Some(composition.garden_inventory);
-    let mut work_run_port = Some(composition.work_runs);
     // Resident session-inventory lane. The frame loop only wakes and drains it;
     // the observation itself never runs here (#551).
     let mut session_refresh = composition.session_refresh;
@@ -759,7 +743,6 @@ pub(super) fn drive_workspace_controller(
     let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
-    let (work_run_sender, work_run_completions) = mpsc::channel::<WorkRunLaneCompletion>();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -804,12 +787,12 @@ pub(super) fn drive_workspace_controller(
         });
     runtime.set_agent_models(available_models, default_model);
     runtime.set_client_build(backend_factory.client_build());
-    runtime.set_work_mode(work_mode);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
     let mut metrics_backend = MetricsBackend::new(composition.metrics);
     let mut metrics_projection = MetricsProjection::default();
+    let mut help_context: Option<super::views::key_help::State> = None;
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
     // The reducer hit-tests sidebar clicks and owns stable-identity double-click
@@ -846,13 +829,7 @@ pub(super) fn drive_workspace_controller(
     let mut garden_observation =
         ObservationLane::new(GARDEN_OBSERVATION_INTERVAL, GARDEN_OBSERVATION_BACKOFF);
     let mut garden_observations = 0_u64;
-    let mut work_run_observation =
-        ObservationLane::new(WORK_RUN_OBSERVATION_INTERVAL, WORK_RUN_OBSERVATION_BACKOFF);
-    let mut work_runs = WorkRunProjection::default();
-    let mut work_run_control = WorkRunControl::default();
-    let mut help_context: Option<super::views::key_help::State> = None;
-    let mut pending_work_run_control = None;
-    let mut work_run_revision = 0_u64;
+
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
     let mut worktree_hint = SessionWorktreeHint::new(composition.session_worktrees);
@@ -1042,49 +1019,7 @@ pub(super) fn drive_workspace_controller(
             garden_inventory = Some(completion.port);
             garden_observation.complete(restore_clock.elapsed(), observed);
         }
-        for completion in work_run_completions.try_iter().take(FRAME_EVENT_BUDGET) {
-            match completion {
-                WorkRunLaneCompletion::Observation { port, snapshot } => {
-                    let observed = snapshot.is_ok();
-                    let next = match snapshot {
-                        Ok(snapshot) => WorkRunProjection::fresh(snapshot.runs),
-                        Err(_) => work_runs.clone().unavailable(),
-                    };
-                    if next != work_runs {
-                        work_runs = next;
-                        work_run_control.sync_selection(work_runs.runs());
-                        work_run_revision = work_run_revision.wrapping_add(1);
-                    }
-                    work_run_port = Some(port);
-                    work_run_observation.complete(restore_clock.elapsed(), observed);
-                }
-                WorkRunLaneCompletion::Control {
-                    port,
-                    operation_id,
-                    result,
-                } => {
-                    let result = *result;
-                    let previous_control = work_run_control.clone();
-                    let accepted = work_run_control.complete(operation_id, &result);
-                    if accepted && let Ok(result) = &result {
-                        match result {
-                            WorkRunControlResult::Updated(run) => {
-                                work_runs.apply_control(run.as_ref().clone());
-                            }
-                            WorkRunControlResult::Deleted(deletion) => {
-                                work_runs.apply_deletion(*deletion);
-                                work_run_control.sync_selection(work_runs.runs());
-                            }
-                        }
-                    }
-                    if work_run_control != previous_control || accepted {
-                        work_run_revision = work_run_revision.wrapping_add(1);
-                    }
-                    work_run_port = Some(port);
-                    work_run_observation.refresh_now();
-                }
-            }
-        }
+
         let (terminal_height, width) = term.size()?;
         let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
         ui.set_terminal_size(height, width);
@@ -1235,13 +1170,10 @@ pub(super) fn drive_workspace_controller(
             runtime.material_key(),
             ui.material_revision,
             director_terminal_generation,
-            work_run_revision,
         );
         if director_material_key != Some(next_director_key) {
             let drawer_projection =
-                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref())
-                    .with_work_runs(work_runs.clone())
-                    .with_work_run_control(work_run_control_projection(&work_run_control));
+                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref());
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -1317,7 +1249,6 @@ pub(super) fn drive_workspace_controller(
                 .as_ref()
                 .map(|create| create.name.clone()),
             garden_observations,
-            work_run_revision,
             now,
         };
         if frame_source_key.as_ref() != Some(&next_source_key) {
@@ -1343,7 +1274,6 @@ pub(super) fn drive_workspace_controller(
                 icon_mode,
             )
             .with_agent_inventory(ui.agent_inventory(), runtime.panes())
-            .with_work_runs(work_runs.clone())
             .with_workspace_deck_garden(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
@@ -1393,22 +1323,7 @@ pub(super) fn drive_workspace_controller(
                 spawn_garden_observation_job(port, targets, garden_sender.clone());
             }
         }
-        if work_run_port.is_some() && pending_work_run_control.is_some() {
-            let port = work_run_port
-                .take()
-                .expect("the Work Run control port was checked above");
-            let request = pending_work_run_control
-                .take()
-                .expect("the Work Run control request was checked above");
-            spawn_work_run_control_job(port, workspace_id, request, work_run_sender.clone());
-        } else if work_run_port.is_some()
-            && work_run_observation.begin_if_due(true, restore_clock.elapsed())
-        {
-            let port = work_run_port
-                .take()
-                .expect("the Work Run observation port was checked above");
-            spawn_work_run_observation_job(port, workspace_id, work_run_sender.clone());
-        }
+
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
                 .take()
@@ -1448,11 +1363,10 @@ pub(super) fn drive_workspace_controller(
             // being described.
             continue;
         }
-        if opens_workspace_help(&raw_key, deck, &runtime, &work_run_control) {
-            help_context = Some(super::views::key_help::State::new(
-                workspace_help_context(deck, &runtime, &work_run_control),
-                runtime.state().work_mode(),
-            ));
+        if opens_workspace_help(&raw_key, deck, &runtime) {
+            help_context = Some(super::views::key_help::State::new(workspace_help_context(
+                deck, &runtime,
+            )));
             drawn_material = None;
             frame_source_key = None;
             frame_material_key = None;
@@ -1839,49 +1753,9 @@ pub(super) fn drive_workspace_controller(
         });
         let director_new_effects = drawer_header_effects
             .is_none()
-            .then(|| {
-                open_director_from_new_button(
-                    &mut runtime,
-                    &key,
-                    height,
-                    width,
-                    work_run_control.mode(),
-                )
-            })
+            .then(|| open_director_from_new_button(&mut runtime, &key, height, width))
             .flatten();
         let director_new_clicked = director_new_effects.is_some();
-        if drawer_header_effects.is_some() || director_new_clicked {
-            let previous = work_run_control.clone();
-            work_run_control.suspend();
-            if work_run_control != previous {
-                work_run_revision = work_run_revision.wrapping_add(1);
-            }
-        }
-        let work_run_input =
-            if garden_route.is_none() && drawer_header_effects.is_none() && !director_new_clicked {
-                let previous = work_run_control.clone();
-                let input = handle_work_run_control_input_with_ui(
-                    Some(&mut ui),
-                    &mut runtime,
-                    &mut work_run_control,
-                    &work_runs,
-                    &key,
-                );
-                if work_run_control != previous {
-                    work_run_revision = work_run_revision.wrapping_add(1);
-                }
-                input
-            } else {
-                None
-            };
-        if let Some(WorkRunControlInput {
-            outcome: WorkRunControlOutcome::Submit(request),
-            ..
-        }) = work_run_input.as_ref()
-        {
-            pending_work_run_control = Some(request.clone());
-        }
-        let work_run_effects = work_run_input.map(|input| input.effects);
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
             Some(GardenInputRoute::Agent(effects)) => {
@@ -1894,9 +1768,6 @@ pub(super) fn drive_workspace_controller(
             }
             None if director_new_clicked => WorkspaceInputRoute::Drawer(
                 director_new_effects.expect("matched Director New button"),
-            ),
-            None if work_run_effects.is_some() => WorkspaceInputRoute::Drawer(
-                work_run_effects.expect("matched Work Run control input"),
             ),
             None => route_workspace_input_before_reducer(
                 &mut ui,
@@ -2065,7 +1936,6 @@ pub(super) fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
-                runtime.set_work_mode(effective.work_mode);
                 let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
                     session_catalogs.branches(&root_cwd, effective.default_branch.as_deref()),
                 )));
@@ -2287,15 +2157,12 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             continue;
         }
         if key == Key::Help {
-            help_context = Some(super::views::key_help::State::new(
-                entry_help_context(
-                    screen,
-                    &open,
-                    &config_form,
-                    missing_workspace_prompt.is_some(),
-                ),
-                WorkMode::Classic,
-            ));
+            help_context = Some(super::views::key_help::State::new(entry_help_context(
+                screen,
+                &open,
+                &config_form,
+                missing_workspace_prompt.is_some(),
+            )));
             drawn_material = None;
             continue;
         }

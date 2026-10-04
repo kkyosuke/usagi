@@ -37,8 +37,8 @@ use crate::presentation::views::workspace::{
 };
 use crate::usecase::application::Key;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, DirectorConsoleParent, DirectorNew, DirectorRoute, Effect,
-    HomeMode, Overlay, Route, Selection, TabDirection, Target, WorkspaceDrawerFocus, update,
+    AppEvent, AppKey, AppState, DirectorNew, DirectorRoute, Effect, HomeMode, Overlay, Route,
+    Selection, TabDirection, Target, WorkspaceDrawerFocus, update,
 };
 use crate::usecase::application::interrupted_tab::{
     InterruptedTab, ResumeCommand, ResumeRejection, ResumeReplacement, accept_replacement,
@@ -244,11 +244,6 @@ impl WorkspaceRuntime {
     #[must_use]
     pub const fn state(&self) -> &AppState {
         &self.state
-    }
-
-    /// Apply the effective workspace Director interaction setting.
-    pub fn set_work_mode(&mut self, mode: usagi_core::domain::settings::WorkMode) {
-        self.state.set_work_mode(mode);
     }
 
     /// The active target's pane state, for `HomeProjection::with_pane`.
@@ -578,8 +573,7 @@ impl WorkspaceRuntime {
             return self.handle_closeup_key(key);
         }
         // With no existing modal in front, the drawer owns every Home input.
-        // Its local New surface accepts provider selection and, in goal-driven
-        // mode, bounded goal editing; everything else is consumed without
+        // Its local New surface accepts provider selection; everything else is consumed without
         // reaching sidebar, pane, or globals.
         if self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director) {
             return match (self.state.director_new(), key) {
@@ -615,15 +609,10 @@ impl WorkspaceRuntime {
                     _,
                     Key::Live(crate::usecase::terminal_input::LiveTerminalAction::DirectorBack),
                 ) => self.apply_event(AppEvent::Key(AppKey::DirectorBack)),
-                (_, Key::Live(crate::usecase::terminal_input::LiveTerminalAction::WorkRuns)) => {
-                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
-                }
                 (DirectorNew::Idle, Key::Enter)
                     if self.state.director_route() == DirectorRoute::Organization =>
                 {
-                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorConsole(
-                        DirectorConsoleParent::Organization,
-                    )))
+                    self.apply_event(AppEvent::Key(AppKey::OpenDirectorConsole))
                 }
                 (
                     _,
@@ -1065,7 +1054,7 @@ impl WorkspaceRuntime {
         let live_surface = matches!(self.state.route(), Route::Home(HomeMode::Closeup))
             || self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Terminal)
             || (self.state.workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
-                && matches!(self.state.director_route(), DirectorRoute::Console(_)));
+                && matches!(self.state.director_route(), DirectorRoute::Console));
         live_surface
             && self.state.has_live_pane()
             && (!self.state.workspace_drawer_open() || self.focused_terminal().is_some())
@@ -1938,13 +1927,6 @@ impl WorkspaceRuntime {
                 let target = session.map_or(Target::Root(*workspace), Target::Session);
                 let _ = self.request_pane(target, *operation_id, PaneKind::Agent);
             }
-            Effect::LaunchGoal {
-                workspace,
-                operation_id,
-                ..
-            } => {
-                let _ = self.request_pane(Target::Root(*workspace), *operation_id, PaneKind::Agent);
-            }
             _ => {}
         }
     }
@@ -2419,6 +2401,23 @@ mod tests {
         assert!(runtime.handle_key(Key::Quit).is_empty());
         assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
         assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
+    }
+
+    #[test]
+    fn closeup_arrows_move_the_selection_and_wrap_in_both_directions() {
+        let mut runtime = closeup_on(WorkspaceId::new(), SessionId::new());
+        let count = runtime.closeup_modal().unwrap().actions().len();
+        assert!(count > 1);
+        assert_eq!(runtime.closeup_modal().unwrap().selected(), 0);
+        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert_eq!(runtime.closeup_modal().unwrap().selected(), count - 1);
+        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert_eq!(runtime.closeup_modal().unwrap().selected(), count - 2);
+        assert!(runtime.handle_key(Key::Down).is_empty());
+        assert_eq!(runtime.closeup_modal().unwrap().selected(), count - 1);
+        assert!(runtime.handle_key(Key::Down).is_empty());
+        assert_eq!(runtime.closeup_modal().unwrap().selected(), 0);
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
     }
 
     #[test]
@@ -3609,19 +3608,10 @@ mod tests {
     }
 
     #[test]
-    fn director_work_runs_shortcut_and_interactive_agent_detection_cover_live_states() {
+    fn interactive_agent_detection_covers_live_states() {
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
-        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
-        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorBack));
-        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
-        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::WorkRuns));
-        assert_eq!(runtime.state().director_route(), DirectorRoute::WorkRuns);
-
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, PaneKind::Agent);
         assert!(runtime.has_interactive_root_agent_tabs());
@@ -4530,27 +4520,6 @@ mod tests {
             runtime.active_pane().tabs().last(),
             Some(PaneTab::Pending(pending)) if pending.kind == PaneKind::Agent
         ));
-        let goal_op = OperationId::new();
-        runtime.on_effect(&Effect::LaunchGoal {
-            workspace,
-            operation_id: goal_op,
-            profile: None,
-            goal: "prepare a PR".to_owned(),
-        });
-        assert!(matches!(
-            runtime
-                .panes()
-                .pane(Target::Root(workspace))
-                .and_then(|pane| pane.tabs().last()),
-            Some(PaneTab::Pending(pending)) if pending.operation == goal_op
-        ));
-
-        runtime.set_work_mode(usagi_core::domain::settings::WorkMode::GoalDriven);
-        assert_eq!(
-            runtime.state().work_mode(),
-            usagi_core::domain::settings::WorkMode::GoalDriven
-        );
-
         // A non-pane effect leaves the tabs untouched.
         let before = runtime.active_pane().tabs().len();
         runtime.on_effect(&Effect::RefreshSessions { workspace });

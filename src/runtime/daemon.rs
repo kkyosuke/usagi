@@ -28,12 +28,12 @@ use ipc_accept::{ResponseFrameProgress, start_terminal_observer};
 #[cfg(test)]
 use agent::spawn_decision_maintenance;
 use agent::{
-    AgentDecisionWaker, DeferredDecisionWaker, PendingDaemonAgentRestart, SharedAgent,
-    SharedAgentState, SystemTenantOpener, TenantWorkspaces, append_live_tenant_inventory,
-    clear_pending_daemon_agent_restart, current_agent_integrations, open_agent_runtime,
-    planned_agent_workspace_root, provisioned_agent_command, read_pending_daemon_agent_restart,
-    reconcile_removed_session_agents, restore_pending_daemon_agents, retained_startup_root,
-    send_agent_observation, start_daemon_agent_restart_recovery, start_decision_maintenance,
+    PendingDaemonAgentRestart, SharedAgent, SharedAgentState, SystemTenantOpener, TenantWorkspaces,
+    append_live_tenant_inventory, clear_pending_daemon_agent_restart, current_agent_integrations,
+    open_agent_runtime, planned_agent_workspace_root, provisioned_agent_command,
+    read_pending_daemon_agent_restart, reconcile_removed_session_agents,
+    restore_pending_daemon_agents, retained_startup_root, send_agent_observation,
+    start_daemon_agent_restart_recovery, start_decision_maintenance,
     write_pending_daemon_agent_restart,
 };
 
@@ -97,31 +97,18 @@ use broker::{
 
 use dispatch::session::reconcile_orphan_delegations;
 use dispatch::{
-    DispatchToolContext, SessionDispatchContext, authenticated_supervisor_caller,
-    clean_orphan_session_resources, daemon_request_surface, dispatch_agent,
-    dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
-    dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
-    dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
-    dispatch_supervisor_tool, dispatch_user_decision, envelope, expected_client_disconnect,
-    reconcile_aborted_supervisor_workers, reconcile_pending_goal_artifacts,
-    reconcile_pending_supervisor_promotions, reconcile_startup_supervisor_promotions,
-    reconcile_startup_supervisor_workers, request_mcp_credential, run_agent_readiness,
-    unexpected_daemon_response_entry,
+    DispatchToolContext, SessionDispatchContext, clean_orphan_session_resources,
+    daemon_request_surface, dispatch_agent, dispatch_agent_phase_report,
+    dispatch_codex_session_capture, dispatch_dispatch, dispatch_dispatch_tool,
+    dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot, dispatch_rollover,
+    dispatch_session, dispatch_user_decision, envelope, expected_client_disconnect,
+    request_mcp_credential, run_agent_readiness, unexpected_daemon_response_entry,
 };
 
 #[cfg(test)]
 use dispatch::{
-    AuthenticatedSupervisorCaller, PendingPromotionCandidate, PendingPromotionKind,
-    best_effort_merged_pr_head, exact_merged_pr_head, finish_supervisor_promotion_reconciliation,
-    goal_supervisor_caller, lock_agent_runtime, lock_supervisor_runtime, map_inbox_query_error,
-    project_reported_pr, promotion_admission_matches, prompt_supervisor_retry,
-    reconcile_supervisor_promotion, reconcile_supervisor_promotion_outcome,
-    reconcile_supervisor_promotions, reconcile_supervisor_run_workers,
-    record_supervisor_promotion_result, require_stable_supervisor_fence,
-    require_supervisor_reservation_presence, reserve_goal_supervisor_run,
-    resolve_goal_artifact_repository, safe_log_token, session_response_envelope,
-    start_goal_supervisor_run, supervisor_caller_descriptor, supervisor_control_error,
-    supervisor_control_unconfirmed, supervisor_error,
+    best_effort_merged_pr_head, exact_merged_pr_head, map_inbox_query_error, project_reported_pr,
+    safe_log_token, session_response_envelope,
 };
 
 #[cfg(test)]
@@ -174,7 +161,7 @@ use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::clock::MonotonicClock;
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{
-    AgentRuntimeRef, ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
@@ -198,7 +185,7 @@ use usagi_core::infrastructure::ipc::{
     build_rollover_trigger,
 };
 use usagi_core::infrastructure::ipc::{ClientError, DaemonRestartAgents};
-use usagi_core::infrastructure::ipc::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
+use usagi_core::infrastructure::ipc::{DaemonRequest, DispatchToolAction};
 use usagi_core::infrastructure::paths;
 #[cfg(test)]
 use usagi_core::infrastructure::persistence::json_file;
@@ -229,7 +216,7 @@ use usagi_daemon::presentation::{
 };
 use usagi_daemon::usecase::agent_ipc::{
     AGENT_RUNTIME_LIMIT, AgentAdmission, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor,
-    PromptMode, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
+    ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
     TerminalOutcome,
 };
 use usagi_daemon::usecase::agy::AgyAdapter;
@@ -305,14 +292,8 @@ use usagi_daemon::usecase::session_teardown::{
 };
 use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
-use usagi_daemon::usecase::supervisor_runtime::{
-    ArtifactVerification, ArtifactVerificationRequest, ArtifactVerificationStatus,
-    ArtifactVerifier, DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
-    bounded_supervisor_query,
-};
 use usagi_daemon::usecase::tenant::{
-    DEFAULT_TENANT_LIMIT, OpenedTenant, Tenant, TenantRegistry, TenantRuntimeOpener,
-    WorkspaceFenceFactory,
+    DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
 };
 use usagi_daemon::usecase::terminal::{
     Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
@@ -857,7 +838,6 @@ fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Optio
 type RootAgentRuntime = AgentRuntime;
 
 type SharedAgentRuntime = Arc<SharedAgentState>;
-type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 
 const PTY_OBSERVATION_QUEUE_ITEMS: usize = 64;
 
@@ -946,7 +926,6 @@ const CLIENT_NOFILE_TARGET: u64 =
 /// write: expiry no longer takes the store lock or fsyncs unless something
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
-const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy)]
 struct GhProcess;
 
@@ -1337,7 +1316,6 @@ const TENANT_IDLE_RETIREMENT: Duration = Duration::from_mins(10);
 struct DaemonWorkspaceActivity {
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
-    supervisor: SharedSupervisorRuntime,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
@@ -1356,15 +1334,10 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
             .agent
             .lock()
             .map_or(true, |agent| agent.has_running_agent(workspace));
-        let running_supervisor = self.supervisor.lock().map_or(true, |supervisor| {
-            supervisor
-                .has_unfinished_workspace(workspace)
-                .unwrap_or(true)
-        });
         let unfinished = runtime.lock().map_or(true, |runtime| {
             runtime.has_unfinished_work().unwrap_or(true)
         });
-        running_terminal || running_agent || running_supervisor || unfinished
+        running_terminal || running_agent || unfinished
     }
 }
 
@@ -2142,70 +2115,6 @@ fn pending_daemon_agent_restart_path(data_dir: &Path) -> PathBuf {
     data_dir
         .join("daemon")
         .join(PENDING_DAEMON_AGENT_RESTART_FILE)
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
-fn start_supervisor_recovery(
-    supervisor: SharedSupervisorRuntime,
-    agent: SharedAgentRuntime,
-    workspaces: Workspaces,
-    shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
-        .name("usagi-supervisor-recovery".to_owned())
-        .spawn(move || {
-            let worker_health =
-                shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
-            let mut promotion_log = FailureTransitionLog::default();
-            let mut worker_log = FailureTransitionLog::default();
-            let mut artifact_log = FailureTransitionLog::default();
-            let mut state_log = FailureTransitionLog::default();
-            while !shutdown.is_requested() {
-                let now = chrono::Utc::now();
-                let failure = reconcile_pending_supervisor_promotions(&supervisor, &agent)
-                    .err()
-                    .map(|error| format!("supervisor promotion reconciliation deferred: {error}"));
-                if let Some(entry) = promotion_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = reconcile_aborted_supervisor_workers(&supervisor, &agent)
-                    .err()
-                    .map(|error| {
-                        format!("supervisor worker termination reconciliation deferred: {error}")
-                    });
-                if let Some(entry) = worker_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
-                    .err()
-                    .map(|error| {
-                        format!("Goal artifact verification reconciliation deferred: {error}")
-                    });
-                if let Some(entry) = artifact_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = supervisor.lock().map_or_else(
-                    |_| {
-                        Some("supervisor state reconciliation deferred: runtime unavailable".into())
-                    },
-                    |runtime| {
-                        runtime
-                            .tick_all(now, &mut AgentDecisionWaker { agent: &agent })
-                            .err()
-                            .map(|error| {
-                                format!("supervisor state reconciliation deferred: {error}")
-                            })
-                    },
-                );
-                if let Some(entry) = state_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
-                    break;
-                }
-            }
-            worker_health.finish_planned();
-        })
 }
 
 struct IpcRolloverRequester<'a> {

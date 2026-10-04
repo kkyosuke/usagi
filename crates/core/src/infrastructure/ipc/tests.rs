@@ -24,8 +24,15 @@ impl io::Write for BadWriter {
 const TRUSTED_ROOT: &str = "/workspace/root";
 
 #[test]
-fn removed_session_workflow_requests_are_rejected() {
-    for kind in ["workflow_snapshot", "workflow_control"] {
+fn removed_workflow_requests_are_rejected() {
+    for kind in [
+        "workflow_snapshot",
+        "workflow_control",
+        "agent_goal",
+        "supervisor_tool",
+        "supervisor_snapshot",
+        "supervisor_control",
+    ] {
         let error = serde_json::from_value::<DaemonRequest>(json!({"kind": kind})).unwrap_err();
         assert!(error.to_string().contains("unknown variant"), "{error}");
     }

@@ -861,22 +861,12 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
             .launch(OperationId::new(), workspace_id, None, None)
             .is_err()
     );
-    assert!(
-        UnavailableAgentCommandPort
-            .launch_goal(OperationId::new(), workspace_id, None, "goal")
-            .is_err()
-    );
     // An embedder without a launch client refuses every pane launch inline
     // instead of leaving a pending tab forever.
     let history = interrupted_history(workspace_id, Some(session_id), true);
     assert!(
         UnavailablePaneLaunchPort
             .launch(OperationId::new(), workspace_id, None, None)
-            .is_err()
-    );
-    assert!(
-        UnavailablePaneLaunchPort
-            .launch_goal(OperationId::new(), workspace_id, None, "goal")
             .is_err()
     );
     assert!(
@@ -940,12 +930,12 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
 }
 
 #[test]
-fn serialized_launch_port_forwards_goal_admission() {
+fn serialized_launch_port_forwards_agent_admission() {
     let workspace = WorkspaceId::new();
     let terminal = scoped_terminal_ref(workspace, None);
     let port = launch_port(Box::new(SuccessfulAgentPort(terminal.clone())));
     let admitted = port
-        .launch_goal(OperationId::new(), workspace, None, "prepare a PR")
+        .launch(OperationId::new(), workspace, None, None)
         .unwrap();
     assert!(admitted.terminal.fences(&terminal));
 }
@@ -1770,7 +1760,6 @@ fn stale_agent_admission_cannot_show_or_focus_a_lineage_closed_by_another_tui() 
                 result: Ok(AgentPaneAdmission {
                     terminal: replacement,
                     continuation: Some(continuation),
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -2666,10 +2655,7 @@ fn unreadable_recent_reports_the_error_without_a_removal_prompt() {
 fn key_help_scroll_keys_drive_the_bounded_viewport() {
     use crate::presentation::views::key_help::{Context, State};
 
-    let initial = State::new(
-        Context::Switch,
-        usagi_core::domain::settings::WorkMode::GoalDriven,
-    );
+    let initial = State::new(Context::Switch);
     let mut state = initial;
 
     assert!(crate::presentation::scroll_key_help(

@@ -487,7 +487,7 @@ where
     /// unbound connection is admitted against — so that question has one
     /// permanent answer and would refuse every release. What decides instead is
     /// the same fail-closed [`WorkspaceActivity`] observation: no live
-    /// terminal, Agent, supervisor, or unfinished lifecycle work.
+    /// terminal, Agent, or unfinished lifecycle work.
     ///
     /// Returns whether the entry was removed, which is the caller's signal to
     /// release the process fence it holds. A `false` is the ordinary answer on

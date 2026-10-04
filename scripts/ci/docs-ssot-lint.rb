@@ -147,15 +147,12 @@ numbered_docs.each_with_index do |path, position|
   end
 end
 
-work_run_input = read.call("crates/tui/src/usecase/terminal_input.rs")
-work_run_client = read.call("crates/core/src/infrastructure/client.rs")
+terminal_input_source = read.call("crates/tui/src/usecase/terminal_input.rs")
 tui_spec = read.call("document/03-tui.md")
-ipc_spec = read.call("document/04-ipc.md")
 root_readme = read.call("README.md")
 keybinding_spec = read.call("document/11-keybindings.md")
-work_run_history = read.call("document/proposals/18-goal-driven-work-run.md")
 
-shortcut_catalog = work_run_input[/const PREFIX_SHORTCUTS:.*?= &\[(.*?)^\];/m, 1].to_s
+shortcut_catalog = terminal_input_source[/const PREFIX_SHORTCUTS:.*?= &\[(.*?)^\];/m, 1].to_s
 implemented_shortcut_actions = shortcut_catalog.scan(/LiveTerminalAction::([A-Z][A-Za-z0-9]*)/)
   .flatten.to_set
 runtime_shortcut_pairs = shortcut_catalog.scan(
@@ -215,19 +212,6 @@ end
 }.each do |path, content|
   if content.lines.any? { |line| line.start_with?("|") && line.include?("Ctrl-O") }
     failures << "#{path} duplicates the leader shortcut table owned by document/11-keybindings.md"
-  end
-end
-
-if implemented_shortcut_actions.include?("WorkRuns")
-  if work_run_history.lines.first(24).join.match?(/選択可能な複数\s+run\s+一覧/i)
-    failures << "proposal 18 classifies the implemented Work Run list as future work"
-  end
-end
-
-if work_run_client.include?("SupervisorSnapshot") && work_run_client.include?("SupervisorControl")
-  work_run_ipc = ipc_spec[/^## Work Run observation and control\n(.*?)(?=^## )/m, 1].to_s
-  unless work_run_ipc.include?("`supervisor_snapshot`") && work_run_ipc.include?("`supervisor_control`")
-    failures << "document/04-ipc.md must own the implemented Work Run observation and control requests"
   end
 end
 

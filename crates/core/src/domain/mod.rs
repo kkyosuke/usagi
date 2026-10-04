@@ -20,7 +20,6 @@ pub mod role;
 pub mod session;
 pub mod session_lifecycle;
 pub mod settings;
-pub mod supervisor;
 pub mod terminal_launch;
 pub mod terminal_retention;
 pub mod terminal_visibility;

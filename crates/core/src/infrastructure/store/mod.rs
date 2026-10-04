@@ -43,6 +43,5 @@ pub mod pr_inventory;
 pub mod session_favorites;
 pub mod settings;
 pub mod state;
-pub mod supervisor;
 pub mod user_decision;
 pub mod workspace;

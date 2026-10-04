@@ -55,11 +55,4 @@ impl ObservationLane {
             },
         );
     }
-
-    /// Makes an idle lane due immediately while preserving single-flight.
-    pub(crate) fn refresh_now(&mut self) {
-        if !self.in_flight {
-            self.next_due = Some(Duration::ZERO);
-        }
-    }
 }

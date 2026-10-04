@@ -178,7 +178,7 @@ coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除�
 
 | 代替案 | 却下理由 |
 |---|---|
-| daemon の idle timeout（client 0 で一定時間後に終了） | 正当な daemon は client が 0 でも live PTY と supervisor scheduler を所有する。idle は終了根拠にならない。custody 喪失は「この process はもう誰の権威でもない」を意味する精密な signal であり、policy tuning も不要である |
+| daemon の idle timeout（client 0 で一定時間後に終了） | 正当な daemon は client が 0 でも live PTY を所有する。idle は終了根拠にならない。custody 喪失は「この process はもう誰の権威でもない」を意味する精密な signal であり、policy tuning も不要である |
 | 親プロセス死亡検知（`getppid` 監視 / `PR_SET_PDEATHSIG`） | detached 起動（`process_group(0)`）は前景 hangup で PTY を失わせないための正しい設計であり、親の生死に daemon の生死を結び直すのは退行である。macOS には `PDEATHSIG` 相当も無い |
 | 起動経路（launchd plist / MCP 注入 / shell）の env 解決を統一して fence の分裂を防ぐ | plist と MCP 注入は統一できるが、利用者自身の shell（`USAGI_RUNTIME_MODE=production usagi ...`、`task prd`）は強制できない。env の合意は運用規約でしか守れず invariant にならない。lock は表記に依らない invariant なので、fence の正しい実装は lock 側である |
 | workspace fence だけにして data dir lock を撤去する | data directory 単位の record / locator / socket / durable state は依然その単位で排他が必要である。2 段とも残すのが正しい |

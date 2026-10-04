@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 56);
+    assert_eq!(tools.len(), 50);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -125,6 +125,12 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
         "workflow_status",
         "workflow_instruct",
         "workflow_finish",
+        "supervisor_start",
+        "supervisor_get",
+        "supervisor_list",
+        "supervisor_cancel",
+        "supervisor_resolve_escalation",
+        "supervisor_events",
     ] {
         assert!(!names.contains(name), "removed tool is advertised: {name}");
         let response = mcp.tool(name, &json!({"name": "removed-workflow"}));
@@ -141,7 +147,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 45);
+    assert_eq!(names.len(), 39);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -663,57 +669,6 @@ fn production_delegate_brief_rejects_an_unknown_caller_without_creating_a_sessio
             .join(".usagi/sessions/unowned-brief")
             .exists()
     );
-}
-
-#[test]
-fn production_supervisor_tools_observe_one_durable_aggregate() {
-    let mut mcp = McpHarness::start();
-    let caller_credential = mcp.launch_caller();
-    mcp.restart_with_credential(&caller_credential);
-    let started = mcp.tool(
-        "supervisor_start",
-        &json!({
-            "root_task": "coordinate the production fixture",
-            "idempotency_key": "production-supervisor-e2e"
-        }),
-    );
-    assert!(started.get("error").is_none(), "{started}");
-    let started: serde_json::Value =
-        serde_json::from_str(started["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let run_id = started["supervisor_run_id"].as_str().unwrap();
-    assert_eq!(started["state"], "running");
-    assert!(started["escalation"].is_null());
-    assert_eq!(started["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(started["tasks"][0]["state"], "dispatched");
-    assert_eq!(
-        started["display_label"],
-        "coordinate the production fixture"
-    );
-
-    let fetched = mcp.tool("supervisor_get", &json!({"supervisor_run_id": run_id}));
-    let fetched: serde_json::Value =
-        serde_json::from_str(fetched["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(fetched["supervisor_run_id"], run_id);
-    assert_eq!(fetched["state_revision"], started["state_revision"]);
-
-    let listed = mcp.tool("supervisor_list", &json!({"limit": 10}));
-    let listed: serde_json::Value =
-        serde_json::from_str(listed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(listed["runs"].as_array().unwrap().len(), 1);
-    assert_eq!(listed["runs"][0]["supervisor_run_id"], run_id);
-
-    let events = mcp.tool(
-        "supervisor_events",
-        &json!({"supervisor_run_id": run_id, "after_sequence": 0, "limit": 10}),
-    );
-    let events: serde_json::Value =
-        serde_json::from_str(events["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(events["events"].as_array().unwrap().len(), 3);
-    assert_eq!(events["next_sequence"], 4);
-    assert_eq!(events["events"][2]["source"], "admission");
-
-    let durable_dir = mcp.data_dir().join("daemon/supervisor-runs");
-    assert!(fs::read_dir(durable_dir).unwrap().count() >= 2);
 }
 
 #[test]

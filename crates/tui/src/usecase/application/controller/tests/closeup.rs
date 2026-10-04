@@ -180,26 +180,6 @@ fn new_validation_rejects_terminal_and_direction_controls() {
 }
 
 #[test]
-fn goal_composer_normalizes_paste_and_rejects_terminal_controls() {
-    let workspace = WorkspaceId::new();
-    let mut state = sized_home(workspace, Vec::new(), 100, 30);
-    state.set_work_mode(WorkMode::GoalDriven);
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-
-    let _ = update(
-        &mut state,
-        AppEvent::Key(AppKey::Paste(
-            "first\r\nsecond\t\u{2028}\u{a0} \u{1b}[2J\u{7}third\u{202e} fourth".to_owned(),
-        )),
-    );
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('\u{9b}')));
-
-    assert_eq!(state.director_goal(), "first second [2Jthird fourth");
-    assert!(!state.director_goal().chars().any(char::is_control));
-    assert!(!state.director_goal().chars().any(is_bidi_control));
-}
-
-#[test]
 fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
     let (workspace, first, second) = ids();
     let mut state = AppState::home(workspace, vec![first, second]);

@@ -147,7 +147,6 @@ fn drawer_new_root_completion_commits_one_selected_exact_tab_across_reopen() {
                 result: Ok(AgentPaneAdmission {
                     terminal: terminal.clone(),
                     continuation: Some(continuation),
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -1242,7 +1241,7 @@ fn entry_help_resolves_every_entry_surface_and_config_submode() {
     );
 
     let mut team = Config::load(&mut settings);
-    for _ in 0..7 {
+    for _ in 0..6 {
         let _ = step_config(&mut team, Key::Down, &mut settings);
     }
     let _ = step_config(&mut team, Key::Enter, &mut settings);
@@ -1380,7 +1379,7 @@ fn step_config_opens_applies_and_cancels_the_team_picker() {
 
     let mut settings = DefaultSettingsPort;
     let mut config = Config::load(&mut settings);
-    for _ in 0..7 {
+    for _ in 0..6 {
         step_config(&mut config, Key::Down, &mut settings);
     }
     assert_eq!(config.field(), ConfigField::TeamTemplate);
@@ -1497,7 +1496,6 @@ fn step_config_saves_only_from_the_dirty_save_row() {
     step_config(&mut config, Key::Down, &mut settings);
     step_config(&mut config, Key::Down, &mut settings);
     step_config(&mut config, Key::Down, &mut settings);
-    step_config(&mut config, Key::Down, &mut settings);
     // Enter on the dirty Save row begins the save flow (loading).
     assert!(matches!(
         step_config(&mut config, Key::Enter, &mut settings),
@@ -1516,7 +1514,6 @@ fn overview_config_saves_the_current_workspace_and_returns_to_home() {
     keys.extend("config".chars().map(Key::Char));
     keys.extend([
         Key::Enter,
-        Key::Down,
         Key::Down,
         Key::Down,
         Key::Down,
@@ -1640,7 +1637,7 @@ fn production_config_and_source_writes_use_the_responsive_worker_path() {
     };
     let mut config = Config::load(&mut settings);
     let _ = step_config(&mut config, Key::Right, &mut settings);
-    for _ in 0..11 {
+    for _ in 0..10 {
         let _ = step_config(&mut config, Key::Down, &mut settings);
     }
     assert!(matches!(

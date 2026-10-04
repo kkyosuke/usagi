@@ -18,7 +18,6 @@ make_fixture() {
   cp "$repo/crates/cli/src/mcp/guides/orchestration.md" "$destination/crates/cli/src/mcp/guides/orchestration.md"
   cp "$repo/crates/core/src/domain/settings/mod.rs" "$destination/crates/core/src/domain/settings/mod.rs"
   cp "$repo/crates/core/src/infrastructure/role_catalog.rs" "$destination/crates/core/src/infrastructure/role_catalog.rs"
-  cp "$repo/crates/core/src/infrastructure/client.rs" "$destination/crates/core/src/infrastructure/client.rs"
   cp "$repo/crates/daemon/src/lib.rs" "$destination/crates/daemon/src/lib.rs"
   cp "$repo/crates/tui/src/usecase/terminal_input.rs" "$destination/crates/tui/src/usecase/terminal_input.rs"
 }
@@ -72,26 +71,17 @@ make_fixture "$tmp/contents"
 sed -i.bak '/^- \[検討した代替案\]/d' "$tmp/contents/document/02-architecture.md"
 expect_fail "$tmp/contents" '02-architecture.md top-level contents do not match body heading order'
 
-make_fixture "$tmp/work-run-keybindings"
-sed -i.bak '/| `Ctrl-O w` | WorkRuns |/d' "$tmp/work-run-keybindings/document/11-keybindings.md"
-expect_fail "$tmp/work-run-keybindings" 'document/11-keybindings.md is missing implemented leader action WorkRuns'
+make_fixture "$tmp/leader-keybindings"
+sed -i.bak '/| `Ctrl-O g` | Director |/d' "$tmp/leader-keybindings/document/11-keybindings.md"
+expect_fail "$tmp/leader-keybindings" 'document/11-keybindings.md is missing implemented leader action Director'
 
-make_fixture "$tmp/work-run-key-drift"
-sed -i.bak 's/`Ctrl-O w` | WorkRuns/`Ctrl-O q` | WorkRuns/' "$tmp/work-run-key-drift/document/11-keybindings.md"
-expect_fail "$tmp/work-run-key-drift" 'document/11-keybindings.md documents stale leader shortcut `Ctrl-O q` (WorkRuns)'
+make_fixture "$tmp/leader-key-drift"
+sed -i.bak 's/`Ctrl-O g` | Director/`Ctrl-O q` | Director/' "$tmp/leader-key-drift/document/11-keybindings.md"
+expect_fail "$tmp/leader-key-drift" 'document/11-keybindings.md documents stale leader shortcut `Ctrl-O q` (Director)'
 
 make_fixture "$tmp/duplicate-shortcut"
-printf '\n| `Ctrl-O w` | WorkRuns |\n' >> "$tmp/duplicate-shortcut/README.md"
+printf '\n| `Ctrl-O g` | Director |\n' >> "$tmp/duplicate-shortcut/README.md"
 expect_fail "$tmp/duplicate-shortcut" 'README.md duplicates the leader shortcut table owned by document/11-keybindings.md'
-
-make_fixture "$tmp/work-run-ipc"
-sed -i.bak '/^- \[Work Run observation and control\]/d' "$tmp/work-run-ipc/document/04-ipc.md"
-sed -i.bak '/^## Work Run observation and control$/d' "$tmp/work-run-ipc/document/04-ipc.md"
-expect_fail "$tmp/work-run-ipc" 'document/04-ipc.md must own the implemented Work Run observation and control requests'
-
-make_fixture "$tmp/work-run-history"
-sed -i.bak 's/現在契約にない後続段階は、独立 Run Closeup/現在契約にない後続段階は、選択可能な複数 run 一覧、独立 Run Closeup/' "$tmp/work-run-history/document/proposals/18-goal-driven-work-run.md"
-expect_fail "$tmp/work-run-history" 'proposal 18 classifies the implemented Work Run list as future work'
 
 make_fixture "$tmp/team-template"
 sed -i.bak '/| pipeline | `pipeline` |/d' "$tmp/team-template/document/10-session-roles.md"

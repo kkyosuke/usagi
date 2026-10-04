@@ -6,7 +6,7 @@
 //! `serve` は実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、routing は
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
 //! issue / memory は接続時に固定した root の core store usecase、session / agent / terminal /
-//! supervisor 系は daemon client へ接続し、tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
+//! session / agent / terminal 系は daemon client へ接続し、tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -755,26 +755,6 @@ fn execute_tool(
                 }),
             )
         }
-        ToolRoute::Supervisor(action) => {
-            let operation_id = arguments
-                .get("idempotency_key")
-                .and_then(Value::as_str)
-                .map_or_else(
-                    || usagi_core::domain::id::OperationId::new().as_str(),
-                    ToOwned::to_owned,
-                );
-            daemon_body_response(
-                id,
-                client.request(DaemonRequest::SupervisorTool {
-                    action,
-                    operation_id,
-                    payload: arguments,
-                    caller_context: caller_credential.map(|credential| McpCallerContext {
-                        credential: credential.to_owned(),
-                    }),
-                }),
-            )
-        }
         ToolRoute::Store(_) => store_tool_call(id, descriptor, &arguments, store_root),
     }
 }
@@ -1207,7 +1187,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 55);
+        assert_eq!(tools.len(), 49);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1253,7 +1233,7 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 44);
+        assert_eq!(names.len(), 38);
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
@@ -1368,6 +1348,12 @@ mod tests {
             "workflow_status",
             "workflow_instruct",
             "workflow_finish",
+            "supervisor_start",
+            "supervisor_get",
+            "supervisor_list",
+            "supervisor_cancel",
+            "supervisor_resolve_escalation",
+            "supervisor_events",
         ] {
             let request = serde_json::json!({
                 "jsonrpc": "2.0", "id": 5, "method": "tools/call",
@@ -1484,11 +1470,7 @@ mod tests {
             assert_eq!(response["error"]["code"], expected);
         }
 
-        for policy in [
-            CallerPolicy::Public,
-            CallerPolicy::AgentCredential,
-            CallerPolicy::DaemonProvenance,
-        ] {
+        for policy in [CallerPolicy::Public, CallerPolicy::AgentCredential] {
             let mut arguments = serde_json::json!({});
             apply_caller_policy(policy, &mut arguments, Some("secret"));
             assert!(arguments.get("_caller_credential").is_none());
@@ -1520,25 +1502,6 @@ mod tests {
         assert!(matches!(
             client.requests.last(),
             Some(DaemonRequest::DispatchTool { caller_context: Some(context), .. })
-                if context.credential == "secret"
-        ));
-
-        let supervisor = registry
-            .iter()
-            .find(|descriptor| descriptor.name() == "supervisor_list")
-            .unwrap();
-        let response = execute_tool(
-            serde_json::json!(3),
-            supervisor,
-            serde_json::json!({}),
-            &mut client,
-            Some("secret"),
-            Path::new("."),
-        );
-        assert!(response.get("result").is_some());
-        assert!(matches!(
-            client.requests.last(),
-            Some(DaemonRequest::SupervisorTool { caller_context: Some(context), .. })
                 if context.credential == "secret"
         ));
 
@@ -2178,12 +2141,6 @@ mod tests {
             "agent_complete",
             "agent_fail",
             "agent_inbox",
-            "supervisor_start",
-            "supervisor_get",
-            "supervisor_list",
-            "supervisor_cancel",
-            "supervisor_resolve_escalation",
-            "supervisor_events",
         ] {
             let snapshot = RuntimeModelSnapshot::capture(
                 &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),

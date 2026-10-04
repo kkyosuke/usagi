@@ -1044,57 +1044,6 @@ fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
 }
 
 #[test]
-fn goal_readiness_defaults_profile_and_rejects_semantic_conflict() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let operation = OperationId::new().to_string();
-    let mut intent = AgentGoalIntent {
-        workspace: WorkspaceId::new(),
-        profile: None,
-        goal: "use the default profile".into(),
-    };
-    assert_eq!(
-        runtime.goal_worker_profile(&intent).unwrap().as_str(),
-        "claude"
-    );
-    let mut explicit = intent.clone();
-    explicit.profile = Some(AgentProfileId::new("claude").unwrap());
-    assert_eq!(
-        runtime.goal_worker_profile(&explicit).unwrap().as_str(),
-        "claude"
-    );
-    let mut invalid = intent.clone();
-    invalid.goal = " ".into();
-    assert_eq!(
-        runtime.goal_worker_profile(&invalid).unwrap_err().code,
-        ErrorCode::InvalidArgument
-    );
-    let readiness = runtime
-        .prepare_goal_launch_readiness(&operation, &intent)
-        .unwrap()
-        .unwrap();
-    assert_eq!(readiness.product(), "claude");
-    runtime
-        .launch_goal_after_readiness(
-            &operation,
-            &intent,
-            &FakeScope(Ok(scope())),
-            Some(&readiness),
-        )
-        .unwrap();
-
-    intent.goal = "a different goal".into();
-    assert_eq!(
-        runtime
-            .prepare_goal_launch_readiness(&operation, &intent)
-            .unwrap_err()
-            .code,
-        ErrorCode::IdempotencyConflict
-    );
-}
-
-#[test]
 fn agent_resume_reports_exit_for_parity_with_the_generic_terminal() {
     // Regression: an Agent's `Resume` must carry the hosting terminal's
     // `exited` flag (like the generic terminal Resume), so a TUI client's

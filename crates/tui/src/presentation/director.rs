@@ -1,11 +1,10 @@
 //! Director drawer / Director tab の選択と projection。
 
 use super::{
-    AgentRuntimeId, AgentTabIntent, AgentTabIntentMutation, AppEvent, AppKey, DirectorConversation,
+    AgentTabIntent, AgentTabIntentMutation, AppEvent, AppKey, DirectorConversation,
     DirectorDrawerProjection, DirectorNew, DirectorNewProjection, DirectorOrganizationRow,
     DirectorRoute, Effect, HomeProjection, Key, LiveTerminalAction, OperationId, PaneKind, PaneTab,
-    PointerEvent, PointerKind, SessionId, SupervisorRunId, TabSelection, Target,
-    TerminalViewProjection, WorkRunControlMode, WorkRunControlProjection, WorkRunProjection,
+    PointerEvent, PointerKind, SessionId, TabSelection, Target, TerminalViewProjection,
     WorkspaceDrawerFocus, WorkspaceForegroundInputOwner, WorkspaceIoRuntime, WorkspaceRuntime,
     activate_focused_interrupted_tab, drawer_agent_owns_escape, surface_agent_tab_intent_error,
     workspace_drawer_header_key, workspace_foreground_input_owner,
@@ -53,43 +52,6 @@ pub(super) fn handle_director_picker_input(
     } else {
         None
     }
-}
-
-pub(super) fn select_director_agent(
-    runtime_id: AgentRuntimeId,
-    ui: &mut WorkspaceIoRuntime,
-    runtime: &mut WorkspaceRuntime,
-) -> bool {
-    let Some(index) = runtime.agent_tab_index(runtime_id, ui.agent_inventory()) else {
-        return false;
-    };
-    let selection = runtime
-        .tab_selection_at(index)
-        .expect("an Agent index is returned only for a tab in the same pane");
-    select_director_selection(selection, ui, runtime)
-}
-
-pub(super) fn select_director_selection(
-    selection: TabSelection,
-    ui: &mut WorkspaceIoRuntime,
-    runtime: &mut WorkspaceRuntime,
-) -> bool {
-    let continuation = match &selection {
-        TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
-        TabSelection::Interrupted(continuation) => Some(*continuation),
-        TabSelection::Pending(_) | TabSelection::Ready(_) => return false,
-    };
-    if ui
-        .mutate_agent_intent(AgentTabIntentMutation::Select {
-            session_id: None,
-            continuation,
-        })
-        .is_err()
-    {
-        return false;
-    }
-    let _ = runtime.select_tab_selection(selection);
-    true
 }
 
 /// Project the root pane entry into the frontmost Agent-only drawer.
@@ -158,32 +120,23 @@ pub(super) fn director_drawer_projection(
     // fail while an older live Director remains selected. Keep the pane-safe
     // reason at the route level as well as in the Console terminal projection.
     let feedback = pane.error().map(str::to_owned);
-    let goal_driven =
-        runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven;
-    let organization = if !goal_driven
-        && conversations
-            .iter()
-            .any(|conversation| conversation.selected)
+    let organization = if conversations
+        .iter()
+        .any(|conversation| conversation.selected)
     {
         director_organization(ui)
     } else {
         Vec::new()
     };
-    if goal_driven {
-        conversations.clear();
-    }
     DirectorDrawerProjection {
         focused: runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director),
         route: runtime.state().director_route(),
-        goal_driven,
         conversations,
         organization,
         terminal_view,
         interrupted_detail,
         feedback,
         new: director_new_projection(runtime),
-        work_runs: WorkRunProjection::default(),
-        work_run_control: WorkRunControlProjection::default(),
     }
 }
 
@@ -207,17 +160,10 @@ pub(super) fn director_new_projection(runtime: &WorkspaceRuntime) -> DirectorNew
                 .iter()
                 .position(|model| model == selected)
                 .unwrap_or(0);
-            if runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven {
-                DirectorNewProjection::GoalComposer {
-                    candidates,
-                    selected,
-                    goal: runtime.state().director_goal().to_owned(),
-                }
-            } else {
-                DirectorNewProjection::Choosing {
-                    candidates,
-                    selected,
-                }
+
+            DirectorNewProjection::Choosing {
+                candidates,
+                selected,
             }
         }
     }
@@ -366,7 +312,7 @@ pub(super) fn select_director_tab_and_activate(
 ) -> bool {
     let outcome = select_director_tab_outcome(key, ui, runtime);
     if outcome == DirectorTabSelection::Selected
-        && matches!(runtime.state().director_route(), DirectorRoute::Console(_))
+        && matches!(runtime.state().director_route(), DirectorRoute::Console)
     {
         activate_focused_interrupted_tab(ui, runtime, pending_targets);
     }
@@ -393,30 +339,18 @@ pub(super) fn is_director_new_click(
         && runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
         && matches!(runtime.state().director_new(), DirectorNew::Idle)
         && runtime.state().director_launching().is_none()
-        && super::director_drawer::new_button_at(
-            height,
-            width,
-            column,
-            row,
-            runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
-            false,
-        )
+        && super::director_drawer::new_button_at(height, width, column, row, false)
 }
 
-/// Resolve the Director's visible New / Start button before route-local input.
-///
-/// Work Runs deliberately owns otherwise-unrecognized clicks, so deferring
-/// this chrome action would make the primary Goal-driven CTA inert.
+/// Resolve the Director's New button before route-local input.
 pub(super) fn open_director_from_new_button(
     runtime: &mut WorkspaceRuntime,
     key: &Key,
     height: usize,
     width: usize,
-    work_run_mode: WorkRunControlMode,
 ) -> Option<Vec<Effect>> {
-    (work_run_mode != WorkRunControlMode::Submitting
-        && is_director_new_click(key, runtime, height, width))
-    .then(|| runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew)))
+    is_director_new_click(key, runtime, height, width)
+        .then(|| runtime.apply_event(AppEvent::Key(AppKey::OpenDirectorNew)))
 }
 
 /// Apply a workspace-drawer header button while Director is open, before its
@@ -448,27 +382,18 @@ pub(super) fn is_director_new_pointer(
         _ => return false,
     };
     runtime.state().director_drawer_open()
-        && super::director_drawer::new_button_at(
-            height,
-            width,
-            column,
-            row,
-            runtime.state().work_mode() == usagi_core::domain::settings::WorkMode::GoalDriven,
-            false,
-        )
+        && super::director_drawer::new_button_at(height, width, column, row, false)
 }
 
 pub(super) fn complete_director_launch(
     runtime: &mut WorkspaceRuntime,
     target: Target,
     operation: OperationId,
-    supervisor_run_id: Option<SupervisorRunId>,
     succeeded: bool,
 ) {
     if matches!(target, Target::Root(_)) {
         let _ = runtime.apply_event(AppEvent::DirectorLaunchFinished {
             operation,
-            supervisor_run_id,
             succeeded,
         });
     }

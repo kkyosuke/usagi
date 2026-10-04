@@ -19,7 +19,6 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
   - [Switch の右ペインは cursor の preview](#switch-の右ペインは-cursor-の-preview)
 - [workspace terminal drawer](#workspace-terminal-drawer)
 - [指示モード（Director mode）](#指示モードdirector-mode)
-  - [goal-driven workflow](#goal-driven-workflow)
 - [Home frame loop と背景観測 lane](#home-frame-loop-と背景観測-lane)
 - [frame 予算](#frame-予算)
 - [Session sidebar rows](#session-sidebar-rows)
@@ -104,9 +103,9 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
 Welcome の Config は、`Global` 見出しに全体へ適用する Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment、`Workspace init` 見出しに
-新規 workspace の初期値となる Agent・Workflow・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
-実行した場合は、Home 上の overlay modal に Agent・Environment・Base branch・Session setup・Workflow・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
-`↑↓` で行を、`←→` で値を切り替える。Workflow 行は択一値として `< classic >` / `< goal-driven >` と表示する。
+新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
+実行した場合は、Home 上の overlay modal に Agent・Environment・Base branch・Session setup・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
+`↑↓` で行を、`←→` で値を切り替える。
 Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
 `←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
 `Esc` は変更せずConfigへ戻る。80列未満では同じ選択肢を縦リストへ縮退する。未保存の値には `●` が付く。
@@ -254,19 +253,19 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Workflow・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
-| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Workflow・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する。Workflow の未知 token は自律実行を暗黙に有効化せず `classic` へ縮退する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する |
 | Workspace session setup | 対象 repository の `.usagi/config.toml` | session worktree 作成直後に順番に実行する command 列を保持する。Global scope はなく、新規 session の admission 時に読み取る |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Agent・Workflow・Team・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Agent・Team・Issue・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
-Workspace Config は Agent・Base branch・Workflow・Team・Issue・Memory、workspace `env`、session setup command を所有する。workspace の Environment editor は
+Workspace Config は Agent・Base branch・Team・Issue・Memory、workspace `env`、session setup command を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 Session setup editor は `.usagi/config.toml` の `[session].setup_commands` だけを atomic に置換し、コメントと `[agents]` を含む他の TOML 設定を保持する。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Icons は global-only の `icon_mode`、Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Workflow は `work_mode`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
+Icons は global-only の `icon_mode`、Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
 `icon_mode` は `nerd_font`（既定）または `text` である。端末から利用者が設定した font の glyph coverage を
 確実には判定できないため自動検出は行わず、patched font がない場合は Global Config の Icons 行で `text` を選ぶ。
 Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の codepoint を使う。
@@ -279,18 +278,15 @@ Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の c
 | CPU / resident memory | `U+F2DB` / `U+F233` | `CPU` / `MEM` |
 | pending decision | bell `U+F0F3` | `!` |
 | Switch / Closeup mode | `U+F0EC` / `U+F00E` と mode 名 | mode 名 |
-Workflow の `classic` は既定値で、従来どおり New が CLI picker を開き、選択した root Agent conversation を空の
-initial prompt で起動する。`goal-driven` は明示的な opt-in で、New を [Goal Composer](#goal-driven-workflow) に替える。
-Global / Workspace の field 欠落と Global の未知値は `classic`、Workspace の明示的な未知値も `classic` へ縮退するため、
-upgrade や typo だけで自律実行へ移らない。
-Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ安全に戻す。
-`default_model` は選択可能な agent CLI の closed vocabulary（`claude` / `codex` / `agy`）であり、Config 画面の
+
+Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ戻す。
+`default_model` は選択可能な Agent CLI の closed vocabulary（`claude` / `codex` / `agy`）であり、Config 画面の
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`agy` は Antigravity CLI を表す。
 Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
 全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field も読み飛ばし、次の保存時に除去する。
-Workspace の Agent・Workflow・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog)を正本とする。
+Workspace の Agent・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog) を正本とする。
 MCP server は起動時に解決した Issue / Memory の実効値を tool 公開・実行へ適用する。
-無効時の tool 範囲と server lifetime の契約は [MCP サーバ](07-mcp.md#tool-面)を正本とする。
+無効時の tool 範囲と server lifetime の契約は [MCP サーバ](07-mcp.md#tool-面) を正本とする。
 
 Workspace 設定の保存は project store の cross-process lock を取得し、version envelope を付けた local
 settings 形式へ temp file、fsync、rename の順で atomic write する。形式 migration は発生しない。壊れた JSON や
@@ -673,14 +669,10 @@ root scope（`session_id: None`）の Agent へ指示を出し、session を作�
 `director`）と呼ぶ。この節が指示モードの名称と仕様の正本である。managed session の実作業を見る面
 （[Closeup pane](#closeup-pane)）とは役割が異なり、指示モードは Home header の下から右端へ重なる drawer として現れる。
 
-Director shell は Workflow ごとに独立した明示 route tree を持つ。classic は `Organization` → `Director Console`、
-goal-driven は `Work Runs` → `Run Overview` → `Director Console` であり、一時 route としてそれぞれ
-`New Conversation` / `Start Work Run` を持つ。初回 open は各 tree の root へ着地する。同じ Workflow のまま drawer を閉じて
-再 open した場合は直前 route へ戻り、実効 Workflow が切り替わった場合は新しい tree の root へ route を正規化する。
-切替前の Conversation / Work Run と進行中 operation は daemon に残るが、現在の Workflow と異なる route tree は開かない。
+Director shell は `Organization` と `Director Console` を持ち、`New Conversation` から root Agent を起動する。
+初回は Organization を表示し、drawer を閉じて再 open すると直前の route に戻る。
 各画面は `Director / …` breadcrumb を表示する。Organization は Conversation 一覧と選択 Conversation の Agent / Session tree、
-Work Runs は Run の集合、Run Overview は daemon projection の 1 Run、Console は選択した root Agent の PTY だけを所有する。
-provider 固有 ID、prompt、inbox 本文は表示しない。
+Console は選択した root Agent の PTY を表示する。provider 固有 ID、prompt、inbox 本文は表示しない。
 
 Home header の右端には Unicode の chess queen を使う `[ ♛ Director ]` button を表示し、drawer title も
 `♛ Director` とする。glyph は直接描画し、狭幅でも
@@ -695,7 +687,7 @@ button の強調は mode toggle と同じ「入力 focus を持つ面がアク�
 clip する場合も、この対比は変わらない。
 
 button または `Ctrl-O g`（`Ctrl-O Ctrl-G`）は、Switch、managed-session Closeup、live pane のいずれからも同じ
-指示モードの open/closed state を toggle し、同じ Workflow の close 中も Director route を保持する。drawer の通常幅は端末幅の 60% とし、
+指示モードの open/closed state を toggle し、close 中も Director route を保持する。drawer の通常幅は端末幅の 60% とし、
 56 columns 以上 96 columns 以下へ clamp する。56 columns の drawer と 24 columns の背景を
 同時に保てない幅では全幅へ縮退する。PR modal と同じ合成 overlay であり、背景 Home は header を残して ANSI span ごと dim にするが、
 完全に隠れる managed terminal も通常の Home geometry と attachment を維持する。
@@ -703,32 +695,30 @@ Console の terminal viewport は drawer の border、breadcrumb、separator、f
 managed-session Closeup の right pane viewport とは別の pure geometry とする。背景に見えている managed Agent は
 その通常の right pane viewport の幅と attachment、出力 poll を維持し、dim 表示中も live output を描く。
 
-Organization は classic 専用であり、root scope（`session_id: None`）の live / pending / interrupted Conversation 一覧と、
+Organization は、root scope（`session_id: None`）の live / pending / interrupted Conversation 一覧と、
 選択 Conversation の Agent / Session tree を表示する。Conversation が未選択なら tree を表示せず選択を促す。
 generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
 Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。`↑` / `↓` は Conversation を
 stable tab identity で選び、`Enter` は選択 Conversation の root Agent Console を開く。Console だけが terminal view を描き、
-Organization、Work Run progress、追加の command editor は混ぜない。
 
-drawer の開閉状態にかかわらず `Ctrl-O n`（または `Ctrl-O Ctrl-N`）、または `[ New ]` / `[ Start ]` の mouse-down hit で
-classic の `New Conversation` または goal-driven の `Start Work Run` を開く。合成ルートから注入された起動できる CLI
+
+drawer の開閉状態にかかわらず `Ctrl-O n`（または `Ctrl-O Ctrl-N`）、または `[ New ]` の mouse-down hit で
+`New Conversation` を開く。合成ルートから注入された起動できる CLI
 （[正本](#closeup-の-agent-cli-選択)）だけを
 `claude`、`codex`、`agy` の順で picker に表示する。
 設定済み default が候補ならそこを、なければ先頭候補を highlight するが、自動確定はしない。`↑↓` は循環選択し、
 `Enter` は選択した CLI の explicit profile を確定する。`Esc` は保存済み Director route / selection と drawer open
 状態を変えず picker だけを閉じる。候補が 0 件なら installation と Config の確認を促す
 safe empty state を表示し、daemon request を発行しない。
-Work Run の cancel / delete が送信中の場合は New / Start を fence し、表示上も busy として、応答が返るまで
-別の composer を開かない。
 
 live Agent の Director Console は managed session の Agent pane と同じ入力経路を使う。通常文字、IME の
 確定文字列、paste、`Enter`、`Esc`、編集キーは追加の入力欄へ保持せず selected root Agent の PTY へ直接送る。
 terminal selection / copy と `Ctrl-O` control は既存の live terminal contract を共有する。`Ctrl-O b` は PTY に送らず
-Console の parent（classic は Organization、goal-driven は Run Overview）へ戻る。`Ctrl-O w` は goal-driven だけで Work Runs へ直接移動する。
+Organization へ戻る。
 
 Director を開いた状態で最後の live / starting root Agent が exit、close、launch failure、または authoritative restore により
 消えても drawer と route は保持する。Console は safe failure / stopped detail を表示し、`Ctrl-O b` で parent へ戻れる。
-drawer 全体を閉じるのは `Ctrl-O g`、header button、または各 Workflow の root（Organization / Work Runs）の `Esc` である。
+drawer 全体を閉じるのは `Ctrl-O g`、header button、またはOrganizationの `Esc` である。
 
 picker の viewport は selection に追従し、候補が picker の行数を超える端末でも highlight 中の候補を必ず描く。
 窓の外に残る候補は `↑ N more` / `↓ N more` へ畳むが、この indicator は候補と同じ行数を分け合うため、
@@ -745,73 +735,6 @@ root New の pending / completion は terminal の `workspace_id` と `session_i
 `Target::Root` に照合してから root registry entry だけへ admit する。scope が一致しない completion は拒否し、
 現在 active / selected な managed-session entry へ fallback しない。New を繰り返しても増えるのは drawer の
 conversation だけで、managed Closeup の tab count・identity・selection は変わらない。
-
-### goal-driven workflow
-
-実効 Workspace 設定の Workflow が `goal-driven` の場合、Start Work Run は CLI だけの picker ではなく Goal Composer を開く。
-Composer は必須の `Goal` と起動できる provider の選択を同じ drawer に表示し、通常文字、Backspace、bracketed paste を
-Goal が所有する。paste 内の改行・tabを含む区切り whitespace は単一 field の可視 space へ正規化し、その他の terminal control と bidi control は
-保存しない。`↑` / `↓` は provider だけを循環し、`Esc` は draft を破棄して開始前の exact Director route へ戻る。空または空白だけの
-Goal、または選択中 provider を描けない高さは launch を発行せず、footer に `Terminal too short to choose provider` を出す。
-TUI は 16 KiB を超える入力部分を受け付けず、上限までの完全な UTF-8 境界だけを保持する。daemon も 16 KiB 超の request と
-非空条件を admission 前に再検証する。
-
-`Enter` は fresh operation、workspace root、explicit profile、Goal を持つ専用の `agent_goal` request を 1 件発行する。
-この request は classic `agent` request と別の wire variant であり、classic の semantic key や初期 prompt を変更しない。
-goal-driven の semantic key は Goal 全文を長さ付きで含むため、同じ operation の replay は同じ root Agent へ収束し、
-別 Goal への operation ID 再利用は idempotency conflict になる。response の operation、semantic digest、workspace、
-`session_id: None` は classic launch と同じ exact correlation を通り、一つでも不一致なら pending pane を成功へ昇格しない。
-
-daemon は利用者の Goal を次の固定 operating contract と結合し、`LaunchRequest.initial_prompt` として Agent admission transaction
-へ載せる。
-
-- Draft PR、required check 成功、human review ready、または本当に必要な user decision まで再 prompt なしで継続する。
-- repository の `AGENTS.md` に従い、既存 session / delegation tool で必要な worktree と worker を作る。
-- 委譲する worker は Work Run の root Agent と同じ provider/runtime を使う。model は task に必要な能力へ合わせ、より小さい model で十分な場合に最上位 model を既定で選ばない。
-- 通常の不確実性や回復可能な failure では質問せず、blocking choice だけを durable user-decision tool へ送る。
-- 停止時は安全な理由と回復 action を root conversation に出し、PR は自動 merge しない。
-
-Work Run の前面は既存 Director drawer である。daemon が workspace に属する durable `SupervisorRun` を保持すると、
-Home の notice band は最優先の未完了 run だけを対象に、bounded な Goal label、状態、成功 task 数、実行中 task 数と
-concurrency 上限を表示する。通常は `Active work`、判断待ちは `Action needed` とし、終了済み run を active banner に戻さない。
-Director drawer は同じ redaction-safe snapshot から Goal label、progress bar、最大5件の task state、停止理由を描き、2秒 cadence の
-専用 background lane で更新する。実行中 Agent 数は supervisor admission と同じ `Dispatched | Running` task の数を正本とし、
-Home と Director は共通 projection から同じ並び順・集計を読む。観測失敗時は既存 snapshot を維持して `Stale` と明示し、
-初回から取得不能なら `Work Run progress unavailable` と authoritative `Failed` を描き分けて5秒 backoffする。frame thread から
-IPCは行わない。
-workspace 所有情報を持たない旧 run は別 workspace へ推測せず表示しない。
-
-Goal-driven Director の root は Work Runs である。`Ctrl-O w` は goal-driven から同じ projection の最大16件を stable run ID で
-選べる Work Runs を直接開く。Director が閉じていれば同時に drawer を開き、`↑` / `↓` で Run を選ぶ。classic ではこの chord を
-消費するだけで route を変更しない。`Enter` は mutation を起こさず、選択した
-`SupervisorRunId` の Run Overview を開く。Run Overview は Goal、state、task progress、停止理由と redaction-safe な root
-Director identity を表示し、root Director の `Enter` だけが Console を開く。identity が無い場合は時刻、label、tab 順から推測せず
-固定 footer に unavailable feedback を出す。Work Runs の `Esc` は Director を閉じ、Run Overview の `Esc` / `Ctrl-O b` は Work Runs へ戻る。
-goal-driven から Organization は開かず、classic から Work Runs / Run Overview は開かない。classic の New は Conversation だけを開始し、
-Work Run は新規作成しない。
-
-Work Runs と Run Overview の plain `Ctrl-C` は active Run の cancel 確認、plain `Ctrl-X` は
-`Succeeded` / `Failed` / `Cancelled` の終了済み Run の delete 確認を開く。active Run の `Ctrl-X` と finished Run の
-`Ctrl-C` は mutation を起こさず、一覧行を動かさない固定 footer に理由を表示する。Escalated Run の cancel は観測した exact
-escalation ID の `Cancel` decision として送る。確認中の `Esc` / `Ctrl-C` は元画面へ戻る。
-
-cancel / delete は fresh snapshot からだけ typed command を送る。delete は fresh `OperationId`、exact `SupervisorRunId`、
-観測済み state revision を daemon に渡し、daemon が workspace ownership、terminal state、revision を再検証して
-supervisor store から履歴を削除する。送信中の連打は消費し、応答が未確認なら新しい操作を作らず同じ operation ID を再送する。
-確定拒否は理由を固定位置へ表示し、削除 receipt は exact ID / revision が一致したときだけ projection から row を除く。
-
-snapshot と command は workspace ごとの単一 `WorkRunPort` lane を直列に共有するため、古い観測が操作結果を追い越さない。
-snapshot は workspace・件数上限・重複・private provenance を、command 応答は exact run ID・private provenance を境界で検証し、
-受理した高い state revision だけを共通 projection へ即時反映してから観測を再開する。adapter が失敗またはpanicしても port を lane へ戻し、cached 表示と同一 operation の
-安全な再試行を維持する。frame thread 自身は IPC を行わない。
-
-この表示は workspace に属する `SupervisorRun` の観測面である。goal-driven `AgentGoal` launch は同じ operation ID で
-idempotent な run start へ接続され、応答再送でも同じ root Agent と Run へ収束する。Run の root task は実際のAgent dispatchへ
-束縛され、Agentの終了に伴ってtaskとRunの進捗もterminalへ収束する。Agent admission が失敗した場合はRunを作らない。
-進行中の worker は Run Overview / Session / Garden、明示判断は既存 decision notice/modal、
-PR は既存 PR inventory/modal、launch failure と Agent 停止理由は root pane の safe feedback と terminal output でも確認する。
-この操作面を含む Goal-driven Work Run の設計履歴は
-[goal-driven Work Run 提案](proposals/18-goal-driven-work-run.md) に記録する。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
 してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、
@@ -846,9 +769,9 @@ next / previous・Garden のうさぎで明示選択したとき、resume 可能
 root background entry だけを更新し、managed foreground を奪わない。resume 不可の明示選択は削除確認を前面に出す。
 
 drawer open 中は focus 中の Director route が sidebar、managed pane、Home header の別 action、通常の global action の入力を
-所有し、それらへ key / click / pointer を伝播しない。Organization、Work Runs、Run Overview、New Conversation / Start Work Run は management
+所有し、それらへ key / click / pointer を伝播しない。Organization と New Conversation は management
 surface であり、通常文字や `Enter` を背面の PTY へ送らない。Director Console だけが root Agent terminal input と
-`Ctrl-O` tab controls を受理し、追加の入力 bar や command composer は持たない。`[ New ]` / `[ Start ]` の mouse-down は
+`Ctrl-O` tab controls を受理し、追加の入力 bar や command composer は持たない。`[ New ]` の mouse-down は
 drawer が先に消費し、同じ pointer gesture を背景 Closeup の click / focus / attach 選択へ fallthrough させない。picker 中の
 button 再クリックは inert とし、launch は明示的な `Enter` だけが発行する。開閉は Home mode、selected cursor、active managed
 session、managed pane の selected tab、terminal scroll / text selection を変更しない。既存 modal が前面にある間は drawer
@@ -856,18 +779,15 @@ shortcut と header button を受理せず、modal と drawer は同時に visib
 
 Director Console が live Agent を attach している間の `Esc` は Agent CLI が所有し、PTY へ `0x1b` を 1 回だけ送る。
 Console から parent route へ戻る操作は `Ctrl-O b`、drawer 全体を閉じる操作は `Ctrl-O g` または header button である。
-Console が non-live の場合だけ `Esc` でも parent route へ戻る。Organization と Work Runs の `Esc` は drawer を閉じ、Run
-Overview の `Esc` は Work Runs へ戻る。
+Console が non-live の場合だけ `Esc` でも Organization へ戻る。Organization の `Esc` は drawer を閉じる。
 
-New Conversation / Start Work Run の `Choosing` / `Empty` と launch pending (`Launching`) は排他的な foreground input owner
-である。この owner は picker / composer の予約操作以外の keyboard / paste / terminal copy / pointer と、tab の選択・移動・
+New Conversation の `Choosing` / `Empty` と launch pending (`Launching`) は排他的な foreground input owner
+である。この owner は picker の予約操作以外の keyboard / paste / terminal copy / pointer と、tab の選択・移動・
 close・resume、terminal scroll を inert に消費する。したがって背後の root Agent PTY bytes、pane/tab state、scroll、text
 selection、attach/detach は変化しない。terminal resize と backend/timer tick だけは owner を越えて通常の frame 処理へ進む。
 Choosing / Empty の `Esc` は draft を破棄して開始前の exact Director route へ戻り、PTY へは届かない。launch pending の
-`Esc` / `Ctrl-O b` / `Ctrl-O w` は route を変えず消費する。開始前 route の操作 hint を残さず mode-neutral な breadcrumb / waiting
-body を表示する。開始時と同じ Workflow の matching completion は、`SupervisorRunId` があれば Run Overview、なければ Organization
-配下の Console へ進む。待機中に Workflow が切り替わった場合は現在の Workflow の root を保ち、完了した Conversation / Work Run は
-daemon に残すが異なる画面 tree を開かない。
+`Esc` / `Ctrl-O b` は route を変えず消費する。開始前 route の操作 hint を残さず breadcrumb / waiting
+body を表示する。pending operation と一致した launch 成功は Console へ進み、失敗は開始前の route を保つ。
 
 入力 context の優先順位と遷移は次のとおりである。
 
@@ -875,17 +795,13 @@ daemon に残すが異なる画面 tree を開かない。
 |---|---|---|
 | modal | drawer chord / button | modal を維持し、drawer は開かない |
 | Organization | `Enter` / `Esc` | 選択 Conversation の Console / drawer close |
-| Work Runs | `Enter` / `Esc` | 選択 Run の Run Overview / drawer close |
-| Run Overview | `Enter` / `Esc` | root Director の Console / Work Runs |
-| Work Runs / Run Overview | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の delete 確認 |
-| Work Run 確認 | `Enter` / `Esc` / `Ctrl-C` | command 発行 / 元 route へ戻る |
 | Director Console（live） | `Esc` / 通常文字 / `Enter` | selected root Agent PTY |
-| Director Console | DirectorBack | Organization または Run Overview |
+| Director Console | DirectorBack | Organization |
 | Director route | Director / header button | drawer を閉じ、route と背面の selection / focus を保持する |
-| Director route | DirectorNew / `[ New ]` / `[ Start ]` click | New Conversation / Start Work Run。背景への effect は発行しない |
-| New Conversation / Start Work Run | `↑` / `↓` | provider 選択だけを循環する |
-| New Conversation / Start Work Run | `Esc` | draft を捨て、開始前の exact route へ戻る |
-| New Conversation / Start Work Run | `Enter` | root scope launch を 1 件発行する。goal-driven は該当 Run Overview へ進む |
+| Director route | DirectorNew / `[ New ]` click | New Conversation。背景への effect は発行しない |
+| New Conversation | `↑` / `↓` | provider 選択だけを循環する |
+| New Conversation | `Esc` | draft を捨て、開始前の exact route へ戻る |
+| New Conversation | `Enter` | root scope launch を 1 件発行する |
 
 ## Home frame loop と背景観測 lane
 
@@ -1126,7 +1042,7 @@ Overview palette の Tab は選択中のトップレベル command を補完す�
 Config の `Modal mode` は Overview と Closeup の command surface に共通して適用される。`Action` は
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
-`config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Workflow / Team / Issue / Memory の overlay modal で開く。
+`config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Team / Issue / Memory の overlay modal で開く。
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
@@ -1798,8 +1714,7 @@ projection から毎フレーム導出する派生値であり、[metrics](04-ip
 
 sidecar の常設行として、daemon が Agent launch を admit する際の **使用中/上限**を出す。値は daemon の admission
 権威が報告した [agent concurrency projection](04-ipc.md#agent-concurrency-projection) そのものであり、TUI は
-runtime を数え直さず、上限の定数も持たない。対象は Agent runtime の pool だけで、generic terminal capacity や
-supervisor run の同時実行数とは別物である（正本は
+runtime を数え直さず、上限の定数も持たない。対象は Agent runtime の pool だけで、generic terminal capacity とは別物である（正本は
 [5. daemon](05-daemon.md#agent-concurrency-projection)）。
 
 | 状態 | 表示 | 色 |
