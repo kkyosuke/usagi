@@ -1316,6 +1316,10 @@ exact mode・`nlink == 1` を検証する。JSON 全体の write と file fsync 
 regular file、所有 UID、exact mode、single link であることを検証する。discovery も final path を secure-open した
 同じ fd からこれらの invariant を再検証して読むため、symlink、hardlink、non-regular node を拒否する。
 
+generation registry の read-only snapshot 読み取りで、open と検証の間の atomic replacement により古い inode の
+`nlink` が `0` になった場合は、現在の path の secure-open と検証を最大 3 回試行する。内容を読む fd は regular file・
+所有 UID・`0600`・`nlink == 1` を検証し、継続する置換は `WouldBlock`、その他の不正な属性は検証エラーとする。
+
 replacement publish は secure-open した old locator の exact bytes を別の private single-link temporary に保持する。
 rename 前の create / write / sync / verify / rename failure は既存 locator を置換せず、writer 所有 temporary を回収する。
 rename 後の final verify が失敗した場合は、final path がまだ prepared inode と一致する場合だけ `current.lock` を保持したまま
