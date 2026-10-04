@@ -2217,6 +2217,8 @@ pub(super) fn clean_orphan_session_resources(
     }))
 }
 
+#[coverage(off)]
+// coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn admit_agent_dispatch_request(
     agent: &SharedAgentRuntime,
     scope: &dyn SessionScopeResolver,

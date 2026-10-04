@@ -253,7 +253,7 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit(operation_id, intent, scope, None, &semantic_key, context);
+        let outcome = self.admit(operation_id, intent, scope, &semantic_key, context);
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }

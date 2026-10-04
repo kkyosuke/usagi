@@ -504,7 +504,6 @@ impl AgentRuntime {
         operation_id: &str,
         intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
-        initial_prompt: Option<&str>,
         launch_semantic: &str,
         context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
@@ -575,21 +574,13 @@ impl AgentRuntime {
             .dispatch
             .queued_prompt(intent.workspace, intent.session)
             .map_err(map_dispatch_storage_error)?;
-        if initial_prompt.is_some() && queued.is_some() {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "workspace root already has a queued prompt",
-            ));
-        }
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
             provider_resume: None,
-            initial_prompt: initial_prompt
-                .map(str::to_owned)
-                .or_else(|| queued.as_ref().map(|item| item.prompt.clone())),
+            initial_prompt: queued.as_ref().map(|item| item.prompt.clone()),
             scope: LaunchScope {
                 workspace_id: intent.workspace,
                 session_id: intent.session,

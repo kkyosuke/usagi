@@ -769,6 +769,34 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_console_shows_its_detail_and_recovery_feedback() {
+        for feedback in [None, Some("Resume was refused".to_owned())] {
+            let projection = DirectorDrawerProjection {
+                route: DirectorRoute::Console,
+                interrupted_detail: Some("This Agent is interrupted".to_owned()),
+                feedback: feedback.clone(),
+                ..DirectorDrawerProjection::default()
+            };
+            let frame = render_over(20, 80, &[], &projection);
+            let text = frame
+                .iter()
+                .map(|row| strip_ansi(row))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("Director / Organization / Console"));
+            assert!(text.contains("This Agent is interrupted"));
+            assert!(
+                text.contains(
+                    feedback
+                        .as_deref()
+                        .unwrap_or("Ctrl-O b: Organization · Ctrl-O g: close")
+                )
+            );
+            assert!(frame.iter().all(|line| display_width(line) == 80));
+        }
+    }
+
+    #[test]
     fn picker_and_safe_empty_state_render_without_clipping_cjk() {
         let picker = DirectorDrawerProjection {
             new: DirectorNewProjection::Choosing {

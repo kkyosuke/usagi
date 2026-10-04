@@ -3599,6 +3599,51 @@ mod tests {
     }
 
     #[test]
+    fn director_back_cancels_the_picker_then_returns_to_organization() {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        let background = (runtime.state().route(), runtime.active_pane().clone());
+        let back = Key::Live(LiveTerminalAction::DirectorBack);
+
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::Director))
+                .is_empty()
+        );
+        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert_eq!(runtime.state().director_route(), DirectorRoute::Console);
+        assert!(
+            runtime
+                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
+                .is_empty()
+        );
+        assert!(matches!(
+            runtime.state().director_new(),
+            DirectorNew::Choosing(_)
+        ));
+
+        assert!(runtime.handle_key(back.clone()).is_empty());
+        assert!(runtime.state().director_drawer_open());
+        assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
+        assert_eq!(runtime.state().director_route(), DirectorRoute::Console);
+
+        for _ in 0..2 {
+            assert!(runtime.handle_key(back.clone()).is_empty());
+            assert!(runtime.state().director_drawer_open());
+            assert_eq!(
+                runtime.state().director_route(),
+                DirectorRoute::Organization
+            );
+        }
+        assert!(runtime.handle_key(Key::Escape).is_empty());
+        assert!(!runtime.state().director_drawer_open());
+        assert_eq!(
+            (runtime.state().route(), runtime.active_pane().clone()),
+            background
+        );
+    }
+
+    #[test]
     fn director_drawer_routes_picker_navigation_and_swallows_other_keys() {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
