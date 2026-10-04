@@ -25,9 +25,9 @@ pub(crate) enum ManagedUpdateSync {
 /// installer still owns `update.lock`. An absent daemon stays stopped; live
 /// Agent credentials and retained multi-workspace fences defer replacement
 /// while preserving the current owner.
-#[coverage(off)]
-// coverage: reason=composition owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
-#[allow(clippy::too_many_lines)] // One lock-held owner observation, deferral, replacement, and readiness transaction.
+// One lock-held owner observation, deferral, replacement, and readiness transaction.
+#[allow(clippy::too_many_lines)]
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
 pub(crate) fn sync_after_update(
     out: &mut dyn Write,
     policy: ClientPolicy,
@@ -44,6 +44,32 @@ pub(crate) fn sync_after_update(
     };
     let published_build = owner.server_build().clone();
     if published_build != expected_build {
+        // A seamless successor hydrates only the startup workspace. The
+        // predecessor retains its other fences while serving PTYs, so replacing
+        // a multi-workspace owner would strand those projects on the next open.
+        // This observation shares bootstrap/lifecycle custody with replacement;
+        // ordinary connecting clients cannot adopt a new workspace between them.
+        // It precedes Agent diagnosis so a multi-workspace deferral never
+        // suggests the single-workspace Agent handoff remedy.
+        let retained = owner
+            .request(DaemonRequest::Tenant {
+                action: TenantAction::Inventory,
+                root: None,
+                force: false,
+            })
+            .and_then(retained_workspace_count);
+        match retained {
+            Ok(Some(workspaces)) => {
+                writeln!(
+                    out,
+                    "daemon sync: deferred to preserve {workspaces} workspace connection(s); \
+                     finish live runtimes, then run 'usagi daemon restart' to switch builds"
+                )?;
+                return Ok(Ok(ManagedUpdateSync::Deferred));
+            }
+            Ok(None) => {}
+            Err(error) => return Ok(Err(error)),
+        }
         let workspace = owner
             .request(DaemonRequest::Session {
                 action: usagi_core::infrastructure::ipc::SessionAction::List,
@@ -100,30 +126,6 @@ pub(crate) fn sync_after_update(
                     "daemon cannot prove server-side handoff fencing".to_owned(),
                 )));
             }
-        }
-        // A seamless successor hydrates only the startup workspace. The
-        // predecessor retains its other fences while serving PTYs, so replacing
-        // a multi-workspace owner would strand those projects on the next open.
-        // This observation shares bootstrap/lifecycle custody with replacement;
-        // ordinary connecting clients cannot adopt a new workspace between them.
-        let retained = owner
-            .request(DaemonRequest::Tenant {
-                action: TenantAction::Inventory,
-                root: None,
-                force: false,
-            })
-            .and_then(retained_workspace_count);
-        match retained {
-            Ok(Some(workspaces)) => {
-                writeln!(
-                    out,
-                    "daemon sync: deferred to preserve {workspaces} workspace connection(s); \
-                     finish live runtimes, then run 'usagi daemon restart' to switch builds"
-                )?;
-                return Ok(Ok(ManagedUpdateSync::Deferred));
-            }
-            Ok(None) => {}
-            Err(error) => return Ok(Err(error)),
         }
         drop(owner);
         if let Err(error) = replace_running_daemon_during_update(out, policy, info, &lock)? {

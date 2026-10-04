@@ -955,6 +955,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   複数 tenant を保持し、いずれかに live runtime（ownership unknown を含む）が残る場合も、live tenant inventory の観測により
   replacement を保留する。successor は起動 workspace だけを hydrate し、draining predecessor の他 workspace の fence を
   引き継げないため、この場合は旧 owner を active のまま維持して、更新後の各 workspace の接続を保つ。
+  この判定は Agent credential の診断より先に行い、複数 workspace の保留で `--restart-agents` を案内しない。
   cold replacement の process record 公開後も、期限付きの read-only 接続で tenant inventory が応答するまで待ち、
   同じ lifecycle custody 内で installed build の hello を検証してから同期完了とする。
   installer は子の `USAGI_UPDATE_SYNC_OUTCOMES=1` で内部同期の保留結果を受け取る契約へ opt in する。

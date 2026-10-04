@@ -2873,9 +2873,10 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         OperationId::new().to_string(),
         ClientPolicy::cli(),
         shipping_build_identity(),
-        selected_second,
+        selected_second.clone(),
     )
     .expect("the second project still opens without a workspace ownership conflict");
+    assert_eq!(daemon_pid(&data_dir), old_pid);
     wait_for_terminal_text(&mut reopened, &terminal, "shell-ready");
     first_client
         .request(DaemonRequest::Terminal {
@@ -2947,8 +2948,92 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
             .contains("installed build is current and serving")
     );
     assert_ne!(daemon_pid(&data_dir), old_pid);
+    let mut successor_second = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        selected_second,
+    )
+    .expect("the idle predecessor released the second project's workspace fence");
+    assert_eq!(available_scope(&mut successor_second).0, second_scope.0);
+    drop(successor_second);
     daemon_fixture::reap(home.path());
     let _ = old_daemon.terminate_and_wait(Duration::from_secs(2));
+}
+
+#[test]
+fn managed_update_defers_multi_workspace_agents_without_suggesting_a_handoff() {
+    let _serial = serial();
+    let first = fixture_repo();
+    let second = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    write_restartable_codex(&bin, &agent_spawns);
+    let _daemon = start_daemon_with_source_identity(
+        first.path(),
+        home.path(),
+        &bin,
+        Path::new("/bin/sh"),
+        &"a".repeat(64),
+    );
+    let data_dir = channel_data_dir(home.path());
+    let mut owner = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
+    wait_for_spawns(&agent_spawns, 1);
+    let mut second_client = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                fs::canonicalize(second.path()).unwrap(),
+            ),
+        },
+    )
+    .unwrap();
+    assert_ne!(available_scope(&mut second_client).0, workspace);
+    let old_pid = daemon_pid(&data_dir);
+    let old_registry = read_registry_document(&data_dir).unwrap().unwrap();
+    let old_children = live_process_identities(&data_dir);
+
+    let sync = usagi_command(
+        home.path(),
+        Channel::Local,
+        second.path(),
+        &["daemon".as_ref(), "sync-after-update".as_ref()],
+    )
+    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .output()
+    .unwrap();
+    let output = String::from_utf8_lossy(&sync.stdout);
+    assert_eq!(
+        sync.status.code(),
+        Some(3),
+        "{output}{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    assert!(
+        output.contains("deferred to preserve 2 workspace connection(s)"),
+        "{output}"
+    );
+    assert!(!output.contains("--restart-agents"), "{output}");
+    assert!(output.contains("finish live runtimes"), "{output}");
+    assert_eq!(daemon_pid(&data_dir), old_pid);
+    assert_eq!(
+        read_registry_document(&data_dir).unwrap().unwrap(),
+        old_registry
+    );
+    assert_eq!(live_process_identities(&data_dir), old_children);
+    assert_eq!(
+        fs::read_to_string(&agent_spawns).unwrap().lines().count(),
+        1
+    );
 }
 
 #[test]
