@@ -361,6 +361,17 @@ fn render_home_editors(material: &HomeFrameMaterial, frame: Vec<String>) -> Vec<
             .target()
             .session_id()
             .map_or("workspace", |id| material.projection.label_for_session(id));
+        if material.projection.mode() == crate::usecase::application::controller::HomeMode::Switch
+            && editor.section() == crate::usecase::application::controller::NoteSection::Note
+        {
+            return super::views::workspace::render_memo_editor_over(
+                material.height,
+                material.width,
+                &frame,
+                editor,
+                label,
+            );
+        }
         return super::views::scratchpad_modal::render_notes_for_over(
             material.height,
             material.width,

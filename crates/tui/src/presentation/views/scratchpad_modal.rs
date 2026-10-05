@@ -90,7 +90,7 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
 }
 
 fn memo_body(editor: &NoteEditor, body_height: usize, inner_width: usize) -> Vec<String> {
-    let mut lines = vec![modal::caption("Session memo")];
+    let mut lines = vec![modal::caption("Shared with agent")];
     if editor.confirmation() {
         lines.push(modal::heading("Save changes before closing?"));
         lines.push(String::new());
@@ -116,42 +116,16 @@ fn memo_body(editor: &NoteEditor, body_height: usize, inner_width: usize) -> Vec
         ));
         return fit_memo_body(lines, body_height);
     }
-    let value = editor.draft();
-    let cursor = editor.source().cursor();
-    let cursor_line = value[..cursor]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count();
-    let cursor_start = value[..cursor].rfind('\n').map_or(0, |offset| offset + 1);
-    let source = value.split('\n').collect::<Vec<_>>();
+    let (source, cursor_line) = wrapped_memo(
+        editor.draft(),
+        editor.source().cursor(),
+        inner_width.saturating_sub(modal::BODY_INDENT_WIDTH),
+        !editor.loading_state() && !editor.read_failed() && !editor.saving(),
+    );
     let max_rows = MAX_ROWS.min(body_height.saturating_sub(5)).max(1);
     let start = cursor_line.saturating_sub(max_rows - 1);
-    let textarea = Role::Accent.style();
-    for (index, line) in source.iter().enumerate().skip(start).take(max_rows) {
-        // The canonical sanitizer displays a tab as one stable cell without
-        // changing the draft or its UTF-8 cursor offsets.
-        let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
-        let content = if index == cursor_line
-            && !editor.loading_state()
-            && !editor.read_failed()
-            && !editor.saving()
-        {
-            let local_cursor = cursor - cursor_start;
-            // Slide a long line horizontally so the caret remains visible.
-            let mut left = 0;
-            for (offset, ch) in line[..local_cursor].char_indices().rev() {
-                if crate::presentation::widgets::display_width(&line[offset..local_cursor])
-                    >= inner_width.saturating_sub(5)
-                {
-                    left = offset + ch.len_utf8();
-                    break;
-                }
-            }
-            crate::presentation::widgets::block_caret(&line[left..], local_cursor - left, &textarea)
-        } else {
-            textarea.paint(&line)
-        };
-        lines.push(modal::content_line(&content, inner_width));
+    for line in source.iter().skip(start).take(max_rows) {
+        lines.push(modal::content_line(line, inner_width));
     }
     if source.len() > start + max_rows {
         lines.push(modal::caption("↓ more"));
@@ -175,10 +149,93 @@ fn memo_body(editor: &NoteEditor, body_height: usize, inner_width: usize) -> Vec
     }));
     lines.push(modal::footer(if editor.read_failed() {
         "Enter: retry   Esc: close"
+    } else if inner_width < 54 {
+        "Ctrl-S: save  Enter: ↵  Esc: close"
     } else {
         "Ctrl-S: save and close   Enter: newline   Esc: cancel"
     }));
     fit_memo_body(lines, body_height)
+}
+
+// Wrap before styling so ANSI and the caret marker never count as text cells.
+// Byte offsets stay tied to the draft, including tabs (rendered as one space).
+fn wrapped_memo(
+    value: &str,
+    cursor: usize,
+    width: usize,
+    show_cursor: bool,
+) -> (Vec<String>, usize) {
+    use crate::presentation::widgets::{block_caret, display_width};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let width = width.max(2);
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    let mut caret_row = 0;
+    for logical in value.split('\n') {
+        let mut start = 0;
+        let mut cells = 0;
+        let mut segments = Vec::new();
+        for (index, grapheme) in logical.grapheme_indices(true) {
+            let size = if grapheme == "\t" {
+                1
+            } else {
+                display_width(grapheme)
+            };
+            if cells + size > width && index > start {
+                segments.push((start, &logical[start..index]));
+                start = index;
+                cells = 0;
+            }
+            cells += size;
+        }
+        segments.push((start, &logical[start..]));
+        if cells >= width && cursor == offset + logical.len() {
+            segments.push((logical.len(), ""));
+        }
+        let last = segments.len() - 1;
+        for (index, (start, segment)) in segments.into_iter().enumerate() {
+            let local_start = offset + start;
+            let is_caret = cursor >= local_start
+                && (cursor < local_start + segment.len()
+                    || (index == last && cursor == local_start + segment.len()));
+            let line = usagi_core::domain::presentation_text::sanitize_presentation_line(segment);
+            let style = Role::Accent.style();
+            if is_caret {
+                caret_row = rows.len();
+            }
+            rows.push(if is_caret && show_cursor {
+                block_caret(&line, cursor - local_start, &style)
+            } else {
+                style.paint(&line)
+            });
+        }
+        offset += logical.len() + 1;
+    }
+    (rows, caret_row)
+}
+
+/// The Switch preview and editor use the same compact border and pane width.
+pub(super) fn memo_card(
+    editor: &NoteEditor,
+    width: usize,
+    height: usize,
+    label: &str,
+) -> Vec<String> {
+    let inner = width.saturating_sub(4);
+    let label = usagi_core::domain::presentation_text::sanitize_presentation_line(label);
+    modal::compact_boxed(
+        &Role::Accent
+            .style()
+            .bold()
+            .paint(&format!("Memo · {label} · editing")),
+        inner,
+        &memo_body(
+            editor,
+            height.saturating_sub(2).min(NOTES_BODY_HEIGHT),
+            inner,
+        ),
+    )
 }
 
 fn fit_memo_body(mut lines: Vec<String>, height: usize) -> Vec<String> {
@@ -339,6 +396,38 @@ mod tests {
         (0..24)
             .map(|row| format!("home-row-{row}-{}", ".".repeat(72)))
             .collect()
+    }
+
+    #[test]
+    fn memo_wrap_keeps_caret_on_boundaries_and_preserves_unicode_and_tabs() {
+        use super::wrapped_memo;
+        use crate::presentation::frame::INPUT_CURSOR_MARKER;
+        for (value, cursor, width, expected, caret_row) in [
+            ("abcdef", 2, 2, vec!["ab", "cd", "ef"], 1),
+            ("abcd", 4, 2, vec!["ab", "cd", " "], 2),
+            ("日本語", 6, 4, vec!["日本", "語"], 1),
+            ("a\tb", 2, 2, vec!["a ", "b"], 1),
+            ("e\u{301}x", 0, 2, vec!["e\u{301}x"], 0),
+            ("a\n\nb", 2, 4, vec!["a", " ", "b"], 1),
+            ("", 0, 0, vec![" "], 0),
+        ] {
+            let (rows, actual) = wrapped_memo(value, cursor, width, true);
+            assert_eq!(actual, caret_row);
+            assert_eq!(
+                rows.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|s| s.contains(INPUT_CURSOR_MARKER))
+                    .count(),
+                1
+            );
+            assert!(rows[caret_row].contains(INPUT_CURSOR_MARKER));
+        }
+        let (rows, caret) = wrapped_memo("abcdef", 1, 2, false);
+        assert_eq!(caret, 0);
+        assert!(rows.iter().all(|s| !s.contains(INPUT_CURSOR_MARKER)));
     }
 
     #[test]

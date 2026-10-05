@@ -184,6 +184,8 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 
 作業メモ・todo・decision は workspace の repository-local `state.json` にある `session_notes` で、daemon が
 解決した stable session ID ごとに保存する。TUI の [session memo](03-tui.md#session-memo) と同じ内容である。
+`session_note_update` の tool 説明は、人にも表示される共有メモとして要点を1項目1行、日本語で40文字程度を目安に
+意味の区切りで改行すること、更新前に既存の内容を確認することを agent に案内する。文字数は保存時の制限ではない。
 `session_note_get` の引数は空オブジェクト、`session_note_update` は `note` を受け取り、空文字はメモをクリアする。
 対象の ID は caller credential と利用可能な lifecycle から解決し、呼び出し側に session 名や保存先を選ばせない。
 
