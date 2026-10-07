@@ -309,9 +309,6 @@ impl UserDecisionStore {
         mut decision: UserDecision,
         default_expiry: bool,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
-        if let Err(error) = decision.validate_request() {
-            return Ok(Err(error));
-        }
         self.mutate_decision(|state| {
             if let Some(key) = &decision.idempotency_key
                 && let Some(existing) = state.decisions.iter().find(|item| {
@@ -334,6 +331,9 @@ impl UserDecisionStore {
             {
                 return Err(UserDecisionError::IdempotencyExpired);
             }
+            // A retry is compared with its durable request above. Only a new
+            // admission interprets the deadline relative to this call's clock.
+            decision.validate_request()?;
             if default_expiry {
                 decision.expires_at = decision
                     .created_at
@@ -933,6 +933,64 @@ mod tests {
             Err(UserDecisionError::IdempotencyConflict)
         );
         assert_eq!(store.pending(first.owner.workspace_id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn explicit_deadline_replays_after_expiry_without_readmitting_or_changing_content() {
+        for resolved in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = UserDecisionStore::new(temp.path());
+            let mut request = item();
+            request.expires_at = Some(request.created_at + chrono::Duration::hours(1));
+            let first = store
+                .create_with_default_expiry(request.clone())
+                .unwrap()
+                .unwrap();
+            let expected = if resolved {
+                store
+                    .resolve(
+                        first.owner.workspace_id,
+                        first.decision_id,
+                        UserDecisionAnswer::Option {
+                            option_id: "a".into(),
+                            comment: None,
+                        },
+                        first.created_at,
+                    )
+                    .unwrap()
+                    .unwrap()
+            } else {
+                store
+                    .terminal(
+                        first.owner.workspace_id,
+                        first.decision_id,
+                        UserDecisionStatus::Expired,
+                        first.created_at + chrono::Duration::hours(2),
+                    )
+                    .unwrap()
+                    .unwrap()
+            };
+            request.created_at += chrono::Duration::hours(2);
+            request.decision_id = UserDecisionId::new();
+            let store = UserDecisionStore::new(temp.path());
+            assert_eq!(
+                store.create_with_default_expiry(request.clone()).unwrap(),
+                Ok(expected)
+            );
+            let before = std::fs::read(store.path()).unwrap();
+            let mut changed = request.clone();
+            changed.prompt.push_str("changed");
+            assert_eq!(
+                store.create_with_default_expiry(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+            request.idempotency_key = Some("new request".into());
+            assert_eq!(
+                store.create_with_default_expiry(request).unwrap(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        }
     }
 
     #[test]

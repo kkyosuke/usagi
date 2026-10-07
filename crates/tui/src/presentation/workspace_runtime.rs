@@ -846,6 +846,25 @@ impl WorkspaceRuntime {
     /// live-pane flag in sync with the resulting controller state.
     #[must_use]
     pub fn apply_event(&mut self, event: AppEvent) -> Vec<Effect> {
+        // Page keys need the same wrapping and focus anchor as the renderer.
+        // Resolve them here before the pure reducer stores a content-row offset.
+        let event = if matches!(event, AppEvent::Key(AppKey::PageUp | AppKey::PageDown))
+            && self.state.overlay() == Some(Overlay::Decisions)
+            && let Some(editor) = self
+                .state
+                .decision_overlay()
+                .and_then(|overlay| overlay.editor())
+        {
+            let (width, height) = self.material_size.unwrap_or((80, 24));
+            super::views::decision_modal::page_event(
+                editor,
+                usize::from(height),
+                usize::from(width),
+                matches!(event, AppEvent::Key(AppKey::PageDown)),
+            )
+        } else {
+            event
+        };
         let previous_drawer_focus = self.state.workspace_drawer_focus();
         let advances_material = match &event {
             AppEvent::Tick => false,

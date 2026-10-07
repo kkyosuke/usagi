@@ -486,8 +486,8 @@ pub struct DecisionEditor {
     input_comment: bool,
     comment: String,
     confirmation: Option<UserDecisionAnswer>,
-    /// Manual scroll position in `SCROLL_STEP` increments. The view limits each
-    /// step to its capacity. `None` follows the active automatic anchor.
+    /// First visible content row. `None` follows the active automatic anchor.
+    /// Presentation resolves paging against the actual rendered viewport.
     scroll_offset: Option<usize>,
     /// Whether automatic scrolling follows the freeform draft instead.
     follow_freeform: bool,
@@ -496,8 +496,6 @@ pub struct DecisionEditor {
 }
 
 impl DecisionEditor {
-    pub(crate) const SCROLL_STEP: usize = 8;
-
     fn new(decision: UserDecision) -> Self {
         let scroll_offset =
             (!decision.context.is_empty() || decision.recommendation.is_some()).then_some(0);
@@ -2359,6 +2357,11 @@ pub enum AppEvent {
     /// workspace drawers. Geometry and z-order stay presentation concerns; the
     /// reducer owns the focus invariant shared with keyboard toggles.
     WorkspaceDrawerFocused(WorkspaceDrawerFocus),
+    /// A page move resolved against the decision's rendered content and size.
+    DecisionScrolled {
+        decision_id: UserDecisionId,
+        offset: usize,
+    },
     /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
     /// reducer resolves the row with the same viewport geometry the frame draws
     /// and either moves the cursor or, for two presses on the same stable
@@ -2929,6 +2932,10 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::WorkspaceDrawerFocused(focus) => update_workspace_drawer_focused(state, focus),
+        AppEvent::DecisionScrolled {
+            decision_id,
+            offset,
+        } => decision::scroll(state, decision_id, offset),
         AppEvent::OperationResult(result) => update_operation_result(state, result),
         AppEvent::CarriedCreateOutcome { name, error } => {
             update_carried_create_outcome(state, &name, error)

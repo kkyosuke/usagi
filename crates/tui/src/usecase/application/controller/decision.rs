@@ -126,6 +126,26 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
     Vec::new()
 }
 
+pub(super) fn scroll(
+    state: &mut AppState,
+    decision_id: UserDecisionId,
+    offset: usize,
+) -> Vec<Effect> {
+    if state.overlay == Some(Overlay::Decisions)
+        && let Some(editor) = state
+            .decision_overlay
+            .as_mut()
+            .and_then(|overlay| overlay.editor.as_mut())
+        && editor.decision.decision_id == decision_id
+    {
+        editor.scroll_offset = Some(offset);
+        editor.follow_freeform = false;
+        state.pending_session_click = None;
+        state.interaction_count = state.interaction_count.saturating_add(1);
+    }
+    Vec::new()
+}
+
 pub(super) fn update_decision_editor(
     workspace: WorkspaceId,
     editor: &mut DecisionEditor,
@@ -162,24 +182,6 @@ pub(super) fn update_decision_editor(
         }
         AppKey::DecisionNext | AppKey::Down if !editor.decision.options.is_empty() => {
             composition::move_input(editor, true);
-        }
-        AppKey::PageUp => {
-            editor.scroll_offset = Some(
-                editor
-                    .scroll_offset
-                    .unwrap_or_default()
-                    .saturating_sub(DecisionEditor::SCROLL_STEP),
-            );
-            editor.follow_freeform = false;
-        }
-        AppKey::PageDown => {
-            editor.scroll_offset = Some(
-                editor
-                    .scroll_offset
-                    .unwrap_or_default()
-                    .saturating_add(DecisionEditor::SCROLL_STEP),
-            );
-            editor.follow_freeform = false;
         }
         AppKey::SetDecisionFreeform(text) => {
             if editor.decision.allow_freeform {
