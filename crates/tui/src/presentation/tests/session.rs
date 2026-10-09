@@ -60,35 +60,6 @@ fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
     assert_eq!(runtime.focused_terminal(), None);
 }
 
-#[test]
-fn goal_pane_launch_rejects_a_managed_session_before_calling_the_port() {
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let operation = OperationId::new();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let outcome = crate::presentation::run_pane_launch(
-        &IdentityRecordingLaunchPort(Arc::clone(&requests)),
-        crate::presentation::PaneLaunch::Agent {
-            operation,
-            workspace,
-            session: Some(session),
-            profile: None,
-            goal: Some("invalid scope".to_owned()),
-            resume: false,
-        },
-        terminal_geometry(20, 80),
-    );
-
-    assert!(matches!(
-        outcome,
-        crate::presentation::PaneLaunchOutcome::Agent {
-            operation: actual,
-            result: Err(ref reason),
-        } if actual == operation && reason.contains("workspace-root scope")
-    ));
-    assert!(requests.lock().unwrap().is_empty());
-}
-
 /// #551 acceptance. The frame loop must be "non-blocking drain → projection
 /// → draw → input" and nothing else: neither a wake-up tick nor a resize may
 /// reach a daemon lane, and no frame may spawn a session worker. Both used
@@ -186,6 +157,7 @@ fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
         session_lifecycles: None,
         session_roles: None,
         revision: Some(1),
+        notes_updated_at: None,
     };
     let mut term = CacheInvalidationTerminal::scripted([
         Key::Other,
@@ -252,6 +224,7 @@ fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
         session_lifecycles: None,
         session_roles: None,
         revision: Some(1),
+        notes_updated_at: None,
     };
     let lane = RecordingPrLane::default();
     let mut factory = PrLaneBackendFactory {
@@ -392,6 +365,7 @@ fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         ws("empty"),
         WorkspaceState {
             sessions: Vec::new(),
+            session_notes: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         },
@@ -480,6 +454,7 @@ fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_por
             ws("empty"),
             WorkspaceState {
                 sessions: Vec::new(),
+                session_notes: std::collections::BTreeMap::new(),
                 root_notes: Scratchpad::default(),
                 updated_at: now(),
             },
@@ -1018,6 +993,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(2),
+                notes_updated_at: None,
             }),
             completion: crate::presentation::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
@@ -1044,6 +1020,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(1),
+                notes_updated_at: None,
             }),
             completion: crate::presentation::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
@@ -1120,6 +1097,7 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
         session_lifecycles: None,
         session_roles: None,
         revision: None,
+        notes_updated_at: None,
     });
     let completion = crate::presentation::SessionBackendCompletion::Create {
         token,
@@ -1401,6 +1379,7 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         session_lifecycles: None,
         session_roles: None,
         revision: None,
+        notes_updated_at: None,
     });
     let completion = crate::presentation::SessionBackendCompletion::Remove {
         session: SessionId::new(),
@@ -1528,6 +1507,9 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
                 runtimes: initial_pairs
                     .iter()
                     .map(|(terminal, continuation)| AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
+                        launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             terminal.clone(),
@@ -1579,6 +1561,9 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
             agents: Ok(AgentInventory {
                 workspace_id: workspace,
                 runtimes: vec![AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(
                         AgentRuntimeId::new(),
                         root_open_terminal.clone(),
@@ -1923,7 +1908,7 @@ fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
         calls,
         created: created.clone(),
     };
-    let keys = [Key::Char('1'), Key::CtrlQ, Key::Char('y')];
+    let keys = [Key::Char('r'), Key::CtrlQ, Key::Char('y')];
     let mut term = FakeTerminal::with_keys(&keys);
     let mut loader = FakeLoader::default();
     let mut settings = DefaultSettingsPort;
@@ -1953,4 +1938,35 @@ fn session_command_result_message_carries_no_projection() {
     assert_eq!(result.message, "daemon accepted");
     assert!(result.sessions.is_none());
     assert!(result.session_ids.is_none());
+}
+
+#[test]
+fn switch_session_reorder_invalidates_row_cache_and_redraws_immediately() {
+    reset_projection_build_counts();
+    let mut term = CacheInvalidationTerminal::scripted([
+        Key::Char('N'),
+        Key::Other,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    let mut factory = FixedBackendFactory {
+        sessions: Some(Box::new(UnavailableSessionCommandPort)),
+        agent: Some(Box::new(UnavailableAgentCommandPort)),
+        launch: None,
+        restore: None,
+        metrics: Some(Box::new(NoMetrics)),
+        browser: Some(Box::new(UnavailableBrowserOpener)),
+        session_refresh: None,
+        decisions: None,
+        session_worktrees: None,
+    };
+    let snapshot = snapshot_with_sessions("reorder", &["first-row", "second-row"]);
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+        Exit::Quit
+    );
+    assert_eq!(projection_build_counts(), (2, 1));
+    assert!(term.builds_at_draw.contains(&(2, 1)));
+    let frame = strip_ansi(&term.frames[1].join("\n"));
+    assert!(frame.find("second-row").unwrap() < frame.find("first-row").unwrap());
 }

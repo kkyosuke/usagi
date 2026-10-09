@@ -199,6 +199,9 @@ fn restore_worker_retries_a_cross_rpc_snapshot_race_until_refs_are_coherent() {
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), None).unwrap(),
             continuation,
             state: AgentRuntimeInventoryState::Live,
@@ -476,6 +479,9 @@ fn restore_scope_change_rejects_snapshot_and_exact_duplicates_normalize_once() {
     let foreign = scoped_terminal_ref(workspace, Some(added_session));
     let continuation = AgentContinuationRef::new();
     let foreign_runtime = AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
+        launch_provenance: None,
         runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), foreign, Some(added_session)).unwrap(),
         continuation,
         state: AgentRuntimeInventoryState::Live,
@@ -499,6 +505,9 @@ fn restore_scope_change_rejects_snapshot_and_exact_duplicates_normalize_once() {
         live: true,
     };
     let duplicate_runtime = || AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
+        launch_provenance: None,
         runtime: AgentRuntimeRef::new(
             AgentRuntimeId::new(),
             agent_terminal.clone(),
@@ -728,6 +737,9 @@ fn mixed_restore_intent_failure_preserves_visible_agents_and_restores_generics()
                 workspace_id: workspace,
                 runtimes: vec![
                     AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
+                        launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             agent.clone(),
@@ -739,6 +751,9 @@ fn mixed_restore_intent_failure_preserves_visible_agents_and_restores_generics()
                         resumed_from: None,
                     },
                     AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
+                        launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             inventory_only_agent.clone(),
@@ -1008,6 +1023,9 @@ fn late_restore_leaves_runtime_and_durable_intent_bytes_unchanged() {
     let mutation_count = mutations.lock().unwrap().len();
 
     let runtime_item = |continuation, terminal: &TerminalRef| AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
+        launch_provenance: None,
         runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
             .unwrap(),
         continuation,
@@ -1156,6 +1174,9 @@ fn cross_tui_stale_observe_omits_old_ref_then_fresh_observation_restores_replace
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),
             continuation,
@@ -1248,6 +1269,9 @@ fn successful_restore_retains_port_and_reconnect_reobserves_exactly_once() {
             live: true,
         }],
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),
             continuation,
@@ -1467,105 +1491,6 @@ fn drawer_round_trip_restores_both_views_and_restates_each_viewport_without_resy
     );
     assert_eq!(calls.attaches, 3);
     assert_eq!(calls.detaches, 1);
-}
-
-#[test]
-fn workflow_focus_survives_agent_restore_and_explicit_agent_selection_still_works() {
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let allowed = BTreeSet::from([session]);
-    let terminals = [
-        scoped_terminal_ref(workspace, Some(session)),
-        scoped_terminal_ref(workspace, Some(session)),
-    ];
-    let agents = terminals
-        .iter()
-        .map(|terminal| AgentRuntimeInventoryItem {
-            runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
-                .unwrap(),
-            continuation: AgentContinuationRef::new(),
-            state: AgentRuntimeInventoryState::Live,
-            resumed_from: None,
-        })
-        .collect::<Vec<_>>();
-    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
-    let mut command_lane = SessionCommandLane::new();
-    let mut ui = io_runtime_on(&command_lane, view, Box::new(UnavailableSessionCommandPort))
-        .with_agent_tab_intent(
-            workspace,
-            allowed.clone(),
-            Box::new(MemoryIntentPort {
-                state: Arc::new(Mutex::new(AgentTabIntent::empty(workspace))),
-                mutations: Arc::new(Mutex::new(Vec::new())),
-            }),
-        );
-    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
-    let _ = runtime.handle_key(Key::Enter);
-    runtime.on_effect(&Effect::OpenWorkflow { session });
-    let workflow_selection = runtime.active_pane().selected().clone();
-    // First Codex and then Claude appear through the real coherent restore path.
-    for count in [1, 2] {
-        let fence = runtime.restore_fence();
-        let restored = crate::presentation::apply_restore_completion(
-            crate::presentation::RestoreCompletion {
-                port: Box::new(UnavailableAgentCommandPort),
-                dispatched_interaction: fence.0,
-                dispatched_registry_revision: fence.1,
-                dispatched_allowed_sessions: allowed.clone(),
-                terminals: Ok(terminals[..count]
-                    .iter()
-                    .map(|terminal| TerminalInventoryEntry {
-                        terminal: terminal.clone(),
-                        kind: TerminalKind::Agent,
-                        live: true,
-                    })
-                    .collect()),
-                agents: Ok(AgentInventory {
-                    workspace_id: workspace,
-                    runtimes: agents[..count].to_vec(),
-                    resumable: Vec::new(),
-                }),
-                observation_coherent: true,
-            },
-            &mut ui,
-            &mut runtime,
-            workspace,
-            &allowed,
-        );
-        assert_eq!(
-            restored.outcome,
-            crate::presentation::RestoreJobOutcome::Applied
-        );
-        assert_eq!(runtime.active_pane().selected(), &workflow_selection);
-        assert_eq!(runtime.active_pane().tabs().len(), count + 1);
-        assert_eq!(runtime.focused_terminal(), None);
-    }
-    let (sender, receiver) = std::sync::mpsc::channel();
-    // Explicit tab navigation remains the existing exact-terminal selection path.
-    for terminal in &terminals {
-        sender
-            .send(ControllerHostAction::SelectTab(TabDirection::Next))
-            .unwrap();
-        drain_host_actions(
-            &receiver,
-            &mut ui,
-            &mut command_lane,
-            &mut runtime,
-            &mut std::collections::HashMap::new(),
-        );
-        assert_eq!(runtime.focused_terminal().as_ref(), Some(terminal));
-    }
-    sender
-        .send(ControllerHostAction::SelectTab(TabDirection::Next))
-        .unwrap();
-    drain_host_actions(
-        &receiver,
-        &mut ui,
-        &mut command_lane,
-        &mut runtime,
-        &mut std::collections::HashMap::new(),
-    );
-    assert_eq!(runtime.active_pane().selected(), &workflow_selection);
 }
 
 #[test]
@@ -1885,16 +1810,16 @@ fn workspace_switch_restores_each_projects_last_session_cursor() {
 fn cancelling_recent_and_open_list_restores_the_originating_screen() {
     let cases = [
         (
-            vec![Key::Char('1'), Key::Quit],
+            vec![Key::Char('r'), Key::Quit],
             Vec::new(),
             vec![recent("recent")],
-            "Menu",
+            "Clone repository",
         ),
         (
             vec![Key::Char('o'), Key::Enter, Key::Quit],
             vec![ws("open")],
             Vec::new(),
-            "Open Workspace",
+            "Open / add projects",
         ),
     ];
 
@@ -2063,4 +1988,32 @@ fn interrupted_history_joins_its_own_scope_in_the_restore_projection() {
         .find(|target| target.target == Target::Session(other))
         .unwrap();
     assert!(empty.interrupted.is_empty());
+}
+
+#[test]
+fn workspace_switch_restores_manual_session_order_with_fresh_membership() {
+    let snapshot = snapshot_with_sessions("ordered", &["first", "second", "third"]);
+    let [a, b, c] = snapshot.session_ids.clone().try_into().unwrap();
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    assert!(
+        deck.session_order_for_path(&snapshot.workspace.path)
+            .is_none()
+    );
+    assert!(deck.session_order_for_path(Path::new("/missing")).is_none());
+    deck.remember_session_order(WorkspaceId::new(), &[a]);
+    let mut previous = WorkspaceRuntime::new(snapshot.workspace_id, vec![a, b, c]);
+    let _ = previous.handle_key(Key::Char('N'));
+    remember_workspace_session_focus(&mut deck, previous.state());
+    deck.activate_snapshot(&snapshot);
+    assert_eq!(
+        deck.session_order_for_path(&snapshot.workspace.path),
+        Some([b, a, c].as_slice())
+    );
+    let new = SessionId::new();
+    let mut restored = WorkspaceRuntime::new(snapshot.workspace_id, vec![new, c, b]);
+    restore_workspace_session_focus(&deck, &snapshot.workspace.path, &mut restored);
+    assert_eq!(restored.state().sessions(), &[b, c, new]);
+    let _ = restored.apply_event(AppEvent::Backend(BackendEvent::Sessions(vec![new, c, b])));
+    assert_eq!(restored.state().sessions(), &[b, c, new]);
+    assert_eq!(restored.state().session_order_revision(), 1);
 }

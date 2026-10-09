@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use usagi_core::domain::{
     agent::{
-        DurableLaunchSnapshot, LaunchRequest, LaunchValidationError, ProviderResumePhase,
-        ProviderResumeRef, ProviderResumeStatus,
+        AgentLaunchProvenance, DurableLaunchSnapshot, LaunchRequest, LaunchValidationError,
+        ProviderResumePhase, ProviderResumeRef, ProviderResumeStatus,
     },
     id::{
         AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, SessionId,
@@ -80,6 +80,9 @@ pub struct DurableRuntimeRecord {
     /// in the live Agent owner and claimed MCP child process.
     #[serde(default)]
     pub credential_provenance: Option<CredentialProvenance>,
+    /// Public launch audit, retained through restart and exact resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_provenance: Option<AgentLaunchProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -597,7 +600,7 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
     ) -> Result<(), RuntimeError> {
-        self.launch_with_semantic_superseding(
+        self.launch_with_provenance(
             request,
             runtime,
             operation,
@@ -608,6 +611,7 @@ impl RuntimeCoordinator {
             mcp_credential,
             semantic_key,
             &[],
+            None,
         )
     }
 
@@ -627,7 +631,7 @@ impl RuntimeCoordinator {
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
     ) -> Result<(), RuntimeError> {
-        self.launch_with_semantic_superseding(
+        self.launch_with_provenance(
             request,
             runtime,
             operation,
@@ -638,12 +642,15 @@ impl RuntimeCoordinator {
             mcp_credential,
             semantic_key,
             superseded,
+            None,
         )
     }
 
     /// Releases the pre-admission retention reservation on every failure: a
     /// launch that never reaches `Running` will never commit a final.
-    fn launch_with_semantic_superseding(
+    /// Persist trusted launch provenance together with the runtime reservation,
+    /// before the spawner can perform any external effect.
+    pub fn launch_with_provenance(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
@@ -655,6 +662,7 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
+        launch_provenance: Option<AgentLaunchProvenance>,
     ) -> Result<(), RuntimeError> {
         let terminal = runtime.terminal.clone();
         let outcome = self.admit_with_semantic_superseding(
@@ -668,6 +676,7 @@ impl RuntimeCoordinator {
             mcp_credential,
             semantic_key,
             superseded,
+            launch_provenance,
         );
         if outcome.is_err() {
             self.retention.release(&terminal);
@@ -688,6 +697,7 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
+        launch_provenance: Option<AgentLaunchProvenance>,
     ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
         if self.generation.current().is_none() {
@@ -849,6 +859,7 @@ impl RuntimeCoordinator {
                 semantic_key: Some(semantic_key),
                 outcome: DurableOperationOutcome::Accepted,
                 credential_provenance,
+                launch_provenance,
             },
         );
         self.generation
@@ -1615,18 +1626,6 @@ impl RuntimeCoordinator {
         self.records
             .values()
             .find(|record| record.runtime.terminal.fences(terminal))
-            .map(|record| record.runtime.clone())
-    }
-
-    /// Resolves the runtime admitted by one durable operation fence.
-    ///
-    /// Operation ownership is unique by construction: hydration rejects a
-    /// duplicate and launch refuses to reserve one twice.
-    #[must_use]
-    pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
-        self.records
-            .values()
-            .find(|record| record.operation.operation_id == operation_id)
             .map(|record| record.runtime.clone())
     }
 

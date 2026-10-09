@@ -523,7 +523,7 @@ pub(super) fn apply_restore_completion(
             }
         }
     }
-    let mut targets = pane_restore_targets(
+    let targets = pane_restore_targets(
         workspace,
         allowed_sessions,
         observation.projection,
@@ -532,7 +532,6 @@ pub(super) fn apply_restore_completion(
         interrupted,
         &saved_selections,
     );
-    runtime.preserve_workflow_selection(&mut targets);
     let fence_accepted = runtime.restore_snapshot(
         dispatched_interaction,
         dispatched_registry_revision,
@@ -600,6 +599,9 @@ pub(super) fn restore_workspace_session_focus(
     path: &Path,
     runtime: &mut WorkspaceRuntime,
 ) {
+    if let Some(order) = deck.session_order_for_path(path) {
+        let _ = runtime.apply_event(AppEvent::RestoreSessionOrder(order.to_vec()));
+    }
     if let Some(session) = deck.focused_session_for_path(path) {
         let _ = runtime.apply_event(AppEvent::FocusSession(session));
     }

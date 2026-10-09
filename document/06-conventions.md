@@ -124,7 +124,10 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
   （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
   Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
   issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
-- ベースブランチは `main`。
+- 単独 PR と stacked PR の最下段のベースブランチは `main`。stack の上段は直前の PR の
+  head branch をベースにし、各 PR の本文で順序と前段を示す。現在の必須 CI は `main` 向け PR が
+  対象のため、各段を一時的に `main` 向けにして最終 head の CI を検証してからベースを前段へ変更する。
+  前段を更新したら上段を restack し、更新後の head を同じ手順でレビュー・検証し直す。
 - **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 
 ## ドキュメント規約
@@ -320,6 +323,10 @@ daemon から分離して常駐する bootstrap broker も同じ teardown の対
 `daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
 `mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
 なる（自分自身を撃たない）。
+
+Agent IPC E2E の Git fixture は daemon と同じ system PATH で準備する。macOS では親の PATH が Homebrew Git、
+daemon の固定 PATH が Apple Git を選ぶことがあるため、daemon が使う toolchain の初回起動を fixture 準備に含める。
+daemon の Git read / effect deadline は production と同じ値で検証する。
 
 ### 重い E2E の直列化
 

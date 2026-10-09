@@ -27,16 +27,19 @@
 //! A binding that cannot be resolved is dropped and logged: a locked vault
 //! leaves one variable unset instead of making a pane impossible to open.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::thread::ThreadId;
 
 use sha2::{Digest as _, Sha256};
 use usagi_core::domain::agent::EnvironmentVariableName;
 use usagi_core::domain::settings::{
-    EnvBindings, EnvLimitError, MAX_SECRET_REFERENCES, Settings, is_secret_reference,
-    valid_bindings, validate_env_limits,
+    EnvBindings, EnvLimitError, MAX_SECRET_REFERENCES, Settings, valid_bindings,
+    validate_env_limits,
 };
 use usagi_core::infrastructure::env_resolver::{
     OpCli, resolve_parallel_with_service_account_token,
@@ -120,7 +123,7 @@ impl SecretCache {
 
     /// Store `value`, evicting the least recently used entry when full.
     fn insert(&mut self, key: SecretCacheKey, value: String) {
-        if self.entries.len() >= MAX_CACHED_SECRETS {
+        if self.entries.len() >= MAX_CACHED_SECRETS && !self.entries.contains_key(&key) {
             let evicted = self
                 .entries
                 .iter()
@@ -140,6 +143,7 @@ impl SecretCache {
 pub enum UserEnvironmentError {
     Limits(EnvLimitError),
     ReservedLauncherVariable,
+    NotPrepared,
 }
 
 impl From<EnvLimitError> for UserEnvironmentError {
@@ -157,12 +161,13 @@ impl From<EnvLimitError> for UserEnvironmentError {
 /// binding `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` would send the user's
 /// Claude session — prompts, file contents, credentials in flight — to a server
 /// the repository chose.
-const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 14] = [
+const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
     "PATH",
     "TMPDIR",
     "HOME",
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
+    usagi_core::infrastructure::paths::TRUST_ROOT_ENV,
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
@@ -184,10 +189,12 @@ pub struct UserEnvironment<R = OpCli> {
     /// serves. A failed read is not stored, so a locked vault is retried on the
     /// next launch instead of being fixed for the life of the daemon.
     ///
-    /// The lock is held across resolution deliberately: two launches racing on
-    /// the same reference then wait for one `op read` instead of asking
-    /// 1Password for two approvals.
+    /// Cache locks protect only in-memory accesses; secret reads never hold one.
     secrets: Mutex<SecretCache>,
+    /// Concurrent reads share one result only for the same credential and scope.
+    flights: Mutex<BTreeMap<SecretCacheKey, Weak<SecretRead>>>,
+    /// Values owned by active launch preparations, removed by their guards.
+    prepared: Mutex<HashMap<PreparedKey, Vec<Arc<EnvBindings>>>>,
 }
 
 impl<R: SecretResolver + Sync> UserEnvironment<R> {
@@ -197,6 +204,8 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
             global: Storage::new(data_dir),
             resolver,
             secrets: Mutex::new(SecretCache::default()),
+            flights: Mutex::new(BTreeMap::new()),
+            prepared: Mutex::new(HashMap::new()),
         }
     }
 
@@ -232,7 +241,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         if local
             .env
             .keys()
-            .any(|name| WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&name.as_str()))
+            .any(|name| WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&name.trim()))
         {
             return Err(UserEnvironmentError::ReservedLauncherVariable);
         }
@@ -241,8 +250,17 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
             .keys()
             .map(|name| name.trim().to_owned())
             .collect();
-        let mut bindings = global.with_local(&local).env;
-        validate_env_limits(&bindings)?;
+        // Count the stored merged map before filtering, then merge normalized
+        // scopes so a padded workspace key retains workspace precedence.
+        let mut stored_bindings = global.env.clone();
+        stored_bindings.extend(local.env.clone());
+        validate_env_limits(&stored_bindings)?;
+        let mut bindings: EnvBindings = valid_bindings(&global.env)
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        bindings.extend(
+            valid_bindings(&local.env).map(|(name, value)| (name.to_owned(), value.to_owned())),
+        );
         let service_account_token = bindings.remove(OP_SERVICE_ACCOUNT_TOKEN);
         Ok(ConfiguredEnvironment {
             bindings,
@@ -257,48 +275,162 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         workspace_root: &Path,
     ) -> Result<BTreeMap<String, String>, UserEnvironmentError> {
         let configured = self.configured(workspace_root)?;
-        let credential = credential_identity(configured.service_account_token.as_deref());
-        let mut secrets = self
-            .secrets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut values = BTreeMap::new();
-        let mut pending = EnvBindings::new();
-        for (name, value) in valid_bindings(&configured.bindings) {
-            let cached = is_secret_reference(value)
-                .then(|| {
-                    secrets.get(&configured.cache_key(&credential, workspace_root, name, value))
-                })
-                .flatten();
-            if let Some(secret) = cached {
-                values.insert(name.to_owned(), secret);
-            } else {
-                pending.insert(name.to_owned(), value.to_owned());
-            }
-        }
+        let cached_reader = CachingResolver {
+            environment: self,
+            configured: &configured,
+            workspace_root,
+            credential: credential_identity(configured.service_account_token.as_deref()),
+        };
         let resolved = resolve_parallel_with_service_account_token(
-            &pending,
-            &self.resolver,
+            &configured.bindings,
+            &cached_reader,
             configured.service_account_token.as_deref(),
         )
-        .expect("a subset of the validated bindings preserves the env limits");
+        .expect("validated bindings preserve the env limits");
         for failure in &resolved.failures {
             ErrorLog::record(&format!(
                 "could not resolve environment variable {} from {}: {}",
                 failure.name, failure.reference, failure.error
             ));
         }
-        for (name, value) in resolved.values {
-            if let Some(reference) = pending
-                .get(&name)
-                .filter(|reference| is_secret_reference(reference))
+        Ok(resolved.values)
+    }
+
+    /// Resolve outside runtime owner locks and retain a snapshot for this thread.
+    pub fn prepare(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<PreparedEnvironment<'_, R>, UserEnvironmentError> {
+        let values = Arc::new(self.resolved(workspace_root)?);
+        let key = (std::thread::current().id(), workspace_root.to_path_buf());
+        self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key.clone())
+            .or_default()
+            .push(Arc::clone(&values));
+        Ok(PreparedEnvironment {
+            environment: self,
+            key,
+            values,
+            thread: PhantomData,
+        })
+    }
+
+    /// The current launch's prepared values, with no settings or external I/O.
+    pub fn prepared(&self, workspace_root: &Path) -> Result<EnvBindings, UserEnvironmentError> {
+        self.prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(std::thread::current().id(), workspace_root.to_path_buf()))
+            .and_then(|values| values.last())
+            .map(|values| values.as_ref().clone())
+            .ok_or(UserEnvironmentError::NotPrepared)
+    }
+
+    fn read_cached(
+        &self,
+        key: SecretCacheKey,
+        reference: &str,
+        token: Option<&str>,
+    ) -> Result<String, String> {
+        let flight = {
+            let mut flights = self
+                .flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // The cache is consulted while the flight map is held, so a completed
+            // read cannot disappear between a cache miss and joining its flight.
+            if let Some(value) = self
+                .secrets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
             {
-                let key = configured.cache_key(&credential, workspace_root, &name, reference);
-                secrets.insert(key, value.clone());
+                return Ok(value);
             }
-            values.insert(name, value);
+            flights.retain(|_, flight| flight.strong_count() > 0);
+            flights
+                .entry(key.clone())
+                .or_default()
+                .upgrade()
+                .unwrap_or_else(|| {
+                    let flight = Arc::new(OnceLock::new());
+                    flights.insert(key.clone(), Arc::downgrade(&flight));
+                    flight
+                })
+        };
+        let result = flight
+            .get_or_init(|| {
+                self.resolver
+                    .read_with_service_account_token(reference, token)
+            })
+            .clone();
+        if let Ok(value) = &result {
+            self.secrets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, value.clone());
         }
-        Ok(values)
+        result
+    }
+}
+
+type SecretRead = OnceLock<Result<String, String>>;
+type PreparedKey = (ThreadId, PathBuf);
+
+/// An ephemeral launch snapshot. It cannot move to another thread or escape
+/// the lifetime of its environment reader, and dropping it erases its values.
+pub struct PreparedEnvironment<'a, R> {
+    environment: &'a UserEnvironment<R>,
+    key: PreparedKey,
+    values: Arc<EnvBindings>,
+    thread: PhantomData<Rc<()>>,
+}
+
+impl<R> Drop for PreparedEnvironment<'_, R> {
+    fn drop(&mut self) {
+        let mut prepared = self
+            .environment
+            .prepared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let values = prepared
+            .get_mut(&self.key)
+            .expect("a live preparation guard keeps its snapshot registered");
+        values.retain(|value| !Arc::ptr_eq(value, &self.values));
+        if values.is_empty() {
+            prepared.remove(&self.key);
+        }
+    }
+}
+
+struct CachingResolver<'a, R> {
+    environment: &'a UserEnvironment<R>,
+    configured: &'a ConfiguredEnvironment,
+    workspace_root: &'a Path,
+    credential: String,
+}
+
+impl<R: SecretResolver + Sync> SecretResolver for CachingResolver<'_, R> {
+    fn read(&self, reference: &str) -> Result<String, String> {
+        self.read_binding(
+            "",
+            reference,
+            self.configured.service_account_token.as_deref(),
+        )
+    }
+
+    fn read_binding(
+        &self,
+        name: &str,
+        reference: &str,
+        token: Option<&str>,
+    ) -> Result<String, String> {
+        let key = self
+            .configured
+            .cache_key(&self.credential, self.workspace_root, name, reference);
+        self.environment.read_cached(key, reference, token)
     }
 }
 
@@ -360,7 +492,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
     use usagi_core::domain::settings::{EnvBindings, LocalSettings, Settings};
     use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
     use usagi_core::infrastructure::store::workspace::Storage;
@@ -435,6 +567,254 @@ mod tests {
                 ..LocalSettings::default()
             })
             .unwrap();
+    }
+
+    struct BlockingResolver {
+        started: mpsc::SyncSender<()>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+        reads: Mutex<Vec<String>>,
+    }
+
+    impl SecretResolver for BlockingResolver {
+        fn read(&self, reference: &str) -> Result<String, String> {
+            self.reads.lock().unwrap().push(reference.to_owned());
+            if reference == "op://Private/Slow/token" {
+                self.started.send(()).unwrap();
+                let (released, wake) = self.release.as_ref();
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = wake.wait(released).unwrap();
+                }
+            }
+            Ok(format!("resolved:{reference}"))
+        }
+    }
+
+    #[test]
+    fn a_slow_secret_does_not_block_unrelated_workspaces_or_cache_access() {
+        let data = tempfile::tempdir().unwrap();
+        let slow = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        write_workspace(
+            slow.path(),
+            bindings(&[("SLOW", "op://Private/Slow/token")]),
+        );
+        write_workspace(
+            other.path(),
+            bindings(&[("FAST", "op://Private/Fast/token"), ("LITERAL", "value")]),
+        );
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let environment = UserEnvironment::new(
+            data.path().to_path_buf(),
+            BlockingResolver {
+                started: started_tx,
+                release: Arc::clone(&release),
+                reads: Mutex::new(Vec::new()),
+            },
+        );
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| environment.resolved(slow.path()).unwrap());
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let cache_available = environment.secrets.try_lock().is_ok();
+            let flights_available = environment.flights.try_lock().is_ok();
+            let (done_tx, done_rx) = mpsc::sync_channel(1);
+            let independent_environment = &environment;
+            let independent_root = other.path();
+            let independent = scope.spawn(move || {
+                done_tx
+                    .send(independent_environment.resolved(independent_root))
+                    .unwrap();
+            });
+            let completed = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+            // Always release the fixture before asserting, including a regression.
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            let slow_values = pending.join().unwrap();
+            independent.join().unwrap();
+            assert!(cache_available && flights_available);
+            assert_eq!(slow_values["SLOW"], "resolved:op://Private/Slow/token");
+            let values = completed.unwrap().unwrap();
+            assert_eq!(values["LITERAL"], "value");
+            assert_eq!(values["FAST"], "resolved:op://Private/Fast/token");
+        });
+    }
+
+    #[test]
+    fn concurrent_reads_share_only_the_same_secret_flight() {
+        let data = tempfile::tempdir().unwrap();
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let environment = UserEnvironment::new(
+            data.path().to_path_buf(),
+            BlockingResolver {
+                started: started_tx,
+                release: Arc::clone(&release),
+                reads: Mutex::new(Vec::new()),
+            },
+        );
+        let reference = "op://Private/Slow/token";
+        let key = (credential_identity(None), None, reference.to_owned());
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| environment.read_cached(key.clone(), reference, None));
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            let second = scope.spawn(|| environment.read_cached(key.clone(), reference, None));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut joined = false;
+            while std::time::Instant::now() < deadline {
+                joined = environment
+                    .flights
+                    .lock()
+                    .unwrap()
+                    .get(&key)
+                    .is_some_and(|flight| flight.strong_count() == 2);
+                if joined {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            *release.0.lock().unwrap() = true;
+            release.1.notify_all();
+            let first_value = first.join().unwrap().unwrap();
+            assert_eq!(second.join().unwrap().unwrap(), first_value);
+            assert!(joined, "both callers joined the same in-flight secret");
+        });
+        assert_eq!(
+            environment.resolver.reads.lock().unwrap().as_slice(),
+            [reference]
+        );
+    }
+
+    #[test]
+    fn prepared_values_are_scoped_to_the_launch_thread_and_reader_and_erased_on_drop() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        write_workspace(workspace.path(), bindings(&[("VALUE", "first")]));
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        assert_eq!(
+            environment.prepared(workspace.path()),
+            Err(UserEnvironmentError::NotPrepared)
+        );
+        let first = environment.prepare(workspace.path()).unwrap();
+        write_workspace(workspace.path(), bindings(&[("VALUE", "second")]));
+        assert_eq!(
+            environment.prepared(workspace.path()).unwrap()["VALUE"],
+            "first"
+        );
+        assert_eq!(
+            environment.prepared(other.path()),
+            Err(UserEnvironmentError::NotPrepared)
+        );
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_eq!(
+                        environment.prepared(workspace.path()),
+                        Err(UserEnvironmentError::NotPrepared)
+                    );
+                })
+                .join()
+                .unwrap();
+        });
+        let another_reader =
+            UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        assert_eq!(
+            another_reader.prepared(workspace.path()),
+            Err(UserEnvironmentError::NotPrepared)
+        );
+        let second = environment.prepare(workspace.path()).unwrap();
+        assert_eq!(
+            environment.prepared(workspace.path()).unwrap()["VALUE"],
+            "second"
+        );
+        drop(first); // Out-of-order drops preserve the still-active snapshot.
+        assert_eq!(
+            environment.prepared(workspace.path()).unwrap()["VALUE"],
+            "second"
+        );
+        drop(second);
+        assert!(environment.prepared.lock().unwrap().is_empty());
+        write_workspace(workspace.path(), bindings(&[("PATH", "invalid")]));
+        assert!(matches!(
+            environment.prepare(workspace.path()),
+            Err(UserEnvironmentError::ReservedLauncherVariable)
+        ));
+        assert_eq!(
+            environment.prepared(workspace.path()),
+            Err(UserEnvironmentError::NotPrepared)
+        );
+    }
+
+    #[test]
+    fn padded_names_cannot_bypass_control_variables_or_expose_the_op_credential() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_global(
+            data.path(),
+            bindings(&[("OP_SERVICE_ACCOUNT_TOKEN", "global"), ("VALUE", "global")]),
+        );
+        write_workspace(
+            workspace.path(),
+            bindings(&[
+                (" OP_SERVICE_ACCOUNT_TOKEN ", " workspace "),
+                (" VALUE ", " local "),
+                ("SECRET", "op://Private/Token/value"),
+            ]),
+        );
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        let values = environment.resolved(workspace.path()).unwrap();
+        assert_eq!(values["VALUE"], "local");
+        assert_eq!(
+            values["SECRET"],
+            "secret:workspace:op://Private/Token/value"
+        );
+        assert!(!values.contains_key("OP_SERVICE_ACCOUNT_TOKEN"));
+        write_workspace(workspace.path(), bindings(&[(" PATH ", "attacker")]));
+        assert_eq!(
+            environment.resolved(workspace.path()),
+            Err(UserEnvironmentError::ReservedLauncherVariable)
+        );
+        write_workspace(workspace.path(), EnvBindings::new());
+        write_global(
+            data.path(),
+            bindings(&[
+                (" OP_SERVICE_ACCOUNT_TOKEN ", "global"),
+                ("SECRET", "op://Private/Token/value"),
+            ]),
+        );
+        assert!(
+            !environment
+                .resolved(workspace.path())
+                .unwrap()
+                .contains_key("OP_SERVICE_ACCOUNT_TOKEN")
+        );
+    }
+
+    #[test]
+    fn direct_cached_resolver_uses_the_same_credential_aware_read() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_global(
+            data.path(),
+            bindings(&[("OP_SERVICE_ACCOUNT_TOKEN", "credential")]),
+        );
+        let environment = UserEnvironment::new(data.path().to_path_buf(), CountingResolver::new());
+        let configured = environment.configured(workspace.path()).unwrap();
+        let resolver = super::CachingResolver {
+            environment: &environment,
+            configured: &configured,
+            workspace_root: workspace.path(),
+            credential: credential_identity(Some("credential")),
+        };
+        assert_eq!(
+            resolver.read("op://Private/Direct/token").unwrap(),
+            "secret:credential:op://Private/Direct/token"
+        );
     }
 
     #[test]
@@ -721,6 +1101,24 @@ mod tests {
             MAX_CACHED_SECRETS
         );
 
+        // Parallel reads finish in scheduler order. Make one reference
+        // explicitly cold instead of assuming its first read finished first.
+        for generation in 0..generations {
+            write_global(
+                data.path(),
+                (0..MAX_SECRET_REFERENCES)
+                    .filter(|index| generation != 0 || *index != 0)
+                    .map(|index| {
+                        (
+                            format!("SECRET_{index}"),
+                            format!("op://Private/{generation}/{index}"),
+                        )
+                    })
+                    .collect(),
+            );
+            environment.resolved(workspace.path()).unwrap();
+        }
+
         // Relaunching the current configuration reads nothing and counts every
         // one of its references as used.
         environment.resolved(workspace.path()).unwrap();
@@ -820,6 +1218,7 @@ mod tests {
         let cases = [
             ("PATH", "/workspace/fake-bin"),
             ("TMPDIR", "/"),
+            ("USAGI_TRUST_ROOT", "/"),
             ("HOME", "/"),
             ("CODEX_HOME", "/workspace/.codex"),
             ("USAGI_CLAUDE_SANDBOX_PASSTHROUGH", "1"),

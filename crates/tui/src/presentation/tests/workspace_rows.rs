@@ -132,7 +132,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
                 workspace,
                 session,
                 profile: None,
-                goal: None,
                 resume: true,
             });
         crate::presentation::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
@@ -157,7 +156,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
             workspace,
             session: Some(session),
             profile: None,
-            goal: None,
             resume: false,
         });
     let mut pending = std::collections::HashMap::from([(operation, target)]);
@@ -231,7 +229,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
                 result: Ok(AgentPaneAdmission {
                     terminal: terminal.clone(),
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -363,7 +360,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
             workspace,
             session: Some(session),
             profile: None,
-            goal: None,
             resume: false,
         });
     ui.pane_launches
@@ -453,7 +449,6 @@ fn drawer_root_final_without_conversation_identity_fails_closed() {
                 result: Ok(AgentPaneAdmission {
                     terminal: scoped_terminal_ref(workspace, None),
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -1048,7 +1043,7 @@ fn missing_workspace_prompt_keyboard_controls_are_complete() {
 
 #[test]
 fn quitting_from_a_recent_workspace_exits_the_runtime() {
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::CtrlQ, Key::Char('y')]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::CtrlQ, Key::Char('y')]);
     run(
         &mut term,
         Vec::new(),
@@ -1073,7 +1068,6 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         deck: WorkspaceDeckHelp::None,
         overlay: None,
         decision_answer_open: false,
-        work_run_mode: crate::presentation::WorkRunControlMode::Closed,
         director_new_open: false,
         director_route: DirectorRoute::Organization,
         drawer_focus: None,
@@ -1163,68 +1157,6 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         HelpContext::DecisionAnswer
     );
 
-    for (mode, expected) in [
-        (
-            crate::presentation::WorkRunControlMode::List,
-            HelpContext::WorkRuns,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::ResolveEscalation,
-            HelpContext::WorkRunEscalation,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::ConfirmCancel,
-            HelpContext::WorkRunConfirmation,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::Submitting,
-            HelpContext::WorkRunSubmitting,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::Retry,
-            HelpContext::WorkRunConfirmation,
-        ),
-    ] {
-        assert_eq!(
-            resolve_workspace_help_context(WorkspaceHelpState {
-                work_run_mode: mode,
-                director_route: DirectorRoute::WorkRuns,
-                drawer_focus: Some(WorkspaceDrawerFocus::Director),
-                ..base
-            }),
-            expected,
-            "{mode:?}"
-        );
-    }
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::List,
-            director_route: DirectorRoute::RunOverview(SupervisorRunId::new()),
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::RunOverview
-    );
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::ConfirmDelete,
-            director_route: DirectorRoute::WorkRuns,
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::WorkRunConfirmation
-    );
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::Submitting,
-            director_route: DirectorRoute::Organization,
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::WorkRunSubmitting,
-        "an in-flight action outranks the normalized Organization route"
-    );
-
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
             director_new_open: true,
@@ -1235,9 +1167,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
     );
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::Submitting,
             director_new_open: true,
-            director_route: DirectorRoute::WorkRuns,
             drawer_focus: Some(WorkspaceDrawerFocus::Terminal),
             ..base
         }),
@@ -1257,19 +1187,8 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         );
     }
     for (director_route, expected) in [
-        (
-            DirectorRoute::Console(DirectorConsoleParent::Organization),
-            HelpContext::DirectorConsole,
-        ),
-        (
-            DirectorRoute::Console(DirectorConsoleParent::RunOverview(SupervisorRunId::new())),
-            HelpContext::WorkRunConsole,
-        ),
-        (
-            DirectorRoute::RunOverview(SupervisorRunId::new()),
-            HelpContext::RunOverview,
-        ),
-        (DirectorRoute::WorkRuns, HelpContext::WorkRuns),
+        (DirectorRoute::Console, HelpContext::DirectorConsole),
+        (DirectorRoute::Organization, HelpContext::Organization),
     ] {
         assert_eq!(
             resolve_workspace_help_context(WorkspaceHelpState {
@@ -1310,7 +1229,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
     ));
 
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::Char('?'),
         // Ctrl-X would remove the selected session outside Help.
         Key::CtrlX,
@@ -1348,7 +1267,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
 fn workspace_loader_failure_is_propagated() {
     for (keys, recent) in [
         (vec![Key::Char('o'), Key::Enter], Vec::new()),
-        (vec![Key::Char('1')], vec![recent("alpha")]),
+        (vec![Key::Char('r')], vec![recent("alpha")]),
     ] {
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
@@ -1367,15 +1286,22 @@ fn workspace_loader_failure_is_propagated() {
 #[test]
 fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::CtrlQ,
         Key::Char('w'),
-        Key::Char('2'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Down,
+        Key::Enter,
         Key::CtrlQ,
         Key::Char('q'),
     ]);
     let mut loader = FakeLoader {
         opened_at: Some(now() + Duration::hours(1)),
+        recent_projects: vec![
+            recent_at("first", now() + Duration::hours(1)),
+            recent_at("second", now() - Duration::hours(1)),
+        ],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();
@@ -1492,7 +1418,13 @@ fn add_workspace_overlay_can_close_its_checked_active_project() {
 
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
     assert_eq!(factory.drops_at_create, vec![0]);
-    assert!(term.frames.last().unwrap().join("\n").contains("Recent"));
+    assert!(
+        term.frames
+            .last()
+            .unwrap()
+            .join("\n")
+            .contains("Clone repository")
+    );
 }
 
 #[test]

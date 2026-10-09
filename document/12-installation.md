@@ -39,6 +39,12 @@ installer は Bash、`curl`、`tar`、`sha256sum` または `shasum` を使う�
 curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | bash
 ```
 
+`USAGI_HOME` を指定すると、その directory の `bin/usagi` へ導入する。空白を含む path も指定できる。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install.sh | USAGI_HOME="$HOME/usagi tools" bash
+```
+
 installer は archive の SHA-256 と release version artifact を検証してから binary を差し替える。
 archive 構造、検証、atomic replacement の内部契約は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)を正本とする。
@@ -80,10 +86,24 @@ usagi update -v
 ```
 
 更新後の CLI は次回起動から使われるため、起動中の TUI は終了して開き直す。
+Agent の MCP client も再接続し、新しい `usagi mcp` process から tool 一覧と guide を取得する。
+既存の MCP server は更新前のバイナリで動き続けるため、daemon の切り替えだけでは tool 一覧と guide は更新されない。
+実行中の Agent が daemon の切り替えを妨げる場合も binary の更新は成功し、切り替えの保留を表示する。
+複数プロジェクトを保持し、いずれかに実行中の端末や Agent が残る場合も切り替えを保留するため、更新後も各プロジェクトを
+開き直せる。保留中は既存 daemon と端末への接続を維持し、それらの終了後に `usagi daemon restart` で切り替える。
 更新時の download・検証・atomic replacement と内部 daemon 同期は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)、
 live Agent を含む daemon の安全な引き継ぎと拒否条件は
 [planned replacement](05-daemon.md#planned-replacement)を正本とする。
+
+同じ保存先への更新は順番に実行する。更新 process が crash しても、次の更新が残った owner を回収する。
+現行 installer で旧版へ戻した後も、旧版の `usagi update` から再更新できる。
+バイナリ置換後の強制終了でも旧方式が読み取れる保持 PID を残し、直列に行う次の更新で回収する。
+旧版と現行版の installer を同時に使う場合の範囲は、上記の内部契約を参照する。
+
+HUP / INT / TERM による中断はそれぞれ終了コード 129 / 130 / 143 で終了し、更新成功を表示しない。
+staging と自身の lock owner は cleanup する。置換前の中断では旧 binary を維持し、置換後の daemon 同期中に
+中断した場合は導入済みの新 binary を維持する。どちらも次の `usagi update` で再試行できる。
 
 managed daemon 同期を持たない旧版から初めて更新する 1 回だけは、実行中の旧 `update` 自体を
 遡及的に変更できないため binary の差し替えだけで終了する。その場合は更新後の `usagi update` または

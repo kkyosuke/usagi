@@ -128,6 +128,7 @@ fn agent_record(
     };
     let plan = LaunchPlan::new(profile, 1, "codex", Vec::new(), [], PathBuf::from("/tmp")).unwrap();
     DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: AgentRuntimeRef {
             agent_runtime_id: AgentRuntimeId::new(),
             terminal: resource.clone(),

@@ -3,41 +3,6 @@
 use super::*;
 
 #[test]
-fn runtime_operation_join_is_exact_and_durable_ownership_is_unique() {
-    let mut agent = runtime();
-    let first_operation = OperationId::new();
-    let first = agent
-        .launch(
-            &first_operation.to_string(),
-            &intent(None),
-            &FakeScope(Ok(scope())),
-        )
-        .unwrap();
-    assert_eq!(
-        agent.runtime_for_operation(first_operation),
-        agent.coordinator.runtime_for_terminal(&first.terminal)
-    );
-    assert_eq!(agent.runtime_for_operation(OperationId::new()), None);
-
-    let second_operation = OperationId::new();
-    agent
-        .launch(
-            &second_operation.to_string(),
-            &intent(None),
-            &FakeScope(Ok(scope())),
-        )
-        .unwrap();
-    let mut duplicate = agent.coordinator.snapshot();
-    for record in &mut duplicate.records {
-        record.operation.operation_id = first_operation;
-    }
-    assert_eq!(
-        RuntimeCoordinator::hydrate(duplicate, 16, 64 * 1024, 64).unwrap_err(),
-        crate::usecase::runtime::RuntimeSnapshotError::DuplicateOperation
-    );
-}
-
-#[test]
 fn agent_output_answers_cursor_position_queries_through_the_owned_pty() {
     let mut agent = runtime();
     let admission = agent

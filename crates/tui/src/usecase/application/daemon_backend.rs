@@ -105,8 +105,6 @@ pub struct LaunchAgentRequest {
     pub operation_id: OperationId,
     /// Optional Agent profile; `None` uses the daemon default.
     pub profile: Option<AgentProfileId>,
-    /// Present only for the opt-in goal-driven Director launch.
-    pub goal: Option<String>,
 }
 
 /// Explicit provider-native resume request derived from
@@ -185,10 +183,31 @@ pub trait AgentPort {
 /// A scratchpad belongs to one target (workspace root or session); an
 /// environment belongs to one [`EnvScope`] (this workspace, or every workspace).
 pub trait TargetStorePort {
+    /// Read user favorites independently of session lifecycle state.
+    fn load_session_favorites(&mut self, completions: Completions) {
+        completions.emit(AppEvent::Backend(
+            super::controller::BackendEvent::SessionFavorites(std::collections::BTreeSet::new()),
+        ));
+    }
+    /// Toggle a favorite, reporting a snapshot only after persistence succeeds.
+    fn toggle_session_favorite(&mut self, _session: SessionId, completions: Completions) {
+        unavailable(&completions, "Session favorites are unavailable.");
+    }
     /// Read a target's scratchpad.
-    fn load_notes(&mut self, target: Target, completions: Completions);
+    fn load_notes(
+        &mut self,
+        target: Target,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    );
     /// Persist an edited scratchpad.
-    fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions);
+    fn save_notes(
+        &mut self,
+        target: Target,
+        scratchpad: Scratchpad,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    );
     /// Read one scope's environment bindings, plus what it inherits.
     fn load_environment(&mut self, scope: EnvScope, completions: Completions);
     /// Persist one scope's environment bindings.
@@ -414,7 +433,6 @@ pub enum Flow {
 ///
 /// [`drain_events`]: Self::drain_events
 pub struct DaemonBackend {
-    workflow: Option<Box<dyn super::workflow::WorkflowPort>>,
     sessions: Box<dyn SessionLifecyclePort>,
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
@@ -437,7 +455,6 @@ impl DaemonBackend {
     ) -> Self {
         let (completions_tx, completions_rx) = mpsc::channel();
         Self {
-            workflow: None,
             sessions,
             agent,
             store,
@@ -471,12 +488,6 @@ impl DaemonBackend {
         self
     }
 
-    #[must_use]
-    pub fn with_workflow(mut self, port: Box<dyn super::workflow::WorkflowPort>) -> Self {
-        self.workflow = Some(port);
-        self
-    }
-
     /// Run one reducer-issued effect against its owning port.
     ///
     /// Returns [`Flow::Exit`] for [`Effect::Detach`] and [`Flow::Leave`] for
@@ -488,26 +499,6 @@ impl DaemonBackend {
     #[allow(clippy::too_many_lines)] // This exhaustive adapter keeps every controller effect visibly mapped to exactly one port.
     pub fn dispatch(&mut self, effect: Effect) -> Flow {
         match effect {
-            Effect::Workflow(job) => {
-                let completions = self.completions();
-                if let Some(port) = self.workflow.as_mut() {
-                    port.dispatch(job, completions);
-                } else {
-                    completions.emit(AppEvent::Backend(
-                        super::controller::BackendEvent::Workflow {
-                            job,
-                            result: Err(super::workflow::WorkflowError {
-                                message: "Workflow backend is unavailable".into(),
-                                unconfirmed: false,
-                            }),
-                        },
-                    ));
-                }
-            }
-            // The Workflow tab is shell-local and owns no daemon operation, so
-            // this executor has nothing to run: the pane registry takes the
-            // intent when the reducer produces it (`WorkspaceRuntime`).
-            Effect::OpenWorkflow { .. } => {}
             Effect::CreateSession {
                 workspace,
                 token,
@@ -555,19 +546,6 @@ impl DaemonBackend {
                 session,
                 operation_id,
                 profile,
-                goal: None,
-            }),
-            Effect::LaunchGoal {
-                workspace,
-                operation_id,
-                profile,
-                goal,
-            } => self.agent.launch_agent(LaunchAgentRequest {
-                workspace,
-                session: None,
-                operation_id,
-                profile,
-                goal: Some(goal),
             }),
             Effect::ResumeAgent {
                 workspace,
@@ -596,10 +574,22 @@ impl DaemonBackend {
             }),
             Effect::OpenExternalTerminal { target } => self.agent.open_external_terminal(target),
             Effect::SelectTab { direction } => self.agent.select_tab(direction),
-            Effect::LoadNotes { target } => self.store.load_notes(target, self.completions()),
-            Effect::SaveNotes { target, scratchpad } => {
+            Effect::LoadSessionFavorites => self.store.load_session_favorites(self.completions()),
+            Effect::ToggleSessionFavorite { session } => {
                 self.store
-                    .save_notes(target, scratchpad, self.completions());
+                    .toggle_session_favorite(session, self.completions());
+            }
+            Effect::LoadNotes { target, request_id } => {
+                self.store
+                    .load_notes(target, request_id, self.completions());
+            }
+            Effect::SaveNotes {
+                target,
+                scratchpad,
+                request_id,
+            } => {
+                self.store
+                    .save_notes(target, scratchpad, request_id, self.completions());
             }
             Effect::LoadEnvironment { scope } => {
                 self.store.load_environment(scope, self.completions());
@@ -713,56 +703,6 @@ mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
 
-    #[test]
-    fn workflow_backend_routes_snapshots_and_explicit_unavailability() {
-        use crate::usecase::application::workflow::{WorkflowJob, WorkflowPort};
-        struct FakeWorkflow;
-        impl WorkflowPort for FakeWorkflow {
-            fn dispatch(&mut self, job: WorkflowJob, completions: Completions) {
-                let snapshot = usagi_core::domain::workflow::WorkflowSnapshot {
-                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-                    session: job.session,
-                    run: None,
-                    pending_start: None,
-                    finished: Vec::new(),
-                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
-                };
-                completions.emit(AppEvent::Backend(
-                    super::super::controller::BackendEvent::Workflow {
-                        job,
-                        result: Ok(Box::new(snapshot)),
-                    },
-                ));
-            }
-        }
-        let mut backend = backend();
-        let job = WorkflowJob {
-            workspace: WorkspaceId::new(),
-            session: SessionId::new(),
-            control: None,
-        };
-        assert_eq!(
-            backend.dispatch(Effect::OpenWorkflow {
-                session: job.session
-            }),
-            Flow::Continue
-        );
-        backend.dispatch(Effect::Workflow(job.clone()));
-        assert!(matches!(
-            backend.drain_events().as_slice(),
-            [AppEvent::Backend(
-                super::super::controller::BackendEvent::Workflow { result: Err(_), .. }
-            )]
-        ));
-        let mut backend = backend.with_workflow(Box::new(FakeWorkflow));
-        backend.dispatch(Effect::Workflow(job));
-        assert!(matches!(
-            backend.drain_events().as_slice(),
-            [AppEvent::Backend(
-                super::super::controller::BackendEvent::Workflow { result: Ok(_), .. }
-            )]
-        ));
-    }
     use crate::usecase::application::controller::{
         BackendEvent, Notice, OperationResult, SafeError, SafeMessage,
     };
@@ -919,17 +859,30 @@ mod tests {
     }
 
     impl TargetStorePort for FakeStore {
-        fn load_notes(&mut self, target: Target, completions: Completions) {
+        fn load_notes(
+            &mut self,
+            target: Target,
+            request_id: usagi_core::domain::id::RequestId,
+            completions: Completions,
+        ) {
             self.loaded_notes.push(target);
             completions.emit(AppEvent::Backend(BackendEvent::NotesLoaded {
+                request_id,
                 target,
                 scratchpad: Scratchpad::default(),
             }));
         }
 
-        fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions) {
+        fn save_notes(
+            &mut self,
+            target: Target,
+            scratchpad: Scratchpad,
+            request_id: usagi_core::domain::id::RequestId,
+            completions: Completions,
+        ) {
             self.saved_notes.push((target, scratchpad));
             completions.emit(AppEvent::Backend(BackendEvent::NotesError {
+                request_id,
                 target,
                 error: SafeError {
                     message: SafeMessage::new("disk full"),
@@ -1222,7 +1175,7 @@ mod tests {
             Box::new(FakeStore::default()),
             Box::new(FakeWorkspaceCommands::default()),
         );
-        let goal_workspace = WorkspaceId::new();
+        let root_workspace = WorkspaceId::new();
         assert_eq!(
             backend.dispatch(Effect::LaunchAgent {
                 workspace: WorkspaceId::new(),
@@ -1233,11 +1186,11 @@ mod tests {
             Flow::Continue
         );
         assert_eq!(
-            backend.dispatch(Effect::LaunchGoal {
-                workspace: goal_workspace,
+            backend.dispatch(Effect::LaunchAgent {
+                workspace: root_workspace,
+                session: None,
                 operation_id: OperationId::new(),
                 profile: None,
-                goal: "prepare a PR".to_owned(),
             }),
             Flow::Continue
         );
@@ -1275,12 +1228,11 @@ mod tests {
         assert!(backend.drain_events().is_empty());
         assert!(matches!(
             launches.lock().unwrap().as_slice(),
-            [LaunchAgentRequest { goal: None, .. }, LaunchAgentRequest {
+            [LaunchAgentRequest { session: Some(_), .. }, LaunchAgentRequest {
                 workspace,
                 session: None,
-                goal: Some(goal),
                 ..
-            }] if *workspace == goal_workspace && goal == "prepare a PR"
+            }] if *workspace == root_workspace
         ));
     }
 
@@ -1288,13 +1240,17 @@ mod tests {
     fn load_and_save_notes_reflux_backend_events() {
         let mut backend = backend();
         let target = Target::Root(WorkspaceId::new());
-        backend.dispatch(Effect::LoadNotes { target });
+        backend.dispatch(Effect::LoadNotes {
+            target,
+            request_id: usagi_core::domain::id::RequestId::new(),
+        });
         assert!(matches!(
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::NotesLoaded { target: loaded, .. })]
                 if *loaded == target
         ));
         backend.dispatch(Effect::SaveNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target,
             scratchpad: Scratchpad::default(),
         });
@@ -1349,6 +1305,25 @@ mod tests {
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::RolesError { scope, .. })]
                 if *scope == RoleEditorScope::Global
+        ));
+    }
+
+    #[test]
+    fn session_favorites_dispatch_and_unavailable_adapter_are_explicit() {
+        let mut backend = backend();
+        backend.dispatch(Effect::LoadSessionFavorites);
+        assert_eq!(
+            backend.drain_events(),
+            vec![AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::new()
+            ))]
+        );
+        backend.dispatch(Effect::ToggleSessionFavorite {
+            session: SessionId::new(),
+        });
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::Notice(_))]
         ));
     }
 
@@ -1564,6 +1539,7 @@ mod tests {
             workspace: WorkspaceId::new(),
         });
         backend.dispatch(Effect::LoadNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target: Target::Root(WorkspaceId::new()),
         });
         let events = backend.drain_events();
@@ -1611,7 +1587,6 @@ mod tests {
             session: Some(session),
             operation_id,
             profile: None,
-            goal: None,
         };
         assert_eq!(launch.clone(), launch);
         assert!(format!("{launch:?}").contains("LaunchAgentRequest"));

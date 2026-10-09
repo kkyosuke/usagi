@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::IssueSummary;
-use crate::domain::recent::Unite;
+use crate::domain::recent::{LastProjectSet, Unite};
 use crate::domain::settings::Settings;
 use crate::domain::workspace::{Workspace, validate_workspace_name};
 use crate::domain::workspace_state::WorkspaceState;
@@ -154,6 +154,30 @@ impl Storage {
         )
     }
 
+    /// Load the last committed project deck. Missing storage has no resume target.
+    ///
+    /// # Errors
+    /// Returns an error for unreadable, unsupported, or invalid data.
+    pub fn load_last_projects(&self) -> Result<Option<LastProjectSet>> {
+        let saved: Option<LastProjectSet> =
+            json_file::read_supported_version(&self.dir.join("last-projects.json"))?;
+        anyhow::ensure!(
+            saved.as_ref().is_none_or(LastProjectSet::is_valid),
+            "invalid last project set"
+        );
+        Ok(saved)
+    }
+
+    /// Atomically save the last committed deck under the shared store lock.
+    ///
+    /// # Errors
+    /// Returns an error for invalid data or a failed write.
+    pub fn save_last_projects(&self, projects: &LastProjectSet) -> Result<()> {
+        anyhow::ensure!(projects.is_valid(), "invalid last project set");
+        let _lock = self.lock()?;
+        json_file::write_versioned(&self.dir, &self.dir.join("last-projects.json"), projects)
+    }
+
     /// Load the per-user settings used by the TUI Config screen. Missing files
     /// are the default settings, so an upgrade never prevents the TUI from
     /// opening. Values that later reach process configuration are sanitized at
@@ -267,6 +291,45 @@ mod tests {
     }
 
     #[test]
+    fn last_projects_round_trip_and_reject_invalid_or_future_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temp.path());
+        assert_eq!(storage.load_last_projects().unwrap(), None);
+        let projects = crate::domain::recent::LastProjectSet {
+            paths: vec!["/alpha".into(), "/beta".into()],
+            active: "/beta".into(),
+        };
+        storage.save_last_projects(&projects).unwrap();
+        assert_eq!(
+            storage.load_last_projects().unwrap(),
+            Some(projects.clone())
+        );
+        let mut invalid = projects.clone();
+        invalid.active = "/gone".into();
+        assert!(storage.save_last_projects(&invalid).is_err());
+        invalid.active = "/alpha".into();
+        invalid.paths.push("/alpha".into());
+        assert!(storage.save_last_projects(&invalid).is_err());
+        invalid.paths = vec!["relative".into()];
+        invalid.active = "relative".into();
+        assert!(storage.save_last_projects(&invalid).is_err());
+        invalid.paths.clear();
+        assert!(storage.save_last_projects(&invalid).is_err());
+        assert_eq!(storage.load_last_projects().unwrap(), Some(projects));
+        let file = temp.path().join("last-projects.json");
+        std::fs::write(&file, r#"{"version":1,"paths":[],"active":"/alpha"}"#).unwrap();
+        assert!(storage.load_last_projects().is_err());
+        std::fs::write(
+            &file,
+            r#"{"version":999,"paths":["/alpha"],"active":"/alpha"}"#,
+        )
+        .unwrap();
+        assert!(storage.load_last_projects().is_err());
+        std::fs::write(temp.path().join("last-projects.json"), "broken").unwrap();
+        assert!(storage.load_last_projects().is_err());
+    }
+
+    #[test]
     fn workspaces_round_trip_through_disk() {
         let (_dir, storage) = temp_storage();
         assert!(storage.load_workspaces().unwrap().is_empty());
@@ -308,7 +371,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
-            work_mode: crate::domain::settings::WorkMode::GoalDriven,
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -320,6 +382,35 @@ mod tests {
         storage.save_settings(&settings).unwrap();
         assert_eq!(storage.load_settings().unwrap(), settings);
         assert!(storage.dir().join(SETTINGS_FILE).is_file());
+    }
+
+    #[test]
+    fn old_workflow_setting_preserves_global_defaults_and_is_not_saved() {
+        let (_dir, storage) = temp_storage();
+        let expected = Settings {
+            default_model: crate::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
+            team_template: crate::domain::settings::TeamTemplate::Flat,
+            env: [("PROJECT".to_owned(), "usagi".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Settings::default()
+        };
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy["work_mode"] = serde_json::json!("goal-driven");
+        fs::create_dir_all(storage.dir()).unwrap();
+        fs::write(
+            storage.dir().join(SETTINGS_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert_eq!(loaded, expected);
+        storage.save_settings(&loaded).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(storage.dir().join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert!(saved.get("work_mode").is_none());
+        assert_eq!(storage.load_settings().unwrap(), expected);
     }
 
     #[test]

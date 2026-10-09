@@ -280,7 +280,12 @@ fn agent_motion(
         },
         AgentPhase::Absent | AgentPhase::Ready | AgentPhase::Running => {
             let local_tick = (tick + seed % LIFESTYLE_CYCLE_TICKS) % LIFESTYLE_CYCLE_TICKS;
-            lifestyle_motion(places, local_tick)
+            let mut motion = lifestyle_motion(places, local_tick);
+            // The decorative cycle must keep a busy runtime visibly awake.
+            if phase == AgentPhase::Running && motion.activity == Activity::Sleeping {
+                motion.activity = Activity::Working;
+            }
+            motion
         }
     }
 }

@@ -15,6 +15,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 
+use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
 use crate::presentation::layouts::mascot_screen;
@@ -22,10 +23,55 @@ use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, TextInput, modal::ConfirmationModal};
 
 /// 画面上部に置くタイトル。
-const TITLE: &str = "Open Workspace";
+const TITLE: &str = "Open / add projects";
 /// 最下行に固定するキー操作ヒント。
 const FOOTER: &str =
-    "↑↓ select / Tab mode / Space mark / Enter open / Ctrl-X unregister / Esc back";
+    "↑↓ select / Tab view / Space mark / Enter open / Ctrl-X unregister / Esc back";
+fn history_lines(width: usize, open: &Open, budget: usize) -> Vec<String> {
+    let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let indent = |line: &str| {
+        format!(
+            "{left_pad}{}",
+            widgets::clip_to_width(line, BLOCK_WIDTH.min(width))
+        )
+    };
+    let mut lines = Vec::new();
+    let history = open.filtered_history();
+    if history.is_empty() {
+        lines.push(indent("No recent projects match."));
+    }
+    let (start, capacity) = viewport(history.len(), open.selected_index, budget);
+    if let Some(above) = overflow_line("↑", start) {
+        lines.push(indent(&above));
+    }
+    for (index, recent) in history.iter().enumerate().skip(start).take(capacity) {
+        let name = format!(
+            "{} {}",
+            if index == open.selected_index {
+                ">"
+            } else {
+                " "
+            },
+            history_name(recent)
+        );
+        let style = if index == open.selected_index {
+            Role::Accent.style().bold()
+        } else {
+            Style::new()
+        };
+        lines.push(indent(&style.paint(&name)));
+        lines.push(indent(
+            &Style::new()
+                .dim()
+                .paint(&format!("    {} projects", history_paths(recent).len())),
+        ));
+    }
+    if let Some(below) = overflow_line("↓", history.len().saturating_sub(start + capacity)) {
+        lines.push(indent(&below));
+    }
+    lines
+}
+
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
@@ -37,10 +83,21 @@ const SELECTED_PATH_LINES: usize = 2;
 /// 1 件の workspace が占める行数（名前行＋状態行）。
 const ROWS_PER_WORKSPACE: usize = 2;
 
+/// The same choices are available before opening the first project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenView {
+    Projects,
+    Recent,
+    Directory,
+}
+
 /// Open 画面の状態。登録済み workspace の一覧と選択位置を持つ。端末 IO は持たない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Open {
     workspaces: Vec<WorkspaceOverview>,
+    history: Vec<Recent>,
+    view: OpenView,
+    directory: TextInput,
     selected_index: usize,
     filter: TextInput,
     unite: bool,
@@ -70,6 +127,10 @@ impl Open {
     #[must_use]
     pub fn with_overviews(mut workspaces: Vec<WorkspaceOverview>) -> Self {
         workspaces.sort_by(|left, right| {
+            let recency = right.workspace.updated_at.cmp(&left.workspace.updated_at);
+            if recency != std::cmp::Ordering::Equal {
+                return recency;
+            }
             let folded = left
                 .workspace
                 .name
@@ -83,6 +144,9 @@ impl Open {
         });
         Self {
             workspaces,
+            history: Vec::new(),
+            view: OpenView::Projects,
+            directory: TextInput::new(),
             selected_index: 0,
             filter: TextInput::new(),
             unite: false,
@@ -91,6 +155,89 @@ impl Open {
             unregistering_path: None,
             unregister_confirmation: ConfirmationModal::new(),
             notice: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_history(mut self, history: Vec<Recent>) -> Self {
+        self.history = history;
+        self
+    }
+
+    #[must_use]
+    pub const fn view(&self) -> OpenView {
+        self.view
+    }
+
+    pub fn cycle_view(&mut self) {
+        self.view = match self.view {
+            OpenView::Projects => OpenView::Recent,
+            OpenView::Recent => OpenView::Directory,
+            OpenView::Directory => OpenView::Projects,
+        };
+        self.selected_index = 0;
+        self.notice = None;
+    }
+
+    fn input(&self) -> &TextInput {
+        if self.view == OpenView::Directory {
+            &self.directory
+        } else {
+            &self.filter
+        }
+    }
+    fn input_mut(&mut self) -> &mut TextInput {
+        if self.view == OpenView::Directory {
+            &mut self.directory
+        } else {
+            &mut self.filter
+        }
+    }
+
+    fn filtered_history(&self) -> Vec<&Recent> {
+        let filter = self.filter.value().to_lowercase();
+        self.history
+            .iter()
+            .filter(|recent| {
+                !history_paths(recent).is_empty()
+                    && history_name(recent).to_lowercase().contains(&filter)
+            })
+            .collect()
+    }
+
+    fn visible_len(&self) -> usize {
+        match self.view {
+            OpenView::Projects => self.filtered().len(),
+            OpenView::Recent => self.filtered_history().len(),
+            OpenView::Directory => 0,
+        }
+    }
+
+    #[must_use]
+    pub fn chosen_paths(&self) -> Vec<std::path::PathBuf> {
+        match self.view {
+            OpenView::Directory => {
+                let path = self.directory.value().trim();
+                if path.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![path.into()]
+                }
+            }
+            OpenView::Recent => self
+                .filtered_history()
+                .get(self.selected_index)
+                .map_or_else(Vec::new, |recent| history_paths(recent)),
+            OpenView::Projects => {
+                let marked = self.unite_paths();
+                if marked.is_empty() {
+                    self.selected()
+                        .map(|w| vec![w.path.clone()])
+                        .unwrap_or_default()
+                } else {
+                    marked
+                }
+            }
         }
     }
 
@@ -173,60 +320,60 @@ impl Open {
 
     /// Append one character to the filter and return selection to its first hit.
     pub fn push_filter(&mut self, ch: char) {
-        self.filter.insert(ch);
+        self.input_mut().insert(ch);
         self.selected_index = 0;
     }
 
     /// Delete one filter character and return selection to its first hit.
     pub fn pop_filter(&mut self) {
-        self.filter.backspace();
+        self.input_mut().backspace();
         self.selected_index = 0;
     }
 
     /// Move the always-active filter cursor one character left.
     pub fn filter_left(&mut self) {
-        self.filter.move_left();
+        self.input_mut().move_left();
     }
 
     /// Move the always-active filter cursor one character right.
     pub fn filter_right(&mut self) {
-        self.filter.move_right();
+        self.input_mut().move_right();
     }
 
     /// Move the filter caret to the start of the line (Home / Ctrl-A).
     pub fn filter_home(&mut self) {
-        self.filter.move_home();
+        self.input_mut().move_home();
     }
 
     /// Move the filter caret to the end of the line (End / Ctrl-E).
     pub fn filter_end(&mut self) {
-        self.filter.move_end();
+        self.input_mut().move_end();
     }
 
     /// Forward-delete at the filter caret (Delete), returning to the first hit.
     pub fn filter_delete_forward(&mut self) {
-        self.filter.delete_forward();
+        self.input_mut().delete_forward();
         self.selected_index = 0;
     }
 
     /// Extend the filter selection one character left (Shift+Left).
     pub fn filter_select_left(&mut self) {
-        self.filter.select_left();
+        self.input_mut().select_left();
     }
 
     /// Extend the filter selection one character right (Shift+Right).
     pub fn filter_select_right(&mut self) {
-        self.filter.select_right();
+        self.input_mut().select_right();
     }
 
     /// Extend the filter selection to the start of the line (Shift+Home).
     pub fn filter_select_home(&mut self) {
-        self.filter.select_home();
+        self.input_mut().select_home();
     }
 
     /// Extend the filter selection to the end of the line (Shift+End).
     pub fn filter_select_end(&mut self) {
-        self.filter.select_end();
+        self.input_mut().select_end();
     }
 
     /// Switch between Single and Unite selection. A new Unite set starts empty.
@@ -237,6 +384,10 @@ impl Open {
 
     /// Add or remove the selected workspace from the Unite set.
     pub fn toggle_unite_member(&mut self) {
+        if self.view != OpenView::Projects {
+            return;
+        }
+        self.unite = true;
         let Some(path) = self.selected().map(|workspace| workspace.path.clone()) else {
             return;
         };
@@ -257,7 +408,7 @@ impl Open {
 
     /// Ask for an explicit cleanup confirmation.
     pub fn request_cleanup(&mut self) {
-        self.cleanup_confirming = true;
+        self.cleanup_confirming = self.view == OpenView::Projects;
     }
 
     /// Dismiss a cleanup confirmation without mutating the registry.
@@ -270,6 +421,9 @@ impl Open {
     /// This records only the entry path. The caller owns the actual registry
     /// mutation, so this view can never delete the workspace directory or data.
     pub fn request_unregister(&mut self) {
+        if self.view != OpenView::Projects {
+            return;
+        }
         self.unregistering_path = self.selected().map(|workspace| workspace.path.clone());
         self.unregister_confirmation.select_confirm();
     }
@@ -299,6 +453,7 @@ impl Open {
         self.workspaces
             .retain(|overview| !paths.iter().any(|path| path == &overview.workspace.path));
         self.unite_paths.retain(|path| !paths.contains(path));
+        crate::presentation::prune_recent_paths(&mut self.history, paths);
         self.cleanup_confirming = false;
         self.unregistering_path = None;
         self.unregister_confirmation.select_confirm();
@@ -323,6 +478,8 @@ impl Open {
             .iter_mut()
             .find(|current| current.workspace.path == workspace.path)
         else {
+            self.workspaces
+                .insert(0, WorkspaceOverview::new(workspace.clone(), 0, 0, 0));
             return;
         };
         current.workspace = workspace.clone();
@@ -338,21 +495,37 @@ impl Open {
     /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。移動で通知は消える。
     pub fn select_next(&mut self) {
         self.notice = None;
-        if self.filtered().is_empty() {
+        let len = self.visible_len();
+        if len == 0 {
             return;
         }
-        let len = self.filtered().len();
         self.selected_index = (self.selected_index + 1) % len;
     }
 
     /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。空一覧では何もしない。移動で通知は消える。
     pub fn select_prev(&mut self) {
         self.notice = None;
-        if self.filtered().is_empty() {
+        let len = self.visible_len();
+        if len == 0 {
             return;
         }
-        let len = self.filtered().len();
         self.selected_index = self.selected_index.checked_sub(1).unwrap_or(len - 1);
+    }
+}
+
+fn history_paths(recent: &Recent) -> Vec<std::path::PathBuf> {
+    crate::presentation::recent_paths(recent)
+}
+
+fn history_name(recent: &Recent) -> String {
+    match recent {
+        Recent::Workspace(overview) => overview.workspace.name.clone(),
+        Recent::Unite(unite) => unite
+            .members()
+            .iter()
+            .map(|m| m.workspace.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" · "),
     }
 }
 
@@ -392,7 +565,7 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
 
 /// 共通 [`TextInput`] の編集位置を明示した、常時フォーカスされる Filter 行。
 fn filter_line(open: &Open) -> String {
-    let input = &open.filter;
+    let input = open.input();
     // 共通 widget が input 全体を accent で描き、編集位置だけを block cursor にする。
     let accent = Role::Accent.style().bold();
     let value = format!(
@@ -409,7 +582,14 @@ fn filter_line(open: &Open) -> String {
             String::new()
         },
     );
-    format!("{} {value}", accent.paint("Filter:"))
+    format!(
+        "{} {value}",
+        accent.paint(if open.view == OpenView::Directory {
+            "Path:"
+        } else {
+            "Filter:"
+        })
+    )
 }
 
 /// 一覧に収める件数と、その先頭位置（`(start, capacity)`）を `budget` 行から決める。
@@ -455,26 +635,42 @@ fn overflow_line(arrow: &str, hidden: usize) -> Option<String> {
 /// `budget` はボディに使える行数で、溢れる workspace は [`viewport`] が scroll させる。
 fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> Vec<String> {
     let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
-    let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
+    let indent = |line: &str| {
+        format!(
+            "{left_pad}{}",
+            widgets::clip_to_width(line, BLOCK_WIDTH.min(width))
+        )
+    };
 
+    let modes = match open.view {
+        OpenView::Projects => "[Projects]  Recent  Directory",
+        OpenView::Recent => "Projects  [Recent]  Directory",
+        OpenView::Directory => "Projects  Recent  [Directory]",
+    };
     let mut lines = vec![
-        indent(&Role::Success.style().bold().paint("Workspaces")),
-        indent(&Style::new().dim().paint(if open.is_unite() {
-            "Mode: Unite — Space marks project tabs"
-        } else {
-            "Mode: Single — Tab enables multiple project tabs"
-        })),
+        indent(&Role::Success.style().bold().paint(modes)),
+        indent(
+            &Style::new()
+                .dim()
+                .paint("Tab switches view · Space selects multiple projects"),
+        ),
+        String::new(),
+        indent(&filter_line(open)),
         String::new(),
     ];
-
-    lines.push(indent(&filter_line(open)));
-    lines.push(String::new());
-
+    if open.view == OpenView::Directory {
+        lines.push(indent("Enter an existing directory to register and open."));
+        return lines;
+    }
+    if open.view == OpenView::Recent {
+        lines.extend(history_lines(width, open, budget));
+        return lines;
+    }
     if open.is_empty() {
         lines.push(indent(
             &Style::new()
                 .dim()
-                .paint("No workspaces yet — create one from New."),
+                .paint("No projects yet — Tab to Directory to add one."),
         ));
         return lines;
     }
@@ -555,7 +751,7 @@ pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Ut
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{Open, overflow_line, render, viewport};
+    use super::{Open, Recent, history_lines, overflow_line, render, viewport};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
     use std::path::Path;
@@ -616,6 +812,52 @@ mod tests {
         let open = Open::new(Vec::new());
         assert!(open.is_empty());
         assert_eq!(open.selected(), None);
+    }
+
+    #[test]
+    fn recent_picker_renders_groups_scrolls_and_never_unregisters_a_hidden_project() {
+        let members = vec![
+            WorkspaceOverview::new(workspace("alpha", 1), 0, 0, 0),
+            WorkspaceOverview::new(workspace("beta", 2), 0, 0, 0),
+        ];
+        let mut history = vec![Recent::Unite(
+            usagi_core::domain::recent::UniteOverview::new(members),
+        )];
+        history.extend((0..12).map(|i| {
+            Recent::Workspace(WorkspaceOverview::new(
+                workspace(&format!("item-{i}"), i),
+                0,
+                0,
+                0,
+            ))
+        }));
+        let mut open = Open::new(vec![workspace("hidden", 1)]).with_history(history);
+        open.cycle_view();
+        assert!(rendered(&open).contains("alpha · beta"));
+        assert_eq!(
+            open.chosen_paths(),
+            vec![std::path::PathBuf::from("/tmp/alpha"), "/tmp/beta".into()]
+        );
+        assert!(history_lines(80, &open, 6).join("\n").contains('↓'));
+        open.select_prev();
+        assert!(history_lines(80, &open, 6).join("\n").contains('↑'));
+        open.toggle_unite_member();
+        open.request_unregister();
+        assert!(open.unite_paths().is_empty());
+        assert!(open.unregistering_path().is_none());
+        let group_time = open.history[0].updated_at();
+        open.remove_paths(&["/tmp/alpha".into()]);
+        assert_eq!(
+            open.chosen_paths(),
+            vec![std::path::PathBuf::from("/tmp/beta")]
+        );
+        assert_eq!(open.history[0].updated_at(), group_time);
+        open.remove_paths(&["/tmp/beta".into()]);
+        assert_eq!(open.history.len(), 12);
+        open.cycle_view();
+        assert!(open.chosen_paths().is_empty());
+        open.select_next();
+        open.select_prev();
     }
 
     #[test]
@@ -702,8 +944,8 @@ mod tests {
     fn render_lists_workspaces_with_their_relative_time_and_selected_path() {
         let open = Open::new(vec![workspace("alpha", 11), workspace("beta", 180)]);
         let joined = rendered(&open);
-        assert!(joined.contains("Open Workspace"));
-        assert!(joined.contains("Workspaces"));
+        assert!(joined.contains("Open / add projects"));
+        assert!(joined.contains("Projects"));
         assert!(joined.contains("alpha"));
         assert!(joined.contains("beta"));
         assert!(joined.contains("11min ago"));
@@ -734,7 +976,7 @@ mod tests {
     #[test]
     fn render_shows_a_placeholder_when_there_are_no_workspaces() {
         let joined = rendered(&Open::new(Vec::new()));
-        assert!(joined.contains("No workspaces yet"));
+        assert!(joined.contains("No projects yet"));
         assert!(joined.contains("Filter:"));
         assert!(joined.contains("type to filter"));
     }
@@ -844,7 +1086,7 @@ mod tests {
         let footer = rendered(&Open::new(vec![workspace("alpha", 1)]));
 
         assert!(footer.contains("Ctrl-X unregister"));
-        assert!(footer.contains("Tab mode"));
+        assert!(footer.contains("Tab view"));
         assert!(footer.contains("Space mark"));
         assert!(!footer.contains("C cleanup"));
     }
@@ -862,7 +1104,7 @@ mod tests {
         assert_eq!(open.workspaces()[0].name, "Alpha");
         let joined = rendered(&open);
         assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
-        assert!(joined.contains("Workspaces"));
+        assert!(joined.contains("Projects"));
         assert!(!joined.contains("A–Z"));
     }
 

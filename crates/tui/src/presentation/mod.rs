@@ -24,7 +24,6 @@ mod terminal_io;
 pub mod theme;
 pub mod views;
 pub mod widgets;
-mod work_run;
 pub mod workspace_deck;
 mod workspace_io;
 pub mod workspace_runtime;
@@ -51,7 +50,7 @@ use terminal_io::{
 use terminal_io::{
     PaneLaunchOutcome, close_focused_terminal_pane, copy_terminal_selection,
     handle_terminal_pointer, key_to_terminal_bytes, key_to_terminal_bytes_for_mode,
-    poll_and_project_terminals, run_pane_launch, select_root_terminal_tab, terminal_geometry,
+    poll_and_project_terminals, select_root_terminal_tab, terminal_geometry,
 };
 
 use flow_steps::{
@@ -91,19 +90,7 @@ use director::{
     open_director_from_new_button, select_director_tab_and_activate,
 };
 #[cfg(test)]
-use director::{
-    director_organization, select_director_agent, select_director_selection, select_director_tab,
-};
-
-#[cfg(test)]
-use work_run::{
-    UnavailableWorkRunPort, handle_work_run_control_input, handle_work_run_list_input,
-    validate_work_run_snapshot,
-};
-use work_run::{
-    WorkRunControlInput, WorkRunLaneCompletion, handle_work_run_control_input_with_ui,
-    spawn_work_run_control_job, spawn_work_run_observation_job, work_run_control_projection,
-};
+use director::{director_organization, select_director_tab};
 
 #[cfg(test)]
 use garden::GardenProjectVisit;
@@ -140,8 +127,7 @@ use usagi_core::domain::id::{
 use usagi_core::domain::id::{RequestId, UserDecisionId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
-use usagi_core::domain::settings::{IconMode, WorkMode};
-use usagi_core::domain::supervisor::{MAX_SUPERVISOR_WORKSPACE_SNAPSHOT_RUNS, SupervisorRunId};
+use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 #[cfg(test)]
 use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -155,7 +141,7 @@ use crate::presentation::theme::{Color, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::director_drawer::{
     self, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
-    DirectorOrganizationRow, WorkRunControlProjection,
+    DirectorOrganizationRow,
 };
 use crate::presentation::views::key_help::{self, Context as KeyHelpContext};
 use crate::presentation::views::new::{DirectoryCompletion, Field, New};
@@ -163,7 +149,6 @@ use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::pr_modal;
 use crate::presentation::views::root_terminal_drawer;
 use crate::presentation::views::welcome::{MenuAction, Welcome};
-use crate::presentation::views::work_run::WorkRunProjection;
 use crate::presentation::views::workspace::{
     self, HomeHeaderAction, HomeProjection, ProjectedSession, TerminalViewProjection,
     Workspace as WorkspaceView, garden_click_at, garden_fits, home_header_action_at, render_home,
@@ -183,10 +168,10 @@ use crate::usecase::application::agent_tab_intent::{
     AgentTabProjection,
 };
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState,
-    DirectorConsoleParent, DirectorNew, DirectorRoute, Effect, ExitChoice, Feedback, GardenClick,
-    HomeMode, NewRequest, Notice, OperationResult, Overlay, PendingToken, Route,
-    SessionRoleProjection, Target, WorkspaceDrawerFocus,
+    AppEvent, AppKey, AppState, BackendEvent, BranchChoice, DecisionOverlayState, DirectorNew,
+    DirectorRoute, Effect, ExitChoice, Feedback, GardenClick, HomeMode, NewRequest, Notice,
+    OperationResult, Overlay, PendingToken, Route, SessionRoleProjection, Target,
+    WorkspaceDrawerFocus,
 };
 #[cfg(test)]
 use crate::usecase::application::controller::{
@@ -222,11 +207,6 @@ use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSel
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
-};
-use crate::usecase::application::work_run_control::{
-    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControl, WorkRunControlAction, WorkRunControlError,
-    WorkRunControlMode, WorkRunControlOutcome, WorkRunControlRequest, WorkRunControlResult,
-    WorkRunPort,
 };
 use crate::usecase::application::{Key, Terminal, open_failure_notice};
 use crate::usecase::overview::SessionCommand;
@@ -346,7 +326,7 @@ fn workspace_foreground_input_owner(runtime: &WorkspaceRuntime) -> WorkspaceFore
         && runtime.state().workspace_drawer_focus() == Some(WorkspaceDrawerFocus::Director)
         && (runtime.state().director_launching().is_some()
             || !matches!(runtime.state().director_new(), DirectorNew::Idle)
-            || !matches!(runtime.state().director_route(), DirectorRoute::Console(_)))
+            || !matches!(runtime.state().director_route(), DirectorRoute::Console))
     {
         WorkspaceForegroundInputOwner::DirectorPicker
     } else {
@@ -470,10 +450,6 @@ pub struct ControllerBackendComposition {
     /// observes the *other* open projects' Agent inventory, so it never shares
     /// a connection with this workspace's own lanes.
     pub garden_inventory: Box<dyn GardenInventoryPort>,
-    /// Dedicated serialized lane for daemon-owned `SupervisorRun` observation
-    /// and human control. Serialization prevents an older snapshot from
-    /// overtaking a control response in the UI.
-    pub work_runs: Box<dyn WorkRunPort>,
     pub agent_tab_intents: Box<dyn AgentTabIntentPort>,
     pub external_terminal: Box<dyn ExternalTerminalPort>,
     pub metrics: Box<dyn MetricsPort>,
@@ -549,13 +525,19 @@ struct UnavailableBackendPort;
 
 #[cfg(test)]
 impl BackendTargetStorePort for UnavailableBackendPort {
-    fn load_notes(&mut self, _: Target, completions: Completions) {
+    fn load_notes(
+        &mut self,
+        _: Target,
+        _: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    ) {
         unavailable_completion(&completions, "notes are unavailable");
     }
     fn save_notes(
         &mut self,
         _: Target,
         _: usagi_core::domain::note::Scratchpad,
+        _: usagi_core::domain::id::RequestId,
         completions: Completions,
     ) {
         unavailable_completion(&completions, "notes are unavailable");
@@ -795,7 +777,6 @@ struct WorkspaceEntryPolicy {
     available_models: AvailableAgentModels,
     default_model: usagi_core::domain::settings::DefaultModel,
     default_branch: Option<String>,
-    work_mode: usagi_core::domain::settings::WorkMode,
     icon_mode: usagi_core::domain::settings::IconMode,
 }
 
@@ -805,7 +786,6 @@ impl Default for WorkspaceEntryPolicy {
             available_models: AvailableAgentModels::all(),
             default_model: usagi_core::domain::settings::DefaultModel::default(),
             default_branch: None,
-            work_mode: usagi_core::domain::settings::WorkMode::default(),
             icon_mode: usagi_core::domain::settings::IconMode::default(),
         }
     }
@@ -991,9 +971,6 @@ const GARDEN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::fro
 /// unbounded tab list.
 const MAX_OBSERVED_PROJECTS: usize = 16;
 
-const WORK_RUN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2_000);
-const WORK_RUN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5_000);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreJobOutcome {
     Applied,
@@ -1111,10 +1088,7 @@ fn run_workspace_config(
             continue;
         }
         if key == Key::Help {
-            help = Some(key_help::State::new(
-                config_help_context(&form),
-                WorkMode::Classic,
-            ));
+            help = Some(key_help::State::new(config_help_context(&form)));
             continue;
         }
         match step_workspace_config(&mut form, key, settings) {
@@ -1191,6 +1165,7 @@ pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
         // A focused palette / create form intercepts these before the
         // reducer, so caret motion never reaches this navigation branch.
         Key::LineStart | Key::Home | Key::Char('\u{1}') => AppKey::CtrlA,
+        Key::Char('\u{13}') => AppKey::SaveRoles,
         Key::Char(character) => AppKey::Char(character),
         Key::Quit => AppKey::CtrlC,
         Key::CtrlQ => AppKey::CtrlQ,
@@ -1559,6 +1534,7 @@ struct HomeFrameMaterial {
     agent_launch_error: Option<String>,
     /// Failed-delete session label and focused Yes/No answer.
     force_remove_confirmation: Option<(String, bool)>,
+    note_editor: Option<crate::usecase::application::controller::NoteEditor>,
     environment_editor: Option<crate::usecase::application::controller::EnvironmentEditor>,
     role_editor: Option<crate::usecase::application::controller::RoleEditor>,
     /// Minute-resolution wall clock behind relative session labels. Garden
@@ -1575,11 +1551,6 @@ impl HomeFrameMaterial {
         self.projection = self
             .projection
             .with_agent_inventory_and_panes(inventory, panes);
-        self
-    }
-
-    fn with_work_runs(mut self, runs: WorkRunProjection) -> Self {
-        self.projection = self.projection.with_work_runs(runs);
         self
     }
 
@@ -1642,11 +1613,10 @@ fn apply_agent_launch_completion(
         Err(message) => {
             let _ = runtime.fail_pane(target, operation, message.clone());
             let _ = runtime.apply_event(AppEvent::AgentLaunchFailed(Notice::new(message)));
-            complete_director_launch(runtime, target, operation, None, false);
+            complete_director_launch(runtime, target, operation, false);
             return;
         }
     };
-    let supervisor_run_id = admission.supervisor_run_id;
     let terminal = admission.terminal;
     if let Some(continuation) = admission.continuation {
         let select =
@@ -1674,7 +1644,7 @@ fn apply_agent_launch_completion(
     } else {
         let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
     }
-    complete_director_launch(runtime, target, operation, supervisor_run_id, true);
+    complete_director_launch(runtime, target, operation, true);
 }
 
 /// Apply one explicit per-tab resume answer (#510).
@@ -1889,6 +1859,9 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
 /// Only stable session rows are remembered; transient action rows remain local
 /// to the controller that owns them.
 fn remember_workspace_session_focus(deck: &mut WorkspaceDeck, state: &AppState) {
+    if state.session_order_revision() != 0 {
+        deck.remember_session_order(state.workspace(), state.sessions());
+    }
     if let crate::usecase::application::controller::Selection::Target(Target::Session(session)) =
         state.selected()
     {
@@ -2305,7 +2278,6 @@ struct WorkspaceHelpState {
     deck: WorkspaceDeckHelp,
     overlay: Option<Overlay>,
     decision_answer_open: bool,
-    work_run_mode: WorkRunControlMode,
     director_new_open: bool,
     director_route: DirectorRoute,
     drawer_focus: Option<WorkspaceDrawerFocus>,
@@ -2341,29 +2313,6 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::Garden => KeyHelpContext::Garden,
         };
     }
-    if state.drawer_focus == Some(WorkspaceDrawerFocus::Director)
-        && state.work_run_mode == WorkRunControlMode::Submitting
-    {
-        return KeyHelpContext::WorkRunSubmitting;
-    }
-    if state.drawer_focus == Some(WorkspaceDrawerFocus::Director)
-        && matches!(
-            state.director_route,
-            DirectorRoute::WorkRuns | DirectorRoute::RunOverview(_)
-        )
-    {
-        match state.work_run_mode {
-            WorkRunControlMode::List if state.director_route == DirectorRoute::WorkRuns => {
-                return KeyHelpContext::WorkRuns;
-            }
-            WorkRunControlMode::List => return KeyHelpContext::RunOverview,
-            WorkRunControlMode::ResolveEscalation => return KeyHelpContext::WorkRunEscalation,
-            WorkRunControlMode::ConfirmCancel
-            | WorkRunControlMode::ConfirmDelete
-            | WorkRunControlMode::Retry => return KeyHelpContext::WorkRunConfirmation,
-            WorkRunControlMode::Submitting | WorkRunControlMode::Closed => {}
-        }
-    }
     if state.director_new_open && state.drawer_focus == Some(WorkspaceDrawerFocus::Director) {
         return KeyHelpContext::DirectorNew;
     }
@@ -2371,14 +2320,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
         Some(WorkspaceDrawerFocus::Director) => {
             return match state.director_route {
                 DirectorRoute::Organization => KeyHelpContext::Organization,
-                DirectorRoute::WorkRuns => KeyHelpContext::WorkRuns,
-                DirectorRoute::RunOverview(_) => KeyHelpContext::RunOverview,
-                DirectorRoute::Console(DirectorConsoleParent::Organization) => {
-                    KeyHelpContext::DirectorConsole
-                }
-                DirectorRoute::Console(DirectorConsoleParent::RunOverview(_)) => {
-                    KeyHelpContext::WorkRunConsole
-                }
+                DirectorRoute::Console => KeyHelpContext::DirectorConsole,
             };
         }
         Some(WorkspaceDrawerFocus::Terminal) => return KeyHelpContext::RootShell,
@@ -2394,11 +2336,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
 /// Resolve the frontmost visible surface before Help opens. The resulting
 /// value is held for the lifetime of that Help overlay, so background daemon
 /// updates cannot make the shortcut list jump while it is being read.
-fn workspace_help_context(
-    deck: &WorkspaceDeck,
-    runtime: &WorkspaceRuntime,
-    work_run_control: &WorkRunControl,
-) -> KeyHelpContext {
+fn workspace_help_context(deck: &WorkspaceDeck, runtime: &WorkspaceRuntime) -> KeyHelpContext {
     let state = runtime.state();
     resolve_workspace_help_context(WorkspaceHelpState {
         deck: WorkspaceDeckHelp::new(deck.add_overlay_open(), deck.overlay_open()),
@@ -2407,7 +2345,6 @@ fn workspace_help_context(
             .decision_overlay()
             .and_then(DecisionOverlayState::editor)
             .is_some(),
-        work_run_mode: work_run_control.mode(),
         director_new_open: state.director_launching().is_some()
             || state.director_new() != DirectorNew::Idle,
         director_route: state.director_route(),
@@ -2421,19 +2358,13 @@ fn workspace_help_context(
 /// `Ctrl-?` remains global. Plain `?` is the discoverable shortcut on an
 /// unobscured management Home, while a focused live terminal preserves plain
 /// `?` for the PTY and uses the `Ctrl-O ?` action instead.
-fn opens_workspace_help(
-    key: &Key,
-    deck: &WorkspaceDeck,
-    runtime: &WorkspaceRuntime,
-    work_run_control: &WorkRunControl,
-) -> bool {
+fn opens_workspace_help(key: &Key, deck: &WorkspaceDeck, runtime: &WorkspaceRuntime) -> bool {
     match key {
         Key::Help | Key::Live(LiveTerminalAction::KeyboardHelp) => true,
         Key::Char('?') => {
             !deck.overlay_open()
                 && runtime.state().overlay().is_none()
                 && runtime.state().workspace_drawer_focus().is_none()
-                && work_run_control.mode() == WorkRunControlMode::Closed
                 && !runtime.wants_live_input()
         }
         _ => false,
@@ -2527,7 +2458,6 @@ pub(crate) fn run_workspace_controller_with_backend_and_settings(
         WorkspaceEntryPolicy {
             default_model: settings.default_model,
             default_branch: settings.default_branch.clone(),
-            work_mode: settings.work_mode,
             icon_mode: settings.icon_mode,
             ..WorkspaceEntryPolicy::default()
         },
@@ -2568,7 +2498,6 @@ pub(crate) fn run_workspace_controller_with_backend_and_config(
             available_models,
             default_model: effective.default_model,
             default_branch: effective.default_branch.clone(),
-            work_mode: effective.work_mode,
             icon_mode: effective.icon_mode,
         },
         Some(WorkspaceConfigContext {
@@ -2638,7 +2567,6 @@ impl ControllerBackendFactory for FixedBackendFactory {
                 .unwrap_or_else(|| Box::new(UnavailableAgentCommandPort)),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
             garden_inventory: Box::new(UnavailableGardenInventoryPort),
-            work_runs: Box::new(UnavailableWorkRunPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics: self
@@ -2723,7 +2651,54 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
             .filter(|workspace| !projected.contains(&workspace.path))
             .map(|workspace| WorkspaceOverview::new(workspace, 0, 0, 0)),
     );
-    Open::with_overviews(open_overviews)
+    Open::with_overviews(open_overviews).with_history(recent.to_vec())
+}
+
+fn refresh_entry_projects(
+    loader: &mut dyn WorkspaceLoader,
+    welcome: &mut Welcome,
+    open: &mut Open,
+) {
+    match loader.recent_projects() {
+        Ok(recent) => {
+            *open = open_from_registry(open.workspaces(), &recent);
+            welcome.set_recent(recent);
+        }
+        Err(error) => welcome.set_notice(Some(format!("Could not read recent projects: {error}"))),
+    }
+    match loader.last_projects() {
+        Ok(Some(last)) => welcome.set_last_projects(Some(last)),
+        Ok(None) => {}
+        Err(error) => {
+            welcome.set_last_projects(None);
+            welcome.set_notice(Some(format!("Could not read last projects: {error}")));
+        }
+    }
+}
+
+fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
+    *recent = recent
+        .drain(..)
+        .filter_map(|recent| match recent {
+            Recent::Workspace(overview) => {
+                (!paths.contains(&overview.workspace.path)).then_some(Recent::Workspace(overview))
+            }
+            Recent::Unite(unite) => {
+                let updated_at = unite.updated_at()?;
+                let members = unite
+                    .members()
+                    .iter()
+                    .filter(|member| !paths.contains(&member.workspace.path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!members.is_empty()).then(|| {
+                    Recent::Unite(usagi_core::domain::recent::UniteOverview::with_updated_at(
+                        members, updated_at,
+                    ))
+                })
+            }
+        })
+        .collect();
 }
 
 #[cfg(test)]
@@ -2818,6 +2793,7 @@ fn open_snapshot_via_controller(
     available_models: AvailableAgentModels,
 ) -> io::Result<WorkspaceStep> {
     settings.select_workspace(&snapshot.workspace.path)?;
+    remember_project_deck(loader, deck);
     let effective = usagi_core::usecase::settings::read_for_workspace_entry(settings);
     drive_workspace_controller(
         term,
@@ -2833,7 +2809,6 @@ fn open_snapshot_via_controller(
             available_models,
             default_model: effective.default_model,
             default_branch: effective.default_branch.clone(),
-            work_mode: effective.work_mode,
             icon_mode: effective.icon_mode,
         },
         Some(WorkspaceConfigContext {
@@ -2905,17 +2880,32 @@ fn enter_workspace_deck(
             backend_factory,
             available_models,
         )?;
+        remember_project_deck(loader, &mut deck);
         match step {
             WorkspaceStep::Quit => return Ok(Some(Exit::Quit)),
             WorkspaceStep::Back => return Ok(None),
             WorkspaceStep::Activate(prepared) => {
                 deck.activate_snapshot(&prepared);
+                remember_project_deck(loader, &mut deck);
                 if deck.slots().len() > 1 {
                     let _ = loader.record_unite(&deck.paths());
                 }
                 snapshot = *prepared;
             }
         }
+    }
+}
+
+fn remember_project_deck(loader: &mut dyn WorkspaceLoader, deck: &mut WorkspaceDeck) {
+    if deck.slots().is_empty() {
+        return;
+    }
+    let projects = usagi_core::domain::recent::LastProjectSet {
+        paths: deck.paths(),
+        active: deck.active_path().to_path_buf(),
+    };
+    if let Err(error) = loader.record_last_projects(&projects) {
+        deck.set_notice(format!("Could not save last projects: {error}"));
     }
 }
 
@@ -2999,7 +2989,6 @@ impl ControllerBackendFactory for CompatibilityBackendFactory<'_, '_, '_> {
             ),
             restore_connection: Box::new(UnavailableRestoreConnectionPort),
             garden_inventory: Box::new(UnavailableGardenInventoryPort),
-            work_runs: Box::new(UnavailableWorkRunPort),
             agent_tab_intents: Box::new(UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics,

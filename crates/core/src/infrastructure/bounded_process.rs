@@ -2,10 +2,13 @@
 //!
 //! The runner owns the complete child lifecycle: each probe gets a fresh
 //! process group, bounded output capture, a deadline, and TERM -> KILL -> reap
-//! cleanup. Results are deliberately closed and never contain argv, paths,
+//! cleanup. Public observations are closed and never contain argv, paths,
 //! environment values, credentials, raw OS errors, or failed command output.
+//! The trusted internal execution API also preserves completed nonzero output
+//! and can wait for long-running effects without an execution deadline.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -33,7 +36,7 @@ pub enum ChildObservation {
     SpawnFailed,
     /// The child exited nonzero.
     ExitFailure,
-    /// The deadline elapsed and the complete process group was reaped.
+    /// The deadline elapsed or inherited pipes could not be closed in time.
     TimedOut,
     /// stdout or stderr exceeded the configured capture bound.
     OutputTooLarge,
@@ -58,6 +61,40 @@ pub enum ChildOutputObservation {
     ObservationFailed,
 }
 
+/// Captured bytes from a completed command, including a nonzero exit.
+/// Callers of [`execute_command_output`] must sanitize these before publishing
+/// diagnostics: unlike the public-observation API, these may include stderr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildCommandOutput {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Closed failures of a bounded execution that did not yield complete output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildOutputError {
+    SpawnFailed,
+    TimedOut,
+    IncompleteOutput,
+    OutputTooLarge,
+    ObservationFailed,
+}
+
+impl std::fmt::Display for ChildOutputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::SpawnFailed => "command could not be started",
+            Self::TimedOut => "command observation timed out",
+            Self::IncompleteOutput => "command output remained incomplete after process exit",
+            Self::OutputTooLarge => "command output exceeded the capture limit",
+            Self::ObservationFailed => "command observation failed",
+        })
+    }
+}
+
+impl std::error::Error for ChildOutputError {}
+
 /// Safe result of a bounded command fed through stdin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildInputExecution {
@@ -71,9 +108,10 @@ pub enum ChildInputExecution {
 }
 
 #[derive(Debug)]
-struct Capture {
-    bytes: Vec<u8>,
-    exceeded: bool,
+pub(crate) struct Capture {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) exceeded: bool,
+    pub(crate) cancelled: bool,
 }
 
 /// Runs one public, non-interactive CLI probe under `policy`.
@@ -83,10 +121,35 @@ struct Capture {
 /// limited to `output_limit` bytes per stream.
 #[must_use]
 pub fn observe(program: &str, arguments: &[&str], policy: ChildPolicy) -> ChildObservation {
+    observe_until(program, arguments, policy, &NEVER_ABORTED)
+}
+
+/// [`observe`], with an owner that can end the probe before its deadline.
+///
+/// Setting `abort` brings the deadline forward: the process group is
+/// terminated and reaped exactly as on timeout, and the result is
+/// [`ChildObservation::TimedOut`]. A long per-product budget therefore never
+/// holds up an owner that is shutting down.
+#[must_use]
+pub fn observe_until(
+    program: &str,
+    arguments: &[&str],
+    policy: ChildPolicy,
+    abort: &AtomicBool,
+) -> ChildObservation {
     let mut command = Command::new(program);
     command.args(arguments);
-    normalize_observation(observe_command_output(command, policy))
+    normalize_observation(public_output(execute_command_output_until(
+        command,
+        Some(policy.timeout),
+        policy.terminate_grace,
+        policy.output_limit,
+        abort,
+    )))
 }
+
+/// The abort flag of an observation no owner can end early.
+static NEVER_ABORTED: AtomicBool = AtomicBool::new(false);
 
 fn normalize_observation(observation: ChildOutputObservation) -> ChildObservation {
     match observation {
@@ -109,76 +172,166 @@ fn normalize_observation(observation: ChildOutputObservation) -> ChildObservatio
 /// passing the command; this function owns stdin/stdout/stderr and process-group
 /// configuration from that point onward.
 #[must_use]
-#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=preserves_machine_output_bytes,normalizes_success_and_safe_failure_states,timeout_terminates_the_process_group_and_reaps_the_child
-pub fn observe_command_output(mut command: Command, policy: ChildPolicy) -> ChildOutputObservation {
+pub fn observe_command_output(command: Command, policy: ChildPolicy) -> ChildOutputObservation {
+    public_output(execute_command_output(command, policy))
+}
+
+fn public_output(result: Result<ChildCommandOutput, ChildOutputError>) -> ChildOutputObservation {
+    match result {
+        Ok(output) if output.success => ChildOutputObservation::Success {
+            stdout: output.stdout,
+            stderr: output.stderr,
+        },
+        Ok(_) => ChildOutputObservation::ExitFailure,
+        Err(ChildOutputError::SpawnFailed) => ChildOutputObservation::SpawnFailed,
+        Err(ChildOutputError::TimedOut | ChildOutputError::IncompleteOutput) => {
+            ChildOutputObservation::TimedOut
+        }
+        Err(ChildOutputError::OutputTooLarge) => ChildOutputObservation::OutputTooLarge,
+        Err(ChildOutputError::ObservationFailed) => ChildOutputObservation::ObservationFailed,
+    }
+}
+
+/// Executes a trusted command with bounded time, capture, and pipe cleanup.
+/// Nonzero exits retain their captured output for internal adapters such as Git;
+/// public readiness probes should use [`observe_command_output`] instead.
+///
+/// # Errors
+///
+/// Returns a closed failure when spawning, waiting, capture, or cleanup fails.
+pub fn execute_command_output(
+    command: Command,
+    policy: ChildPolicy,
+) -> Result<ChildCommandOutput, ChildOutputError> {
+    execute_command_output_until(
+        command,
+        Some(policy.timeout),
+        policy.terminate_grace,
+        policy.output_limit,
+        &NEVER_ABORTED,
+    )
+}
+
+/// Executes a trusted command until it exits, with bounded capture and cleanup.
+///
+/// Long-running background effects such as worktree removal must not be killed
+/// solely because their duration depends on the amount of data to remove.
+/// Output overflow still terminates the process group, and inherited pipes are
+/// reclaimed with bounded cleanup after the main process exits.
+///
+/// # Errors
+///
+/// Returns a closed failure when spawning, waiting, capture, or cleanup fails.
+pub fn execute_command_output_without_timeout(
+    command: Command,
+    terminate_grace: Duration,
+    output_limit: usize,
+) -> Result<ChildCommandOutput, ChildOutputError> {
+    execute_command_output_until(command, None, terminate_grace, output_limit, &NEVER_ABORTED)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=preserves_machine_output_bytes,normalizes_success_and_safe_failure_states,escaped_descendant_cannot_hold_capture_or_input_workers,abort_ends_the_probe_before_its_deadline
+fn execute_command_output_until(
+    mut command: Command,
+    timeout: Option<Duration>,
+    terminate_grace: Duration,
+    output_limit: usize,
+    abort: &AtomicBool,
+) -> Result<ChildCommandOutput, ChildOutputError> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let Ok(mut child) = command.spawn() else {
-        return ChildOutputObservation::SpawnFailed;
-    };
+    let mut child = command.spawn().map_err(|_| ChildOutputError::SpawnFailed)?;
     let pid = child.id();
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        terminate_and_reap(&mut child, policy.terminate_grace);
-        return ChildOutputObservation::ObservationFailed;
+        terminate_and_reap(&mut child, terminate_grace);
+        return Err(ChildOutputError::ObservationFailed);
     };
+    if nonblocking(stdout.as_raw_fd())
+        .and_then(|()| nonblocking(stderr.as_raw_fd()))
+        .is_err()
+    {
+        terminate_and_reap(&mut child, terminate_grace);
+        return Err(ChildOutputError::ObservationFailed);
+    }
     let output_exceeded = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
     let stdout_exceeded = Arc::clone(&output_exceeded);
+    let stdout_cancelled = Arc::clone(&cancelled);
     let stdout = thread::spawn(move || {
         let mut stdout = stdout;
-        capture(&mut stdout, policy.output_limit, &stdout_exceeded)
+        capture(
+            &mut stdout,
+            output_limit,
+            &stdout_exceeded,
+            &stdout_cancelled,
+        )
     });
     let stderr_exceeded = Arc::clone(&output_exceeded);
+    let stderr_cancelled = Arc::clone(&cancelled);
     let stderr = thread::spawn(move || {
         let mut stderr = stderr;
-        capture(&mut stderr, policy.output_limit, &stderr_exceeded)
+        capture(
+            &mut stderr,
+            output_limit,
+            &stderr_exceeded,
+            &stderr_cancelled,
+        )
     });
 
-    let deadline = Instant::now() + policy.timeout;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if output_exceeded.load(Ordering::Acquire) => {
-                terminate_and_reap(&mut child, policy.terminate_grace);
-                break Err(ChildOutputObservation::OutputTooLarge);
+        match child_exited(&child) {
+            Ok(true) => break Ok(()),
+            Ok(false) if output_exceeded.load(Ordering::Acquire) => {
+                terminate_and_reap(&mut child, terminate_grace);
+                break Err(ChildOutputError::OutputTooLarge);
             }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(
-                    Duration::from_millis(5)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
+            Ok(false)
+                if deadline.is_none_or(|deadline| Instant::now() < deadline)
+                    && !abort.load(Ordering::Acquire) =>
+            {
+                thread::sleep(deadline.map_or(Duration::from_millis(5), |deadline| {
+                    Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now()))
+                }));
             }
-            Ok(None) => {
-                terminate_and_reap(&mut child, policy.terminate_grace);
-                break Err(ChildOutputObservation::TimedOut);
+            Ok(false) => {
+                terminate_and_reap(&mut child, terminate_grace);
+                break Err(ChildOutputError::TimedOut);
             }
             Err(_) => {
-                terminate_and_reap(&mut child, policy.terminate_grace);
-                break Err(ChildOutputObservation::ObservationFailed);
+                terminate_and_reap(&mut child, terminate_grace);
+                break Err(ChildOutputError::ObservationFailed);
             }
         }
     };
-    close_descendant_resources(pid, &stdout, &stderr, None, policy.terminate_grace);
+    let status = match status {
+        Ok(()) => {
+            close_descendant_resources(pid, &stdout, &stderr, None, terminate_grace);
+            child.wait().or(Err(ChildOutputError::ObservationFailed))
+        }
+        Err(error) => Err(error),
+    };
+    cancelled.store(true, Ordering::Release);
     let stdout = stdout.join();
     let stderr = stderr.join();
-    let Ok(status) = status else {
-        return status.unwrap_err();
-    };
+    let status = status?;
     let (Ok(stdout), Ok(stderr)) = (stdout, stderr) else {
-        return ChildOutputObservation::ObservationFailed;
+        return Err(ChildOutputError::ObservationFailed);
     };
     if stdout.exceeded || stderr.exceeded {
-        return ChildOutputObservation::OutputTooLarge;
+        return Err(ChildOutputError::OutputTooLarge);
     }
-    if !status.success() {
-        return ChildOutputObservation::ExitFailure;
+    if stdout.cancelled || stderr.cancelled {
+        return Err(ChildOutputError::IncompleteOutput);
     }
-    ChildOutputObservation::Success {
+    Ok(ChildCommandOutput {
+        success: status.success(),
         stdout: stdout.bytes,
         stderr: stderr.bytes,
-    }
+    })
 }
 
 /// Runs a non-interactive command with bounded input, output, lifetime, and
@@ -212,31 +365,53 @@ pub fn write_stdin_bounded(
         terminate_and_reap(&mut child, policy.terminate_grace);
         return ChildInputExecution::ObservationFailed;
     };
+    if nonblocking(stdin.as_raw_fd())
+        .and_then(|()| nonblocking(stdout.as_raw_fd()))
+        .and_then(|()| nonblocking(stderr.as_raw_fd()))
+        .is_err()
+    {
+        terminate_and_reap(&mut child, policy.terminate_grace);
+        return ChildInputExecution::ObservationFailed;
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let writer_cancelled = Arc::clone(&cancelled);
     let input = input.to_vec();
-    let writer = thread::spawn(move || stdin.write_all(&input).is_ok());
+    let writer = thread::spawn(move || write_input(&mut stdin, &input, &writer_cancelled));
     let output_exceeded = Arc::new(AtomicBool::new(false));
     let stdout_exceeded = Arc::clone(&output_exceeded);
+    let stdout_cancelled = Arc::clone(&cancelled);
     let stdout = thread::spawn(move || {
         let mut stdout = stdout;
-        capture(&mut stdout, policy.output_limit, &stdout_exceeded)
+        capture(
+            &mut stdout,
+            policy.output_limit,
+            &stdout_exceeded,
+            &stdout_cancelled,
+        )
     });
     let stderr_exceeded = Arc::clone(&output_exceeded);
+    let stderr_cancelled = Arc::clone(&cancelled);
     let stderr = thread::spawn(move || {
         let mut stderr = stderr;
-        capture(&mut stderr, policy.output_limit, &stderr_exceeded)
+        capture(
+            &mut stderr,
+            policy.output_limit,
+            &stderr_exceeded,
+            &stderr_cancelled,
+        )
     });
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if output_exceeded.load(Ordering::Acquire) => {
+        match child_exited(&child) {
+            Ok(true) => break Ok(()),
+            Ok(false) if output_exceeded.load(Ordering::Acquire) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildInputExecution::OutputTooLarge);
             }
-            Ok(None) if Instant::now() < deadline => thread::sleep(
+            Ok(false) if Instant::now() < deadline => thread::sleep(
                 Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
             ),
-            Ok(None) => {
+            Ok(false) => {
                 terminate_and_reap(&mut child, policy.terminate_grace);
                 break Err(ChildInputExecution::TimedOut);
             }
@@ -246,20 +421,48 @@ pub fn write_stdin_bounded(
             }
         }
     };
-    close_descendant_resources(pid, &stdout, &stderr, Some(&writer), policy.terminate_grace);
+    let status = match status {
+        Ok(()) => {
+            close_descendant_resources(
+                pid,
+                &stdout,
+                &stderr,
+                Some(&writer),
+                policy.terminate_grace,
+            );
+            child.wait().or(Err(ChildInputExecution::ObservationFailed))
+        }
+        Err(error) => Err(error),
+    };
+    cancelled.store(true, Ordering::Release);
     let stdout = stdout.join();
     let stderr = stderr.join();
     let writer = writer.join();
     let Ok(status) = status else {
         return status.unwrap_err();
     };
-    let (Ok(stdout), Ok(stderr), Ok(true)) = (stdout, stderr, writer) else {
+    let (Ok(stdout), Ok(stderr), Ok(writer)) = (stdout, stderr, writer) else {
         return ChildInputExecution::ObservationFailed;
     };
+    normalize_input_completion(status.success(), &stdout, &stderr, writer)
+}
+
+fn normalize_input_completion(
+    success: bool,
+    stdout: &Capture,
+    stderr: &Capture,
+    writer: Option<bool>,
+) -> ChildInputExecution {
     if stdout.exceeded || stderr.exceeded {
         return ChildInputExecution::OutputTooLarge;
     }
-    if status.success() {
+    if stdout.cancelled || stderr.cancelled || writer.is_none() {
+        return ChildInputExecution::TimedOut;
+    }
+    if writer == Some(false) {
+        return ChildInputExecution::ObservationFailed;
+    }
+    if success {
         ChildInputExecution::Success
     } else {
         ChildInputExecution::ExitFailure
@@ -267,51 +470,140 @@ pub fn write_stdin_bounded(
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=exited_parent_cannot_leave_a_descendant_holding_capture_pipes
-fn close_descendant_resources(
+pub(crate) fn close_descendant_resources<T>(
     pid: u32,
-    stdout: &thread::JoinHandle<Capture>,
-    stderr: &thread::JoinHandle<Capture>,
-    writer: Option<&thread::JoinHandle<bool>>,
+    stdout: &thread::JoinHandle<T>,
+    stderr: &thread::JoinHandle<T>,
+    writer: Option<&thread::JoinHandle<Option<bool>>>,
     grace: Duration,
-) {
+) -> bool {
     let finished = || {
         stdout.is_finished()
             && stderr.is_finished()
             && writer.is_none_or(thread::JoinHandle::is_finished)
     };
-    if finished() {
-        return;
-    }
-    // A probe must not daemonize. If its main process exits while a descendant
-    // still owns either pipe, close that process group instead of joining a
-    // reader forever.
-    signal_group(pid, libc::SIGTERM);
+    // Keep the leader unreaped until group cleanup finishes so its PID cannot
+    // be reused while signalling. Let readers establish natural EOF first:
+    // signalling a zombie alone does not prove a descendant held a pipe open.
     let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        if finished() {
-            return;
-        }
+    while !finished() && Instant::now() < deadline {
         thread::sleep(
             Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
         );
     }
-    signal_group(pid, libc::SIGKILL);
+    let forced_capture_cleanup = !finished();
+    // A probe must not daemonize even after descendants close their pipes.
+    // Always send KILL before reaping the leader, including when TERM closed
+    // every stream but another descendant ignored it.
+    let mut signalled = signal_group(pid, libc::SIGTERM);
+    let deadline = Instant::now() + grace;
+    while !finished() && Instant::now() < deadline {
+        thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    signalled |= signal_group(pid, libc::SIGKILL);
+    // Even a descendant that escaped the original group must not hold a join.
+    // Allow an EOF from cooperative descendants before cancelling the workers.
+    let deadline = Instant::now() + grace;
+    while !finished() && Instant::now() < deadline {
+        thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    forced_capture_cleanup && signalled
 }
 
-fn capture(reader: &mut dyn Read, limit: usize, exceeded_signal: &AtomicBool) -> Capture {
+/// Observe exit without reaping, reserving the owned PID until group cleanup.
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=closed_pipe_descendants_are_killed_before_the_leader_is_reaped
+pub(crate) fn child_exited(child: &std::process::Child) -> std::io::Result<bool> {
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: info is writable and waitid observes only our owned child. WNOWAIT
+    // leaves its exit status available for Child::wait.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: zero initialization plus successful waitid initializes the struct;
+    // si_signo stays zero when WNOHANG observes no exited child.
+    Ok(unsafe { info.assume_init() }.si_signo != 0)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
+pub(crate) fn nonblocking(fd: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: fcntl only reads and changes flags on the owned open descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn write_input(writer: &mut dyn Write, mut input: &[u8], cancelled: &AtomicBool) -> Option<bool> {
+    while !input.is_empty() {
+        if cancelled.load(Ordering::Acquire) {
+            return None;
+        }
+        match writer.write(input) {
+            Ok(0) => return Some(false),
+            Ok(count) => input = &input[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return Some(false),
+        }
+    }
+    Some(true)
+}
+
+pub(crate) fn capture(
+    reader: &mut dyn Read,
+    limit: usize,
+    exceeded_signal: &AtomicBool,
+    cancelled: &AtomicBool,
+) -> Capture {
     let mut retained = Vec::with_capacity(limit.min(8 * 1024));
     let mut exceeded = false;
     let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        let Ok(read) = reader.read(&mut buffer) else {
-            exceeded_signal.store(true, Ordering::Release);
-            return Capture {
-                bytes: retained,
-                exceeded: true,
-            };
+    let incomplete = loop {
+        // Cancellation must not turn an already closed pipe into a timeout
+        // merely because its reader was scheduled after cleanup completed.
+        // Nonblocking reads can still establish EOF and retain ready bytes.
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if cancelled.load(Ordering::Acquire)
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                break true;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            Err(_) => {
+                exceeded_signal.store(true, Ordering::Release);
+                return Capture {
+                    bytes: retained,
+                    exceeded: true,
+                    cancelled: false,
+                };
+            }
         };
         if read == 0 {
-            break;
+            break false;
         }
         let remaining = limit.saturating_sub(retained.len());
         let keep = remaining.min(read);
@@ -319,11 +611,17 @@ fn capture(reader: &mut dyn Read, limit: usize, exceeded_signal: &AtomicBool) ->
         exceeded |= keep < read;
         if exceeded {
             exceeded_signal.store(true, Ordering::Release);
+            // An escaped descendant may keep producing immediately readable
+            // output forever. The capture limit bounds draining after cancel.
+            if cancelled.load(Ordering::Acquire) {
+                break true;
+            }
         }
-    }
+    };
     Capture {
         bytes: retained,
         exceeded,
+        cancelled: incomplete,
     }
 }
 
@@ -338,19 +636,18 @@ fn normalize_output(output: Vec<u8>) -> ChildObservation {
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=timeout_terminates_the_process_group_and_reaps_the_child
-fn terminate_and_reap(child: &mut std::process::Child, grace: Duration) {
+pub(crate) fn terminate_and_reap(child: &mut std::process::Child, grace: Duration) {
     signal_group(child.id(), libc::SIGTERM);
     let deadline = Instant::now() + grace;
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) if Instant::now() < deadline => {
+        match child_exited(child) {
+            Ok(false) if Instant::now() < deadline => {
                 thread::sleep(
                     Duration::from_millis(5)
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
             }
-            Ok(None) | Err(_) => break,
+            Ok(_) | Err(_) => break,
         }
     }
     signal_group(child.id(), libc::SIGKILL);
@@ -359,15 +656,14 @@ fn terminate_and_reap(child: &mut std::process::Child, grace: Duration) {
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=timeout_terminates_the_process_group_and_reaps_the_child
-fn signal_group(pid: u32, signal: libc::c_int) {
-    if let Ok(pid) = libc::pid_t::try_from(pid) {
-        // SAFETY: the child was placed in a process group whose ID is its PID;
-        // a negative PID targets only that owned group. Signal errors are safe
-        // to ignore because the child may have exited between try_wait and kill.
-        unsafe {
-            libc::kill(-pid, signal);
-        }
-    }
+pub(crate) fn signal_group(pid: u32, signal: libc::c_int) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: the child was placed in a process group whose ID is its PID;
+    // a negative PID targets only that owned group. A missing group is normal
+    // when all processes exited before the reader workers were scheduled.
+    unsafe { libc::kill(-pid, signal) == 0 }
 }
 
 #[cfg(test)]
@@ -394,6 +690,505 @@ mod tests {
             timeout: Duration::from_secs(1),
             terminate_grace: Duration::from_millis(20),
             output_limit: 16,
+        }
+    }
+
+    #[test]
+    fn public_output_drops_failed_command_bytes_and_maps_closed_errors() {
+        assert_eq!(
+            public_output(Ok(ChildCommandOutput {
+                success: false,
+                stdout: b"secret".to_vec(),
+                stderr: b"credential".to_vec(),
+            })),
+            ChildOutputObservation::ExitFailure
+        );
+        for (error, expected) in [
+            (
+                ChildOutputError::SpawnFailed,
+                ChildOutputObservation::SpawnFailed,
+            ),
+            (ChildOutputError::TimedOut, ChildOutputObservation::TimedOut),
+            (
+                ChildOutputError::IncompleteOutput,
+                ChildOutputObservation::TimedOut,
+            ),
+            (
+                ChildOutputError::OutputTooLarge,
+                ChildOutputObservation::OutputTooLarge,
+            ),
+            (
+                ChildOutputError::ObservationFailed,
+                ChildOutputObservation::ObservationFailed,
+            ),
+        ] {
+            assert!(!error.to_string().is_empty());
+            assert_eq!(public_output(Err(error)), expected);
+        }
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf diagnostic >&2; exit 7"]);
+        assert_eq!(
+            execute_command_output(command, policy()).unwrap(),
+            ChildCommandOutput {
+                success: false,
+                stdout: Vec::new(),
+                stderr: b"diagnostic".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn input_completion_never_accepts_overflow_or_cancelled_io() {
+        let complete = Capture {
+            bytes: Vec::new(),
+            exceeded: false,
+            cancelled: false,
+        };
+        for (success, writer, expected) in [
+            (true, Some(true), ChildInputExecution::Success),
+            (false, Some(true), ChildInputExecution::ExitFailure),
+            (true, Some(false), ChildInputExecution::ObservationFailed),
+            (true, None, ChildInputExecution::TimedOut),
+        ] {
+            assert_eq!(
+                normalize_input_completion(success, &complete, &complete, writer),
+                expected
+            );
+        }
+        let overflow = Capture {
+            bytes: Vec::new(),
+            exceeded: true,
+            cancelled: false,
+        };
+        let cancelled = Capture {
+            bytes: Vec::new(),
+            exceeded: false,
+            cancelled: true,
+        };
+        for (aborted, expected) in [
+            (&overflow, ChildInputExecution::OutputTooLarge),
+            (&cancelled, ChildInputExecution::TimedOut),
+        ] {
+            assert_eq!(
+                normalize_input_completion(true, aborted, &complete, Some(true)),
+                expected
+            );
+            assert_eq!(
+                normalize_input_completion(true, &complete, aborted, Some(true)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn capture_and_input_retry_nonblocking_io_but_honor_cancellation() {
+        use std::collections::VecDeque;
+        struct Reader(VecDeque<std::io::Result<Vec<u8>>>);
+        impl Read for Reader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let bytes = self.0.pop_front().unwrap()?;
+                buffer[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+        }
+        struct Writer(VecDeque<std::io::Result<usize>>);
+        impl Write for Writer {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                self.0.pop_front().unwrap()
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut reader = Reader(
+            [
+                Err(std::io::ErrorKind::Interrupted.into()),
+                Err(std::io::ErrorKind::WouldBlock.into()),
+                Ok(b"ok".to_vec()),
+                Ok(Vec::new()),
+            ]
+            .into(),
+        );
+        let captured = capture(
+            &mut reader,
+            4,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(captured.bytes, b"ok");
+        assert!(!captured.cancelled);
+        let mut writer = Writer(
+            [
+                Err(std::io::ErrorKind::Interrupted.into()),
+                Err(std::io::ErrorKind::WouldBlock.into()),
+                Ok(1),
+                Ok(1),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            write_input(&mut writer, b"ok", &AtomicBool::new(false)),
+            Some(true)
+        );
+        assert!(writer.flush().is_ok());
+        for step in [Ok(0), Err(std::io::Error::other("write failed"))] {
+            assert_eq!(
+                write_input(&mut Writer([step].into()), b"x", &AtomicBool::new(false)),
+                Some(false)
+            );
+        }
+        assert_eq!(
+            write_input(&mut Writer(VecDeque::new()), b"x", &AtomicBool::new(true)),
+            None
+        );
+    }
+
+    #[test]
+    fn cancelled_capture_preserves_ready_bytes_and_closed_pipes() {
+        // The reader starts only after the owner has cancelled cleanup, as
+        // happens when a successful child's reader is delayed by scheduling.
+        for bytes in [b"".as_slice(), b"ok".as_slice(), b"full".as_slice()] {
+            let exceeded = AtomicBool::new(false);
+            let captured = capture(
+                &mut std::io::Cursor::new(bytes),
+                4,
+                &exceeded,
+                &AtomicBool::new(true),
+            );
+            assert_eq!(captured.bytes, bytes);
+            assert!(!captured.cancelled);
+            assert!(!captured.exceeded);
+            assert!(!exceeded.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn cancelled_capture_bounds_open_and_continuously_readable_pipes() {
+        struct OpenReader {
+            first: Option<Vec<u8>>,
+            error: std::io::ErrorKind,
+            reads: usize,
+        }
+        impl Read for OpenReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if let Some(bytes) = self.first.take() {
+                    buffer[..bytes.len()].copy_from_slice(&bytes);
+                    return Ok(bytes.len());
+                }
+                Err(self.error.into())
+            }
+        }
+        struct EndlessReader(usize);
+        impl Read for EndlessReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+
+        for error in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            for first in [Vec::new(), b"full".to_vec()] {
+                let mut reader = OpenReader {
+                    first: (!first.is_empty()).then(|| first.clone()),
+                    error,
+                    reads: 0,
+                };
+                let captured = capture(
+                    &mut reader,
+                    4,
+                    &AtomicBool::new(false),
+                    &AtomicBool::new(true),
+                );
+                assert_eq!(captured.bytes, first);
+                assert!(captured.cancelled);
+                assert!(!captured.exceeded);
+                assert_eq!(reader.reads, usize::from(!first.is_empty()) + 1);
+            }
+        }
+        let mut reader = EndlessReader(0);
+        let exceeded = AtomicBool::new(false);
+        let captured = capture(&mut reader, 4, &exceeded, &AtomicBool::new(true));
+        assert_eq!(captured.bytes, b"xxxx");
+        assert!(captured.cancelled);
+        assert!(captured.exceeded);
+        assert!(exceeded.load(Ordering::Acquire));
+        assert_eq!(reader.0, 5);
+        let captured = capture(
+            &mut OpenReader {
+                first: None,
+                error: std::io::ErrorKind::Other,
+                reads: 0,
+            },
+            4,
+            &AtomicBool::new(false),
+            &AtomicBool::new(true),
+        );
+        assert!(captured.exceeded);
+        assert!(!captured.cancelled);
+    }
+
+    #[test]
+    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
+    fn escaped_descendant_probe() {
+        use std::os::fd::FromRawFd;
+        struct PendingEscape(libc::pid_t);
+        #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers
+        impl Drop for PendingEscape {
+            fn drop(&mut self) {
+                // SAFETY: this guard owns the exact forked child until the
+                // PID file hands cleanup to the invoking test's guard.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                    while libc::waitpid(self.0, std::ptr::null_mut(), 0) < 0 {
+                        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(path) = std::env::var_os("USAGI_BOUNDED_PIPE_HELPER") else {
+            return;
+        };
+        let mut ready = [0; 2];
+        // SAFETY: all child-side work after fork uses only async-signal-safe
+        // libc calls; the child is explicitly killed by the test's cleanup.
+        unsafe {
+            assert_eq!(libc::pipe(ready.as_mut_ptr()), 0);
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                libc::close(ready[0]);
+                if libc::setsid() < 0 {
+                    libc::_exit(71);
+                }
+                libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                libc::close(ready[1]);
+                loop {
+                    libc::pause();
+                }
+            }
+            let _child_cleanup = PendingEscape(pid);
+            libc::close(ready[1]);
+            let mut read = std::fs::File::from_raw_fd(ready[0]);
+            read.read_exact(&mut [0]).unwrap();
+            std::fs::write(path, pid.to_string()).unwrap();
+            std::process::exit(0);
+        }
+    }
+
+    #[test]
+    fn escaped_descendant_cannot_hold_capture_or_input_workers() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let test = "infrastructure::bounded_process::tests::escaped_descendant_probe";
+        let bounded = ChildPolicy {
+            timeout: Duration::from_secs(2),
+            output_limit: 4096,
+            ..policy()
+        };
+        for (name, with_input, without_timeout) in [
+            ("capture.pid", false, false),
+            ("capture-unlimited.pid", false, true),
+            ("input.pid", true, false),
+        ] {
+            let path = temp.path().join(name);
+            let _cleanup = KillEscaped(path.clone());
+            let started = Instant::now();
+            if with_input {
+                let binding = format!("USAGI_BOUNDED_PIPE_HELPER={}", path.display());
+                let input = vec![b'x'; 1024 * 1024];
+                let result = write_stdin_bounded(
+                    "env",
+                    &[
+                        &binding,
+                        executable.to_str().unwrap(),
+                        "--exact",
+                        test,
+                        "--nocapture",
+                    ],
+                    &input,
+                    input.len(),
+                    bounded,
+                );
+                assert_eq!(result, ChildInputExecution::TimedOut);
+            } else {
+                let mut command = Command::new(&executable);
+                command
+                    .args(["--exact", test, "--nocapture"])
+                    .env("USAGI_BOUNDED_PIPE_HELPER", &path);
+                let result = if without_timeout {
+                    execute_command_output_without_timeout(
+                        command,
+                        bounded.terminate_grace,
+                        bounded.output_limit,
+                    )
+                } else {
+                    execute_command_output(command, bounded)
+                };
+                assert_eq!(result, Err(ChildOutputError::IncompleteOutput));
+                assert_eq!(public_output(result), ChildOutputObservation::TimedOut);
+            }
+            assert!(
+                path.exists(),
+                "the helper must have escaped before the probe returned"
+            );
+            assert!(started.elapsed() < Duration::from_secs(4));
+        }
+    }
+
+    struct KillEscaped(std::path::PathBuf);
+    #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=escaped_descendant_cannot_hold_capture_or_input_workers,closed_pipe_descendants_are_killed_before_the_leader_is_reaped
+    impl Drop for KillEscaped {
+        fn drop(&mut self) {
+            if let Some(pid) = std::fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+            {
+                // SAFETY: the fixture recorded exactly the owned descendant.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    const CLOSED_PIPE_CHILD: &str = r"
+import os, signal, sys, time
+path, mode = sys.argv[1:]
+pid = os.fork()
+if pid == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    for fd in (0, 1, 2):
+        os.close(fd)
+    with open(path + '.next', 'w') as marker:
+        marker.write(str(os.getpid()))
+    os.rename(path + '.next', path)
+    while True:
+        signal.pause()
+deadline = time.monotonic() + 5
+while not os.path.exists(path):
+    if time.monotonic() > deadline:
+        raise SystemExit(71)
+    time.sleep(0.001)
+if mode == 'exit':
+    print('done', flush=True)
+elif mode == 'overflow':
+    os.write(1, b'x' * 8192)
+    time.sleep(30)
+else:
+    time.sleep(30)
+";
+
+    #[test]
+    fn closed_pipe_descendants_are_killed_before_the_leader_is_reaped() {
+        let script = CLOSED_PIPE_CHILD;
+        let temporary = tempfile::tempdir().unwrap();
+        for with_input in [false, true] {
+            for mode in ["exit", "timeout", "overflow", "abort"] {
+                if with_input && mode == "abort" {
+                    continue; // stdin runner has a deadline and no abort flag.
+                }
+                let path = temporary.path().join(format!("{with_input}-{mode}.pid"));
+                let _cleanup = KillEscaped(path.clone());
+                let bounded = ChildPolicy {
+                    timeout: if mode == "timeout" {
+                        Duration::from_millis(300)
+                    } else {
+                        Duration::from_secs(5)
+                    },
+                    output_limit: 16,
+                    ..policy()
+                };
+                let abort = Arc::new(AtomicBool::new(false));
+                let trigger = if mode == "abort" {
+                    let path = path.clone();
+                    let abort = Arc::clone(&abort);
+                    Some(thread::spawn(move || {
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while !path.exists() && Instant::now() < deadline {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        abort.store(true, Ordering::Release);
+                    }))
+                } else {
+                    None
+                };
+                let started = Instant::now();
+                if with_input {
+                    let result = write_stdin_bounded(
+                        "python3",
+                        &["-c", script, path.to_str().unwrap(), mode],
+                        b"",
+                        0,
+                        bounded,
+                    );
+                    assert_eq!(
+                        result,
+                        match mode {
+                            "exit" => ChildInputExecution::Success,
+                            "overflow" => ChildInputExecution::OutputTooLarge,
+                            _ => ChildInputExecution::TimedOut,
+                        }
+                    );
+                } else {
+                    let mut command = Command::new("python3");
+                    command.args(["-c", script, path.to_str().unwrap(), mode]);
+                    let result = execute_command_output_until(
+                        command,
+                        Some(bounded.timeout),
+                        bounded.terminate_grace,
+                        bounded.output_limit,
+                        &abort,
+                    );
+                    if let Some(trigger) = trigger {
+                        trigger.join().unwrap();
+                    }
+                    match mode {
+                        "exit" => assert_eq!(result.unwrap().stdout, b"done\n"),
+                        "overflow" => assert_eq!(result, Err(ChildOutputError::OutputTooLarge)),
+                        _ => assert_eq!(result, Err(ChildOutputError::TimedOut)),
+                    }
+                }
+                assert!(started.elapsed() < Duration::from_secs(3));
+                let pid: libc::pid_t = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    // SAFETY: signal zero only observes the fixture's exact PID.
+                    let running = unsafe { libc::kill(pid, 0) == 0 };
+                    #[cfg(target_os = "linux")]
+                    let running = if running {
+                        // An orphan can be a zombie until init reaps it; it must
+                        // already have stopped executing when the runner returns.
+                        let state = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+                        state.is_ok_and(|stat| {
+                            !stat
+                                .rsplit_once(')')
+                                .unwrap()
+                                .1
+                                .trim_start()
+                                .starts_with('Z')
+                        })
+                    } else {
+                        false
+                    };
+                    if !running {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{with_input} {mode}: descendant survived"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                std::fs::remove_file(path).unwrap();
+            }
         }
     }
 
@@ -456,14 +1251,14 @@ mod tests {
     fn capture_bounds_memory_and_normalizes_read_failures() {
         let exceeded = AtomicBool::new(false);
         let mut exact = std::io::Cursor::new(b"1234");
-        let captured = capture(&mut exact, 4, &exceeded);
+        let captured = capture(&mut exact, 4, &exceeded, &AtomicBool::new(false));
         assert_eq!(captured.bytes, b"1234");
         assert!(!captured.exceeded);
         assert!(!exceeded.load(Ordering::Acquire));
 
         let exceeded = AtomicBool::new(false);
         let mut oversized = std::io::Cursor::new(b"12345");
-        let captured = capture(&mut oversized, 4, &exceeded);
+        let captured = capture(&mut oversized, 4, &exceeded, &AtomicBool::new(false));
         assert_eq!(captured.bytes, b"1234");
         assert!(captured.exceeded);
         assert!(exceeded.load(Ordering::Acquire));
@@ -472,7 +1267,7 @@ mod tests {
         let mut failing = FailingReader {
             returned_bytes: false,
         };
-        let captured = capture(&mut failing, 4, &exceeded);
+        let captured = capture(&mut failing, 4, &exceeded, &AtomicBool::new(false));
         assert_eq!(captured.bytes, b"ok");
         assert!(captured.exceeded);
         assert!(exceeded.load(Ordering::Acquire));
@@ -534,6 +1329,64 @@ mod tests {
         );
         assert_eq!(result, ChildObservation::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn completion_execution_keeps_capture_and_cleanup_limits() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "(trap '' TERM; sleep 30) & printf 'one\\000two'; printf diagnostic >&2; exit 7",
+        ]);
+        let started = Instant::now();
+        assert_eq!(
+            execute_command_output_without_timeout(
+                command,
+                policy().terminate_grace,
+                policy().output_limit,
+            )
+            .unwrap(),
+            ChildCommandOutput {
+                success: false,
+                stdout: b"one\0two".to_vec(),
+                stderr: b"diagnostic".to_vec(),
+            }
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let mut overflow = Command::new("sh");
+        overflow.args(["-c", "trap '' TERM; yes oversized"]);
+        assert_eq!(
+            execute_command_output_without_timeout(
+                overflow,
+                policy().terminate_grace,
+                policy().output_limit,
+            ),
+            Err(ChildOutputError::OutputTooLarge)
+        );
+    }
+
+    #[test]
+    fn abort_ends_the_probe_before_its_deadline() {
+        let abort = Arc::new(AtomicBool::new(false));
+        let setter = Arc::clone(&abort);
+        let started = Instant::now();
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            setter.store(true, Ordering::Release);
+        });
+        let result = observe_until(
+            "sh",
+            &["-c", "sleep 30"],
+            ChildPolicy {
+                timeout: Duration::from_secs(30),
+                ..policy()
+            },
+            &abort,
+        );
+        trigger.join().unwrap();
+        assert_eq!(result, ChildObservation::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

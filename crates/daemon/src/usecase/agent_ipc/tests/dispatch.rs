@@ -583,91 +583,6 @@ fn missing_dispatch_binding_is_a_safe_noop_for_report_and_observer_exit() {
 }
 
 #[test]
-fn delegated_dispatch_requires_the_authenticated_callers_runtime() {
-    let runtime = runtime();
-    let workspace = WorkspaceId::new();
-    let caller_agent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(SessionId::new()),
-            AgentProfileId::new("claude").unwrap(),
-            ModelSelector::new("manager").unwrap(),
-        )
-        .unwrap();
-    let same_runtime_agent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(SessionId::new()),
-            AgentProfileId::new("claude").unwrap(),
-            ModelSelector::new("worker").unwrap(),
-        )
-        .unwrap();
-    let other_runtime_agent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(SessionId::new()),
-            AgentProfileId::new("codex").unwrap(),
-            ModelSelector::new("worker").unwrap(),
-        )
-        .unwrap();
-    let caller = CallerRef {
-        session_id: caller_agent.session_id,
-        agent_id: caller_agent.agent_id,
-    };
-
-    for selected in [
-        DispatchAgentIntent::New {
-            runtime: AgentProfileId::new("claude").unwrap(),
-            model: ModelSelector::new("different-model-is-allowed").unwrap(),
-        },
-        DispatchAgentIntent::Existing {
-            agent_id: same_runtime_agent.agent_id,
-        },
-    ] {
-        runtime
-            .require_same_dispatch_runtime(workspace, &caller, &selected)
-            .unwrap();
-    }
-    for selected in [
-        DispatchAgentIntent::New {
-            runtime: AgentProfileId::new("codex").unwrap(),
-            model: ModelSelector::new("worker").unwrap(),
-        },
-        DispatchAgentIntent::Existing {
-            agent_id: other_runtime_agent.agent_id,
-        },
-    ] {
-        assert_eq!(
-            runtime
-                .require_same_dispatch_runtime(workspace, &caller, &selected)
-                .unwrap_err()
-                .code,
-            ErrorCode::PermissionDenied
-        );
-    }
-    assert_eq!(
-        runtime
-            .require_same_dispatch_runtime(
-                workspace,
-                &CallerRef {
-                    session_id: None,
-                    agent_id: usagi_core::domain::id::AgentId::new(),
-                },
-                &DispatchAgentIntent::New {
-                    runtime: AgentProfileId::new("claude").unwrap(),
-                    model: ModelSelector::new("worker").unwrap(),
-                },
-            )
-            .unwrap_err()
-            .code,
-        ErrorCode::OwnershipUnknown
-    );
-}
-
-#[test]
 #[allow(clippy::too_many_lines)] // One dispatch lifetime exercises claim, reconnect, PID reuse, replay, and exit invalidation.
 fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
     let fixture = tempfile::tempdir().unwrap();
@@ -949,6 +864,9 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         commits: vec!["abc".into()],
         ..Default::default()
     };
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
     let delivery = runtime
         .report_from_mcp(
             &credential,
@@ -961,6 +879,20 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
     assert_eq!(delivery.delivered_to, caller);
     assert_eq!(delivery.worker.session_id, Some(session));
     assert!(delivery.accepted);
+    assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Running,
+        "a completion MCP call does not finish the provider's active turn"
+    );
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Ended)
+        .unwrap();
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Idle,
+        "the lifecycle Stop clears its running activity"
+    );
     let wake = runtime
         .dispatch_store()
         .queued_prompt(workspace, Some(parent_session))
@@ -1021,6 +953,9 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             Some(completed_run),
         )
         .unwrap();
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
     let duplicate = runtime
         .report_from_mcp(
             &credential,
@@ -1031,6 +966,11 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         )
         .unwrap();
     assert!(!duplicate.accepted);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Running,
+        "replaying an old completion must preserve a newer prompt's activity"
+    );
     assert_eq!(
         duplicate
             .committed
@@ -1098,6 +1038,10 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
                 &dispatch.prompt,
             ),
             &FakeScope(Ok(configured_scope(worktree.path()))),
+            AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Mcp,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
+            ),
         )
         .unwrap();
     runtime.remember_operation(

@@ -472,6 +472,9 @@ pub(super) fn adopt_session_snapshot(ui: &mut WorkspaceIoRuntime, result: Sessio
         ui.last_session_revision = revision;
     }
     if is_current {
+        if let Some(updated_at) = result.notes_updated_at {
+            ui.notes_updated_at = Some(updated_at);
+        }
         apply_session_projection(
             ui,
             result.sessions,
@@ -673,7 +676,30 @@ pub(super) fn sync_runtime_sessions(
     worktree_names: &[String],
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
-    let ids = ui.workspace.session_ids().to_vec();
+    // Retain a save acknowledgement while an older snapshot is in flight. Once
+    // persistence has been observed, subsequent MCP edits use the normal rows.
+    if let Some((saved_id, notes)) = runtime.state().saved_notes()
+        && (runtime
+            .state()
+            .saved_note_at()
+            .zip(ui.notes_updated_at)
+            .is_some_and(|(saved, observed)| observed >= saved)
+            || ui
+                .workspace
+                .sessions()
+                .iter()
+                .zip(ui.workspace.session_ids())
+                .any(|(record, id)| id == saved_id && record.notes.note == notes.note))
+    {
+        let observed = BackendEvent::SessionNoteObserved {
+            session: *saved_id,
+            note: notes.note.clone(),
+            updated_at: ui.notes_updated_at,
+        };
+        effects.extend(runtime.apply_event(AppEvent::Backend(observed)));
+    }
+    let mut ids = ui.workspace.session_ids().to_vec();
+    runtime.state().order_session_snapshot(&mut ids);
     if runtime.state().sessions() != ids.as_slice() {
         // The reducer answers a changed session set with the effects that keep
         // daemon-backed observation aimed at it — the resident PR lane above

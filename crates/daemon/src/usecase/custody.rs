@@ -7,7 +7,7 @@
 //! deleted underneath it and the process keeps listening forever.
 //!
 //! The terminating condition is **loss of custody**, not idleness: a legitimate
-//! daemon owns live PTYs and a supervisor schedule even with zero clients, so
+//! daemon owns live PTYs even with zero clients, so
 //! "no client" is never evidence that it should exit. Custody is the conjunction
 //! of two invariants, each observed through the injected [`CustodyProbe`]:
 //!

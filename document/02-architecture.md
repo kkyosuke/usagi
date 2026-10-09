@@ -65,6 +65,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │   ├── daemon/pty.rs        # PTY の確保と所有、terminal runtime の composition
 │   │   ├── daemon/instance_lock.rs # single-instance lock と workspace fence、custody 監視
 │   │   ├── daemon/broker.rs     # bootstrap broker の起動・endpoint 公開・idle 監視
+│   │   ├── daemon/managed_update.rs # binary 更新後の daemon 同期・live Agent による保留
 │   │   ├── daemon/dispatch.rs # admitted request と daemon owner / store の composition adapter
 │   │   ├── daemon/agent_provisioning.rs # provider argv・sandbox・role・MCP 注入の合成
 │   │   └── tui.rs        # crossterm terminal と workspace filesystem adapter
@@ -82,7 +83,7 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │       ├── cli/             # 人間向けサブコマンド（引数解析・dispatch・結果整形）
 │   │       │   └── commands/         # サブコマンドハンドラ（store 系は core usecase 直呼び、session 系は daemon IPC）
 │   │       └── mcp/             # MCP サーバ（stdio JSON-RPC の解釈・dispatch）
-│   │           └── tools/            # tool descriptor（store 系は core usecase、session / agent / terminal / supervisor 系は daemon IPC）
+│   │           └── tools/            # tool descriptor（store 系は core usecase、session / agent / terminal 系は daemon IPC）
 │   ├── daemon/           # usagi-daemon: daemon 面
 │   │   └── src/
 │   │       ├── lib.rs
@@ -91,7 +92,6 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │   │       ├── usecase/         # daemon 専用ロジック（lifecycle verb、terminal/runtime・orchestration）
 │   │       │   ├── agent_ipc/   # Agent runtime の admission / delivery / dispatch / lifecycle と tests
 │       │   ├── authority/   # cross-process generation authority（registry・handoff・admission）
-│       │   ├── supervisor_runtime/ # supervisor の reservation / obligations と tests
 │   │       │   └── resources/   # owner generation ごとの runtime shard と global resource allocator
 │   │       └── infrastructure/  # daemon 専用の外部接続（Unix socket transport）
 │   │           ├── child_identity.rs # spawn した child の OS process-start / process-group identity 観測
@@ -110,7 +110,6 @@ dispatch を参照する。画面上の挙動、IPC wire、daemon lifecycle の�
 │           │   ├── session_commands.rs  # Overview の session コマンド発行と完了反映
 │           │   ├── restore.rs           # pane / terminal の復元 job と対象選定
 │           │   ├── director.rs          # Director drawer / tab の選択と projection
-│           │   ├── work_run.rs          # Work run pane の入力と observation / control job
 │           │   └── garden.rs            # Garden の入力 routing と observation job
 │           ├── usecase/         # TUI に閉じた application ロジック（画面グラフの遷移・イベント状態機械）
 │           │   ├── application        # 起動画面 EntryScreen と ScreenRunner への dispatch、Home controller
@@ -447,6 +446,12 @@ snapshotをstrictにparseし、filename/frontmatter不一致・prefix欠落・�
 session worktree adapter、issue number authority の repository resolver）は
 `confined_git_command(repo)` だけで command を組み立てる。
 
+session worktree adapter の Git 観測は core の `infrastructure::bounded_process` を使う。
+この共通 runner と secret resolver は、direct child の終了を `waitid(WNOWAIT)` で観測し、
+PID を保持したまま process group を TERM / KILL で終了させてから reap する。
+親だけが TERM で終了した場合や、子孫が stdout / stderr を閉じた場合も group cleanup を省略しない。
+capture worker の自然な EOF を先に確認するため、通常の完了と forced pipe cleanup を区別できる。
+
 `-C <repo>` は scope の宣言にならない。Git は repository・index・object database・config を
 `GIT_*` 環境変数から先に解決するため、継承した `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` /
 `GIT_OBJECT_DIRECTORY` / `GIT_COMMON_DIR` や `GIT_CONFIG_COUNT` 経由の config injection は、
@@ -518,10 +523,6 @@ session の Git effect（create、mirror した tree の nested worktree、remov
   `infrastructure::store::lifecycle::DaemonLifecycleStore` に分ける。後者を保持して reducer 結果を永続化するのは daemon の command handler
   だけであり、TUI / CLI / MCP は IPC command を通じて要求する。repository-local な `state.json` の session record は
   managed state として解釈・採用せず、daemon lifecycle store だけを権威にする。notes 等の UI metadata は lifecycle とは独立して扱う。
-- supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
-  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と compacting event journal、
-  offset index、replay checkpoint を保持し、lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
-  event producer であり、domain/store はそれらを解釈しない。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない
@@ -572,7 +573,7 @@ domain は常に内側に留まる。
 全 manifest の usagi dependency と `domain` / `usecase` / `infrastructure` の production Rust AST を走査して強制する。
 コメントや `#[cfg(test)]` の fake は production 依存として数えない。
 
-ルート合成 adapter が TUI の application port（`WorkspaceLoader`、workspace create effect、Work Run control など）を
+ルート合成 adapter が TUI の application port（`WorkspaceLoader`、workspace create effect など）を
 実装するときは `usagi_tui::usecase::application` の定義元を直接 import する。`presentation` はこれらを互換 re-export
 しない。これにより adapter が描画面を経由して usecase 境界へ依存しているように見える逆向きの API を作らず、公開名の
 所有場所と依存行列を一致させる。
@@ -675,9 +676,9 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
 | daemon IPC の request/reply 語彙、client connection state machine、planned restart 中の request routing（trusted endpoint 解決・snapshot cache・inventory merge・generation 別 connection / cursor） | request / reply の wire 契約は `crates/core/src/infrastructure/ipc/request.rs`（`ipc` が re-export するので呼び手の import path は `infrastructure::ipc`）、接続 state machine・retry・deadline は同じ層の `client.rs`、session observation reply は `session_snapshot.rs`、generation routing は `owner_routing.rs`。directory と transport は port として注入し、`generations.json` / `current.json` を読む adapter は `crates/daemon/src/infrastructure/generation_registry.rs`。process ごとの snapshot cache（`RouteCache`）と owner ごとの lane は合成ルートの `src/runtime/daemon.rs` / `src/runtime/tui.rs` が束ねる（正本は [4. IPC](04-ipc.md#owner-generation-routing)） |
 | 表示専用 daemon metrics から診断専用 health（level と閉じた理由語彙）を作る判定 | `crates/tui/src/usecase/application/daemon_health.rs`。TUI-local な sample 列と現在時刻だけの純関数で、実時計は引数として受ける。port・polling・sample を畳む cache は同層の `metrics.rs`、表示文言と狭幅の縮退は `crates/tui/src/presentation/views/workspace.rs`（正本は [3. TUI](03-tui.md#daemon-health-indicator)） |
-| TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden / Work Run 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
+| TUI background observation の single-flight / cadence / failure backoff 判定 | `crates/tui/src/usecase/application/observation_lane.rs`。presentation は Garden 固有の cadence と worker 実行だけを所有し、共有 admission state machine を重複実装しない |
 | 環境変数 binding の語彙・2 層スコープの合成・子プロセス環境への解決方針 | `crates/core/src/domain/settings/env.rs` と `crates/core/src/usecase/env.rs`（`SecretResolver` port を注入）。並列解決と実 `op` subprocess は `crates/core/src/infrastructure/env_resolver.rs`、設定の読み出しと解決キャッシュは合成ルートの `src/runtime/user_env.rs`（正本は [9. 環境変数設定](09-env.md)） |
-| daemon usecase の巨大 module の内訳 | `agent_ipc`（受け入れ判定 `admission` / prompt・report の `delivery` / worker 計画の `dispatch` / 起動・再開の `lifecycle`）と `supervisor_runtime`（予約の `reservation` / worker stop・artifact・promotion の `obligations`）は bounded context ごとの子 module に分ける。各 module の test は同じ階層の `tests.rs` に置き、production と同居させない |
+| daemon usecase の巨大 module の内訳 | `agent_ipc`（受け入れ判定 `admission` / prompt・report の `delivery` / worker 計画の `dispatch` / 起動・再開の `lifecycle`）は bounded context ごとの子 module に分ける。各 module の test は同じ階層の `tests.rs` に置き、production と同居させない |
 | product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
 | Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
@@ -950,10 +951,48 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   `lifecycle.lock` の下で同期時点の exact owner を unbound 接続により再観測し、handoff、successor build、serving readiness の
   検証まで同じ直列化区間に含める。明示的な `daemon stop` / `restart` も `lifecycle.lock` を通るため、その途中へ割り込まない。
   daemon が無い場合や crash 後の stale owner を回収した場合は singleton lock でも不在を証明し、新規起動しない。
-  live Agent の process-local MCP authority を安全に移せない場合、内部同期は replacement を拒否して Agent と旧 daemon を維持する。
+  live Agent の process-local MCP authority を安全に移せない場合、内部同期は replacement を保留して Agent と旧 daemon を維持する。
+  複数 tenant を保持し、いずれかに live runtime（ownership unknown を含む）が残る場合も、live tenant inventory の観測により
+  replacement を保留する。successor は起動 workspace だけを hydrate し、draining predecessor の他 workspace の fence を
+  引き継げないため、この場合は旧 owner を active のまま維持して、更新後の各 workspace の接続を保つ。
+  この判定は Agent credential の診断より先に行い、複数 workspace の保留で `--restart-agents` を案内しない。
+  cold replacement の process record 公開後も、期限付きの read-only 接続で tenant inventory が応答するまで待ち、
+  同じ lifecycle custody 内で installed build の hello を検証してから同期完了とする。
+  installer は子の `USAGI_UPDATE_SYNC_OUTCOMES=1` で内部同期の保留結果を受け取る契約へ opt in する。
+  opt in 時の exit code は、同期完了・daemon 不在が `0`、live Agent または複数 workspace の接続を維持した保留が `3`、未対応 command が `2`、
+  その他の失敗が非 zero である。installer は `3` を binary 更新の成功として扱い、daemon の切り替えが保留中であることを表示する。
+  この契約を持たない旧 binary の埋め込み installer から呼ばれた場合は、保留を stdout に表示して `0` を返す。
+  この契約へ opt in した installer は保留時に同期完了を表示しない。live runtime の終了後に `usagi daemon restart` で切り替える。
+  単一 workspace の Agent 継続による保留では、会話を引き継ぐ `usagi daemon restart --restart-agents` でも切り替えられる。
   選択した旧 release が managed daemon sync capability を解釈できない場合や、published daemon が server-side handoff fence を証明できない場合も、
   legacy の弱い replacement を実行せず非 0 で終える。内部 command は Agent integration 履歴の修復を行わず、daemon build の同期だけを担う。
   atomic rename 後の拒否では binary は選択版、daemon は旧 build のままであり、安全な現行版へ更新するか Agent 終了後に `usagi daemon restart` を実行する。
+  installer lock の正本は `scripts/install.sh` である。mode 0700 の共有 `update.lock` directory を保持し、各 process は
+  PID と choosing marker を private directory に準備してから固有 owner node として atomic に公開する。
+  [Lamport の bakery algorithm](https://lamport.azurewebsites.net/pubs/bakery.pdf) に従う choosing / ticket と
+  `(ticket, PID)` の順序で admission を決め、ticket は 2147483646 を上限として overflow 前に拒否する。
+  stale 回収は死亡を確認した固有 node だけを削除し、正常 cleanup は自分の node を atomic に retire してから削除する。
+  atomic binary rename の前に保持中の PID を legacy `pid` metadata として公開するため、旧版への切り替え後に
+  SIGKILL で終了しても次の旧方式 installer は終了済み PID を確認して root を回収できる。
+  置換前後の cleanup は、lock を保持し、他の live / unknown owner がいない場合だけ recovery marker
+  `2147483647` を公開する。この値は [Linux の PID 上限](https://github.com/torvalds/linux/blob/master/include/linux/threads.h)と
+  [macOS の PID 上限](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_internal.h)より大きいため、
+  通常終了した PID の再利用で次の更新が停止しない。新方式は marker を認識して待機せず、旧方式は死亡 PID として回収する。
+  他の owner がいる場合は、自身の PID と一致する legacy metadata を node の退役前に除去するため、通常の
+  handoff 中に旧方式が待機者を stale owner ごと削除しない。公開も退役前に行い、待機者は holder の PID を上書きしない。
+  新方式は admission 前に legacy PID を再確認するため、late publication にも終了待ちを適用する。metadata の削除は
+  bakery で admission された process だけが行い、先行する観測者が後続 holder の新しい PID を消さない。
+  公開前の crash と空の共有 root は admission を妨げない。lock root / owner node の symlink は拒否し、待機は約 60 秒を上限とする。
+  PID の再利用、permission denial、判別できない liveness probe failure は live owner として保守的に待つ。
+  公開済み PID / ticket は通常ファイルで固定し、symlink・FIFO・device・directory を読まない。new owner の PID が
+  読めない、欠けている、または不正な場合は未知として回収せず、同順位の admission も待つ。legacy PID の読取失敗は
+  空値へ変換せず待つが、読めた空値・不正値は従来の復旧対象とする。ticket の初回読取中に choosing が消えた場合は、
+  同じ node の公開済み ticket を再読して最大値へ取り込み、atomic に retire 済みなら飛ばす。
+  PID probe の C locale で `No such process` を確認した場合だけ死亡とみなす。旧方式の公開済み live PID は process が cleanup を終えて
+  終了するまで待ち、残った legacy PID metadata は bakery admission 後の critical section へ入る直前に除去する。直列化と stale 回収の保証は新方式同士に適用する。
+  旧方式の PID 公開前の空 root、SIGKILL で cleanup されなかった holder と新方式の待機者の共存、
+  既に stale PID を読んだ旧 process による共有 root の削除は新方式から制御できないため、
+  異なる方式の installer を並行実行しない。
 - **内部フックコマンド**: Claude の `PreToolUse` フックが呼ぶ `usagi guard-workspace`（worktree の外へ
   出るツール呼び出しを拒否）と、Antigravity / Codex / Claude の各ライフサイクルフックが呼ぶ `usagi agent-phase <phase>`
   （phase 報告）。この 2 つは人間向けではないため `--help` に出さない（`hide = true`）。呼び手（人手でも
@@ -962,7 +1001,8 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   dispatch は共有）。MCP tool と違い provider のフックは command を呼び出すため、この統合は
   CLI コマンドとして持つしかない。`guard-workspace` は enforcing で、`PreToolUse` payload（`cwd` /
   `tool_name` / `tool_input`）を stdin から読み、`cwd` から選んだ 2 モード（session / root）で判定する。
-  session モードは session worktree の外を狙う file 書き込みを拒否し、root モードはコーディネータの
+  session モードは symlink と `..` を filesystem の解決順で検査し、session worktree の外を狙う file
+  書き込みを拒否する。未作成の末尾は許容し、既存 prefix の解決失敗は拒否する。root モードはコーディネータの
   リポジトリ変更（全 file 書き込みツールと read-only allowlist 外の shell command）を拒否する。判定は
   **ツール名の closed allowlist ではなく変更能力**で行う。名前で分かるのは書き込みツールと `Bash` と
   MCP tool までで、未知のツールは `tool_input` の shape で決める。file を名指しする key を持てば
@@ -1204,7 +1244,8 @@ launcher control として拒否し、Codex process の state / arg0
 だけを有界に修復し、lock-aware cleanup と削除は Codex 自身へ委ねる。
 
 Claude の root read-only Git は `guard-workspace` の小さな allowlistを使う。`--no-pager --no-optional-locks` を必須にし、
-diff 系は `--no-ext-diff --no-textconv` も必須にする。`-c` / `--config-env`、pager、upload-pack、signature 検証など
+diff 系は `--no-ext-diff --no-textconv` も必須にする。`gh pr view/list` のブラウザ起動は `--web`、
+`--web=...`、`-w` とその short flag group を拒否する。`-c` / `--config-env`、pager、upload-pack、signature 検証など
 外部 process を起動しうる option は拒否する。Agent child の daemon-issued environment は system/global config、
 fsmonitor、hook、submodule recursion、optional index lock、pager、external diff を無効化し、repository config や公開
 terminal environment が guard の前提を差し替えない。
@@ -1239,7 +1280,7 @@ server lifetime 中は変わらないため、設定、PATH、CLI install/uninst
 `session_complete` は引き続き利用できる。
 
 `crates/cli` の `mcp/` は、エージェント向けの tool 面（IF）を持つ。CLI が人間向けの
-`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session / agent / terminal / supervisor の tool を JSON-RPC で
+`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session / agent / terminal の tool を JSON-RPC で
 公開する（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。CLI の
 `Run` トレイトに対応する metadata の一様化を `Tool` と `ToolDescriptor` で行う。
 
@@ -1251,13 +1292,13 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
                                      ┌─────────────────────────────────┴──────────────────────────────┐
                                      ▼                                                                ▼
                          Store route ─► Tool::call ─► core store usecase       daemon route ─► core IPC client
-                         （issue / memory）                                  （session / agent / terminal / supervisor）
+                         （issue / memory）                                  （session / agent / terminal）
 ```
 
 - **`Tool` トレイト**: `name` / `description` / `input_schema`（`tools/list` に載る IF）と
   `call`（Store route の実行）を持つ。`call` は既定が未実装スタブで、issue / memory の store tool だけが
   core usecase を呼ぶ実装へオーバーライドする。tool は **系統ごとにファイル**（`mcp/tools/issue.rs` /
-  `memory.rs` / `session.rs` / `terminal.rs` / `supervisor.rs`）に置き、各 tool が 1 struct として実装する。
+  `memory.rs` / `session.rs` / `terminal.rs`）に置き、各 tool が 1 struct として実装する。
 - **レジストリと dispatch**: 各系統の `tools()` が tool struct と typed `ToolRoute` を同じ式で
   `ToolDescriptor` にし、`tools::registry()` は descriptor を連結する。tool 名を再解釈する文字列 `match` は持たず、
   route を付けていない `Box<dyn Tool>` は registry の要素型になれない。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
@@ -1268,7 +1309,7 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
   応答エンベロープの整形は `mcp/protocol.rs` に集約する。`initialize` と `tools/list` は実際に
   応答し、`tools/call` は tool を名前で引いて store または daemon の実行経路へ送る。tool または
   daemon の失敗は JSON-RPC エラーに変換する。配布 version は合成ルートが `serve` に注入する。
-- issue / memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal / supervisor tool は
+- issue / memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal tool は
   core IPC client を介して daemon の usecase へ委譲する。共有ロジックは
   `usagi-core`、daemon-owned effect は `usagi-daemon` に置く（[入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)）。
 

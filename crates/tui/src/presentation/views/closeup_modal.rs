@@ -842,7 +842,7 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 7);
+        assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
         assert!(joined(&modal).contains("outputs"));
@@ -857,10 +857,10 @@ mod tests {
     #[test]
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
-        modal.select_prev(); // wrap to last (workflow)
-        assert_eq!(modal.selected(), 6);
-        assert_eq!(modal.selected_action().name, "workflow");
-        assert!(joined(&modal).contains("workflow"));
+        modal.select_prev(); // wrap to last (terminal)
+        assert_eq!(modal.selected(), 5);
+        assert_eq!(modal.selected_action().name, "terminal");
+        assert!(joined(&modal).contains("terminal"));
         assert!(joined(&modal).contains("Enter: run"));
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);

@@ -65,6 +65,19 @@ pub trait SecretResolver {
     ) -> Result<String, String> {
         self.read(reference)
     }
+
+    /// Resolve a named binding, allowing a cache to preserve its configured scope.
+    ///
+    /// # Errors
+    /// Returns the same secret-free failure as the credential-aware read.
+    fn read_binding(
+        &self,
+        _name: &str,
+        reference: &str,
+        service_account_token: Option<&str>,
+    ) -> Result<String, String> {
+        self.read_with_service_account_token(reference, service_account_token)
+    }
 }
 
 /// One binding that could not be resolved, safe to log.

@@ -1,5 +1,9 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
+fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
+    notes::key(state, &AppKey::CommitNoteDraft)
+}
+
 mod closeup;
 mod director;
 mod garden;
@@ -7,78 +11,10 @@ mod new;
 mod pointer;
 mod pr;
 mod session;
-mod workflow;
 
 use super::*;
 use crate::usecase::application::environment_source::parse_environment_source;
 use std::collections::VecDeque;
-
-#[test]
-fn a_background_read_never_swallows_the_person_s_submission() {
-    use crate::usecase::application::workflow::WorkflowJob;
-    use usagi_core::domain::workflow::{WorkflowCommand, WorkflowSnapshot};
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let mut state = AppState::home(workspace, vec![session]);
-    state.active = Some(session);
-    state.route = Route::Home(HomeMode::Closeup);
-    let _ = submit_closeup_workflow(&mut state, session, "");
-    // Opening the tab leaves a read in flight. The pane re-reads on a steady
-    // cadence, so a person who waits for it to clear waits forever.
-    assert!(state.workflow_panel(session).unwrap().loading);
-    assert_eq!(
-        state.workflow_panel(session).unwrap().freshness,
-        crate::usecase::application::workflow::WorkflowFreshness::Pending
-    );
-    let _ = update(
-        &mut state,
-        AppEvent::WorkflowInput {
-            session,
-            key: AppKey::Paste("Build login".into()),
-        },
-    );
-    let effects = update(
-        &mut state,
-        AppEvent::WorkflowInput {
-            session,
-            key: AppKey::SaveRoles,
-        },
-    );
-    let [Effect::Workflow(start)] = effects.as_slice() else {
-        panic!("the submission is dispatched, got {effects:?}");
-    };
-    assert!(
-        matches!(&start.control, Some((_, WorkflowCommand::Start { goal, .. })) if goal == "Build login")
-    );
-
-    // The read it overlapped lands without disturbing the submission.
-    let _ = update(
-        &mut state,
-        AppEvent::Backend(BackendEvent::Workflow {
-            job: WorkflowJob {
-                workspace,
-                session,
-                control: None,
-            },
-            result: Ok(Box::new(WorkflowSnapshot {
-                agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-                session,
-                run: None,
-                pending_start: None,
-                finished: Vec::new(),
-                revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
-            })),
-        }),
-    );
-    let panel = state.workflow_panel(session).unwrap();
-    assert!(!panel.loading);
-    assert_eq!(
-        panel.freshness,
-        crate::usecase::application::workflow::WorkflowFreshness::Observed
-    );
-    assert!(panel.submitting);
-    assert!(panel.pending.is_some());
-}
 
 /// Fake entry backend for Welcome / Open attach scenarios. It has no IO: tests
 /// inspect dispatched effects and enqueue typed completions in deterministic order.
@@ -407,6 +343,7 @@ fn management_classifier_covers_non_key_release_navigation_and_text() {
         (KeyCode::Left, AppKey::Left),
         (KeyCode::Right, AppKey::Right),
         (KeyCode::Char('x'), AppKey::Char('x')),
+        (KeyCode::Char('\u{13}'), AppKey::SaveRoles),
     ] {
         assert_eq!(
             classify_management_input(LiveInput::Key(KeyEvent::new(
@@ -516,81 +453,6 @@ fn table_driven_mode_and_overlay_scenarios() {
         }
         assert_eq!(state.route(), case.route, "{}", case.name);
         assert_eq!(state.overlay(), case.overlay, "{}", case.name);
-    }
-}
-
-#[test]
-fn goal_composer_edits_utf8_within_the_daemon_bound_and_discards_drafts() {
-    let workspace = WorkspaceId::new();
-    let mut state = sized_home(workspace, Vec::new(), 100, 30);
-    state.set_work_mode(WorkMode::GoalDriven);
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-
-    let _ = update(
-        &mut state,
-        AppEvent::Key(AppKey::Paste("x".repeat(MAX_WORK_GOAL_BYTES + 1))),
-    );
-    assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
-    assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('é')));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Paste("é".to_owned())));
-    assert_eq!(state.director_goal().len(), MAX_WORK_GOAL_BYTES - 1);
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
-    assert_eq!(state.director_goal(), "");
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
-    assert_eq!(state.director_goal(), "");
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
-    let _ = update(&mut state, AppEvent::Key(AppKey::CtrlC));
-    assert_eq!(state.director_goal(), "");
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('z')));
-    state.set_work_mode(WorkMode::Classic);
-    assert_eq!(state.director_goal(), "");
-}
-
-#[test]
-fn goal_composer_enter_requires_its_provider_to_be_visible() {
-    assert_eq!(
-        director_goal_composer_picker_capacity(0),
-        NORMALIZED_TERMINAL_ROWS - DIRECTOR_GOAL_COMPOSER_CHROME_ROWS
-    );
-    assert_eq!(director_goal_composer_picker_capacity(11), 0);
-    assert_eq!(director_goal_composer_picker_capacity(12), 1);
-
-    let workspace = WorkspaceId::new();
-    for (height, launches) in [(11_u16, 0_usize), (12, 1)] {
-        let mut state = AppState::home(workspace, Vec::new());
-        state.set_agent_models(
-            AvailableModels::new([DefaultModel::OpenAi]),
-            DefaultModel::OpenAi,
-        );
-        state.set_work_mode(WorkMode::GoalDriven);
-        let _ = update(&mut state, AppEvent::Resize { width: 80, height });
-        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-        let _ = update(
-            &mut state,
-            AppEvent::Key(AppKey::Paste("finish the PR".to_owned())),
-        );
-        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
-        assert_eq!(
-            effects
-                .iter()
-                .filter(|effect| matches!(effect, Effect::LaunchGoal { .. }))
-                .count(),
-            launches,
-            "height {height}"
-        );
-        assert_eq!(state.director_launching().is_some(), launches == 1);
-        assert_eq!(
-            matches!(state.director_new(), DirectorNew::Choosing(_)),
-            launches == 0
-        );
     }
 }
 
@@ -1171,8 +1033,15 @@ fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
     let mut backend = FakeControllerBackend::default();
 
     let effects = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
-    assert_eq!(effects, vec![Effect::LoadNotes { target }]);
+    assert_eq!(
+        effects,
+        vec![Effect::LoadNotes {
+            target,
+            request_id: state.note_editor().unwrap().request_id()
+        }]
+    );
     backend.push_event(BackendEvent::NotesLoaded {
+        request_id: state.note_editor().unwrap().request_id(),
         target,
         scratchpad: Scratchpad {
             note: Some("before".to_owned()),
@@ -1193,9 +1062,10 @@ fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
     let _ = update(&mut state, AppEvent::Key(AppKey::CommitNoteDraft));
     let queued_saves = update(&mut state, AppEvent::Key(AppKey::SaveNotes));
     assert!(
-        matches!(&queued_saves[..], [Effect::SaveNotes { target: saved_target, scratchpad }] if *saved_target == target && scratchpad.todos.len() == 2 && scratchpad.todos[0].done)
+        matches!(&queued_saves[..], [Effect::SaveNotes { target: saved_target, scratchpad, .. }] if *saved_target == target && scratchpad.todos.len() == 2 && scratchpad.todos[0].done)
     );
     backend.push_event(BackendEvent::NotesError {
+        request_id: state.note_editor().unwrap().request_id(),
         target,
         error: SafeError {
             message: SafeMessage::new("Could not save notes"),
@@ -1209,6 +1079,9 @@ fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
         note.error().unwrap().message.as_str(),
         "Could not save notes"
     );
+
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('d')));
 
     let effects = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
     assert_eq!(
@@ -1718,9 +1591,17 @@ fn paste_is_inserted_into_every_reducer_owned_home_input() {
 
     let mut notes = AppState::home(workspace, vec![session]);
     let _ = update(&mut notes, AppEvent::Key(AppKey::OpenNotes));
+    let request_id = notes.note_editor().unwrap().request_id();
     let _ = update(
         &mut notes,
-        AppEvent::Key(AppKey::SetNoteDraft("before ".to_owned())),
+        AppEvent::Backend(BackendEvent::NotesLoaded {
+            request_id,
+            target: Target::Session(session),
+            scratchpad: Scratchpad {
+                note: Some("before ".into()),
+                ..Scratchpad::default()
+            },
+        }),
     );
     let _ = update(
         &mut notes,
@@ -1782,6 +1663,7 @@ fn paste_is_inserted_into_every_reducer_owned_home_input() {
         }),
     );
     let _ = update(&mut decisions, AppEvent::Key(AppKey::Enter));
+    let _ = update(&mut decisions, AppEvent::Key(AppKey::Tab));
     let _ = update(
         &mut decisions,
         AppEvent::Key(AppKey::Paste("free form".to_owned())),
@@ -2144,6 +2026,47 @@ fn decision_editor_covers_freeform_navigation_and_invalid_answers() {
 }
 
 #[test]
+fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft() {
+    let workspace = WorkspaceId::new();
+    let mut request = pending_decision(workspace);
+    request.allow_freeform = true;
+    let mut second = request.options[0].clone();
+    second.id = "second".into();
+    second.label = "Second".into();
+    request.options.push(second);
+    let mut editor = DecisionEditor::new(request.clone());
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('x'));
+    assert!(!editor.input_freeform);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Tab);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('x'));
+    assert!(editor.input_freeform);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Up);
+    assert!(!editor.input_freeform);
+    assert_eq!(
+        decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        vec![Effect::ResolveDecision {
+            workspace,
+            decision_id: request.decision_id,
+            answer: UserDecisionAnswer::Option {
+                option_id: request.options[0].id.clone(),
+                comment: None,
+            },
+        }]
+    );
+    assert_eq!(editor.freeform, "x");
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Tab);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('y'));
+    assert_eq!(
+        decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        vec![Effect::ResolveDecision {
+            workspace,
+            decision_id: request.decision_id,
+            answer: UserDecisionAnswer::Freeform { text: "xy".into() },
+        }]
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // The reducer matrix shares one state and preserves event order.
 fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     let (workspace, session, _) = ids();
@@ -2198,10 +2121,20 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     );
     for event in [
         BackendEvent::NotesLoaded {
+            request_id: state
+                .note_editor()
+                .map_or_else(usagi_core::domain::id::RequestId::new, |editor| {
+                    editor.request_id()
+                }),
             target: Target::Session(session),
             scratchpad: Scratchpad::default(),
         },
         BackendEvent::NotesError {
+            request_id: state
+                .note_editor()
+                .map_or_else(usagi_core::domain::id::RequestId::new, |editor| {
+                    editor.request_id()
+                }),
             target: Target::Session(session),
             error: safe_error("notes"),
         },
@@ -2276,7 +2209,8 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     ] {
         let editor = state.note_editor.as_mut().unwrap();
         editor.section = section;
-        editor.draft.clear();
+        editor.source.replace("");
+        editor.phase = notes::NotePhase::Ready;
         assert!(commit_note_draft(&mut state).is_empty());
     }
 
@@ -2412,7 +2346,8 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     ] {
         let editor = state.note_editor.as_mut().unwrap();
         editor.section = section;
-        editor.draft = draft.into();
+        editor.source.replace(draft);
+        editor.phase = notes::NotePhase::Ready;
         let _ = commit_note_draft(&mut state);
     }
     state.preview_overlay = None;
@@ -2438,9 +2373,15 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.active = Some(session);
     state.overlay = Some(Overlay::Closeup);
     let _ = submit_closeup(&mut state, "close invalid");
+    let request_id = state
+        .note_editor()
+        .map_or_else(usagi_core::domain::id::RequestId::new, |editor| {
+            editor.request_id()
+        });
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::NotesLoaded {
+            request_id,
             target: Target::Root(WorkspaceId::new()),
             scratchpad: Scratchpad::default(),
         }),
@@ -2620,4 +2561,105 @@ fn decision_confirmation_revalidates_expiry_before_sending() {
     assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
     assert!(editor.error().is_some());
     assert!(editor.confirmation().is_some());
+}
+
+#[test]
+fn decision_arrows_traverse_choices_comment_and_freeform_without_losing_drafts() {
+    for multiple in [false, true] {
+        for comment in [false, true] {
+            for freeform in [false, true] {
+                let workspace = WorkspaceId::new();
+                let mut request = pending_decision(workspace);
+                request.allow_comment = comment;
+                request.allow_freeform = freeform;
+                if multiple {
+                    request.selection_mode = UserDecisionSelectionMode::Multiple;
+                }
+                let mut second = request.options[0].clone();
+                second.id = "second".into();
+                request.options.push(second);
+                let mut editor = DecisionEditor::new(request);
+                let key = |editor: &mut DecisionEditor, key| {
+                    decision::update_decision_editor(workspace, editor, key)
+                };
+                key(&mut editor, AppKey::Up);
+                assert_eq!(editor.selected_option, 0);
+                key(&mut editor, AppKey::Down);
+                assert_eq!(editor.selected_option, 1);
+                if multiple {
+                    key(&mut editor, AppKey::Char(' '));
+                }
+                if comment {
+                    key(&mut editor, AppKey::Down);
+                    assert!(editor.input_comment);
+                    key(&mut editor, AppKey::Paste("note".into()));
+                }
+                if freeform {
+                    key(&mut editor, AppKey::Down);
+                    assert!(editor.input_freeform);
+                    key(&mut editor, AppKey::Paste("answer 🐇".into()));
+                    assert!(matches!(key(&mut editor, AppKey::Enter).as_slice(),
+                        [Effect::ResolveDecision {answer: UserDecisionAnswer::Freeform {text}, ..}] if text == "answer 🐇"));
+                }
+                key(&mut editor, AppKey::Down);
+                assert_eq!(editor.input_freeform, freeform);
+                assert_eq!(editor.input_comment, comment && !freeform);
+                if freeform {
+                    key(&mut editor, AppKey::Up);
+                }
+                if comment {
+                    assert!(editor.input_comment);
+                    assert_eq!(editor.comment, "note");
+                    key(&mut editor, AppKey::Up);
+                }
+                assert!(!editor.input_freeform && !editor.input_comment);
+                assert_eq!(editor.selected_option, 1);
+                assert_eq!(editor.freeform, if freeform { "answer 🐇" } else { "" });
+                assert_eq!(editor.option_checked("second"), multiple);
+                assert!(
+                    matches!(key(&mut editor, AppKey::Enter).as_slice(),
+                    [Effect::ResolveDecision {answer: UserDecisionAnswer::Option {option_id, ..}, ..}] if option_id == "second")
+                        || multiple
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn decision_inputs_return_to_each_selected_answer_without_changing_it() {
+    for comment in [false, true] {
+        for selected in 0..3 {
+            let workspace = WorkspaceId::new();
+            let mut request = pending_decision(workspace);
+            request.allow_comment = comment;
+            request.allow_freeform = true;
+            request.options = (0..3)
+                .map(|index| {
+                    let mut option = request.options[0].clone();
+                    option.id = format!("answer-{index}");
+                    option
+                })
+                .collect();
+            let mut editor = DecisionEditor::new(request);
+            editor.selected_option = selected;
+            update_decision_editor(workspace, &mut editor, AppKey::Tab);
+            update_decision_editor(workspace, &mut editor, AppKey::Paste("draft".into()));
+            if comment {
+                assert!(
+                    matches!(update_decision_editor(workspace, &mut editor, AppKey::Enter).as_slice(),
+                    [Effect::ResolveDecision {answer: UserDecisionAnswer::Option {option_id, comment: Some(note)}, ..}]
+                    if option_id == &format!("answer-{selected}") && note == "draft")
+                );
+            }
+            update_decision_editor(workspace, &mut editor, AppKey::Up);
+            assert_eq!(editor.selected_option, selected);
+            assert!(!editor.input_comment && !editor.input_freeform);
+            assert!(
+                matches!(update_decision_editor(workspace, &mut editor, AppKey::Enter).as_slice(),
+                [Effect::ResolveDecision {answer: UserDecisionAnswer::Option {option_id, ..}, ..}]
+                if option_id == &format!("answer-{selected}"))
+            );
+        }
+    }
 }

@@ -378,9 +378,11 @@ pub enum DaemonCommand {
     UninstallService,
 }
 
-/// The session mutations exposed by the human CLI.
+/// The session operations exposed by the human CLI.
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
+    /// Inspect Agent creation and launch origins in the current workspace.
+    Agents,
     Create {
         name: String,
         /// Stable session role selected from the effective role catalog.
@@ -484,6 +486,31 @@ impl Command {
     }
 }
 
+#[cfg(test)]
+mod agent_inventory_tests {
+    use super::*;
+
+    #[test]
+    fn agents_command_requests_read_only_workspace_inventory() {
+        let parsed = Cli::try_parse_from(["usagi", "session", "agents"]).unwrap();
+        let command = parsed.command.unwrap();
+        assert!(matches!(
+            command,
+            Command::Session {
+                command: SessionCommand::Agents
+            }
+        ));
+        let (outcome, _) = execute(command);
+        assert!(matches!(
+            outcome,
+            RunOutcome::DaemonRequest(DaemonRequest::Session {
+                action: SessionAction::Agents,
+                ..
+            })
+        ));
+    }
+}
+
 struct Clean {
     apply: bool,
     force: bool,
@@ -527,6 +554,7 @@ struct Session {
 impl Run for Session {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         let (action, payload) = match &self.command {
+            SessionCommand::Agents => (SessionAction::Agents, serde_json::json!({})),
             SessionCommand::Create {
                 name,
                 role,

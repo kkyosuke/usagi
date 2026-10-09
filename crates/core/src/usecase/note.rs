@@ -7,14 +7,15 @@
 //! reading and writing that scratchpad through the injected
 //! [`WorkspaceStateRepository`](crate::usecase::ports::WorkspaceStateRepository).
 //!
-//! A [`Target`] selects whose scratchpad to touch: a named session or the
-//! workspace root. Mutations hold the store lock across load→edit→save and
+//! A [`Target`] selects whose scratchpad to touch: a stable managed session ID,
+//! a legacy named session, or the workspace root. Mutations hold the store lock across load→edit→save and
 //! return `false` when the target session does not exist. The clock is passed in
 //! (`now`) so these stay clock-free and testable.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
+use crate::domain::id::SessionId;
 use crate::domain::note::{Scratchpad, SessionDecision, SessionTodo};
 use crate::domain::workspace_state::WorkspaceState;
 use crate::usecase::ports::WorkspaceStateRepository;
@@ -26,10 +27,12 @@ pub enum Target<'a> {
     Root,
     /// The named session's scratchpad.
     Session(&'a str),
+    /// A daemon-owned session incarnation, shared by TUI and MCP.
+    Managed(SessionId),
 }
 
 /// The scratchpad for `target` within `state`, or `None` when a named session
-/// does not exist. The root always resolves.
+/// does not exist or a managed ID is uninitialized. The root always resolves.
 fn scratchpad<'a>(state: &'a WorkspaceState, target: Target<'_>) -> Option<&'a Scratchpad> {
     match target {
         Target::Root => Some(&state.root_notes),
@@ -38,6 +41,7 @@ fn scratchpad<'a>(state: &'a WorkspaceState, target: Target<'_>) -> Option<&'a S
             .iter()
             .find(|s| s.name == name)
             .map(|s| &s.notes),
+        Target::Managed(id) => state.session_notes.get(&id),
     }
 }
 
@@ -53,18 +57,49 @@ fn scratchpad_mut<'a>(
             .iter_mut()
             .find(|s| s.name == name)
             .map(|s| &mut s.notes),
+        Target::Managed(id) => state.session_notes.get_mut(&id),
     }
 }
 
 /// Read the target's scratchpad, or a default (empty) one when there is no
 /// `state.json` or the target session does not exist.
-fn read(store: &impl WorkspaceStateRepository, target: Target<'_>) -> Result<Scratchpad> {
+/// # Errors
+/// Returns an error when the compatibility store cannot be read.
+pub fn read(store: &impl WorkspaceStateRepository, target: Target<'_>) -> Result<Scratchpad> {
     Ok(store
         .load()?
         .as_ref()
         .and_then(|state| scratchpad(state, target))
         .cloned()
         .unwrap_or_default())
+}
+
+/// Import a legacy scratchpad once. A concurrent writer or an explicit clear
+/// always wins over migration.
+///
+/// # Errors
+/// Returns an error when the compatibility store cannot be read or written.
+pub fn initialize_session(
+    store: &impl WorkspaceStateRepository,
+    id: SessionId,
+    legacy_name: &str,
+    legacy: &Scratchpad,
+) -> Result<()> {
+    store.transact(|transaction| {
+        let mut state = transaction.load()?.unwrap_or_default();
+        if let std::collections::btree_map::Entry::Vacant(entry) = state.session_notes.entry(id) {
+            entry.insert(legacy.clone());
+            if let Some(record) = state
+                .sessions
+                .iter_mut()
+                .find(|record| record.name == legacy_name)
+            {
+                record.notes = Scratchpad::default();
+            }
+            transaction.save(&state)?;
+        }
+        Ok(())
+    })
 }
 
 /// Apply `edit` to the target's scratchpad and persist, stamping `now`. Returns
@@ -266,6 +301,7 @@ mod tests {
         let store = WorkspaceStateStore::new(tmp.path());
         let state = WorkspaceState {
             sessions: vec![session("alpha")],
+            session_notes: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: ts(20),
         };

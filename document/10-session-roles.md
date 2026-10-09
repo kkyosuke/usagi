@@ -28,8 +28,7 @@ filesystem sandbox、MCP authorization、session lifecycle の権限ではない
 
 `RoleId` は 1–64 byte の小文字 ASCII kebab-case である。session 名から role を推測せず、session の途中で `role_id` を変更しない。
 role を変える場合は別 session を作成する。
-現在の Team と role catalog は workspace 単位であり、Work Run ごとの Team override / snapshot は持たない。
-goal-driven の root Agent とそこから委譲する session も、launch 時点の同じ effective catalog を使う。
+Team と role catalog は workspace 単位である。
 
 ## catalog
 
@@ -47,7 +46,7 @@ Config の `Team` は次の組み込み catalog を選ぶ。global の値は wor
 `none` は既定値であり、組み込み catalog を注入しない。未知の `team_template` token、および読み取れないworkspace設定も
 委譲権限を暗黙に増やさないよう `none` へ縮退する。
 各テンプレートの委譲上限 `max_concurrency` は 4 である。パイプライン型は role と委譲経路によって工程順を制約し、
-独立した workflow engine や自動ステージ遷移は追加しない。各 Agent が role instruction に従って次工程へ dispatch する。
+各 Agent が role instruction に従って次工程へ dispatch する。
 
 catalog は次の順で合成する。後の layer にある同一 role ID は、前の定義を field 単位で混ぜず定義全体を置換する。
 default は各 layer で指定された scope だけを上書きする。
@@ -121,8 +120,7 @@ Worker → Manager → Director と一段ずつ返る。`delegation` block を�
 `enabled`、`child_roles`、`max_depth`、`max_concurrency` を検証し、prompt の自己申告には依存しない。block を
 持たない role は従来の許可動作を維持する。depth admission も managed session では lifecycle state を直接読み、
 作成完了直後の daemon crash で dispatch sidecar への複製が遅れても深さを過小評価しない。sidecar は lifecycle に
-存在しない legacy / supervisor scope の fallback に限る。
-durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
+存在しない legacy scope の fallback に限る。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
 `manager` とする。Director/Managerが実行者を委譲するときは `role = "worker"` を明示し、既定値に依存しない。

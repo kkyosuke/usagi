@@ -12,7 +12,6 @@ use usagi_core::domain::agent::{
 use usagi_core::domain::id::{
     AgentContinuationRef, OperationId, SessionId, TerminalRef, WorkspaceId,
 };
-use usagi_core::domain::supervisor::SupervisorRunId;
 use usagi_core::domain::terminal_launch::TerminalInventoryEntry;
 
 use super::pane_runtime::Geometry;
@@ -28,8 +27,6 @@ pub struct AgentPaneAdmission {
     pub terminal: TerminalRef,
     /// Provider-neutral continuation identity, when available.
     pub continuation: Option<AgentContinuationRef>,
-    /// Run identity returned only for a goal-driven root launch.
-    pub supervisor_run_id: Option<SupervisorRunId>,
 }
 
 /// One accepted exact-target Agent resume.
@@ -62,21 +59,6 @@ pub trait AgentCommandPort: Send {
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String>;
-
-    /// Launches a goal-driven workspace root Agent.
-    ///
-    /// # Errors
-    ///
-    /// Returns a presentation-safe daemon failure.
-    fn launch_goal(
-        &mut self,
-        _operation: OperationId,
-        _workspace: WorkspaceId,
-        _profile: Option<AgentProfileId>,
-        _goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        Err("goal-driven Agent launch is unavailable".to_owned())
-    }
 
     /// Resumes retained metadata without attaching to its old PTY.
     ///
@@ -365,21 +347,6 @@ pub trait PaneLaunchCommandPort: Send + Sync {
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String>;
 
-    /// Launches one goal-driven root Agent.
-    ///
-    /// # Errors
-    ///
-    /// Returns a presentation-safe daemon failure.
-    fn launch_goal(
-        &self,
-        _operation: OperationId,
-        _workspace: WorkspaceId,
-        _profile: Option<AgentProfileId>,
-        _goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        Err("goal-driven Agent launch is unavailable".to_owned())
-    }
-
     /// Resumes one session Agent.
     ///
     /// # Errors
@@ -442,17 +409,6 @@ impl PaneLaunchCommandPort for SerializedPaneLaunchPort {
         profile: Option<AgentProfileId>,
     ) -> Result<AgentPaneAdmission, String> {
         self.client().launch(operation, workspace, session, profile)
-    }
-
-    fn launch_goal(
-        &self,
-        operation: OperationId,
-        workspace: WorkspaceId,
-        profile: Option<AgentProfileId>,
-        goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        self.client()
-            .launch_goal(operation, workspace, profile, goal)
     }
 
     fn resume(

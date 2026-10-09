@@ -8,8 +8,8 @@ use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::ManagedSession;
 use usagi_core::domain::terminal_launch::TerminalLaunchScope;
 use usagi_core::infrastructure::ipc::{
-    AgentGoalIntent, AgentLaunchIntent, ClientError, DaemonReply, DaemonRequest, PrSnapshot,
-    TerminalRequest, TerminalSnapshotMode,
+    AgentLaunchIntent, ClientError, DaemonReply, DaemonRequest, PrSnapshot, TerminalRequest,
+    TerminalSnapshotMode,
 };
 use usagi_core::usecase::vt_screen::ScreenCheckpoint;
 
@@ -20,9 +20,6 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_session::{
     TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
-};
-use crate::usecase::application::work_run_control::{
-    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
 };
 
 /// How many acknowledgements one terminal caches before the oldest is dropped.
@@ -280,68 +277,6 @@ pub fn agent_inventory_request(workspace: WorkspaceId) -> DaemonRequest {
     }
 }
 
-///
-/// # Errors
-///
-/// Returns a safe message when the snapshot reply cannot be decoded.
-pub fn decode_work_run_snapshot_reply(
-    reply: DaemonReply,
-) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
-    match reply {
-        DaemonReply::Ok(body) => serde_json::from_value(body)
-            .map_err(|_| "daemon returned invalid Work Run progress".to_owned()),
-        DaemonReply::Accepted { .. } => Err("Work Run progress is unavailable".to_owned()),
-    }
-}
-
-///
-/// # Errors
-///
-/// Returns a typed control failure when the daemon did not answer with a final, typed result.
-pub fn decode_work_run_control_reply(
-    reply: DaemonReply,
-) -> Result<WorkRunControlResult, WorkRunControlError> {
-    match reply {
-        DaemonReply::Ok(body) => {
-            if body.get("state").is_some() {
-                serde_json::from_value(body)
-                    .map(|run| WorkRunControlResult::Updated(Box::new(run)))
-                    .map_err(|_| {
-                        WorkRunControlError::Unconfirmed(
-                            "daemon returned an invalid Work Run result".to_owned(),
-                        )
-                    })
-            } else {
-                serde_json::from_value(body)
-                    .map(WorkRunControlResult::Deleted)
-                    .map_err(|_| {
-                        WorkRunControlError::Unconfirmed(
-                            "daemon returned an invalid Work Run deletion".to_owned(),
-                        )
-                    })
-            }
-        }
-        // A durable Accepted acknowledgement proves admission, not the final
-        // aggregate. Treating its optional body as final could make the UI
-        // forget the only operation identity safe to replay after ambiguity.
-        DaemonReply::Accepted { .. } => Err(WorkRunControlError::Unconfirmed(
-            WORK_RUN_ACTION_UNCONFIRMED.to_owned(),
-        )),
-    }
-}
-
-#[must_use]
-pub fn work_run_control_client_error(error: ClientError) -> WorkRunControlError {
-    match error {
-        ClientError::Protocol(protocol)
-            if protocol.side_effect == usagi_core::infrastructure::ipc::SideEffect::None =>
-        {
-            WorkRunControlError::Rejected(protocol.message)
-        }
-        _ => WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned()),
-    }
-}
-
 #[must_use]
 pub fn exact_agent_resume_request(
     operation_id: usagi_core::domain::id::OperationId,
@@ -410,17 +345,9 @@ pub fn decode_agent_admission(
         .map(serde_json::from_value)
         .transpose()
         .map_err(|_| format!("{operation} returned an invalid continuation"))?;
-    let supervisor_run_id = body
-        .get("supervisor_run_id")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| format!("{operation} returned an invalid Work Run identity"))?;
     Ok(AgentPaneAdmission {
         terminal,
         continuation,
-        supervisor_run_id,
     })
 }
 
@@ -432,17 +359,6 @@ pub fn agent_launch_request(
     intent: AgentLaunchIntent,
 ) -> DaemonRequest {
     DaemonRequest::Agent {
-        operation_id: operation.to_string(),
-        intent,
-    }
-}
-
-#[must_use]
-pub fn agent_goal_request(
-    operation: usagi_core::domain::id::OperationId,
-    intent: AgentGoalIntent,
-) -> DaemonRequest {
-    DaemonRequest::AgentGoal {
         operation_id: operation.to_string(),
         intent,
     }
@@ -479,21 +395,6 @@ pub fn correlate_agent_launch(
         intent.workspace,
         intent.session,
     )
-}
-
-///
-/// # Errors
-///
-/// Returns a safe message when the goal reply cannot be correlated safely.
-pub fn correlate_agent_goal(
-    reply: DaemonReply,
-    operation: usagi_core::domain::id::OperationId,
-    intent: &AgentGoalIntent,
-) -> Result<AgentPaneAdmission, String> {
-    let expected_digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-        &usagi_core::infrastructure::ipc::agent_goal_semantic_key(intent),
-    );
-    correlate_agent_response(reply, operation, &expected_digest, intent.workspace, None)
 }
 
 ///

@@ -18,13 +18,13 @@ use super::{
     AgentRuntime, AgentTerminalActor, AgyAdapter, Arc, BTreeSet, BackgroundWorker, ClaudeAdapter,
     ClientPolicy, ClientWorkspace, CodexAdapter, ConnectionWorkspace, CurrentLocatorFile,
     DECISION_MAINTENANCE_TICK, DEFAULT_GENERATION_LIMIT, DaemonRequest, DaemonRestartAgent,
-    DaemonRestartAgentPlan, DecisionWake, DecisionWaker, DefaultModel, Deserialize, DiscardJournal,
-    DispatchStore, Duration, ErrorLog, FailureTransitionLog, FileWorkspaceFences,
-    GenerationRegistry, GenerationRegistryFile, GenerationRole, Geometry, LeaseClass, LockResult,
-    Mutex, MutexGuard, OpenedTenant, OperationId, PENDING_DAEMON_AGENT_RESTART_MAX_BYTES,
+    DaemonRestartAgentPlan, DefaultModel, Deserialize, DiscardJournal, DispatchStore, Duration,
+    ErrorLog, FailureTransitionLog, FileWorkspaceFences, GenerationRegistry,
+    GenerationRegistryFile, GenerationRole, Geometry, LeaseClass, LockResult, Mutex, MutexGuard,
+    OpenedTenant, OperationId, PENDING_DAEMON_AGENT_RESTART_MAX_BYTES,
     PENDING_DAEMON_AGENT_RESTART_SCHEMA, PENDING_DAEMON_AGENT_RESTART_TICK, Path, PathBuf,
-    PromptMode, RootAgentRuntime, RootClaudeProvisioner, RootCodexProvisioner, RuntimeHydration,
-    Serialize, SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime, SharedSessionRuntime,
+    RootAgentRuntime, RootClaudeProvisioner, RootCodexProvisioner, RuntimeHydration, Serialize,
+    SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime, SharedSessionRuntime,
     SharedUserEnvironment, ShutdownRequest, SpawnProvision, SpawnedChildren, SyncSender,
     SystemAgentReadiness, TenantRegistry, TenantRuntimeOpener, TerminalOutcome,
     TerminalPipelineMetrics, TrySendError, UserDecisionStore, Workspaces, Write,
@@ -250,67 +250,80 @@ impl usagi_core::infrastructure::ipc::WorkspaceResolver for TenantWorkspaces {
 pub(super) struct SharedAgentState {
     pub(super) owner: Mutex<RootAgentRuntime>,
     pub(super) readiness: Arc<dyn AgentReadinessProbe>,
+    pub(super) launch_environment: Option<LaunchEnvironmentSource>,
+}
+
+/// Owner-independent input for preparing one launch's configured values.
+#[derive(Clone)]
+pub(super) struct LaunchEnvironmentSource {
+    pub(super) environment: Arc<SharedUserEnvironment>,
+    pub(super) workspaces: Workspaces,
+}
+
+impl LaunchEnvironmentSource {
+    pub(super) fn prepare(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Result<
+        crate::runtime::user_env::PreparedEnvironment<
+            '_,
+            usagi_core::infrastructure::env_resolver::OpCli,
+        >,
+        usagi_core::infrastructure::ipc::ProtocolError,
+    > {
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+        let tenant = self.workspaces.workspace(workspace).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unavailable, "launch workspace is unavailable")
+        })?;
+        self.environment.prepare(tenant.root()).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "configured launch environment is invalid",
+            )
+        })
+    }
 }
 
 impl SharedAgentState {
+    pub(super) fn prepare_environment(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+        needed: bool,
+    ) -> Result<
+        Option<
+            crate::runtime::user_env::PreparedEnvironment<
+                '_,
+                usagi_core::infrastructure::env_resolver::OpCli,
+            >,
+        >,
+        usagi_core::infrastructure::ipc::ProtocolError,
+    > {
+        if !needed {
+            return Ok(None);
+        }
+        self.launch_environment
+            .as_ref()
+            .map(|source| source.prepare(workspace))
+            .transpose()
+    }
+
     pub(super) fn lock(&self) -> LockResult<MutexGuard<'_, RootAgentRuntime>> {
         self.owner.lock()
     }
 }
 
-pub(super) struct AgentDecisionWaker<'a> {
-    pub(super) agent: &'a SharedAgentRuntime,
-}
+/// The Agent owner lock as the lock watchdog probes it. It holds only a weak
+/// reference: the Agent observer exits once the owner's last strong reference
+/// is gone, and a probe must not postpone that.
+pub(super) struct AgentOwnerLock(pub(super) std::sync::Weak<SharedAgentState>);
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
-impl DecisionWaker for AgentDecisionWaker<'_> {
-    fn wake(&mut self, wake: &DecisionWake) -> anyhow::Result<()> {
-        let prompt = format!(
-            "Supervisor child {} finished ({:?}). Re-open the durable task tree, verify and aggregate the child result, then continue the parent decision. Summary: {}",
-            wake.child_run_id, wake.outcome.kind, wake.outcome.summary
-        );
-        let mut runtime = self
-            .agent
-            .lock()
-            .map_err(|_| anyhow::anyhow!("agent owner is unavailable"))?;
-        if runtime
-            .prompt_run(wake.parent.dispatch_run_id, &prompt)
-            .is_ok()
-        {
-            return Ok(());
-        }
-        let binding = runtime
-            .dispatch_store()
-            .binding(wake.parent.dispatch_run_id)?
-            .ok_or_else(|| anyhow::anyhow!("parent dispatch binding is unavailable"))?;
-        let workspace = runtime
-            .dispatch_store()
-            .workspace_for_agent(binding.worker.agent_id)?
-            .ok_or_else(|| anyhow::anyhow!("parent workspace is unavailable"))?;
-        if runtime
-            .prompt(
-                workspace,
-                binding.worker.session_id,
-                &prompt,
-                PromptMode::Live,
-            )
-            .is_ok()
-        {
-            return Ok(());
-        }
-        runtime
-            .queue_prompt_for_next_launch(workspace, binding.worker.session_id, &prompt)
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-        Ok(())
-    }
-}
-
-pub(super) struct DeferredDecisionWaker;
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_supervisor_tools_observe_one_durable_aggregate
-impl DecisionWaker for DeferredDecisionWaker {
-    fn wake(&mut self, _: &DecisionWake) -> anyhow::Result<()> {
-        anyhow::bail!("parent agent wake is deferred until the agent owner is available")
+impl usagi_daemon::usecase::lock_watch::ProbeTarget for AgentOwnerLock {
+    fn acquire(&self) -> bool {
+        let Some(agent) = self.0.upgrade() else {
+            return false;
+        };
+        drop(agent.lock());
+        true
     }
 }
 
@@ -480,6 +493,7 @@ pub(super) fn open_agent_runtime(
     children: &Arc<SpawnedChildren>,
     hydration: RuntimeHydration,
     terminal_limit: usize,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<SharedAgentRuntime> {
     let state = open_runtime_state(data_dir, generation, children, terminal_limit)?;
     let snapshot = match hydration {
@@ -505,7 +519,7 @@ pub(super) fn open_agent_runtime(
     };
     let store = ShardedAgentStore::new(state);
     let mut registry = AdapterRegistry::new();
-    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::default());
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness::new(shutdown));
     let sandbox_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|path| path.canonicalize().ok());
@@ -565,10 +579,10 @@ pub(super) fn open_agent_runtime(
             sandbox_passthrough,
         }),
         AgyAdapter::new(agent_provisioning::RootAgyProvisioner {
-            workspaces,
+            workspaces: Arc::clone(&workspaces),
             mcp_command,
             data_home,
-            environment: Some(environment),
+            environment: Some(Arc::clone(&environment)),
             sandbox_backend,
             sandbox_tmpdir,
             sandbox_home,
@@ -601,6 +615,10 @@ pub(super) fn open_agent_runtime(
     Ok(Arc::new(SharedAgentState {
         owner: Mutex::new(runtime),
         readiness,
+        launch_environment: Some(LaunchEnvironmentSource {
+            environment,
+            workspaces,
+        }),
     }))
 }
 
@@ -848,23 +866,34 @@ pub(super) fn restore_pending_daemon_agents(
         drop(owner);
         run_agent_readiness(agent, preflight.as_ref())
             .map_err(|error| std::io::Error::other(error.message))?;
+        let _environment = agent
+            .prepare_environment(item.agent.target.workspace_id, preflight.is_some())
+            .map_err(|error| std::io::Error::other(error.message))?;
         let mut owner = agent
             .lock()
             .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
         let resumed = if current_integration {
-            owner.resume_with_current_integration_after_readiness(
+            owner.resume_with_current_integration_from_after_readiness(
                 &item.resume_operation_id,
                 &item.agent.target,
                 item.agent.expected_revision,
                 scope,
                 preflight.as_ref(),
+                usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                    usagi_core::domain::agent::AgentLaunchSource::Daemon,
+                    usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+                ),
             )
         } else {
-            owner.resume_exact_after_readiness(
+            owner.resume_from_after_readiness(
                 &item.resume_operation_id,
                 &item.agent.target,
                 scope,
                 preflight.as_ref(),
+                usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
+                    usagi_core::domain::agent::AgentLaunchSource::Daemon,
+                    usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+                ),
             )
         };
         resumed.map_err(|error| std::io::Error::other(error.message))?;

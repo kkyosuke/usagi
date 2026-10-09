@@ -513,9 +513,11 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
     };
-    let value =
-        serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
-    Ok(Some(value))
+    decode(path, &text).map(Some)
+}
+
+fn decode<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
+    serde_json::from_str(text).context(format!("failed to parse {}", path.display()))
 }
 
 /// Read and deserialize a JSON file only when its bytes fit `max_bytes`.
@@ -725,16 +727,25 @@ pub fn read_versioned<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 /// Returns an error when the file cannot be read or parsed, or when its version
 /// is newer than [`FILE_FORMAT_VERSION`].
 pub fn read_supported_version<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    let Some(versioned) = read::<Versioned<T>>(path)? else {
-        return Ok(None);
-    };
+    read::<Versioned<T>>(path)?
+        .map(|versioned| supported_payload(path, versioned))
+        .transpose()
+}
+
+/// Decode bytes read from an already verified file descriptor with the same
+/// envelope validation as the path-based reader.
+pub(crate) fn decode_supported_version<T: DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
+    supported_payload(path, decode(path, text)?)
+}
+
+fn supported_payload<T>(path: &Path, versioned: Versioned<T>) -> Result<T> {
     anyhow::ensure!(
         versioned.version <= FILE_FORMAT_VERSION,
         "unsupported file format version {} in {}",
         versioned.version,
         path.display()
     );
-    Ok(Some(versioned.inner))
+    Ok(versioned.inner)
 }
 
 /// Serialize `payload` and write it atomically to `path` as a versioned JSON
@@ -1296,6 +1307,39 @@ mod tests {
         // A missing versioned file reads as `None`.
         let missing: Option<Payload> = read_versioned(&dir.path().join("nope.json")).unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[test]
+    fn verified_descriptor_payloads_share_the_supported_version_decoder() {
+        #[derive(serde::Deserialize, Debug, PartialEq, Eq)]
+        struct Payload {
+            items: Vec<String>,
+        }
+        let path = Path::new("favorites.json");
+        for text in [
+            r#"{"items":["legacy"]}"#.to_owned(),
+            format!(r#"{{"version":{FILE_FORMAT_VERSION},"items":["legacy"]}}"#),
+        ] {
+            assert_eq!(
+                decode_supported_version::<Payload>(path, &text).unwrap(),
+                Payload {
+                    items: vec!["legacy".to_owned()],
+                }
+            );
+        }
+        let newer = format!(r#"{{"version":{},"items":[]}}"#, FILE_FORMAT_VERSION + 1);
+        assert!(
+            decode_supported_version::<Payload>(path, &newer)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported file format version")
+        );
+        assert!(
+            decode_supported_version::<Payload>(path, "broken")
+                .unwrap_err()
+                .to_string()
+                .contains("failed to parse favorites.json")
+        );
     }
 
     #[test]

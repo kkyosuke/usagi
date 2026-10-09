@@ -138,6 +138,7 @@ fn agent_record(owner: DaemonGeneration) -> DurableRuntimeRecord {
         worktree_id: terminal.terminal.worktree_id,
     };
     DurableRuntimeRecord {
+        launch_provenance: None,
         runtime: AgentRuntimeRef {
             agent_runtime_id: AgentRuntimeId::new(),
             terminal: terminal.terminal.clone(),

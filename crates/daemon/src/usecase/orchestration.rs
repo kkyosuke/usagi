@@ -155,6 +155,7 @@ pub struct RuntimeAuthorization {
     pub runtime: AgentRuntimeRef,
     pub operation: CompletionFence,
     pub mcp_allowed: bool,
+    pub launch_provenance: Option<usagi_core::domain::agent::AgentLaunchProvenance>,
 }
 
 impl RuntimeAuthorization {
@@ -330,20 +331,8 @@ impl Orchestrator {
         let adapter = registry
             .adapter_mut(&request.profile_id)
             .map_err(|_| OrchestrationError::UnknownProfile)?;
-        if superseded.is_empty() {
-            runtime.launch_with_semantic(
-                request,
-                authorization.runtime.clone(),
-                authorization.operation.clone(),
-                geometry,
-                adapter,
-                store,
-                spawner,
-                mcp_credential,
-                semantic_key,
-            )
-        } else {
-            runtime.resume_with_semantic(
+        runtime
+            .launch_with_provenance(
                 request,
                 authorization.runtime.clone(),
                 authorization.operation.clone(),
@@ -354,9 +343,9 @@ impl Orchestrator {
                 mcp_credential,
                 semantic_key,
                 superseded,
+                authorization.launch_provenance.clone(),
             )
-        }
-        .map_err(OrchestrationError::Runtime)
+            .map_err(OrchestrationError::Runtime)
     }
 
     /// Adds an ephemeral token lease for one successfully spawned runtime.
@@ -713,6 +702,7 @@ mod tests {
         )
         .unwrap();
         let authorization = RuntimeAuthorization {
+            launch_provenance: None,
             runtime,
             operation: CompletionFence {
                 workspace_id: scope.workspace_id,

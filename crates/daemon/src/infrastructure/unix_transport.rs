@@ -1205,19 +1205,40 @@ fn create_private_locator_temp(daemon: &Path) -> io::Result<(PathBuf, fs::File)>
 /// Returns an error when the path exists but is not a safe private file, or
 /// cannot be read.
 pub(crate) fn read_private_bytes_if_present(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(PRIVATE_FILE_FLAGS | libc::O_NONBLOCK)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    verify_open_private_file(&file, SOCKET_MODE)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    read_private_bytes_with(&mut || {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(PRIVATE_FILE_FLAGS | libc::O_NONBLOCK)
+            .open(path)
+    })
+}
+
+fn read_private_bytes_with(
+    open: &mut dyn FnMut() -> io::Result<fs::File>,
+) -> io::Result<Option<Vec<u8>>> {
+    for _ in 0..3 {
+        let mut file = match open() {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = verify_open_private_file(&file, SOCKET_MODE) {
+            // A writer can atomically replace the path after open but before
+            // fstat. Discard that unlinked snapshot and validate a fresh open;
+            // never read its bytes or relax the single-link ownership check.
+            if file.metadata()?.nlink() == 0 {
+                continue;
+            }
+            return Err(error);
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        return Ok(Some(bytes));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "private daemon state was repeatedly replaced while opening it",
+    ))
 }
 
 fn verify_published_file(path: &Path, expected: &fs::File) -> io::Result<()> {
@@ -1420,12 +1441,17 @@ fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
 /// # Errors
 ///
 /// Returns an error when the node cannot be created, verified, or locked.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store
 pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<fs::File> {
+    lock_private_node_within(daemon, name, SETUP_LOCK_WAIT)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store,contended_private_node_lock_is_bounded_and_preserves_the_owner
+fn lock_private_node_within(daemon: &Path, name: &str, wait: Duration) -> io::Result<fs::File> {
+    let deadline = Instant::now() + wait;
     let path = daemon.join(name);
     // The directory fd is a bootstrap lock for creating or repairing the lock
     // file itself.
-    let directory = lock_setup_directory(daemon, true)?;
+    let directory = lock_setup_directory_within(daemon, true, wait)?;
     let file = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -1451,7 +1477,22 @@ pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<fs::Fil
     drop(directory);
     #[cfg(test)]
     pause_locator_lock_after_setup();
-    FileExt::lock_exclusive(&file)?;
+    loop {
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "private daemon state is locked by another process",
+                    ));
+                }
+                thread::sleep(SETUP_LOCK_POLL.min(remaining));
+            }
+            Err(error) => return Err(error),
+        }
+    }
     #[cfg(test)]
     pause_locator_lock_before_verify();
     verify_locked_private_file(&path, &file, SOCKET_MODE)?;
@@ -1991,12 +2032,19 @@ pub fn ensure_private_dir(path: &Path) -> io::Result<()> {
 /// sticky temporary directory. Every newly managed component is requested as
 /// `0700`; crash residues whose mode is a subset of `0700` are repaired before
 /// traversal continues.
+/// With `USAGI_TRUST_ROOT`, traversal is confined to that existing user-owned
+/// boundary; the environment provider is trusted to protect its ancestors.
 ///
 /// # Errors
 ///
 /// Returns an error for an unsafe anchor/component, a symlinked managed
 /// component, or a filesystem failure.
 pub fn ensure_private_dir_all(path: &Path) -> io::Result<()> {
+    let root = std::env::var_os(usagi_core::infrastructure::paths::TRUST_ROOT_ENV);
+    ensure_private_dir_all_with_root(path, root.as_deref().map(Path::new))
+}
+
+fn ensure_private_dir_all_with_root(path: &Path, root: Option<&Path>) -> io::Result<()> {
     if path.as_os_str().as_bytes().contains(&0)
         || path
             .components()
@@ -2012,7 +2060,10 @@ pub fn ensure_private_dir_all(path: &Path) -> io::Result<()> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    verify_private_chain_prefixes(&requested)?;
+    let boundary = root
+        .map(|root| open_trust_root(root, &requested))
+        .transpose()?;
+    verify_private_chain_prefixes_from(&requested, root)?;
     let (mut current, components, mut anchor) = private_chain_anchor(&requested)?;
     for component in components.into_iter().rev() {
         current.push(component);
@@ -2025,15 +2076,72 @@ pub fn ensure_private_dir_all(path: &Path) -> io::Result<()> {
         anchor = PrivateChainAnchor::Owned;
     }
     verify_private(&requested, DIR_MODE, true)?;
-    verify_private_chain_prefixes(&requested)
+    verify_private_chain_prefixes_from(&requested, root)?;
+    if let Some((root, directory)) = boundary {
+        open_trust_root(&root, &requested)?;
+        verify_open_directory(&root, &directory, false)?;
+    }
+    Ok(())
 }
 
-fn verify_private_chain_prefixes(path: &Path) -> io::Result<()> {
+/// Above an explicit boundary, ownership is entrusted to the environment
+/// provider. Never allow that opt-in to authorize an alias, an unsafe boundary,
+/// or a sibling path. Hold its inode until setup finishes and recheck it.
+fn open_trust_root(root: &Path, requested: &Path) -> io::Result<(PathBuf, fs::File)> {
+    if !root.is_absolute()
+        || root.as_os_str().as_bytes().contains(&0)
+        || root
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        || !requested.starts_with(root)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "USAGI_TRUST_ROOT must be an absolute ancestor of the private directory without '..'",
+        ));
+    }
     let mut prefix = PathBuf::new();
-    for component in path.components() {
+    for component in root.components() {
+        prefix.push(component);
+        if !fs::symlink_metadata(&prefix)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "USAGI_TRUST_ROOT must not contain symlinks or non-directory components",
+            ));
+        }
+    }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | PRIVATE_FILE_FLAGS)
+        .open(root)?;
+    verify_open_directory(root, &directory, false)?;
+    if directory.metadata()?.mode() & DIR_MODE != DIR_MODE {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "USAGI_TRUST_ROOT must grant its owner read, write and search permissions",
+        ));
+    }
+    Ok((root.to_path_buf(), directory))
+}
+
+fn verify_private_chain_prefixes_from(path: &Path, root: Option<&Path>) -> io::Result<()> {
+    let mut prefix = root.map_or_else(PathBuf::new, Path::to_path_buf);
+    // `open_trust_root` has already proven that `root` is an ancestor of
+    // `path`; a non-ancestor would only restart the walk at `/`, which checks
+    // more, never less.
+    let suffix = root
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
+    for component in suffix.components() {
         prefix.push(component);
         match fs::symlink_metadata(&prefix) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
+                if root.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "private directory chain below USAGI_TRUST_ROOT contains a symlink",
+                    ));
+                }
                 // macOS exposes `/tmp` as a root-owned symlink to the exact
                 // root-owned 01777 directory `/private/tmp`. Preserve that
                 // trusted system anchor while rejecting every user-controlled
@@ -2586,6 +2694,105 @@ fn effective_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_state_read_reopens_an_inode_unlinked_by_atomic_replacement() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        write_private_file(&daemon, "state.json", ".state.tmp.", b"old").unwrap();
+        let path = daemon.join("state.json");
+        let mut opens = 0;
+        let bytes = read_private_bytes_with(&mut || {
+            opens += 1;
+            let file = fs::File::open(&path)?;
+            if opens == 1 {
+                write_private_file(&daemon, "state.json", ".state.tmp.", b"new")?;
+                assert_eq!(file.metadata()?.nlink(), 0);
+            }
+            Ok(file)
+        })
+        .expect("a private atomic replacement must not be reported as unsafe ownership");
+        assert_eq!(bytes, Some(b"new".to_vec()));
+        assert_eq!(opens, 2);
+    }
+
+    #[test]
+    fn private_state_read_bounds_replaced_inode_retries() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        write_private_file(&daemon, "state.json", ".state.tmp.", b"old").unwrap();
+        let path = daemon.join("state.json");
+        let unlinked = fs::File::open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let mut opens = 0;
+        let error = read_private_bytes_with(&mut || {
+            opens += 1;
+            unlinked.try_clone()
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(opens, 3);
+    }
+
+    #[test]
+    fn private_state_read_refuses_unsafe_replacements_without_retrying_them() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        let path = daemon.join("state.json");
+        for hard_link in [false, true] {
+            write_private_file(&daemon, "state.json", ".state.tmp.", b"old").unwrap();
+            let mut opens = 0;
+            let error = read_private_bytes_with(&mut || {
+                opens += 1;
+                let file = fs::File::open(&path)?;
+                if opens == 1 {
+                    write_private_file(&daemon, "state.json", ".state.tmp.", b"unsafe")?;
+                    if hard_link {
+                        fs::hard_link(&path, daemon.join("alias"))?;
+                    } else {
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+                    }
+                }
+                Ok(file)
+            })
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(opens, 2);
+        }
+    }
+
+    #[test]
+    fn private_state_read_preserves_absence_and_open_errors() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        assert!(
+            read_private_bytes_if_present(&temp.path().join("absent"))
+                .unwrap()
+                .is_none()
+        );
+        let mut opens = 0;
+        let error = read_private_bytes_with(&mut || {
+            opens += 1;
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "refused"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(opens, 1);
+    }
+
+    #[test]
+    fn private_state_read_reports_io_errors_after_validation() {
+        let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        write_private_file(&daemon, "state.json", ".state.tmp.", b"state").unwrap();
+        let path = daemon.join("state.json");
+        assert!(
+            read_private_bytes_with(&mut || OpenOptions::new().write(true).open(&path)).is_err()
+        );
+    }
 
     #[test]
     fn peer_pid_validation_rejects_non_process_targets() {
@@ -3844,6 +4051,27 @@ mod tests {
     }
 
     #[test]
+    fn contended_private_node_lock_is_bounded_and_preserves_the_owner() {
+        let temp = TempDir::new().unwrap();
+        let daemon = temp.path().join("daemon");
+        ensure_private_dir(&daemon).unwrap();
+        for name in [LOCATOR_LOCK, "generations.lock"] {
+            let owner = lock_private_node(&daemon, name).unwrap();
+            let identity = owner.metadata().unwrap().ino();
+            let wait = Duration::from_millis(40);
+            let started = Instant::now();
+            let error = lock_private_node_within(&daemon, name, wait).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            assert!(started.elapsed() >= wait);
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert_eq!(fs::metadata(daemon.join(name)).unwrap().ino(), identity);
+            drop(owner);
+            let next = lock_private_node_within(&daemon, name, wait).unwrap();
+            assert_eq!(next.metadata().unwrap().ino(), identity);
+        }
+    }
+
+    #[test]
     fn concurrent_locator_writers_publish_whole_json_without_temp_collisions() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let daemon = temp.path().join("daemon");
@@ -4517,6 +4745,103 @@ mod tests {
     }
 
     #[test]
+    fn explicit_trust_root_confines_private_setup_and_preserves_default_policy() {
+        let temp = TempDir::new().unwrap();
+        let untrusted = temp.path().canonicalize().unwrap().join("provider");
+        fs::create_dir(&untrusted).unwrap();
+        fs::set_permissions(&untrusted, fs::Permissions::from_mode(0o777)).unwrap();
+        let root = untrusted.join("owned");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let target = root.join("local/daemon");
+        assert!(ensure_private_dir_all_with_root(&target, None).is_err());
+        assert!(!target.exists());
+        ensure_private_dir_all_with_root(&target, Some(&root)).unwrap();
+        ensure_private_dir_all_with_root(&target, Some(&root)).unwrap();
+        for path in [root.join("local"), target.clone()] {
+            verify_private(&path, DIR_MODE, true).unwrap();
+        }
+        assert_eq!(fs::metadata(&root).unwrap().mode() & 0o7777, 0o755);
+        assert!(ensure_private_dir_all_with_root(&target, None).is_err());
+        // A prefix that only matches the spelling is not a descendant.
+        let sibling = untrusted.join("owned-sibling/daemon");
+        assert!(ensure_private_dir_all_with_root(&sibling, Some(&root)).is_err());
+        assert!(!sibling.exists());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(ensure_private_dir_all_with_root(&target, Some(&root)).is_err());
+        // A restrictive boundary must not be repaired or traversed upwards.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(ensure_private_dir_all_with_root(&target, Some(&root)).is_err());
+        assert_eq!(fs::metadata(&root).unwrap().mode() & 0o7777, 0o500);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn explicit_trust_root_rejects_invalid_boundaries_and_symlink_components() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("owned");
+        ensure_private_dir(&root).unwrap();
+        let target = root.join("daemon");
+        for invalid in [
+            PathBuf::new(),
+            PathBuf::from("relative"),
+            PathBuf::from("/nul\0"),
+            root.join("../owned"),
+            root.join("missing"),
+        ] {
+            assert!(ensure_private_dir_all_with_root(&target, Some(&invalid)).is_err());
+            assert!(!target.exists());
+        }
+        let file = root.join("file");
+        fs::write(&file, []).unwrap();
+        assert!(ensure_private_dir_all_with_root(&file.join("child"), Some(&file)).is_err());
+        let alias = root.parent().unwrap().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        assert!(ensure_private_dir_all_with_root(&alias.join("daemon"), Some(&alias)).is_err());
+        let canonical_temp = temp.path().canonicalize().unwrap();
+        let error = ensure_private_dir_all_with_root(&alias.join("daemon"), Some(&canonical_temp))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("below USAGI_TRUST_ROOT contains a symlink")
+        );
+        let nested_alias = alias.join("nested");
+        ensure_private_dir(&root.join("nested")).unwrap();
+        assert!(
+            ensure_private_dir_all_with_root(&nested_alias.join("daemon"), Some(&nested_alias))
+                .is_err()
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn explicit_trust_root_detects_boundary_replacement_during_setup() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("owned");
+        ensure_private_dir(&root).unwrap();
+        let target = root.join("daemon");
+        let ready = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let worker = {
+            let root = root.clone();
+            let target = target.clone();
+            let ready = Arc::clone(&ready);
+            let resume = Arc::clone(&resume);
+            std::thread::spawn(move || {
+                pause_next_private_chain_anchor_recheck(&root, ready, resume);
+                ensure_private_dir_all_with_root(&target, Some(&root))
+            })
+        };
+        ready.wait();
+        fs::rename(&root, temp.path().join("displaced")).unwrap();
+        ensure_private_dir(&root).unwrap();
+        resume.wait();
+        assert!(worker.join().unwrap().is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn private_directory_chain_rejects_unsafe_anchors_and_inputs() {
         let clean = TempDir::new_in("/tmp").unwrap();
         let broad = clean.path().join("broad-directory");
@@ -4604,7 +4929,7 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         let overlong = clean.path().join("x".repeat(1024));
-        let error = verify_private_chain_prefixes(&overlong).unwrap_err();
+        let error = verify_private_chain_prefixes_from(&overlong, None).unwrap_err();
         assert!(!matches!(
             error.kind(),
             io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied

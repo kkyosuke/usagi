@@ -45,12 +45,14 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | session ごとの生成物を探しづらい | [Outputs](document/03-tui.md#outputs) で横断検索し、削除後の保管済み成果物も開ける |
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
-Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
-計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。
-進捗の確認と追加指示も同じタブで行えます。
+macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
+logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
+よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
+保存中も操作でき、登録・解除の結果は session 一覧のお気に入りマーカーへ反映されます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
 質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。選択への補足コメントや、送信前の確認画面も利用できます。
+選択肢は余白と行の強調で読みやすく表示し、上下キーでコメント・自由入力まで移動できます。長文は現在の表示位置から PgUp/PgDn で読み進められます。画面下部には回答件数と必要な操作を控えめに表示します。詳しい表示と操作は [TUI の仕様](document/03-tui.md#home-と-target) を参照してください。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
 
 ## インストール
@@ -66,7 +68,11 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 usagi doctor  # 必要なツールと設定を確認
 ```
 
-対応環境と必要なツール、ソースからのビルド、更新、shell 補完は
+`usagi update` は、実行中 Agent や複数プロジェクトの端末を継続するため daemon の切り替えを保留した場合も binary の更新成功を表示します。
+更新中の中断は非 0 で終了し、旧版へ戻した後も再更新できます。
+切り替えの扱いは [更新](document/12-installation.md#更新) を参照してください。
+
+対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。
 
 ## はじめる
@@ -81,25 +87,41 @@ TUI が開いたら、次の順に進めます。
 
 1. `+ new session` から作業名と base branch を選ぶ。
 2. 作成した session で `agent` または `terminal` を実行する。
-3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。Workflow はレビュー中の更新にも追従し、PR 検証では未追跡ファイルと GitHub のマージ要件も確認する。
+3. [File Preview](document/03-tui.md#file-preview)、Diff と PR の状態を確認しながら作業する。
 
 session 作成直後の環境構築は、開いた workspace の Overview から `config` を実行して
 `Session setup` を編集するか、`.usagi/config.toml` の
 [`[session].setup_commands`](document/05-daemon.md#session-作成後の-setup-command) に直接設定できます。
 
-次回からは `usagi` を起動し、Open / Recent から workspace を選べます。
-サイドバーでは、委譲して作成した子 session を親の直下にまとめて表示します。
-[Session Garden](document/assets/session-garden.gif) では、ゆったり動くうさぎと庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
+Welcome はロゴとメニューを画面の上から約 1/3 にまとめ、選択中の項目を色と太字で示します。
+Config / Quit はメニューの直下、操作ヒントは画面最下部に表示します。
+次回からは `usagi` の Welcome で `Enter` を押すと、前回の project タブ構成と選択中の project を開けます。
+`o` の Open / add projects では登録済み project・Recent・Directory を切り替え、複数 project の選択や既存ディレクトリの追加ができます。
+Clone は `e`、全体の Config は `c` から開きます。
+サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。
+[Session Garden](document/assets/session-garden.gif) では、[Agent の状態に沿って動くうさぎ](document/03-tui.md#区画とうさぎ)と庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。
 中断 Agent の Closeup でも、Ctrl+C は[終了確認](document/03-tui.md)を通します。
+Agent タブと daemon の状態画面では、手動・MCP・daemon の作成元を表示します。
+同じ session に複数の Agent がある場合は `usagi session agents` で、各 runtime の作成時刻・起動操作・呼び出し元を調べられます。
+記録の読み方と過去データの扱いは [Agent の作成元と起動記録](document/05-daemon.md#agent-の作成元と起動記録)を参照してください。
 画面の詳細は [TUI](document/03-tui.md)、全キーボード操作は
 [キーバインド](document/11-keybindings.md) を参照してください。
+スクロールなどのマウス操作で届く制御列が分割されても、[TUI の端末入力](document/03-tui.md)で復元し、座標の数値が文字入力へ混ざるのを防ぎます。
+
+Switch では選択中の session の [メモ](document/03-tui.md#session-memo) が右ペイン上部に表示され、`n` で同じ枠を編集できます。メモは Agent と共有され、長文は画面幅で折り返します。
+`Ctrl-S` で保存した内容は、その session の Agent も MCP の `session_note_get` から読めます。
 
 不要になった孤立資源は `usagi clean --dry-run` で確認できます。削除条件と daemon 稼働中の動作は
 [孤立資源の削除](document/01-overview.md#孤立資源の削除)を参照してください。
+session の削除状況は一覧から確認できます。時間のかかる worktree 撤去や、削除途中の失敗からの再試行は
+[session teardown worker](document/05-daemon.md#session-teardown-worker)を参照してください。
 
 起動失敗や daemon の異常終了を調べる際は、[failure log](document/05-daemon.md#failure-logging)を確認してください。
+
+Agent は起動前に CLI の認証状態を確認し、確認失敗の理由を daemon log に記録します。
+詳しくは[起動前の認証確認](document/05-daemon.md#agent-cli-の-readiness-preflight)を参照してください。
 
 ## 基本概念
 
@@ -133,6 +155,9 @@ Agent は組み込みの MCP server を通じて session の作成・観測・�
 
 toolchain は `rust-toolchain.toml` に固定されています。環境構築、開発フロー、品質 gate、PR の手順は
 [開発規約](document/06-conventions.md) を参照してください。
+
+クラウド環境の親ディレクトリの所有権が通常と異なる場合は、
+[`USAGI_TRUST_ROOT` で検査の起点を指定](document/05-daemon.md#private-directory-の検査起点)できます。
 
 ## ライセンス
 

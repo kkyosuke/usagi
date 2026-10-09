@@ -3,7 +3,7 @@
 //! The global, per-user preferences persisted as `settings.json` in the data
 //! directory, plus workspace settings persisted beside a project. Theme, icon
 //! rendering, modal interaction, and the generic Terminal PTY ceiling stay global; Agent,
-//! Workflow, Team, Issue, and Memory values are copied to a workspace when it is
+//! Team, Issue, and Memory values are copied to a workspace when it is
 //! registered and may then be changed independently.
 //! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
 //! adds to — or overrides — what every workspace inherits.
@@ -180,37 +180,6 @@ pub enum TeamTemplate {
     None,
 }
 
-/// The workspace interaction model used when starting Director work.
-///
-/// `Classic` preserves the existing conversation-first flow. `GoalDriven`
-/// opens a goal composer and starts the Director with an autonomous delivery
-/// contract. The compatibility mode is deliberately the serde fallback so an
-/// older settings file, a future token, or an omitted field cannot opt a user
-/// into autonomous work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkMode {
-    /// One goal starts a Director-owned run through PR readiness or an explicit
-    /// human decision.
-    GoalDriven,
-    /// Existing session- and conversation-first interaction. This must remain
-    /// last because it is also serde's unknown-token fallback.
-    #[default]
-    #[serde(other)]
-    Classic,
-}
-
-impl WorkMode {
-    /// Toggle between compatibility and goal-driven interaction.
-    #[must_use]
-    pub const fn cycle(self) -> Self {
-        match self {
-            Self::Classic => Self::GoalDriven,
-            Self::GoalDriven => Self::Classic,
-        }
-    }
-}
-
 impl TeamTemplate {
     /// Every selectable Config value in display order.
     pub const ALL: [Self; 4] = [Self::None, Self::Hierarchical, Self::Flat, Self::Pipeline];
@@ -232,8 +201,15 @@ impl TeamTemplate {
 }
 
 /// Budget of a status probe whose CLI answers from local credentials alone.
-/// Claude and the Codex-compatible CLIs read a token file and exit.
-const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+/// Claude and the Codex-compatible CLIs read a token file and exit, but the
+/// process start-up is not free: `claude auth status` boots a ~230 MB bundled
+/// runtime and measured 0.8–0.9 s on an idle host and 1.3–1.5 s under CPU
+/// contention, and the first run of a freshly auto-updated binary also pays
+/// the OS code-signature scan. A two-second budget left less than 2x headroom,
+/// so a busy host reported an installed, authenticated CLI as unavailable and
+/// refused every launch. The budget only bounds a hung CLI, so it stays well
+/// above the slowest healthy start-up instead of near the typical one.
+const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Budget of Antigravity's probe. `agy models` is not a local credential read:
 /// it starts the product's language server and lists the models the signed-in
@@ -462,7 +438,7 @@ impl DefaultModel {
 /// Availability is observed by the composition root as one snapshot (without
 /// executing provider CLIs) and injected, so every surface that offers a
 /// provider — the Config screen, the Closeup `agent -m` picker and completion,
-/// the Director launch picker, and the Session Workflow tab's participants —
+/// and the Director launch picker —
 /// offers exactly the same set. A provider qualifies when its
 /// [`command`](DefaultModel::command) is on `PATH`; `usagi_core::infrastructure::runtime_model::observe_available_models`
 /// is the one place that decides it.
@@ -576,8 +552,6 @@ pub struct Settings {
     pub memory_enabled: bool,
     /// Built-in role catalog used for new and resumed Agent work.
     pub team_template: TeamTemplate,
-    /// Whether Director starts as a classic conversation or from one goal.
-    pub work_mode: WorkMode,
     /// Environment bindings injected into every workspace's Agent and terminal
     /// children. The key is the variable name, the value a literal or a
     /// `op://…` secret reference; a workspace adds to or overrides them through
@@ -598,7 +572,6 @@ impl Default for Settings {
             issue_enabled: true,
             memory_enabled: true,
             team_template: TeamTemplate::default(),
-            work_mode: WorkMode::default(),
             // No environment is injected unless it is configured explicitly.
             env: EnvBindings::new(),
         }
@@ -624,11 +597,10 @@ impl Settings {
         self.issue_enabled = settings.issue_enabled;
         self.memory_enabled = settings.memory_enabled;
         self.team_template = settings.team_template;
-        self.work_mode = settings.work_mode;
         self
     }
 
-    /// Apply workspace-owned Agent, Base branch, Workflow, Team, Issue, Memory, and
+    /// Apply workspace-owned Agent, Base branch, Team, Issue, Memory, and
     /// environment values over this global baseline. Theme, icon rendering, modal interaction,
     /// and the generic Terminal PTY ceiling always remain global.
     ///
@@ -652,9 +624,6 @@ impl Settings {
         if let Some(template) = local.team_template {
             self.team_template = template;
         }
-        if let Some(mode) = local.work_mode {
-            self.work_mode = mode;
-        }
         for (name, value) in valid_bindings(&local.env) {
             self.env.insert(name.to_owned(), value.to_owned());
         }
@@ -668,7 +637,7 @@ impl Settings {
     }
 }
 
-/// Per-workspace Agent, Base branch, Workflow, Team, Issue, and Memory settings stored in
+/// Per-workspace Agent, Base branch, Team, Issue, and Memory settings stored in
 /// `<workspace>/.usagi/settings.json` (or the development-mode-specific `dev`
 /// directory).
 ///
@@ -688,16 +657,13 @@ pub struct LocalSettings {
     /// Workspace override for the built-in team template.
     #[serde(deserialize_with = "deserialize_local_team_template")]
     pub team_template: Option<TeamTemplate>,
-    /// Workspace override for the Director interaction model.
-    #[serde(deserialize_with = "deserialize_local_work_mode")]
-    pub work_mode: Option<WorkMode>,
     /// Environment bindings this workspace adds to the global ones. An empty map
     /// means the workspace uses exactly what it inherits.
     pub env: EnvBindings,
 }
 
 impl LocalSettings {
-    /// Replace the Agent, Base branch, Workflow, Team, Issue, and Memory choices with
+    /// Replace the Agent, Base branch, Team, Issue, and Memory choices with
     /// `settings`, keeping this workspace's own environment bindings.
     ///
     /// The Config surface edits a merged [`Settings`] view, which carries the
@@ -711,7 +677,6 @@ impl LocalSettings {
         self.issue_enabled = Some(settings.issue_enabled);
         self.memory_enabled = Some(settings.memory_enabled);
         self.team_template = Some(settings.team_template);
-        self.work_mode = Some(settings.work_mode);
         self
     }
 
@@ -756,20 +721,6 @@ where
         // `none` and unknown future values both disable delegation instead of
         // inheriting a potentially more permissive global template.
         Some(_) => Some(TeamTemplate::None),
-        None => None,
-    })
-}
-
-fn deserialize_local_work_mode<'de, D>(deserializer: D) -> Result<Option<WorkMode>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let token = Option::<String>::deserialize(deserializer)?;
-    Ok(match token.as_deref() {
-        Some("goal_driven") => Some(WorkMode::GoalDriven),
-        // An explicit unknown token stays fail-closed in compatibility mode;
-        // only an absent field inherits the global workspace default.
-        Some(_) => Some(WorkMode::Classic),
         None => None,
     })
 }

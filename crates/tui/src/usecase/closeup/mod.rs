@@ -27,7 +27,6 @@ pub enum Command {
     Diff { arguments: String },
     Env { arguments: String },
     Terminal { arguments: String },
-    Workflow { arguments: String },
 }
 
 type CommandFactory = fn(String) -> Command;
@@ -89,14 +88,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
         },
         factory: |arguments| Command::Terminal { arguments },
     },
-    CommandDefinition {
-        info: CommandInfo {
-            name: "workflow",
-            description: "Open this session's implementation/review workflow",
-            usage: "workflow [finish]",
-        },
-        factory: |arguments| Command::Workflow { arguments },
-    },
 ];
 
 /// Closeup 固有コマンドの metadata を名前順に返す。
@@ -116,7 +107,6 @@ impl Command {
             Self::Diff { .. } => "diff",
             Self::Env { .. } => "env",
             Self::Terminal { .. } => "terminal",
-            Self::Workflow { .. } => "workflow",
         }
     }
 }
@@ -177,9 +167,7 @@ mod tests {
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
         assert_eq!(
             names,
-            [
-                "agent", "close", "diff", "env", "outputs", "terminal", "workflow"
-            ]
+            ["agent", "close", "diff", "env", "outputs", "terminal"]
         );
         assert!(
             definitions
@@ -191,12 +179,6 @@ mod tests {
     #[test]
     fn interprets_every_registered_command_and_trims_arguments() {
         let cases = [
-            (
-                "workflow",
-                Command::Workflow {
-                    arguments: String::new(),
-                },
-            ),
             (
                 "agent   codex  ",
                 Command::Agent {
@@ -252,5 +234,11 @@ mod tests {
             interpret("reopen"),
             Err(ParseError::Unknown("reopen".to_owned()))
         );
+        for input in ["workflow", "workflow finish", "workflow start"] {
+            assert_eq!(
+                interpret(input),
+                Err(ParseError::Unknown("workflow".to_owned()))
+            );
+        }
     }
 }
