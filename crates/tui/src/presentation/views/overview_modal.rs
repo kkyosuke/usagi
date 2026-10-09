@@ -16,7 +16,7 @@ use usagi_core::domain::settings::ModalSelectionMode;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 56;
-/// 一度に出す候補の最大数。
+/// 候補一覧に使う最大行数（スクロール表示・展開したサブコマンドを含む）。
 const MAX_MATCHES: usize = 8;
 /// input, heading, candidates, help, result, and footer.
 const BODY_HEIGHT: usize = 20;
@@ -366,20 +366,27 @@ fn body(state: &OverviewModal) -> Vec<String> {
             "matches"
         };
         lines.push(modal::caption(header));
-        for (i, hint) in matches.iter().take(MAX_MATCHES).enumerate() {
-            lines.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
+        let mut rows = Vec::new();
+        let mut cursor = 0;
+        for (i, hint) in matches.iter().enumerate() {
+            if i == state.selected {
+                cursor = rows.len();
+            }
+            rows.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
             if state.selection_mode == ModalSelectionMode::Action
                 && state.expanded
                 && i == state.selected
             {
+                cursor += 1 + state.selected_subcommand;
                 for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                    lines.push(modal::subcommand_row(
+                    rows.push(modal::subcommand_row(
                         subcommand,
                         sub_index == state.selected_subcommand,
                     ));
                 }
             }
         }
+        lines.extend(modal::bounded_list_rows(&rows, cursor, MAX_MATCHES));
     }
     let help = matches
         .get(state.selected)
@@ -561,10 +568,11 @@ mod tests {
         modal.select_prev();
         assert_eq!(modal.submission(), "session remove");
         let expanded = joined(&modal);
-        assert!(expanded.contains("cleanup"));
-        assert!(expanded.contains("list"));
-        assert!(expanded.contains("overview"));
-        assert!(expanded.contains("remove"));
+        assert!(expanded.contains("        cleanup"));
+        assert!(expanded.contains("        list"));
+        assert!(expanded.contains("        overview"));
+        assert!(expanded.contains("› remove"));
+        assert!(expanded.contains("Esc: close"));
         assert!(modal.collapse());
         assert!(!modal.collapse());
 
@@ -573,6 +581,24 @@ mod tests {
         plain.expand_selected();
         assert!(!plain.collapse());
         assert_eq!(plain.submission(), "config");
+    }
+
+    #[test]
+    fn scrolling_keeps_every_selected_command_and_footer_visible() {
+        let mut modal = OverviewModal::new();
+        for command in modal.matches() {
+            let text = joined(&modal);
+            assert!(text.contains(&format!("› {}", command.name)), "{text}");
+            assert!(text.contains("Esc: close"), "{text}");
+            assert_eq!(modal.submission(), command.name);
+            modal.select_next();
+        }
+        assert_eq!(modal.selected(), 0);
+        modal.expand_selected();
+        modal.select_next();
+        let text = joined(&modal);
+        assert!(text.contains("› --apply --force"), "{text}");
+        assert!(text.contains("Esc: close"), "{text}");
     }
 
     #[test]
