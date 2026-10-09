@@ -1029,10 +1029,13 @@ fn garden_observation_runs_only_while_the_garden_is_open_and_backs_off_unanswere
 
     // Nothing answered: the same open Garden waits out the longer backoff.
     lane.complete(now, false);
-    assert!(!lane.begin_if_due(
-        true,
-        now + crate::presentation::GARDEN_OBSERVATION_INTERVAL * 4
-    ));
+    assert!(
+        !lane.begin_if_due(
+            true,
+            (now + crate::presentation::GARDEN_OBSERVATION_BACKOFF)
+                .saturating_sub(std::time::Duration::from_millis(1))
+        )
+    );
     assert!(lane.begin_if_due(true, now + crate::presentation::GARDEN_OBSERVATION_BACKOFF));
 
     // A round dispatched before the Garden closed still owns the port, so
@@ -1102,7 +1105,8 @@ fn a_garden_round_observes_every_other_project_and_drops_a_mismatched_answer() {
     let mut targets = vec![observed, mismatched, unavailable];
     targets.extend((0..crate::presentation::MAX_OBSERVED_PROJECTS).map(|_| WorkspaceId::new()));
 
-    crate::presentation::spawn_garden_observation_job(Box::new(port), targets, sender);
+    let _worker =
+        crate::presentation::spawn_garden_observation_job(Box::new(port), targets, true, sender);
     let completion = completions
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("the round returns its port");

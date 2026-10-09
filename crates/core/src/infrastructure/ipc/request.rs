@@ -121,6 +121,8 @@ pub enum DaemonRequest {
     /// per-session dispatch status. Process-level cross-project views use this
     /// instead of treating a coarse live PTY as proof that dispatch is running.
     AgentWorkspaceObservation { workspace: WorkspaceId },
+    /// Human-only read of attention in an already adopted workspace.
+    WorkspaceAttention { workspace: WorkspaceId },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.
     DiagnoseAgents {

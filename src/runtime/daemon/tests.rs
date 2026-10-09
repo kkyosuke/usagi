@@ -11286,3 +11286,86 @@ fn launch_audit_keeps_authenticated_caller_independent_of_reported_surface() {
     assert_eq!(legacy.client, None);
     assert_eq!(legacy.caller_operation_id, None);
 }
+
+#[test]
+fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_tenants() {
+    use usagi_core::domain::attention::WorkspaceAttention;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let sessions = Arc::new(Mutex::new(
+        SessionRuntime::open(
+            root.clone(),
+            &temporary.path().join("sessions"),
+            DaemonGeneration::new(),
+            AlwaysSuccessfulGit,
+            PermissiveSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    let before = sessions.lock().unwrap().snapshot().unwrap();
+    let workspace = serde_json::from_value(before["workspace_id"].clone()).unwrap();
+    let bound = bound_to(
+        &temporary.path().join("tenants"),
+        &root,
+        Arc::clone(&sessions),
+        workspace,
+    );
+    let agent = empty_agent_runtime(DispatchStore::new(temporary.path().join("dispatch")));
+    let decisions = UserDecisionStore::new(temporary.path().join("decisions"));
+    let prs = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
+        PrInventoryStore::new(temporary.path().join("prs")),
+        GenerationRole::Active,
+    ))));
+    let call = |workspace, raw: &serde_json::Value| {
+        super::attention::dispatch(
+            &agent,
+            &bound,
+            &decisions,
+            &prs,
+            workspace,
+            usagi_core::infrastructure::ipc::RequestId("attention".into()),
+            raw,
+            &session_test_hello(),
+        )
+    };
+    let reply = call(workspace, &serde_json::json!({}));
+    let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+        panic!("response expected")
+    };
+    assert_eq!(outcome, ResponseOutcome::Ok);
+    let snapshot: WorkspaceAttention = serde_json::from_value(body).unwrap();
+    assert_eq!(snapshot.workspace, workspace);
+    assert!(snapshot.items.is_empty());
+    assert_eq!(sessions.lock().unwrap().snapshot().unwrap(), before);
+    sessions
+        .lock()
+        .unwrap()
+        .handle(
+            usagi_core::infrastructure::ipc::SessionAction::Create,
+            &usagi_core::domain::id::OperationId::new().to_string(),
+            &serde_json::json!({"name":"observed"}),
+        )
+        .unwrap();
+    let created = sessions.lock().unwrap().snapshot().unwrap();
+    assert_eq!(created["sessions"].as_array().unwrap().len(), 1);
+    assert!(matches!(
+        call(workspace, &serde_json::json!({})).kind,
+        EnvelopeKind::Response {
+            outcome: ResponseOutcome::Ok,
+            ..
+        }
+    ));
+    assert_eq!(sessions.lock().unwrap().snapshot().unwrap(), created);
+    for raw in [
+        serde_json::json!({"caller_context":{}}),
+        serde_json::json!({"_caller_credential":"secret"}),
+    ] {
+        assert!(
+            matches!(call(workspace, &raw).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::PermissionDenied)
+        );
+    }
+    assert!(
+        matches!(call(WorkspaceId::new(), &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::OwnershipUnknown)
+    );
+}

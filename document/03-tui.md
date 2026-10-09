@@ -213,6 +213,32 @@ Home の top-level `update` は event family の routing を担い、独立し�
 プロセスを終了する必要はない。離脱と終了の区別、および離脱時の teardown は
 [workspace の離脱と終了](#workspace-の離脱と終了)を正本とする。
 
+### workspace 横断の対応待ち
+
+project bar の `! Attention` または `Ctrl-O i` は、開いている全 project の対応待ち一覧を開く。
+この節が横断一覧の表示・観測契約の正本である。登録済みでも deck に開いていない workspace は対象外とする。
+
+| 分類 | 対象 | Enter の移動先 |
+|---|---|---|
+| Your decision | pending decision | 対象 workspace の Decisions |
+| Review ready | 確認済みの open・非 draft PR | 対象 session の PR 一覧 |
+| Stopped / failed | session/Agent の失敗・中断、CI失敗・修正要求 | 対象 session または PR 一覧 |
+| System wait | session の作成・削除、Agent の待機、CI待ち、PR状態の未取得・再取得 | 対象 session または PR 一覧 |
+| Running | 実行中の Agent | 対象 session |
+
+一覧は対応待ちを先に表示し、文字入力で project・session・理由を絞り込める。`↑↓` / `PageUp` / `PageDown` で選択し、
+`Enter` で移動、`Esc` で閉じる。更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は
+別項目を開かない。移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
+Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
+明示的な質問がなければ System wait として表示する。
+
+project tab の `!N` は判断・レビュー・停止の対応件数、`?` は未取得、`!?` は取得失敗または古い観測を示す。
+背景観測は Garden を閉じていても継続し、1 round 最大16 project を順番に巡回する。成功後3秒、全件取得失敗後5秒で再取得する。
+30秒以上更新されない結果は Stale とする。取得失敗時は以前の行を Stale で残し、件数集計と移動の対象から外す。
+一覧の Unknown projects は未取得・失敗した project 数であり、未取得を「対応待ちゼロ」とみなさない。
+観測は専用 worker が稼働済み daemon の保存済み状態だけを読み、workspace の adopt、daemon/Agent 起動、terminal attach、状態の変更は行わない。
+各接続・request は250ms・再試行なしで読み、workspace 切り替え時は次の request を中止して worker を回収する。
+
 ## workspace の離脱と終了
 
 **離脱（Welcome へ戻る）と終了（プロセスを終える）は別の答えである**。どちらも Home の
@@ -1369,9 +1395,9 @@ Garden は開いている project 全件を描くが、workspace controller が 
 |---|---|
 | 何を読むか | project ごとの `AgentWorkspaceObservation`。`AgentInventory` の runtime detail と、session ごとの daemon-authoritative な dispatch status を同じ応答で読む。request が名指しした `WorkspaceId` を daemon が自分の record から filter して答えるので、その project の tenant へ接続し直さない |
 | 表示 intent | 各観測で同じ project の保存済み表示 intent を再読込し、中断タブと同じ規則で削除済み・重複履歴を除外する。読込失敗時はその観測を採用せず、直前の表示を保つ |
-| いつ読むか | Garden が前面にある間だけ。1 round ずつ直列で、成功後は 1 秒、daemon が 1 件も答えなかった round のあとは 5 秒あけて次の round に入る。Garden を閉じると次に開いた瞬間へ再武装する |
+| いつ読むか | Garden が前面にある間だけ。1 round ずつ直列で、成功後は 3 秒、daemon が 1 件も答えなかった round のあとは 5 秒あけて次の round に入る。Garden を閉じても対応待ちの観測は継続し、Agent inventory の取得だけを止める |
 | 何をしないか | daemon の cold start、session の変更、terminal の attach。observation 専用の port を使い、active project の lane とは接続を共有しない |
-| 上限 | 1 round で観測する project は 16 件まで。超えた分は `project inactive` のまま残る |
+| 上限 | 1 round で観測する project は 16 件まで。超えた分は次 round 以降に巡回する |
 
 観測が届いた区画は active project と同じ規則（[区画とうさぎ](#区画とうさぎ)）でうさぎを描く。届く前・daemon が
 居ない・上限を超えた区画は `project inactive` を保ち、うさぎを推測しない。runtime phase は inventory の粗い state

@@ -5,6 +5,8 @@
 //! Mutable session, pane, and Agent state remain owned by the active workspace
 //! controller.
 
+mod attention;
+
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -44,6 +46,9 @@ pub struct WorkspaceSlot {
     /// unobserved slot keeps drawing the read-only `project inactive` plot
     /// instead of claiming that an empty cached list means "no Agents".
     agents_observed: bool,
+    attention: Option<usagi_core::domain::attention::WorkspaceAttention>,
+    attention_stale: bool,
+    attention_observed_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +140,9 @@ impl WorkspaceSlot {
             focused_session: None,
             manual_session_order: None,
             agents_observed: false,
+            attention: None,
+            attention_stale: false,
+            attention_observed_at: None,
         }
     }
 
@@ -168,6 +176,7 @@ impl WorkspaceSlot {
 enum DeckOverlay {
     Add(AddWorkspace),
     Switcher(ProjectSwitcher),
+    Attention(attention::AttentionList),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +198,19 @@ pub enum OverlayIntent {
         session: SessionId,
     },
     Close(PathBuf),
+    AttentionVisit {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        destination: AttentionDestination,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionDestination {
+    Decisions,
+    PullRequests,
+    Session,
 }
 
 /// Ordered tabs and the active tab identity.
@@ -202,6 +224,8 @@ pub struct WorkspaceDeck {
     pending_closeup_path: Option<PathBuf>,
     /// Global terminal icon preference used by cached transition frames.
     icon_mode: IconMode,
+    attention_cursor: usize,
+    pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -225,6 +249,8 @@ impl WorkspaceDeck {
             pending_garden_visit: None,
             pending_closeup_path: None,
             icon_mode: IconMode::default(),
+            attention_cursor: 0,
+            pending_attention: None,
         }
     }
 
@@ -339,6 +365,11 @@ impl WorkspaceDeck {
             .find(|slot| slot.path == snapshot.workspace.path)
         {
             let focused_session = slot.focused_session;
+            if slot.workspace_id != snapshot.workspace_id {
+                slot.attention = None;
+                slot.attention_observed_at = None;
+                slot.attention_stale = false;
+            }
             slot.workspace_id = snapshot.workspace_id;
             slot.label.clone_from(&snapshot.workspace.name);
             slot.sessions = WorkspaceSlot::from_snapshot(snapshot).sessions;
@@ -413,6 +444,7 @@ impl WorkspaceDeck {
         match overlay {
             DeckOverlay::Add(add) => add.handle(key),
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
+            DeckOverlay::Attention(list) => list.handle(key, &self.slots),
         }
     }
 
@@ -436,6 +468,13 @@ impl WorkspaceDeck {
             .is_some_and(|(target, _)| target == path)
         {
             self.pending_garden_visit = None;
+        }
+        if self
+            .pending_attention
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == path)
+        {
+            self.pending_attention = None;
         }
         if self.pending_closeup_path.as_deref() == Some(path) {
             self.pending_closeup_path = None;
@@ -973,6 +1012,7 @@ impl FinderRow {
 pub enum ProjectBarTarget {
     Workspace(PathBuf),
     Add,
+    Attention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1015,11 +1055,12 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         .enumerate()
         .map(|(index, slot)| {
             let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
-            format!(" {} {name} ", index + 1)
+            format!(" {} {name}{} ", index + 1, attention::badge(slot))
         })
         .collect::<Vec<_>>();
     let add_button = InlineButton::new(ADD_LABEL);
-    let add_width = add_button.width();
+    let attention_button = InlineButton::new("! Attention");
+    let add_width = add_button.width() + attention_button.width();
 
     let mut best = (active, active + 1);
     let mut best_count = 1;
@@ -1088,6 +1129,14 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
             columns: column..column + span,
             target: ProjectBarTarget::Add,
         });
+        column += span;
+        let attention =
+            attention_button.render(width.saturating_sub(column), Role::Accent.style().bold());
+        line.push_str(&attention.line);
+        hits.push(ProjectBarHit {
+            columns: column..column + attention.width,
+            target: ProjectBarTarget::Attention,
+        });
     }
     ProjectBar { line, hits }
 }
@@ -1125,6 +1174,7 @@ pub fn render_overlay(
 ) -> Vec<String> {
     match &deck.overlay {
         None => base.to_vec(),
+        Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {
             render_switcher(deck, switcher, height, width, base)

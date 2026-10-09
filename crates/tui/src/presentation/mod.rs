@@ -957,17 +957,16 @@ struct RestoreApply {
     outcome: RestoreJobOutcome,
 }
 
-/// Steady cadence of the Garden's cross-project observation while the screen
-/// saver is up. It bounds how stale another project's rabbits can be: cadence
-/// plus one round of requests.
-const GARDEN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_000);
+/// Steady cadence of cross-project attention observation. Agent inventories
+/// are included while the Garden is visible.
+const GARDEN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(3_000);
 
 /// Cadence after a round that observed nothing (no daemon, refused workspace).
 /// A Garden left open in front of a dead daemon must not retry every second.
 const GARDEN_OBSERVATION_BACKOFF: std::time::Duration = std::time::Duration::from_millis(5_000);
 
-/// Most open projects observed in one round. Beyond this the extra tabs keep
-/// their read-only plots rather than letting one round's request count follow an
+/// Most open projects observed in one round. The deck rotates larger sets
+/// across rounds rather than letting one round's request count follow an
 /// unbounded tab list.
 const MAX_OBSERVED_PROJECTS: usize = 16;
 

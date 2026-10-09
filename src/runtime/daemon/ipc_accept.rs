@@ -980,6 +980,7 @@ pub(super) fn start_ipc_accept_loop(
                                             | DaemonRequest::PrBatch { .. }
                                             | DaemonRequest::PrDismiss { .. } => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
                                             DaemonRequest::DispatchTool { .. } => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, launch_client: Some(&launch_client) }, request_id, &body, hello),
+                                            DaemonRequest::WorkspaceAttention { workspace } => super::attention::dispatch(&agent_launch, &bound, &decisions, &pr_inventory, workspace, request_id, &body, hello),
                                             DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
