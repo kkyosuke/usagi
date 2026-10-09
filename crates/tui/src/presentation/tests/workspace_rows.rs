@@ -1068,6 +1068,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         deck: WorkspaceDeckHelp::None,
         overlay: None,
         decision_answer_open: false,
+        artifacts_open: false,
         director_new_open: false,
         director_route: DirectorRoute::Organization,
         drawer_focus: None,
@@ -1148,6 +1149,14 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
             "{overlay:?}"
         );
     }
+    assert_eq!(
+        resolve_workspace_help_context(WorkspaceHelpState {
+            overlay: Some(Overlay::Preview),
+            artifacts_open: true,
+            ..base
+        }),
+        HelpContext::Artifacts
+    );
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
             overlay: Some(Overlay::Decisions),

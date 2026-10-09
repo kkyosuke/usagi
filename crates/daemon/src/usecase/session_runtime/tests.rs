@@ -420,7 +420,7 @@ impl GitRunner for WorkspaceExistsGit {
     }
 }
 // Successful fake checkout must materialize the directory: the real IO adapter
-// now prepares outputs in the worktree before reporting creation complete.
+// now prepares artifacts in the worktree before reporting creation complete.
 fn materialize_fake_worktree(args: &[&str], success: bool) -> anyhow::Result<()> {
     if success && let ["worktree", "add", "--no-checkout", "--", destination, _] = args {
         std::fs::create_dir_all(destination)?;

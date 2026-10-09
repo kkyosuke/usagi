@@ -86,10 +86,10 @@ fn list_files_with(
 ) -> Result<Vec<String>, FilePreviewError> {
     let mut files = Vec::new();
     match filter {
-        PreviewFileFilter::Outputs | PreviewFileFilter::AllOutputs => {
-            return usagi_core::infrastructure::outputs::list(
+        PreviewFileFilter::Artifacts | PreviewFileFilter::AllArtifacts => {
+            return usagi_core::infrastructure::artifacts::list(
                 root,
-                filter == PreviewFileFilter::AllOutputs,
+                filter == PreviewFileFilter::AllArtifacts,
             )
             .map_err(|_| FilePreviewError::FilesUnavailable);
         }
@@ -219,10 +219,10 @@ fn load_preview_with(
     run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
 ) -> Result<PreviewPayload, FilePreviewError> {
     if let Some(path) = path {
-        if filter.is_outputs()
-            && !usagi_core::infrastructure::outputs::contains(
+        if filter.is_artifacts()
+            && !usagi_core::infrastructure::artifacts::contains(
                 path,
-                filter == PreviewFileFilter::AllOutputs,
+                filter == PreviewFileFilter::AllArtifacts,
             )
         {
             return Err(FilePreviewError::OutsideRoot);
@@ -240,15 +240,15 @@ fn load_preview_with(
 
 /// Validate an explicit native-viewer request. Executables and application
 /// bundles are never handed to the OS opener.
-pub(crate) fn output_open_path(
+pub(crate) fn artifact_open_path(
     root: &Path,
     path: &str,
     filter: PreviewFileFilter,
 ) -> Result<std::path::PathBuf, FilePreviewError> {
-    if !filter.is_outputs()
-        || !usagi_core::infrastructure::outputs::contains(
+    if !filter.is_artifacts()
+        || !usagi_core::infrastructure::artifacts::contains(
             path,
-            filter == PreviewFileFilter::AllOutputs,
+            filter == PreviewFileFilter::AllArtifacts,
         )
     {
         return Err(FilePreviewError::OutsideRoot);
@@ -1008,48 +1008,67 @@ mod tests {
         }
     }
     #[test]
-    fn outputs_are_listed_without_git_and_native_open_is_confined() {
+    fn artifacts_are_listed_without_git_and_native_open_is_confined() {
         let temp = tempdir().unwrap();
         let session = temp.path().join(".usagi/sessions/one");
         fs::create_dir_all(&session).unwrap();
-        usagi_core::infrastructure::outputs::prepare(&session).unwrap();
-        fs::write(session.join("outputs/report.md"), "hello\n\u{1b}[31mworld").unwrap();
-        fs::write(session.join("outputs/image.PNG"), [0, 1, 2]).unwrap();
-        fs::write(session.join("outputs/execute.sh"), "exit 1").unwrap();
-        let (files, changed, _) = load_preview(&session, None, PreviewFileFilter::Outputs).unwrap();
+        usagi_core::infrastructure::artifacts::prepare(&session).unwrap();
+        fs::write(
+            session.join("artifacts/report.md"),
+            "hello\n\u{1b}[31mworld",
+        )
+        .unwrap();
+        fs::write(session.join("artifacts/image.PNG"), [0, 1, 2]).unwrap();
+        fs::write(session.join("artifacts/execute.sh"), "exit 1").unwrap();
+        let (files, changed, _) =
+            load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
         assert_eq!(files.len(), 3);
         assert!(changed.is_empty());
-        let (all, _, _) = load_preview(temp.path(), None, PreviewFileFilter::AllOutputs).unwrap();
+        let (all, _, _) = load_preview(temp.path(), None, PreviewFileFilter::AllArtifacts).unwrap();
         assert_eq!(all.len(), 3);
         let (_, _, lines) = load_preview(
             &session,
-            Some("outputs/report.md"),
-            PreviewFileFilter::Outputs,
+            Some("artifacts/report.md"),
+            PreviewFileFilter::Artifacts,
         )
         .unwrap();
         assert_eq!(lines[0], "hello");
         assert!(!lines[1].contains('\u{1b}'));
-        assert!(load_preview(&session, Some("Cargo.toml"), PreviewFileFilter::Outputs).is_err());
+        assert!(load_preview(&session, Some("Cargo.toml"), PreviewFileFilter::Artifacts).is_err());
         assert!(
-            output_open_path(&session, "outputs/image.PNG", PreviewFileFilter::Outputs)
-                .unwrap()
-                .is_absolute()
-        );
-        assert!(output_open_path(&session, "outputs/report.md", PreviewFileFilter::All).is_err());
-        assert!(
-            output_open_path(&session, "outputs/execute.sh", PreviewFileFilter::Outputs).is_err()
-        );
-        fs::create_dir(session.join("outputs/dir.pdf")).unwrap();
-        assert!(output_open_path(&session, "outputs/dir.pdf", PreviewFileFilter::Outputs).is_err());
-        std::os::unix::fs::symlink(temp.path(), session.join("outputs/link")).unwrap();
-        assert!(
-            output_open_path(
+            artifact_open_path(
                 &session,
-                "outputs/link/secret.pdf",
-                PreviewFileFilter::Outputs
+                "artifacts/image.PNG",
+                PreviewFileFilter::Artifacts
+            )
+            .unwrap()
+            .is_absolute()
+        );
+        assert!(
+            artifact_open_path(&session, "artifacts/report.md", PreviewFileFilter::All).is_err()
+        );
+        assert!(
+            artifact_open_path(
+                &session,
+                "artifacts/execute.sh",
+                PreviewFileFilter::Artifacts
             )
             .is_err()
         );
-        assert!(load_preview(&session, None, PreviewFileFilter::Outputs).is_err());
+        fs::create_dir(session.join("artifacts/dir.pdf")).unwrap();
+        assert!(
+            artifact_open_path(&session, "artifacts/dir.pdf", PreviewFileFilter::Artifacts)
+                .is_err()
+        );
+        std::os::unix::fs::symlink(temp.path(), session.join("artifacts/link")).unwrap();
+        assert!(
+            artifact_open_path(
+                &session,
+                "artifacts/link/secret.pdf",
+                PreviewFileFilter::Artifacts
+            )
+            .is_err()
+        );
+        assert!(load_preview(&session, None, PreviewFileFilter::Artifacts).is_err());
     }
 }

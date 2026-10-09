@@ -2189,7 +2189,7 @@ pub(super) fn clean_orphan_session_resources(
         }
         let result = match candidate {
             CleanCandidate::Worktree { path, .. } => {
-                usagi_core::infrastructure::outputs::archive(path)
+                usagi_core::infrastructure::artifacts::archive(path)
                     .map_err(anyhow::Error::from)
                     .and_then(|_| {
                         remove_worktree(

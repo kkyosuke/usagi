@@ -2784,7 +2784,7 @@ pub enum Effect {
     /// Discard pending and in-flight preview work after leaving the overlay.
     CancelPreview,
     /// Open a selected generated artifact using the platform viewer.
-    OpenOutput {
+    OpenArtifact {
         target: Target,
         path: String,
         filter: PreviewFileFilter,
@@ -5034,23 +5034,23 @@ fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect>
     vec![Effect::LoadEnvironment { scope }]
 }
 
-fn open_workspace_outputs(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+fn open_workspace_artifacts(state: &mut AppState, arguments: &str) -> Vec<Effect> {
     let target = Target::Root(state.workspace);
-    open_outputs(state, target, arguments)
+    open_artifacts(state, target, arguments)
 }
 
-fn open_outputs(state: &mut AppState, target: Target, arguments: &str) -> Vec<Effect> {
+fn open_artifacts(state: &mut AppState, target: Target, arguments: &str) -> Vec<Effect> {
     let target = match arguments.trim() {
         "" => target,
         "all" => Target::Root(state.workspace),
         _ => {
-            state.notice = Some(Notice::new("usage: outputs [all]"));
+            state.notice = Some(Notice::new("usage: artifact [all]"));
             return Vec::new();
         }
     };
     let filter = match target {
-        Target::Root(_) => PreviewFileFilter::AllOutputs,
-        Target::Session(_) => PreviewFileFilter::Outputs,
+        Target::Root(_) => PreviewFileFilter::AllArtifacts,
+        Target::Session(_) => PreviewFileFilter::Artifacts,
     };
     let mut overlay = PreviewOverlay::loading(target, Vec::new());
     overlay.file_filter = filter;
@@ -5090,7 +5090,9 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         return Vec::new();
     }
     match overview::interpret(input) {
-        Ok(overview::Command::Outputs { arguments }) => open_workspace_outputs(state, &arguments),
+        Ok(overview::Command::Artifacts { arguments }) => {
+            open_workspace_artifacts(state, &arguments)
+        }
         Ok(overview::Command::Config { arguments }) => submit_overview_config(state, arguments),
         Ok(overview::Command::Daemon { arguments }) => {
             if arguments.trim().is_empty() {
@@ -5411,8 +5413,8 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                 None
             }
         }
-        closeup::Command::Outputs { arguments } => {
-            return open_outputs(state, active_target, &arguments);
+        closeup::Command::Artifacts { arguments } => {
+            return open_artifacts(state, active_target, &arguments);
         }
         closeup::Command::Diff { .. } => {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));

@@ -762,6 +762,7 @@ mod tests {
         // Command-name completion still honours ↑↓: Tab completes the row the
         // user moved to, then advances from there.
         let mut modal = CloseupModal::new("s");
+        modal.select_next(); // artifact
         modal.select_next(); // close
         modal.complete_selected();
         assert_eq!(modal.submission(), "close");
@@ -845,7 +846,7 @@ mod tests {
         assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
-        assert!(joined(&modal).contains("outputs"));
+        assert!(joined(&modal).contains("artifact"));
         assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
         assert!(format!("{modal:?}").contains("tui"));
@@ -865,7 +866,7 @@ mod tests {
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();
-        assert_eq!(modal.selected_action().name, "close");
+        assert_eq!(modal.selected_action().name, "artifact");
     }
 
     #[test]
@@ -886,6 +887,8 @@ mod tests {
         let mut modal = CloseupModal::new("s");
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
+        assert_eq!(modal.submission(), "artifact");
+        modal.select_next();
         assert_eq!(modal.submission(), "close");
     }
 
@@ -899,6 +902,7 @@ mod tests {
     #[test]
     fn expanded_action_cycles_subcommands_and_renders_them() {
         let mut modal = CloseupModal::new("s");
+        modal.select_next(); // artifact
         modal.select_next(); // close
         modal.expand_selected();
         assert_eq!(modal.submission(), "close --force");
@@ -1015,7 +1019,7 @@ mod tests {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Closeup: daemon")); // タイトル
         assert!(text.contains("Run a command:"));
-        assert!(text.contains("outputs"));
+        assert!(text.contains("artifact"));
         assert!(text.contains("Launch or attach"));
         assert!(text.contains("close"));
         assert!(text.contains("Enter: run"));

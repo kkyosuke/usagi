@@ -42,7 +42,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | Agent と terminal が散らばり、状態を追いにくい | workspace をまたいで TUI から一覧・操作する |
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
-| session ごとの生成物を探しづらい | [Outputs](document/03-tui.md#outputs) で横断検索し、削除後の保管済み成果物も開ける |
+| session ごとの生成物を探しづらい | [Artifacts](document/03-tui.md#artifacts) で横断検索し、削除後の保管済み成果物も開ける |
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、

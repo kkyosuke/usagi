@@ -488,7 +488,7 @@ mod tests {
         // registry metadata の derive も。
         let hint = modal.matches()[0];
         assert_eq!(hint, hint);
-        assert!(format!("{hint:?}").contains("clean"));
+        assert!(format!("{hint:?}").contains("artifact"));
     }
 
     #[test]
@@ -548,12 +548,14 @@ mod tests {
     #[test]
     fn action_mode_expands_and_cycles_session_subcommands() {
         let mut modal = OverviewModal::new();
+        modal.select_next(); // clean
         modal.expand_selected();
         assert_eq!(modal.submission(), "clean --apply");
         modal.select_next();
         assert_eq!(modal.submission(), "clean --apply --force");
         assert!(modal.collapse());
 
+        modal.select_prev(); // artifact
         modal.select_prev(); // session
         modal.expand_selected();
         assert_eq!(modal.submission(), "session cleanup");
@@ -594,6 +596,7 @@ mod tests {
             modal.select_next();
         }
         assert_eq!(modal.selected(), 0);
+        modal.select_next(); // clean
         modal.expand_selected();
         modal.select_next();
         let text = joined(&modal);
@@ -611,7 +614,7 @@ mod tests {
         assert_eq!(modal.submission(), expected);
 
         let empty = OverviewModal::new();
-        assert_eq!(empty.submission(), "clean");
+        assert_eq!(empty.submission(), "artifact");
     }
 
     #[test]
@@ -697,6 +700,7 @@ mod tests {
     #[test]
     fn render_shows_long_help_and_a_result_strip() {
         let mut modal = OverviewModal::new();
+        modal.select_next(); // clean
         modal.set_result("Settings saved");
         let text = joined(&modal);
         assert!(text.contains("Compare daemon lifecycle state"));

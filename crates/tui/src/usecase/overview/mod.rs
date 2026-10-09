@@ -24,7 +24,7 @@ pub struct CommandInfo {
 /// `arguments` は前後の空白だけを除いた未解釈文字列で、文法の検証は各ハンドラに委ねる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Outputs { arguments: String },
+    Artifacts { arguments: String },
     Clean { arguments: String },
     Config { arguments: String },
     Daemon { arguments: String },
@@ -86,6 +86,15 @@ struct CommandDefinition {
 const DEFINITIONS: &[CommandDefinition] = &[
     CommandDefinition {
         info: CommandInfo {
+            name: "artifact",
+            description: "Browse generated files and retained artifacts",
+            usage: "artifact [all]",
+            long_description: "Browse artifacts from all sessions, including retained archives.",
+        },
+        factory: |arguments| Command::Artifacts { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
             name: "clean",
             description: "Inspect or remove orphan session resources",
             usage: "clean [--apply [--force]]",
@@ -137,15 +146,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
             long_description: "List issues or inspect an issue, dependency graph, or gantt view.",
         },
         factory: |arguments| Command::Issue { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
-            name: "outputs",
-            description: "Browse generated files and retained artifacts",
-            usage: "outputs [all]",
-            long_description: "Browse outputs from all sessions, including retained archives.",
-        },
-        factory: |arguments| Command::Outputs { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -347,7 +347,7 @@ impl Command {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
-            Self::Outputs { .. } => "outputs",
+            Self::Artifacts { .. } => "artifact",
             Self::Clean { .. } => "clean",
             Self::Config { .. } => "config",
             Self::Daemon { .. } => "daemon",
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "outputs", "roles",
+                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
                 "session"
             ]
         );
@@ -446,6 +446,9 @@ mod tests {
         assert!(session.usage.contains("sleep"));
         assert_eq!(
             [
+                Command::Artifacts {
+                    arguments: String::new()
+                },
                 Command::Clean {
                     arguments: String::new()
                 },
@@ -464,9 +467,6 @@ mod tests {
                 Command::Issue {
                     arguments: String::new()
                 },
-                Command::Outputs {
-                    arguments: String::new()
-                },
                 Command::Roles {
                     arguments: String::new()
                 },
@@ -476,7 +476,7 @@ mod tests {
             ]
             .map(|command| command.name()),
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "outputs", "roles",
+                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
                 "session"
             ]
         );

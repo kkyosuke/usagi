@@ -2548,9 +2548,9 @@ mod tests {
             "{effects:?}"
         );
 
-        // `close` is the second action; Down selects it and submits a remove.
+        // Select `close` by name, independent of the registry's ordering.
         let mut runtime = closeup_on(workspace, session);
-        let _ = runtime.handle_key(Key::Down);
+        type_str(&mut runtime, "close");
         let effects = runtime.handle_key(Key::Enter);
         assert!(
             effects

@@ -1,7 +1,7 @@
-//! Session-generated files and immutable, workspace-local output archives.
+//! Session-generated files and immutable, workspace-local artifact archives.
 //!
 //! Archives are independent of session worktrees and never removed by session
-//! teardown. Failed snapshots leave the original outputs intact.
+//! teardown. Failed snapshots leave the original artifacts intact.
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -14,14 +14,14 @@ use std::path::{Component, Path, PathBuf};
 use crate::domain::presentation_text::presentation_character_is_safe;
 use crate::domain::workspace_layout::{SESSIONS_DIR, STATE_DIR};
 
-/// Reserved session output directory, also used below `.usagi` for archives.
-pub const OUTPUTS_DIR: &str = "outputs";
+/// Reserved session artifact directory, also used below `.usagi` for archives.
+pub const ARTIFACTS_DIR: &str = "artifacts";
 const MAX_ENTRIES: usize = 20_000;
 const MAX_DEPTH: usize = 64;
 
 fn invalid() -> io::Error {
     io::Error::other(
-        "outputs contain an unsafe path, unsupported entry, or exceed traversal limits",
+        "artifacts contain an unsafe path, unsupported entry, or exceed traversal limits",
     )
 }
 
@@ -40,12 +40,12 @@ fn directory(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Prepare the session's ignored output directory without replacing user files.
+/// Prepare the session's ignored artifact directory without replacing user files.
 ///
 /// # Errors
 /// Returns an error if the directory cannot be created safely or written.
 pub fn prepare(session: &Path) -> io::Result<()> {
-    let root = session.join(OUTPUTS_DIR);
+    let root = session.join(ARTIFACTS_DIR);
     directory(&root)?;
     let ignore = root.join(".gitignore");
     match OpenOptions::new().write(true).create_new(true).open(ignore) {
@@ -57,7 +57,7 @@ pub fn prepare(session: &Path) -> io::Result<()> {
     }
 }
 
-/// Walk bounded, regular output files only. Symlinks and special files are
+/// Walk bounded, regular artifact files only. Symlinks and special files are
 /// refused instead of dereferenced or silently lost during archiving.
 fn walk(
     root: &Path,
@@ -142,14 +142,14 @@ fn open_relative(root: &Path, relative: &Path) -> io::Result<File> {
     Ok(directory)
 }
 
-/// Snapshot all output files before removing a session. Published snapshots
+/// Snapshot all artifact files before removing a session. Published snapshots
 /// have unique names, so retries and reused session names never overwrite data.
 /// `session` has already passed the daemon's canonical teardown fence.
 ///
 /// # Errors
 /// Refuses unsafe entries, invalid session layouts, and incomplete copies.
 pub fn archive(session: &Path) -> io::Result<Option<PathBuf>> {
-    let source = session.join(OUTPUTS_DIR);
+    let source = session.join(ARTIFACTS_DIR);
     let entries = files(&source)?;
     if entries.is_empty() {
         return Ok(None);
@@ -162,7 +162,7 @@ pub fn archive(session: &Path) -> io::Result<Option<PathBuf>> {
         return Err(invalid());
     }
     let name = session.file_name().ok_or_else(invalid)?;
-    let archives = state.join(OUTPUTS_DIR);
+    let archives = state.join(ARTIFACTS_DIR);
     directory(&archives)?;
     prepare(state)?;
     File::open(state)?.sync_all()?;
@@ -177,7 +177,7 @@ pub fn archive(session: &Path) -> io::Result<Option<PathBuf>> {
         for relative in entries {
             let destination = staging.join(&relative);
             fs::create_dir_all(destination.parent().ok_or_else(invalid)?)?;
-            let input = open_relative(session, &Path::new(OUTPUTS_DIR).join(&relative))?;
+            let input = open_relative(session, &Path::new(ARTIFACTS_DIR).join(&relative))?;
             copy_regular(input, &destination)?;
         }
         sync_directories(&staging)?;
@@ -213,7 +213,7 @@ fn sync_directories(root: &Path) -> io::Result<()> {
     File::open(root)?.sync_all()
 }
 
-/// Paths offered by the output finder, relative to its session/workspace root.
+/// Paths offered by the artifact list, relative to its session/workspace root.
 /// Discovery deliberately does not use Git, so ignored generated files appear.
 ///
 /// # Errors
@@ -228,7 +228,7 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
             Err(error) => return Err(error),
             Ok(_) => {}
         }
-        for base in [state.join(SESSIONS_DIR), state.join(OUTPUTS_DIR)] {
+        for base in [state.join(SESSIONS_DIR), state.join(ARTIFACTS_DIR)] {
             if let Ok(metadata) = fs::symlink_metadata(&base)
                 && !metadata.is_dir()
             {
@@ -245,7 +245,7 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
                     continue;
                 }
                 if base.ends_with(SESSIONS_DIR) {
-                    append(root, &entry.path().join(OUTPUTS_DIR), &mut paths)?;
+                    append(root, &entry.path().join(ARTIFACTS_DIR), &mut paths)?;
                 } else {
                     for snapshot in fs::read_dir(entry.path())? {
                         let snapshot = snapshot?;
@@ -260,7 +260,7 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
             }
         }
     } else {
-        append(root, &root.join(OUTPUTS_DIR), &mut paths)?;
+        append(root, &root.join(ARTIFACTS_DIR), &mut paths)?;
     }
     paths.sort();
     Ok(paths)
@@ -282,7 +282,7 @@ fn append(root: &Path, directory: &Path, paths: &mut Vec<String>) -> io::Result<
     Ok(())
 }
 
-/// Restrict file reads and external-open requests to the selected output scope.
+/// Restrict file reads and external-open requests to the selected artifact scope.
 #[must_use]
 pub fn contains(relative: &str, all: bool) -> bool {
     let parts = Path::new(relative)
@@ -301,10 +301,10 @@ pub fn contains(relative: &str, all: bool) -> bool {
     if all {
         matches!(
             parts.as_slice(),
-            [STATE_DIR, SESSIONS_DIR, _, OUTPUTS_DIR, _, ..]
-        ) || matches!(parts.as_slice(), [STATE_DIR, OUTPUTS_DIR, _, snapshot, _, ..] if uuid::Uuid::parse_str(snapshot).is_ok())
+            [STATE_DIR, SESSIONS_DIR, _, ARTIFACTS_DIR, _, ..]
+        ) || matches!(parts.as_slice(), [STATE_DIR, ARTIFACTS_DIR, _, snapshot, _, ..] if uuid::Uuid::parse_str(snapshot).is_ok())
     } else {
-        matches!(parts.as_slice(), [OUTPUTS_DIR, _, ..])
+        matches!(parts.as_slice(), [ARTIFACTS_DIR, _, ..])
     }
 }
 
@@ -321,26 +321,26 @@ mod tests {
     }
 
     #[test]
-    fn outputs_survive_removal_and_same_named_sessions_never_overwrite_archives() {
+    fn artifacts_survive_removal_and_same_named_sessions_never_overwrite_archives() {
         let temp = tempfile::tempdir().unwrap();
         let first = session(temp.path(), "first");
         let second = session(temp.path(), "second");
         assert_eq!(archive(&first).unwrap(), None);
         prepare(&first).unwrap();
-        fs::create_dir(first.join("outputs/nested")).unwrap();
-        fs::write(first.join("outputs/nested/report.md"), "first result").unwrap();
-        fs::write(second.join("outputs/chart.png"), [1, 2, 3]).unwrap();
-        assert_eq!(list(&first, false).unwrap(), ["outputs/nested/report.md"]);
+        fs::create_dir(first.join("artifacts/nested")).unwrap();
+        fs::write(first.join("artifacts/nested/report.md"), "first result").unwrap();
+        fs::write(second.join("artifacts/chart.png"), [1, 2, 3]).unwrap();
+        assert_eq!(list(&first, false).unwrap(), ["artifacts/nested/report.md"]);
         assert_eq!(list(temp.path(), true).unwrap().len(), 2);
         let archived = archive(&first).unwrap().unwrap();
         assert_eq!(
             fs::read_to_string(archived.join("nested/report.md")).unwrap(),
             "first result"
         );
-        assert!(first.join("outputs/nested/report.md").exists());
+        assert!(first.join("artifacts/nested/report.md").exists());
         fs::remove_dir_all(&first).unwrap();
         let recreated = session(temp.path(), "first");
-        fs::write(recreated.join("outputs/report.md"), "new result").unwrap();
+        fs::write(recreated.join("artifacts/report.md"), "new result").unwrap();
         let newer = archive(&recreated).unwrap().unwrap();
         assert_ne!(archived, newer);
         assert_eq!(
@@ -363,18 +363,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_outputs_are_empty_and_non_directories_or_links_are_refused() {
+    fn missing_artifacts_are_empty_and_non_directories_or_links_are_refused() {
         let temp = tempfile::tempdir().unwrap();
         assert!(list(temp.path(), false).unwrap().is_empty());
         assert!(list(temp.path(), true).unwrap().is_empty());
         assert!(archive(temp.path()).unwrap().is_none());
-        fs::write(temp.path().join("outputs"), "occupied").unwrap();
+        fs::write(temp.path().join("artifacts"), "occupied").unwrap();
         assert!(prepare(temp.path()).is_err());
         assert!(list(temp.path(), false).is_err());
-        fs::remove_file(temp.path().join("outputs")).unwrap();
+        fs::remove_file(temp.path().join("artifacts")).unwrap();
         let outside = temp.path().join("outside");
         fs::create_dir(&outside).unwrap();
-        symlink(&outside, temp.path().join("outputs")).unwrap();
+        symlink(&outside, temp.path().join("artifacts")).unwrap();
         assert!(prepare(temp.path()).is_err());
         assert!(list(temp.path(), false).is_err());
         symlink(&outside, temp.path().join(STATE_DIR)).unwrap();
@@ -389,15 +389,15 @@ mod tests {
     fn unsafe_entry_prevents_publication_and_keeps_original_files() {
         let temp = tempfile::tempdir().unwrap();
         let session = session(temp.path(), "safe");
-        fs::write(session.join("outputs/report.txt"), "keep").unwrap();
-        symlink(temp.path(), session.join("outputs/link")).unwrap();
+        fs::write(session.join("artifacts/report.txt"), "keep").unwrap();
+        symlink(temp.path(), session.join("artifacts/link")).unwrap();
         assert!(archive(&session).is_err());
-        assert!(session.join("outputs/report.txt").exists());
-        assert!(!temp.path().join(".usagi/outputs").exists());
-        assert!(open_relative(&session, Path::new("outputs/link/secret")).is_err());
-        fs::remove_file(session.join("outputs/link")).unwrap();
-        fs::write(session.join("outputs/escape\u{1b}.txt"), "not displayed").unwrap();
-        assert_eq!(list(&session, false).unwrap(), ["outputs/report.txt"]);
+        assert!(session.join("artifacts/report.txt").exists());
+        assert!(!temp.path().join(".usagi/artifacts").exists());
+        assert!(open_relative(&session, Path::new("artifacts/link/secret")).is_err());
+        fs::remove_file(session.join("artifacts/link")).unwrap();
+        fs::write(session.join("artifacts/escape\u{1b}.txt"), "not displayed").unwrap();
+        assert_eq!(list(&session, false).unwrap(), ["artifacts/report.txt"]);
         assert!(
             archive(&session)
                 .unwrap()
@@ -406,9 +406,9 @@ mod tests {
                 .exists()
         );
         assert!(open_relative(&session, Path::new("../secret")).is_err());
-        assert!(open_relative(&session, Path::new("outputs/a\0b")).is_err());
+        assert!(open_relative(&session, Path::new("artifacts/a\0b")).is_err());
         assert!(
-            open_relative(&session, Path::new("outputs/report.txt"))
+            open_relative(&session, Path::new("artifacts/report.txt"))
                 .unwrap()
                 .metadata()
                 .unwrap()
@@ -420,34 +420,34 @@ mod tests {
     fn archive_requires_managed_container_and_refuses_occupied_archive_roots() {
         let temp = tempfile::tempdir().unwrap();
         prepare(temp.path()).unwrap();
-        fs::write(temp.path().join("outputs/result.txt"), "result").unwrap();
+        fs::write(temp.path().join("artifacts/result.txt"), "result").unwrap();
         assert!(archive(temp.path()).is_err());
         let session = session(temp.path(), "one");
-        fs::write(session.join("outputs/result.txt"), "result").unwrap();
-        fs::write(temp.path().join(".usagi/outputs"), "occupied").unwrap();
+        fs::write(session.join("artifacts/result.txt"), "result").unwrap();
+        fs::write(temp.path().join(".usagi/artifacts"), "occupied").unwrap();
         assert!(archive(&session).is_err());
-        assert!(session.join("outputs/result.txt").exists());
+        assert!(session.join("artifacts/result.txt").exists());
     }
 
     #[test]
-    fn output_scope_rejects_traversal_and_non_output_files() {
+    fn artifact_scope_rejects_traversal_and_non_artifact_files() {
         for path in [
             "",
-            "/outputs/a",
-            "outputs/../secret",
+            "/artifacts/a",
+            "artifacts/../secret",
             "src/main.rs",
-            "outputs/a\n.txt",
+            "artifacts/a\n.txt",
         ] {
             assert!(!contains(path, false), "{path}");
             assert!(!contains(path, true), "{path}");
         }
-        assert!(contains("outputs/nested/a.txt", false));
-        assert!(!contains("outputs/nested/a.txt", true));
-        assert!(contains(".usagi/sessions/one/outputs/a.txt", true));
+        assert!(contains("artifacts/nested/a.txt", false));
+        assert!(!contains("artifacts/nested/a.txt", true));
+        assert!(contains(".usagi/sessions/one/artifacts/a.txt", true));
         assert!(!contains(".usagi/sessions/one/src/a.txt", true));
-        assert!(!contains(".usagi/outputs/one/.partial-123/a.txt", true));
+        assert!(!contains(".usagi/artifacts/one/.partial-123/a.txt", true));
         assert!(contains(
-            ".usagi/outputs/one/00000000-0000-4000-8000-000000000000/a.txt",
+            ".usagi/artifacts/one/00000000-0000-4000-8000-000000000000/a.txt",
             true
         ));
     }
@@ -491,7 +491,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let session = session(temp.path(), "one");
-        let unreadable = session.join("outputs/unreadable.txt");
+        let unreadable = session.join("artifacts/unreadable.txt");
         fs::write(&unreadable, "keep").unwrap();
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
         let result = archive(&session);
@@ -499,12 +499,12 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(unreadable).unwrap(), "keep");
         assert_eq!(
-            fs::read_dir(temp.path().join(".usagi/outputs/one"))
+            fs::read_dir(temp.path().join(".usagi/artifacts/one"))
                 .unwrap()
                 .count(),
             0
         );
-        let output = session.join("outputs");
+        let output = session.join("artifacts");
         fs::remove_file(output.join(".gitignore")).unwrap();
         fs::set_permissions(&output, fs::Permissions::from_mode(0o500)).unwrap();
         let result = prepare(&session);

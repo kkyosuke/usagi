@@ -951,8 +951,8 @@ fn closeup_environment_editor_is_composited_over_home() {
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     let _ = runtime.handle_key(Key::Enter);
     let _ = runtime.handle_key(Key::Enter);
-    for _ in 0..3 {
-        let _ = runtime.handle_key(Key::Down);
+    for character in "env".chars() {
+        let _ = runtime.handle_key(Key::Char(character));
     }
     assert!(matches!(
         runtime.handle_key(Key::Enter).as_slice(),

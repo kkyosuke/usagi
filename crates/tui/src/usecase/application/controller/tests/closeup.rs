@@ -966,20 +966,20 @@ fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
 }
 
 #[test]
-fn outputs_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
+fn artifacts_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     for (arguments, target, filter) in [
         (
-            "outputs",
+            "artifact",
             Target::Session(session),
-            PreviewFileFilter::Outputs,
+            PreviewFileFilter::Artifacts,
         ),
         (
-            "outputs all",
+            "artifact all",
             Target::Root(workspace),
-            PreviewFileFilter::AllOutputs,
+            PreviewFileFilter::AllArtifacts,
         ),
     ] {
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
@@ -1000,10 +1000,10 @@ fn outputs_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
         );
         assert_eq!(state.overlay(), Some(Overlay::Preview));
         assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
-        let path = if filter == PreviewFileFilter::Outputs {
-            "outputs/report.md"
+        let path = if filter == PreviewFileFilter::Artifacts {
+            "artifacts/report.md"
         } else {
-            ".usagi/sessions/one/outputs/report.md"
+            ".usagi/sessions/one/artifacts/report.md"
         }
         .to_owned();
         let _ = update(
@@ -1019,17 +1019,20 @@ fn outputs_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
             }),
         );
         assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Tab)),
-            vec![Effect::OpenOutput {
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::OpenArtifact {
                 target,
                 path: path.clone(),
                 filter
             }]
         );
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let preview = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert!(
+            matches!(preview.as_slice(), [Effect::LoadPreview { path: Some(selected), .. }] if selected == &path)
+        );
         assert_eq!(
             update(&mut state, AppEvent::Key(AppKey::Tab)),
-            vec![Effect::OpenOutput {
+            vec![Effect::OpenArtifact {
                 target,
                 path,
                 filter
@@ -1045,19 +1048,19 @@ fn outputs_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
     let effects = update(
         &mut state,
-        AppEvent::Key(AppKey::SubmitOverview("outputs".to_owned())),
+        AppEvent::Key(AppKey::SubmitOverview("artifact".to_owned())),
     );
     assert!(
-        matches!(effects.as_slice(), [Effect::LoadPreview { target: Target::Root(id), filter: PreviewFileFilter::AllOutputs, .. }] if *id == workspace)
+        matches!(effects.as_slice(), [Effect::LoadPreview { target: Target::Root(id), filter: PreviewFileFilter::AllArtifacts, .. }] if *id == workspace)
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
     assert!(
         update(
             &mut state,
-            AppEvent::Key(AppKey::SubmitCloseup("outputs bad".to_owned()))
+            AppEvent::Key(AppKey::SubmitCloseup("artifact bad".to_owned()))
         )
         .is_empty()
     );
-    assert_eq!(state.notice().unwrap().message, "usage: outputs [all]");
+    assert_eq!(state.notice().unwrap().message, "usage: artifact [all]");
 }

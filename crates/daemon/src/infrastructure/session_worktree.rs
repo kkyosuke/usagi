@@ -145,7 +145,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
                 std::fs::create_dir_all(parent)?;
             }
             add_worktree(git, workspace_root, destination, branch, base_ref)?;
-            usagi_core::infrastructure::outputs::prepare(destination)?;
+            usagi_core::infrastructure::artifacts::prepare(destination)?;
             return Ok(());
         }
         std::fs::create_dir_all(destination)?;
@@ -182,7 +182,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
                 cleanup.join("; ")
             ));
         }
-        usagi_core::infrastructure::outputs::prepare(destination)?;
+        usagi_core::infrastructure::artifacts::prepare(destination)?;
         Ok(())
     }
 
@@ -208,7 +208,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         session_root: &Path,
         force: bool,
     ) -> anyhow::Result<()> {
-        usagi_core::infrastructure::outputs::archive(session_root)?;
+        usagi_core::infrastructure::artifacts::archive(session_root)?;
         let mut worktrees = Vec::new();
         collect_session_worktrees(self, session_root, &mut worktrees)?;
         worktrees.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
@@ -514,7 +514,7 @@ mod tests {
         );
     }
     #[test]
-    fn outputs_are_created_ignored_and_preserved_before_real_worktree_removal() {
+    fn artifacts_are_created_ignored_and_preserved_before_real_worktree_removal() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         for args in [
@@ -536,8 +536,8 @@ mod tests {
         SystemSessionWorktreeIo
             .build_session_tree(&SystemGit, root, &session, "usagi/test", None)
             .unwrap();
-        assert!(session.join("outputs/.gitignore").is_file());
-        std::fs::write(session.join("outputs/report.md"), "retained result").unwrap();
+        assert!(session.join("artifacts/.gitignore").is_file());
+        std::fs::write(session.join("artifacts/report.md"), "retained result").unwrap();
         assert!(
             SystemGit
                 .run(&session, &["status", "--porcelain"])
@@ -550,7 +550,7 @@ mod tests {
             .remove_session_tree(&SystemGit, &session, false)
             .unwrap();
         assert!(!session.exists());
-        let files = usagi_core::infrastructure::outputs::list(root, true).unwrap();
+        let files = usagi_core::infrastructure::artifacts::list(root, true).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(
             std::fs::read_to_string(root.join(&files[0])).unwrap(),
@@ -563,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_workspace_preserves_nested_outputs_directories_and_repositories() {
+    fn mirrored_workspace_preserves_nested_artifacts_directories_and_repositories() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let directory = root.join("data/outputs");
@@ -600,7 +600,7 @@ mod tests {
             "existing repository"
         );
         assert!(session.join("repositories/outputs/.git").is_file());
-        assert!(session.join("outputs/.gitignore").is_file());
+        assert!(session.join("artifacts/.gitignore").is_file());
         SystemSessionWorktreeIo
             .remove_session_tree(&SystemGit, &session, false)
             .unwrap();
@@ -612,19 +612,19 @@ mod tests {
     }
 
     #[test]
-    fn outputs_archive_failure_stops_worktree_removal_even_when_forced() {
+    fn artifacts_archive_failure_stops_worktree_removal_even_when_forced() {
         let temp = tempfile::tempdir().unwrap();
         let session = temp.path().join(".usagi/sessions/test");
         std::fs::create_dir_all(&session).unwrap();
-        usagi_core::infrastructure::outputs::prepare(&session).unwrap();
-        std::fs::write(session.join("outputs/report.md"), "keep").unwrap();
-        std::os::unix::fs::symlink(temp.path(), session.join("outputs/link")).unwrap();
+        usagi_core::infrastructure::artifacts::prepare(&session).unwrap();
+        std::fs::write(session.join("artifacts/report.md"), "keep").unwrap();
+        std::os::unix::fs::symlink(temp.path(), session.join("artifacts/link")).unwrap();
         assert!(
             SystemSessionWorktreeIo
                 .remove_session_tree(&SystemGit, &session, true)
                 .is_err()
         );
-        assert!(session.join("outputs/report.md").exists());
+        assert!(session.join("artifacts/report.md").exists());
     }
 }
 

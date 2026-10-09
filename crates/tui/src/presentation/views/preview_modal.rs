@@ -51,6 +51,9 @@ pub fn render_over(
     if let Some(path) = state.path() {
         return render_document(height, width, base, state, path);
     }
+    if state.file_filter().is_artifacts() {
+        return super::artifact_modal::render_over(height, width, base, state);
+    }
     render_finder(height, width, base, state)
 }
 
@@ -101,20 +104,14 @@ fn render_finder(
         let pane_rows = body_height.saturating_sub(3);
         body = beside_pane(body, state.pane(), list_width, inner, pane_rows);
     }
-    body.push(modal::footer(if state.file_filter().is_outputs() {
-        "type filter / ↑↓ select / Enter preview / Tab open app / Esc close"
-    } else {
-        "←→ scope / type filter / ↑↓ select / Enter preview / Esc close"
-    }));
+    body.push(modal::footer(
+        "←→ scope / type filter / ↑↓ select / Enter preview / Esc close",
+    ));
     modal::render_body_over(
         height,
         width,
         base,
-        if state.file_filter().is_outputs() {
-            "Outputs"
-        } else {
-            "Preview files"
-        },
+        "Preview files",
         inner,
         desired_body,
         body,
@@ -368,12 +365,11 @@ fn empty_rows(state: &PreviewOverlay, inner: usize) -> Vec<String> {
             ))];
         }
         return vec![modal::empty_notice(match state.file_filter() {
-            PreviewFileFilter::All => "No files available.",
+            PreviewFileFilter::All
+            | PreviewFileFilter::Artifacts
+            | PreviewFileFilter::AllArtifacts => "No files available.",
             PreviewFileFilter::Changed => "No changed files.",
             PreviewFileFilter::Tracked => "No tracked files.",
-            PreviewFileFilter::Outputs | PreviewFileFilter::AllOutputs => {
-                "No outputs yet. Save generated files in outputs/."
-            }
         })];
     }
     let query = widgets::clip_to_width(state.filter(), 32);
@@ -396,14 +392,14 @@ fn empty_rows(state: &PreviewOverlay, inner: usize) -> Vec<String> {
 }
 
 fn file_tabs(active: PreviewFileFilter) -> String {
-    if active.is_outputs() {
+    if active.is_artifacts() {
         return active.label().to_owned();
     }
     let choices = PreviewFileFilter::TABS.map(|filter| {
         let role = match filter {
-            PreviewFileFilter::All | PreviewFileFilter::Outputs | PreviewFileFilter::AllOutputs => {
-                Role::Accent
-            }
+            PreviewFileFilter::All
+            | PreviewFileFilter::Artifacts
+            | PreviewFileFilter::AllArtifacts => Role::Accent,
             PreviewFileFilter::Changed => Role::Warning,
             PreviewFileFilter::Tracked => Role::Info,
         };
@@ -447,7 +443,7 @@ fn render_document(
         let query = widgets::clip_to_width(state.search(), 32);
         format!("Preview · {path} · /{query} [{match_position}]")
     };
-    let footer = if state.file_filter().is_outputs() && !state.is_search_editing() {
+    let footer = if state.file_filter().is_artifacts() && !state.is_search_editing() {
         "Esc: files  Tab: open app  /: search  ↑↓: scroll".to_owned()
     } else if state.is_search_editing() {
         search_footer(state.search(), inner)
@@ -1439,43 +1435,43 @@ mod tests {
         assert!(joined(&state).contains("No tracked files"));
     }
     #[test]
-    fn outputs_finder_and_document_show_native_open_controls() {
-        assert!(file_tabs(PreviewFileFilter::Outputs).contains("session outputs"));
-        assert_eq!(PreviewFileFilter::Outputs.tab_index(), 0);
+    fn artifacts_finder_and_document_show_native_open_controls() {
+        assert!(file_tabs(PreviewFileFilter::Artifacts).contains("session artifacts"));
+        assert_eq!(PreviewFileFilter::Artifacts.tab_index(), 0);
         let workspace = WorkspaceId::new();
         let target = Target::Root(workspace);
         let mut state = AppState::home(workspace, vec![]);
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
         let _ = update(
             &mut state,
-            AppEvent::Key(AppKey::SubmitOverview("outputs".to_owned())),
+            AppEvent::Key(AppKey::SubmitOverview("artifact".to_owned())),
         );
-        assert!(joined(&state).contains("Outputs"));
+        assert!(joined(&state).contains("Artifacts"));
         complete_preview(
             &mut state,
             target,
             None,
-            PreviewFileFilter::AllOutputs,
+            PreviewFileFilter::AllArtifacts,
             vec![],
             vec![],
         );
-        assert!(joined(&state).contains("No outputs yet"));
-        let path = ".usagi/sessions/one/outputs/report.md".to_owned();
+        assert!(joined(&state).contains("No artifacts yet"));
+        let path = ".usagi/sessions/one/artifacts/report.md".to_owned();
         complete_preview(
             &mut state,
             target,
             None,
-            PreviewFileFilter::AllOutputs,
+            PreviewFileFilter::AllArtifacts,
             vec![path.clone()],
             vec![],
         );
-        assert!(joined(&state).contains("Tab open app"));
-        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(joined(&state).contains("Tab preview"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
         complete_preview(
             &mut state,
             target,
             Some(&path),
-            PreviewFileFilter::AllOutputs,
+            PreviewFileFilter::AllArtifacts,
             vec![],
             vec!["result".to_owned()],
         );

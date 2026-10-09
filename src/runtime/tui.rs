@@ -803,7 +803,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
             .request(target, request_id, path, filter, root);
     }
 
-    fn open_output(
+    fn open_artifact(
         &mut self,
         target: Target,
         path: String,
@@ -812,15 +812,15 @@ impl BackendOverlayPort for ProductionOverlayPort {
     ) {
         let result = self
             .target_root(target)
-            .and_then(|root| crate::runtime::file_preview::output_open_path(root, &path, filter));
+            .and_then(|root| crate::runtime::file_preview::artifact_open_path(root, &path, filter));
         let message = match result {
             Ok(path) => self
                 .browser
                 .open(&path.to_string_lossy())
                 .err()
-                .map(|_| "Could not open this output in an external app."),
+                .map(|_| "Could not open this artifact in an external app."),
             Err(_) => {
-                Some("Cannot open this output. Select a regular text, image, HTML, or PDF file.")
+                Some("Cannot open this artifact. Select a regular text, image, HTML, or PDF file.")
             }
         };
         if let Some(message) = message {
