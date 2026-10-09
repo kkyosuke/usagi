@@ -11866,6 +11866,53 @@ mod workflow_composition {
         }
     }
 
+    #[test]
+    fn workspace_attention_reads_durable_state_without_advancing_workflow() {
+        use usagi_core::domain::attention::WorkspaceAttention;
+        let fixture = Fixture::new();
+        let temporary = tempfile::tempdir().unwrap();
+        let decisions = UserDecisionStore::new(temporary.path().join("decisions"));
+        let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(
+            &temporary.path().join("supervisor"),
+        )));
+        let request =
+            serde_json::json!({"kind":"workspace_attention", "workspace":fixture.workspace});
+        let call = |workspace, raw: &serde_json::Value| {
+            super::super::attention::dispatch(
+                &fixture.agent,
+                &fixture.bound,
+                &decisions,
+                &fixture.inventory,
+                &supervisor,
+                workspace,
+                usagi_core::infrastructure::ipc::RequestId("attention".into()),
+                raw,
+                &session_test_hello(),
+            )
+        };
+        let reply = call(fixture.workspace, &request);
+        let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+            panic!("response");
+        };
+        assert_eq!(outcome, ResponseOutcome::Ok);
+        let snapshot: WorkspaceAttention = serde_json::from_value(body).unwrap();
+        assert_eq!(snapshot.workspace, fixture.workspace);
+        assert!(snapshot.items.is_empty());
+        assert!(fixture.writes.lock().unwrap().entries.is_empty());
+        let reply = call(WorkspaceId::new(), &request);
+        assert!(matches!(
+            reply.kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Error(_),
+                ..
+            }
+        ));
+        let denied = call(fixture.workspace, &serde_json::json!({"caller_context":{}}));
+        assert!(
+            matches!(denied.kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::PermissionDenied)
+        );
+    }
+
     struct Fixture {
         _directory: tempfile::TempDir,
         bound: ConnectionWorkspace,

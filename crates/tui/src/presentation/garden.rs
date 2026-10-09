@@ -206,6 +206,10 @@ pub(super) struct GardenObservationCompletion {
     /// Inventories the daemon answered, each already checked to be the
     /// workspace it was asked for.
     pub(super) inventories: Vec<AgentWorkspaceObservation>,
+    pub(super) attention: Vec<(
+        WorkspaceId,
+        Result<usagi_core::domain::attention::WorkspaceAttention, String>,
+    )>,
 }
 
 /// Observe the other open projects' Agent inventory off the frame thread.
@@ -213,22 +217,45 @@ pub(super) struct GardenObservationCompletion {
 /// A workspace whose daemon does not answer, or answers with another
 /// workspace's inventory, is skipped: the Garden keeps that project's read-only
 /// plot rather than drawing a foreign project's rabbits in it.
+pub(super) struct GardenObservationJob(Option<std::thread::JoinHandle<()>>);
+
+impl Drop for GardenObservationJob {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub(super) fn spawn_garden_observation_job(
     mut port: Box<dyn GardenInventoryPort>,
     workspaces: Vec<WorkspaceId>,
+    observe_agents: bool,
     sender: Sender<GardenObservationCompletion>,
-) {
-    std::thread::spawn(move || {
+) -> GardenObservationJob {
+    let worker = std::thread::spawn(move || {
         let mut inventories = Vec::new();
+        let mut attention = Vec::new();
         for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
-            if let Ok(inventory) = port.inventory(workspace)
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                port.attention(workspace)
+            }))
+            .unwrap_or_else(|_| Err("Workspace attention is unavailable".into()));
+            attention.push((workspace, result));
+            if observe_agents
+                && let Ok(inventory) = port.inventory(workspace)
                 && inventory.inventory.workspace_id == workspace
             {
                 inventories.push(inventory);
             }
         }
-        let _ = sender.send(GardenObservationCompletion { port, inventories });
+        let _ = sender.send(GardenObservationCompletion {
+            port,
+            inventories,
+            attention,
+        });
     });
+    GardenObservationJob(Some(worker))
 }
 
 /// Select one visible managed-session tab after the frame's hit test resolved

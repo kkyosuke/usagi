@@ -72,6 +72,16 @@ pub trait GardenInventoryPort: Send {
     /// Returns safe feedback when the daemon is unavailable or refuses the
     /// workspace.
     fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
+
+    /// Human attention across already opened workspaces, without attach or mutation.
+    /// # Errors
+    /// Returns safe feedback if the daemon cannot provide a complete snapshot.
+    fn attention(
+        &mut self,
+        _workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::attention::WorkspaceAttention, String> {
+        Err("Workspace attention is unavailable".into())
+    }
 }
 
 /// Dedicated restore-client connection lifecycle.

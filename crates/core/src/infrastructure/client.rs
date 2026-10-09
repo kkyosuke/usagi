@@ -963,6 +963,7 @@ impl RetryEligibility {
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
+            | DaemonRequest::WorkspaceAttention { .. }
             | DaemonRequest::SupervisorSnapshot { .. }
             | DaemonRequest::WorkflowSnapshot { .. }
             | DaemonRequest::DiagnoseAgents { .. }
@@ -2418,6 +2419,9 @@ mod deadline_and_retry_tests {
                 caller_context: None,
             },
             DaemonRequest::AgentWorkspaceObservation {
+                workspace: WorkspaceId::new(),
+            },
+            DaemonRequest::WorkspaceAttention {
                 workspace: WorkspaceId::new(),
             },
             DaemonRequest::Session {

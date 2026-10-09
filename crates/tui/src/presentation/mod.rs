@@ -980,7 +980,7 @@ struct RestoreApply {
 /// Steady cadence of the Garden's cross-project observation while the screen
 /// saver is up. It bounds how stale another project's rabbits can be: cadence
 /// plus one round of requests.
-const GARDEN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_000);
+const GARDEN_OBSERVATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(3_000);
 
 /// Cadence after a round that observed nothing (no daemon, refused workspace).
 /// A Garden left open in front of a dead daemon must not retry every second.

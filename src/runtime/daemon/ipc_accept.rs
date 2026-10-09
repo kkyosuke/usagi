@@ -1043,6 +1043,7 @@ pub(super) fn start_ipc_accept_loop(
                                                 let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
                                                 dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
                                             },
+                                            DaemonRequest::WorkspaceAttention { workspace } => super::attention::dispatch(&agent_launch, &bound, &decisions, &pr_inventory, &supervisor, workspace, request_id, &body, hello),
                                             DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
                                             DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
                                             DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&workflow::WorkflowDispatchContext { agent: &agent_launch, inventory: &pr_inventory, verification: workflow::Verification { cache: &verification, clock: verification_clock.as_ref() }, bound: &bound }, request_id, request, &body, hello),

@@ -1635,7 +1635,7 @@ fn project_bar_click_adds_and_activates_the_project_identity_it_rendered() {
     let mut term = FakeTerminal::with_keys(&[
         Key::Char('o'),
         Key::Enter,
-        Key::Click { column: 10, row: 0 },
+        Key::Click { column: 13, row: 0 },
         Key::Down,
         Key::Char(' '),
         Key::Enter,

@@ -43,6 +43,9 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
+複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
+分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
+
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
 Closeup の action menu で `workflow` を選ぶと開く [Workflow タブ](document/03-tui.md#session-workflow-タブ)では、
 計画・実行・レビューの Agent を個別に選択でき、前回の選択を初期候補として使えます。

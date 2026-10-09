@@ -127,6 +127,8 @@ pub enum DaemonRequest {
     /// per-session dispatch status. Process-level cross-project views use this
     /// instead of treating a coarse live PTY as proof that dispatch is running.
     AgentWorkspaceObservation { workspace: WorkspaceId },
+    /// Human-only read of attention in an already adopted workspace.
+    WorkspaceAttention { workspace: WorkspaceId },
     /// Read the redaction-safe durable Work Runs owned by the connection's
     /// workspace. This TUI-only observation never accepts an Agent credential.
     SupervisorSnapshot { workspace: WorkspaceId },

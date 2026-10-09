@@ -2069,6 +2069,23 @@ struct DaemonGardenInventoryPort;
 impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
     for DaemonGardenInventoryPort
 {
+    fn attention(
+        &mut self,
+        workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::attention::WorkspaceAttention, String> {
+        let mut client = crate::runtime::daemon::policy_client(
+            usagi_core::infrastructure::client::ClientPolicy::tui(),
+        )
+        .map_err(|_| "Workspace attention is unavailable".to_owned())?;
+        let reply = client
+            .request(
+                usagi_core::infrastructure::ipc::DaemonRequest::WorkspaceAttention { workspace },
+            )
+            .map_err(|_| "Workspace attention is unavailable".to_owned())?;
+        let (DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) = reply;
+        serde_json::from_value(body).map_err(|_| "Invalid workspace attention".to_owned())
+    }
+
     fn inventory(
         &mut self,
         workspace: WorkspaceId,

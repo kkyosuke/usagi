@@ -717,6 +717,13 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。
 
+`workspace_attention { workspace: WorkspaceId }` は local TUI 用の read-only request で、daemon が既に adopt している
+workspace のみを参照する。応答の `WorkspaceAttention` は exact workspace identity と、stable key・optional SessionId・
+label・分類・短い理由を持つ一覧である。decision 本文、回答、provider identity、path は含めない。
+MCP caller context は拒否し、観測による adopt・reconcile・runtime 起動は行わない。取得に失敗した入力を空一覧へ
+置き換えず request 全体を unavailable とする。fresh connection で安全に retry できる。
+表示上の分類と移動先は [workspace 横断の対応待ち](03-tui.md#workspace-横断の対応待ち) を参照する。
+
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
 構成する。

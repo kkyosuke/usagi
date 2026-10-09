@@ -738,6 +738,7 @@ pub(super) fn drive_workspace_controller(
     let mut pending_session_refresh: Option<Completions> = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
+    let mut _garden_job = None;
     let (work_run_sender, work_run_completions) = mpsc::channel::<WorkRunLaneCompletion>();
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
@@ -962,6 +963,26 @@ pub(super) fn drive_workspace_controller(
             let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
             pending_garden_agent = visit.agent.map(|agent| (visit.session, agent));
         }
+        if let Some((session, destination)) = deck.take_attention_visit(&root_cwd)
+            && session.is_none_or(|id| ui.workspace.session_ids().contains(&id))
+        {
+            use super::workspace_deck::AttentionDestination;
+            if let Some(session) = session {
+                let _ = runtime.apply_event(AppEvent::VisitSession(session));
+            }
+            let key = match destination {
+                AttentionDestination::Decisions => Some(AppKey::OpenDecisions),
+                AttentionDestination::PullRequests => Some(AppKey::OpenPrs),
+                AttentionDestination::WorkRuns => Some(AppKey::OpenDirectorWorkRuns),
+                AttentionDestination::Session => None,
+            };
+            if let Some(key) = key {
+                let effects = runtime.apply_event(AppEvent::Key(key));
+                if let Some(step) = dispatch_reducer_effects(&mut backend, effects) {
+                    return Ok(step);
+                }
+            }
+        }
         // After the one-shot entry restores above: both apply events that close
         // an overlay, so delivering earlier would dismiss the create-failure
         // dialog on the very frame it opened (#768).
@@ -1009,9 +1030,18 @@ pub(super) fn drive_workspace_controller(
                 pending_garden_agent = None;
             }
         }
+        if deck.expire_attention(std::time::Instant::now()) {
+            garden_observations = garden_observations.wrapping_add(1);
+        }
         for completion in garden_completions.try_iter().take(FRAME_EVENT_BUDGET) {
-            let observed = !completion.inventories.is_empty();
+            let observed = completion
+                .attention
+                .iter()
+                .any(|(_, result)| result.is_ok());
             let mut changed = false;
+            for (workspace, result) in completion.attention {
+                changed |= deck.apply_attention(workspace, result);
+            }
             for inventory in &completion.inventories {
                 changed |= deck.apply_garden_inventory(inventory);
             }
@@ -1353,12 +1383,12 @@ pub(super) fn drive_workspace_controller(
             frame_source_key = Some(next_source_key);
             frame_material_key = Some(next_frame_key);
         }
-        // The other open projects' Agents, observed only while the Garden is the
-        // frame. The active project keeps its own controller's richer phases.
+        // Attention is always observed; detailed Agent inventory is only read
+        // while Garden is visible. Both use the same bounded background lane.
         if garden_inventory.is_some()
-            && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
+            && garden_observation.begin_if_due(true, restore_clock.elapsed())
         {
-            let targets = deck.observable_workspaces();
+            let targets = deck.attention_workspaces();
             if targets.is_empty() {
                 // The only open project is the one this loop already draws.
                 garden_observation.complete(restore_clock.elapsed(), true);
@@ -1366,7 +1396,12 @@ pub(super) fn drive_workspace_controller(
                 let port = garden_inventory
                     .take()
                     .expect("the Garden observation port was checked above");
-                spawn_garden_observation_job(port, targets, garden_sender.clone());
+                _garden_job = Some(spawn_garden_observation_job(
+                    port,
+                    targets,
+                    garden_open,
+                    garden_sender.clone(),
+                ));
             }
         }
         if work_run_port.is_some() && pending_work_run_control.is_some() {
@@ -1468,6 +1503,15 @@ pub(super) fn drive_workspace_controller(
             frame_material_key = None;
             continue;
         }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenAttention))
+            || matches!(bar_target, Some(ProjectBarTarget::Attention))
+        {
+            deck.open_attention();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
         if matches!(key, Key::Live(LiveTerminalAction::OpenWorkspaceSwitcher)) {
             deck.open_switcher();
             drawn_material = None;
@@ -1519,6 +1563,38 @@ pub(super) fn drive_workspace_controller(
         }
         if deck.overlay_open() {
             match deck.handle_overlay_key(&key) {
+                OverlayIntent::AttentionVisit {
+                    path,
+                    workspace,
+                    session,
+                    destination,
+                } => {
+                    if workspace_has_unsaved_surface(&runtime) {
+                        deck.set_notice("Save or cancel the current draft before switching.");
+                    } else if path == deck.active_path() {
+                        if workspace == runtime.state().workspace() {
+                            deck.close_overlay();
+                            deck.schedule_attention_visit(path, session, destination);
+                        }
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                        && prepared.workspace_id == workspace
+                        && session.is_none_or(|id| prepared.session_ids.contains(&id))
+                        && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        )
+                    {
+                        deck.schedule_attention_visit(path, session, destination);
+                        remember_workspace_session_focus(deck, runtime.state());
+                        return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                    } else {
+                        deck.set_notice("Target is unavailable; refresh and select again.");
+                    }
+                }
                 OverlayIntent::Stay => {}
                 OverlayIntent::Cancel => deck.close_overlay(),
                 OverlayIntent::Activate(path) => {
