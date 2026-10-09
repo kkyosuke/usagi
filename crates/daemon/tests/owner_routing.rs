@@ -742,6 +742,7 @@ fn a_rollover_is_refused_while_a_connected_client_cannot_route_by_owner() {
     let ledger = RoutingLedger::new();
     let mut legacy = usagi_core::infrastructure::ipc::ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId("legacy".into()),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: Vec::new(),

@@ -1,17 +1,16 @@
 //! MCP tool アダプタの置き場。tool は系統ごとにファイルを分け（`issue` / `memory` /
-//! `session` / `terminal` / `supervisor`）、各 tool が 1 struct として `Tool` を実装する。各系統の
+//! `session` / `terminal`）、各 tool が 1 struct として `Tool` を実装する。各系統の
 //! registry は metadata、schema validator、typed execution route、caller policy を 1 つの
 //! `ToolDescriptor` に束ねる。
 //!
 //! 各アダプタは presentation に徹する — issue / memory の Store route は usagi-core の
-//! store usecase を直接呼び、session / agent / terminal / supervisor route は usagi-core の
+//! store usecase を直接呼び、session / agent / terminal route は usagi-core の
 //! IPC client 経由で daemon に委譲する（独自のビジネスロジックは持たない）。
 
 pub mod issue;
 mod issue_wire;
 pub mod memory;
 pub mod session;
-pub mod supervisor;
 pub mod terminal;
 
 use std::collections::HashSet;
@@ -21,7 +20,7 @@ use super::tool::{CallerPolicy, ToolDescriptor, ToolRoute, validate_schema_defin
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::infrastructure::ipc::SessionAction;
 
-/// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal / supervisor を連結）。
+/// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal を連結）。
 ///
 /// # Panics
 ///
@@ -57,7 +56,6 @@ pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> 
             )
     }));
     tools.extend(terminal::tools());
-    tools.extend(supervisor::tools());
     validate_registry(&tools).expect("invalid MCP tool descriptor registry");
     tools
 }
@@ -103,7 +101,6 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
                     ToolRoute::AgentInventory | ToolRoute::AgentResume | ToolRoute::Dispatch(_),
                     CallerPolicy::AgentCredential
                 )
-                | (ToolRoute::Supervisor(_), CallerPolicy::DaemonProvenance)
         ) {
             return Err(RegistryError(format!(
                 "route and caller policy mismatch for {}",
@@ -144,9 +141,7 @@ mod tests {
     use crate::mcp::tool::{CallerPolicy, StoreRoot, Tool, ToolDescriptor, ToolError, ToolRoute};
     use std::path::Path;
     use usagi_core::domain::user_decision::UserDecisionPolicy;
-    use usagi_core::infrastructure::ipc::{
-        DispatchToolAction, SessionAction, SupervisorToolAction,
-    };
+    use usagi_core::infrastructure::ipc::{DispatchToolAction, SessionAction};
 
     struct FixtureTool(&'static str);
     impl Tool for FixtureTool {
@@ -233,12 +228,12 @@ mod tests {
     }
 
     /// 全 tool の IF メタデータが健全である（名前一意・説明非空・スキーマが JSON object・
-    /// session / supervisor の既定 `call` は未実装）。store tool は durable effect を持つため、
+    /// session の既定 `call` は未実装）。store tool は durable effect を持つため、
     /// call の被覆は専用テストに委ねる。
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 60); // issue 6 + memory 4 + session 42 + terminal 2 + supervisor 6
+        assert_eq!(reg.len(), 50); // issue 6 + memory 4 + session 38 + terminal 2
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -431,9 +426,8 @@ mod tests {
     fn each_category_contributes_its_tools() {
         assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 42);
+        assert_eq!(super::session::tools().len(), 38);
         assert_eq!(super::terminal::tools().len(), 2);
-        assert_eq!(super::supervisor::tools().len(), 6);
     }
 
     #[test]
@@ -478,14 +472,14 @@ mod tests {
             issue: false,
             memory: false,
         });
-        assert_eq!(neither.len(), 49);
+        assert_eq!(neither.len(), 39);
         assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 60);
+        assert_eq!(registry.len(), 50);
         validate_registry(&registry).unwrap();
         for descriptor in &registry {
             assert!(!descriptor.description().is_empty());
@@ -508,7 +502,6 @@ mod tests {
                         ToolRoute::AgentInventory | ToolRoute::AgentResume | ToolRoute::Dispatch(_),
                         CallerPolicy::AgentCredential
                     )
-                    | (ToolRoute::Supervisor(_), CallerPolicy::DaemonProvenance)
             ));
         }
         assert_eq!(valid_value(&serde_json::json!({"type":"number"})), 0);
@@ -519,11 +512,10 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // The complete tool golden table is intentionally contiguous.
     fn every_tool_name_keeps_its_exact_route_and_caller_policy() {
-        use CallerPolicy::{AgentCredential, DaemonProvenance, Public, SessionCredential};
+        use CallerPolicy::{AgentCredential, Public, SessionCredential};
         use DispatchToolAction as Dispatch;
         use SessionAction as Session;
         use StoreRoot::{Memory, Workspace};
-        use SupervisorToolAction as Supervisor;
         use ToolRoute::{AgentInventory, AgentResume, Store};
 
         let expected = vec![
@@ -622,26 +614,6 @@ mod tests {
             (
                 "session_delegate_brief",
                 ToolRoute::Session(Session::DelegateBrief),
-                SessionCredential,
-            ),
-            (
-                "workflow_start",
-                ToolRoute::Session(Session::WorkflowStart),
-                SessionCredential,
-            ),
-            (
-                "workflow_status",
-                ToolRoute::Session(Session::WorkflowStatus),
-                SessionCredential,
-            ),
-            (
-                "workflow_instruct",
-                ToolRoute::Session(Session::WorkflowInstruct),
-                SessionCredential,
-            ),
-            (
-                "workflow_finish",
-                ToolRoute::Session(Session::WorkflowFinish),
                 SessionCredential,
             ),
             (
@@ -748,36 +720,6 @@ mod tests {
                 "terminal_read",
                 ToolRoute::Dispatch(Dispatch::TerminalRead),
                 AgentCredential,
-            ),
-            (
-                "supervisor_start",
-                ToolRoute::Supervisor(Supervisor::Start),
-                DaemonProvenance,
-            ),
-            (
-                "supervisor_get",
-                ToolRoute::Supervisor(Supervisor::Get),
-                DaemonProvenance,
-            ),
-            (
-                "supervisor_list",
-                ToolRoute::Supervisor(Supervisor::List),
-                DaemonProvenance,
-            ),
-            (
-                "supervisor_cancel",
-                ToolRoute::Supervisor(Supervisor::Cancel),
-                DaemonProvenance,
-            ),
-            (
-                "supervisor_resolve_escalation",
-                ToolRoute::Supervisor(Supervisor::ResolveEscalation),
-                DaemonProvenance,
-            ),
-            (
-                "supervisor_events",
-                ToolRoute::Supervisor(Supervisor::Events),
-                DaemonProvenance,
             ),
         ];
         let actual = registry()

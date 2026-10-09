@@ -4,8 +4,130 @@
 
 use super::*;
 
+struct MemoFavorites(BTreeSet<SessionId>);
+
+impl crate::presentation::BackendTargetStorePort for MemoFavorites {
+    fn toggle_session_favorite(&mut self, session: SessionId, completions: Completions) {
+        if !self.0.remove(&session) {
+            self.0.insert(session);
+        }
+        completions.emit(AppEvent::Backend(BackendEvent::SessionFavorites(
+            self.0.clone(),
+        )));
+    }
+    fn load_notes(&mut self, target: Target, request_id: RequestId, completions: Completions) {
+        completions.emit(AppEvent::Backend(BackendEvent::NotesLoaded {
+            target,
+            request_id,
+            scratchpad: Scratchpad::default(),
+        }));
+    }
+    fn save_notes(
+        &mut self,
+        target: Target,
+        scratchpad: Scratchpad,
+        request_id: RequestId,
+        completions: Completions,
+    ) {
+        completions.emit(AppEvent::Backend(BackendEvent::NotesSaved {
+            target,
+            request_id,
+            scratchpad,
+            updated_at: None,
+        }));
+    }
+    fn load_environment(&mut self, _: EnvScope, _: Completions) {}
+    fn save_environment(&mut self, _: EnvScope, _: Vec<EnvironmentEntry>, _: Completions) {}
+}
+
+#[test]
+fn memo_and_favorite_completions_update_the_interactive_cached_rows() {
+    struct Factory;
+    impl crate::presentation::ControllerBackendFactory for Factory {
+        fn create(
+            &mut self,
+            snapshot: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> crate::presentation::ControllerBackendComposition {
+            let mut base = PrLaneBackendFactory {
+                lane: RecordingPrLane::default(),
+                session_refresh: Some(Box::new(crate::presentation::UnavailableSessionRefreshPort)),
+            };
+            let mut composition = crate::presentation::ControllerBackendFactory::create(
+                &mut base,
+                snapshot,
+                host.clone(),
+            );
+            composition.backend = DaemonBackend::new(
+                Box::new(host.clone()),
+                Box::new(host),
+                Box::new(MemoFavorites(BTreeSet::new())),
+                Box::new(UnavailableBackendPort),
+            );
+            composition
+        }
+    }
+    let mut terminal = FakeTerminal::with_keys(&[
+        Key::Char('n'),
+        Key::Other,
+        Key::Paste("saved memo".into()),
+        Key::Char('\u{13}'),
+        Key::Other,
+        Key::Escape,
+        Key::Other,
+        Key::Char('f'),
+        Key::Other,
+        Key::Char('f'),
+        Key::Other,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    let snapshot = snapshot("favorite");
+    let label = snapshot.state.sessions[0].name.clone();
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut terminal, snapshot, &mut Factory).unwrap(),
+        Exit::Quit
+    );
+    let frames = terminal
+        .frames
+        .iter()
+        .map(|frame| {
+            frame
+                .iter()
+                .map(|line| strip_ansi(line))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>();
+    let marked = format!("★ {label}");
+    assert!(!frames[0].contains(&marked));
+    let first_marked = frames
+        .iter()
+        .position(|frame| frame.contains(&marked))
+        .expect("favorite completion must refresh the interactive row cache");
+    let first_saved = frames
+        .iter()
+        .position(|frame| frame.contains("Memo · n: edit") && frame.contains("saved memo"))
+        .expect("memo completion must refresh the Switch preview cache");
+    assert!(
+        first_saved < first_marked,
+        "memo completion must refresh before another favorite change"
+    );
+    assert!(frames[first_marked].contains("saved memo"));
+    assert!(
+        frames[first_marked + 1..]
+            .iter()
+            .any(|frame| !frame.contains(&marked) && frame.contains("saved memo")),
+        "unfavorite completion must remove the cached star and preserve the memo"
+    );
+}
+
 #[test]
 fn app_event_from_key_maps_ordinary_management_keys() {
+    assert_eq!(
+        app_event_from_key(Key::Char('\u{13}')),
+        Some(AppEvent::Key(AppKey::SaveRoles))
+    );
     assert_eq!(app_event_from_key(Key::Up), Some(AppEvent::Key(AppKey::Up)));
     assert_eq!(
         app_event_from_key(Key::Down),
@@ -65,6 +187,121 @@ fn app_event_from_key_maps_ordinary_management_keys() {
             passthrough: vec![0x13],
         }),
         Some(AppEvent::Key(AppKey::SaveRoles))
+    );
+}
+
+#[test]
+fn memo_save_updates_cached_rows_until_persistence_is_observed_then_follows_mcp_edits() {
+    let workspace = WorkspaceId::new();
+    let id = SessionId::new();
+    let target = Target::Session(id);
+    let initial = state("memo");
+    let records = initial.sessions.clone();
+    let view = WorkspaceView::with_runtime_ids(ws("memo"), initial, vec![id]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![id]);
+    let effects = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+    assert!(
+        matches!(effects.as_slice(), [Effect::LoadNotes { target: found, .. }] if *found == target)
+    );
+    let request_id = runtime.state().note_editor().unwrap().request_id();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        request_id,
+        target,
+        scratchpad: Scratchpad::default(),
+    }));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Paste("保存したメモ".into())));
+    let effects = runtime.apply_event(AppEvent::Key(AppKey::SaveRoles));
+    let [
+        Effect::SaveNotes {
+            request_id,
+            scratchpad,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("expected save")
+    };
+    let saved = scratchpad.clone();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesSaved {
+        updated_at: None,
+        request_id: *request_id,
+        target,
+        scratchpad: saved.clone(),
+    }));
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert_eq!(runtime.state().note_revision(), 1);
+    let projected = crate::presentation::project_controller_sessions(&ui, runtime.state());
+    assert_eq!(projected[0].memo.as_deref(), Some("保存したメモ"));
+    assert!(projected[0].has_notes);
+    let mut observed = records;
+    observed[0].notes = saved;
+    ui.workspace
+        .replace_sessions_with_runtime_ids(observed.clone(), vec![id]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert!(runtime.state().saved_notes().is_none());
+    assert_eq!(runtime.state().note_revision(), 2);
+    observed[0].notes.note = Some("MCP update".into());
+    ui.workspace
+        .replace_sessions_with_runtime_ids(observed, vec![id]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert_eq!(
+        crate::presentation::project_controller_sessions(&ui, runtime.state())[0]
+            .memo
+            .as_deref(),
+        Some("MCP update")
+    );
+}
+
+#[test]
+fn a_newer_mcp_memo_replaces_the_save_acknowledgement_even_before_the_next_snapshot() {
+    let id = SessionId::new();
+    let target = Target::Session(id);
+    let initial = state("memo-race");
+    let mut records = initial.sessions.clone();
+    let view = WorkspaceView::with_runtime_ids(ws("memo-race"), initial, vec![id]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![id]);
+    let saved_at = now();
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('n')));
+    let request_id = runtime.state().note_editor().unwrap().request_id();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        request_id,
+        target,
+        scratchpad: Scratchpad::default(),
+    }));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Paste("TUI save".into())));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::SaveRoles));
+    let request_id = runtime.state().note_editor().unwrap().request_id();
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::NotesSaved {
+        request_id,
+        target,
+        updated_at: Some(saved_at),
+        scratchpad: Scratchpad {
+            note: Some("TUI save".into()),
+            ..Default::default()
+        },
+    }));
+    ui.notes_updated_at = Some(saved_at - chrono::Duration::seconds(1));
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert!(runtime.state().saved_notes().is_some());
+    records[0].notes.note = Some("MCP won".into());
+    crate::presentation::session_commands::adopt_session_snapshot(
+        &mut ui,
+        SessionCommandResult {
+            sessions: Some(records),
+            session_ids: Some(vec![id]),
+            notes_updated_at: Some(saved_at + chrono::Duration::seconds(1)),
+            ..SessionCommandResult::message("notes refreshed")
+        },
+    );
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert!(runtime.state().saved_notes().is_none());
+    assert_eq!(
+        crate::presentation::project_controller_sessions(&ui, runtime.state())[0]
+            .memo
+            .as_deref(),
+        Some("MCP won")
     );
 }
 
@@ -207,8 +444,12 @@ fn backend_host_and_explicit_error_adapters_cover_the_full_route_matrix() {
     assert_eq!(actions.try_iter().count(), 10);
 
     for effect in [
-        Effect::LoadNotes { target },
+        Effect::LoadNotes {
+            target,
+            request_id: usagi_core::domain::id::RequestId::new(),
+        },
         Effect::SaveNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target,
             scratchpad: Scratchpad::default(),
         },
@@ -620,22 +861,12 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
             .launch(OperationId::new(), workspace_id, None, None)
             .is_err()
     );
-    assert!(
-        UnavailableAgentCommandPort
-            .launch_goal(OperationId::new(), workspace_id, None, "goal")
-            .is_err()
-    );
     // An embedder without a launch client refuses every pane launch inline
     // instead of leaving a pending tab forever.
     let history = interrupted_history(workspace_id, Some(session_id), true);
     assert!(
         UnavailablePaneLaunchPort
             .launch(OperationId::new(), workspace_id, None, None)
-            .is_err()
-    );
-    assert!(
-        UnavailablePaneLaunchPort
-            .launch_goal(OperationId::new(), workspace_id, None, "goal")
             .is_err()
     );
     assert!(
@@ -699,12 +930,12 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
 }
 
 #[test]
-fn serialized_launch_port_forwards_goal_admission() {
+fn serialized_launch_port_forwards_agent_admission() {
     let workspace = WorkspaceId::new();
     let terminal = scoped_terminal_ref(workspace, None);
     let port = launch_port(Box::new(SuccessfulAgentPort(terminal.clone())));
     let admitted = port
-        .launch_goal(OperationId::new(), workspace, None, "prepare a PR")
+        .launch(OperationId::new(), workspace, None, None)
         .unwrap();
     assert!(admitted.terminal.fences(&terminal));
 }
@@ -742,6 +973,7 @@ fn closeup_environment_editor_is_composited_over_home() {
         cwd: "/work/alpha".into(),
         last_modified: now(),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,
@@ -751,6 +983,7 @@ fn closeup_environment_editor_is_composited_over_home() {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     }];
     let frame = render_controller_frame(
         20,
@@ -918,6 +1151,7 @@ fn refresh_requests_coalesce_onto_one_published_snapshot() {
             session_lifecycles: None,
             session_roles: None,
             revision: Some(7),
+            notes_updated_at: None,
         })]))),
     };
 
@@ -966,6 +1200,7 @@ fn refresh_requests_coalesce_onto_one_published_snapshot() {
             session_lifecycles: None,
             session_roles: None,
             revision: Some(8),
+            notes_updated_at: None,
         }));
     crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
     assert!(ui.workspace.sessions().is_empty());
@@ -1001,6 +1236,7 @@ fn a_failed_or_stale_lane_observation_never_rewrites_the_adopted_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(3),
+                notes_updated_at: None,
             }),
             Err("later daemon failure".to_owned()),
         ]))),
@@ -1524,7 +1760,6 @@ fn stale_agent_admission_cannot_show_or_focus_a_lineage_closed_by_another_tui() 
                 result: Ok(AgentPaneAdmission {
                     terminal: replacement,
                     continuation: Some(continuation),
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -2333,7 +2568,7 @@ fn failed_clone_retains_every_clone_draft_field_and_mode() {
 #[test]
 fn missing_recent_can_cancel_without_mutating_the_registry() {
     let alpha = ws("alpha");
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('n'), Key::Quit]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Char('n'), Key::Quit]);
     let mut loader = FakeLoader {
         missing: vec![alpha.path.clone()],
         ..FakeLoader::default()
@@ -2360,7 +2595,7 @@ fn missing_recent_can_cancel_without_mutating_the_registry() {
     assert!(term.frames.last().unwrap().join("\n").contains("alpha"));
 
     let alpha = ws("alpha");
-    let mut confirm_term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('y'), Key::Quit]);
+    let mut confirm_term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Char('y'), Key::Quit]);
     let mut confirm_loader = FakeLoader {
         missing: vec![alpha.path.clone()],
         cleanup_removed: vec![alpha.path.clone()],
@@ -2375,14 +2610,15 @@ fn missing_recent_can_cancel_without_mutating_the_registry() {
     )
     .unwrap();
     let final_frame = confirm_term.frames.last().unwrap().join("\n");
-    assert!(final_frame.contains("No recent workspace"));
+    assert!(!final_frame.contains("Open last projects"));
+    assert!(final_frame.contains("Open / add projects"));
     assert!(!final_frame.contains("alpha"));
 }
 
 #[test]
 fn unreadable_recent_reports_the_error_without_a_removal_prompt() {
     let alpha = ws("alpha");
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Quit]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Quit]);
     let mut loader = FakeLoader {
         missing_error: Some(io::ErrorKind::PermissionDenied),
         ..FakeLoader::default()
@@ -2419,10 +2655,7 @@ fn unreadable_recent_reports_the_error_without_a_removal_prompt() {
 fn key_help_scroll_keys_drive_the_bounded_viewport() {
     use crate::presentation::views::key_help::{Context, State};
 
-    let initial = State::new(
-        Context::Switch,
-        usagi_core::domain::settings::WorkMode::GoalDriven,
-    );
+    let initial = State::new(Context::Switch);
     let mut state = initial;
 
     assert!(crate::presentation::scroll_key_help(
@@ -2854,6 +3087,9 @@ fn closing_an_inventory_only_history_tab_persists_its_removal_without_resuming()
     let inventory = AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(
                 history.target.as_ref().unwrap().runtime_id,
                 history.last_terminal.clone(),
@@ -3046,7 +3282,7 @@ fn an_accepted_resume_whose_display_intent_cannot_be_saved_surfaces_a_typed_noti
 /// shell here is exactly how a wedged daemon locks a user out of usagi.
 #[test]
 fn an_unreachable_daemon_keeps_the_switcher_up_instead_of_ending_the_process() {
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q'), Key::Enter]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::Char('q'), Key::Enter]);
     let mut loader = FakeLoader {
         unreachable: Some("daemon unavailable: the daemon did not answer".to_owned()),
         ..FakeLoader::default()
@@ -3080,4 +3316,29 @@ fn an_unreachable_daemon_keeps_the_switcher_up_instead_of_ending_the_process() {
     // The outage happened before any workspace runtime existed, so no daemon
     // port was created for a workspace that never opened.
     assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn switch_reorder_projects_rows_and_does_not_resync_on_every_frame() {
+    use crate::usecase::application::controller::{AppEvent, AppKey};
+    let [a, b] = std::array::from_fn(|_| SessionId::new());
+    let mut snapshot = state("demo");
+    let mut second = snapshot.sessions[0].clone();
+    second.name = "second".into();
+    snapshot.sessions.push(second);
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), snapshot, vec![a, b]);
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), vec![a, b]);
+    let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(runtime.state().sessions(), &[b, a]);
+    for _ in 0..2 {
+        assert!(crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]).is_empty());
+        let rows = crate::presentation::project_controller_sessions(&ui, runtime.state());
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![b, a]
+        );
+        assert_eq!(rows[0].label, "second");
+    }
 }

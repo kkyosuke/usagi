@@ -27,17 +27,16 @@ fn rows(slots: &[WorkspaceSlot], filter: &str) -> Vec<Row> {
         let project = sanitize_presentation_line(&slot.label);
         if let Some(snapshot) = &slot.attention {
             for item in &snapshot.items {
-                let destination = if item.key.starts_with("run:") {
-                    AttentionDestination::WorkRuns
-                } else if item.kind == usagi_core::domain::attention::AttentionKind::Decision {
-                    AttentionDestination::Decisions
-                } else if item.key.starts_with("pr:")
-                    || item.kind == usagi_core::domain::attention::AttentionKind::Review
-                {
-                    AttentionDestination::PullRequests
-                } else {
-                    AttentionDestination::Session
-                };
+                let destination =
+                    if item.kind == usagi_core::domain::attention::AttentionKind::Decision {
+                        AttentionDestination::Decisions
+                    } else if item.key.starts_with("pr:")
+                        || item.kind == usagi_core::domain::attention::AttentionKind::Review
+                    {
+                        AttentionDestination::PullRequests
+                    } else {
+                        AttentionDestination::Session
+                    };
                 let intent = OverlayIntent::AttentionVisit {
                     path: slot.path.clone(),
                     workspace: slot.workspace_id,
@@ -254,7 +253,7 @@ impl WorkspaceDeck {
 fn valid_snapshot(workspace: WorkspaceId, snapshot: &WorkspaceAttention) -> bool {
     let mut keys = HashSet::new();
     snapshot.workspace == workspace
-        && snapshot.items.len() <= 1024
+        && snapshot.items.len() <= usagi_core::domain::attention::ATTENTION_ITEMS_MAX
         && snapshot.items.iter().all(|item| {
             !item.key.is_empty()
                 && item.key.len() <= 1024
@@ -279,19 +278,17 @@ pub(super) fn render(
     let mut running = 0;
     let mut unknown = 0;
     for slot in &deck.slots {
-        if slot.attention_stale || slot.attention.is_none() {
+        let Some(snapshot) = slot.attention.as_ref().filter(|_| !slot.attention_stale) else {
             unknown += 1;
             continue;
-        }
-        if let Some(snapshot) = &slot.attention {
-            for item in &snapshot.items {
-                if item.kind.needs_action() {
-                    action += 1;
-                } else if item.kind == usagi_core::domain::attention::AttentionKind::System {
-                    system += 1;
-                } else {
-                    running += 1;
-                }
+        };
+        for item in &snapshot.items {
+            if item.kind.needs_action() {
+                action += 1;
+            } else if item.kind == usagi_core::domain::attention::AttentionKind::System {
+                system += 1;
+            } else {
+                running += 1;
             }
         }
     }
@@ -566,6 +563,52 @@ mod tests {
         deck.schedule_attention_visit(path.clone(), session, AttentionDestination::Session);
         deck.close_path(&path);
         assert!(deck.take_attention_visit(&path).is_none());
+    }
+
+    #[test]
+    fn attention_renders_loading_and_all_action_categories() {
+        let mut deck = deck();
+        deck.open_attention();
+        let frame = render_overlay(&deck, 24, 120, &vec![String::new(); 24]).join("\n");
+        assert!(frame.contains("Loading"));
+        assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
+        update(
+            &mut deck,
+            0,
+            vec![
+                item("blocked", AttentionKind::Blocked),
+                item("review", AttentionKind::Review),
+            ],
+        );
+        update(&mut deck, 1, vec![]);
+        deck.open_attention();
+        let frame = render_overlay(&deck, 24, 120, &vec![String::new(); 24]).join("\n");
+        assert!(frame.contains("Action needed: 2"));
+        assert!(matches!(
+            deck.handle_overlay_key(&Key::Enter),
+            OverlayIntent::AttentionVisit {
+                destination: AttentionDestination::PullRequests,
+                ..
+            }
+        ));
+        deck.handle_overlay_key(&Key::Down);
+        assert!(matches!(
+            deck.handle_overlay_key(&Key::Enter),
+            OverlayIntent::AttentionVisit {
+                destination: AttentionDestination::Session,
+                ..
+            }
+        ));
+        let workspace = deck.slots[0].workspace_id;
+        assert!(!valid_snapshot(
+            workspace,
+            &WorkspaceAttention {
+                workspace,
+                items: (0..=usagi_core::domain::attention::ATTENTION_ITEMS_MAX)
+                    .map(|n| item(&n.to_string(), AttentionKind::Running))
+                    .collect()
+            }
+        ));
     }
 
     #[test]

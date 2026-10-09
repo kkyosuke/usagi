@@ -1,5 +1,6 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
+mod attention;
 mod director;
 mod flow;
 mod garden;
@@ -8,7 +9,6 @@ mod render;
 mod restore;
 mod session;
 mod terminal;
-mod work_run;
 mod workspace_rows;
 use super::{
     ActiveSessionCommand, AgentCommandPort, AgentCommandPortFactory, AgentPaneAdmission,
@@ -76,10 +76,9 @@ use crate::usecase::application::agent_tab_intent::{
 };
 use crate::usecase::application::controller::WorkspaceDrawerFocus;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, DirectorConsoleParent, DirectorNew, DirectorRoute,
-    Effect, EnvironmentEntry, GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay,
-    PendingToken, PreviewFileFilter, RoleEditorScope, Route, SessionCreateIntent, TabDirection,
-    Target,
+    AppEvent, AppKey, AppState, BackendEvent, DirectorNew, DirectorRoute, Effect, EnvironmentEntry,
+    GARDEN_IDLE_THRESHOLD, GardenClick, HomeMode, NewRequest, Overlay, PendingToken,
+    PreviewFileFilter, RoleEditorScope, Route, SessionCreateIntent, TabDirection, Target,
 };
 use crate::usecase::application::daemon_backend::{
     Completions, DaemonBackend, DecisionPort as BackendDecisionPort, LaunchAgentRequest,
@@ -113,9 +112,6 @@ use usagi_core::domain::id::{
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::domain::settings::{AvailableModels, DefaultModel, IconMode, Settings};
-use usagi_core::domain::supervisor::{
-    ExecutionPolicy, RunProvenance, SupervisorRunId, SupervisorRunQuery, SupervisorRunState, TaskId,
-};
 use usagi_core::domain::terminal_launch::{TerminalInventoryEntry, TerminalKind};
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 use usagi_core::usecase::env::EnvScope;
@@ -142,85 +138,6 @@ fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
         .unwrap()
         .with_timezone(&Utc)
-}
-
-fn observed_work_run(state: SupervisorRunState) -> SupervisorRunQuery {
-    SupervisorRunQuery {
-        supervisor_run_id: SupervisorRunId::new(),
-        state_revision: 1,
-        state,
-        terminal_at: None,
-        terminal_reason: None,
-        display_label: Some("Observed Goal".into()),
-        root_agent_id: None,
-        policy: ExecutionPolicy::default(),
-        escalation: None,
-        tasks: Vec::new(),
-        provenance: Vec::new(),
-    }
-}
-
-fn with_private_work_run_provenance(mut run: SupervisorRunQuery) -> SupervisorRunQuery {
-    run.provenance.push(RunProvenance {
-        supervisor_run_id: run.supervisor_run_id,
-        task_id: TaskId::new("private-task").unwrap(),
-        parent_task_id: None,
-        parent_dispatch_run: None,
-        dispatch_run_id: OperationId::new(),
-        worker_session_id: Some(SessionId::new()),
-        worker_agent_id: AgentRuntimeId::new(),
-        worker_worktree_id: WorktreeId::new(),
-        generation: 1,
-    });
-    run
-}
-
-struct FixedWorkRunControl(super::WorkRunControlResult);
-
-impl super::WorkRunPort for FixedWorkRunControl {
-    fn snapshot(
-        &mut self,
-        _: WorkspaceId,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
-        unreachable!("control test never observes Work Runs")
-    }
-
-    fn control(
-        &mut self,
-        _: WorkspaceId,
-        _: OperationId,
-        _: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-    ) -> Result<super::WorkRunControlResult, super::WorkRunControlError> {
-        Ok(self.0.clone())
-    }
-}
-
-fn complete_work_run_control(
-    workspace: WorkspaceId,
-    request: super::WorkRunControlRequest,
-    result: super::WorkRunControlResult,
-) -> (
-    OperationId,
-    Result<super::WorkRunControlResult, super::WorkRunControlError>,
-) {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    super::spawn_work_run_control_job(
-        Box::new(FixedWorkRunControl(result)),
-        workspace,
-        request,
-        sender,
-    );
-    let super::WorkRunLaneCompletion::Control {
-        operation_id,
-        result,
-        ..
-    } = receiver
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the Work Run control returns its port")
-    else {
-        panic!("control job returned an observation completion");
-    };
-    (operation_id, *result)
 }
 
 /// Host-action routing without the resident session lane. These tests
@@ -382,7 +299,9 @@ fn user_interactions() -> Vec<Key> {
 }
 
 fn ws(name: &str) -> Workspace {
-    Workspace::new(name, format!("/tmp/{name}"))
+    let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
+    workspace.updated_at = now();
+    workspace
 }
 
 fn ws_minutes_ago(name: &str, minutes: i64) -> Workspace {
@@ -404,6 +323,7 @@ fn state(name: &str) -> WorkspaceState {
             notes: Scratchpad::default(),
             prs: Vec::new(),
         }],
+        session_notes: std::collections::BTreeMap::new(),
         root_notes: Scratchpad::default(),
         updated_at: now(),
     }
@@ -584,7 +504,6 @@ impl PaneLaunchCommandPort for GatedLaunchPort {
         Ok(AgentPaneAdmission {
             terminal: self.terminal.clone(),
             continuation: None,
-            supervisor_run_id: None,
         })
     }
 
@@ -641,7 +560,6 @@ impl PaneLaunchCommandPort for PanickingLaunchPort {
         Ok(AgentPaneAdmission {
             terminal: self.terminal.clone(),
             continuation: None,
-            supervisor_run_id: None,
         })
     }
 
@@ -702,7 +620,6 @@ fn agent_launch(
         workspace,
         session: Some(session),
         profile: None,
-        goal: None,
         resume: false,
     }
 }
@@ -796,21 +713,6 @@ impl PaneLaunchCommandPort for IdentityRecordingLaunchPort {
         Ok(AgentPaneAdmission {
             terminal: self.record("agent", operation, workspace, session),
             continuation: None,
-            supervisor_run_id: None,
-        })
-    }
-
-    fn launch_goal(
-        &self,
-        operation: OperationId,
-        workspace: WorkspaceId,
-        _profile: Option<AgentProfileId>,
-        _goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        Ok(AgentPaneAdmission {
-            terminal: self.record("goal", operation, workspace, None),
-            continuation: None,
-            supervisor_run_id: None,
         })
     }
 
@@ -892,21 +794,6 @@ impl AgentCommandPort for SuccessfulAgentPort {
         Ok(AgentPaneAdmission {
             terminal: self.0.clone(),
             continuation: None,
-            supervisor_run_id: None,
-        })
-    }
-
-    fn launch_goal(
-        &mut self,
-        _operation: OperationId,
-        _workspace: WorkspaceId,
-        _profile: Option<AgentProfileId>,
-        _goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        Ok(AgentPaneAdmission {
-            terminal: self.0.clone(),
-            continuation: None,
-            supervisor_run_id: None,
         })
     }
 }
@@ -953,6 +840,7 @@ impl SessionCommandPort for SnapshotSessionPort {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         })
     }
 }
@@ -1490,6 +1378,7 @@ impl SessionCommandPort for BlockingSessionPort {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         })
     }
 }
@@ -1648,6 +1537,7 @@ impl SessionCommandPort for PanicOnceSessionPort {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         })
     }
 }
@@ -1691,7 +1581,6 @@ impl AgentCommandPort for ScriptedAgentPort {
         Ok(AgentPaneAdmission {
             terminal: self.terminal.clone(),
             continuation: None,
-            supervisor_run_id: None,
         })
     }
 
@@ -1765,7 +1654,6 @@ impl AgentCommandPort for ScrollingAgentPort {
         Ok(AgentPaneAdmission {
             terminal: self.terminal.clone(),
             continuation: None,
-            supervisor_run_id: None,
         })
     }
 
@@ -1812,7 +1700,6 @@ impl AgentCommandPort for WheelRecordingPort {
         Ok(AgentPaneAdmission {
             terminal: self.terminal.clone(),
             continuation: None,
-            supervisor_run_id: None,
         })
     }
 
@@ -2683,6 +2570,12 @@ enum FakeRegistryRefresh {
 
 #[derive(Default)]
 struct FakeLoader {
+    last_projects: Option<usagi_core::domain::recent::LastProjectSet>,
+    last_projects_error: Option<&'static str>,
+    save_projects_error: Option<&'static str>,
+    activation_failure_path: Option<PathBuf>,
+    recent_projects: Vec<Recent>,
+    recent_projects_error: Option<&'static str>,
     operation_mode: FakeOperationMode,
     opened: Vec<PathBuf>,
     refreshed: Vec<PathBuf>,
@@ -2783,11 +2676,39 @@ impl WorkspaceLoader for FakeLoader {
         }
     }
 
+    fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>> {
+        if let Some(error) = self.last_projects_error {
+            return Err(io::Error::other(error));
+        }
+        Ok(self.last_projects.clone())
+    }
+
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> io::Result<()> {
+        if let Some(error) = self.save_projects_error {
+            return Err(io::Error::other(error));
+        }
+        self.last_projects = Some(projects.clone());
+        Ok(())
+    }
+
+    fn recent_projects(&mut self) -> io::Result<Vec<Recent>> {
+        if let Some(error) = self.recent_projects_error {
+            return Err(io::Error::other(error));
+        }
+        Ok(self.recent_projects.clone())
+    }
+
     fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
         Ok(())
     }
 
-    fn activate_prepared(&mut self, _path: &Path) -> io::Result<()> {
+    fn activate_prepared(&mut self, path: &Path) -> io::Result<()> {
+        if self.activation_failure_path.as_deref() == Some(path) {
+            return Err(io::Error::other("saved project activation failed"));
+        }
         self.activate_error
             .map_or(Ok(()), |error| Err(io::Error::other(error)))
     }
@@ -3060,10 +2981,9 @@ impl SettingsPort for RecordingSettingsPort {
 
 // Focus the dirty Save row from Global Config: cycle the theme, then step down to
 // Save (Theme → Icons → Modal mode → Terminal PTYs → Environment → Agent model →
-// Workflow → Team → Issue → Memory → PR → Save).
-const CONFIG_SAVE_KEYS: [Key; 13] = [
+// Team → Issue → Memory → PR → Save).
+const CONFIG_SAVE_KEYS: [Key; 12] = [
     Key::Right,
-    Key::Down,
     Key::Down,
     Key::Down,
     Key::Down,
@@ -3078,10 +2998,9 @@ const CONFIG_SAVE_KEYS: [Key; 13] = [
 ];
 
 // Workspace Config starts on Agent and contains Agent → env → Base branch →
-// Session setup → Workflow → Team → Issue → Memory → Save.
-const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 10] = [
+// Session setup → Team → Issue → Memory → Save.
+const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 9] = [
     Key::Right,
-    Key::Down,
     Key::Down,
     Key::Down,
     Key::Down,
@@ -3548,7 +3467,6 @@ impl super::ControllerBackendFactory for PrLaneBackendFactory {
             restore_commands: Box::new(UnavailableAgentCommandPort),
             restore_connection: Box::new(super::UnavailableRestoreConnectionPort),
             garden_inventory: Box::new(UnavailableGardenInventoryPort),
-            work_runs: Box::new(super::UnavailableWorkRunPort),
             agent_tab_intents: Box::new(super::UnavailableAgentTabIntentPort),
             external_terminal: Box::new(UnavailableExternalTerminalPort),
             metrics: Box::new(NoMetrics),
@@ -3610,7 +3528,6 @@ impl super::ControllerBackendFactory for CountingBackendFactory {
             // Owned by the loop unless a Garden round is in flight, which
             // needs the screen saver to be up: these entries never open it.
             garden_inventory: Box::new(self.port()),
-            work_runs: Box::new(super::UnavailableWorkRunPort),
             agent_tab_intents: Box::new(self.port()),
             external_terminal: Box::new(self.port()),
             metrics: Box::new(self.port()),

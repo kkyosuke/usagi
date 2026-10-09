@@ -27,6 +27,7 @@ pub(super) struct WorkspaceIoRuntime {
     /// snapshot revisions additionally fence stale authoritative observations.
     pub(super) session_commands: std::sync::Arc<dyn SessionCommandPort>,
     pub(super) last_session_revision: u64,
+    pub(super) notes_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Non-sensitive interrupted/resume state received from the daemon.
     pub(super) agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
     /// Latest coherent workspace-wide Agent inventory received by the restore
@@ -100,6 +101,7 @@ impl WorkspaceIoRuntime {
             workspace,
             session_commands: std::sync::Arc::from(session_commands),
             last_session_revision: 0,
+            notes_updated_at: None,
             agent_resumes: BTreeMap::new(),
             agent_inventory: None,
             material_revision: 0,

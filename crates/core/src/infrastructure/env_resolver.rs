@@ -121,6 +121,7 @@ where
         for _ in 0..worker_count {
             let jobs = Arc::clone(&jobs_rx);
             let outcomes = Arc::clone(&outcomes);
+            let requested = &requested;
             scope.spawn(move || {
                 loop {
                     let job = jobs
@@ -129,7 +130,11 @@ where
                         .recv();
                     let Ok((index, reference)) = job else { break };
                     let outcome = catch_unwind(AssertUnwindSafe(|| {
-                        resolver.read_with_service_account_token(&reference, service_account_token)
+                        resolver.read_binding(
+                            &requested[index].0,
+                            &reference,
+                            service_account_token,
+                        )
                     }))
                     .unwrap_or_else(|_| Err("secret read thread panicked".to_owned()));
                     outcomes
@@ -263,6 +268,7 @@ fn run_owned_child(
         .to_owned())
 }
 
+#[cfg(test)]
 fn capture_output(reader: &mut dyn std::io::Read, limit: usize) -> std::io::Result<CapturedOutput> {
     let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
     let mut exceeded = false;
@@ -312,17 +318,37 @@ fn join_output_readers(
     }
 }
 
-mod real {
-    #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output,capture_output_retains_the_limit_and_drains_to_eof
+fn require_complete_output(
+    forced_cleanup: bool,
+    output: Result<(CapturedOutput, CapturedOutput), String>,
+) -> Result<(CapturedOutput, CapturedOutput), String> {
+    if forced_cleanup {
+        return Err("secret resolver output required forced pipe cleanup".to_owned());
+    }
+    output
+}
 
+mod real {
+    #![coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=owned_child_timeout_escalates_and_reaps_before_joining_output,real_secret_child_cannot_leave_escaped_pipe_readers_unbounded
+
+    use crate::infrastructure::bounded_process::{
+        capture, child_exited, close_descendant_resources, nonblocking, signal_group,
+        terminate_and_reap,
+    };
     use std::io::Read;
-    use std::process::Child;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     use super::{
         Cancellation, CapturedOutput, ChildExit, ChildRunner, OP_OUTPUT_BYTES_MAX,
         OP_POLL_INTERVAL, OP_TERMINATE_GRACE, OP_TIMEOUT, OutputReader, OwnedChild, Time,
-        capture_output, join_output_readers, op_read_command, run_owned_child,
+        join_output_readers, op_read_command, run_owned_child,
     };
 
     pub(super) fn run(
@@ -352,30 +378,94 @@ mod real {
 
     impl ChildRunner for SystemRunner<'_> {
         fn spawn(&self, reference: &str) -> Result<Box<dyn OwnedChild>, String> {
-            let mut child = op_read_command(reference, self.service_account_token)
-                .spawn()
-                .map_err(|_| "failed to start secret resolver".to_owned())?;
-            let stdout = reader(child.stdout.take().expect("piped stdout"));
-            let stderr = reader(child.stderr.take().expect("piped stderr"));
-            Ok(Box::new(SystemChild {
-                child,
-                stdout: Some(stdout),
-                stderr: Some(stderr),
-            }))
+            spawn_command(
+                op_read_command(reference, self.service_account_token),
+                OP_TERMINATE_GRACE,
+            )
         }
     }
 
-    fn reader(mut pipe: impl Read + Send + 'static) -> OutputReader {
-        std::thread::spawn(move || capture_output(&mut pipe, OP_OUTPUT_BYTES_MAX))
+    pub(super) fn spawn_command(
+        mut command: Command,
+        cleanup_grace: Duration,
+    ) -> Result<Box<dyn OwnedChild>, String> {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map_err(|_| "failed to start secret resolver".to_owned())?;
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            terminate_and_reap(&mut child, cleanup_grace);
+            return Err("could not open secret resolver capture".to_owned());
+        };
+        if nonblocking(stdout.as_raw_fd())
+            .and_then(|()| nonblocking(stderr.as_raw_fd()))
+            .is_err()
+        {
+            terminate_and_reap(&mut child, cleanup_grace);
+            return Err("could not configure secret resolver capture".to_owned());
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stdout = reader(stdout, Arc::clone(&cancelled));
+        let stderr = reader(stderr, Arc::clone(&cancelled));
+        Ok(Box::new(SystemChild {
+            child,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            cancelled,
+            cleanup_grace,
+            group_closed: false,
+            forced_cleanup: false,
+        }))
+    }
+
+    fn reader(mut pipe: impl Read + Send + 'static, cancelled: Arc<AtomicBool>) -> OutputReader {
+        std::thread::spawn(move || {
+            let captured = capture(
+                &mut pipe,
+                OP_OUTPUT_BYTES_MAX,
+                &AtomicBool::new(false),
+                &cancelled,
+            );
+            if captured.cancelled {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+            Ok(CapturedOutput {
+                bytes: captured.bytes,
+                exceeded: captured.exceeded,
+            })
+        })
     }
 
     struct SystemChild {
         child: Child,
         stdout: Option<OutputReader>,
         stderr: Option<OutputReader>,
+        cancelled: Arc<AtomicBool>,
+        cleanup_grace: Duration,
+        group_closed: bool,
+        forced_cleanup: bool,
     }
 
     impl SystemChild {
+        fn close_group(&mut self) {
+            if self.group_closed {
+                return;
+            }
+            if let (Some(stdout), Some(stderr)) = (&self.stdout, &self.stderr) {
+                self.forced_cleanup = close_descendant_resources(
+                    self.child.id(),
+                    stdout,
+                    stderr,
+                    None,
+                    self.cleanup_grace,
+                );
+            }
+            self.group_closed = true;
+        }
+
         fn exit(status: std::process::ExitStatus) -> ChildExit {
             ChildExit {
                 success: status.success(),
@@ -386,6 +476,14 @@ mod real {
 
     impl OwnedChild for SystemChild {
         fn try_wait(&mut self) -> Result<Option<ChildExit>, String> {
+            if !self.group_closed {
+                if !child_exited(&self.child)
+                    .map_err(|_| "could not observe secret resolver".to_owned())?
+                {
+                    return Ok(None);
+                }
+                self.close_group();
+            }
             self.child
                 .try_wait()
                 .map(|status| status.map(Self::exit))
@@ -393,31 +491,19 @@ mod real {
         }
 
         fn terminate(&mut self) -> Result<(), String> {
-            #[cfg(unix)]
-            {
-                let pid = libc::pid_t::try_from(self.child.id())
-                    .map_err(|_| "could not terminate secret resolver".to_owned())?;
-                // The PID comes directly from this still-owned Child handle.
-                let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-                (result == 0)
-                    .then_some(())
-                    .ok_or_else(|| "could not terminate secret resolver".to_owned())
-            }
-            #[cfg(not(unix))]
-            {
-                self.child
-                    .kill()
-                    .map_err(|_| "could not terminate secret resolver".to_owned())
-            }
+            signal_group(self.child.id(), libc::SIGTERM);
+            Ok(())
         }
 
         fn kill(&mut self) -> Result<(), String> {
+            signal_group(self.child.id(), libc::SIGKILL);
             self.child
                 .kill()
                 .map_err(|_| "could not kill secret resolver".to_owned())
         }
 
         fn wait(&mut self) -> Result<ChildExit, String> {
+            self.close_group();
             self.child
                 .wait()
                 .map(Self::exit)
@@ -425,11 +511,13 @@ mod real {
         }
 
         fn join_output(&mut self) -> Result<(CapturedOutput, CapturedOutput), String> {
-            join_output_readers(&mut self.stdout, &mut self.stderr)
+            self.cancelled.store(true, Ordering::Release);
+            let output = join_output_readers(&mut self.stdout, &mut self.stderr);
+            super::require_complete_output(self.forced_cleanup, output)
         }
     }
 
-    struct SystemTime(Instant);
+    pub(super) struct SystemTime(Instant);
 
     struct NeverCancelled;
 
@@ -440,7 +528,7 @@ mod real {
     }
 
     impl SystemTime {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self(Instant::now())
         }
     }
@@ -512,6 +600,152 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn real_secret_child_cannot_leave_escaped_pipe_readers_unbounded() {
+        struct Runner(Mutex<Option<Command>>);
+        impl ChildRunner for Runner {
+            fn spawn(&self, _: &str) -> Result<Box<dyn OwnedChild>, String> {
+                real::spawn_command(
+                    self.0.lock().unwrap().take().unwrap(),
+                    Duration::from_millis(20),
+                )
+            }
+        }
+        struct KillEscaped(std::path::PathBuf);
+        #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=real_secret_child_cannot_leave_escaped_pipe_readers_unbounded
+        impl Drop for KillEscaped {
+            fn drop(&mut self) {
+                if let Some(pid) = std::fs::read_to_string(&self.0)
+                    .ok()
+                    .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+                {
+                    // SAFETY: the helper recorded exactly the escaped child's PID.
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("escaped.pid");
+        let _cleanup = KillEscaped(path.clone());
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "infrastructure::bounded_process::tests::escaped_descendant_probe",
+                "--nocapture",
+            ])
+            .env("USAGI_BOUNDED_PIPE_HELPER", &path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let started = std::time::Instant::now();
+        let result = run_owned_child(
+            &Runner(Mutex::new(Some(command))),
+            &real::SystemTime::new(),
+            "unused",
+            &NeverCancelled,
+            Duration::from_secs(2),
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+        );
+        assert!(
+            result.is_err(),
+            "incomplete output must not be treated as a secret value"
+        );
+        assert!(
+            path.exists(),
+            "the descendant must have escaped before cleanup"
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf 'secret\n'"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        assert_eq!(
+            run_owned_child(
+                &Runner(Mutex::new(Some(command))),
+                &real::SystemTime::new(),
+                "unused",
+                &NeverCancelled,
+                Duration::from_secs(1),
+                Duration::from_millis(20),
+                Duration::from_millis(5)
+            ),
+            Ok("secret".to_owned())
+        );
+    }
+
+    #[test]
+    fn forced_cleanup_never_publishes_a_partial_secret() {
+        let stdout = CapturedOutput {
+            bytes: b"partial-secret".to_vec(),
+            exceeded: false,
+        };
+        let stderr = CapturedOutput {
+            bytes: Vec::new(),
+            exceeded: false,
+        };
+        let output = Ok((stdout, stderr));
+        assert_eq!(require_complete_output(false, output.clone()), output);
+        assert_eq!(
+            require_complete_output(false, Err("reader failed".into())),
+            Err("reader failed".into())
+        );
+        for joined in [output, Err("reader failed".into())] {
+            assert_eq!(
+                require_complete_output(true, joined),
+                Err("secret resolver output required forced pipe cleanup".into())
+            );
+        }
+    }
+
+    #[test]
+    fn real_secret_child_refuses_eof_caused_by_terminating_its_descendants() {
+        struct Runner(Mutex<Option<Command>>);
+        impl ChildRunner for Runner {
+            fn spawn(&self, _: &str) -> Result<Box<dyn OwnedChild>, String> {
+                real::spawn_command(
+                    self.0.lock().unwrap().take().unwrap(),
+                    Duration::from_millis(20),
+                )
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        for (index, script) in [
+            "(printf ready > \"$1\"; sleep 30; printf rest) & while [ ! -e \"$1\" ]; do sleep 0.01; done; printf partial",
+            "(trap '' TERM; printf ready > \"$1\"; sleep 30; printf rest) & while [ ! -e \"$1\" ]; do sleep 0.01; done; printf partial",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut command = Command::new("sh");
+            // Main-process exit follows the descendant's signal setup, so
+            // the second case must survive TERM and require KILL for EOF.
+            command
+                .args(["-c", script, "secret-output-fixture"])
+                .arg(temporary.path().join(format!("ready-{index}")));
+            let started = std::time::Instant::now();
+            assert_eq!(
+                run_owned_child(
+                    &Runner(Mutex::new(Some(command))),
+                    &real::SystemTime::new(),
+                    "unused",
+                    &NeverCancelled,
+                    Duration::from_secs(2),
+                    Duration::from_millis(20),
+                    Duration::from_millis(5),
+                ),
+                Err("secret resolver output required forced pipe cleanup".into())
+            );
+            assert!(started.elapsed() < Duration::from_secs(4));
+        }
     }
 
     #[test]

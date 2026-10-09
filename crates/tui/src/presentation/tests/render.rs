@@ -76,6 +76,7 @@ fn render_controller_frame_composites_the_home_and_overlays() {
         cwd: "/work/alpha".into(),
         last_modified: now(),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,
@@ -85,6 +86,7 @@ fn render_controller_frame_composites_the_home_and_overlays() {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     };
     let sessions = std::slice::from_ref(&projected);
     let git = std::collections::BTreeMap::new();
@@ -175,6 +177,91 @@ fn render_controller_frame_composites_the_home_and_overlays() {
     let failure = frame(&failing, &[]);
     assert!(failure.join("\n").contains("Session create failed"));
     assert!(failure.join("\n").contains("worktree path already exists"));
+}
+
+#[test]
+fn render_controller_frame_composites_the_selected_session_memo() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let record = SessionRecord {
+        name: "alpha".to_owned(),
+        display_name: None,
+        origin: SessionOrigin::Human,
+        started_from: None,
+        root: PathBuf::from("/work/alpha"),
+        created_at: now(),
+        last_active: None,
+        notes: Scratchpad::default(),
+        prs: Vec::new(),
+    };
+    let projected = [ProjectedSession::from_record(session, &record)];
+    let frame = |runtime: &WorkspaceRuntime| {
+        render_home_material(&home_frame_material(
+            24,
+            80,
+            runtime,
+            "atlas",
+            &projected,
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        ))
+        .join("\n")
+    };
+    let mut memo = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = memo.handle_key(Key::Char('n'));
+    let request_id = memo.state().note_editor().unwrap().request_id();
+    let loading = frame(&memo);
+    let border = loading
+        .lines()
+        .position(|line| line.contains("Memo · alpha"))
+        .unwrap();
+    assert_eq!(border, 5, "editor starts at the preview's top border");
+    assert_eq!(loading.lines().filter(|line| line.contains('┌')).count(), 1);
+    assert!(loading.contains("Shared with agent"));
+    assert!(loading.contains("Memo · alpha"));
+    assert!(loading.contains("Loading"));
+    let _ = memo.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        target: Target::Session(session),
+        request_id,
+        scratchpad: Scratchpad {
+            note: Some("次の作業をここに保存".into()),
+            ..Default::default()
+        },
+    }));
+    assert!(frame(&memo).contains("次の作業をここに保存"));
+    let _ = memo.handle_key(Key::Char('x'));
+    let _ = memo.handle_key(Key::Escape);
+    assert!(frame(&memo).contains("Save changes"));
+
+    // Closeup has no preview card: keep its explicit memo action centered.
+    let mut closeup = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = closeup.apply_event(AppEvent::Key(AppKey::Enter));
+    let _ = closeup.apply_event(AppEvent::LivePaneAvailability(true));
+    let _ = closeup.apply_event(AppEvent::Key(AppKey::OpenNotes));
+    let request_id = closeup.state().note_editor().unwrap().request_id();
+    let _ = closeup.apply_event(AppEvent::Backend(BackendEvent::NotesLoaded {
+        target: Target::Session(session),
+        request_id,
+        scratchpad: Scratchpad {
+            note: Some("Closeup memo".into()),
+            ..Default::default()
+        },
+    }));
+    let centered = frame(&closeup);
+    assert!(centered.contains("Closeup memo"));
+    let border = centered
+        .lines()
+        .find(|line| line.contains("Memo · alpha"))
+        .unwrap();
+    let plain = crate::presentation::widgets::strip_ansi(border);
+    assert_eq!(
+        crate::presentation::widgets::display_width(plain.split('┌').next().unwrap()),
+        7
+    );
 }
 
 #[test]
@@ -891,6 +978,9 @@ fn visible_old_ref_can_close_latest_lineage_while_fresh_observation_is_pending()
     let inventory = |terminal: &TerminalRef| AgentInventory {
         workspace_id: workspace,
         runtimes: vec![AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
                 .unwrap(),
             continuation,

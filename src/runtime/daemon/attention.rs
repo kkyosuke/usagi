@@ -1,16 +1,14 @@
 //! Read-only summary of already adopted workspaces. Never adopts or reconciles.
-use super::{
-    ConnectionWorkspace, SharedAgentRuntime, SharedPrInventory, SharedSupervisorRuntime, envelope,
-};
+use super::{ConnectionWorkspace, SharedAgentRuntime, SharedPrInventory, envelope};
 use serde::Deserialize;
 use usagi_core::domain::{
     agent::AgentStatus,
-    attention::{AttentionItem, AttentionKind, WorkspaceAttention},
+    attention::{ATTENTION_ITEMS_MAX, AttentionItem, AttentionKind, WorkspaceAttention},
     id::{SessionId, WorkspaceId},
     pr_inventory::{PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState},
     presentation_text::sanitize_presentation_line,
-    session_lifecycle::SessionLifecycle,
-    workflow::{Phase, WorkflowSnapshot},
+    session_lifecycle::{AgentPhase, SessionLifecycle},
+    user_decision::UserDecision,
 };
 use usagi_core::infrastructure::{
     ipc::{Envelope, ErrorCode, ProtocolError, RequestId, ResponseOutcome, ServerHello},
@@ -30,7 +28,6 @@ pub(super) fn dispatch(
     bound: &ConnectionWorkspace,
     decisions: &UserDecisionStore,
     prs: &SharedPrInventory,
-    supervisor: &SharedSupervisorRuntime,
     workspace: WorkspaceId,
     request_id: RequestId,
     raw: &serde_json::Value,
@@ -42,7 +39,7 @@ pub(super) fn dispatch(
             "Attention is human-only",
         ))
     } else {
-        snapshot(agent, bound, decisions, prs, supervisor, workspace)
+        snapshot(agent, bound, decisions, prs, workspace)
             .and_then(|snapshot| serde_json::to_value(snapshot).map_err(unavailable))
     };
     match result {
@@ -65,7 +62,6 @@ fn snapshot(
     bound: &ConnectionWorkspace,
     decisions: &UserDecisionStore,
     prs: &SharedPrInventory,
-    supervisor: &SharedSupervisorRuntime,
     workspace: WorkspaceId,
 ) -> Result<WorkspaceAttention, ProtocolError> {
     let tenant = bound.workspaces.workspace(workspace).ok_or_else(|| {
@@ -79,24 +75,49 @@ fn snapshot(
         .map_err(unavailable)?;
     let sessions: Vec<SessionRow> =
         serde_json::from_value(value["sessions"].clone()).map_err(unavailable)?;
-    let mut items = Vec::new();
-    for run in supervisor
+    let decisions = decisions.pending(workspace).map_err(unavailable)?;
+    let agent = agent.lock().map_err(unavailable)?;
+    let observation = agent.workspace_observation(workspace)?;
+    let phases = sessions
+        .iter()
+        .map(|session| agent.session_phase(session.session_id))
+        .collect::<Vec<_>>();
+    drop(agent);
+    let ids = sessions
+        .iter()
+        .map(|session| session.session_id)
+        .collect::<Vec<_>>();
+    let prs = prs
         .lock()
         .map_err(unavailable)?
-        .list_workspace(workspace)
-        .map_err(unavailable)?
-    {
-        if let Some(item) = work_run_attention(&run) {
-            items.push(item);
-        }
-    }
-    for decision in decisions.pending(workspace).map_err(unavailable)? {
+        .snapshots(&ids)
+        .map_err(unavailable)?;
+    project(
+        workspace,
+        &sessions,
+        &decisions,
+        &observation.session_statuses,
+        &phases,
+        &prs,
+    )
+}
+
+fn project(
+    workspace: WorkspaceId,
+    sessions: &[SessionRow],
+    decisions: &[UserDecision],
+    statuses: &std::collections::BTreeMap<SessionId, AgentStatus>,
+    phases: &[AgentPhase],
+    prs: &[usagi_core::infrastructure::ipc::PrSnapshot],
+) -> Result<WorkspaceAttention, ProtocolError> {
+    let mut items = Vec::new();
+    for decision in decisions {
         let label = match decision.owner.session_id {
             Some(id) => sessions
                 .iter()
                 .find(|session| session.session_id == id)
                 .map(|session| session.name.as_str()),
-            None => Some("Director"),
+            None => Some("Workspace"),
         };
         // A removed incarnation must not turn into a visit to a same-name session.
         if let Some(label) = label {
@@ -109,53 +130,21 @@ fn snapshot(
             });
         }
     }
-    let agent = agent.lock().map_err(unavailable)?;
-    let observation = agent.workspace_observation(workspace)?;
-    let mut workflows = Vec::new();
-    for session in &sessions {
-        workflows.push(
-            usagi_daemon::usecase::workflow::projection(
-                agent.dispatch_store(),
-                workspace,
-                session.session_id,
-            )
-            .map_err(unavailable)?,
-        );
-    }
-    drop(agent);
-    let ids = sessions
-        .iter()
-        .map(|session| session.session_id)
-        .collect::<Vec<_>>();
-    let prs = prs
-        .lock()
-        .map_err(unavailable)?
-        .snapshots(&ids)
-        .map_err(unavailable)?;
-    for ((session, workflow), prs) in sessions.iter().zip(&workflows).zip(&prs) {
+    for ((session, phase), prs) in sessions.iter().zip(phases).zip(prs) {
         let pending_decision = items
             .iter()
             .any(|item| item.session == Some(session.session_id));
-        if let Some((kind, reason)) = session_attention(
-            session,
-            workflow,
-            observation
-                .session_statuses
-                .get(&session.session_id)
-                .copied(),
-        ) && (!pending_decision
-            || !matches!(kind, AttentionKind::Blocked | AttentionKind::Running))
+        if let Some((kind, reason)) =
+            session_attention(session, *phase, statuses.get(&session.session_id).copied())
+            && !(pending_decision
+                && session.lifecycle == SessionLifecycle::Available
+                && *phase == AgentPhase::Waiting
+                && kind == AttentionKind::System)
         {
             items.push(session_item(session, kind, &reason));
         }
         for pr in &prs.entries {
             if let Some((kind, reason)) = pr_attention(pr) {
-                // Ready workflow and its PR are one review action.
-                if workflow.run.as_ref().is_some_and(|run| {
-                    run.phase == Phase::Ready && run.pr_url.as_deref() == Some(pr.identity.as_url())
-                }) {
-                    continue;
-                }
                 let mut item = session_item(session, kind, reason);
                 item.key = format!("pr:{}:{}", session.session_id, pr.identity.as_url());
                 item.reason = format!("PR #{} · {}", pr.identity.number(), reason);
@@ -164,7 +153,7 @@ fn snapshot(
         }
     }
     // Fail the whole observation rather than silently omitting waiting work.
-    if items.len() > 1024 {
+    if items.len() > ATTENTION_ITEMS_MAX {
         return Err(unavailable("attention item limit"));
     }
     items.sort_by(|a, b| (a.kind, &a.label, &a.key).cmp(&(b.kind, &b.label, &b.key)));
@@ -187,7 +176,7 @@ fn session_item(session: &SessionRow, kind: AttentionKind, reason: &str) -> Atte
 
 fn session_attention(
     session: &SessionRow,
-    workflow: &WorkflowSnapshot,
+    phase: AgentPhase,
     status: Option<AgentStatus>,
 ) -> Option<(AttentionKind, String)> {
     if session.lifecycle == SessionLifecycle::Failed {
@@ -199,25 +188,19 @@ fn session_attention(
             format!("Session {:?}", session.lifecycle),
         ));
     }
-    if let Some(pending) = &workflow.pending_start {
-        return Some(pending.error.as_ref().map_or_else(
-            || (AttentionKind::System, "Workflow starting".into()),
-            |error| (AttentionKind::Blocked, error.clone()),
+    if phase == AgentPhase::Waiting
+        && !matches!(
+            status,
+            Some(AgentStatus::Running | AgentStatus::Starting | AgentStatus::Failed)
+        )
+    {
+        return Some((
+            AttentionKind::System,
+            "Agent waiting — inspect terminal".into(),
         ));
     }
-    if let Some(run) = &workflow.run {
-        let kind = match run.phase {
-            Phase::Ready => AttentionKind::Review,
-            Phase::Waiting => AttentionKind::Blocked,
-            Phase::Verifying => AttentionKind::System,
-            _ => AttentionKind::Running,
-        };
-        return Some((
-            kind,
-            run.waiting_reason
-                .clone()
-                .unwrap_or_else(|| run.phase.label().into()),
-        ));
+    if phase == AgentPhase::Interrupted {
+        return Some((AttentionKind::Blocked, "Agent interrupted".into()));
     }
     match status {
         Some(AgentStatus::Failed) => Some((AttentionKind::Blocked, "Agent failed".into())),
@@ -250,45 +233,15 @@ fn pr_attention(pr: &PrEntry) -> Option<(AttentionKind, &'static str)> {
     None
 }
 
-fn work_run_attention(
-    run: &usagi_core::domain::supervisor::SupervisorRunQuery,
-) -> Option<AttentionItem> {
-    use usagi_core::domain::supervisor::SupervisorRunState;
-    let (kind, reason) = match run.state {
-        SupervisorRunState::Escalated | SupervisorRunState::WaitingForDecision => (
-            AttentionKind::Decision,
-            run.escalation
-                .as_ref()
-                .map_or("Work Run needs a decision", |escalation| {
-                    escalation.reason.as_str()
-                }),
-        ),
-        SupervisorRunState::Failed => (
-            AttentionKind::Blocked,
-            run.terminal_reason.as_deref().unwrap_or("Work Run failed"),
-        ),
-        SupervisorRunState::Verifying => (AttentionKind::System, "Work Run verifying artifacts"),
-        SupervisorRunState::Planning | SupervisorRunState::Running => {
-            (AttentionKind::Running, "Work Run active")
-        }
-        SupervisorRunState::Succeeded | SupervisorRunState::Cancelled => return None,
-    };
-    Some(AttentionItem {
-        key: format!("run:{}", run.supervisor_run_id),
-        session: None,
-        label: safe(run.display_label.as_deref().unwrap_or("Work Run")),
-        kind,
-        reason: safe(reason),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use usagi_core::domain::{
-        id::{AgentId, OperationId},
-        workflow::{WorkflowPendingStart, WorkflowRun},
+        agent::CallerRef,
+        id::{AgentId, OperationId, UserDecisionId},
+        user_decision::{UserDecisionOwner, UserDecisionSelectionMode, UserDecisionStatus},
     };
+
     fn session() -> SessionRow {
         SessionRow {
             session_id: SessionId::new(),
@@ -296,114 +249,102 @@ mod tests {
             lifecycle: SessionLifecycle::Available,
         }
     }
-    fn workflow(session: SessionId) -> WorkflowSnapshot {
-        WorkflowSnapshot {
-            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-            revision_limit: 3,
-            session,
-            run: None,
-            pending_start: None,
-            finished: vec![],
+    fn decision(workspace: WorkspaceId, session: Option<SessionId>) -> UserDecision {
+        UserDecision {
+            decision_id: UserDecisionId::new(),
+            owner: UserDecisionOwner {
+                workspace_id: workspace,
+                session_id: session,
+                caller: CallerRef {
+                    session_id: session,
+                    agent_id: AgentId::new(),
+                },
+                run_id: OperationId::new(),
+            },
+            title: "Choose\u{1b}\nnext step".into(),
+            prompt: "Choose".into(),
+            options: vec![],
+            allow_freeform: true,
+            allow_comment: false,
+            require_confirmation: false,
+            recommendation: None,
+            selection_limits: None,
+            selection_mode: UserDecisionSelectionMode::Single,
+            context: vec![],
+            expires_at: None,
+            idempotency_key: None,
+            status: UserDecisionStatus::Pending,
+            answer: None,
+            created_at: chrono::Utc::now(),
+            resolved_at: None,
         }
+    }
+    fn pr() -> PrEntry {
+        PrEntry::new(
+            usagi_core::domain::pr_inventory::canonicalize(
+                "https://github.com/example/repo/pull/1",
+            )
+            .unwrap(),
+        )
     }
 
     #[test]
-    fn attention_classification_does_not_turn_idle_or_agent_review_into_human_wait() {
-        let mut session = session();
-        let mut workflow = workflow(session.session_id);
-        for status in [None, Some(AgentStatus::Idle), Some(AgentStatus::Exited)] {
-            assert!(session_attention(&session, &workflow, status).is_none());
+    fn session_attention_distinguishes_activity_waiting_interruption_and_intentional_sleep() {
+        let mut row = session();
+        for phase in [
+            AgentPhase::Absent,
+            AgentPhase::Ready,
+            AgentPhase::Sleeping,
+            AgentPhase::Ended,
+            AgentPhase::Exited,
+        ] {
+            for status in [None, Some(AgentStatus::Idle), Some(AgentStatus::Exited)] {
+                assert!(session_attention(&row, phase, status).is_none());
+            }
         }
-        for status in [AgentStatus::Running, AgentStatus::Starting] {
+        for status in [AgentStatus::Starting, AgentStatus::Running] {
             assert_eq!(
-                session_attention(&session, &workflow, Some(status))
+                session_attention(&row, AgentPhase::Waiting, Some(status))
                     .unwrap()
                     .0,
                 AttentionKind::Running
             );
         }
         assert_eq!(
-            session_attention(&session, &workflow, Some(AgentStatus::Failed))
+            session_attention(&row, AgentPhase::Waiting, None)
+                .unwrap()
+                .0,
+            AttentionKind::System
+        );
+        assert_eq!(
+            session_attention(&row, AgentPhase::Interrupted, None)
                 .unwrap()
                 .0,
             AttentionKind::Blocked
         );
-        session.lifecycle = SessionLifecycle::Failed;
         assert_eq!(
-            session_attention(&session, &workflow, None).unwrap().0,
+            session_attention(&row, AgentPhase::Absent, Some(AgentStatus::Failed))
+                .unwrap()
+                .0,
             AttentionKind::Blocked
         );
-        session.lifecycle = SessionLifecycle::Creating;
+        row.lifecycle = SessionLifecycle::Failed;
         assert_eq!(
-            session_attention(&session, &workflow, None).unwrap().0,
+            session_attention(&row, AgentPhase::Absent, None).unwrap().0,
+            AttentionKind::Blocked
+        );
+        row.lifecycle = SessionLifecycle::Creating;
+        assert_eq!(
+            session_attention(&row, AgentPhase::Absent, None).unwrap().0,
             AttentionKind::System
         );
-        session.lifecycle = SessionLifecycle::Available;
-        workflow.pending_start = Some(WorkflowPendingStart {
-            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-            revision_limit: 3,
-            operation_id: OperationId::new(),
-            goal: "build".into(),
-            error: None,
-            issue: None,
-        });
-        assert_eq!(
-            session_attention(&session, &workflow, None).unwrap().0,
-            AttentionKind::System
-        );
-        workflow.pending_start.as_mut().unwrap().error = Some("credentials unavailable".into());
-        assert_eq!(
-            session_attention(&session, &workflow, None).unwrap(),
-            (AttentionKind::Blocked, "credentials unavailable".into())
-        );
-        workflow.pending_start = None;
-        workflow.run = Some(WorkflowRun {
-            agents: usagi_core::domain::workflow::WorkflowAgents::default(),
-            id: OperationId::new(),
-            session: session.session_id,
-            goal: "build".into(),
-            implementer: AgentId::new(),
-            reviewer: None,
-            phase: Phase::Reviewing,
-            revision_limit: 3,
-            revisions: 0,
-            review: None,
-            waiting_reason: None,
-            pr_url: None,
-            issue: None,
-            instructions: vec![],
-            history: vec![],
-        });
-        for (phase, expected) in [
-            (Phase::Reviewing, AttentionKind::Running),
-            (Phase::Ready, AttentionKind::Review),
-            (Phase::Waiting, AttentionKind::Blocked),
-            (Phase::Verifying, AttentionKind::System),
-        ] {
-            workflow.run.as_mut().unwrap().phase = phase;
-            assert_eq!(
-                session_attention(&session, &workflow, None).unwrap().0,
-                expected
-            );
-        }
-        workflow.run.as_mut().unwrap().waiting_reason = Some("specific reason".into());
-        assert_eq!(
-            session_attention(&session, &workflow, None).unwrap().1,
-            "specific reason"
-        );
-        let item = session_item(&session, AttentionKind::Decision, "hello\u{1b}\nworld");
-        assert!(!item.reason.contains('\u{1b}'));
         assert_eq!(safe(&"x".repeat(200)).len(), 160);
+        assert_eq!(unavailable("private error").code, ErrorCode::Unavailable);
     }
 
     #[test]
-    fn attention_pr_classification_ignores_closed_and_distinguishes_ci_and_drafts() {
-        let mut pr = PrEntry::new(
-            usagi_core::domain::pr_inventory::canonicalize(
-                "https://github.com/example/repo/pull/1",
-            )
-            .unwrap(),
-        );
+    fn pr_attention_distinguishes_ci_review_draft_and_closed_states() {
+        let mut pr = pr();
         assert_eq!(pr_attention(&pr).unwrap().0, AttentionKind::System);
         pr.head_oid = Some("a".repeat(40));
         pr.refresh = PrRefreshState::Idle;
@@ -421,52 +362,125 @@ mod tests {
             pr.state = state;
             assert!(pr_attention(&pr).is_none());
         }
-        assert_eq!(unavailable("private error").code, ErrorCode::Unavailable);
     }
 
     #[test]
-    fn attention_work_runs_surface_escalations_but_not_completed_history() {
-        use usagi_core::domain::supervisor::{
-            EscalationRecord, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
-        };
-        let mut run = SupervisorRunQuery {
-            supervisor_run_id: SupervisorRunId::new(),
-            state_revision: 1,
-            state: SupervisorRunState::Planning,
-            terminal_at: None,
-            terminal_reason: None,
-            display_label: None,
-            root_agent_id: None,
-            policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
-            escalation: None,
-            tasks: vec![],
-            provenance: vec![],
-        };
-        for (state, expected) in [
-            (SupervisorRunState::Planning, AttentionKind::Running),
-            (SupervisorRunState::Verifying, AttentionKind::System),
-            (SupervisorRunState::Failed, AttentionKind::Blocked),
-            (
-                SupervisorRunState::WaitingForDecision,
+    fn projection_fences_decisions_deduplicates_wait_and_keeps_independent_failures() {
+        let workspace = WorkspaceId::new();
+        let mut sessions = vec![session(), session()];
+        let decisions = vec![
+            decision(workspace, Some(sessions[0].session_id)),
+            decision(workspace, None),
+            decision(workspace, Some(SessionId::new())),
+        ];
+        let mut pr = pr();
+        pr.head_oid = Some("a".repeat(40));
+        pr.refresh = PrRefreshState::Idle;
+        let prs = vec![
+            usagi_core::infrastructure::ipc::PrSnapshot {
+                session_id: sessions[0].session_id,
+                revision: 1,
+                entries: vec![pr.clone()],
+            },
+            usagi_core::infrastructure::ipc::PrSnapshot {
+                session_id: sessions[1].session_id,
+                revision: 1,
+                entries: vec![],
+            },
+        ];
+        let phases = [AgentPhase::Waiting, AgentPhase::Running];
+        let statuses = [(sessions[1].session_id, AgentStatus::Running)].into();
+        let result = project(workspace, &sessions, &decisions, &statuses, &phases, &prs).unwrap();
+        assert_eq!(result.items.len(), 4);
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.kind)
+                .collect::<Vec<_>>(),
+            vec![
                 AttentionKind::Decision,
-            ),
-        ] {
-            run.state = state;
-            assert_eq!(work_run_attention(&run).unwrap().kind, expected);
-        }
-        run.state = SupervisorRunState::Escalated;
-        run.escalation = Some(EscalationRecord {
-            escalation_id: OperationId::new(),
-            reason: "retry budget".into(),
-            blocking_task_id: None,
-            safe_evidence: String::new(),
-            choices: vec![],
-            created_at: chrono::Utc::now(),
-        });
-        assert_eq!(work_run_attention(&run).unwrap().reason, "retry budget");
-        run.state = SupervisorRunState::Succeeded;
-        assert!(work_run_attention(&run).is_none());
-        run.state = SupervisorRunState::Cancelled;
-        assert!(work_run_attention(&run).is_none());
+                AttentionKind::Decision,
+                AttentionKind::Review,
+                AttentionKind::Running
+            ]
+        );
+        assert!(
+            result
+                .items
+                .iter()
+                .all(|item| !item.reason.contains('\u{1b}') && !item.reason.contains('\n'))
+        );
+        assert!(
+            result
+                .items
+                .iter()
+                .any(|item| item.reason == "PR #1 · Review / merge decision")
+        );
+        let failed_statuses = [(sessions[0].session_id, AgentStatus::Failed)].into();
+        assert!(
+            project(
+                workspace,
+                &sessions,
+                &decisions,
+                &failed_statuses,
+                &phases,
+                &prs
+            )
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.kind == AttentionKind::Blocked)
+        );
+        sessions[0].lifecycle = SessionLifecycle::Failed;
+        let result = project(workspace, &sessions, &decisions, &statuses, &phases, &prs).unwrap();
+        assert!(
+            result
+                .items
+                .iter()
+                .any(|item| item.kind == AttentionKind::Blocked)
+        );
+    }
+
+    #[test]
+    fn projection_rejects_oversized_backlogs_and_omits_closed_prs() {
+        let workspace = WorkspaceId::new();
+        let sessions = [session()];
+        let too_many = (0..=ATTENTION_ITEMS_MAX)
+            .map(|_| decision(workspace, None))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            project(
+                workspace,
+                &[],
+                &too_many,
+                &std::collections::BTreeMap::default(),
+                &[],
+                &[]
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::Unavailable
+        );
+        let mut closed = pr();
+        closed.state = PrState::Closed;
+        let closed_prs = vec![usagi_core::infrastructure::ipc::PrSnapshot {
+            session_id: sessions[0].session_id,
+            revision: 2,
+            entries: vec![closed],
+        }];
+        assert!(
+            project(
+                workspace,
+                &sessions[..1],
+                &[],
+                &std::collections::BTreeMap::default(),
+                &[AgentPhase::Absent],
+                &closed_prs
+            )
+            .unwrap()
+            .items
+            .is_empty()
+        );
     }
 }

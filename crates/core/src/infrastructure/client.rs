@@ -14,8 +14,8 @@ use std::time::Duration;
 use crate::domain::clock::MonotonicClock;
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::infrastructure::ipc::request::{
-    ClientError, DaemonReply, DaemonRequest, SessionAction, SupervisorToolAction, TenantAction,
-    TerminalAction, TuiUserDecisionAction,
+    ClientError, DaemonReply, DaemonRequest, SessionAction, TenantAction, TerminalAction,
+    TuiUserDecisionAction,
 };
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, Capability, ClientHello, ClientId, ClientWorkspace, DaemonGeneration,
@@ -36,10 +36,9 @@ use crate::domain::pr_inventory::PrInventory;
 use crate::domain::session_lifecycle::AgentPhase;
 #[cfg(test)]
 use crate::infrastructure::ipc::request::{
-    AgentConcurrency, AgentGoalIntent, AgentLaunchIntent, DaemonMetrics, DaemonRestartAgents,
-    DispatchToolAction, McpCallerContext, MetricsAction, PrAction, PrRequest, PrSnapshot,
-    TerminalGeometry, TerminalLaunchIntent, agent_goal_semantic_key, agent_launch_semantic_key,
-    agent_resume_semantic_key, decode_pr_snapshot,
+    AgentConcurrency, AgentLaunchIntent, DaemonMetrics, DaemonRestartAgents, DispatchToolAction,
+    McpCallerContext, MetricsAction, PrAction, PrRequest, PrSnapshot, TerminalGeometry,
+    TerminalLaunchIntent, agent_launch_semantic_key, agent_resume_semantic_key, decode_pr_snapshot,
 };
 #[cfg(test)]
 use crate::infrastructure::ipc::{OWNER_GENERATION_ROUTING_CAPABILITY, WORKSPACE_FENCE_CAPABILITY};
@@ -167,6 +166,7 @@ impl<S: Read + Write> IpcClient<S> {
             client_required_capabilities(expected_owner.is_some(), &workspace);
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
+            surface: Some(policy.surface),
             connection_nonce,
             expected_daemon_generation: expected_owner
                 .as_ref()
@@ -610,6 +610,7 @@ mod metrics_schema_tests {
 /// mutation may only be retried with its original request/operation identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientPolicy {
+    pub surface: crate::domain::agent::AgentClientSurface,
     pub timeout_ms: u64,
     pub reconnect_attempts: u8,
 }
@@ -618,6 +619,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn tui() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Tui,
             timeout_ms: 2_000,
             reconnect_attempts: 3,
         }
@@ -636,6 +638,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn cli() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Cli,
             timeout_ms: 10_000,
             reconnect_attempts: 1,
         }
@@ -643,6 +646,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn mcp() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Mcp,
             timeout_ms: 30_000,
             reconnect_attempts: 1,
         }
@@ -658,6 +662,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn pane_launch() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Tui,
             timeout_ms: 300_000,
             reconnect_attempts: 1,
         }
@@ -964,8 +969,6 @@ impl RetryEligibility {
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
             | DaemonRequest::WorkspaceAttention { .. }
-            | DaemonRequest::SupervisorSnapshot { .. }
-            | DaemonRequest::WorkflowSnapshot { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::PlanDaemonRestartAgents { .. }
             | DaemonRequest::Tenant {
@@ -997,15 +1000,6 @@ impl RetryEligibility {
                     Self::NoCrossConnectionEvidence
                 }
             }
-            DaemonRequest::SupervisorTool { action, .. } => {
-                if supervisor_action_is_read_only(*action) {
-                    Self::ReadOnly
-                } else if supervisor_action_is_durable_operation(*action) {
-                    Self::DurableOperation
-                } else {
-                    Self::NoCrossConnectionEvidence
-                }
-            }
             DaemonRequest::UserDecision { action, .. } => {
                 if user_decision_action_is_read_only(*action) {
                     Self::ReadOnly
@@ -1014,10 +1008,7 @@ impl RetryEligibility {
                 }
             }
             DaemonRequest::Rollover { .. }
-            | DaemonRequest::SupervisorControl { .. }
-            | DaemonRequest::WorkflowControl { .. }
             | DaemonRequest::Agent { .. }
-            | DaemonRequest::AgentGoal { .. }
             | DaemonRequest::ResumeAgent { .. }
             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
@@ -1045,14 +1036,14 @@ impl RetryEligibility {
 const fn session_action_is_read_only(action: SessionAction) -> bool {
     matches!(
         action,
-        SessionAction::List
+        SessionAction::Agents
+            | SessionAction::List
             | SessionAction::Status
             | SessionAction::Overview
             | SessionAction::Pr
             | SessionAction::NoteGet
             | SessionAction::TodoList
             | SessionAction::DecisionList
-            | SessionAction::WorkflowStatus
     )
 }
 
@@ -1061,28 +1052,7 @@ const fn session_action_is_durable_operation(action: SessionAction) -> bool {
     // lifecycle mutations (create/remove across daemon restarts). Other
     // mutating actions stay fail-closed until their server-backed durable
     // contract is proven.
-    matches!(
-        action,
-        SessionAction::Create
-            | SessionAction::Remove
-            // A workflow command is admitted by the producer's operation ID, so
-            // retrying a lost response resumes the same run instead of starting
-            // a second one.
-            | SessionAction::WorkflowStart
-            | SessionAction::WorkflowInstruct
-            | SessionAction::WorkflowFinish
-    )
-}
-
-const fn supervisor_action_is_read_only(action: SupervisorToolAction) -> bool {
-    matches!(
-        action,
-        SupervisorToolAction::Get | SupervisorToolAction::List | SupervisorToolAction::Events
-    )
-}
-
-const fn supervisor_action_is_durable_operation(action: SupervisorToolAction) -> bool {
-    matches!(action, SupervisorToolAction::Start)
+    matches!(action, SessionAction::Create | SessionAction::Remove)
 }
 
 const fn user_decision_action_is_read_only(action: TuiUserDecisionAction) -> bool {
@@ -1713,6 +1683,42 @@ mod tests {
                 .to_string()
                 .contains("exact daemon artifact is unknown")
         );
+    }
+
+    #[test]
+    fn hello_preserves_the_surface_and_remains_readable_without_it() {
+        use crate::domain::agent::AgentClientSurface;
+        for (policy, surface) in [
+            (ClientPolicy::tui(), AgentClientSurface::Tui),
+            (ClientPolicy::cli(), AgentClientSurface::Cli),
+            (ClientPolicy::mcp(), AgentClientSurface::Mcp),
+            (ClientPolicy::pane_launch(), AgentClientSurface::Tui),
+        ] {
+            let client = IpcClient::connect(
+                scripted(ResponseOutcome::Ok, "request"),
+                "public-client-id".into(),
+                "nonce".into(),
+                policy,
+                client_build(),
+                test_workspace(),
+            )
+            .unwrap();
+            let mut frames = Cursor::new(client.stream.output);
+            let hello = read_json_frame::<serde_json::Value>(&mut frames, 1_048_576)
+                .unwrap()
+                .unwrap();
+            assert_eq!(hello["kind"], "client_hello");
+            let hello: ClientHello = serde_json::from_value(hello).unwrap();
+            assert_eq!(hello.surface, Some(surface));
+            let mut legacy = serde_json::to_value(&hello).unwrap();
+            legacy.as_object_mut().unwrap().remove("surface");
+            assert_eq!(
+                serde_json::from_value::<ClientHello>(legacy)
+                    .unwrap()
+                    .surface,
+                None
+            );
+        }
     }
 
     #[test]
@@ -2397,11 +2403,9 @@ mod deadline_and_retry_tests {
                 root: None,
                 force: false,
             },
-            // Reading a workflow reconciles evidence the resident lane would
-            // reconcile anyway, so re-reading it changes nothing a caller owns.
             DaemonRequest::Session {
-                action: SessionAction::WorkflowStatus,
-                operation_id: "op".into(),
+                action: SessionAction::Agents,
+                operation_id: "read-only-audit".into(),
                 payload: session_payload(),
             },
             DaemonRequest::Pr {
@@ -2453,12 +2457,6 @@ mod deadline_and_retry_tests {
                 payload: session_payload(),
                 caller_context: None,
             },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::List,
-                operation_id: String::new(),
-                payload: session_payload(),
-                caller_context: None,
-            },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::List,
                 payload: session_payload(),
@@ -2480,42 +2478,11 @@ mod deadline_and_retry_tests {
                 operation_id: "op".into(),
                 payload: session_payload(),
             },
-            // A workflow command is admitted by the producer's operation ID, so
-            // a lost response resumes the same run instead of starting another.
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowStart,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowInstruct,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowFinish,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::Dispatch,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
-            },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::Start,
-                operation_id: "op".into(),
-                payload: session_payload(),
-                caller_context: None,
-            },
-            DaemonRequest::SupervisorControl {
-                workspace: WorkspaceId::new(),
-                operation_id: OperationId::new(),
-                command: crate::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
-                    supervisor_run_id: crate::domain::supervisor::SupervisorRunId::new(),
-                    reason: "operator cancelled".into(),
-                },
             },
             DaemonRequest::Agent {
                 operation_id: "op".into(),
@@ -2523,14 +2490,6 @@ mod deadline_and_retry_tests {
                     workspace: WorkspaceId::new(),
                     session: None,
                     profile: None,
-                },
-            },
-            DaemonRequest::AgentGoal {
-                operation_id: "op".into(),
-                intent: AgentGoalIntent {
-                    workspace: WorkspaceId::new(),
-                    profile: None,
-                    goal: "prepare a PR".to_owned(),
                 },
             },
         ];
@@ -2561,12 +2520,6 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentInboxAck,
-                operation_id: "op".into(),
-                payload: session_payload(),
-                caller_context: None,
-            },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::Cancel,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
@@ -2996,6 +2949,7 @@ mod deadline_and_retry_tests {
 
         fn bounded_policy() -> ClientPolicy {
             ClientPolicy {
+                surface: crate::domain::agent::AgentClientSurface::Cli,
                 timeout_ms: 200,
                 reconnect_attempts: 0,
             }
@@ -3195,37 +3149,6 @@ mod deadline_and_retry_tests {
             },
         ] {
             assert_ne!(key, agent_launch_semantic_key(&other), "{other:?}");
-        }
-    }
-
-    #[test]
-    fn the_agent_goal_semantic_key_covers_the_exact_goal_and_root_launch() {
-        let intent = AgentGoalIntent {
-            workspace: WorkspaceId::new(),
-            profile: None,
-            goal: "目的を実装する".to_owned(),
-        };
-        let key = agent_goal_semantic_key(&intent);
-        assert_eq!(key, agent_goal_semantic_key(&intent));
-        assert!(key.contains("workspace-root"));
-        assert!(key.contains(&format!("goal:{}", intent.goal.len())));
-        assert!(key.ends_with(&intent.goal));
-
-        for other in [
-            AgentGoalIntent {
-                goal: "別の目的".to_owned(),
-                ..intent.clone()
-            },
-            AgentGoalIntent {
-                workspace: WorkspaceId::new(),
-                ..intent.clone()
-            },
-            AgentGoalIntent {
-                profile: Some(AgentProfileId::new("codex").unwrap()),
-                ..intent
-            },
-        ] {
-            assert_ne!(key, agent_goal_semantic_key(&other));
         }
     }
 

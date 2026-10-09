@@ -128,6 +128,35 @@ mod tests {
     }
 
     #[test]
+    fn old_workflow_setting_is_ignored_and_omitted_on_save() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = WorkspaceSettingsStore::new(workspace.path());
+        let expected = LocalSettings {
+            default_model: Some(DefaultModel::Claude),
+            default_branch: Some("refs/heads/main".to_owned()),
+            team_template: Some(crate::domain::settings::TeamTemplate::Flat),
+            env: [("PROJECT".to_owned(), "usagi".to_owned())]
+                .into_iter()
+                .collect(),
+            ..LocalSettings::default()
+        };
+        for obsolete_value in ["classic", "goal-driven", "unknown"] {
+            let mut legacy = serde_json::to_value(&expected).unwrap();
+            legacy["version"] = serde_json::json!(1);
+            legacy["work_mode"] = serde_json::json!(obsolete_value);
+            fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+            fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+            assert_eq!(store.load().unwrap(), expected);
+            let _lock = store.lock().unwrap();
+            store.save(&expected).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+            assert!(saved.get("work_mode").is_none());
+            assert_eq!(store.load().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn corrupt_settings_are_reported() {
         let workspace = tempfile::tempdir().unwrap();
         let store = WorkspaceSettingsStore::new(workspace.path());
@@ -146,7 +175,6 @@ mod tests {
             issue_enabled: Some(false),
             memory_enabled: Some(true),
             team_template: Some(crate::domain::settings::TeamTemplate::Flat),
-            work_mode: Some(crate::domain::settings::WorkMode::GoalDriven),
             env: [("PROJECT".to_owned(), "usagi".to_owned())]
                 .into_iter()
                 .collect(),

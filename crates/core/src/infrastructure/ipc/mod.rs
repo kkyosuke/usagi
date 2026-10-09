@@ -505,6 +505,9 @@ pub enum ClientWorkspace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
     pub client_id: ClientId,
+    /// Reported surface for launch diagnostics; it grants no caller authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<crate::domain::agent::AgentClientSurface>,
     pub connection_nonce: String,
     pub expected_daemon_generation: Option<DaemonGeneration>,
     pub supported_protocols: Vec<ProtocolRange>,

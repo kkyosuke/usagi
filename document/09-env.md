@@ -45,12 +45,12 @@ editor は 1 行 1 binding の `NAME=value` を受け取り、保存時に次の
 
 ### workspace が bind できない変数
 
-次の名前は workspace binding から拒否する。判定は launch admission で secret 解決より前に行う。
+次の名前は workspace binding から拒否する。前後の空白を除いた名前で判定し、launch admission で secret 解決より前に拒否する。
 global binding は利用者が管理する trusted baseline として扱い、この拒否対象には含めない。
 
 | 変数 | 拒否する理由 |
 |---|---|
-| `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` | Agent launcher が使う filesystem の境界そのものを差し替えられる |
+| `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` / `USAGI_TRUST_ROOT` | Agent launcher が使う filesystem の境界そのものを差し替えられる。private directory の検査境界は [daemon](05-daemon.md#private-directory-の検査起点) を参照 |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` | managed launch の宛先・アカウント・model を差し替えられる。`.usagi/settings.json` は repository に入るため、checkout 側が session の prompt・file 内容・credential を別の server へ送れてしまう |
 
 binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
@@ -92,13 +92,22 @@ Workspace Config、Overview の workspace editor、Closeup は global binding �
 平文の値は解決を要さずそのまま注入する。`op://` の値だけを 1Password CLI（`op read --no-newline`）で
 解決する。
 
+- 解決は Agent / Terminal の owner lock を取る前に行う。起動要求ごとに一時スナップショットを作り、
+  provision は同じ thread・workspace の値だけを読み、要求の終了時にスナップショットを外す。
+  未準備の provision は外部コマンドを実行せず拒否する。値を durable record や IPC へ渡さない。
+- Terminal の既知の起動 operation は owner が再送・競合を判定し、新しい secret 解決を行わない。
+  新規起動は geometry・PTY 同時実行上限・trusted profile の検証を準備前に通し、起動の admission でも再確認する。
+- secret cache の lock は memory の参照・更新中だけ保持する。同じ credential・scope・参照の並行要求は
+  1 件の進行中 read を共有し、別参照や secret を使わない起動をその read の待ちに巻き込まない。
 - 解決は最大 4 worker の bounded queue で行う（1 参照 = 1 subprocess）。1 件あたり 30 秒の deadline を持つ。
   binding の結果は完了順でなく名前順へ戻して merge する。
-- `op` の stdout / stderr は stream ごとに最大 64 KiB だけ保持する。上限後も pipe は EOF まで drain して child を
-  backpressure で停止させず、どちらかが上限を超えた binding は raw output を返さない安全な failure として落とす。
-- deadline を超えた `op` は、その child handle の owner が exact child だけへ graceful terminate を送り、2 秒の bounded wait
-  後も残る場合は kill する。その後は wait/reap と stdout / stderr reader の join を終えてから failure を返す。任意 PID や
-  owner が証明できない process は signal 対象にしない。
+- `op` の stdout / stderr は stream ごとに最大 64 KiB だけ保持する。実行中は上限後も nonblocking pipe を drain して
+  child を backpressure で停止させず、どちらかが上限を超えた binding は raw output を返さない安全な failure として落とす。
+- `op` は child handle の owner が新しい process group に入れて起動する。deadline 時はその owned group へ graceful
+  terminate を送り、2 秒の bounded wait 後も残る場合は kill して exact child を reap する。EOF を得られない capture も
+  bounded cleanup 後に cancel して両 reader を join し、`setsid` した descendant の pipe 保持で無期限に待たない。
+  未完の出力は secret value として返さず failure にする。main child が正常終了しても、残った owned descendant への
+  terminate / kill で初めて閉じた pipe は完全な出力の証拠にしない。任意 PID や owner が証明できない process は signal 対象にしない。
 - 正常終了、非 zero、output 超過、deadline、reader failure のいずれでも stdout / stderr の両 reader を join してから
   結果を返す。片方の reader が panic または read error になっても、もう片方を detach しない。
 - `op` の認証は CLI 側の通常の仕組みに従う。`op signin` セッションに加え、env editor で平文の

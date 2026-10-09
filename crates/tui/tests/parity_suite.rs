@@ -75,6 +75,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
             .unwrap()
             .with_timezone(&Utc),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,
@@ -84,6 +85,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     }
 }
 

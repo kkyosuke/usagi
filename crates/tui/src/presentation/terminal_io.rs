@@ -231,8 +231,6 @@ pub(super) enum PaneLaunch {
         /// Absent for a workspace-root Agent.
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
-        /// Present only for the opt-in workspace-root Work Run.
-        goal: Option<String>,
         resume: bool,
     },
     Terminal {
@@ -371,7 +369,6 @@ pub(super) fn run_pane_launch(
             workspace,
             session,
             profile,
-            goal,
             resume,
         } => {
             let result = if resume {
@@ -379,12 +376,6 @@ pub(super) fn run_pane_launch(
                     || Err("workspace-root Agent resume is unavailable".to_owned()),
                     |session| port.resume(workspace, session, operation),
                 )
-            } else if let Some(goal) = goal {
-                if session.is_some() {
-                    Err("goal-driven Agent launch requires workspace-root scope".to_owned())
-                } else {
-                    port.launch_goal(operation, workspace, profile, &goal)
-                }
             } else {
                 // The pending pane's own operation is what the daemon admits and
                 // finalizes, so no second identity can complete this pane (#522).
@@ -433,7 +424,6 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorBack => Some(AppKey::DirectorBack),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
-        LiveTerminalAction::WorkRuns => Some(AppKey::OpenDirectorWorkRuns),
         LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
         LiveTerminalAction::RootTerminalFullHeight => Some(AppKey::ToggleRootTerminalFullHeight),
         LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
@@ -797,9 +787,9 @@ pub(super) fn handle_terminal_pointer(
     match pointer.kind {
         PointerKind::Move => return true,
         PointerKind::Down => {
-            // Live input is a session-wide level: a non-terminal tab such as
-            // Workflow can be selected while another tab of the same session is
-            // live. That frame has no terminal to select text in, so the press
+            // Live input is a session-wide level: a Diff tab can be selected
+            // while another tab of the same session is live. That frame has no
+            // terminal to select text in, so the press
             // belongs to the pane's own controls rather than to a PTY.
             let Some(terminal) = runtime
                 .wants_live_input()

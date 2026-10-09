@@ -108,6 +108,80 @@ pub struct CallerRef {
     pub agent_id: AgentId,
 }
 
+/// Daemon-observed launch origin. Credentials and provider IDs never belong in
+/// this audit vocabulary; MCP callers are the authenticated public identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchSource {
+    Manual,
+    Mcp,
+    Daemon,
+    /// Legacy or unrecognized classifications carry no inferred authority.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Trusted entry point which requested a runtime, rather than its prompt text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLaunchEntry {
+    LegacyDispatch,
+    Agent,
+    SessionDispatch,
+    AgentHandoff,
+    SessionDelegateBrief,
+    SessionResume,
+    IntegrationRepair,
+    DaemonRestart,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The cooperating IPC client reports its presentation surface. This is
+/// diagnostic context, never authority for the daemon's launch classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentClientSurface {
+    Tui,
+    Cli,
+    Mcp,
+}
+
+/// Connection evidence captured by the daemon when a launch is requested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchClient {
+    pub surface: Option<AgentClientSurface>,
+    pub client_id: String,
+    pub connection_id: String,
+    pub request_id: String,
+    /// Kernel-observed socket peer, rather than a PID supplied in the request.
+    pub peer_pid: u32,
+}
+
+/// Immutable audit event recorded before spawning an Agent process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchOrigin {
+    pub source: AgentLaunchSource,
+    pub entrypoint: AgentLaunchEntry,
+    pub caller: Option<CallerRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_operation_id: Option<OperationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<AgentLaunchClient>,
+    pub operation_id: OperationId,
+    pub at: DateTime<Utc>,
+}
+
+/// Agent creation and this runtime launch are separate facts. Reusing or
+/// resuming a legacy Agent retains an unknown creation origin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    pub created: Option<AgentLaunchOrigin>,
+    pub launched: AgentLaunchOrigin,
+}
+
 /// The worker side of a durable dispatch binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerRef {
@@ -128,7 +202,9 @@ pub struct DispatchBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StructuredResult {
     pub pr: Option<String>,
+    #[serde(default)]
     pub commits: Vec<String>,
+    #[serde(default)]
     pub changed_files: Vec<String>,
     pub verification: Option<String>,
 }
@@ -449,11 +525,20 @@ pub enum AgentRuntimeInventoryState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRuntimeInventoryItem {
     pub runtime: AgentRuntimeRef,
+    /// Known durable operation, independent of optional legacy launch audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+    /// Exact Agent identity from a retained binding or launch audit, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     pub continuation: AgentContinuationRef,
     pub state: AgentRuntimeInventoryState,
     /// Exact source from which this runtime was resumed, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<AgentResumeSourceId>,
+    /// Missing on older records; absence must not be inferred as manual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_provenance: Option<AgentLaunchProvenance>,
 }
 
 /// Deterministic workspace-wide inventory for root and managed-session Agents.
@@ -1041,6 +1126,47 @@ mod tests {
                 serde_json::from_str::<InboxKind>(&serde_json::to_string(&kind).unwrap()).unwrap(),
                 kind
             );
+        }
+    }
+
+    #[test]
+    fn partial_structured_results_default_only_omitted_collections() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"verification": "cargo test"}),
+            serde_json::json!({"pr": "#321"}),
+            serde_json::json!({"commits": ["abc"]}),
+            serde_json::json!({"changed_files": ["fixture.rs"]}),
+        ] {
+            let result: StructuredResult = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(
+                result.commits,
+                if payload.get("commits").is_some() {
+                    vec!["abc"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                result.changed_files,
+                if payload.get("changed_files").is_some() {
+                    vec!["fixture.rs"]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(result.pr.as_deref(), payload["pr"].as_str());
+            assert_eq!(
+                result.verification.as_deref(),
+                payload["verification"].as_str()
+            );
+        }
+        for invalid in [
+            serde_json::json!({"commits": null}),
+            serde_json::json!({"changed_files": "fixture.rs"}),
+            serde_json::json!({"commits": [123]}),
+        ] {
+            assert!(serde_json::from_value::<StructuredResult>(invalid).is_err());
         }
     }
 

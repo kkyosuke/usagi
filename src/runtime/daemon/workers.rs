@@ -2,7 +2,11 @@
 
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::AtomicBool;
 
+use usagi_daemon::usecase::lock_watch::{LockTarget, LockWatchTiming};
+
+use super::agent::AgentOwnerLock;
 use super::{
     AGENT_READINESS_TERMINATE_GRACE, AcceptedStream, AdmissionGate, AgentPtyObservation,
     AgentReadinessCommand, Arc, BTreeMap, BTreeSet, BackgroundWorker, ClientWorkers, Collection,
@@ -78,15 +82,26 @@ pub(super) struct SystemAgentReadiness {
     pub(super) state: Mutex<ReadinessState>,
     pub(super) completed: Condvar,
     pub(super) terminate_grace: Duration,
+    /// The daemon's shutdown flag. A probe runs on a client worker that
+    /// shutdown joins, so a probe still inside its budget must end as soon as
+    /// shutdown begins rather than when the budget does.
+    pub(super) abort: Arc<AtomicBool>,
 }
 
-impl Default for SystemAgentReadiness {
-    fn default() -> Self {
+impl SystemAgentReadiness {
+    pub(super) fn new(abort: Arc<AtomicBool>) -> Self {
         Self {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
+            abort,
         }
+    }
+}
+
+impl Default for SystemAgentReadiness {
+    fn default() -> Self {
+        Self::new(Arc::new(AtomicBool::new(false)))
     }
 }
 
@@ -152,7 +167,13 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
+        let result = bounded_readiness_command(
+            program,
+            arguments,
+            bounds,
+            self.terminate_grace,
+            &self.abort,
+        );
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };
@@ -679,6 +700,34 @@ where
             }
             worker_health.finish_planned();
         })
+}
+
+/// Starts the watchdog that reports a daemon-wide runtime lock left
+/// unavailable, so a parked lock holder is named in the error log instead of
+/// surfacing only as refused connections once client capacity is exhausted.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_watchdog_reports_a_held_lock_and_its_release_then_stops_on_shutdown
+pub(super) fn start_lock_watchdog(
+    agent: &SharedAgentRuntime,
+    terminal: &SharedTerminalRuntime,
+    workers: Arc<ClientWorkers>,
+    shutdown: &Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let threads = usagi_daemon::usecase::lock_watch::start_lock_watch(
+        vec![
+            LockTarget::new(
+                "agent runtime",
+                Box::new(AgentOwnerLock(Arc::downgrade(agent))),
+            ),
+            LockTarget::new("terminal runtime", Box::new(Arc::downgrade(terminal))),
+        ],
+        workers,
+        shutdown,
+        LockWatchTiming::SHIPPING,
+        Arc::new(ErrorLog::record),
+    )?;
+    // The watch thread joins the probes that end with it. One still parked on
+    // the very lock it reports is left, so it cannot hold up shutdown.
+    Ok(threads.watch)
 }
 
 /// Starts the only production retention collector. Launch and exit already

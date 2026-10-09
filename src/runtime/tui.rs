@@ -43,9 +43,9 @@ use usagi_core::infrastructure::ipc::TerminalInputReplayMode;
 #[cfg(test)]
 use usagi_core::infrastructure::ipc::TerminalSnapshotMode;
 use usagi_core::infrastructure::ipc::{
-    AgentGoalIntent, AgentLaunchIntent, ClientError, DaemonMetrics, DaemonReply, DaemonRequest,
-    MetricsAction, PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction, TerminalAction,
-    TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    AgentLaunchIntent, ClientError, DaemonMetrics, DaemonReply, DaemonRequest, MetricsAction,
+    PrBatchRequest, PrDismissRequest, PrSnapshot, SessionAction, TerminalAction, TerminalGeometry,
+    TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::infrastructure::role_catalog::{
     CatalogLayer, read_layer_source, write_layer_source,
@@ -61,13 +61,12 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::session_worktree::SystemGit;
 use usagi_tui::infrastructure::daemon_reply::{
-    PrObservations, agent_goal_request, agent_inventory_request, agent_launch_request,
-    correlate_agent_goal, correlate_agent_launch, daemon_error_reason, decode_attach_screen,
-    decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_input_ack_value,
-    decode_terminal_inventory, decode_terminal_poll, decode_work_run_control_reply,
-    decode_work_run_snapshot_reply, exact_agent_resume_request, map_terminal_error,
+    PrObservations, agent_inventory_request, agent_launch_request, correlate_agent_launch,
+    daemon_error_reason, decode_attach_screen, decode_exact_agent_resume,
+    decode_terminal_input_ack, decode_terminal_input_ack_value, decode_terminal_inventory,
+    decode_terminal_poll, exact_agent_resume_request, map_terminal_error,
     owner_of_terminal_request, pr_snapshot_events, remove_session_payload, reply_geometry,
-    terminal_inventory_matches_scope, validate_unique_session_ids, work_run_control_client_error,
+    terminal_inventory_matches_scope, validate_unique_session_ids,
 };
 use usagi_tui::infrastructure::live_input::classify_terminal_input;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
@@ -108,10 +107,6 @@ use usagi_tui::usecase::application::session_catalog::{
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
     TerminalSubscription,
-};
-use usagi_tui::usecase::application::work_run_control::WorkRunPort;
-use usagi_tui::usecase::application::work_run_control::{
-    WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::application::{
@@ -271,41 +266,32 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
 /// project each read/write back as a controller [`BackendEvent`].
 struct RepoEnvironmentStore {
     store: WorkspaceStateStore,
-    /// Stable session identities paired with their store names, captured from
-    /// the snapshot the runtime opened with (the TUI never infers a name from an
-    /// id elsewhere).
-    session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
     environment: SettingsEnvironmentStore,
     role_data_home: PathBuf,
     role_workspace: PathBuf,
+    favorites: favorites::SessionFavoritesWorker,
 }
 
 impl RepoEnvironmentStore {
     fn new(
         workspace_path: &Path,
-        session_names: Vec<(usagi_core::domain::id::SessionId, String)>,
         environment: SettingsEnvironmentStore,
         role_data_home: PathBuf,
     ) -> Self {
         Self {
             store: WorkspaceStateStore::new(workspace_path),
-            session_names,
             environment,
             role_data_home,
             role_workspace: workspace_path.to_owned(),
+            favorites: favorites::SessionFavoritesWorker::new(workspace_path),
         }
     }
 
-    /// Resolve a controller target to the name-keyed store target, or `None`
-    /// when a session id is no longer in the snapshot (a stale target).
-    fn resolve(&self, target: Target) -> Option<StoreTarget<'_>> {
+    /// Map the controller's stable target directly to the canonical scratchpad.
+    fn resolve(target: Target) -> StoreTarget<'static> {
         match target {
-            Target::Root(_) => Some(StoreTarget::Root),
-            Target::Session(id) => self
-                .session_names
-                .iter()
-                .find(|(known, _)| *known == id)
-                .map(|(_, name)| StoreTarget::Session(name.as_str())),
+            Target::Root(_) => StoreTarget::Root,
+            Target::Session(id) => StoreTarget::Managed(id),
         }
     }
 
@@ -322,6 +308,19 @@ impl RepoEnvironmentStore {
             error_id: "target-store-error".to_owned(),
         }
     }
+}
+
+fn emit_session_favorites(
+    result: anyhow::Result<std::collections::BTreeSet<usagi_core::domain::id::SessionId>>,
+    completions: &Completions,
+) {
+    let event = match result {
+        Ok(favorites) => BackendEvent::SessionFavorites(favorites),
+        Err(_) => BackendEvent::Notice(Notice::new(
+            "Session favorites could not be loaded or saved.",
+        )),
+    };
+    completions.emit(AppEvent::Backend(event));
 }
 
 fn environment_entries(map: BTreeMap<String, String>) -> Vec<EnvironmentEntry> {
@@ -426,24 +425,34 @@ impl EnvironmentStorePort for SettingsEnvironmentStore {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=repo_environment_store_persistence_contract
 impl BackendTargetStorePort for RepoEnvironmentStore {
-    fn load_notes(&mut self, target: Target, completions: Completions) {
-        let event = match self.resolve(target) {
-            Some(scope) => match usagi_core::usecase::note::note(&self.store, scope) {
-                Ok(note) => BackendEvent::NotesLoaded {
-                    target,
-                    scratchpad: Scratchpad {
-                        note,
-                        ..Scratchpad::default()
-                    },
-                },
-                Err(error) => BackendEvent::NotesError {
-                    target,
-                    error: Self::safe_error(error),
-                },
-            },
-            None => BackendEvent::NotesError {
+    fn load_session_favorites(&mut self, completions: Completions) {
+        self.favorites.dispatch(None, completions);
+    }
+
+    fn toggle_session_favorite(
+        &mut self,
+        session: usagi_core::domain::id::SessionId,
+        completions: Completions,
+    ) {
+        self.favorites.dispatch(Some(session), completions);
+    }
+
+    fn load_notes(
+        &mut self,
+        target: Target,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    ) {
+        let event = match usagi_core::usecase::note::read(&self.store, Self::resolve(target)) {
+            Ok(scratchpad) => BackendEvent::NotesLoaded {
+                request_id,
                 target,
-                error: Self::stale_target(),
+                scratchpad,
+            },
+            Err(error) => BackendEvent::NotesError {
+                request_id,
+                target,
+                error: Self::safe_error(error),
             },
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
@@ -494,40 +503,50 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
         }
     }
 
-    fn save_notes(&mut self, target: Target, scratchpad: Scratchpad, completions: Completions) {
+    fn save_notes(
+        &mut self,
+        target: Target,
+        scratchpad: Scratchpad,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    ) {
         let event = (|| -> Result<BackendEvent, SafeError> {
-            let session_name = match target {
-                Target::Root(_) => None,
-                Target::Session(id) => Some(
-                    self.session_names
-                        .iter()
-                        .find(|(known, _)| *known == id)
-                        .map(|(_, name)| name.clone())
-                        .ok_or_else(Self::stale_target)?,
-                ),
-            };
-            let _lock = self.store.lock().map_err(Self::safe_error)?;
-            let mut state = self
+            let scope = Self::resolve(target);
+            if !usagi_core::usecase::note::set_note(
+                &self.store,
+                scope,
+                scratchpad.note.as_deref().unwrap_or(""),
+                Utc::now(),
+            )
+            .map_err(Self::safe_error)?
+            {
+                return Err(Self::stale_target());
+            }
+            let stored = self
                 .store
                 .load()
                 .map_err(Self::safe_error)?
-                .unwrap_or_default();
-            match session_name {
-                None => state.root_notes = scratchpad.clone(),
-                Some(name) => {
-                    let record = state
-                        .sessions
-                        .iter_mut()
-                        .find(|record| record.name == name)
-                        .ok_or_else(Self::stale_target)?;
-                    record.notes = scratchpad.clone();
-                }
-            }
-            state.updated_at = Utc::now();
-            self.store.save(&state).map_err(Self::safe_error)?;
-            Ok(BackendEvent::NotesLoaded { target, scratchpad })
+                .ok_or_else(Self::stale_target)?;
+            let scratchpad = match target {
+                Target::Root(_) => stored.root_notes,
+                Target::Session(id) => stored
+                    .session_notes
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(Self::stale_target)?,
+            };
+            Ok(BackendEvent::NotesSaved {
+                request_id,
+                target,
+                scratchpad,
+                updated_at: Some(stored.updated_at),
+            })
         })()
-        .unwrap_or_else(|error| BackendEvent::NotesError { target, error });
+        .unwrap_or_else(|error| BackendEvent::NotesError {
+            request_id,
+            target,
+            error,
+        });
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
     }
 
@@ -1183,18 +1202,17 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         snapshot: &WorkspaceSnapshot,
         host: ControllerHost,
     ) -> ControllerBackendComposition {
-        let (session_names, sessions) = project_backend_sessions(snapshot);
+        let (_session_names, sessions) = project_backend_sessions(snapshot);
         let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let store = RepoEnvironmentStore::new(
             &snapshot.workspace.path,
-            session_names,
             SettingsEnvironmentStore::new(environment_data_dir.clone(), &snapshot.workspace.path),
             environment_data_dir,
         );
         let pr_sessions = Arc::new(Mutex::new(snapshot.session_ids.clone()));
         let pr_pump = spawn_pr_pump(Arc::clone(&pr_sessions));
-        let backend = DaemonBackend::new(
+        let mut backend = DaemonBackend::new(
             Box::new(host.clone()),
             Box::new(host),
             Box::new(store),
@@ -1203,7 +1221,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
                 root: snapshot.workspace.path.clone(),
             }),
         )
-        .with_workflow(Box::new(workflow::DaemonWorkflowPort::default()))
         .with_daemon_control(Box::new(ProductionDaemonControl {
             workspace: snapshot.workspace_id,
             root: snapshot.workspace.path.clone(),
@@ -1230,6 +1247,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             },
             clipboard: PlatformClipboard,
         }));
+        backend.dispatch(usagi_tui::usecase::application::controller::Effect::LoadSessionFavorites);
         let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let (restore_connection, restore_publisher) =
@@ -1264,7 +1282,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             ),
             restore_connection: Box::new(restore_connection),
             garden_inventory: Box::new(DaemonGardenInventoryPort),
-            work_runs: Box::new(DaemonWorkRunPort),
             agent_tab_intents: Box::new(UserAgentTabIntentPort::new()),
             external_terminal: Box::new(PlatformExternalTerminalPort {
                 reaper: self.helper_reaper.clone(),
@@ -2073,8 +2090,13 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::attention::WorkspaceAttention, String> {
-        let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::tui(),
+        let mut client = crate::runtime::daemon::existing_policy_client(
+            usagi_core::infrastructure::client::ClientPolicy {
+                timeout_ms: 250,
+                reconnect_attempts: 0,
+                ..usagi_core::infrastructure::client::ClientPolicy::tui()
+            },
+            usagi_core::infrastructure::ipc::ClientWorkspace::Unbound,
         )
         .map_err(|_| "Workspace attention is unavailable".to_owned())?;
         let reply = client
@@ -2090,8 +2112,13 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
         &mut self,
         workspace: WorkspaceId,
     ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
-        let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::tui(),
+        let mut client = crate::runtime::daemon::existing_policy_client(
+            usagi_core::infrastructure::client::ClientPolicy {
+                timeout_ms: 250,
+                reconnect_attempts: 0,
+                ..usagi_core::infrastructure::client::ClientPolicy::tui()
+            },
+            usagi_core::infrastructure::ipc::ClientWorkspace::Unbound,
         )
         .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
         match client
@@ -2120,54 +2147,7 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
     }
 }
 
-mod workflow;
-
-struct DaemonWorkRunPort;
-
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=agent_ipc_e2e
-impl WorkRunPort for DaemonWorkRunPort {
-    fn snapshot(
-        &mut self,
-        workspace: WorkspaceId,
-    ) -> Result<usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot, String> {
-        let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::tui(),
-        )
-        .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
-        decode_work_run_snapshot_reply(
-            client
-                .request(
-                    usagi_core::infrastructure::ipc::DaemonRequest::SupervisorSnapshot {
-                        workspace,
-                    },
-                )
-                .map_err(|_| "Work Run progress is unavailable".to_owned())?,
-        )
-    }
-
-    fn control(
-        &mut self,
-        workspace: WorkspaceId,
-        operation_id: usagi_core::domain::id::OperationId,
-        command: usagi_core::domain::supervisor::SupervisorWorkspaceCommand,
-    ) -> Result<WorkRunControlResult, WorkRunControlError> {
-        let mut client = crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::tui(),
-        )
-        .map_err(|_| WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned()))?;
-        decode_work_run_control_reply(
-            client
-                .request(
-                    usagi_core::infrastructure::ipc::DaemonRequest::SupervisorControl {
-                        workspace,
-                        operation_id,
-                        command,
-                    },
-                )
-                .map_err(work_run_control_client_error)?,
-        )
-    }
-}
+mod favorites;
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=daemon_terminal_decode_and_reconnect_contract
 impl AgentCommandPort for DaemonAgentCommandPort {
@@ -2211,45 +2191,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         result
     }
 
-    fn launch_goal(
-        &mut self,
-        operation: usagi_core::domain::id::OperationId,
-        workspace: WorkspaceId,
-        profile: Option<usagi_core::domain::agent::AgentProfileId>,
-        goal: &str,
-    ) -> Result<AgentPaneAdmission, String> {
-        let mut client = match crate::runtime::daemon::policy_client(
-            usagi_core::infrastructure::client::ClientPolicy::pane_launch(),
-        ) {
-            Ok(client) => client,
-            Err(error) => {
-                ErrorLog::record(&tui_error_entry(
-                    "Agent goal launch connect",
-                    &error.to_string(),
-                ));
-                return Err("daemon unavailable; reconnect to continue".to_owned());
-            }
-        };
-        let intent = AgentGoalIntent {
-            workspace,
-            profile,
-            goal: goal.to_owned(),
-        };
-        let reply = match client.request(agent_goal_request(operation, intent.clone())) {
-            Ok(reply) => reply,
-            Err(error) => {
-                let reason = daemon_error_reason(error);
-                ErrorLog::record(&tui_error_entry("Agent goal launch request", &reason));
-                return Err(reason);
-            }
-        };
-        let result = correlate_agent_goal(reply, operation, &intent);
-        if let Err(reason) = &result {
-            ErrorLog::record(&tui_error_entry("Agent goal launch response", reason));
-        }
-        result
-    }
-
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=structured_codex_identity_enables_one_explicit_new_runtime_resume
     fn resume(
         &mut self,
@@ -2274,7 +2215,6 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         Ok(AgentPaneAdmission {
             terminal: resumed.terminal,
             continuation: resumed.continuation,
-            supervisor_run_id: None,
         })
     }
 
@@ -3204,13 +3144,18 @@ impl LifecycleSnapshot {
             .collect()
     }
 
-    fn project(&self, workspace: &Workspace, legacy: &[SessionRecord]) -> Vec<SessionRecord> {
+    fn project(
+        &self,
+        workspace: &Workspace,
+        legacy: &usagi_core::domain::workspace_state::WorkspaceState,
+    ) -> Vec<SessionRecord> {
         self.listed_sessions()
             .map(|session| {
                 // Lifecycle is daemon-authoritative, but `state.json` remains
                 // the durable home of UI-only annotations.  Retain a matching
                 // record wholesale and only replace its physical identity.
                 let mut record = legacy
+                    .sessions
                     .iter()
                     .find(|record| record.name == session.name)
                     .cloned()
@@ -3229,6 +3174,9 @@ impl LifecycleSnapshot {
                         notes: Scratchpad::default(),
                         prs: Vec::new(),
                     });
+                if let Some(notes) = legacy.session_notes.get(&session.session_id) {
+                    record.notes.clone_from(notes);
+                }
                 record.root = workspace
                     .path
                     .join(".usagi")
@@ -3817,18 +3765,19 @@ fn session_snapshot_result(
         .listed_sessions()
         .map(|session| session.session_id)
         .collect();
-    let legacy = match load_workspace_state(&workspace.path) {
+    let legacy = match load_workspace_notes(&workspace.path, snapshot) {
         Ok(state) => state,
         Err(error) => return Err(error.to_string()),
     };
     Ok(SessionCommandResult {
         message: message.into(),
-        sessions: Some(snapshot.project(workspace, &legacy.sessions)),
+        sessions: Some(snapshot.project(workspace, &legacy)),
         session_ids: Some(session_ids),
         agent_resumes: Some(snapshot.agent_resumes.clone()),
         session_lifecycles: Some(snapshot.session_lifecycles()),
         session_roles: Some(snapshot.session_roles.clone()),
         revision: Some(snapshot.revision),
+        notes_updated_at: Some(legacy.updated_at),
     })
 }
 
@@ -3839,6 +3788,36 @@ fn load_workspace_state(
         .load()
         .map_err(io_error)
         .map(Option::unwrap_or_default)
+}
+
+/// Read annotations once per snapshot and import old notes only for a newly
+/// observed, available session incarnation. The background snapshot pump owns IO.
+fn load_workspace_notes(
+    root: &Path,
+    lifecycle: &LifecycleSnapshot,
+) -> std::io::Result<usagi_core::domain::workspace_state::WorkspaceState> {
+    let mut state = load_workspace_state(root)?;
+    for session in lifecycle.listed_sessions().filter(|session| {
+        session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+    }) {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            state.session_notes.entry(session.session_id)
+        {
+            let worktree = root.join(".usagi").join("sessions").join(&session.name);
+            // A damaged legacy store belongs to this session. Keep its entry
+            // uninitialized so saving cannot replace unreadable data, while
+            // other sessions and the workspace remain usable.
+            if let Ok(notes) = usagi_core::infrastructure::session_notes::load(
+                root,
+                session.session_id,
+                &session.name,
+                &worktree,
+            ) {
+                entry.insert(notes);
+            }
+        }
+    }
+    Ok(state)
 }
 
 struct FsWorkspaceLoader {
@@ -3872,7 +3851,7 @@ impl FsWorkspaceLoader {
         workspace: Workspace,
         lifecycle: LifecycleSnapshot,
     ) -> std::io::Result<WorkspaceSnapshot> {
-        let mut state = load_workspace_state(&workspace.path)?;
+        let mut state = load_workspace_notes(&workspace.path, &lifecycle)?;
         let workspace_id = lifecycle.workspace_id;
         // Identities align with the listed rows (`project` lists the same set),
         // so a `Failed` row shows on the first frame with a removable action.
@@ -3881,7 +3860,7 @@ impl FsWorkspaceLoader {
             .map(|session| session.session_id)
             .collect();
         let session_lifecycles = lifecycle.session_lifecycles();
-        state.sessions = lifecycle.project(&workspace, &state.sessions);
+        state.sessions = lifecycle.project(&workspace, &state);
         Ok(WorkspaceSnapshot::with_runtime_projection(
             workspace,
             state,
@@ -3960,6 +3939,28 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
         }
         result
+    }
+
+    fn last_projects(
+        &mut self,
+    ) -> std::io::Result<Option<usagi_core::domain::recent::LastProjectSet>> {
+        let mut projects = self.storage.load_last_projects().map_err(io_error)?;
+        let registered = self.storage.load_workspaces().map_err(io_error)?;
+        if let Some(last) = projects.as_mut() {
+            last.retain_paths(|path| registered.iter().any(|workspace| workspace.path == path));
+        }
+        Ok(projects)
+    }
+
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> std::io::Result<()> {
+        self.storage.save_last_projects(projects).map_err(io_error)
+    }
+
+    fn recent_projects(&mut self) -> std::io::Result<Vec<Recent>> {
+        workspace_usecase::recent(&self.storage).map_err(io_error)
     }
 
     fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
@@ -4641,23 +4642,21 @@ mod tests {
     const CLOCK_GRANULARITY_MS: u64 = 2;
 
     use super::{
-        AGENT_LAUNCH_UNCORRELATED, AgentGoalIntent, AgentLaunchIntent, AppEvent, AppKey,
-        BackendDaemonControlPort, BackendTargetStorePort, Completions, DaemonAction,
-        DaemonAgentCommandPort, DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply,
-        DaemonRequest, DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort,
-        FsSessionWorktreeScanPort, FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET,
-        LaneConnection, LifecycleRequestError, LifecycleSnapshot, PersistentSettingsPort,
-        ProductionBackendFactory, ProductionDaemonControl, ProductionSessionCatalogPort,
-        RepoEnvironmentStore, RoleEditorScope, SessionBranchCatalog, SessionRoleCatalog,
-        SettingsEnvironmentStore, Start, StoreTarget, TerminalAttachScreen, TerminalChunk,
-        TerminalError, TerminalInputOutcome, TerminalSnapshotMode, TerminalSubscription,
-        VersionProbeResult, WORK_RUN_ACTION_UNCONFIRMED, WorkRunControlError, WorkRunControlResult,
-        agent_goal_request, agent_inventory_request, agent_launch_request, child_directory_names,
-        classify_terminal_input, classify_workspace_directory, correlate_agent_goal,
-        correlate_agent_launch, created_session_hook, daemon_control_error, daemon_control_result,
-        daemon_error_reason, decision_cadence, decode_agent_admission, decode_attach_screen,
-        decode_exact_agent_resume, decode_terminal_input_ack, decode_terminal_inventory,
-        decode_terminal_poll, decode_work_run_control_reply, decode_work_run_snapshot_reply,
+        AGENT_LAUNCH_UNCORRELATED, AgentLaunchIntent, AppEvent, AppKey, BackendDaemonControlPort,
+        BackendTargetStorePort, Completions, DaemonAction, DaemonAgentCommandPort,
+        DaemonCommandOutput, DaemonDecisionCommandPort, DaemonReply, DaemonRequest,
+        DaemonRestoreConnectionPort, EnvScope, EnvironmentStorePort, FsSessionWorktreeScanPort,
+        FsWorkspaceLoader, Geometry, LANE_COLD_START_BUDGET, LaneConnection, LifecycleRequestError,
+        LifecycleSnapshot, PersistentSettingsPort, ProductionBackendFactory,
+        ProductionDaemonControl, ProductionSessionCatalogPort, RepoEnvironmentStore,
+        RoleEditorScope, SessionBranchCatalog, SessionRoleCatalog, SettingsEnvironmentStore, Start,
+        StoreTarget, TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
+        TerminalSnapshotMode, TerminalSubscription, VersionProbeResult, agent_inventory_request,
+        agent_launch_request, child_directory_names, classify_terminal_input,
+        classify_workspace_directory, correlate_agent_launch, created_session_hook,
+        daemon_control_error, daemon_control_result, daemon_error_reason, decision_cadence,
+        decode_agent_admission, decode_attach_screen, decode_exact_agent_resume,
+        decode_terminal_input_ack, decode_terminal_inventory, decode_terminal_poll,
         exact_agent_resume_request, global_icon_mode, lifecycle_snapshot, load_screen_graph_data,
         load_workspace_state, lock_pr_sessions, map_terminal_error, metrics_cadence,
         passthrough_key, pr_cadence, pr_snapshot_events, probe_path,
@@ -4665,7 +4664,7 @@ mod tests {
         reply_geometry, resolve_workspace_path, session_cadence, session_snapshot_result,
         terminal_copy_key, terminal_inventory_matches_scope, tui_error_entry,
         validate_workspace_directory, version_detail, version_result_from_observation,
-        work_run_control_client_error, workspace_directory_missing, workspace_open_error,
+        workspace_directory_missing, workspace_open_error,
     };
     use crate::runtime::refresh_pump::{MAX_INTERVAL, MIN_INTERVAL};
     use crate::runtime::terminal_pump::TerminalPollPump;
@@ -4810,98 +4809,6 @@ mod tests {
             }) if completed_workspace == stale_workspace
                 && error.error_id == "daemon-target-stale"
         ));
-    }
-
-    #[test]
-    fn work_run_control_accepts_only_a_final_typed_reply() {
-        let run = usagi_core::domain::supervisor::SupervisorRunQuery {
-            supervisor_run_id: usagi_core::domain::supervisor::SupervisorRunId::new(),
-            state_revision: 2,
-            state: usagi_core::domain::supervisor::SupervisorRunState::Cancelled,
-            terminal_at: None,
-            terminal_reason: Some("cancelled by local operator".to_owned()),
-            display_label: Some("Controlled Goal".to_owned()),
-            root_agent_id: None,
-            policy: usagi_core::domain::supervisor::ExecutionPolicy::default(),
-            escalation: None,
-            tasks: Vec::new(),
-            provenance: Vec::new(),
-        };
-        let body = serde_json::to_value(&run).unwrap();
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Ok(body.clone())),
-            Ok(WorkRunControlResult::Updated(Box::new(run.clone())))
-        );
-        let deletion = usagi_core::domain::supervisor::SupervisorRunDeletion {
-            supervisor_run_id: run.supervisor_run_id,
-            state_revision: run.state_revision,
-        };
-        assert_eq!(
-            decode_work_run_control_reply(
-                DaemonReply::Ok(serde_json::to_value(deletion).unwrap(),)
-            ),
-            Ok(WorkRunControlResult::Deleted(deletion))
-        );
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Accepted {
-                operation_id: "durable-operation".to_owned(),
-                revision: 1,
-                body,
-            }),
-            Err(WorkRunControlError::Unconfirmed(
-                WORK_RUN_ACTION_UNCONFIRMED.to_owned()
-            ))
-        );
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Ok(serde_json::Value::Null)),
-            Err(WorkRunControlError::Unconfirmed(
-                "daemon returned an invalid Work Run deletion".to_owned()
-            ))
-        );
-        assert_eq!(
-            decode_work_run_control_reply(DaemonReply::Ok(
-                serde_json::json!({"state": "not-a-supervisor-state"})
-            )),
-            Err(WorkRunControlError::Unconfirmed(
-                "daemon returned an invalid Work Run result".to_owned()
-            ))
-        );
-
-        let rejection = usagi_core::infrastructure::ipc::ProtocolError::new(
-            usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument,
-            "the Work Run action is no longer valid",
-        );
-        assert_eq!(
-            work_run_control_client_error(ClientError::Protocol(rejection)),
-            WorkRunControlError::Rejected("the Work Run action is no longer valid".to_owned())
-        );
-        assert_eq!(
-            work_run_control_client_error(ClientError::Unavailable("lost acknowledgement".into())),
-            WorkRunControlError::Unconfirmed(WORK_RUN_ACTION_UNCONFIRMED.to_owned())
-        );
-
-        let snapshot = usagi_core::domain::supervisor::SupervisorWorkspaceSnapshot {
-            workspace_id: WorkspaceId::new(),
-            runs: vec![run],
-        };
-        assert_eq!(
-            decode_work_run_snapshot_reply(DaemonReply::Ok(
-                serde_json::to_value(&snapshot).unwrap()
-            )),
-            Ok(snapshot)
-        );
-        assert_eq!(
-            decode_work_run_snapshot_reply(DaemonReply::Accepted {
-                operation_id: "read-only-request".to_owned(),
-                revision: 1,
-                body: serde_json::Value::Null,
-            }),
-            Err("Work Run progress is unavailable".to_owned())
-        );
-        assert_eq!(
-            decode_work_run_snapshot_reply(DaemonReply::Ok(serde_json::Value::Null)),
-            Err("daemon returned invalid Work Run progress".to_owned())
-        );
     }
 
     #[test]
@@ -6863,24 +6770,6 @@ mod tests {
             .unwrap_err(),
             "agent launch returned an invalid continuation"
         );
-        let supervisor_run_id = usagi_core::domain::supervisor::SupervisorRunId::new();
-        let admission = decode_agent_admission(
-            &json!({
-                "terminal": terminal,
-                "supervisor_run_id": supervisor_run_id,
-            }),
-            "goal launch",
-        )
-        .unwrap();
-        assert_eq!(admission.supervisor_run_id, Some(supervisor_run_id));
-        assert_eq!(
-            decode_agent_admission(
-                &json!({"terminal": terminal, "supervisor_run_id": "invalid"}),
-                "goal launch",
-            )
-            .unwrap_err(),
-            "goal launch returned an invalid Work Run identity"
-        );
     }
 
     /// The pending pane's own operation is what reaches the daemon: the adapter
@@ -6902,55 +6791,6 @@ mod tests {
         };
         assert_eq!(operation_id, operation.to_string());
         assert_eq!(sent, intent);
-    }
-
-    #[test]
-    fn agent_goal_request_and_reply_preserve_identity_digest_and_root_scope() {
-        let operation = OperationId::new();
-        let workspace = WorkspaceId::new();
-        let intent = AgentGoalIntent {
-            workspace,
-            profile: None,
-            goal: "prepare a PR".to_owned(),
-        };
-        let DaemonRequest::AgentGoal {
-            operation_id,
-            intent: sent,
-        } = agent_goal_request(operation, intent.clone())
-        else {
-            panic!("a Work Run is an AgentGoal request")
-        };
-        assert_eq!(operation_id, operation.to_string());
-        assert_eq!(sent, intent);
-
-        let terminal = TerminalRef {
-            daemon_generation: DaemonGeneration::new(),
-            terminal_id: TerminalId::new(),
-            workspace_id: workspace,
-            session_id: None,
-            worktree_id: WorktreeId::new(),
-        };
-        let digest = usagi_core::infrastructure::ipc::agent_operation_digest(
-            &usagi_core::infrastructure::ipc::agent_goal_semantic_key(&intent),
-        );
-        let admission = correlate_agent_goal(
-            DaemonReply::Accepted {
-                operation_id: operation.to_string(),
-                revision: 1,
-                body: json!({
-                    "operation_id": operation.to_string(),
-                    "semantic_digest": digest,
-                    "terminal": terminal,
-                    "continuation": null,
-                    "resume_relation": null,
-                    "completed": false,
-                }),
-            },
-            operation,
-            &intent,
-        )
-        .unwrap();
-        assert_eq!(admission.terminal, terminal);
     }
 
     fn launch_correlation_fixture() -> (OperationId, AgentLaunchIntent, TerminalRef, String, String)
@@ -7216,7 +7056,10 @@ mod tests {
         // removal in progress keeps its row until the teardown finishes.
         assert_eq!(
             snapshot
-                .project(&workspace, &[])
+                .project(
+                    &workspace,
+                    &usagi_core::domain::workspace_state::WorkspaceState::default()
+                )
                 .iter()
                 .map(|record| record.name.clone())
                 .collect::<Vec<_>>(),
@@ -7505,7 +7348,13 @@ mod tests {
             prs: Vec::new(),
         };
 
-        let projected = snapshot.project(&workspace, &[legacy]);
+        let projected = snapshot.project(
+            &workspace,
+            &usagi_core::domain::workspace_state::WorkspaceState {
+                sessions: vec![legacy],
+                ..Default::default()
+            },
+        );
         assert_eq!(projected[0].display_name.as_deref(), Some("Keep me"));
         assert_eq!(projected[0].origin, SessionOrigin::Mcp);
         assert_eq!(projected[0].notes.note.as_deref(), Some("do not drop"));
@@ -8213,6 +8062,32 @@ mod tests {
     }
 
     #[test]
+    fn saved_project_loader_prunes_unregistered_members_without_rewriting_the_deck() {
+        use std::path::PathBuf;
+        use usagi_core::domain::recent::LastProjectSet;
+        let temporary = tempfile::tempdir().unwrap();
+        let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path()));
+        assert!(loader.last_projects().unwrap().is_none());
+        let saved = LastProjectSet {
+            paths: vec!["/alpha".into(), "/beta".into()],
+            active: "/beta".into(),
+        };
+        loader.record_last_projects(&saved).unwrap();
+        loader
+            .storage
+            .save_workspaces(&[Workspace::new("alpha", "/alpha")])
+            .unwrap();
+        let retained = loader.last_projects().unwrap().unwrap();
+        assert_eq!(retained.paths, vec![PathBuf::from("/alpha")]);
+        assert_eq!(retained.active, PathBuf::from("/alpha"));
+        assert_eq!(loader.storage.load_last_projects().unwrap(), Some(saved));
+        loader.storage.save_workspaces(&[]).unwrap();
+        assert!(loader.last_projects().unwrap().unwrap().paths.is_empty());
+        std::fs::write(temporary.path().join("last-projects.json"), "broken").unwrap();
+        assert!(loader.last_projects().is_err());
+    }
+
+    #[test]
     fn directory_adapters_list_only_sorted_child_directories() {
         let temporary = tempfile::tempdir().unwrap();
         std::fs::create_dir(temporary.path().join("zeta")).unwrap();
@@ -8378,27 +8253,192 @@ mod tests {
     }
 
     #[test]
+    fn workspace_notes_keep_sessions_usable_when_one_legacy_store_is_corrupt() {
+        use super::load_workspace_notes;
+        use usagi_core::infrastructure::store::state::WorkspaceStateStore;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("repo", directory.path());
+        let broken = ManagedSession::adopt_available("broken".into(), Utc::now());
+        let healthy = ManagedSession::adopt_available("healthy".into(), Utc::now());
+        let canonical = ManagedSession::adopt_available("canonical".into(), Utc::now());
+        let broken_id = broken.session_id;
+        let healthy_id = healthy.session_id;
+        let canonical_id = canonical.session_id;
+        let healthy_notes = Scratchpad {
+            note: Some("legacy memo".into()),
+            ..Default::default()
+        };
+        let canonical_notes = Scratchpad {
+            note: Some("saved memo".into()),
+            ..Default::default()
+        };
+        WorkspaceStateStore::new(directory.path())
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                session_notes: BTreeMap::from([(canonical_id, canonical_notes.clone())]),
+                ..Default::default()
+            })
+            .unwrap();
+        let broken_store =
+            WorkspaceStateStore::new(directory.path().join(".usagi/sessions/broken"));
+        std::fs::create_dir_all(broken_store.dir()).unwrap();
+        std::fs::write(broken_store.state_path(), "malformed").unwrap();
+        WorkspaceStateStore::new(directory.path().join(".usagi/sessions/healthy"))
+            .save(&usagi_core::domain::workspace_state::WorkspaceState {
+                root_notes: healthy_notes.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let lifecycle = LifecycleSnapshot {
+            workspace_id: WorkspaceId::new(),
+            root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            revision: 1,
+            sessions: vec![broken, healthy, canonical],
+            agent_resumes: BTreeMap::new(),
+            session_roles: BTreeMap::new(),
+        };
+
+        let notes = load_workspace_notes(directory.path(), &lifecycle).unwrap();
+        assert!(!notes.session_notes.contains_key(&broken_id));
+        assert_eq!(notes.session_notes[&healthy_id], healthy_notes);
+        assert_eq!(notes.session_notes[&canonical_id], canonical_notes);
+        // The resident refresh and initial open both keep all lifecycle rows.
+        let refreshed = session_snapshot_result("refresh", &lifecycle, &workspace).unwrap();
+        assert_eq!(
+            refreshed.session_ids.unwrap(),
+            [broken_id, healthy_id, canonical_id]
+        );
+        assert_eq!(refreshed.sessions.unwrap()[1].notes, healthy_notes);
+        let opened = FsWorkspaceLoader::runtime_snapshot(workspace, lifecycle).unwrap();
+        assert_eq!(opened.state.sessions.len(), 3);
+        assert_eq!(opened.state.sessions[2].notes, canonical_notes);
+        assert!(
+            !usagi_core::usecase::note::set_note(
+                &WorkspaceStateStore::new(directory.path()),
+                StoreTarget::Managed(broken_id),
+                "replacement",
+                Utc::now(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(broken_store.state_path()).unwrap(),
+            "malformed"
+        );
+    }
+
+    #[test]
+    fn session_favorites_adapter_loads_toggles_and_reports_storage_errors() {
+        let workspace = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
+            data.path().to_path_buf(),
+        );
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        assert_eq!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::new()
+            ))
+        );
+        // Sessions created after the initial snapshot also have valid identities.
+        let session = usagi_core::domain::id::SessionId::new();
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::toggle_session_favorite(&mut store, session, completions);
+        let expected = AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([session]),
+        ));
+        assert_eq!(receiver.recv().unwrap(), expected);
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        assert_eq!(receiver.recv().unwrap(), expected);
+        let path = usagi_core::infrastructure::paths::project_data_dir(workspace.path())
+            .join("session-favorites.json");
+        std::fs::write(path, "broken").unwrap();
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::toggle_session_favorite(&mut store, session, completions);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+        let (completions, receiver) = Completions::channel();
+        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::Notice(_))
+        ));
+    }
+
+    #[test]
+    fn session_favorite_dispatch_does_not_wait_for_the_store_lock() {
+        let workspace = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
+            data.path().to_path_buf(),
+        );
+        let lock = usagi_core::infrastructure::persistence::store_lock::StoreLock::acquire(
+            &usagi_core::infrastructure::paths::project_data_dir(workspace.path()),
+        )
+        .unwrap();
+        let session = SessionId::new();
+        let (completions, events) = Completions::channel();
+        let (admitted, dispatched) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            BackendTargetStorePort::toggle_session_favorite(&mut store, session, completions);
+            admitted.send(()).unwrap();
+            store
+        });
+        let admission = dispatched.recv_timeout(Duration::from_secs(1));
+        let pending = events.try_recv();
+        drop(lock);
+        let store = caller.join().unwrap();
+        assert!(pending.is_err(), "held storage cannot complete the save");
+        assert!(
+            admission.is_ok(),
+            "frame dispatch waited for the storage lock"
+        );
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::from([session]),
+            )),
+        );
+        drop(store);
+    }
+
+    #[test]
     fn repo_store_resolves_targets_and_reports_a_stale_session() {
         let workspace = tempfile::tempdir().unwrap();
         let alpha = SessionId::new();
         let store = RepoEnvironmentStore::new(
             workspace.path(),
-            vec![(alpha, "alpha".to_owned())],
             SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
             workspace.path().to_path_buf(),
         );
 
-        // The root always resolves; a known session resolves to its store name.
         assert!(matches!(
-            store.resolve(Target::Root(WorkspaceId::new())),
-            Some(StoreTarget::Root)
+            RepoEnvironmentStore::resolve(Target::Root(WorkspaceId::new())),
+            StoreTarget::Root
         ));
-        assert!(matches!(
-            store.resolve(Target::Session(alpha)),
-            Some(StoreTarget::Session("alpha"))
-        ));
-        // A session absent from the snapshot mapping is stale, not guessed.
-        assert!(store.resolve(Target::Session(SessionId::new())).is_none());
+        assert!(
+            matches!(RepoEnvironmentStore::resolve(Target::Session(alpha)), StoreTarget::Managed(id) if id == alpha)
+        );
+        // A missing canonical entry refuses writes rather than creating notes
+        // under a stale or name-reused session.
+        assert!(
+            !usagi_core::usecase::note::set_note(
+                &store.store,
+                StoreTarget::Managed(alpha),
+                "stale",
+                Utc::now()
+            )
+            .unwrap()
+        );
 
         let stale = RepoEnvironmentStore::stale_target();
         assert_eq!(stale.error_id, "target-store-error");
@@ -8412,12 +8452,79 @@ mod tests {
     }
 
     #[test]
+    fn repo_notes_save_preserves_concurrent_lists_and_returns_fenced_persisted_data() {
+        let workspace = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let mut store = RepoEnvironmentStore::new(
+            workspace.path(),
+            SettingsEnvironmentStore::new(workspace.path().to_path_buf(), workspace.path()),
+            workspace.path().to_path_buf(),
+        );
+        usagi_core::usecase::note::initialize_session(
+            &store.store,
+            id,
+            "memo",
+            &Scratchpad::default(),
+        )
+        .unwrap();
+        let scope = StoreTarget::Managed(id);
+        usagi_core::usecase::note::add_todo(&store.store, scope, "MCP-added todo", Utc::now())
+            .unwrap();
+        let request_id = RequestId::new();
+        let (save, receiver) = Completions::channel();
+        BackendTargetStorePort::save_notes(
+            &mut store,
+            Target::Session(id),
+            Scratchpad {
+                note: Some("日本語\n次の行".into()),
+                ..Default::default()
+            },
+            request_id,
+            save,
+        );
+        let AppEvent::Backend(BackendEvent::NotesSaved {
+            target,
+            request_id: response_id,
+            scratchpad,
+            updated_at,
+        }) = receiver.recv().unwrap()
+        else {
+            panic!("expected saved notes")
+        };
+        assert_eq!(target, Target::Session(id));
+        assert_eq!(response_id, request_id);
+        assert!(updated_at.is_some());
+        assert_eq!(scratchpad.note.as_deref(), Some("日本語\n次の行"));
+        assert_eq!(scratchpad.todos[0].text, "MCP-added todo");
+        let (load, receiver) = Completions::channel();
+        BackendTargetStorePort::load_notes(&mut store, target, request_id, load);
+        assert_eq!(
+            receiver.recv().unwrap(),
+            AppEvent::Backend(BackendEvent::NotesLoaded {
+                target,
+                request_id,
+                scratchpad
+            })
+        );
+        let (save, receiver) = Completions::channel();
+        BackendTargetStorePort::save_notes(
+            &mut store,
+            Target::Session(SessionId::new()),
+            Scratchpad::default(),
+            request_id,
+            save,
+        );
+        assert!(
+            matches!(receiver.recv().unwrap(), AppEvent::Backend(BackendEvent::NotesError { request_id: response_id, .. }) if response_id == request_id)
+        );
+    }
+
+    #[test]
     fn production_role_store_reads_and_atomically_validates_workspace_catalog() {
         let workspace = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let mut store = RepoEnvironmentStore::new(
             workspace.path(),
-            Vec::new(),
             SettingsEnvironmentStore::new(data.path().to_path_buf(), workspace.path()),
             data.path().to_path_buf(),
         );
@@ -8961,7 +9068,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
-            work_mode: usagi_core::domain::settings::WorkMode::GoalDriven,
             env: usagi_core::domain::settings::EnvBindings::new(),
         };
         let storage = Storage::new(&global_dir);
@@ -9091,7 +9197,32 @@ mod tests {
         );
         let (host, actions) = ControllerHost::channel();
         let mut factory = ProductionBackendFactory::default();
+        std::fs::write(temporary.path().join(".git/info/exclude"), ".usagi/\n").unwrap();
+        usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore::new(
+            temporary.path(),
+        )
+        .toggle(session_ids[0])
+        .unwrap();
         let mut composition = factory.create(&snapshot, host);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let favorites = loop {
+            let events = composition.backend.drain_events();
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "favorites completion did not arrive"
+            );
+            std::thread::yield_now();
+        };
+        assert_eq!(
+            favorites,
+            vec![AppEvent::Backend(BackendEvent::SessionFavorites(
+                std::collections::BTreeSet::from([session_ids[0]])
+            ))],
+            "opening a workspace restores saved favorites through the background lane",
+        );
         // The Daemon modal compares the daemon's build with this client's own.
         assert_eq!(
             factory.client_build(),
@@ -9111,6 +9242,7 @@ mod tests {
         ));
 
         composition.backend.dispatch(Effect::LoadNotes {
+            request_id: usagi_core::domain::id::RequestId::new(),
             target: Target::Root(workspace_id),
         });
         composition.backend.dispatch(Effect::LoadEnvironment {
@@ -9289,6 +9421,7 @@ mod tests {
             cwd: std::path::PathBuf::from("/tmp/demo"),
             last_modified: Utc::now(),
             has_notes: true,
+            memo: None,
             pr_count: 0,
             removing: false,
             agent_resume: None,
@@ -9298,6 +9431,7 @@ mod tests {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         };
         let frame = runtime.render(
             24,
@@ -9308,6 +9442,6 @@ mod tests {
             &std::collections::BTreeMap::new(),
             None,
         );
-        assert!(frame.join("\n").contains('✎'));
+        assert!(frame.join("\n").contains('\u{f249}'));
     }
 }

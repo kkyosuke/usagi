@@ -52,7 +52,7 @@ restart / crash をまたいで **既に durable な**ものは次のとおり�
 | Agent conversation lineage（`AgentContinuationRef`）と provider-native resume 情報 | [agent ownership](../05-daemon.md#agent-ownership) |
 | Agent tab の表示順・target ごとの選択（`agent-tabs.json`） | [pane 復元](../03-tui.md#workspace-open-時の-pane-復元) |
 | exited terminal の final tombstone・replay window・workspace-global visibility | [final retention と aggregate GC](../05-daemon.md#final-retention-と-aggregate-gc) |
-| PR inventory、dispatch registry、supervisor run、operation ledger | [daemon data directory](../05-daemon.md#daemon-data-directory) |
+| PR inventory、dispatch registry、operation ledger | [daemon data directory](../05-daemon.md#daemon-data-directory) |
 
 失われるのは次の 3 つである。本書の機構はこの 3 つに 1 対 1 で対応する。
 

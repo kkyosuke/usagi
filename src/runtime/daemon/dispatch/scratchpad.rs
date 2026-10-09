@@ -1,8 +1,8 @@
 //! The session scratchpad actions: note, todo and decision log.
 //!
 //! These live beside the dispatch table rather than inside it because they share
-//! one shape — read or write one machine-local store in the caller's own session
-//! worktree — and because the table itself has a line budget the rest of the
+//! one shape — read or write the caller's session-ID scratchpad in a workspace
+//! store — and because the table itself has a line budget the rest of the
 //! daemon has to fit inside (`tests/architecture.rs`).
 
 use usagi_core::infrastructure::ipc::SessionAction;
@@ -13,8 +13,7 @@ use usagi_daemon::usecase::session_runtime::SessionRuntimeError;
 /// Apply one scratchpad action to the store in `path` and answer with the part
 /// of the scratchpad it concerns.
 ///
-/// The caller has already resolved `path` from its own credential, so this
-/// function never chooses a session.
+/// The caller has already resolved `path` and `target` from its credential.
 ///
 /// # Errors
 /// Returns `InvalidRequest` for an action this module does not own and for a
@@ -23,9 +22,9 @@ pub(super) fn read_or_write(
     action: SessionAction,
     payload: &serde_json::Value,
     path: &std::path::Path,
+    target: note::Target<'_>,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
     let store = WorkspaceStateStore::new(path);
-    let target = note::Target::Root;
     let string = |key: &str| {
         payload
             .get(key)
@@ -118,8 +117,70 @@ pub(super) fn read_or_write(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionAction, SessionRuntimeError, read_or_write as call};
+    use super::{SessionAction, SessionRuntimeError};
+
+    fn call(
+        action: SessionAction,
+        payload: &serde_json::Value,
+        path: &std::path::Path,
+    ) -> Result<serde_json::Value, SessionRuntimeError> {
+        super::read_or_write(
+            action,
+            payload,
+            path,
+            usagi_core::usecase::note::Target::Root,
+        )
+    }
     use serde_json::json;
+
+    #[test]
+    fn mcp_and_tui_share_one_session_id_scratchpad_and_keep_other_sessions_separate() {
+        use usagi_core::domain::id::SessionId;
+        use usagi_core::infrastructure::store::state::WorkspaceStateStore;
+        use usagi_core::usecase::note;
+        let workspace = tempfile::tempdir().unwrap();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let store = WorkspaceStateStore::new(workspace.path());
+        for id in [first, second] {
+            note::initialize_session(
+                &store,
+                id,
+                "child",
+                &usagi_core::domain::note::Scratchpad::default(),
+            )
+            .unwrap();
+        }
+        let own = note::Target::Managed(first);
+        note::set_note(
+            &store,
+            own,
+            "saved in Switch\nnext step",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_or_write(SessionAction::NoteGet, &json!({}), workspace.path(), own)
+                .unwrap()["note"],
+            "saved in Switch\nnext step"
+        );
+        super::read_or_write(
+            SessionAction::NoteUpdate,
+            &json!({"note":"saved by Agent", "session_id":second}),
+            workspace.path(),
+            own,
+        )
+        .unwrap();
+        assert_eq!(
+            note::read(&store, own).unwrap().note.as_deref(),
+            Some("saved by Agent")
+        );
+        assert!(
+            note::read(&store, note::Target::Managed(second))
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     /// Every refusal in this module is the same one. Asserting `is_err()` alone
     /// would keep passing if one of them turned into a `Storage` failure.

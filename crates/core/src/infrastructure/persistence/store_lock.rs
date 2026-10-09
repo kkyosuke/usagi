@@ -19,7 +19,7 @@
 //! The store's directory scans only pick up `*.md` files, so the lock file is
 //! never parsed as data.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -58,9 +58,19 @@ impl StoreLock {
     /// # Errors
     ///
     /// Returns an error when `dir` cannot be created, the lock file cannot be
-    /// opened, or the lock cannot be taken within the timeout.
+    /// opened, is not a regular file, or the lock cannot be taken within the timeout.
     pub fn acquire(dir: &Path) -> Result<Self> {
         Self::acquire_with_timeout(dir, ACQUIRE_TIMEOUT)
+    }
+
+    /// Acquire with the same wait budget as [`acquire`](Self::acquire), but stop
+    /// waiting when `cancelled` becomes true. The probe runs before filesystem
+    /// access and before each non-blocking acquisition attempt.
+    ///
+    /// # Errors
+    /// Returns the same errors as `acquire`, or an error when cancelled.
+    pub fn acquire_cancellable(dir: &Path, cancelled: impl Fn() -> bool) -> Result<Self> {
+        Self::acquire_with_policy(dir, ACQUIRE_TIMEOUT, cancelled)
     }
 
     /// [`acquire`](Self::acquire) with an explicit wait budget, so tests can use a
@@ -68,11 +78,21 @@ impl StoreLock {
     /// a holder wedged mid-operation surfaces as an error the caller can report
     /// instead of hanging the UI.
     fn acquire_with_timeout(dir: &Path, timeout: Duration) -> Result<Self> {
+        Self::acquire_with_policy(dir, timeout, || false)
+    }
+
+    fn acquire_with_policy(
+        dir: &Path,
+        timeout: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self> {
+        anyhow::ensure!(!cancelled(), "store lock acquisition cancelled");
         fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
         let path = Self::path(dir);
         let file = Self::open_lock_file(&path)?;
         let deadline = Instant::now() + timeout;
         loop {
+            anyhow::ensure!(!cancelled(), "store lock acquisition cancelled");
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(Self { file }),
                 // Held by another process (or, rarely, a transient lock error):
@@ -103,28 +123,50 @@ impl StoreLock {
     /// descriptor — `fs2` locks whatever handle it is given — we can retry with a
     /// read-only open when the file already exists. If the file is missing we
     /// cannot fall back (read-only cannot create it), so the original error stands.
+    /// On Unix both opens are non-blocking, so a FIFO cannot wait for a writer
+    /// before its descriptor is rejected by the regular-file check.
     fn open_lock_file(path: &Path) -> Result<File> {
-        match File::options()
+        match Self::lock_open_options()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(path)
         {
-            Ok(file) => Ok(file),
+            Ok(file) => Self::regular_lock_file(path, file),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.exists() => {
                 // Advisory locking only needs a valid descriptor, not write
                 // access, so a read-only handle is enough to try_lock_exclusive
                 // on both Unix (flock) and Windows (LockFileEx, per fs2).
-                File::options()
+                let file = Self::lock_open_options()
                     .read(true)
                     .open(path)
-                    .context(format!("failed to open {} read-only", path.display()))
+                    .context(format!("failed to open {} read-only", path.display()))?;
+                Self::regular_lock_file(path, file)
             }
             Err(e) => {
                 Err(anyhow::Error::new(e)).context(format!("failed to open {}", path.display()))
             }
         }
+    }
+
+    fn lock_open_options() -> OpenOptions {
+        let mut options = File::options();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        options
+    }
+
+    fn regular_lock_file(path: &Path, file: File) -> Result<File> {
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "store lock is not a regular file: {}",
+            path.display()
+        );
+        Ok(file)
     }
 
     /// Path of the lock file for the store rooted at `dir`.
@@ -165,6 +207,47 @@ mod tests {
         let guard = StoreLock::acquire(&dir).unwrap();
         assert!(dir.join(LOCK_FILE_NAME).is_file());
         drop(guard);
+    }
+
+    #[test]
+    fn cancelled_acquisition_does_not_create_store_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        let error = StoreLock::acquire_cancellable(&dir, || true).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn cancellation_stops_a_wait_without_releasing_the_other_holder() {
+        use std::cell::Cell;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        let held = StoreLock::acquire(&dir).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_waiter = Arc::clone(&cancelled);
+        let (started, waiting) = mpsc::channel();
+        let (finished, result) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let probes = Cell::new(0);
+            let acquired = StoreLock::acquire_cancellable(&dir, || {
+                probes.set(probes.get() + 1);
+                if probes.get() == 2 {
+                    started.send(()).unwrap();
+                }
+                cancel_waiter.load(Ordering::Acquire)
+            });
+            finished.send(acquired.unwrap_err().to_string()).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancelled.store(true, Ordering::Release);
+        let stopped = result.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        handle.join().unwrap();
+        assert!(stopped.unwrap().contains("cancelled"));
     }
 
     #[test]
@@ -247,6 +330,113 @@ mod tests {
         fs::write(&path, "x").unwrap();
         // create_dir_all fails because the path is an existing file.
         assert!(StoreLock::acquire(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    type FifoProbeResult = std::result::Result<(), String>;
+
+    #[cfg(unix)]
+    fn complete_fifo_lock_probe(
+        path: &Path,
+        completed: std::result::Result<FifoProbeResult, mpsc::RecvTimeoutError>,
+        received: &mpsc::Receiver<FifoProbeResult>,
+        worker: thread::JoinHandle<()>,
+    ) -> std::result::Result<FifoProbeResult, mpsc::RecvTimeoutError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        if completed.is_ok() {
+            worker.join().unwrap();
+            return completed;
+        }
+        // Keep both FIFO ends alive until the worker is reaped, including when
+        // its completion receive times out.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        let writer = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .unwrap();
+        let result = received.recv_timeout(Duration::from_secs(5));
+        let joined = worker.join();
+        drop(writer);
+        joined.unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_probe_cleanup_unblocks_and_reaps_a_read_only_open() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".lock");
+        let native = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), 0o400) }, 0);
+        let reader_path = path.clone();
+        let (finished, received) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let file = File::open(reader_path).unwrap();
+            drop(file);
+            finished.send(Ok(())).unwrap();
+        });
+        let result = complete_fifo_lock_probe(
+            &path,
+            Err(mpsc::RecvTimeoutError::Timeout),
+            &received,
+            reader,
+        );
+        assert_eq!(result.unwrap(), Ok(()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_lock_files_are_rejected_without_blocking_the_read_only_fallback() {
+        use std::cell::Cell;
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for mode in [0o400, 0o600] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("store");
+            fs::create_dir_all(&dir).unwrap();
+            let path = StoreLock::path(&dir);
+            let native = CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), mode) }, 0);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let stop = Arc::clone(&cancelled);
+            let (started, entered) = mpsc::channel();
+            let (finished, received) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let announced = Cell::new(false);
+                let result = StoreLock::acquire_cancellable(&dir, || {
+                    if !announced.replace(true) {
+                        started.send(()).unwrap();
+                    }
+                    stop.load(Ordering::Acquire)
+                });
+                finished
+                    .send(result.map(drop).map_err(|error| error.to_string()))
+                    .unwrap();
+            });
+            let entered = entered.recv_timeout(Duration::from_secs(5));
+            let completed = received.recv_timeout(Duration::from_secs(1));
+            let stalled = completed.is_err();
+            cancelled.store(true, Ordering::Release);
+            let result = complete_fifo_lock_probe(&path, completed, &received, worker);
+            entered.unwrap();
+            assert!(
+                !stalled,
+                "FIFO lock open waited for a writer in mode {mode:o}"
+            );
+            assert!(
+                result.unwrap().unwrap_err().contains("not a regular file"),
+                "FIFO lock was accepted in mode {mode:o}"
+            );
+        }
     }
 
     #[cfg(unix)]

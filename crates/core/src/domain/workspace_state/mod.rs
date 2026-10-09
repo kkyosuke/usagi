@@ -11,7 +11,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
+use crate::domain::id::SessionId;
 use crate::domain::note::Scratchpad;
 use crate::domain::session::SessionRecord;
 
@@ -23,6 +25,10 @@ pub struct WorkspaceState {
     /// omitted from the file) when none exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<SessionRecord>,
+    /// Scratchpads keyed by daemon-owned session incarnation. An empty entry
+    /// records an explicit clear and prevents legacy notes from reappearing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_notes: BTreeMap<SessionId, Scratchpad>,
     /// The note scratchpad attached to the workspace **root** — the same scratch
     /// space sessions carry, but for the workspace itself (the `⌂ root` row).
     /// Empty (the default) is omitted from the file.
@@ -38,6 +44,7 @@ impl WorkspaceState {
     pub fn new() -> Self {
         Self {
             sessions: Vec::new(),
+            session_notes: BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: Utc::now(),
         }

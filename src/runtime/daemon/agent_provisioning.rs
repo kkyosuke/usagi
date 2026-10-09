@@ -1168,7 +1168,7 @@ pub(super) fn configured_environment(
 ) -> Result<BTreeMap<String, String>, user_env::UserEnvironmentError> {
     environment.map_or_else(
         || Ok(BTreeMap::new()),
-        |environment| environment.resolved(workspace_root),
+        |environment| environment.prepared(workspace_root),
     )
 }
 
@@ -1205,6 +1205,7 @@ pub(super) fn mcp_environment_allowlist(
             usagi_core::infrastructure::paths::DATA_DIR_ENV,
             usagi_core::infrastructure::paths::RUNTIME_MODE_ENV,
             usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV,
+            usagi_core::infrastructure::paths::TRUST_ROOT_ENV,
         ]
         .into_iter()
         .map(|name| {
@@ -1230,7 +1231,7 @@ pub(super) fn mcp_environment(
     context
         .inject_mcp
         .then(|| {
-            Ok([
+            let mut environment = vec![
                 (
                     EnvironmentVariableName::new(usagi_core::infrastructure::paths::DATA_DIR_ENV)
                         .expect("literal environment variable name is valid"),
@@ -1250,7 +1251,15 @@ pub(super) fn mcp_environment(
                     .expect("literal environment variable name is valid"),
                     workspace_root.to_str().ok_or(())?.to_owned(),
                 ),
-            ])
+            ];
+            if let Some(root) = std::env::var_os(paths::TRUST_ROOT_ENV) {
+                environment.push((
+                    EnvironmentVariableName::new(paths::TRUST_ROOT_ENV)
+                        .expect("literal environment variable name is valid"),
+                    root.into_string().map_err(|_| ())?,
+                ));
+            }
+            Ok(environment)
         })
         .transpose()
         .map(Option::into_iter)

@@ -8,8 +8,14 @@ record から生成する。CI は catalog の key/action 組と本書の worksp
 [3. TUI](03-tui.md)に対応表を複製しない。画面遷移と各操作の詳細は TUI 仕様を参照する。本書は
 キーボード入力だけを対象とし、クリック、ドラッグ、ホイールは TUI 仕様を正本とする。
 
+## この文書の読み方
+
+基本の操作は前半の prefix と画面別の表を参照し、端末への入力転送と特殊なキーの解釈は後半で確認する。
+画面間で共有するキーと例外を一つの正本に保つため、この文書にまとめる。
+
 ## 目次
 
+- [この文書の読み方](#この文書の読み方)
 - [割り振り規則](#割り振り規則)
 - [全画面共通](#全画面共通)
 - [workspace 共通コマンド](#workspace-共通コマンド)
@@ -88,12 +94,11 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
-| `Ctrl-O g` | Director | Director drawer toggle。初回は goal-driven = Work Runs / classic = Organization。同じ Workflow の再 open は直前 route |
+| `Ctrl-O g` | Director | Director drawer toggle。初回は Organization。再 open は直前 route |
 | `Ctrl-O b` | DirectorBack | Director 内で一階層戻る |
-| `Ctrl-O w` | WorkRuns | goal-driven の daemon-owned Work Runs を直接開く。classic では遷移しない |
 | `Ctrl-O t` | RootTerminal | workspace root Shell drawer |
 | `Ctrl-O z` | RootTerminalFullHeight | Shell drawerの高さ切替 |
-| `Ctrl-O n` | DirectorNew | Director の New Conversation / Start Work Run。Shell 選択中は新しい terminal tab |
+| `Ctrl-O n` | DirectorNew | Director の New Conversation。Shell 選択中は新しい terminal tab |
 | `Ctrl-O x` | CloseTab | 選択中pane tabの終了／取消／dismiss |
 | `Ctrl-O r` | ResumeTab | 選択済み interrupted Agent tabの再開／再試行。resume不可なら削除確認 |
 | `Ctrl-O ↑` | ScrollUp | retained outputを1行上へ |
@@ -108,13 +113,12 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 |---|---|---|
 | Welcome | `↑` / `k`、`↓` / `j` | 前 / 次の項目 |
 | Welcome | `Enter` | 選択項目を開く |
-| Welcome | `o` / `e` / `c` / `q` | Open / New / Config / Quit |
-| Welcome | `1` … `3` | Recent cardを開く |
+| Welcome | `r` / `o` / `e` / `c` / `q` | 前回の project / Open・追加 / Clone / Config / Quit |
 | Welcome | `Esc` / `Ctrl-C` / `Ctrl-Q` | Quit |
 | Open | `↑` / `↓` | workspace選択（端末に収まらない分は窓がscrollし、残り件数を一覧下に出す） |
-| Open | 文字 / paste / `Backspace` / `Delete` | filter編集 |
-| Open | `Tab` | Single / Unite |
-| Open | `Space` | Unite対象をmark |
+| Open | 文字 / paste / `Backspace` / `Delete` | filter または Directory の path 編集 |
+| Open | `Tab` | Projects / Recent / Directory |
+| Open | `Space` | Projects で複数 project を mark |
 | Open | `Enter` | open |
 | Open | `Ctrl-X` | 選択workspaceの登録解除確認 |
 | Open | `C` | 存在しない登録のcleanup確認 |
@@ -161,9 +165,11 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | surface | 入力 | 動作 |
 |---|---|---|
 | Switch | `↑` / `↓` | session row選択 |
+| Switch | `P` / `N` | 選択中のsessionを1行上 / 下へ並べ替え（端では停止） |
 | Switch | `←` / `→` | 前 / 次のproject tab |
 | Switch | `Enter` / `t` | session Closeup、または選択したnew session |
 | Switch | `Ctrl-A` / `Home` | new session form |
+| Switch | `n` | 選択中 session の memo 編集 |
 | Switch | `:` | Overview palette |
 | Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
 | Switch | `Ctrl-X` | 選択sessionのforce remove（未コミットworktreeと未マージbranchを破棄）。選択中の `failed/integrity` orphan sessionはpurgeも付ける |
@@ -219,7 +225,13 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Preview file finder | 文字 / paste / `Backspace` | fuzzy filter編集 |
 | Preview file finder | `↑` / `↓` / `Enter` / `Esc` | file選択 / preview / close |
 | Preview document | `↑` / `↓` / `Esc` | scroll / file一覧へ戻る |
-| Scratchpad | paste / `Esc` | draftへ追記 / close |
+| Scratchpad | 文字 / paste | メモ本文を編集（複数行 paste 対応） |
+| Scratchpad | 矢印 / `Home` | メモのカーソル移動 |
+| Scratchpad | `Enter` | 改行。読み込み失敗時は再試行 |
+| Scratchpad | `Ctrl-S` | 保存して閉じる |
+| Scratchpad | `Esc` | 閉じる。未保存なら保存 / 破棄 / 編集継続を選択 |
+| Scratchpad close confirmation | `←` / `→` / `Tab` / `Enter` / `Esc` | 選択 / 決定 / 編集継続 |
+| Scratchpad close confirmation | `s` / `d` / `c` | 保存 / 破棄 / 編集継続を直接選択 |
 | Daemon control | `↑` / `↓` / `←` / `→` / `Tab` | Start / Restart / Stopを選択 |
 | Daemon control | `s` / `r` / `x` | Start / Restart / Stopを直接実行 |
 | Daemon control | `Enter` / `Esc` | 選択actionを実行 / close |
@@ -232,20 +244,13 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Organization | `↑` / `↓` | Conversation 選択 |
 | Organization | `Enter` | 選択 Conversation の Director Console |
 | Organization | `Esc` | Director を閉じる |
-| Work Runs | `↑` / `↓` | Run 選択 |
-| Work Runs | `Enter` / `Esc` | Run Overview / Director を閉じる |
-| Work Runs | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
-| Run Overview | `Enter` / `Esc` | root Director の Console / Work Runs |
-| Run Overview | `Ctrl-C` / `Ctrl-X` | active Run の cancel 確認 / 終了済み Run の削除確認 |
 | Director Console | `Ctrl-O [` / `Ctrl-O ]` | conversation 選択 |
 | Director Console | `Ctrl-O x` / `Ctrl-O r` | close / resume |
 | Director Console | `Ctrl-O ↑` / `Ctrl-O ↓` / `Ctrl-O End` | scroll |
 | Director Console | 文字 / paste / `Enter` / `Esc` / 編集キー | selected Agent PTY へ直接送る |
-| Director Console | `Ctrl-O b` | classic は Organization、goal-driven は Run Overview へ戻る |
-| New Conversation / Start Work Run | `↑` / `↓` | provider 選択 |
-| Start Work Run | 文字 / paste / `Backspace` | Goal 編集 |
-| New Conversation / Start Work Run | `Enter` / `Esc` / `Ctrl-C` | launch / 開始前 route へ戻る |
-| Work Run cancel / delete 確認 | `Enter` / `Esc` / `Ctrl-C` | confirm / cancel |
+| Director Console | `Ctrl-O b` | Organization へ戻る |
+| New Conversation | `↑` / `↓` | provider 選択 |
+| New Conversation | `Enter` / `Esc` / `Ctrl-C` | launch / 開始前 route へ戻る |
 | Root Shell | `Ctrl-O n` | terminal tab追加 |
 | Root Shell | `Ctrl-O [` / `Ctrl-O ]` | terminal tab選択 |
 | Root Shell | `Ctrl-O z` / `Ctrl-O x` | 高さ切替 / terminal終了 |
@@ -253,12 +258,6 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Garden | `↑` / `↓`、`Page Up` / `Page Down` | 右の session 一覧をスクロール（幅 99 桁以上） |
 | Garden | マウス移動 | うさぎに重ねると右一覧の対応行を強調する。画面は閉じない |
 | Garden | その他のキー / paste | wakeして閉じる |
-| Session Workflow | 文字 / paste / `Enter` / `←` / `→` / `Home` / `End` / `Delete` / `Backspace` | 依頼・追加指示の入力編集 |
-| Session Workflow | `Tab` | 開始前は Goal・担当欄・修正回数の欄を順に移動、開始後は宛先を切り替え |
-| Session Workflow | `←` / `→` | 担当欄にいる間は候補を選ぶ（開始前のみ） |
-| Session Workflow | `PgUp` / `PgDn` | 履歴をスクロール。履歴の先頭で止まり、空にはならない |
-| Session Workflow | `Shift-End` | 履歴を最新位置へ戻す |
-| Session Workflow | `Ctrl-S` | 開始 / 送信 |
 
 前面に入力modal / drawerがないworkspaceの `?`、live paneの `Ctrl-O ?`、全画面の `Ctrl-?` / `Ctrl-/` は
 同じ Keyboard help を開き、現在の最前面surfaceが受理する全キーボード操作を表示する。plain `?` はOverview /

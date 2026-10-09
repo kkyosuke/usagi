@@ -40,6 +40,7 @@ pub struct WorkspaceSlot {
     /// controller. The controller is intentionally torn down on every project
     /// switch, so the process-level deck carries only this stable identity.
     focused_session: Option<SessionId>,
+    manual_session_order: Option<Vec<SessionId>>,
     /// Whether the Garden's cross-project observation lane has seen this
     /// project's daemon Agent inventory since the cache was last rebuilt. An
     /// unobserved slot keeps drawing the read-only `project inactive` plot
@@ -137,6 +138,7 @@ impl WorkspaceSlot {
             label: snapshot.workspace.name.clone(),
             sessions,
             focused_session: None,
+            manual_session_order: None,
             agents_observed: false,
             attention: None,
             attention_stale: false,
@@ -208,7 +210,6 @@ pub enum OverlayIntent {
 pub enum AttentionDestination {
     Decisions,
     PullRequests,
-    WorkRuns,
     Session,
 }
 
@@ -549,6 +550,23 @@ impl WorkspaceDeck {
         {
             slot.focused_session = Some(session);
         }
+    }
+
+    /// Carry a workspace-local manual order across controller teardown.
+    pub fn remember_session_order(&mut self, workspace: WorkspaceId, sessions: &[SessionId]) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.workspace_id == workspace)
+        {
+            slot.manual_session_order = Some(sessions.to_vec());
+        }
+    }
+
+    /// Manual order only; untouched projects continue following daemon order.
+    #[must_use]
+    pub fn session_order_for_path(&self, path: &Path) -> Option<&[SessionId]> {
+        self.slot_for_path(path)?.manual_session_order.as_deref()
     }
 
     /// Last session row focused in an already-open project.
@@ -1935,6 +1953,9 @@ mod tests {
                     .into_iter()
                     .map(
                         |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
+                            operation_id: None,
+                            agent_id: None,
+                            launch_provenance: None,
                             runtime,
                             continuation: usagi_core::domain::id::AgentContinuationRef::new(),
                             state,

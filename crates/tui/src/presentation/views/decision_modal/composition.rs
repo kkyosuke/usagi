@@ -1,65 +1,98 @@
 //! Comment entry and answer review rendering.
-use super::{modal, wrapped_content_lines};
+use super::{Role, layout, widgets, wrapped_content_lines};
 use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
 pub(super) fn comment_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
-    wrapped_content_lines(
-        &format!(
-            "{}comment (optional): {}",
-            if editor.input_comment() { "> " } else { "" },
-            editor.comment()
-        ),
-        "",
+    input_rows(
+        "comment (optional)",
+        editor.comment(),
+        editor.input_comment(),
+        if editor.input_comment() {
+            "Comment · Editing"
+        } else if editor.input_freeform() {
+            "Comment · Not included with freeform"
+        } else {
+            "Comment · Optional note for selected choice"
+        },
+        "Add a note to your selected choice",
         width,
     )
 }
 
-pub(super) fn editor_footer(editor: &DecisionEditor, multiple: bool) -> Vec<String> {
-    let decision = editor.decision();
-    let action = if decision.require_confirmation {
-        "review"
-    } else {
-        "submit"
-    };
-    let mut rows = vec![modal::footer(&format!(
-        "↑↓: move  {}Enter: {action}  Esc: back",
-        if multiple { "Space: check  " } else { "" }
-    ))];
-    let tabs = if decision.allow_comment {
-        if decision.allow_freeform {
-            "Tab: choices/comment/freeform"
+pub(super) fn freeform_rows(editor: &DecisionEditor, width: usize) -> Vec<String> {
+    input_rows(
+        "freeform",
+        editor.freeform(),
+        editor.input_freeform(),
+        if editor.input_freeform() {
+            "Freeform · Editing"
         } else {
-            "Tab: choices/comment"
-        }
-    } else if multiple && decision.allow_freeform {
-        "Tab: choices/freeform"
-    } else {
-        ""
-    };
-    let count = if multiple {
-        let count = decision
-            .options
-            .iter()
-            .filter(|option| editor.option_checked(&option.id))
-            .count();
-        let (min, max) = decision.selection_bounds();
-        format!("{count} selected ({min}-{max})  ")
-    } else {
-        String::new()
-    };
-    rows.push(modal::footer(&format!("{count}{tabs} PgUp/PgDn: scroll")));
-    rows
+            "Freeform · Alternative answer"
+        },
+        "Move down to write your own answer",
+        width,
+    )
 }
 
-pub(super) fn confirmation_body(
+fn input_rows(
+    label: &str,
+    value: &str,
+    focused: bool,
+    title: &str,
+    placeholder: &str,
+    width: usize,
+) -> Vec<String> {
+    let content_width = layout::content_width(width);
+    let mut rows = layout::wrapped_rows(
+        &format!(
+            "{}{label}: {}",
+            if focused { "> " } else { "" },
+            if value.is_empty() && !focused {
+                placeholder
+            } else {
+                value
+            },
+        ),
+        "",
+        content_width,
+    );
+    if focused {
+        let tail = rows.pop().unwrap_or_default();
+        let style = crate::presentation::theme::editor_surface_style();
+        rows = rows.into_iter().map(|row| style.paint(&row)).collect();
+        rows.extend(widgets::wrap_with_trailing_caret(
+            &tail,
+            content_width,
+            &style,
+        ));
+        for row in &mut rows {
+            row.push_str(
+                &style
+                    .paint(&" ".repeat(content_width.saturating_sub(widgets::display_width(row)))),
+            );
+        }
+    } else {
+        rows = rows
+            .into_iter()
+            .map(|row| super::Style::new().dim().paint(&row))
+            .collect();
+    }
+    layout::titled_card(width, &rows, title, focused)
+}
+
+pub(super) fn confirmation_viewport(
     editor: &DecisionEditor,
     answer: &UserDecisionAnswer,
     width: usize,
     capacity: usize,
-) -> Vec<String> {
-    let mut rows = wrapped_content_lines("Review answer", "", width);
+) -> super::EditorViewport {
+    let mut rows = wrapped_content_lines("Review answer", "", width)
+        .into_iter()
+        .map(|line| Role::Accent.style().bold().paint(&line))
+        .collect::<Vec<_>>();
     rows.extend(wrapped_content_lines(&editor.decision().title, "", width));
+    rows.push(String::new());
     match answer {
         UserDecisionAnswer::Option { option_id, .. } => {
             add_choice(&mut rows, editor, option_id, width);
@@ -70,27 +103,31 @@ pub(super) fn confirmation_body(
             }
         }
         UserDecisionAnswer::Freeform { text } => {
-            rows.extend(wrapped_content_lines(text, "Answer: ", width));
+            add_card(&mut rows, text, "Answer: ", "Freeform answer", width);
         }
     }
     if let Some(comment) = answer.comment() {
-        rows.extend(wrapped_content_lines(comment, "Comment: ", width));
+        add_card(&mut rows, comment, "Comment: ", "Included comment", width);
     }
     if let Some(error) = editor.error() {
-        rows.extend(wrapped_content_lines(error.message.as_str(), "", width));
+        rows.extend(
+            wrapped_content_lines(error.message.as_str(), "", width)
+                .into_iter()
+                .map(|line| Role::Danger.style().paint(&line)),
+        );
     }
-    let offset = editor.scroll_offset().unwrap_or_else(|| {
-        if editor.error().is_some() {
-            rows.len()
-        } else {
-            0
-        }
-    });
-    let start = offset.min(rows.len().saturating_sub(capacity));
-    let end = (start + capacity).min(rows.len());
-    let mut body = modal::scroll_window(&rows, start, end);
-    body.push(modal::footer("Enter: send  Esc: edit  PgUp/PgDn: scroll"));
-    body
+    let (start, end) = editor.scroll_offset().map_or_else(
+        || {
+            let start = if editor.error().is_some() {
+                rows.len().saturating_sub(capacity)
+            } else {
+                0
+            };
+            (start, start.saturating_add(capacity).min(rows.len()))
+        },
+        |offset| layout::manual_window(rows.len(), offset, capacity),
+    );
+    super::EditorViewport { rows, start, end }
 }
 
 fn add_choice(rows: &mut Vec<String>, editor: &DecisionEditor, id: &str, width: usize) {
@@ -100,9 +137,20 @@ fn add_choice(rows: &mut Vec<String>, editor: &DecisionEditor, id: &str, width: 
         .iter()
         .find(|option| option.id == id)
         .map_or(id, |option| option.label.as_str());
-    rows.extend(wrapped_content_lines(
+    add_card(
+        rows,
         &format!("{label} [{id}]"),
         "Choice: ",
+        "Selected answer",
         width,
+    );
+}
+
+fn add_card(rows: &mut Vec<String>, text: &str, prefix: &str, title: &str, width: usize) {
+    rows.extend(layout::titled_card(
+        width,
+        &layout::wrapped_rows(text, prefix, layout::content_width(width)),
+        title,
+        false,
     ));
 }

@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 60);
+    assert_eq!(tools.len(), 50);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -120,6 +120,22 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
     }
     assert!(names.contains("terminal_list"));
     assert!(names.contains("terminal_read"));
+    for name in [
+        "workflow_start",
+        "workflow_status",
+        "workflow_instruct",
+        "workflow_finish",
+        "supervisor_start",
+        "supervisor_get",
+        "supervisor_list",
+        "supervisor_cancel",
+        "supervisor_resolve_escalation",
+        "supervisor_events",
+    ] {
+        assert!(!names.contains(name), "removed tool is advertised: {name}");
+        let response = mcp.tool(name, &json!({"name": "removed-workflow"}));
+        assert_eq!(response["error"]["code"], -32601, "{response}");
+    }
 }
 
 #[test]
@@ -131,7 +147,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 49);
+    assert_eq!(names.len(), 39);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -424,258 +440,6 @@ fn production_session_pr_resolves_the_authenticated_caller_when_name_is_omitted(
 }
 
 #[test]
-fn production_workflow_tools_observe_a_session_and_refuse_a_self_directed_start() {
-    let mut mcp = McpHarness::start();
-    assert!(mcp.tool("session_create", &json!({"name":"workflow-target"}))["error"].is_null());
-
-    // A workflow that has not started reports no run rather than an error, so a
-    // coordinator can poll before and after starting one.
-    let status = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
-    assert!(status.get("error").is_none(), "{status}");
-    let status = tool_text(&status);
-    assert!(status["run"].is_null(), "{status}");
-    assert!(status["agents"]["implementer"].is_string(), "{status}");
-
-    // An unknown session is refused before any workflow record is created.
-    let missing = mcp.tool("workflow_status", &json!({"name":"no-such-session"}));
-    assert!(missing.get("error").is_some(), "{missing}");
-
-    // The control plane belongs to the human: an Agent may drive a session it
-    // created, but never the one it is running inside.
-    drop(mcp.launch_caller());
-    let own = mcp.tool(
-        "workflow_start",
-        &json!({"name":"mcp-caller","goal":"drive myself"}),
-    );
-    assert!(has_permission_denied(&own), "{own}");
-    // The refusal is the caller's own session, not the tool: a session this
-    // Agent did not create is refused by the same ownership rule.
-    let foreign = mcp.tool("workflow_status", &json!({"name":"workflow-target"}));
-    assert!(has_permission_denied(&foreign), "{foreign}");
-}
-
-#[test]
-// One run's whole life — launch, instruct, finish, restart — shares a single
-// daemon and fixture Agent. Splitting it would spin up a second heavy E2E, and
-// those are deliberately serialized because contention makes them fail falsely.
-#[allow(clippy::too_many_lines)]
-fn production_workflow_start_launches_the_remembered_participants() {
-    let mut mcp = McpHarness::start();
-    // Claude proves readiness with `auth status`; the implementer then stays
-    // alive so the run has a live participant to bind to.
-    mcp.replace_fixture_agent(
-        "claude",
-        r#"#!/bin/sh
-if [ "$1" = auth ] && [ "$2" = status ]; then exit 0; fi
-sleep 30
-"#,
-    );
-    assert!(mcp.tool("session_create", &json!({"name":"workflow-run"}))["error"].is_null());
-
-    // Nobody is named, so the start uses what this workspace remembers. The
-    // default implementer is Codex; remembering Claude is what proves the
-    // workspace answer reached the launch rather than the product default.
-    let defaults = mcp.data_dir().join("daemon/workflows").join(
-        tool_text(&mcp.tool("session_list", &json!({})))["workspace_id"]
-            .as_str()
-            .unwrap(),
-    );
-    fs::create_dir_all(&defaults).unwrap();
-    fs::write(
-        defaults.join("defaults.json"),
-        r#"{"planner":"claude","implementer":"claude","reviewer":"codex"}"#,
-    )
-    .unwrap();
-
-    let started = mcp.tool(
-        "workflow_start",
-        &json!({"name":"workflow-run","goal":"add a login form"}),
-    );
-    assert!(started.get("error").is_none(), "{started}");
-    let started = tool_text(&started);
-    assert_eq!(started["run"]["goal"], "add a login form");
-    assert_eq!(started["run"]["agents"]["implementer"], "claude");
-    assert_eq!(started["run"]["phase"], "implementing");
-
-    // The same call is one operation: repeating it answers with the same run
-    // instead of starting a second one.
-    let again = mcp.tool(
-        "workflow_start",
-        &json!({"name":"workflow-run","goal":"add a login form"}),
-    );
-    assert!(again.get("error").is_some(), "{again}");
-
-    // An instruction reaches the run and is remembered durably.
-    let instructed = mcp.tool(
-        "workflow_instruct",
-        &json!({"name":"workflow-run","body":"cover the error path","recipient":"implementer"}),
-    );
-    assert!(instructed.get("error").is_none(), "{instructed}");
-    let instructed = tool_text(&instructed);
-    assert_eq!(
-        instructed["run"]["instructions"][0]["body"],
-        "cover the error path"
-    );
-
-    // An unknown participant spelling is refused rather than silently defaulted.
-    assert!(
-        mcp.tool(
-            "workflow_start",
-            &json!({"name":"workflow-run","goal":"x","reviewer":"nobody"}),
-        )
-        .get("error")
-        .is_some()
-    );
-
-    // Finishing ends the run. It is not `Ready`, so it is recorded as stopped
-    // with the phase it was abandoned in, and the session keeps its worktree.
-    let worktree = mcp.workspace().join(".usagi/sessions/workflow-run");
-    assert!(worktree.join(".git").exists());
-    // `session_status` is the one view of Agent liveness a human caller can
-    // read: `agent_list` needs Agent provenance, which this caller has not got.
-    let status_of = |mcp: &mut McpHarness| {
-        tool_text(&mcp.tool("session_status", &json!({})))["sessions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|session| session["name"] == "workflow-run")
-            .map(|session| session["agent_status"].clone())
-    };
-    let before = status_of(&mut mcp).expect("the session is listed while it carries the run");
-    // Comparing before and after would also hold if the fixture's own sleep had
-    // already elapsed — and would then hide the very regression this checks for.
-    // A run that gets this far with a dead Agent is a fixture that is too short
-    // for this machine, and saying so is better than passing vacuously.
-    assert!(
-        before != "exited" && before != "failed" && !before.is_null(),
-        "the fixture Agent has to outlive the run's setup, but was {before}"
-    );
-    let finished = mcp.tool("workflow_finish", &json!({"name":"workflow-run"}));
-    assert!(finished.get("error").is_none(), "{finished}");
-    let finished = tool_text(&finished);
-    assert!(finished["run"].is_null(), "{finished}");
-    assert!(finished["pending_start"].is_null(), "{finished}");
-    assert_eq!(finished["finished"][0]["outcome"], "stopped");
-    assert_eq!(finished["finished"][0]["goal"], "add a login form");
-    assert_eq!(finished["finished"][0]["phase"], "implementing");
-
-    // The run's Agent is untouched and so is the worktree: finishing is a
-    // change to the workflow record and nothing else.
-    // The status has to be *unchanged*, not merely non-terminal: a killed Agent
-    // is still reported, as `exited`, so presence alone would pass through the
-    // regression. Comparing two readings around the one call is true regardless
-    // of how long the run took to reach here.
-    let after = status_of(&mut mcp);
-    assert_eq!(
-        after,
-        Some(before),
-        "finishing a run leaves the Agent that carried it exactly as it was"
-    );
-    assert!(
-        worktree.join(".git").exists(),
-        "finishing a run never removes the session worktree"
-    );
-
-    // Finishing again is refused, and so is instructing a run that is over.
-    assert!(
-        mcp.tool("workflow_finish", &json!({"name":"workflow-run"}))
-            .get("error")
-            .is_some()
-    );
-    assert!(
-        mcp.tool(
-            "workflow_instruct",
-            &json!({"name":"workflow-run","body":"one more thing"}),
-        )
-        .get("error")
-        .is_some()
-    );
-
-    // The workflow record no longer holds the session: a new start gets past
-    // "session already has another workflow" and is stopped only by the
-    // separate, pre-existing rule that one session runs one Agent at a time.
-    // Finishing deliberately leaves that Agent alive, so closing it stays the
-    // person's move — but the run that was wedging the session is gone.
-    let restarted = mcp.tool(
-        "workflow_start",
-        &json!({"name":"workflow-run","goal":"add a logout form"}),
-    );
-    let refusal = restarted["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        refusal.contains("existing Agent"),
-        "the record is free and only the live Agent refuses: {restarted}"
-    );
-    assert!(
-        !refusal.contains("another workflow"),
-        "the finished run must not still own the session: {restarted}"
-    );
-
-    // And the archive is what the session reports while it waits. The refused
-    // start left no trace at all: no pending intent to freeze the pane on, and
-    // no archived row, so retrying cannot push real history out of the bounded
-    // archive.
-    let idle = tool_text(&mcp.tool("workflow_status", &json!({"name":"workflow-run"})));
-    assert!(idle["run"].is_null(), "{idle}");
-    assert!(
-        idle["pending_start"].is_null(),
-        "a refused start must not keep holding the session: {idle}"
-    );
-    assert_eq!(idle["finished"][0]["goal"], "add a login form");
-    assert_eq!(idle["finished"].as_array().unwrap().len(), 1);
-}
-
-#[test]
-fn production_workflow_start_from_an_issue_renders_the_goal_and_keeps_the_reference() {
-    let mut mcp = McpHarness::start();
-    mcp.replace_fixture_agent(
-        "codex",
-        r#"#!/bin/sh
-if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
-sleep 30
-"#,
-    );
-    // Issue writes are refused at the workspace root by design, so the backlog
-    // entry is placed the way a merged PR leaves it.
-    let number = 742_u64;
-    let issues = mcp.workspace().join(".usagi/issues");
-    fs::create_dir_all(&issues).unwrap();
-    fs::write(
-        issues.join(format!("{number}-close-the-loop.md")),
-        format!(
-            "---\nnumber: {number}\ntitle: fix(daemon): close the loop\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-09-12T00:00:00+00:00\nupdated_at: 2026-09-12T00:00:00+00:00\n---\n\nreproduce and fix\n"
-        ),
-    )
-    .unwrap();
-    assert!(mcp.tool("session_create", &json!({"name":"issue-run"}))["error"].is_null());
-
-    let started = mcp.tool(
-        "workflow_start",
-        &json!({"name":"issue-run","issue":number}),
-    );
-    assert!(started.get("error").is_none(), "{started}");
-    let started = tool_text(&started);
-    // The issue body becomes the goal, and the run keeps the reference the PR
-    // will have to name.
-    let goal = started["run"]["goal"].as_str().unwrap();
-    assert!(goal.contains("fix(daemon): close the loop"), "{goal}");
-    assert!(goal.contains("reproduce and fix"), "{goal}");
-    assert_eq!(started["run"]["issue"], json!(number));
-
-    // A goal is required when no issue is named.
-    let neither = mcp.tool("workflow_start", &json!({"name":"issue-run"}));
-    assert!(neither.get("error").is_some(), "{neither}");
-    // An issue that does not exist is refused before a run is created.
-    assert!(
-        mcp.tool(
-            "workflow_start",
-            &json!({"name":"issue-run","issue":number + 1000}),
-        )
-        .get("error")
-        .is_some()
-    );
-}
-
-#[test]
 fn production_delegate_brief_immediately_dispatches_an_isolated_triage_worker() {
     let mut mcp = McpHarness::start();
     let caller_credential = mcp.launch_caller();
@@ -905,57 +669,6 @@ fn production_delegate_brief_rejects_an_unknown_caller_without_creating_a_sessio
             .join(".usagi/sessions/unowned-brief")
             .exists()
     );
-}
-
-#[test]
-fn production_supervisor_tools_observe_one_durable_aggregate() {
-    let mut mcp = McpHarness::start();
-    let caller_credential = mcp.launch_caller();
-    mcp.restart_with_credential(&caller_credential);
-    let started = mcp.tool(
-        "supervisor_start",
-        &json!({
-            "root_task": "coordinate the production fixture",
-            "idempotency_key": "production-supervisor-e2e"
-        }),
-    );
-    assert!(started.get("error").is_none(), "{started}");
-    let started: serde_json::Value =
-        serde_json::from_str(started["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let run_id = started["supervisor_run_id"].as_str().unwrap();
-    assert_eq!(started["state"], "running");
-    assert!(started["escalation"].is_null());
-    assert_eq!(started["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(started["tasks"][0]["state"], "dispatched");
-    assert_eq!(
-        started["display_label"],
-        "coordinate the production fixture"
-    );
-
-    let fetched = mcp.tool("supervisor_get", &json!({"supervisor_run_id": run_id}));
-    let fetched: serde_json::Value =
-        serde_json::from_str(fetched["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(fetched["supervisor_run_id"], run_id);
-    assert_eq!(fetched["state_revision"], started["state_revision"]);
-
-    let listed = mcp.tool("supervisor_list", &json!({"limit": 10}));
-    let listed: serde_json::Value =
-        serde_json::from_str(listed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(listed["runs"].as_array().unwrap().len(), 1);
-    assert_eq!(listed["runs"][0]["supervisor_run_id"], run_id);
-
-    let events = mcp.tool(
-        "supervisor_events",
-        &json!({"supervisor_run_id": run_id, "after_sequence": 0, "limit": 10}),
-    );
-    let events: serde_json::Value =
-        serde_json::from_str(events["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(events["events"].as_array().unwrap().len(), 3);
-    assert_eq!(events["next_sequence"], 4);
-    assert_eq!(events["events"][2]["source"], "admission");
-
-    let durable_dir = mcp.data_dir().join("daemon/supervisor-runs");
-    assert!(fs::read_dir(durable_dir).unwrap().count() >= 2);
 }
 
 #[test]
@@ -1871,6 +1584,37 @@ fn production_agent_fixture_is_injected_without_cli_credentials() {
 }
 
 #[test]
+fn production_user_decision_retry_without_deadline_is_idempotent() {
+    let mut mcp = McpHarness::start();
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let request = json!({"title":"Retry", "prompt":"Choose", "options":[{"id":"yes","label":"Yes"}], "idempotency_key":"retry-default-expiry"});
+    let first = mcp.tool("user_decision_request", &request);
+    assert!(first.get("error").is_none(), "{first}");
+    let first = tool_text(&first);
+    mcp.restart_with_credential(&credential);
+    let retry = mcp.tool("user_decision_request", &request);
+    assert!(retry.get("error").is_none(), "{retry}");
+    assert_eq!(tool_text(&retry), first);
+    assert_eq!(
+        tool_text(&mcp.tool("user_decision_list", &json!({})))["decisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut changed = request;
+    changed["prompt"] = json!("Different question");
+    let conflict = mcp.tool("user_decision_request", &changed);
+    assert!(
+        conflict["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("IdempotencyConflict")
+    );
+}
+
+#[test]
 fn production_user_decision_round_trip_reaches_the_original_caller() {
     user_decision_round_trip(false);
 }
@@ -1909,7 +1653,7 @@ credential_excluded=false
 approval_disabled=false
 usagi_required=false
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]' ]; then
+  if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.env_vars = ["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT", "USAGI_TRUST_ROOT"]' ]; then
     credential_excluded=true
   fi
   if [ "$1" = "-c" ] && [ "$2" = 'mcp_servers.usagi.required = true' ]; then
@@ -1960,6 +1704,33 @@ fi
         })
         .unwrap();
     assert!(matches!(reply, DaemonReply::Accepted { .. }));
+    let DaemonReply::Accepted {
+        body: admission, ..
+    } = reply
+    else {
+        unreachable!()
+    };
+    let inventory = match client
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
+        .unwrap()
+    {
+        DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+    };
+    let audit = &inventory["runtimes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["runtime"]["terminal"] == admission["terminal"])
+        .unwrap()["launch_provenance"]["created"];
+    assert_eq!(audit["source"], "unknown");
+    assert_eq!(audit["entrypoint"], "legacy_dispatch");
+    assert!(audit["caller"].is_null());
+    assert!(audit["caller_operation_id"].is_null());
+    assert_eq!(audit["client"]["surface"], "cli");
+    assert_eq!(audit["client"]["peer_pid"], std::process::id());
 
     let decision_path = mcp.data_dir().join("daemon/user-decisions.json");
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -2308,6 +2079,13 @@ exit 0
     let agents = tool_text(&mcp.tool("agent_list", &json!({})));
     assert_eq!(agents["agents"].as_array().unwrap().len(), 1);
     assert_eq!(agents["agents"][0]["agent_id"], admission["agent_id"]);
+    let provenance = &agents["agents"][0]["launch_provenance"];
+    assert_eq!(provenance["created"]["source"], "mcp");
+    assert_eq!(provenance["created"]["entrypoint"], "session_dispatch");
+    assert_eq!(
+        provenance["created"]["caller"]["agent_id"],
+        tool_text(&mcp.tool("agent_peers", &json!({})))["self_agent_id"]
+    );
     assert!(
         mcp.tool(
             "agent_get",
@@ -2396,6 +2174,10 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     let before = tool_text(&mcp.tool("agent_peers", &json!({})));
     let self_id = before["self_agent_id"].clone();
     assert_eq!(before["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        before["agents"][0]["launch_provenance"]["created"]["source"],
+        "manual"
+    );
     let handoff = mcp.tool(
         "agent_handoff",
         &json!({
@@ -2409,6 +2191,21 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     assert_ne!(admission["agent_id"], self_id);
     let peers = tool_text(&mcp.tool("agent_peers", &json!({})));
     assert_eq!(peers["agents"].as_array().unwrap().len(), 2);
+    let worker = peers["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["agent_id"] == admission["agent_id"])
+        .unwrap();
+    assert_eq!(worker["launch_provenance"]["created"]["source"], "mcp");
+    assert_eq!(
+        worker["launch_provenance"]["created"]["entrypoint"],
+        "agent_handoff"
+    );
+    assert_eq!(
+        worker["launch_provenance"]["created"]["caller"]["agent_id"],
+        self_id
+    );
     assert!(
         tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
             .as_array()
@@ -2478,7 +2275,7 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"fixture-worker","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"commits":["abc123"],"changed_files":["fixture.rs"],"verification":"fixture green"}}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"verification":"fixture green"}}}}' \
   | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
     );
@@ -2559,7 +2356,9 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["run_id"], admission["run_id"]);
     assert_eq!(message["kind"], "completed");
     assert_eq!(message["summary"], "fixture completed");
-    assert_eq!(message["result"]["commits"], json!(["abc123"]));
+    assert_eq!(message["result"]["commits"], json!([]));
+    assert_eq!(message["result"]["changed_files"], json!([]));
+    assert_eq!(message["result"]["verification"], "fixture green");
     let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
     let next_cursor = page["next_cursor"].as_u64().unwrap();
     let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));

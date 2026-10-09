@@ -1,8 +1,23 @@
 //! One-line buttons whose painted cells and clickable width come from one value.
 
-use crate::presentation::theme::Style;
+use crate::presentation::theme::{Color, Role, Style};
 
-use super::{clip_to_width, display_width};
+use super::{clip_to_width, display_width, pad_to_width};
+
+/// A choice whose brackets and label stay in the same cells as focus moves.
+/// `label_width` counts display cells, including full-width characters. The
+/// focused choice uses its role in bold; idle choices use an explicit dim white
+/// so a previously focused colour cannot leak into them.
+#[must_use]
+pub fn choice_button(label: &str, label_width: usize, selected: bool, role: Role) -> String {
+    let text = format!("[ {} ]", pad_to_width(label, label_width));
+    let style = if selected {
+        role.style().bold()
+    } else {
+        Style::new().fg(Color::White).dim()
+    };
+    style.paint(&text)
+}
 
 /// A compact inline button with one clickable cell of horizontal padding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +59,24 @@ pub struct RenderedButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::widgets::strip_ansi;
+
+    #[test]
+    fn choice_focus_preserves_brackets_and_full_width_label_geometry() {
+        for (label, width, expected) in [
+            ("保存", 6, "[ 保存   ]"),
+            ("日本語", 3, "[ 日… ]"),
+            ("", 0, "[  ]"),
+        ] {
+            let focused = choice_button(label, width, true, Role::Success);
+            let idle = choice_button(label, width, false, Role::Success);
+            assert_eq!(strip_ansi(&focused), expected);
+            assert_eq!(strip_ansi(&idle), expected);
+            assert_eq!(display_width(&focused), width + 4);
+            assert!(focused.starts_with("\u{1b}[1;32m"));
+            assert!(idle.starts_with("\u{1b}[2;37m"));
+        }
+    }
 
     #[test]
     fn inline_button_keeps_both_padding_cells_inside_its_width() {

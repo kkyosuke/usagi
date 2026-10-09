@@ -919,6 +919,7 @@ fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write(
 fn legacy_client_hello() -> usagi_core::infrastructure::ipc::ClientHello {
     usagi_core::infrastructure::ipc::ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId("legacy".into()),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: Vec::new(),

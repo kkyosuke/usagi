@@ -2,6 +2,9 @@
 use super::id::{SessionId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
+/// Bound the summary below the IPC frame ceiling even with multibyte labels.
+pub const ATTENTION_ITEMS_MAX: usize = 512;
+
 /// A reason to visit a workspace; idle processes alone are not human blockers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

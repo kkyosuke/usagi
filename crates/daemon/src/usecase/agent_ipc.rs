@@ -41,12 +41,11 @@ use usagi_core::{
             ConnectionId, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
             WorkspaceId, WorktreeId,
         },
-        supervisor::RunProvenance,
         terminal_launch::TerminalLaunchScope,
     },
     infrastructure::ipc::{
-        AgentGoalIntent, AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, ErrorCode,
-        MAX_AGENT_GOAL_BYTES, ProtocolError, TerminalRequest, agent_operation_digest,
+        AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, ErrorCode, ProtocolError,
+        TerminalRequest, agent_operation_digest,
     },
     infrastructure::runtime_model::{
         ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig, supported_agent_runtimes,
@@ -117,7 +116,7 @@ pub struct AgentAdmission {
     pub operation_id: String,
     pub revision: u64,
     /// Exact daemon-owned runtime admitted for this operation. Presentation
-    /// layers expose only its terminal, while supervisor composition uses the
+    /// layers expose its terminal, while peer collaboration uses the
     /// full fence to bind the root task without inventing provenance.
     pub runtime: AgentRuntimeRef,
     pub terminal: TerminalRef,
@@ -164,6 +163,45 @@ pub enum PromptMode {
 pub struct PromptDelivery {
     pub delivered_to: &'static str,
     pub queued: bool,
+}
+
+/// Trusted launch request context assembled by the daemon boundary. The
+/// client-reported surface is evidence, not the source of caller authority.
+#[derive(Debug, Clone)]
+pub struct AgentLaunchContext {
+    pub source: usagi_core::domain::agent::AgentLaunchSource,
+    pub entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+    pub caller: Option<CallerRef>,
+    pub caller_operation_id: Option<OperationId>,
+    pub client: Option<usagi_core::domain::agent::AgentLaunchClient>,
+}
+
+impl AgentLaunchContext {
+    #[must_use]
+    pub fn new(
+        source: usagi_core::domain::agent::AgentLaunchSource,
+        entrypoint: usagi_core::domain::agent::AgentLaunchEntry,
+    ) -> Self {
+        Self {
+            source,
+            entrypoint,
+            caller: None,
+            caller_operation_id: None,
+            client: None,
+        }
+    }
+
+    fn origin(self, operation: OperationId) -> usagi_core::domain::agent::AgentLaunchOrigin {
+        usagi_core::domain::agent::AgentLaunchOrigin {
+            source: self.source,
+            entrypoint: self.entrypoint,
+            caller: self.caller,
+            caller_operation_id: self.caller_operation_id,
+            client: self.client,
+            operation_id: operation,
+            at: Utc::now(),
+        }
+    }
 }
 
 /// One process-local Agent operation, replayed identically on resend/reconnect.
@@ -401,86 +439,6 @@ impl DaemonRestartInterruptionError {
 }
 
 impl AgentRuntime {
-    /// Session Workflow admission keeps its initial prompt inside the provider
-    /// launch request, avoiding a race with a not-yet-ready interactive PTY.
-    pub fn prepare_workflow_readiness(
-        &self,
-        operation_id: &str,
-        intent: &AgentLaunchIntent,
-        prompt: &str,
-    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
-        if intent.session.is_none()
-            || prompt.trim().is_empty()
-            || prompt.len() > 24 * 1024
-            || prompt.contains('\0')
-        {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "invalid session workflow launch",
-            ));
-        }
-        let semantic = format!("workflow:{}:{prompt}", semantic_key(intent));
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing.conflicts_with(&semantic) {
-                return Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "workflow launch identity conflicts",
-                ));
-            }
-            return Ok(None);
-        }
-        OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
-        self.readiness_ticket(
-            intent
-                .profile
-                .clone()
-                .unwrap_or_else(|| self.default_profile.clone()),
-        )
-        .map(Some)
-    }
-
-    /// Admit after an owner-external readiness probe and repeat its fences.
-    pub fn launch_workflow_after_readiness(
-        &mut self,
-        operation_id: &str,
-        intent: &AgentLaunchIntent,
-        prompt: &str,
-        scope: &dyn SessionScopeResolver,
-        preflight: Option<&AgentReadinessPreflight>,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        let current = self.prepare_workflow_readiness(operation_id, intent, prompt)?;
-        self.validate_readiness(preflight, current.as_ref())?;
-        if let Some(existing) = self.operations.get(operation_id) {
-            return existing.outcome.clone();
-        }
-        if self
-            .dispatch
-            .agents_in_workspace(intent.workspace)
-            .map_err(map_dispatch_storage_error)?
-            .iter()
-            .any(|worker| {
-                worker.session_id == intent.session
-                    && worker
-                        .current_run
-                        .is_some_and(|run| run.to_string() != operation_id)
-                    && matches!(worker.status, AgentStatus::Starting | AgentStatus::Running)
-            })
-        {
-            // `Busy`, not `Unavailable`: nothing was launched and resending the
-            // same operation cannot succeed until the person stops that Agent.
-            // `Unavailable` means "reconnect and retry the same operation",
-            // which is what left a refused start wedged in the pane.
-            return Err(ProtocolError::new(
-                ErrorCode::Busy,
-                "stop the session's existing Agent before starting a Workflow",
-            ));
-        }
-        let semantic = format!("workflow:{}:{prompt}", semantic_key(intent));
-        let outcome = self.admit(operation_id, intent, scope, Some(prompt), &semantic);
-        self.remember_operation(operation_id, Some(&semantic), outcome.clone());
-        outcome
-    }
-
     fn forget_closed_runtimes(
         &mut self,
         closed: &[AgentRuntimeRef],
@@ -578,23 +536,6 @@ impl AgentReadinessPreflight {
 }
 
 impl AgentRuntime {
-    /// Resolves the exact runtime family a Goal launch will use so Supervisor
-    /// reservation can pin the same semantic fence before Agent admission.
-    ///
-    /// # Errors
-    /// Returns an error when the Goal or selected profile is invalid.
-    pub fn goal_worker_profile(
-        &self,
-        intent: &AgentGoalIntent,
-    ) -> Result<AgentProfileId, ProtocolError> {
-        validate_goal(intent)?;
-        let profile = intent
-            .profile
-            .clone()
-            .unwrap_or_else(|| self.default_profile.clone());
-        self.readiness_ticket(profile).map(|ticket| ticket.profile)
-    }
-
     /// Captures readiness facts for a dispatch-selected worker. The dispatch
     /// method still re-resolves the worker, configuration, executable, scope,
     /// and durable operation after the owner-external probe.
@@ -635,7 +576,7 @@ impl AgentRuntime {
     }
 
     /// Dispatches with the exact read-only worker plan already fenced by a
-    /// Supervisor reservation. The worker is persisted atomically with Agent
+    /// dispatch admission. The worker is persisted atomically with Agent
     /// admission, after readiness and idempotency checks have passed.
     pub fn dispatch_planned_after_readiness(
         &mut self,
@@ -654,6 +595,31 @@ impl AgentRuntime {
             session,
             scope,
             Some(planned_worker),
+        )
+    }
+
+    /// The composition root supplies the actual tool entry point; it is never
+    /// accepted from a worker selector or prompt.
+    #[allow(clippy::too_many_arguments)] // Preserve readiness and planned worker fences while carrying the trusted audit entry.
+    pub fn dispatch_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        planned_worker: Option<&usagi_core::domain::agent::Agent>,
+        context: AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_dispatch_readiness(operation_id, intent)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.dispatch_with_planned_worker_from(
+            operation_id,
+            intent,
+            session,
+            scope,
+            planned_worker,
+            context,
         )
     }
 
@@ -891,83 +857,6 @@ impl AgentRuntime {
         }
     }
 
-    /// Returns the durable outcome of a previously admitted operation, so a
-    /// reconnecting client can replay the same accepted/final result.
-    #[must_use]
-    pub fn operation_outcome(
-        &self,
-        operation_id: &str,
-    ) -> Option<Result<AgentAdmission, ProtocolError>> {
-        self.operations
-            .get(operation_id)
-            .map(|operation| operation.outcome.clone())
-    }
-
-    /// Resolves the exact retained Agent runtime admitted by one durable
-    /// operation. This internal join remains available after the process-local
-    /// replay cache ages out. Durable hydration rejects duplicate ownership.
-    #[must_use]
-    pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
-        self.coordinator.runtime_for_operation(operation_id)
-    }
-
-    /// Observe one workflow participant through only the exact admitted runtime
-    /// and its explicit resume chain, never a new launch that reused an Agent ID.
-    #[must_use]
-    pub fn workflow_live_operation(&self, operation: OperationId) -> Option<OperationId> {
-        let operation = *self.workflow_operation_lineage(operation).last()?;
-        self.coordinator
-            .snapshot()
-            .records
-            .iter()
-            .find(|record| {
-                record.operation.operation_id == operation
-                    && record.superseded_by.is_none()
-                    && record.state == super::runtime::RuntimeState::Running
-            })
-            .map(|record| record.operation.operation_id)
-    }
-
-    /// Exact admitted operations, including exited ancestors and descendants.
-    /// A new launch sharing an Agent ID is never part of this provenance.
-    #[must_use]
-    pub fn workflow_operation_lineage(&self, operation: OperationId) -> Vec<OperationId> {
-        Self::workflow_lineage(&self.coordinator.snapshot(), operation)
-    }
-
-    fn workflow_lineage(
-        snapshot: &super::runtime::RuntimeStoreSnapshot,
-        operation: OperationId,
-    ) -> Vec<OperationId> {
-        let Some(mut record) = snapshot
-            .records
-            .iter()
-            .find(|record| record.operation.operation_id == operation)
-        else {
-            return Vec::new();
-        };
-        let mut lineage = Vec::new();
-        for _ in 0..=snapshot.records.len() {
-            if lineage.contains(&record.operation.operation_id) {
-                break;
-            }
-            lineage.push(record.operation.operation_id);
-            if let Some(replacement) = record.superseded_by {
-                let Some(next) = snapshot
-                    .records
-                    .iter()
-                    .find(|candidate| candidate.runtime.agent_runtime_id == replacement)
-                else {
-                    break;
-                };
-                record = next;
-            } else {
-                break;
-            }
-        }
-        lineage
-    }
-
     #[must_use]
     pub fn dispatch_store(&self) -> &DispatchStore {
         &self.dispatch
@@ -1167,44 +1056,6 @@ impl AgentRuntime {
     pub fn retain_live_connections(&mut self, live: &BTreeSet<ConnectionId>) {
         self.coordinator
             .retain_live_connections(live, &mut *self.pty);
-    }
-
-    /// Enforces Director Work's transitive provider/runtime invariant before
-    /// session creation or Agent admission performs any side effect.
-    pub fn require_same_dispatch_runtime(
-        &self,
-        workspace: WorkspaceId,
-        caller: &CallerRef,
-        selected: &DispatchAgentIntent,
-    ) -> Result<(), ProtocolError> {
-        let caller_runtime = self
-            .dispatch
-            .agent_in_workspace(workspace, caller.agent_id)
-            .map_err(map_dispatch_storage_error)?
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "delegating Agent runtime is unavailable",
-                )
-            })?
-            .runtime;
-        let selected_runtime = match selected {
-            DispatchAgentIntent::New { runtime, .. } => runtime.clone(),
-            DispatchAgentIntent::Existing { agent_id } => {
-                self.dispatch
-                    .agent_in_workspace(workspace, *agent_id)
-                    .map_err(map_dispatch_storage_error)?
-                    .ok_or_else(dispatch_agent_not_found)?
-                    .runtime
-            }
-        };
-        if selected_runtime != caller_runtime {
-            return Err(ProtocolError::new(
-                ErrorCode::PermissionDenied,
-                "delegated Agent runtime must match the authenticated caller runtime",
-            ));
-        }
-        Ok(())
     }
 
     /// Resolves a short-lived provider hook from authenticated OS process identity.
@@ -1560,89 +1411,6 @@ impl AgentRuntime {
         Ok((result, diagnosis))
     }
 
-    /// Stops only the Agent runtimes fenced by durable Supervisor provenance.
-    ///
-    /// Every selected runtime is validated before any PTY is signalled. A
-    /// recycled or corrupt Agent identity therefore fails the whole pass
-    /// closed instead of falling back to another runtime in the workspace.
-    /// Missing or already-exited records are converged no-ops, which makes the
-    /// operation safe for daemon-startup and periodic recovery.
-    pub fn interrupt_supervisor_workers(
-        &mut self,
-        workspace: WorkspaceId,
-        provenance: &[RunProvenance],
-    ) -> Result<usize, ProtocolError> {
-        let mut expected = BTreeMap::new();
-        for worker in provenance {
-            let scope = (worker.worker_session_id, worker.worker_worktree_id);
-            if expected
-                .insert(worker.worker_agent_id, scope)
-                .is_some_and(|existing| existing != scope)
-            {
-                return Err(ProtocolError::new(
-                    ErrorCode::StaleTarget,
-                    "supervisor worker provenance conflicts for one Agent runtime",
-                ));
-            }
-        }
-
-        let records = self.coordinator.snapshot().records;
-        let mut runtime_ids = BTreeSet::new();
-        for (runtime_id, (session_id, worktree_id)) in expected {
-            let Some(record) = records
-                .iter()
-                .find(|record| record.runtime.agent_runtime_id == runtime_id)
-            else {
-                continue;
-            };
-            if record.runtime.terminal.workspace_id != workspace
-                || record.runtime.session_id != session_id
-                || record.runtime.terminal.session_id != session_id
-                || record.runtime.terminal.worktree_id != worktree_id
-            {
-                return Err(ProtocolError::new(
-                    ErrorCode::StaleTarget,
-                    "supervisor worker provenance no longer fences its Agent runtime",
-                ));
-            }
-            match record.state {
-                super::runtime::RuntimeState::Reserved
-                | super::runtime::RuntimeState::Running
-                | super::runtime::RuntimeState::ReconcileRequired(
-                    super::runtime::ReconcileState::SpawnAmbiguous
-                    | super::runtime::ReconcileState::PersistAfterSpawn
-                    | super::runtime::ReconcileState::OrphanRunning,
-                ) => {
-                    runtime_ids.insert(runtime_id.as_str().clone());
-                }
-                super::runtime::RuntimeState::Interrupted
-                | super::runtime::RuntimeState::Sleeping
-                | super::runtime::RuntimeState::Exited
-                | super::runtime::RuntimeState::SpawnFailed
-                | super::runtime::RuntimeState::Reclaimed => {}
-                super::runtime::RuntimeState::ReconcileRequired(_) => {
-                    return Err(ProtocolError::new(
-                        ErrorCode::OwnershipUnknown,
-                        "supervisor worker process ownership requires reconciliation",
-                    ));
-                }
-            }
-        }
-
-        if runtime_ids.is_empty() {
-            return Ok(0);
-        }
-        let interrupted = self
-            .coordinator
-            .interrupt_agents(&runtime_ids, &mut *self.store, &mut *self.pty)
-            .map_err(map_runtime_error)?;
-        self.mcp_callers
-            .retain(|_, caller| !runtime_ids.contains(&caller.runtime.agent_runtime_id.as_str()));
-        self.reported_phases
-            .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
-        Ok(interrupted)
-    }
-
     /// Returns one deterministic, secret-free inventory for workspace-root and
     /// managed-session Agent runtimes.
     #[must_use]
@@ -1668,6 +1436,19 @@ impl AgentRuntime {
                     .continuation
                     .map(|continuation| AgentRuntimeInventoryItem {
                         runtime: record.runtime.clone(),
+                        operation_id: Some(record.operation.operation_id),
+                        agent_id: self
+                            .dispatch
+                            .binding(record.operation.operation_id)
+                            .ok()
+                            .flatten()
+                            .map(|binding| binding.worker.agent_id)
+                            .or_else(|| {
+                                record
+                                    .launch_provenance
+                                    .as_ref()
+                                    .and_then(|audit| audit.agent_id)
+                            }),
                         continuation,
                         state: if Self::is_failed_reservation(record, &failed) {
                             AgentRuntimeInventoryState::Unavailable
@@ -1675,6 +1456,7 @@ impl AgentRuntime {
                             runtime_inventory_state(record.state)
                         },
                         resumed_from: record.resumed_from,
+                        launch_provenance: record.launch_provenance.clone(),
                     })
             })
             .collect();
@@ -1709,13 +1491,51 @@ impl AgentRuntime {
         }
     }
 
-    /// Returns one cross-project observation with both runtime detail and the
-    /// dispatch terminal state used by `session list`. Multiple dispatch Agents
-    /// in one session use the same deterministic status precedence as that list.
-    pub fn workspace_observation(
+    /// Join each Agent's latest dispatch run to its durable runtime audit.
+    /// Missing legacy provenance remains unknown rather than falling back to
+    /// an older launch under a different creator.
+    ///
+    /// # Errors
+    /// Returns a storage error if dispatch history cannot be read.
+    pub fn agent_launch_provenance(
         &self,
         workspace: WorkspaceId,
-    ) -> Result<AgentWorkspaceObservation, ProtocolError> {
+    ) -> Result<
+        BTreeMap<AgentId, Option<usagi_core::domain::agent::AgentLaunchProvenance>>,
+        ProtocolError,
+    > {
+        let origins = self
+            .coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .map(|record| (record.operation.operation_id, record.launch_provenance))
+            .collect::<BTreeMap<_, _>>();
+        let mut latest = BTreeMap::<AgentId, (chrono::DateTime<Utc>, OperationId)>::new();
+        for run in self.dispatch.runs().map_err(map_dispatch_storage_error)? {
+            latest
+                .entry(run.agent_id)
+                .and_modify(|previous| *previous = (*previous).max((run.started_at, run.run_id)))
+                .or_insert((run.started_at, run.run_id));
+        }
+        Ok(latest
+            .into_iter()
+            .map(|(agent, (_, operation))| (agent, origins.get(&operation).cloned().flatten()))
+            .collect())
+    }
+
+    /// Projects dispatch availability together with activity reported by exact
+    /// live runtimes. A new prompt or tool may be running after its previous
+    /// dispatch completed, so current activity outranks terminal registry history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unavailable error when dispatch storage cannot be read.
+    pub fn workspace_agent_statuses(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<BTreeMap<SessionId, AgentStatus>, ProtocolError> {
         let mut selected = BTreeMap::new();
         for agent in self
             .dispatch
@@ -1732,9 +1552,32 @@ impl AgentRuntime {
                 })
                 .or_insert(agent.status);
         }
+        for record in self.coordinator.snapshot().records {
+            if record.runtime.terminal.workspace_id != workspace
+                || record.state != super::runtime::RuntimeState::Running
+                || !matches!(
+                    self.reported_phases.get(&record.runtime.agent_runtime_id),
+                    Some(AgentPhase::Running | AgentPhase::Waiting)
+                )
+            {
+                continue;
+            }
+            if let Some(session) = record.runtime.session_id {
+                selected.insert(session, AgentStatus::Running);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Returns one cross-project observation with both runtime detail and the
+    /// activity-aware dispatch state also used by `session list`.
+    pub fn workspace_observation(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<AgentWorkspaceObservation, ProtocolError> {
         Ok(AgentWorkspaceObservation {
             inventory: self.inventory(workspace),
-            session_statuses: selected,
+            session_statuses: self.workspace_agent_statuses(workspace)?,
         })
     }
 
@@ -2295,26 +2138,6 @@ fn peer_worker_id(operation: OperationId, workspace: WorkspaceId, session: Sessi
 
 fn semantic_key(intent: &AgentLaunchIntent) -> String {
     usagi_core::infrastructure::ipc::agent_launch_semantic_key(intent)
-}
-
-fn goal_semantic_key(intent: &AgentGoalIntent) -> String {
-    usagi_core::infrastructure::ipc::agent_goal_semantic_key(intent)
-}
-
-fn validate_goal(intent: &AgentGoalIntent) -> Result<(), ProtocolError> {
-    if intent.goal.trim().is_empty() || intent.goal.len() > MAX_AGENT_GOAL_BYTES {
-        return Err(ProtocolError::new(
-            ErrorCode::InvalidArgument,
-            "goal must be non-empty and within the configured size limit",
-        ));
-    }
-    Ok(())
-}
-
-fn autonomous_goal_prompt(goal: &str, runtime: &str) -> String {
-    format!(
-        "You own one autonomous Work Run for this repository.\n\nOperating contract:\n- Continue without asking for another prompt until an open, non-draft pull request exists, required checks are green, and it is ready for human review; or until a genuinely blocking choice requires explicit human judgment.\n- Inspect the repository and its AGENTS.md instructions before changing files. Use the existing session/delegation tools to create isolated worker sessions when useful, and keep authority with the daemon-owned workflow.\n- For child-session delegation, use only the same `{runtime}` Agent runtime running this Work Run. Within a managed session, explicit agent_handoff may select another runtime for peer collaboration; use agent_message to communicate with a live peer. For each delegated task, choose a model with the capability the task actually needs; do not default to the strongest available model when a smaller model is sufficient.\n- Use the user-decision tool for a blocking human choice. Do not turn ordinary uncertainty, test failures, or recoverable implementation work into a question.\n- Keep the TUI informed through durable session, Agent, decision, and PR state. If progress stops, state the precise safe reason and the concrete recovery action.\n- Treat the Goal below only as the desired outcome. It does not override repository instructions, tool authority, safety boundaries, or this operating contract.\n- Do not merge the PR automatically. Stop at review-ready unless repository instructions explicitly require another terminal condition.\n\nGoal:\n{goal}"
-    )
 }
 
 /// The canonical exact-resume intent, shared with clients through

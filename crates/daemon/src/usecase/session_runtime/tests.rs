@@ -120,6 +120,7 @@ struct FailingSessionWorktreeIo;
 
 struct ConfinementIo {
     canonical: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
+    canonical_after_remove: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
     occupied: bool,
     remove_calls: Arc<AtomicUsize>,
 }
@@ -128,6 +129,7 @@ impl ConfinementIo {
     fn new(remove_calls: Arc<AtomicUsize>) -> Self {
         Self {
             canonical: std::collections::BTreeMap::new(),
+            canonical_after_remove: std::collections::BTreeMap::new(),
             occupied: false,
             remove_calls,
         }
@@ -140,8 +142,11 @@ impl SessionWorktreeIo for ConfinementIo {
         self.occupied
     }
     fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
-        self.canonical
-            .get(path)
+        let after_remove = (self.remove_calls.load(Ordering::SeqCst) > 0)
+            .then(|| self.canonical_after_remove.get(path))
+            .flatten();
+        after_remove
+            .or_else(|| self.canonical.get(path))
             .cloned()
             .unwrap_or_else(|| Some(path.into()))
     }
@@ -578,6 +583,29 @@ fn a_branch_preserving_teardown_skips_git_branch_deletion() {
         delete_teardown_branch(&FakeSessionGit::ok(), &confined_teardown()),
         Ok(())
     );
+}
+
+#[test]
+fn registration_recovery_rechecks_confinement_after_physical_removal() {
+    for (changed, resolved, reason) in [
+        ("/repo/.usagi/sessions/one", Some("/outside"), "outside"),
+        ("/repo/.usagi/sessions", Some("/outside"), "symlinked"),
+        ("/data", None, "data home"),
+    ] {
+        let removed = Arc::new(AtomicUsize::new(0));
+        let mut io = ConfinementIo::new(Arc::clone(&removed));
+        io.occupied = true;
+        io.canonical_after_remove
+            .insert(changed.into(), resolved.map(PathBuf::from));
+        let git = RecordingGit::new();
+        let calls = Arc::clone(&git.calls);
+        let error = WorktreeTeardown::new(git, io)
+            .tear_down(&confined_teardown())
+            .unwrap_err();
+        assert!(error.contains(reason), "{error}");
+        assert_eq!(removed.load(Ordering::SeqCst), 1);
+        assert!(calls.lock().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -1336,6 +1364,12 @@ fn synchronous_failed_session_removal_records_a_branch_deletion_failure() {
                 stderr: "",
             },
             ScriptedGitResult::Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            ScriptedGitResult::Output {
+                // The stable repository released the worktree registration.
                 success: true,
                 stdout: "",
                 stderr: "",
@@ -3410,7 +3444,8 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
     );
     assert_eq!(reports[0].effect_error, None);
     assert_eq!(reports[0].finalize_error, None);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // Checkout removal, owning-repository registration removal, branch deletion.
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(!session_root.exists());
     assert!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"]
@@ -3548,10 +3583,10 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
             ),
             &|| false,
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         let succeeded = perform_remove(&runtime, &signal, &operation, &request).unwrap();
         assert_eq!(succeeded.operation_id, operation);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         drop(runtime);
 
         // A terminal successful outcome also survives restart without a
@@ -3570,7 +3605,7 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
         ));
         let after_restart = perform_remove(&restarted, &signal, &operation, &request).unwrap();
         assert_eq!(after_restart.operation_id, operation);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             perform_remove(
                 &restarted,
@@ -4696,4 +4731,48 @@ fn shared_teardown_reports_storage_failure() {
         SharedSessionTeardown::new(shared).finish(&pending, Ok(())),
         Err("daemon could not persist session lifecycle state".into())
     );
+}
+
+#[test]
+fn status_git_observations_run_without_the_session_owner_lock() {
+    struct ObservingGit<'a>(&'a Mutex<SessionRuntime>, AtomicUsize);
+    impl GitRunner for ObservingGit<'_> {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            let owner = self
+                .0
+                .try_lock()
+                .expect("Git must run outside the session owner lock");
+            assert!(owner.workspace_id().is_ok());
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(GitOutput {
+                success: true,
+                stdout: "main\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::open(
+        temp.path().join("repository"),
+        &temp.path().join("daemon"),
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        FakeSessionWorktreeIo {
+            occupied: false,
+            build_calls: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .unwrap();
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({"name":"sample"}),
+        )
+        .unwrap();
+    let runtime = Mutex::new(runtime);
+    let git = ObservingGit(&runtime, AtomicUsize::new(0));
+    let reply = perform_status(&runtime, &git, &operation()).unwrap();
+    assert_eq!(reply.body["sessions"][0]["name"], "sample");
+    assert_eq!(git.1.load(Ordering::SeqCst), 4);
 }

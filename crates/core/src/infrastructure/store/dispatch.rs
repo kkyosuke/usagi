@@ -27,7 +27,6 @@ use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 use crate::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
 mod messages;
-pub mod workflows;
 
 const REGISTRY_FILE: &str = "dispatch.json";
 const WORKSPACE_REGISTRY_FILE: &str = "dispatch-workspaces.json";
@@ -1475,16 +1474,6 @@ impl DispatchStore {
             .find(|binding| binding.run_id == run_id))
     }
 
-    /// Returns the retained caller-to-worker lineage used for organization
-    /// policy and read-only projections.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the dispatch registry cannot be read.
-    pub fn bindings(&self) -> Result<Vec<DispatchBinding>> {
-        Ok(self.load_registry()?.bindings)
-    }
-
     /// Appends a report to the caller's durable inbox.
     ///
     /// # Errors
@@ -2779,7 +2768,7 @@ mod tests {
             .record_session_parent(workspace, child_session, Some(parent_session))
             .unwrap();
         store.upsert_binding(binding.clone()).unwrap();
-        assert_eq!(store.bindings().unwrap(), vec![binding]);
+        assert_eq!(store.binding(active_run).unwrap(), Some(binding));
         assert_eq!(
             store.reserve_delegation(&caller, active_run, 2).unwrap(),
             DelegationReservationOutcome::AlreadyAdmitted
