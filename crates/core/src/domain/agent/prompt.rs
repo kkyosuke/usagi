@@ -30,7 +30,7 @@ pub enum PromptScope {
 
 const ROOT_SCOPE: &str = "<context>\nあなたは usagi が管理するワークスペースの root ディレクトリ（統括環境）で起動されています。\n</context>\n<instructions>\n受け取った指示をもとに、どのようなタスクを各セッションに実行させるべきかを判別してください。\n</instructions>";
 
-const SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
+const SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n調査結果・設計書・画像・HTML・検証レポートなどの生成物は、この worktree の outputs/ に保存してください。ディレクトリがなければ作成し、outputs/.gitignore に * を記載して Git 追跡から除外してください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
 
 const TOOLS_OPEN: &str = "<tools>\ntool 名と引数は tools/list のスキーマが正本です。";
 const TOOLS_CLOSE: &str = "</tools>";
@@ -105,7 +105,7 @@ mod tests {
 
     /// Stable session boundary. Tool availability lives in the separate tools
     /// fragment so this text names no concrete tool.
-    const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n</instructions>";
+    const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n調査結果・設計書・画像・HTML・検証レポートなどの生成物は、この worktree の outputs/ に保存してください。ディレクトリがなければ作成し、outputs/.gitignore に * を記載して Git 追跡から除外してください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
 
     const ALL: McpToolFamilies = McpToolFamilies {
         issue: true,

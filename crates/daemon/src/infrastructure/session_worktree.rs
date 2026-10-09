@@ -88,7 +88,9 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            return add_worktree(git, workspace_root, destination, branch, base_ref);
+            add_worktree(git, workspace_root, destination, branch, base_ref)?;
+            usagi_core::infrastructure::outputs::prepare(destination)?;
+            return Ok(());
         }
         std::fs::create_dir_all(destination)?;
         let mut created = Vec::new();
@@ -124,6 +126,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
                 cleanup.join("; ")
             ));
         }
+        usagi_core::infrastructure::outputs::prepare(destination)?;
         Ok(())
     }
 
@@ -149,6 +152,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         session_root: &Path,
         force: bool,
     ) -> anyhow::Result<()> {
+        usagi_core::infrastructure::outputs::archive(session_root)?;
         let mut worktrees = Vec::new();
         collect_session_worktrees(self, session_root, &mut worktrees)?;
         worktrees.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
@@ -291,7 +295,7 @@ fn collect_session_worktrees(
 }
 
 fn skipped_entry(name: &OsStr) -> bool {
-    name == OsStr::new(".git") || name == OsStr::new(STATE_DIR)
+    name == OsStr::new(".git") || name == OsStr::new(STATE_DIR) || name == OsStr::new("outputs")
 }
 
 #[cfg(test)]
@@ -452,5 +456,69 @@ mod tests {
                 .to_string()
                 .contains("exit status: 7")
         );
+    }
+    #[test]
+    fn outputs_are_created_ignored_and_preserved_before_real_worktree_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        ] {
+            assert!(SystemGit.run(root, &args).unwrap().success);
+        }
+        let session = root.join(".usagi/sessions/test");
+        SystemSessionWorktreeIo
+            .build_session_tree(&SystemGit, root, &session, "usagi/test", None)
+            .unwrap();
+        assert!(session.join("outputs/.gitignore").is_file());
+        std::fs::write(session.join("outputs/report.md"), "retained result").unwrap();
+        assert!(
+            SystemGit
+                .run(&session, &["status", "--porcelain"])
+                .unwrap()
+                .stdout
+                .trim()
+                .is_empty()
+        );
+        SystemSessionWorktreeIo
+            .remove_session_tree(&SystemGit, &session, false)
+            .unwrap();
+        assert!(!session.exists());
+        let files = usagi_core::infrastructure::outputs::list(root, true).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join(&files[0])).unwrap(),
+            "retained result"
+        );
+        // Idempotent teardown after the worktree has already gone.
+        SystemSessionWorktreeIo
+            .remove_session_tree(&SystemGit, &session, false)
+            .unwrap();
+    }
+
+    #[test]
+    fn outputs_archive_failure_stops_worktree_removal_even_when_forced() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join(".usagi/sessions/test");
+        std::fs::create_dir_all(&session).unwrap();
+        usagi_core::infrastructure::outputs::prepare(&session).unwrap();
+        std::fs::write(session.join("outputs/report.md"), "keep").unwrap();
+        std::os::unix::fs::symlink(temp.path(), session.join("outputs/link")).unwrap();
+        assert!(
+            SystemSessionWorktreeIo
+                .remove_session_tree(&SystemGit, &session, true)
+                .is_err()
+        );
+        assert!(session.join("outputs/report.md").exists());
     }
 }

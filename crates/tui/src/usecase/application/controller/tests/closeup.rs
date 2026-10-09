@@ -984,3 +984,100 @@ fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
     assert_eq!(state.overlay(), None);
     assert!(state.preview_overlay().is_none());
 }
+
+#[test]
+fn outputs_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    for (arguments, target, filter) in [
+        (
+            "outputs",
+            Target::Session(session),
+            PreviewFileFilter::Outputs,
+        ),
+        (
+            "outputs all",
+            Target::Root(workspace),
+            PreviewFileFilter::AllOutputs,
+        ),
+    ] {
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup(arguments.to_owned())),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        let request_id = overlay.request_id();
+        assert_eq!(
+            effects,
+            vec![Effect::LoadPreview {
+                target,
+                request_id,
+                path: None,
+                filter
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        let path = if filter == PreviewFileFilter::Outputs {
+            "outputs/report.md"
+        } else {
+            ".usagi/sessions/one/outputs/report.md"
+        }
+        .to_owned();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter,
+                files: vec![path.clone()],
+                changed: vec![],
+                lines: vec![],
+            }),
+        );
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Tab)),
+            vec![Effect::OpenOutput {
+                target,
+                path: path.clone(),
+                filter
+            }]
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Tab)),
+            vec![Effect::OpenOutput {
+                target,
+                path,
+                filter
+            }]
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        for key in [AppKey::Left, AppKey::Right] {
+            let _ = update(&mut state, AppEvent::Key(key));
+            assert_eq!(state.preview_overlay().unwrap().file_filter(), filter);
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    }
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::SubmitOverview("outputs".to_owned())),
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::LoadPreview { target: Target::Root(id), filter: PreviewFileFilter::AllOutputs, .. }] if *id == workspace)
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+    assert!(
+        update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("outputs bad".to_owned()))
+        )
+        .is_empty()
+    );
+    assert_eq!(state.notice().unwrap().message, "usage: outputs [all]");
+}

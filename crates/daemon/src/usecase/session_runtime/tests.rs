@@ -414,8 +414,18 @@ impl GitRunner for WorkspaceExistsGit {
         })
     }
 }
+// Successful fake checkout must materialize the directory: the real IO adapter
+// now prepares outputs in the worktree before reporting creation complete.
+fn materialize_fake_worktree(args: &[&str], success: bool) -> anyhow::Result<()> {
+    if success && let ["worktree", "add", "--no-checkout", "--", destination, _] = args {
+        std::fs::create_dir_all(destination)?;
+    }
+    Ok(())
+}
+
 impl GitRunner for FakeSessionGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, self.0)?;
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
         }
@@ -458,11 +468,14 @@ impl GitRunner for ScriptedGit {
                 success,
                 stdout,
                 stderr,
-            } => Ok(GitOutput {
-                success,
-                stdout: stdout.into(),
-                stderr: stderr.into(),
-            }),
+            } => {
+                materialize_fake_worktree(args, success)?;
+                Ok(GitOutput {
+                    success,
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
+                })
+            }
             ScriptedGitResult::Error => Err(anyhow::anyhow!("injected Git IO failure")),
         }
     }
@@ -492,6 +505,7 @@ impl RecordingGit {
 }
 impl GitRunner for RecordingGit {
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, true)?;
         self.calls.lock().unwrap().push((
             repo.into(),
             args.iter().map(|arg| (*arg).to_owned()).collect(),
@@ -505,6 +519,7 @@ impl GitRunner for RecordingGit {
 }
 impl GitRunner for CountingGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, true)?;
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
@@ -518,6 +533,7 @@ impl GitRunner for CountingGit {
 }
 impl GitRunner for OutcomeGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, self.succeeds)?;
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
@@ -2580,6 +2596,7 @@ struct LockProbeGit {
 }
 impl GitRunner for LockProbeGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, true)?;
         let runtime = self.runtime.upgrade().expect("runtime remains alive");
         self.observed_unlocked.store(
             runtime.try_lock().is_ok(),

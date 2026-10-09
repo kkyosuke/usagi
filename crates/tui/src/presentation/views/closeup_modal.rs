@@ -477,17 +477,25 @@ fn body(state: &CloseupModal) -> Vec<String> {
     if state.error.is_some() {
         lines.push(error_row(state));
     }
+    let mut rows = Vec::new();
+    let mut cursor = 0;
     for (i, action) in state.matches().iter().enumerate() {
-        lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
+        if i == state.selected {
+            cursor = rows.len();
+        }
+        rows.push(action_row(*action, i == state.selected, INNER_WIDTH));
         if state.expanded && i == state.selected {
+            cursor += 1 + state.selected_subcommand;
             for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                lines.push(modal::subcommand_row(
+                rows.push(modal::subcommand_row(
                     &subcommand.label,
                     sub_index == state.selected_subcommand,
                 ));
             }
         }
     }
+    let capacity = BODY_HEIGHT.saturating_sub(lines.len() + 1 + usize::from(state.error.is_none()));
+    lines.extend(modal::bounded_list_rows(&rows, cursor, capacity));
     if state.error.is_none() {
         lines.push(String::new());
     }
@@ -834,10 +842,10 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 6);
+        assert_eq!(modal.actions().len(), 7);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
-        assert!(joined(&modal).contains("workflow"));
+        assert!(joined(&modal).contains("outputs"));
         assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
         assert!(format!("{modal:?}").contains("tui"));
@@ -850,8 +858,10 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (workflow)
-        assert_eq!(modal.selected(), 5);
+        assert_eq!(modal.selected(), 6);
         assert_eq!(modal.selected_action().name, "workflow");
+        assert!(joined(&modal).contains("workflow"));
+        assert!(joined(&modal).contains("Enter: run"));
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();
@@ -1005,7 +1015,7 @@ mod tests {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Closeup: daemon")); // タイトル
         assert!(text.contains("Run a command:"));
-        assert!(text.contains("terminal"));
+        assert!(text.contains("outputs"));
         assert!(text.contains("Launch or attach"));
         assert!(text.contains("close"));
         assert!(text.contains("Enter: run"));

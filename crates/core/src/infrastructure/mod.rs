@@ -28,6 +28,7 @@ pub mod error_log;
 pub mod git;
 pub mod gitignore;
 pub mod ipc;
+pub mod outputs;
 pub mod owner_routing;
 pub mod paths;
 pub mod persistence;

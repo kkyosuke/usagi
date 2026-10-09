@@ -235,6 +235,7 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
                 .ok_or_else(|| io::Error::other("worktree has no canonical session name"))?;
             ensure_unlinked(root, name)?;
             ensure_managed_worktree(&SystemGit, root, path, name)?;
+            usagi_core::infrastructure::outputs::archive(path)?;
             remove_worktree(&SystemGit, root, path, force).map_err(io::Error::other)
         }
         CleanCandidate::Branch { root, name, .. } => {

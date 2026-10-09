@@ -24,6 +24,7 @@ pub struct CommandInfo {
 /// `arguments` は前後の空白だけを除いた未解釈文字列で、文法の検証は各ハンドラに委ねる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Outputs { arguments: String },
     Clean { arguments: String },
     Config { arguments: String },
     Daemon { arguments: String },
@@ -136,6 +137,15 @@ const DEFINITIONS: &[CommandDefinition] = &[
             long_description: "List issues or inspect an issue, dependency graph, or gantt view.",
         },
         factory: |arguments| Command::Issue { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
+            name: "outputs",
+            description: "Browse generated files and retained artifacts",
+            usage: "outputs [all]",
+            long_description: "Browse outputs from all sessions, including retained archives.",
+        },
+        factory: |arguments| Command::Outputs { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -337,6 +347,7 @@ impl Command {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::Outputs { .. } => "outputs",
             Self::Clean { .. } => "clean",
             Self::Config { .. } => "config",
             Self::Daemon { .. } => "daemon",
@@ -418,7 +429,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "clean", "config", "daemon", "env", "garden", "issue", "outputs", "roles",
+                "session"
             ]
         );
         assert!(
@@ -452,6 +464,9 @@ mod tests {
                 Command::Issue {
                     arguments: String::new()
                 },
+                Command::Outputs {
+                    arguments: String::new()
+                },
                 Command::Roles {
                     arguments: String::new()
                 },
@@ -461,7 +476,8 @@ mod tests {
             ]
             .map(|command| command.name()),
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "clean", "config", "daemon", "env", "garden", "issue", "outputs", "roles",
+                "session"
             ]
         );
     }

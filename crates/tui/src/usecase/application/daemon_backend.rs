@@ -332,6 +332,16 @@ pub trait OverlayPort {
     );
     /// Fence out pending and in-flight preview results when the overlay closes.
     fn cancel_preview(&mut self) {}
+    /// Open a generated artifact after validating its scope.
+    fn open_output(
+        &mut self,
+        _target: Target,
+        _path: String,
+        _filter: PreviewFileFilter,
+        completions: Completions,
+    ) {
+        unavailable(&completions, "output viewer is unavailable");
+    }
     /// Open one already-selected Pull Request URL in the browser.
     fn open_pull_request(&mut self, url: String, completions: Completions);
     /// Copy one selected canonical URL.
@@ -640,6 +650,13 @@ impl DaemonBackend {
                     .load_preview(target, request_id, path, filter, self.completions());
             }
             Effect::CancelPreview => self.overlay.cancel_preview(),
+            Effect::OpenOutput {
+                target,
+                path,
+                filter,
+            } => self
+                .overlay
+                .open_output(target, path, filter, self.completions()),
             Effect::OpenPullRequest { url } => {
                 self.overlay.open_pull_request(url, self.completions());
             }
@@ -1606,5 +1623,21 @@ mod tests {
         };
         assert_eq!(open.clone(), open);
         assert!(format!("{open:?}").contains("OpenTerminalRequest"));
+    }
+    #[test]
+    fn outputs_external_open_reports_an_unavailable_adapter() {
+        let mut backend = backend();
+        assert_eq!(
+            backend.dispatch(Effect::OpenOutput {
+                target: Target::Session(SessionId::new()),
+                path: "outputs/report.pdf".to_owned(),
+                filter: PreviewFileFilter::Outputs,
+            }),
+            Flow::Continue
+        );
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::Notice(_))]
+        ));
     }
 }

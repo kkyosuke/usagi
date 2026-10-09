@@ -21,6 +21,7 @@ pub struct CommandInfo {
 /// `arguments` は前後の空白だけを除いた未解釈文字列で、文法の検証は各ハンドラに委ねる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Outputs { arguments: String },
     Agent { arguments: String },
     Close { arguments: String },
     Diff { arguments: String },
@@ -74,6 +75,14 @@ const DEFINITIONS: &[CommandDefinition] = &[
     },
     CommandDefinition {
         info: CommandInfo {
+            name: "outputs",
+            description: "Browse generated files and retained artifacts",
+            usage: "outputs [all]",
+        },
+        factory: |arguments| Command::Outputs { arguments },
+    },
+    CommandDefinition {
+        info: CommandInfo {
             name: "terminal",
             description: "Open a terminal in the selected session",
             usage: "terminal [open|new]",
@@ -101,6 +110,7 @@ impl Command {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::Outputs { .. } => "outputs",
             Self::Agent { .. } => "agent",
             Self::Close { .. } => "close",
             Self::Diff { .. } => "diff",
@@ -167,7 +177,9 @@ mod tests {
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
         assert_eq!(
             names,
-            ["agent", "close", "diff", "env", "terminal", "workflow"]
+            [
+                "agent", "close", "diff", "env", "outputs", "terminal", "workflow"
+            ]
         );
         assert!(
             definitions

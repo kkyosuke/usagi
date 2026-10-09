@@ -93,7 +93,26 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 | path | 種別 | 用途 |
 |---|---|---|
 | `sessions/<name>` | directory | session worktree（または mirror した session tree） |
+| `outputs/<name>/<snapshot-id>` | directory | session 削除前に保管した生成物 |
 | `daemon/daemon.lock` | lock file | workspace 単位の単一 daemon fence。owner の pid を 1 行持つ。この `daemon/` だけが daemon-private（`0700`） |
+
+### session outputs と削除前の保管
+
+生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `outputs/` を用意する。
+新規の `outputs/.gitignore` には `*` を書き、生成物を Git の未追跡差分から除外する。既存の ignore file は上書きしない。
+Agent の起動指示は調査結果・設計書・画像・HTML・検証レポートをこの場所へ保存するよう案内する。
+旧 session でディレクトリが無い場合は Agent が作成する。コードとして管理するファイルは従来どおり Git / PR に載せる。
+
+session の削除と orphan worktree の cleanup は、Git / filesystem の削除より前に生成物を
+`.usagi/outputs/<name>/<snapshot-id>/` へコピーする。snapshot ID は毎回新しい UUID で、同名 session の再作成や
+削除の再試行でも既存の成果物を上書きしない。空の出力は保管しない。コピー元は変更しないため、削除が失敗した場合も
+作業中の成果物が残る。再試行時には別の snapshot が作られることがある。
+
+コピーは `.partial-<id>` へ行い、ファイルとディレクトリを同期してから公開名へ rename する。
+保管失敗時は force 指定でも session tree を削除しない。symlink と特殊ファイルは追跡せず保管を拒否する。
+走査は各出力で 20,000 entries・64 階層までとし、上限超過も削除を止める。
+保管済み生成物には session 削除や orphan cleanup による自動削除を適用しない。
+閲覧入口は [TUI の Outputs](03-tui.md#outputs) を参照する。
 
 ### session 作成後の setup command
 

@@ -1076,8 +1076,9 @@ Overview palette の Tab は選択中のトップレベル command を補完す�
 
 Config の `Modal mode` は Overview と Closeup の command surface に共通して適用される。`Action` は
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
-command の subcommand picker を開き、`←` は閉じる。`Prompt` は入力した command line を Enter で解釈・実行する。
+command の subcommand picker を開き、`←` は閉じる。Closeup の候補は選択位置に追従してスクロールし、footer を残す。`Prompt` は入力した command line を Enter で解釈・実行する。
 `config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Workflow / Team / Issue / Memory の overlay modal で開く。
+`outputs` は [全 session の生成物一覧](#outputs)を開く。
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
@@ -1634,6 +1635,28 @@ control / bidi control は無害化する。`/` は大文字小文字を区別�
 初期値は off である。
 検索入力中の `Enter` / `Esc` は query を保持して入力を終える。通常の本文で `Esc` を押すと候補、fuzzy filter、
 file scope、行番号 / 折り返し設定を保持した finder へ戻り、finder の `Esc` は overlay を閉じる。
+
+### Outputs
+
+生成物の閲覧操作はこの節を正本とする。保存・保管の契約は
+[daemon の session outputs](05-daemon.md#session-outputs-と削除前の保管)を参照する。
+
+| 入口 | 表示対象 |
+|---|---|
+| Closeup の `outputs` | 選択中 session の生成物 |
+| Closeup の `outputs all` | workspace 内の全 session と保管済み生成物 |
+| Overview の `outputs` / `outputs all` | workspace 内の全 session と保管済み生成物 |
+
+一覧は File Preview と同じ検索・選択・本文プレビューを使う。session 名を含む相対 path が表示されるため、
+同名のファイルも区別できる。文字入力で path を絞り、↑↓ で選び、Enter でテキストを読む。
+Tab は選択ファイルを OS の関連付けアプリで開く。対象は txt / md / csv / json / html / htm / pdf /
+png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bundle は渡さない。
+本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には `outputs/` への保存案内を表示する。
+
+Git の tracked / changed / ignore 判定を使わず、`outputs/` のファイルを列挙する。横断一覧は
+`.usagi/sessions/<name>/outputs/` と `.usagi/outputs/<name>/<snapshot-id>/` を対象とし、作成途中の保管先は表示しない。
+ファイル一覧は開き直すと更新される。パス逸脱・symlink・特殊ファイルは拒否し、読み込み失敗は一覧内に表示する。
+テキストのサイズ上限・UTF-8 判定・制御文字の無害化は File Preview と共通である。
 
 ## Sidebar mascot
 
