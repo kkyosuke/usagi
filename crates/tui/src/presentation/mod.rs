@@ -2278,6 +2278,7 @@ struct WorkspaceHelpState {
     deck: WorkspaceDeckHelp,
     overlay: Option<Overlay>,
     decision_answer_open: bool,
+    artifacts_open: bool,
     director_new_open: bool,
     director_route: DirectorRoute,
     drawer_focus: Option<WorkspaceDrawerFocus>,
@@ -2306,6 +2307,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::CleanupQueue => KeyHelpContext::CleanupQueue,
             Overlay::RemoveSessions => KeyHelpContext::RemoveSessions,
             Overlay::Prs => KeyHelpContext::PullRequests,
+            Overlay::Preview if state.artifacts_open => KeyHelpContext::Artifacts,
             Overlay::Preview => KeyHelpContext::Preview,
             Overlay::CreateSessionError => KeyHelpContext::CreateSessionError,
             Overlay::TerminalLaunchError => KeyHelpContext::TerminalLaunchError,
@@ -2341,6 +2343,9 @@ fn workspace_help_context(deck: &WorkspaceDeck, runtime: &WorkspaceRuntime) -> K
     resolve_workspace_help_context(WorkspaceHelpState {
         deck: WorkspaceDeckHelp::new(deck.add_overlay_open(), deck.overlay_open()),
         overlay: state.overlay(),
+        artifacts_open: state
+            .preview_overlay()
+            .is_some_and(|overlay| overlay.file_filter().is_artifacts()),
         decision_answer_open: state
             .decision_overlay()
             .and_then(DecisionOverlayState::editor)

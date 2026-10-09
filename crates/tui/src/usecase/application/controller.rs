@@ -2783,6 +2783,12 @@ pub enum Effect {
     },
     /// Discard pending and in-flight preview work after leaving the overlay.
     CancelPreview,
+    /// Open a selected generated artifact using the platform viewer.
+    OpenArtifact {
+        target: Target,
+        path: String,
+        filter: PreviewFileFilter,
+    },
     /// Open one already-selected Pull Request URL through the browser opener.
     /// URL validation stays with the executor; the reducer forwards the raw URL.
     OpenPullRequest {
@@ -5028,6 +5034,40 @@ fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect>
     vec![Effect::LoadEnvironment { scope }]
 }
 
+fn open_workspace_artifacts(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+    let target = Target::Root(state.workspace);
+    open_artifacts(state, target, arguments)
+}
+
+fn open_artifacts(state: &mut AppState, target: Target, arguments: &str) -> Vec<Effect> {
+    let target = match arguments.trim() {
+        "" => target,
+        "all" => Target::Root(state.workspace),
+        _ => {
+            state.notice = Some(Notice::new("usage: artifact [all]"));
+            return Vec::new();
+        }
+    };
+    let filter = match target {
+        Target::Root(_) => PreviewFileFilter::AllArtifacts,
+        Target::Session(_) => PreviewFileFilter::Artifacts,
+    };
+    let mut overlay = PreviewOverlay::loading(target, Vec::new());
+    overlay.file_filter = filter;
+    let request_id = overlay.request_id();
+    state.closeup_action_forced = false;
+    state.overlay = Some(Overlay::Preview);
+    state.preview_overlay = Some(overlay);
+    state.pr_overlay = None;
+    state.notice = None;
+    vec![Effect::LoadPreview {
+        target,
+        request_id,
+        path: None,
+        filter,
+    }]
+}
+
 fn open_preview(state: &mut AppState) -> Vec<Effect> {
     let Some(target) = state.file_preview_target() else {
         return Vec::new();
@@ -5050,19 +5090,10 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         return Vec::new();
     }
     match overview::interpret(input) {
-        Ok(overview::Command::Config { arguments }) => {
-            if arguments.trim().is_empty() {
-                state.overlay = None;
-                state.notice = None;
-                vec![Effect::WorkspaceCommand {
-                    workspace: state.workspace,
-                    command: overview::Command::Config { arguments },
-                }]
-            } else {
-                state.notice = Some(Notice::new("config takes no arguments (usage: config)"));
-                Vec::new()
-            }
+        Ok(overview::Command::Artifacts { arguments }) => {
+            open_workspace_artifacts(state, &arguments)
         }
+        Ok(overview::Command::Config { arguments }) => submit_overview_config(state, arguments),
         Ok(overview::Command::Daemon { arguments }) => {
             if arguments.trim().is_empty() {
                 state.overlay = Some(Overlay::Daemon);
@@ -5145,6 +5176,20 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(error.to_string()));
             Vec::new()
         }
+    }
+}
+
+fn submit_overview_config(state: &mut AppState, arguments: String) -> Vec<Effect> {
+    if arguments.trim().is_empty() {
+        state.overlay = None;
+        state.notice = None;
+        vec![Effect::WorkspaceCommand {
+            workspace: state.workspace,
+            command: overview::Command::Config { arguments },
+        }]
+    } else {
+        state.notice = Some(Notice::new("config takes no arguments (usage: config)"));
+        Vec::new()
     }
 }
 
@@ -5367,6 +5412,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                 state.notice = Some(Notice::new("invalid close arguments"));
                 None
             }
+        }
+        closeup::Command::Artifacts { arguments } => {
+            return open_artifacts(state, active_target, &arguments);
         }
         closeup::Command::Diff { .. } => {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));

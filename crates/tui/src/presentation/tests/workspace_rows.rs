@@ -1068,6 +1068,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         deck: WorkspaceDeckHelp::None,
         overlay: None,
         decision_answer_open: false,
+        artifacts_open: false,
         director_new_open: false,
         director_route: DirectorRoute::Organization,
         drawer_focus: None,
@@ -1150,6 +1151,14 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
     }
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
+            overlay: Some(Overlay::Preview),
+            artifacts_open: true,
+            ..base
+        }),
+        HelpContext::Artifacts
+    );
+    assert_eq!(
+        resolve_workspace_help_context(WorkspaceHelpState {
             overlay: Some(Overlay::Decisions),
             decision_answer_open: true,
             ..base
@@ -1212,6 +1221,27 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
             ..base
         }),
         HelpContext::LiveTerminal
+    );
+}
+
+#[test]
+fn workspace_help_follows_artifact_and_repository_preview_surfaces() {
+    use crate::presentation::{KeyHelpContext, workspace_help_context};
+
+    let snapshot = snapshot("artifacts");
+    let deck = WorkspaceDeck::new(&snapshot);
+    let mut runtime = WorkspaceRuntime::new(snapshot.workspace_id, snapshot.session_ids);
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPreview));
+    assert_eq!(
+        workspace_help_context(&deck, &runtime),
+        KeyHelpContext::Preview
+    );
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenOverview));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::SubmitOverview("artifact".into())));
+    assert_eq!(
+        workspace_help_context(&deck, &runtime),
+        KeyHelpContext::Artifacts
     );
 }
 

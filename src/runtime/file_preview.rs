@@ -86,6 +86,13 @@ fn list_files_with(
 ) -> Result<Vec<String>, FilePreviewError> {
     let mut files = Vec::new();
     match filter {
+        PreviewFileFilter::Artifacts | PreviewFileFilter::AllArtifacts => {
+            return usagi_core::infrastructure::artifacts::list(
+                root,
+                filter == PreviewFileFilter::AllArtifacts,
+            )
+            .map_err(|_| FilePreviewError::FilesUnavailable);
+        }
         PreviewFileFilter::All => extend_listed_files(
             &mut files,
             run(
@@ -212,6 +219,14 @@ fn load_preview_with(
     run: &mut dyn FnMut(&Path, &[&str]) -> ChildOutputObservation,
 ) -> Result<PreviewPayload, FilePreviewError> {
     if let Some(path) = path {
+        if filter.is_artifacts()
+            && !usagi_core::infrastructure::artifacts::contains(
+                path,
+                filter == PreviewFileFilter::AllArtifacts,
+            )
+        {
+            return Err(FilePreviewError::OutsideRoot);
+        }
         return read_file(root, path).map(|lines| (Vec::new(), Vec::new(), lines));
     }
     let files = list_files_with(root, filter, run)?;
@@ -221,6 +236,58 @@ fn load_preview_with(
         Vec::new()
     };
     Ok((files, changed, Vec::new()))
+}
+
+/// Validate an explicit native-viewer request. Executables and application
+/// bundles are never handed to the OS opener.
+pub(crate) fn artifact_open_path(
+    root: &Path,
+    path: &str,
+    filter: PreviewFileFilter,
+) -> Result<std::path::PathBuf, FilePreviewError> {
+    if !filter.is_artifacts()
+        || !usagi_core::infrastructure::artifacts::contains(
+            path,
+            filter == PreviewFileFilter::AllArtifacts,
+        )
+    {
+        return Err(FilePreviewError::OutsideRoot);
+    }
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "txt"
+            | "md"
+            | "csv"
+            | "json"
+            | "html"
+            | "htm"
+            | "pdf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+    ) {
+        return Err(FilePreviewError::NotRegular);
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|_| FilePreviewError::FileUnavailable)?;
+    let file = open_beneath(&root, path)?;
+    if !file
+        .metadata()
+        .map_err(|_| FilePreviewError::FileUnavailable)?
+        .is_file()
+    {
+        return Err(FilePreviewError::NotRegular);
+    }
+    Ok(root.join(path))
 }
 
 /// Read one UTF-8 regular file without allowing the requested path to escape
@@ -258,7 +325,7 @@ pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, File
 /// Open every component relative to an already-open directory descriptor.
 /// `O_NOFOLLOW` on each hop makes the containment decision and the final read
 /// one descriptor chain rather than a check-then-open path race.
-fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePreviewError> {
+pub(crate) fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePreviewError> {
     let mut directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -939,5 +1006,69 @@ mod tests {
             assert!(!error.message().is_empty());
             assert!(error.error_id().starts_with("preview-"));
         }
+    }
+    #[test]
+    fn artifacts_are_listed_without_git_and_native_open_is_confined() {
+        let temp = tempdir().unwrap();
+        let session = temp.path().join(".usagi/sessions/one");
+        fs::create_dir_all(&session).unwrap();
+        usagi_core::infrastructure::artifacts::prepare(&session).unwrap();
+        fs::write(
+            session.join("artifacts/report.md"),
+            "hello\n\u{1b}[31mworld",
+        )
+        .unwrap();
+        fs::write(session.join("artifacts/image.PNG"), [0, 1, 2]).unwrap();
+        fs::write(session.join("artifacts/execute.sh"), "exit 1").unwrap();
+        let (files, changed, _) =
+            load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(changed.is_empty());
+        let (all, _, _) = load_preview(temp.path(), None, PreviewFileFilter::AllArtifacts).unwrap();
+        assert_eq!(all.len(), 3);
+        let (_, _, lines) = load_preview(
+            &session,
+            Some("artifacts/report.md"),
+            PreviewFileFilter::Artifacts,
+        )
+        .unwrap();
+        assert_eq!(lines[0], "hello");
+        assert!(!lines[1].contains('\u{1b}'));
+        assert!(load_preview(&session, Some("Cargo.toml"), PreviewFileFilter::Artifacts).is_err());
+        assert!(
+            artifact_open_path(
+                &session,
+                "artifacts/image.PNG",
+                PreviewFileFilter::Artifacts
+            )
+            .unwrap()
+            .is_absolute()
+        );
+        assert!(
+            artifact_open_path(&session, "artifacts/report.md", PreviewFileFilter::All).is_err()
+        );
+        assert!(
+            artifact_open_path(
+                &session,
+                "artifacts/execute.sh",
+                PreviewFileFilter::Artifacts
+            )
+            .is_err()
+        );
+        fs::create_dir(session.join("artifacts/dir.pdf")).unwrap();
+        assert!(
+            artifact_open_path(&session, "artifacts/dir.pdf", PreviewFileFilter::Artifacts)
+                .is_err()
+        );
+        std::os::unix::fs::symlink(temp.path(), session.join("artifacts/link")).unwrap();
+        assert!(
+            artifact_open_path(
+                &session,
+                "artifacts/link/secret.pdf",
+                PreviewFileFilter::Artifacts
+            )
+            .is_err()
+        );
+        assert!(load_preview(&session, None, PreviewFileFilter::Artifacts).is_err());
     }
 }
