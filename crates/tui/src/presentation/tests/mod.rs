@@ -1,6 +1,5 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
-mod attention;
 mod director;
 mod flow;
 mod garden;
