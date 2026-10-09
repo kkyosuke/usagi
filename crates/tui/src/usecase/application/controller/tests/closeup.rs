@@ -1040,7 +1040,7 @@ fn artifacts_finder_scopes_session_and_workspace_and_opens_selected_artifacts() 
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         for key in [AppKey::Left, AppKey::Right] {
-            let _ = update(&mut state, AppEvent::Key(key));
+            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
             assert_eq!(state.preview_overlay().unwrap().file_filter(), filter);
         }
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));

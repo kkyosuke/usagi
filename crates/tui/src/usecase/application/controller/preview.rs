@@ -783,14 +783,15 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
         }
         AppKey::Left | AppKey::Right => {
             let overlay = state.preview_overlay.as_mut().unwrap();
-            if overlay.file_filter.is_artifacts() {
-                return Vec::new();
-            }
-            overlay.file_filter = if matches!(key, AppKey::Right) {
+            let filter = if matches!(key, AppKey::Right) {
                 overlay.file_filter.next()
             } else {
                 overlay.file_filter.previous()
             };
+            if filter == overlay.file_filter {
+                return Vec::new();
+            }
+            overlay.file_filter = filter;
             overlay.clear_files();
             overlay.loading = true;
             overlay.error = None;
