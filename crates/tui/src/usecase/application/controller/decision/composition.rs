@@ -126,22 +126,6 @@ pub(super) fn update_confirmation(
             editor.scroll_offset = None;
             editor.error = None;
         }
-        AppKey::PageUp => {
-            editor.scroll_offset = Some(
-                editor
-                    .scroll_offset
-                    .unwrap_or_default()
-                    .saturating_sub(DecisionEditor::SCROLL_STEP),
-            );
-        }
-        AppKey::PageDown => {
-            editor.scroll_offset = Some(
-                editor
-                    .scroll_offset
-                    .unwrap_or_default()
-                    .saturating_add(DecisionEditor::SCROLL_STEP),
-            );
-        }
         AppKey::Enter | AppKey::SubmitDecision => {
             let answer = editor
                 .confirmation

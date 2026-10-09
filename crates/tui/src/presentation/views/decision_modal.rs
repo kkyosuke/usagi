@@ -51,13 +51,54 @@ fn wrapped_content_lines(text: &str, prefix: &str, inner_width: usize) -> Vec<St
     .collect()
 }
 
+struct EditorViewport {
+    rows: Vec<String>,
+    start: usize,
+    end: usize,
+}
+
+impl EditorViewport {
+    fn page_event(
+        &self,
+        editor: &crate::usecase::application::controller::DecisionEditor,
+        forward: bool,
+        capacity: usize,
+    ) -> crate::usecase::application::controller::AppEvent {
+        let step = capacity.min(8);
+        let offset = if forward {
+            self.start.saturating_add(step)
+        } else {
+            self.start.saturating_sub(step)
+        };
+        crate::usecase::application::controller::AppEvent::DecisionScrolled {
+            decision_id: editor.decision().decision_id,
+            offset: offset.min(self.rows.len().saturating_sub(capacity)),
+        }
+    }
+}
+
 fn editor_rows(
     editor: &crate::usecase::application::controller::DecisionEditor,
     inner_width: usize,
     capacity: usize,
 ) -> Vec<String> {
+    let viewport = editor_viewport(editor, inner_width, capacity);
+    let mut body = modal::scroll_window(&viewport.rows, viewport.start, viewport.end);
     if let Some(answer) = editor.confirmation() {
-        return composition::confirmation_body(editor, answer, inner_width, capacity);
+        body.extend(controls::review_footer(answer, inner_width));
+    } else {
+        body.extend(controls::editor_footer(editor, inner_width));
+    }
+    body
+}
+
+fn editor_viewport(
+    editor: &crate::usecase::application::controller::DecisionEditor,
+    inner_width: usize,
+    capacity: usize,
+) -> EditorViewport {
+    if let Some(answer) = editor.confirmation() {
+        return composition::confirmation_viewport(editor, answer, inner_width, capacity);
     }
     let decision = editor.decision();
     let multiple = decision.selection_mode == UserDecisionSelectionMode::Multiple;
@@ -101,9 +142,7 @@ fn editor_rows(
         || layout::focus_window(rows.len(), focus, anchor, capacity),
         |offset| layout::manual_window(rows.len(), offset, capacity),
     );
-    let mut body = modal::scroll_window(&rows, start, end);
-    body.extend(controls::editor_footer(editor, inner_width));
-    body
+    EditorViewport { rows, start, end }
 }
 
 fn editor_intro(
@@ -237,6 +276,28 @@ pub fn owner_label(
     )
 }
 
+fn dimensions(height: usize, width: usize) -> (usize, usize, usize) {
+    let inner_width =
+        modal::modal_inner_width(width, scaled(width, MIN_INNER_WIDTH, MAX_INNER_WIDTH));
+    let body_height = modal::reserved_body_height(
+        height,
+        width,
+        scaled(height, MIN_BODY_HEIGHT, MAX_BODY_HEIGHT),
+    );
+    let capacity = body_height.saturating_sub(CHROME_ROWS).max(1);
+    (inner_width, body_height, capacity)
+}
+
+pub(crate) fn page_event(
+    editor: &crate::usecase::application::controller::DecisionEditor,
+    height: usize,
+    width: usize,
+    forward: bool,
+) -> crate::usecase::application::controller::AppEvent {
+    let (inner_width, _, capacity) = dimensions(height, width);
+    editor_viewport(editor, inner_width, capacity).page_event(editor, forward, capacity)
+}
+
 /// Render either the workspace pending list or the selected decision editor.
 #[must_use]
 pub fn render_over(
@@ -247,14 +308,7 @@ pub fn render_over(
     decisions: &[usagi_core::domain::user_decision::UserDecision],
     session_names: &BTreeMap<SessionId, String>,
 ) -> Vec<String> {
-    let inner_width =
-        modal::modal_inner_width(width, scaled(width, MIN_INNER_WIDTH, MAX_INNER_WIDTH));
-    let body_height = modal::reserved_body_height(
-        height,
-        width,
-        scaled(height, MIN_BODY_HEIGHT, MAX_BODY_HEIGHT),
-    );
-    let capacity = body_height.saturating_sub(CHROME_ROWS).max(1);
+    let (inner_width, body_height, capacity) = dimensions(height, width);
     let (title, body) = if let Some(editor) = overlay.editor() {
         ("User decision", editor_rows(editor, inner_width, capacity))
     } else {
@@ -285,13 +339,32 @@ mod tests {
         editor_rows(editor, inner_width, CONTENT_CAPACITY)
     }
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, update,
+        AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, update as reduce,
     };
     use usagi_core::domain::agent::CallerRef;
     use usagi_core::domain::id::{AgentId, OperationId, SessionId, UserDecisionId, WorkspaceId};
     use usagi_core::domain::user_decision::{
         UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionStatus,
     };
+
+    // View tests use the same viewport-resolved events as WorkspaceRuntime.
+    fn update(
+        state: &mut AppState,
+        event: AppEvent,
+    ) -> Vec<crate::usecase::application::controller::Effect> {
+        let event = match event {
+            AppEvent::Key(AppKey::PageUp | AppKey::PageDown) => {
+                let editor = state.decision_overlay().unwrap().editor().unwrap();
+                editor_viewport(editor, 70, CONTENT_CAPACITY).page_event(
+                    editor,
+                    matches!(event, AppEvent::Key(AppKey::PageDown)),
+                    CONTENT_CAPACITY,
+                )
+            }
+            event => event,
+        };
+        reduce(state, event)
+    }
 
     fn decision(workspace: WorkspaceId, session_id: Option<SessionId>) -> UserDecision {
         UserDecision {
@@ -327,6 +400,73 @@ mod tests {
             answer: None,
             created_at: chrono::Utc::now(),
             resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn paging_uses_the_visible_anchor_and_reverses_immediately_at_boundaries() {
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        for (height, width) in [(24, 80), (11, 40)] {
+            let workspace = WorkspaceId::new();
+            let mut request = decision(workspace, None);
+            request.expires_at = None;
+            request.prompt = "Long question\n".repeat(40);
+            request.options[0].description = Some("Detail\n".repeat(25));
+            let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+            let _ = runtime.apply_event(AppEvent::Resize { height, width });
+            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![request],
+            }));
+            let (inner, _, capacity) = dimensions(usize::from(height), usize::from(width));
+            let viewport = |runtime: &WorkspaceRuntime| {
+                editor_viewport(
+                    runtime
+                        .state()
+                        .decision_overlay()
+                        .unwrap()
+                        .editor()
+                        .unwrap(),
+                    inner,
+                    capacity,
+                )
+            };
+            let before = viewport(&runtime).start;
+            assert!(before > 8);
+            let _ = runtime.handle_key(crate::presentation::Key::PageDown);
+            assert_eq!(viewport(&runtime).start, before + capacity.min(8));
+            let _ = runtime.handle_key(crate::presentation::Key::PageUp);
+            assert_eq!(viewport(&runtime).start, before);
+            for _ in 0..100 {
+                let _ = runtime.handle_key(crate::presentation::Key::PageDown);
+            }
+            let bottom = viewport(&runtime).start;
+            let _ = runtime.handle_key(crate::presentation::Key::PageUp);
+            assert_eq!(viewport(&runtime).start, bottom - capacity.min(8));
+            // A new size clamps the stored offset before the next page move.
+            let _ = runtime.apply_event(AppEvent::Resize {
+                height: 60,
+                width: 120,
+            });
+            let editor = runtime
+                .state()
+                .decision_overlay()
+                .unwrap()
+                .editor()
+                .unwrap();
+            let (inner, _, cap) = dimensions(60, 120);
+            let start = editor_viewport(editor, inner, cap).start;
+            let _ = runtime.handle_key(crate::presentation::Key::PageUp);
+            assert_eq!(
+                runtime
+                    .state()
+                    .decision_overlay()
+                    .unwrap()
+                    .editor()
+                    .unwrap()
+                    .scroll_offset(),
+                Some(start.saturating_sub(cap.min(8)))
+            );
         }
     }
 
@@ -952,6 +1092,23 @@ mod tests {
                 assert!(!expected.is_empty());
                 for height in [11, 12, 16, 24] {
                     for key in [AppKey::PageDown, AppKey::PageUp] {
+                        // Traverse from the corresponding edge. Paging from a
+                        // focused input now starts there, never at row zero.
+                        let event = AppEvent::DecisionScrolled {
+                            decision_id: state
+                                .decision_overlay()
+                                .unwrap()
+                                .editor()
+                                .unwrap()
+                                .decision()
+                                .decision_id,
+                            offset: if matches!(key, AppKey::PageDown) {
+                                0
+                            } else {
+                                usize::MAX
+                            },
+                        };
+                        let _ = reduce(&mut state, event);
                         let mut seen = String::new();
                         for page in 0..=full.len() {
                             let frame = render_over(
@@ -964,7 +1121,13 @@ mod tests {
                             );
                             seen.push_str(&widgets::strip_ansi(&frame.join("\n")));
                             if page < full.len() {
-                                let _ = update(&mut state, AppEvent::Key(key.clone()));
+                                let event = page_event(
+                                    state.decision_overlay().unwrap().editor().unwrap(),
+                                    height,
+                                    80,
+                                    matches!(key, AppKey::PageDown),
+                                );
+                                let _ = reduce(&mut state, event);
                             }
                         }
                         for row in &expected {
@@ -1576,7 +1739,12 @@ mod tests {
             for _ in 0..12 {
                 let editor = state.decision_overlay().unwrap().editor().unwrap();
                 seen.push_str(&editor_body(editor, 32).join("\n"));
-                let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+                let event = editor_viewport(editor, 32, CONTENT_CAPACITY).page_event(
+                    editor,
+                    true,
+                    CONTENT_CAPACITY,
+                );
+                let _ = reduce(&mut state, event);
             }
             assert!(seen.contains("Pro: Useful benefit"));
             assert!(seen.contains("Con: TRADEOFF_END"));

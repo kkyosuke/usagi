@@ -1,5 +1,5 @@
 //! Comment entry and answer review rendering.
-use super::{Role, controls, layout, modal, widgets, wrapped_content_lines};
+use super::{Role, layout, widgets, wrapped_content_lines};
 use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::UserDecisionAnswer;
 
@@ -81,12 +81,12 @@ fn input_rows(
     layout::titled_card(width, &rows, title, focused)
 }
 
-pub(super) fn confirmation_body(
+pub(super) fn confirmation_viewport(
     editor: &DecisionEditor,
     answer: &UserDecisionAnswer,
     width: usize,
     capacity: usize,
-) -> Vec<String> {
+) -> super::EditorViewport {
     let mut rows = wrapped_content_lines("Review answer", "", width)
         .into_iter()
         .map(|line| Role::Accent.style().bold().paint(&line))
@@ -127,9 +127,7 @@ pub(super) fn confirmation_body(
         },
         |offset| layout::manual_window(rows.len(), offset, capacity),
     );
-    let mut body = modal::scroll_window(&rows, start, end);
-    body.extend(controls::review_footer(answer, width));
-    body
+    super::EditorViewport { rows, start, end }
 }
 
 fn add_choice(rows: &mut Vec<String>, editor: &DecisionEditor, id: &str, width: usize) {

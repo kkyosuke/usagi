@@ -225,7 +225,8 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
 caller は同じ credential で get / list を polling し、terminal decision を get した時点で durable outbox を ACK する。
-同じ idempotency key の request は同じ decision に収束する。これにより人間の応答時間が MCP connection や caller
+同じ idempotency key の request は同じ decision に収束する。明示した期限を過ぎてからの同一内容の再送も、
+保持中の元の decision とその回答・終了状態を返す。新規 request の期限は作成時に検証する。これにより人間の応答時間が MCP connection や caller
 credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。
 
 質問の補足と選択方法は次の optional field で指定する。省略した既存 request / 保存済み record は単一選択・補足なしとして読む。
