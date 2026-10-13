@@ -2450,6 +2450,18 @@ mod tests {
         // running child, another workspace does not.
         assert!(runtime.has_running_in_workspace(workspace));
         assert!(!runtime.has_running_in_workspace(WorkspaceId::new()));
+        assert_eq!(
+            runtime.cache_cleanup_activity(workspace),
+            vec![(
+                terminal.clone(),
+                crate::usecase::terminal::TerminalRuntimeState::Running
+            )]
+        );
+        assert!(
+            runtime
+                .cache_cleanup_activity(WorkspaceId::new())
+                .is_empty()
+        );
         assert_eq!(runtime.running_count_in_workspace(workspace), 1);
         assert_eq!(runtime.running_count_in_workspace(WorkspaceId::new()), 0);
         assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 1);
@@ -2474,6 +2486,15 @@ mod tests {
         assert!(!runtime.has_running_in_workspace(workspace));
         assert_eq!(runtime.running_count_in_workspace(workspace), 0);
         assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 0);
+        // Retain the stopped identity in the snapshot so a scan can detect
+        // that a runtime started and exited while the tree was measured.
+        assert_eq!(
+            runtime.cache_cleanup_activity(workspace),
+            vec![(
+                terminal.clone(),
+                crate::usecase::terminal::TerminalRuntimeState::Exited
+            )]
+        );
 
         // The exited terminal now appears as a completed tombstone (#525) with
         // its exit status; a foreign scope still sees none.

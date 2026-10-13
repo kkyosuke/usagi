@@ -1388,6 +1388,8 @@ max_bytes = 10737418240
 | `max_bytes` | 指定ディレクトリの workspace 合計の割り当て済み bytes に対する soft limit。省略時は容量で回収しない |
 
 `paths` を指定する場合は少なくとも片方の limit を指定する。0 は即時回収を意味する。
+容量の合計は各ディレクトリの計測値を加算する。ディレクトリ内の hardlink は重複計上しないが、
+別ディレクトリ・session にまたがる共有 hardlink はそれぞれの計測値に含む。
 期限を過ぎたディレクトリを回収し、容量が上限を超えていれば更新の古いものから追加で回収する。
 稼働中・起動予約中・process ownership が不明な Agent / generic terminal の session は保持する。
 workspace-root にそのような runtime がある場合は、その workspace の全 session を保持する。
@@ -1396,14 +1398,20 @@ workspace-root にそのような runtime がある場合は、その workspace 
 daemon の handoff 中も回収を待つ。usagi 外で起動したビルドは観測できないため、併用する workspace
 では外部ビルドを停止してから有効化する。
 
-容量は symlink を辿らずに背景 worker が計測する。回収直前には session identity と runtime の
-観測を再確認し、計測中に起動・終了があれば次の pass に延期する。runtime lock 下で行うのは
+容量は symlink を辿らずに背景 worker が計測する。回収直前には session identity、設定、runtime の
+観測を再確認し、計測中に設定・runtime の観測が変われば次の pass に延期する。runtime lock 下で行うのは
 ディレクトリの短い rename までで、時間のかかる削除は lock を解放してから行う。
 中断された削除は session 内の `.usagi/cache-trash/` に残り、次の整理で再試行する。
-ソース、session、branch、会話履歴は保持される。再開時にはビルド・依存インストールが必要になる。
+Git 管理下のソース、session、branch、会話履歴は保持される。再開時にはビルド・依存インストールが必要になる。
 
-人間向け CLI の `usagi session cache` は容量、保護状態、回収候補を dry-run で表示する。
-`usagi session cache --apply` は同じ policy を直ちに適用する。Agent の MCP credential からの
+人間向け CLI の `usagi session cache` は容量、保護状態、回収候補を調べる dry-run を背景処理に渡す。
+`usagi session cache --apply` は同じ policy での回収を背景処理に渡す。どちらも計測・削除の完了を待たず、
+operation ID と `queued` / `running` を返す。`usagi session cache --status` は最新 job の進捗と
+完了結果（`result`）またはエラーを表示し、再計測しない。job の状態は `idle` / `queued` / `running` /
+`completed` / `failed`。同じ workspace・mode で処理中の要求はその job にまとめ、同時に回収しない。
+計測と回収の mode が違う場合は、処理中の job の完了を確認してから要求する。
+job は daemon の現在のプロセス内で保持する。daemon 再起動後は状態が `idle` に戻るため、必要なら再要求する。
+既に rename した削除残骸は再起動後も再回収する。Agent の MCP credential からの
 workspace 全体への cache 回収は受理しない。自動回収の結果・延期件数と整理処理のエラーは daemon の error log に記録する。
 
 ## session teardown worker

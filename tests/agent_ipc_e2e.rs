@@ -602,7 +602,7 @@ fn macos_daemon_ptys_use_persistent_user_service_context() {
 #[allow(clippy::too_many_lines)] // One daemon exercises both live owners and retained history before reclaiming the same cache.
 fn session_cache_cleanup_reports_usage_and_keeps_the_session() {
     fn caches(client: &mut impl DaemonClient, apply: bool) -> serde_json::Value {
-        match client
+        let accepted = match client
             .request(DaemonRequest::Session {
                 action: SessionAction::Cache,
                 operation_id: OperationId::new().to_string(),
@@ -611,7 +611,33 @@ fn session_cache_cleanup_reports_usage_and_keeps_the_session() {
             .unwrap()
         {
             DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
-        }
+        };
+        assert!(matches!(
+            accepted["state"].as_str(),
+            Some("queued" | "running")
+        ));
+        let mut result = None;
+        assert!(observe_until(Duration::from_secs(20), || {
+            let status = match client
+                .request(DaemonRequest::Session {
+                    action: SessionAction::Cache,
+                    operation_id: OperationId::new().to_string(),
+                    payload: serde_json::json!({"status":true}),
+                })
+                .unwrap()
+            {
+                DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+            };
+            assert_eq!(status["operation_id"], accepted["operation_id"]);
+            assert_ne!(status["state"], "failed", "{status}");
+            if status["state"] == "completed" {
+                result = Some(status["result"].clone());
+                true
+            } else {
+                false
+            }
+        }));
+        result.unwrap()
     }
     fn finish_input(client: &mut impl DaemonClient, terminal: &TerminalRef) {
         let subscription = attach(client, terminal);
@@ -727,7 +753,14 @@ fn session_cache_cleanup_reports_usage_and_keeps_the_session() {
         "{}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    assert!(String::from_utf8_lossy(&cli.stdout).contains("dry_run"));
+    assert!(String::from_utf8_lossy(&cli.stdout).contains("queued"));
+    assert!(observe_until(Duration::from_secs(10), || {
+        matches!(client.request(DaemonRequest::Session {
+            action: SessionAction::Cache,
+            operation_id: OperationId::new().to_string(),
+            payload: serde_json::json!({"status":true}),
+        }), Ok(DaemonReply::Ok(body)) if body["state"] == "completed")
+    }));
     fs::write(&config, "[session.cache_cleanup]\npaths = []\n").unwrap();
     assert_eq!(caches(&mut client, false)["enabled"], false);
 }

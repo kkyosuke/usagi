@@ -2,7 +2,7 @@
 
 セッションのビルド成果物が増える場合は、[session 成果物の自動回収](document/05-daemon.md#session-成果物の自動回収)
 を設定すると、セッションを保持したまま保存期間・容量上限で整理できる。
-`usagi session cache` で容量と回収候補を確認する。
+`usagi session cache` で容量を計測し、`usagi session cache --status` で回収候補と結果を確認する。
 
 <div align="center">
 

@@ -1718,7 +1718,7 @@ pub(super) struct SessionDispatchContext<'a> {
     pub(super) bound: &'a ConnectionWorkspace,
     pub(super) teardown: &'a TeardownSignal,
     pub(super) agent: &'a SharedAgentRuntime,
-    pub(super) terminal: &'a SharedTerminalRuntime,
+    pub(super) cache_jobs: &'a usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     pub(super) pr_inventory: &'a SharedPrInventory,
     pub(super) launch_client: Option<&'a AgentLaunchClient>,
 }

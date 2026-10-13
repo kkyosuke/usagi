@@ -1255,7 +1255,8 @@ impl AgentRuntime {
         self.retirement_blocker_count(workspace) != 0
     }
 
-    /// Exact scopes whose process ownership prevents automatic cache cleanup.
+    /// All workspace runtime identities and states, including stopped records,
+    /// so cache scans can detect a process starting and exiting during IO.
     #[must_use]
     pub fn cache_cleanup_activity(
         &self,

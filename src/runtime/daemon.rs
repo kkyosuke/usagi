@@ -1268,6 +1268,7 @@ fn start_orphan_cleanup_worker(
     gate: AdmissionGate,
     agent: SharedAgentRuntime,
     terminal: SharedTerminalRuntime,
+    cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_orphan_cleanup_worker(
@@ -1276,9 +1277,15 @@ fn start_orphan_cleanup_worker(
             gate,
             agent,
             terminal,
+            cache_jobs,
+            clock: SystemClock::new(),
+            schedule: usagi_daemon::usecase::session_cache_jobs::MaintenanceSchedule::new(
+                0,
+                u64::try_from(ORPHAN_CLEANUP_TICK.as_millis()).unwrap_or(u64::MAX),
+            ),
         },
         shutdown,
-        ORPHAN_CLEANUP_TICK,
+        Duration::from_secs(1),
     )
 }
 

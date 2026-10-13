@@ -589,19 +589,14 @@ pub(super) fn dispatch_session_action(
             if authenticated_caller.is_some() {
                 return Err(SessionRuntimeError::InvalidRequest);
             }
-            let apply = match payload.get("apply") {
-                None => false,
-                Some(serde_json::Value::Bool(value)) => *value,
-                _ => return Err(SessionRuntimeError::InvalidRequest),
-            };
+            let request =
+                usagi_daemon::usecase::session_cache_jobs::CacheJobRequest::from_payload(payload)
+                    .map_err(|_| SessionRuntimeError::InvalidRequest)?;
             reply(
-                super::super::session_cache::clean_session_caches(
-                    bound,
-                    agent,
-                    context.terminal,
-                    apply,
-                )
-                .map_err(|error| SessionRuntimeError::DurableFailure(error.to_string()))?,
+                context
+                    .cache_jobs
+                    .reply(bound.tenant.workspace_id(), operation_id, request)
+                    .map_err(|error| SessionRuntimeError::DurableFailure(error.to_owned()))?,
             )
         }
         SessionAction::Clean => {
