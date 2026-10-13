@@ -2,6 +2,7 @@
 
 mod agent;
 mod agent_provisioning;
+mod attention;
 mod broker;
 mod dispatch;
 mod instance_lock;

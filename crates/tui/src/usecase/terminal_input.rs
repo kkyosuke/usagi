@@ -187,6 +187,8 @@ pub enum LiveTerminalAction {
     OpenWorkspace,
     /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
     OpenWorkspaceSwitcher,
+    /// Open attention across all open projects (`Ctrl-O i`).
+    OpenAttention,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
     ActivateWorkspace(u8),
     /// Select the previous managed session (`Ctrl-Option-Up`).
@@ -600,6 +602,12 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
         PrefixHelpScope::Workspace,
         "Ctrl-O +",
         "add workspace",
+    ),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('i'), legacy = 9 => LiveTerminalAction::OpenAttention),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O i",
+        "all projects attention",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),

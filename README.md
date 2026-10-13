@@ -43,6 +43,9 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 
+複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
+分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
+
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
 logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
