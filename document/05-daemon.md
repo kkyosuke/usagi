@@ -1388,6 +1388,8 @@ max_bytes = 10737418240
 | `max_bytes` | 指定ディレクトリの workspace 合計の割り当て済み bytes に対する soft limit。省略時は容量で回収しない |
 
 `paths` を指定する場合は少なくとも片方の limit を指定する。0 は即時回収を意味する。
+同一ディレクトリを指す表記違いは 1 件として計測する。指定した別のディレクトリを内包する場合は、
+大文字・小文字などの表記違いを問わず、整理処理全体をエラーとして停止する。
 容量の合計は各ディレクトリの計測値を加算する。ディレクトリ内の hardlink は重複計上しないが、
 別ディレクトリ・session にまたがる共有 hardlink はそれぞれの計測値に含む。
 期限を過ぎたディレクトリを回収し、容量が上限を超えていれば更新の古いものから追加で回収する。
@@ -1395,12 +1397,15 @@ max_bytes = 10737418240
 workspace-root にそのような runtime がある場合は、その workspace の全 session を保持する。
 現 daemon executable を含むディレクトリ、Git 管理下のファイルを含むディレクトリ、symlink を経由する
 ディレクトリも保持する。保護対象があると合計は上限を超えたままになることがある。
-daemon の handoff 中も回収を待つ。usagi 外で起動したビルドは観測できないため、併用する workspace
-では外部ビルドを停止してから有効化する。
+整理開始時と rename 直前に登録済みの Standby / Draining generation を観測した場合も回収を延期する。
+usagi 外で起動したビルド、対象ディレクトリ内の binary を別 process として起動する操作、登録前の
+Standby binary の準備・起動は観測できない。これらの操作を行う場合は、自動回収を無効にし、
+手動の `--apply` も停止してから実行する。
 
 容量は symlink を辿らずに背景 worker が計測する。回収直前には session identity、設定、runtime の
-観測を再確認し、計測中に設定・runtime の観測が変われば次の pass に延期する。runtime lock 下で行うのは
-ディレクトリの短い rename までで、時間のかかる削除は lock を解放してから行う。
+観測を再確認し、計測中に設定・runtime の観測が変われば次の pass に延期する。runtime lock 下では
+設定、Git 追跡、filesystem identity、登録済み generation を確認してから短い rename を行う。
+再帰的な容量計測と時間のかかる削除は lock を解放してから行う。
 中断された削除は session 内の `.usagi/cache-trash/` に残り、次の整理で再試行する。
 Git 管理下のソース、session、branch、会話履歴は保持される。再開時にはビルド・依存インストールが必要になる。
 

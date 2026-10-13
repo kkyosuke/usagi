@@ -181,6 +181,7 @@ fn discover_candidates(
 ) -> io::Result<Vec<CacheCandidate>> {
     let mut candidates = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut ancestors = std::collections::BTreeSet::new();
     for (scope, name) in scopes {
         let Ok(scope) = scope else { continue };
         let Ok(root) = session_directory(io, workspace, &scope.path) else {
@@ -194,9 +195,34 @@ fn discover_candidates(
             let Ok(usage) = session_cache::measure(io, &path) else {
                 continue;
             };
-            if !seen.insert(usage.identity) {
+            if seen.contains(&usage.identity) {
                 continue;
             }
+            // Different spellings may alias an ancestor, e.g. TARGET and
+            // target/debug on macOS. Counting both would authorize excess
+            // reclamation; refuse the entire pass instead.
+            if ancestors.contains(&usage.identity) {
+                return Err(io::Error::other(
+                    "cache directories overlap on the filesystem",
+                ));
+            }
+            let mut parent = path.parent();
+            let mut observed_ancestors = Vec::new();
+            while let Some(ancestor) = parent {
+                if ancestor == root {
+                    break;
+                }
+                let identity = io.node(ancestor)?.usage.identity;
+                if seen.contains(&identity) {
+                    return Err(io::Error::other(
+                        "cache directories overlap on the filesystem",
+                    ));
+                }
+                observed_ancestors.push(identity);
+                parent = ancestor.parent();
+            }
+            seen.insert(usage.identity);
+            ancestors.extend(observed_ancestors);
             candidates.push(CacheCandidate {
                 session: scope.session_id,
                 session_name: name.clone(),
@@ -224,6 +250,10 @@ struct DetachmentContext<'a> {
     executable: &'a Path,
     scanned: &'a CacheObservation,
     current: &'a CacheObservation,
+    generations: (
+        usize,
+        Vec<usagi_daemon::usecase::generation::GenerationRole>,
+    ),
 }
 
 fn detach_revalidated(
@@ -234,7 +264,9 @@ fn detach_revalidated(
 ) -> io::Result<Option<PathBuf>> {
     // Configuration may have been changed or disabled during the slow scan.
     // A process may also have started and exited without remaining live.
-    if context.current.policy != context.scanned.policy
+    if context.generations.0 != 1
+        || !generations_quiet(&context.generations.1)
+        || context.current.policy != context.scanned.policy
         || context.current.activity != context.scanned.activity
         || protected(&context.current.activity.0, candidate.session)
         || protected(&context.current.activity.1, candidate.session)
@@ -346,6 +378,7 @@ impl SessionCacheIo for SystemSessionCaches<'_> {
                 executable: &self.executable,
                 scanned: &self.observation,
                 current: &current,
+                generations: self.generation_state()?,
             },
             candidate,
         )
@@ -395,7 +428,7 @@ fn detach_directory(
 
 trait CacheMaintenanceIo: SessionCacheIo {
     fn generation_state(
-        &mut self,
+        &self,
     ) -> io::Result<(
         usize,
         Vec<usagi_daemon::usecase::generation::GenerationRole>,
@@ -406,7 +439,7 @@ trait CacheMaintenanceIo: SessionCacheIo {
 impl CacheMaintenanceIo for SystemSessionCaches<'_> {
     #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_cache_cleanup_reports_usage_and_keeps_the_session
     fn generation_state(
-        &mut self,
+        &self,
     ) -> io::Result<(
         usize,
         Vec<usagi_daemon::usecase::generation::GenerationRole>,
@@ -949,6 +982,7 @@ mod tests {
                     executable: Path::new("/bin/usagi"),
                     scanned: &scanned,
                     current,
+                    generations: quiet_generations(),
                 },
                 candidate,
             )
@@ -999,6 +1033,7 @@ mod tests {
                         executable: Path::new("/bin/usagi"),
                         scanned: &busy,
                         current: &busy,
+                        generations: quiet_generations(),
                     },
                     &candidate
                 )
@@ -1016,6 +1051,7 @@ mod tests {
                     executable: Path::new("/bin/usagi"),
                     scanned: &scanned,
                     current: &scanned,
+                    generations: quiet_generations(),
                 },
                 &candidate
             )
@@ -1162,7 +1198,7 @@ mod tests {
     }
     impl CacheMaintenanceIo for FakeMaintenance {
         fn generation_state(
-            &mut self,
+            &self,
         ) -> io::Result<(
             usize,
             Vec<usagi_daemon::usecase::generation::GenerationRole>,
@@ -1251,6 +1287,80 @@ mod tests {
             vec![Active, Draining],
         ] {
             assert!(!generations_quiet(&roles));
+        }
+    }
+
+    fn quiet_generations() -> (
+        usize,
+        Vec<usagi_daemon::usecase::generation::GenerationRole>,
+    ) {
+        (
+            1,
+            vec![usagi_daemon::usecase::generation::GenerationRole::Active],
+        )
+    }
+
+    #[test]
+    fn session_cache_defers_a_handoff_registered_during_measurement() {
+        use usagi_daemon::usecase::generation::GenerationRole::{Active, Draining, Standby};
+        let tree = FakeTree::fixture();
+        let scanned = CacheObservation {
+            policy: policy(),
+            activity: (Vec::new(), Vec::new()),
+        };
+        for generations in [
+            (2, vec![Active]),
+            (1, vec![]),
+            (1, vec![Active, Standby]),
+            (1, vec![Active, Draining]),
+            (1, vec![Active, Active]),
+        ] {
+            assert_eq!(
+                detach_revalidated(
+                    &tree,
+                    &git(""),
+                    &DetachmentContext {
+                        workspace: Path::new("/workspace"),
+                        root: Path::new("/workspace/.usagi/sessions/fixture"),
+                        executable: Path::new("/bin/usagi"),
+                        scanned: &scanned,
+                        current: &scanned,
+                        generations,
+                    },
+                    &fixture_candidate()
+                )
+                .unwrap(),
+                None
+            );
+        }
+        assert!(
+            !tree
+                .nodes
+                .borrow()
+                .contains_key(Path::new("/workspace/.usagi/sessions/fixture/.usagi"))
+        );
+    }
+
+    #[test]
+    fn session_cache_refuses_aliases_of_overlapping_directory_roots() {
+        let tree = FakeTree::fixture();
+        let root = "/workspace/.usagi/sessions/fixture";
+        tree.directory(&format!("{root}/TARGET"), 4);
+        tree.directory(&format!("{root}/target/debug"), 5);
+        for paths in [["TARGET", "target/debug"], ["target/debug", "TARGET"]] {
+            let paths = paths.map(PathBuf::from);
+            assert!(
+                discover_candidates(
+                    &tree,
+                    &git(""),
+                    Path::new("/workspace"),
+                    vec![(Ok(scope(root)), "fixture".into())],
+                    &paths,
+                    &(Vec::new(), Vec::new()),
+                    Path::new("/bin/usagi"),
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1353,6 +1463,7 @@ mod tests {
         assert!(has_tracked_files(root, Path::new("build[1]")).unwrap());
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn session_cache_filesystem_aliases_protect_index_and_executable() {
         let fixture = tempfile::tempdir().unwrap();

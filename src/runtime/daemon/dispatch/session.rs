@@ -592,12 +592,17 @@ pub(super) fn dispatch_session_action(
             let request =
                 usagi_daemon::usecase::session_cache_jobs::CacheJobRequest::from_payload(payload)
                     .map_err(|_| SessionRuntimeError::InvalidRequest)?;
-            reply(
-                context
-                    .cache_jobs
-                    .reply(bound.tenant.workspace_id(), operation_id, request)
-                    .map_err(|error| SessionRuntimeError::DurableFailure(error.to_owned()))?,
-            )
+            let body = context
+                .cache_jobs
+                .reply(bound.tenant.workspace_id(), operation_id, request)
+                .map_err(|error| SessionRuntimeError::DurableFailure(error.to_owned()))?;
+            // Admission and status never need a lifecycle snapshot. Reading its
+            // revision here would wait on cache detachment's session lock.
+            Ok(usagi_daemon::usecase::session_runtime::SessionReply {
+                operation_id: operation_id.to_owned(),
+                revision: 0,
+                body,
+            })
         }
         SessionAction::Clean => {
             let flag = |name| match payload.get(name) {
