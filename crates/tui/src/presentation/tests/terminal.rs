@@ -142,7 +142,7 @@ fn decision_drag_keeps_combining_marks_and_following_cell_coordinates() {
     let mut selection = DecisionTextSelection::default();
     let mut term = FakeTerminal::default();
     selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
-    for (column, expected) in [(3, "e\u{301}"), (5, "界"), (6, "Z")] {
+    for (column, expected) in [(3, "e\u{301}"), (4, "界"), (5, "界"), (6, "Z")] {
         for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
             assert!(selection.handle_input(
                 &decision_pointer(kind, viewport.left + column, viewport.top),

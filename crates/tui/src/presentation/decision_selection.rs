@@ -85,9 +85,6 @@ impl DecisionTextSelection {
             }
             _ => return false,
         };
-        if kind == PointerKind::Move {
-            return true;
-        }
         let column = usize::from(column);
         let row = usize::from(row);
         let inside = column >= viewport.left
@@ -132,7 +129,7 @@ impl DecisionTextSelection {
                     self.copy(term);
                 }
             }
-            PointerKind::Move => {}
+            PointerKind::Move => return true,
         }
         self.revision = self.revision.wrapping_add(1);
         true
