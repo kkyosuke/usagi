@@ -119,6 +119,24 @@ fn same_directory(io: &impl CacheTreeIo, left: &Path, right: &Path) -> io::Resul
     Ok(left.directory && right.directory && left.usage.identity == right.usage.identity)
 }
 
+fn cache_directory(io: &impl CacheTreeIo, root: &Path, relative: &Path) -> io::Result<PathBuf> {
+    let directory = confined_directory(io, root, relative)?;
+    let mut parent = root.to_path_buf();
+    for component in relative.components() {
+        let path = parent.join(component);
+        // Unicode case aliases can bypass the policy's ASCII name checks:
+        // .uſagi/private aliases .usagi/private on macOS. Preserve management
+        // directories at every depth, including metadata in nested repositories.
+        for protected in [".git", ".usagi"] {
+            if same_directory(io, &path, &parent.join(protected))? {
+                return Err(io::Error::other("cache path aliases a protected directory"));
+            }
+        }
+        parent = path;
+    }
+    Ok(directory)
+}
+
 fn contains_executable(
     io: &impl CacheTreeIo,
     directory: &Path,
@@ -188,7 +206,7 @@ fn discover_candidates(
             continue;
         };
         for relative in paths {
-            let Ok(path) = confined_directory(io, &root, relative) else {
+            let Ok(path) = cache_directory(io, &root, relative) else {
                 continue;
             };
             let tracked = has_tracked_files(io, git, &root, relative)?;
@@ -398,7 +416,7 @@ fn detach_directory(
     identity: (u64, u64),
     executable: &Path,
 ) -> io::Result<Option<PathBuf>> {
-    let path = confined_directory(io, root, relative)?;
+    let path = cache_directory(io, root, relative)?;
     if io.node(&path)?.usage.identity != identity
         || has_tracked_files(io, git, root, relative)?
         || contains_executable(io, &path, executable)?
@@ -1365,6 +1383,86 @@ mod tests {
     }
 
     #[test]
+    fn session_cache_preserves_management_directory_aliases_at_every_depth() {
+        let root = "/workspace/.usagi/sessions/fixture";
+        for (protected, alias) in [(".usagi", ".uſagi"), (".git", ".ɡit")] {
+            for prefix in ["", "target/package/"] {
+                let tree = FakeTree::fixture();
+                tree.directory(&format!("{root}/target/package"), 6);
+                tree.directory(&format!("{root}/{prefix}{protected}"), 10);
+                tree.directory(&format!("{root}/{prefix}{alias}"), 10);
+                tree.directory(&format!("{root}/{prefix}{alias}/private"), 11);
+                let relative = PathBuf::from(format!("{prefix}{alias}/private"));
+                let policy = SessionCachePolicy {
+                    paths: vec![relative.clone()],
+                    ..policy()
+                };
+                assert!(policy.validate().is_ok());
+                assert!(cache_directory(&tree, Path::new(root), &relative).is_err());
+                assert!(
+                    discover_candidates(
+                        &tree,
+                        &git(""),
+                        Path::new("/workspace"),
+                        vec![(Ok(scope(root)), "fixture".into())],
+                        &policy.paths,
+                        &(Vec::new(), Vec::new()),
+                        Path::new("/bin/usagi"),
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+                assert!(
+                    super::detach_directory(
+                        &tree,
+                        &git(""),
+                        Path::new(root),
+                        &relative,
+                        (1, 11),
+                        Path::new("/bin/usagi"),
+                    )
+                    .is_err()
+                );
+                assert!(
+                    !tree
+                        .nodes
+                        .borrow()
+                        .contains_key(&PathBuf::from(format!("{root}/.usagi/cache-trash")))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_cache_rechecks_management_identity_after_measurement() {
+        let tree = FakeTree::fixture();
+        let root = "/workspace/.usagi/sessions/fixture";
+        tree.directory(&format!("{root}/.usagi"), 10);
+        tree.directory(&format!("{root}/.uſagi"), 9);
+        tree.directory(&format!("{root}/.uſagi/private"), 11);
+        let relative = Path::new(".uſagi/private");
+        assert!(cache_directory(&tree, Path::new(root), relative).is_ok());
+        tree.directory(&format!("{root}/.uſagi"), 10);
+        assert!(
+            super::detach_directory(
+                &tree,
+                &git(""),
+                Path::new(root),
+                relative,
+                (1, 11),
+                Path::new("/bin/usagi"),
+            )
+            .is_err()
+        );
+        assert!(
+            !tree
+                .nodes
+                .borrow()
+                .contains_key(&PathBuf::from(format!("{root}/.usagi/cache-trash")))
+        );
+    }
+
+    #[test]
     fn session_cache_fs_keeps_tracked_and_symlinked_directories() {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
@@ -1517,6 +1615,19 @@ mod tests {
                 "retained"
             );
         }
+        fs::create_dir_all(root.join(".usagi/private")).unwrap();
+        fs::write(root.join(".usagi/private/state"), "management data").unwrap();
+        let identity = SystemCacheTree
+            .node(&root.join(".usagi/private"))
+            .unwrap()
+            .usage
+            .identity;
+        assert!(detach_directory(root, Path::new(".uſagi/private"), identity).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join(".usagi/private/state")).unwrap(),
+            "management data"
+        );
+        assert!(!root.join(".usagi/cache-trash").exists());
     }
 
     #[test]
