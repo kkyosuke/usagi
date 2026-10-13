@@ -7,6 +7,10 @@ use crate::presentation::widgets;
 use usagi_core::domain::id::AgentId;
 
 fn decision_selection_runtime() -> WorkspaceRuntime {
+    decision_selection_runtime_with_title("Copy 日本語")
+}
+
+fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
     use usagi_core::domain::agent::CallerRef;
     use usagi_core::domain::user_decision::{
         UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionSelectionMode,
@@ -25,7 +29,7 @@ fn decision_selection_runtime() -> WorkspaceRuntime {
             },
             run_id: OperationId::new(),
         },
-        title: "Copy 日本語".into(),
+        title: title.into(),
         prompt: "Question text\nSecond line".into(),
         options: vec![UserDecisionOption {
             id: "safe".into(),
@@ -127,6 +131,33 @@ fn decision_drag_copies_only_body_and_keeps_wide_glyphs_highlighted() {
         &mut term,
     );
     assert_eq!(term.copied.last().unwrap(), "日本語");
+}
+
+#[test]
+fn decision_drag_keeps_combining_marks_and_following_cell_coordinates() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime_with_title("Ae\u{301}界Z");
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    for (column, expected) in [(3, "e\u{301}"), (5, "界"), (6, "Z")] {
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(selection.handle_input(
+                &decision_pointer(kind, viewport.left + column, viewport.top),
+                &mut term,
+            ));
+        }
+        assert_eq!(term.copied.last().unwrap(), expected);
+        let mut painted = frame.clone();
+        selection.paint(&mut painted, 80);
+        assert!(painted[viewport.top].contains(&format!("\u{1b}[7m{expected}\u{1b}[0m")));
+        assert_eq!(
+            widgets::strip_ansi(&painted[viewport.top]),
+            widgets::strip_ansi(&frame[viewport.top]),
+        );
+    }
 }
 
 #[test]

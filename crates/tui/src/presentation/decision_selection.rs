@@ -204,7 +204,7 @@ fn glyph_bounds(text: &str, first: usize, last: usize, width: usize) -> (usize, 
     let mut end = last.saturating_add(1).min(width);
     let mut column = 0;
     for character in text.chars() {
-        let next = column + UnicodeWidthChar::width(character).unwrap_or(0).max(1);
+        let next = column + UnicodeWidthChar::width(character).unwrap_or(0);
         if column < first && next > first {
             first = column;
         }

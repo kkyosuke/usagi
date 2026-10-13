@@ -234,7 +234,15 @@ fn extract_columns(line: &str, from: usize, to: usize) -> String {
     let mut result = String::new();
     let mut column: usize = 0;
     for character in line.chars() {
-        let width = UnicodeWidthChar::width(character).unwrap_or(0).max(1);
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width == 0 {
+            // Combining marks occupy their preceding cell, including at the
+            // selection's final endpoint. They never advance later columns.
+            if !result.is_empty() {
+                result.push(character);
+            }
+            continue;
+        }
         let end = column.saturating_add(width);
         if end > from && column <= to {
             result.push(character);
@@ -290,6 +298,17 @@ mod tests {
             TerminalSelection::begin(vec!["AあB".into()], TerminalPoint { row: 0, column: 3 });
         selection.extend(TerminalPoint { row: 0, column: 1 });
         assert_eq!(selection.text(), "あB");
+    }
+
+    #[test]
+    fn keeps_combining_marks_with_the_selected_cell_without_shifting_later_cells() {
+        for (column, expected) in [(0, "A"), (1, "e\u{301}"), (3, "界"), (4, "Z")] {
+            let selection = TerminalSelection::begin(
+                vec!["\u{301}Ae\u{301}界Z".into()],
+                TerminalPoint { row: 0, column },
+            );
+            assert_eq!(selection.text(), expected);
+        }
     }
 
     #[test]
