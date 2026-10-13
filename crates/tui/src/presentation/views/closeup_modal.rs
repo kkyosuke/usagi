@@ -477,17 +477,25 @@ fn body(state: &CloseupModal) -> Vec<String> {
     if state.error.is_some() {
         lines.push(error_row(state));
     }
+    let mut rows = Vec::new();
+    let mut cursor = 0;
     for (i, action) in state.matches().iter().enumerate() {
-        lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
+        if i == state.selected {
+            cursor = rows.len();
+        }
+        rows.push(action_row(*action, i == state.selected, INNER_WIDTH));
         if state.expanded && i == state.selected {
+            cursor += 1 + state.selected_subcommand;
             for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                lines.push(modal::subcommand_row(
+                rows.push(modal::subcommand_row(
                     &subcommand.label,
                     sub_index == state.selected_subcommand,
                 ));
             }
         }
     }
+    let capacity = BODY_HEIGHT.saturating_sub(lines.len() + 1 + usize::from(state.error.is_none()));
+    lines.extend(modal::bounded_list_rows(&rows, cursor, capacity));
     if state.error.is_none() {
         lines.push(String::new());
     }
@@ -754,6 +762,7 @@ mod tests {
         // Command-name completion still honours ↑↓: Tab completes the row the
         // user moved to, then advances from there.
         let mut modal = CloseupModal::new("s");
+        modal.select_next(); // artifact
         modal.select_next(); // close
         modal.complete_selected();
         assert_eq!(modal.submission(), "close");
@@ -834,10 +843,10 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 5);
+        assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
-        assert!(!joined(&modal).contains("workflow"));
+        assert!(joined(&modal).contains("artifact"));
         assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
         assert!(format!("{modal:?}").contains("tui"));
@@ -850,12 +859,14 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 4);
+        assert_eq!(modal.selected(), 5);
         assert_eq!(modal.selected_action().name, "terminal");
+        assert!(joined(&modal).contains("terminal"));
+        assert!(joined(&modal).contains("Enter: run"));
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();
-        assert_eq!(modal.selected_action().name, "close");
+        assert_eq!(modal.selected_action().name, "artifact");
     }
 
     #[test]
@@ -876,6 +887,8 @@ mod tests {
         let mut modal = CloseupModal::new("s");
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
+        assert_eq!(modal.submission(), "artifact");
+        modal.select_next();
         assert_eq!(modal.submission(), "close");
     }
 
@@ -889,6 +902,7 @@ mod tests {
     #[test]
     fn expanded_action_cycles_subcommands_and_renders_them() {
         let mut modal = CloseupModal::new("s");
+        modal.select_next(); // artifact
         modal.select_next(); // close
         modal.expand_selected();
         assert_eq!(modal.submission(), "close --force");
@@ -1005,7 +1019,7 @@ mod tests {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Closeup: daemon")); // タイトル
         assert!(text.contains("Run a command:"));
-        assert!(text.contains("terminal"));
+        assert!(text.contains("artifact"));
         assert!(text.contains("Launch or attach"));
         assert!(text.contains("close"));
         assert!(text.contains("Enter: run"));

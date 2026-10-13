@@ -24,6 +24,7 @@ pub struct CommandInfo {
 /// `arguments` は前後の空白だけを除いた未解釈文字列で、文法の検証は各ハンドラに委ねる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Artifacts { arguments: String },
     Clean { arguments: String },
     Config { arguments: String },
     Daemon { arguments: String },
@@ -83,6 +84,15 @@ struct CommandDefinition {
 /// Overview 固有コマンドの registry。metadata と入力名の解決で共有する単一情報源。
 /// 候補表示が安定するよう名前順に並べる。
 const DEFINITIONS: &[CommandDefinition] = &[
+    CommandDefinition {
+        info: CommandInfo {
+            name: "artifact",
+            description: "Browse generated files and retained artifacts",
+            usage: "artifact [all]",
+            long_description: "Browse artifacts from all sessions, including retained archives.",
+        },
+        factory: |arguments| Command::Artifacts { arguments },
+    },
     CommandDefinition {
         info: CommandInfo {
             name: "clean",
@@ -337,6 +347,7 @@ impl Command {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::Artifacts { .. } => "artifact",
             Self::Clean { .. } => "clean",
             Self::Config { .. } => "config",
             Self::Daemon { .. } => "daemon",
@@ -418,7 +429,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
+                "session"
             ]
         );
         assert!(
@@ -434,6 +446,9 @@ mod tests {
         assert!(session.usage.contains("sleep"));
         assert_eq!(
             [
+                Command::Artifacts {
+                    arguments: String::new()
+                },
                 Command::Clean {
                     arguments: String::new()
                 },
@@ -461,7 +476,8 @@ mod tests {
             ]
             .map(|command| command.name()),
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
+                "session"
             ]
         );
     }
