@@ -10,6 +10,7 @@
 mod banner;
 mod config_setup;
 mod controller_host;
+mod decision_selection;
 mod director;
 mod flow_steps;
 pub mod frame;

@@ -3,6 +3,391 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::widgets;
+use usagi_core::domain::id::AgentId;
+
+fn decision_selection_runtime() -> WorkspaceRuntime {
+    decision_selection_runtime_with_title("Copy 日本語")
+}
+
+fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
+    use usagi_core::domain::agent::CallerRef;
+    use usagi_core::domain::user_decision::{
+        UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionSelectionMode,
+        UserDecisionStatus,
+    };
+    let workspace = WorkspaceId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let request = UserDecision {
+        decision_id: UserDecisionId::new(),
+        owner: UserDecisionOwner {
+            workspace_id: workspace,
+            session_id: None,
+            caller: CallerRef {
+                session_id: None,
+                agent_id: AgentId::new(),
+            },
+            run_id: OperationId::new(),
+        },
+        title: title.into(),
+        prompt: "Question text\nSecond line".into(),
+        options: vec![UserDecisionOption {
+            id: "safe".into(),
+            label: "Safe choice".into(),
+            description: None,
+            pros: Vec::new(),
+            cons: Vec::new(),
+        }],
+        allow_freeform: true,
+        allow_comment: true,
+        require_confirmation: true,
+        recommendation: None,
+        selection_limits: None,
+        selection_mode: UserDecisionSelectionMode::Single,
+        context: Vec::new(),
+        expires_at: None,
+        idempotency_key: None,
+        status: UserDecisionStatus::Pending,
+        answer: None,
+        created_at: now(),
+        resolved_at: None,
+    };
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+        workspace,
+        decisions: vec![request],
+    }));
+    runtime
+}
+
+fn decision_selection_frame(
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> Vec<String> {
+    crate::presentation::views::decision_modal::render_over(
+        height,
+        width,
+        &vec!["BACKGROUND TERMINAL".into(); height],
+        runtime.state().decision_overlay().unwrap(),
+        runtime.state().decisions(),
+        &BTreeMap::new(),
+    )
+}
+
+fn decision_pointer(kind: PointerKind, column: usize, row: usize) -> Key {
+    Key::Pointer(PointerEvent {
+        kind,
+        column: u16::try_from(column).unwrap(),
+        row: u16::try_from(row).unwrap(),
+    })
+}
+
+#[test]
+fn decision_drag_copies_only_body_and_keeps_wide_glyphs_highlighted() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime();
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    // Begin on the second cell of 日 and finish on the second cell of 語.
+    for key in [
+        Key::Click {
+            column: u16::try_from(viewport.left + 8).unwrap(),
+            row: u16::try_from(viewport.top).unwrap(),
+        },
+        decision_pointer(PointerKind::Drag, viewport.left + 12, viewport.top),
+        decision_pointer(PointerKind::Up, viewport.left + 12, viewport.top),
+    ] {
+        assert!(selection.handle_input(&key, &mut term));
+    }
+    assert_eq!(term.copied, ["日本語"]);
+    let mut painted = frame.clone();
+    selection.paint(&mut painted, 80);
+    assert!(painted[viewport.top].contains("\u{1b}[7m日本語"));
+    assert_eq!(
+        widgets::strip_ansi(&painted[viewport.top]),
+        widgets::strip_ansi(&frame[viewport.top])
+    );
+    assert!(painted.join("\n").contains("copied 1 line(s)"));
+    assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    assert_eq!(term.copied, ["日本語", "日本語"]);
+    // Background updates do not replace the selected text.
+    let mut background_update = frame;
+    background_update[0] = "NEW BACKGROUND".into();
+    let revision = selection.revision();
+    selection.sync(
+        &background_update,
+        24,
+        80,
+        runtime.state().decision_overlay(),
+    );
+    assert_eq!(selection.revision(), revision);
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut term,
+    );
+    assert_eq!(term.copied.last().unwrap(), "日本語");
+}
+
+#[test]
+fn decision_drag_keeps_combining_marks_and_following_cell_coordinates() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime_with_title("Ae\u{301}界Z");
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    for (column, expected) in [(3, "e\u{301}"), (4, "界"), (5, "界"), (6, "Z")] {
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(selection.handle_input(
+                &decision_pointer(kind, viewport.left + column, viewport.top),
+                &mut term,
+            ));
+        }
+        assert_eq!(term.copied.last().unwrap(), expected);
+        let mut painted = frame.clone();
+        selection.paint(&mut painted, 80);
+        assert!(painted[viewport.top].contains(&format!("\u{1b}[7m{expected}\u{1b}[0m")));
+        assert_eq!(
+            widgets::strip_ansi(&painted[viewport.top]),
+            widgets::strip_ansi(&frame[viewport.top]),
+        );
+    }
+}
+
+#[test]
+fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let mut runtime = decision_selection_runtime();
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    assert!(!selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    selection.sync(
+        &decision_selection_frame(&runtime, 24, 80),
+        24,
+        80,
+        runtime.state().decision_overlay(),
+    );
+    for key in [
+        decision_pointer(PointerKind::Move, 0, 0),
+        decision_pointer(PointerKind::Drag, 0, 0),
+        decision_pointer(PointerKind::Up, 0, 0),
+        decision_pointer(PointerKind::Down, viewport.left, viewport.top),
+        decision_pointer(PointerKind::Up, viewport.left, viewport.top),
+        Key::Click { column: 0, row: 0 },
+        decision_pointer(PointerKind::Drag, viewport.left, viewport.top),
+        decision_pointer(PointerKind::Up, viewport.left, viewport.top),
+        Key::TerminalCopy { fallback: vec![3] },
+    ] {
+        assert!(selection.handle_input(&key, &mut term));
+    }
+    assert!(term.copied.is_empty());
+    let mut painted = decision_selection_frame(&runtime, 24, 80);
+    selection.paint(&mut painted, 80);
+    assert!(painted.join("\n").contains("no decision text is selected"));
+    for key in [Key::Tab, Key::Paste("Pasted comment".into())] {
+        assert!(!selection.handle_input(&key, &mut term));
+        assert!(runtime.handle_key(key).is_empty());
+    }
+    assert_eq!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .comment(),
+        "Pasted comment"
+    );
+    for key in [Key::Tab, Key::Paste("Pasted answer".into())] {
+        assert!(!selection.handle_input(&key, &mut term));
+        assert!(runtime.handle_key(key).is_empty());
+    }
+    assert_eq!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .freeform(),
+        "Pasted answer"
+    );
+}
+
+#[test]
+fn decision_selection_tracks_list_review_scroll_resize_and_close() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let mut runtime = decision_selection_runtime();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    for key in [Key::Other, Key::Enter, Key::Escape, Key::Escape] {
+        let _ = runtime.handle_key(key);
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(selection.handle_input(
+                &decision_pointer(kind, viewport.left + 4, viewport.top),
+                &mut term
+            ));
+        }
+        assert!(!term.copied.last().unwrap().contains("BACKGROUND"));
+    }
+    let _ = runtime.handle_key(Key::Enter);
+    let _ = runtime.handle_key(Key::PageDown);
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    let copies = term.copied.len();
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut term,
+    );
+    assert_eq!(term.copied.len(), copies);
+    for (height, width) in [(40, 140), (12, 20), (0, 0), (2, 4), (12, 3)] {
+        let frame = decision_selection_frame(&runtime, height, width);
+        selection.sync(&frame, height, width, runtime.state().decision_overlay());
+        selection.paint(&mut frame.clone(), if width == 0 { 80 } else { width });
+        selection.handle_input(&decision_pointer(PointerKind::Move, 0, 0), &mut term);
+    }
+    selection.sync(&[], 24, 80, None);
+    selection.paint(&mut [], 80);
+    assert!(!selection.handle_input(&Key::Click { column: 0, row: 0 }, &mut term));
+}
+
+#[test]
+fn decision_multiline_drag_clamps_to_body_and_reports_clipboard_failure() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime();
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    let mut term = FakeTerminal::default();
+    for (kind, column, row) in [
+        (PointerKind::Down, viewport.left + 12, viewport.top + 2),
+        (PointerKind::Drag, 0, 0),
+        (PointerKind::Up, 0, 0),
+    ] {
+        selection.handle_input(&decision_pointer(kind, column, row), &mut term);
+    }
+    assert_eq!(
+        term.copied,
+        ["  Copy 日本語\n  Question text\n  Second line"]
+    );
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut SleepingTerminal::default(),
+    );
+    let mut painted = frame.clone();
+    selection.paint(&mut painted, 80);
+    assert!(painted.join("\n").contains("clipboard is unavailable"));
+    // A blank selection never overwrites the clipboard.
+    for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+        selection.handle_input(
+            &decision_pointer(kind, viewport.left + 40, viewport.top),
+            &mut term,
+        );
+    }
+    assert_eq!(term.copied.len(), 1);
+}
+
+#[test]
+fn decision_copy_and_paste_work_through_the_workspace_frame_loop() {
+    use usagi_core::domain::user_decision::UserDecision;
+    struct DecisionLane(UserDecision);
+    impl BackendDecisionPort for DecisionLane {
+        fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+            self.0.owner.workspace_id = workspace;
+            completions.emit(AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![self.0.clone()],
+            }));
+        }
+        fn resolve(
+            &mut self,
+            _: WorkspaceId,
+            _: UserDecisionId,
+            _: UserDecisionAnswer,
+            _: Completions,
+        ) {
+            panic!("copying text must not submit an answer");
+        }
+    }
+    // The project bar takes one row above the Home frame.
+    let viewport = crate::presentation::views::decision_modal::body_viewport(23, 80).unwrap();
+    let row = viewport.top + 1;
+    let keys = [
+        decision_pointer(PointerKind::Down, viewport.left + 8, row),
+        decision_pointer(PointerKind::Drag, viewport.left + 12, row),
+        decision_pointer(PointerKind::Up, viewport.left + 12, row),
+        Key::TerminalCopy { fallback: vec![3] },
+        Key::Live(LiveTerminalAction::OpenAttention),
+        Key::TerminalCopy { fallback: vec![3] },
+        Key::Escape,
+        Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        Key::Tab,
+        Key::Paste("Pasted note".into()),
+        Key::Escape,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ];
+    let mut term = FakeTerminal {
+        size: Some((24, 80)),
+        ..FakeTerminal::with_keys(&keys)
+    };
+    let runtime = decision_selection_runtime();
+    let mut factory = FixedBackendFactory {
+        sessions: Some(Box::new(UnavailableSessionCommandPort)),
+        agent: Some(Box::new(UnavailableAgentCommandPort)),
+        launch: None,
+        restore: None,
+        metrics: Some(Box::new(NoMetrics)),
+        browser: Some(Box::new(UnavailableBrowserOpener)),
+        session_refresh: None,
+        decisions: Some(Box::new(DecisionLane(
+            runtime.state().decisions()[0].clone(),
+        ))),
+        session_worktrees: None,
+    };
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut term, snapshot("decision"), &mut factory)
+            .unwrap(),
+        Exit::Quit
+    );
+    assert_eq!(term.copied, ["日本語", "日本語"]);
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("\u{1b}[7m日本語"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("copied 1 line(s)"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("Pasted note"))
+    );
+}
 
 #[test]
 fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {

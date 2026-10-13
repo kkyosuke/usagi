@@ -471,10 +471,7 @@ pub fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 /// Strip ANSI escape sequences and the private-use cursor markers from a
-/// rendered line so a test can assert on its visible text. Every modal view
-/// test that inspects a frame's content shares this one helper instead of
-/// copying the same escape-skipping loop.
-#[cfg(test)]
+/// rendered line for copying visible text and inspecting frame content.
 pub(crate) fn strip_ansi(line: &str) -> String {
     use crate::presentation::frame::{INPUT_CURSOR_MARKER, TERMINAL_CURSOR_MARKER};
     let mut out = String::new();
