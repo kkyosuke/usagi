@@ -820,6 +820,7 @@ pub(super) fn drive_workspace_controller(
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
+    let mut decision_selection = super::decision_selection::DecisionTextSelection::default();
     // Seed the daemon-authoritative snapshots before the first frame so a
     // pending decision and another client's sessions are visible without
     // requiring a manual key binding. Both are wakes of a resident lane, not
@@ -1335,7 +1336,18 @@ pub(super) fn drive_workspace_controller(
             if frame_changed
                 && (!controller_may_be_noop || drawn_material.as_ref() != Some(&material))
             {
-                let home = render_home_material(&material);
+                let mut home = render_home_material(&material);
+                decision_selection.sync(
+                    &home,
+                    height,
+                    width,
+                    runtime.state().decision_overlay().filter(|_| {
+                        runtime.state().overlay() == Some(Overlay::Decisions)
+                            && help_context.is_none()
+                            && !deck.overlay_open()
+                    }),
+                );
+                decision_selection.paint(&mut home, width);
                 let frame = compose_workspace_shell_frame(deck, height, width, &home);
                 let frame = match help_context {
                     Some(help) => {
@@ -1430,6 +1442,15 @@ pub(super) fn drive_workspace_controller(
             _ => None,
         };
         let key = adjust_project_bar_pointer(raw_key);
+
+        let selection_revision = decision_selection.revision();
+        if decision_selection.handle_input(&key, term) {
+            if decision_selection.revision() != selection_revision {
+                frame_source_key = None;
+                frame_material_key = None;
+            }
+            continue;
+        }
 
         // Process shortcuts and the remaining project-bar clicks win over the
         // unobscured workspace surface, including a focused live PTY. Foreground

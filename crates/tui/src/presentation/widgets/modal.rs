@@ -381,6 +381,23 @@ struct ModalGeometry {
     height: usize,
 }
 
+/// Content cells inside the padded box drawn by [`render_over`].
+pub(crate) fn body_viewport(
+    raw_height: usize,
+    raw_width: usize,
+    inner_width: usize,
+    body_height: usize,
+) -> Option<super::live_terminal::ViewportGeometry> {
+    let (height, width) = normalize_size(raw_height, raw_width);
+    let geometry = ModalGeometry::new(height, width, inner_width, body_height)?;
+    Some(super::live_terminal::ViewportGeometry {
+        left: geometry.left + 2,
+        top: geometry.top + 2,
+        cols: geometry.inner_width,
+        rows: body_height.min(height.saturating_sub(geometry.top + 2)),
+    })
+}
+
 impl ModalGeometry {
     fn new(
         height: usize,

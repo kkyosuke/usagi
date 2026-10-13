@@ -28,6 +28,14 @@ const CHROME_ROWS: usize = 4;
 #[cfg(test)]
 const CONTENT_CAPACITY: usize = MIN_BODY_HEIGHT - CHROME_ROWS;
 
+pub(crate) fn body_viewport(
+    height: usize,
+    width: usize,
+) -> Option<widgets::live_terminal::ViewportGeometry> {
+    let (inner_width, body_height, _) = dimensions(height, width);
+    modal::body_viewport(height, width, inner_width, body_height)
+}
+
 /// Four fifths of `available`, bounded to the modal's readable range.
 const fn scaled(available: usize, min: usize, max: usize) -> usize {
     let desired = available.saturating_mul(4) / 5;
