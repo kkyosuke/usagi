@@ -406,6 +406,11 @@ pub enum SessionCommand {
     Sleep {
         name: String,
     },
+    /// Inspect configured session cache usage; --apply reclaims eligible caches.
+    Cache {
+        #[arg(long)]
+        apply: bool,
+    },
     /// Resume one exact target returned by `resume-inventory`. The target is a
     /// secret-free JSON object; provider-native IDs are never accepted.
     ResumeExact {
@@ -580,6 +585,9 @@ impl Run for Session {
             ),
             SessionCommand::Sleep { name } => {
                 (SessionAction::Sleep, serde_json::json!({"name": name}))
+            }
+            SessionCommand::Cache { apply } => {
+                (SessionAction::Cache, serde_json::json!({"apply": apply}))
             }
             SessionCommand::ResumeExact { target } => {
                 let target = serde_json::from_str(target).map_err(|_| {
@@ -1050,6 +1058,14 @@ mod tests {
             (
                 ["usagi", "session", "sleep", "a"].as_slice(),
                 usagi_core::infrastructure::ipc::SessionAction::Sleep,
+            ),
+            (
+                ["usagi", "session", "cache"].as_slice(),
+                usagi_core::infrastructure::ipc::SessionAction::Cache,
+            ),
+            (
+                ["usagi", "session", "cache", "--apply"].as_slice(),
+                usagi_core::infrastructure::ipc::SessionAction::Cache,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),

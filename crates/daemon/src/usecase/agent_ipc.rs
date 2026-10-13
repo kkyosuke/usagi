@@ -1255,6 +1255,21 @@ impl AgentRuntime {
         self.retirement_blocker_count(workspace) != 0
     }
 
+    /// Exact scopes whose process ownership prevents automatic cache cleanup.
+    #[must_use]
+    pub fn cache_cleanup_activity(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Vec<(TerminalRef, super::runtime::RuntimeState)> {
+        self.coordinator
+            .snapshot()
+            .records
+            .into_iter()
+            .filter(|record| record.runtime.terminal.workspace_id == workspace)
+            .map(|record| (record.runtime.terminal, record.state))
+            .collect()
+    }
+
     /// Number of Agent records which may still own a PTY process.
     #[must_use]
     pub fn retirement_blocker_count(&self, workspace: WorkspaceId) -> usize {

@@ -352,6 +352,8 @@ pub(super) fn spawn_ipc_server(
     background_workers.push(start_orphan_cleanup_worker(
         &workspaces,
         fence.gate.clone(),
+        Arc::clone(&agent),
+        Arc::clone(&terminal),
         Arc::clone(&shutdown),
     )?);
     // Workspaces adopted for a client that has gone away are given back, so a
@@ -963,7 +965,7 @@ pub(super) fn start_ipc_accept_loop(
                                             DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
                                             DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
                                             DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, launch_client: Some(&launch_client) }, request_id, &body, hello),
+                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, terminal: &tenant_terminal, pr_inventory: &pr_inventory, launch_client: Some(&launch_client) }, request_id, &body, hello),
                                             DaemonRequest::Agent { .. }
                                             | DaemonRequest::AgentInventory { .. }
                                             | DaemonRequest::AgentWorkspaceObservation { .. }

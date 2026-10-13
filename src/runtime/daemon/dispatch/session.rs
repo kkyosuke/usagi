@@ -585,6 +585,25 @@ pub(super) fn dispatch_session_action(
             snapshot.body["session_retained"] = serde_json::json!(true);
             Ok(snapshot)
         }
+        SessionAction::Cache => {
+            if authenticated_caller.is_some() {
+                return Err(SessionRuntimeError::InvalidRequest);
+            }
+            let apply = match payload.get("apply") {
+                None => false,
+                Some(serde_json::Value::Bool(value)) => *value,
+                _ => return Err(SessionRuntimeError::InvalidRequest),
+            };
+            reply(
+                super::super::session_cache::clean_session_caches(
+                    bound,
+                    agent,
+                    context.terminal,
+                    apply,
+                )
+                .map_err(|error| SessionRuntimeError::DurableFailure(error.to_string()))?,
+            )
+        }
         SessionAction::Clean => {
             let flag = |name| match payload.get(name) {
                 None => Ok(false),

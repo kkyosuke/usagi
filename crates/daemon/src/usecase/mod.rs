@@ -37,6 +37,7 @@ pub mod rollover_trigger;
 pub mod runtime;
 pub mod serve;
 pub mod serve_standby;
+pub mod session_cache;
 pub mod session_runtime;
 pub mod session_teardown;
 pub mod shutdown;

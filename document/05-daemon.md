@@ -20,6 +20,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
 - [background worker の待ち方](#background-worker-の待ち方)
+- [session 成果物の自動回収](#session-成果物の自動回収)
 - [session teardown worker](#session-teardown-worker)
 - [terminal ownership](#terminal-ownership)
 - [terminal launch environment](#terminal-launch-environment)
@@ -1365,6 +1366,45 @@ shutdown は 1 秒以内に観測される。lifecycle owner は `daemon.lock` �
 stale recovery も singleton が生きているので owner を回収できない。1 秒の backstop はこの状態を防ぐ。
 この読み直しは idle の間も 1 秒に 1 回の timer wakeup として残るため、上の「意図した tick の回数」には
 この 2 つの待ち手の backstop も含まれる。
+
+## session 成果物の自動回収
+
+workspace の `.usagi/config.toml` に `[session.cache_cleanup]` を設定すると、active daemon の
+5 分ごとの整理処理が、登録済み session を保持したまま指定した成果物ディレクトリを回収する。
+ここが session cache retention の設定と動作の正本である。既定の `paths` は空で、自動回収は無効。
+Cargo、Node.js などのビルドツールを呼ばず、明示した再生成可能なディレクトリだけを扱う。
+
+```toml
+[session.cache_cleanup]
+paths = ["target"]
+max_age_hours = 168
+max_bytes = 10737418240
+```
+
+| 設定 | 意味 |
+|---|---|
+| `paths` | 各 session worktree からの相対ディレクトリ。例: `target`、`node_modules`、`.next`。保存しておきたい成果物は指定しない |
+| `max_age_hours` | ディレクトリ内の最新更新からの保存時間。省略時は経過時間で回収しない |
+| `max_bytes` | 指定ディレクトリの workspace 合計の割り当て済み bytes に対する soft limit。省略時は容量で回収しない |
+
+`paths` を指定する場合は少なくとも片方の limit を指定する。0 は即時回収を意味する。
+期限を過ぎたディレクトリを回収し、容量が上限を超えていれば更新の古いものから追加で回収する。
+稼働中・起動予約中・process ownership が不明な Agent / generic terminal の session は保持する。
+workspace-root にそのような runtime がある場合は、その workspace の全 session を保持する。
+現 daemon executable を含むディレクトリ、Git 管理下のファイルを含むディレクトリ、symlink を経由する
+ディレクトリも保持する。保護対象があると合計は上限を超えたままになることがある。
+daemon の handoff 中も回収を待つ。usagi 外で起動したビルドは観測できないため、併用する workspace
+では外部ビルドを停止してから有効化する。
+
+容量は symlink を辿らずに背景 worker が計測する。回収直前には session identity と runtime の
+観測を再確認し、計測中に起動・終了があれば次の pass に延期する。runtime lock 下で行うのは
+ディレクトリの短い rename までで、時間のかかる削除は lock を解放してから行う。
+中断された削除は session 内の `.usagi/cache-trash/` に残り、次の整理で再試行する。
+ソース、session、branch、会話履歴は保持される。再開時にはビルド・依存インストールが必要になる。
+
+人間向け CLI の `usagi session cache` は容量、保護状態、回収候補を dry-run で表示する。
+`usagi session cache --apply` は同じ policy を直ちに適用する。Agent の MCP credential からの
+workspace 全体への cache 回収は受理しない。自動回収の結果・延期件数と整理処理のエラーは daemon の error log に記録する。
 
 ## session teardown worker
 

@@ -599,6 +599,140 @@ fn macos_daemon_ptys_use_persistent_user_service_context() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One daemon exercises both live owners and retained history before reclaiming the same cache.
+fn session_cache_cleanup_reports_usage_and_keeps_the_session() {
+    fn caches(client: &mut impl DaemonClient, apply: bool) -> serde_json::Value {
+        match client
+            .request(DaemonRequest::Session {
+                action: SessionAction::Cache,
+                operation_id: OperationId::new().to_string(),
+                payload: serde_json::json!({"apply":apply}),
+            })
+            .unwrap()
+        {
+            DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+        }
+    }
+    fn finish_input(client: &mut impl DaemonClient, terminal: &TerminalRef) {
+        let subscription = attach(client, terminal);
+        client
+            .request(DaemonRequest::Terminal {
+                action: TerminalAction::Input,
+                payload: serde_json::to_value(TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription,
+                    input_seq: 0,
+                    input_operation: None,
+                    bytes: b"go\n".to_vec(),
+                })
+                .unwrap(),
+            })
+            .unwrap();
+    }
+    let _serial = serial();
+    let repo = fixture_repo();
+    fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-qm", "ignore generated target"]);
+    fs::create_dir(repo.path().join(".usagi")).unwrap();
+    let config = repo.path().join(".usagi/config.toml");
+    fs::write(
+        &config,
+        "[session.cache_cleanup]\npaths = ['target']\nmax_bytes = 0\n",
+    )
+    .unwrap();
+    let home = short_dir("usagi-cache-");
+    let bin = home.path().join("bin");
+    write_codex(&bin, &home.path().join("codex-count"), 0);
+    let shell = bin.join("fixture-shell");
+    write_shell(&shell, &home.path().join("shell-count"));
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, Some(&shell));
+    let mut client = client(&channel_data_dir(home.path()));
+    let (workspace, session, worktree) = available_scope(&mut client);
+    let root = repo.path().join(".usagi/sessions/agent-e2e");
+    let target = root.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("artifact"), vec![1u8; 8192]).unwrap();
+    let dry = caches(&mut client, false);
+    assert_eq!(dry["enabled"], true);
+    assert_eq!(dry["candidates"][0]["selected"], true);
+    assert!(dry["candidates"][0]["bytes"].as_u64().unwrap() >= 8192);
+    let (operation, agent_terminal) = launch(&mut client, workspace, session, None);
+    assert_eq!(
+        caches(&mut client, false)["candidates"][0]["protected"],
+        true
+    );
+    assert_eq!(caches(&mut client, true)["removed"], 0);
+    assert!(target.exists());
+    finish_input(&mut client, &agent_terminal);
+    wait_for_agent_completion(&mut client, &operation, workspace, session, None);
+    let reply = client
+        .request(DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::to_value(TerminalRequest::Launch {
+                intent: TerminalLaunchIntent {
+                    request: TerminalLaunchRequest {
+                        profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                        scope: TerminalLaunchScope {
+                            workspace_id: workspace,
+                            session_id: Some(session),
+                            worktree_id: worktree,
+                        },
+                    },
+                    geometry: TerminalGeometry { cols: 80, rows: 24 },
+                    launch_operation: None,
+                },
+            })
+            .unwrap(),
+        })
+        .unwrap();
+    let DaemonReply::Ok(reply) = reply else {
+        panic!("terminal launch is synchronous");
+    };
+    let terminal: TerminalRef = serde_json::from_value(reply["terminal"].clone()).unwrap();
+    assert_eq!(caches(&mut client, true)["removed"], 0);
+    finish_input(&mut client, &terminal);
+    assert!(observe_until(Duration::from_secs(10), || {
+        matches!(client.request(DaemonRequest::Terminal { action:TerminalAction::Resync, payload:serde_json::to_value(TerminalRequest::Resync { terminal:terminal.clone() }).unwrap() }), Ok(DaemonReply::Ok(body)) if body["exited"] == 0)
+    }));
+    let applied = caches(&mut client, true);
+    assert_eq!(applied["removed"], 1, "{applied}");
+    assert!(!target.exists());
+    assert!(root.join(".git").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("README.md")).unwrap(),
+        "fixture\n"
+    );
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("source"), "tracked").unwrap();
+    git(&root, &["add", "-f", "target/source"]);
+    let abandoned = root
+        .join(".usagi/cache-trash")
+        .join(OperationId::new().to_string());
+    fs::create_dir(&abandoned).unwrap();
+    fs::write(abandoned.join("old"), "old cache").unwrap();
+    assert_eq!(caches(&mut client, true)["removed"], 0);
+    assert!(!abandoned.exists());
+    assert!(target.join("source").exists());
+    let cli = usagi_command(
+        home.path(),
+        Channel::Local,
+        repo.path(),
+        &[OsStr::new("session"), OsStr::new("cache")],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(String::from_utf8_lossy(&cli.stdout).contains("dry_run"));
+    fs::write(&config, "[session.cache_cleanup]\npaths = []\n").unwrap();
+    assert_eq!(caches(&mut client, false)["enabled"], false);
+}
+
+#[test]
 fn running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions() {
     let _serial = serial();
     let repo = fixture_repo();

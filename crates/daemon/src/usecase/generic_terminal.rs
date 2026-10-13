@@ -672,6 +672,18 @@ impl GenericTerminalCoordinator {
             records: self.records.values().cloned().collect(),
         }
     }
+    /// Exact scopes whose process ownership prevents automatic cache cleanup.
+    #[must_use]
+    pub fn cache_cleanup_activity(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Vec<(usagi_core::domain::id::TerminalRef, TerminalRuntimeState)> {
+        self.records
+            .values()
+            .filter(|record| record.terminal.workspace_id == workspace)
+            .map(|record| (record.terminal.clone(), record.state))
+            .collect()
+    }
     /// Whether this workspace still has a generic terminal that is running.
     ///
     /// Unlike [`Self::inventory`], the question is about the whole workspace

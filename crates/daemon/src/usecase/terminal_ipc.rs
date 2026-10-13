@@ -252,6 +252,18 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         self.coordinator.has_running_in_workspace(workspace)
     }
 
+    /// Runtime scopes and states used to fence automatic cache detachment.
+    #[must_use]
+    pub fn cache_cleanup_activity(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Vec<(
+        usagi_core::domain::id::TerminalRef,
+        super::terminal::TerminalRuntimeState,
+    )> {
+        self.coordinator.cache_cleanup_activity(workspace)
+    }
+
     /// Number of live generic terminal PTYs owned by one workspace.
     #[must_use]
     pub fn running_count_in_workspace(

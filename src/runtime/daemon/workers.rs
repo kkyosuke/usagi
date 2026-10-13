@@ -571,6 +571,8 @@ pub(super) trait OrphanCleanupPass: Send {
 pub(super) struct AutomaticOrphanCleanup {
     pub(super) workspaces: Workspaces,
     pub(super) gate: AdmissionGate,
+    pub(super) agent: SharedAgentRuntime,
+    pub(super) terminal: SharedTerminalRuntime,
 }
 
 impl OrphanCleanupPass for AutomaticOrphanCleanup {
@@ -591,6 +593,27 @@ impl OrphanCleanupPass for AutomaticOrphanCleanup {
                     root.display(),
                     error.safe_message()
                 ));
+            }
+            match super::session_cache::clean_session_caches(
+                &bound,
+                &self.agent,
+                &self.terminal,
+                true,
+            ) {
+                Ok(report)
+                    if report["removed"].as_u64().unwrap_or_default() != 0
+                        || report["deferred"].as_u64().unwrap_or_default() != 0 =>
+                {
+                    ErrorLog::record(&format!(
+                        "session cache cleanup for {}: {report}",
+                        root.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => ErrorLog::record(&format!(
+                    "session cache cleanup deferred for {}: {error}",
+                    root.display()
+                )),
             }
         }
     }
