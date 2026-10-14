@@ -110,9 +110,11 @@ pub struct WorkspaceAgentConfig {
 impl Default for WorkspaceAgentConfig {
     fn default() -> Self {
         // A freshly initialized workspace must be able to delegate without an
-        // undocumented config edit. `default` is the provider-owned selector:
-        // the CLI, rather than usagi, chooses the concrete Claude model.
-        Self::from_runtime_allowlists([("claude", vec!["default".to_owned()])])
+        // undocumented config edit. `default` asks the selected provider CLI
+        // to choose its model; availability is still checked at admission.
+        Self::from_runtime_allowlists(
+            supported_agent_runtimes().map(|runtime| (runtime.id, vec!["default".to_owned()])),
+        )
     }
 }
 
@@ -371,10 +373,10 @@ mod tests {
             ["first", "second"]
         );
 
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
-                .allows("claude", "default")
-        );
+        let missing = WorkspaceAgentConfig::read(workspace.path().join("missing").as_path());
+        for runtime in supported_agent_runtimes() {
+            assert!(missing.allows(runtime.id, "default"));
+        }
         assert!(
             WorkspaceSessionConfig::read(workspace.path().join("missing").as_path())
                 .setup_commands()

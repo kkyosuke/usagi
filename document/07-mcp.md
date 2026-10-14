@@ -371,13 +371,26 @@ session 作成系は optional role selector を受け取る。`session_create` /
 worker の `id` branch は schema に現れず daemon も受理しない。`agent` は allowlist にある `runtime` と `model` の
 組だけであり、部分指定・混在は受理しない。`session_dispatch` は既存 session を対象とするため `id` branch を持つ。
 
+#### runtime/model 選択
+
 runtime の closed vocabulary は daemon の profile catalog と共通で、`claude` / `codex` / `agy` を扱う。
 workspace の `.usagi/config.toml` に対応する model allowlist があり、profile の実行コマンドが PATH 上にある runtime
 だけが MCP schema に現れる。daemon が provision した MCP child は `USAGI_WORKSPACE_ROOT` の trusted root から
 allowlist を読み、session worktree の cwd に machine-local config がなくても workspace と同じ schema を公開する。
 daemon の spawn 直前の再検証も同じ workspace root を権威とし、session worktree は worker の cwd としてだけ使う。
-workspace config 自体が未作成なら `claude/default` を安全な provider-default として使う。config が存在するのに
-読めない、または runtime/model 設定が不正な場合は空へ fail closed し、暗黙の fallback は行わない。
+workspace config 自体が未作成なら、PATH 上にある各 runtime の `default` を provider-default として使う。
+`default` はモデル名の指定ではなく、CLI のモデル選択に任せる selector であり、起動時には model flag を渡さない。
+config が存在するのに読めない、または runtime/model 設定が不正な場合は空へ fail closed し、
+暗黙の fallback は行わない。
+
+設定済み workspace で AGY を委譲先に加える場合は、既存の設定に次の allowlist を追加する。
+特定のモデルに限定する場合は `agy models` に表示される slug を `default` の代わりに指定する。
+
+```toml
+[agents.agy]
+models = ["default"]
+```
+
 `agy` の実行コマンドは `agy` である。Antigravity では daemon が
 daemon の selected data directory に
 `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
