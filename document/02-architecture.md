@@ -756,6 +756,25 @@ secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ
 載せない。MCP caller credential は `SpawnProvision` にも Agent environment にも置かず、OS peer identity を検証した
 専用 MCP child の one-shot IPC claim 後にその process memory へだけ渡す。
 
+#### Antigravity CLI の互換範囲
+
+この表が AGY と他 provider の起動・観測に関する差異の正本である。
+AGY 1.2.0 の `agy --help` と、公式の [headless mode](https://www.antigravity.google/docs/cli/headless)・
+[hooks](https://www.antigravity.google/docs/hooks) の契約に合わせて連携する。
+
+| 機能 | AGY での扱い |
+|---|---|
+| 対話・初回 task・モデル指定 | `--prompt-interactive` と `--model` |
+| headless | `--print`。CLI 自体は headless の会話再開にも対応するが、usagi の exact resume は対話起動に限る |
+| 会話再開 | structured hook の `conversationId` を捕捉し、`--conversation` に渡す |
+| system prompt | 独立した起動 flag がないため、上記の初回 prompt 合成を使う。CLI の system message と同じ優先順位にはならない |
+| MCP・phase hook | managed launch 専用 plugin を使う。設定の配線は [daemon の Agent ownership](05-daemon.md#agent-ownership) を参照する |
+| MCP tool の事前許可 | server 単位の起動 flag がないため `--dangerously-skip-permissions` を使う。書き込み範囲は daemon の外側 sandbox が制限する |
+| 許可要求・終了イベント | `PermissionRequest` / `Notification` / `SessionEnd` に相当する専用 hook はない。tool hook で phase を報告し、process 終了は PTY owner が観測する |
+| 認証状態 | 専用 auth status command がないため `agy models` を preflight とする。budget は [readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight) を参照する |
+
+AGY の MCP 委譲 selector の設定は [MCP の runtime/model 選択](07-mcp.md#runtimemodel-選択) を参照する。
+
 ### Daemon runtime ownership
 
 daemon の `usecase::runtime::RuntimeCoordinator` は、一回の Agent runtime を所有する。

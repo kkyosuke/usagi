@@ -54,6 +54,9 @@ Artifacts は本人だけが読める状態で保管し、外部アプリでは�
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
+AGY は Closeup の `agent -m agy` で選択できます。MCP 委譲の設定は
+[runtime/model 選択](document/07-mcp.md#runtimemodel-選択)、CLI による機能差は
+[Antigravity CLI の互換範囲](document/02-architecture.md#antigravity-cli-の互換範囲)を参照してください。
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
 logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
 よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。

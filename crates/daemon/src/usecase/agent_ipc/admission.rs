@@ -149,7 +149,9 @@ impl AgentRuntime {
         let request = LaunchRequest {
             profile_id: worker.runtime.clone(),
             mode: LaunchMode::Interactive,
-            model: Some(worker.model.clone()),
+            // `default` is usagi's provider-default selector, not a model
+            // slug understood by every CLI (notably AGY and Codex).
+            model: (worker.model.as_str() != "default").then(|| worker.model.clone()),
             resume: false,
             provider_resume: None,
             initial_prompt: Some(prompt.to_owned()),
