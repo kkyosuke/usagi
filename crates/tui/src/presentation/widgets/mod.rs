@@ -205,42 +205,39 @@ pub fn display_width(text: &str) -> usize {
 /// `text` を表示桁数 `max` に収まるよう切り詰める。溢れるときは末尾 1 桁を使って
 /// `…` を付ける（先頭側が情報量が多いので頭を残す）。ANSI エスケープは 0 桁として
 /// そのまま持ち越し、切断が色を開いたままにするときは末尾を [`RESET`] で閉じる。
+/// 結合文字や複合絵文字は grapheme cluster 全体を残すか、省略する。
 #[must_use]
 pub fn clip_to_width(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
     }
-    let truncated = display_width(text) > max;
+    let (plain, escapes) = text_and_escapes(text);
+    let truncated = display_width(&plain) > max;
     // 省略記号 `…` に 1 桁を残す。
     let budget = if truncated { max - 1 } else { max };
-    let mut out = String::with_capacity(text.len());
     let mut width = 0usize;
-    // 切断がスタイル（SGR エスケープ）を持ち越したか。持ち越したら末尾を
-    // [`RESET`] で閉じ、開いた色が後続へ滲まないようにする。
-    let mut carried_escape = false;
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == ESC {
-            out.push(ch);
-            carried_escape = true;
-            for c in chars.by_ref() {
-                out.push(c);
-                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
-                    break;
-                }
-            }
-            continue;
-        }
-        if !presentation_character_is_safe(ch) {
-            continue;
-        }
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+    let mut end = 0;
+    for grapheme in plain.graphemes(true) {
+        let w = display_width(grapheme);
         if width + w > budget {
             break;
         }
         width += w;
-        out.push(ch);
+        end += grapheme.len();
     }
+    let mut out = String::with_capacity(text.len());
+    let mut offset = 0;
+    let mut carried_escape = false;
+    for (position, escape) in escapes {
+        if position > end {
+            break;
+        }
+        out.push_str(&plain[offset..position]);
+        out.push_str(escape);
+        offset = position;
+        carried_escape = true;
+    }
+    out.push_str(&plain[offset..end]);
     if truncated {
         out.push('…');
     }
@@ -250,8 +247,31 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
     out
 }
 
+/// Segment the visible text independently of SGR, then replay styles at their
+/// original byte positions. A style change inside a grapheme cannot split it.
+fn text_and_escapes(text: &str) -> (String, Vec<(usize, &str)>) {
+    let mut plain = String::with_capacity(text.len());
+    let mut escapes = Vec::new();
+    let mut chars = text.char_indices();
+    while let Some((start, ch)) = chars.next() {
+        if ch == ESC {
+            let mut end = start + ch.len_utf8();
+            for (offset, next) in chars.by_ref() {
+                end = offset + next.len_utf8();
+                if ('\u{40}'..='\u{7e}').contains(&next) && next != '[' {
+                    break;
+                }
+            }
+            escapes.push((plain.len(), &text[start..end]));
+        } else if presentation_character_is_safe(ch) {
+            plain.push(ch);
+        }
+    }
+    (plain, escapes)
+}
+
 /// `text` を表示桁数 `width` 以下の行に折り返す。空白を持たない CJK でも折れるよう、
-/// 文字の境目で分割する。単体で `width` を超える 1 文字（幅 1 の行に幅 2 の全角など）は
+/// grapheme cluster の境目で分割する。単体で `width` を超える 1 文字（幅 1 の行に幅 2 の全角など）は
 /// その行に単独で置いて溢れさせ、文字を落とさない。`width == 0` か空文字は 0 行を返す。
 ///
 /// **plain text 専用である**。[`clip_to_width`] / [`display_width`] と違い ANSI エスケープを
@@ -266,16 +286,17 @@ pub fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_w = 0usize;
-    for ch in text.chars() {
-        if !presentation_character_is_safe(ch) {
-            continue;
-        }
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+    let safe: String = text
+        .chars()
+        .filter(|ch| presentation_character_is_safe(*ch))
+        .collect();
+    for grapheme in safe.graphemes(true) {
+        let w = display_width(grapheme);
         if current_w + w > width && !current.is_empty() {
             lines.push(std::mem::take(&mut current));
             current_w = 0;
         }
-        current.push(ch);
+        current.push_str(grapheme);
         current_w += w;
     }
     if !current.is_empty() {
@@ -682,6 +703,34 @@ mod tests {
     }
 
     #[test]
+    fn clip_to_width_does_not_keep_part_of_an_emoji() {
+        for grapheme in ["👍🏽", "🇯🇵", "👩‍👩‍👧‍👦"] {
+            let value = format!("ab{grapheme}Z");
+            let styled = Style::new().bold().paint(&value);
+            for budget in 2..2 + display_width(grapheme) {
+                assert_eq!(clip_to_width(&value, budget + 1), "ab…");
+                let clipped = clip_to_width(&styled, budget + 1);
+                assert_eq!(strip_ansi(&clipped), "ab…");
+                assert!(clipped.ends_with("\u{1b}[0m"));
+            }
+            assert_eq!(clip_to_width(&value, display_width(&value)), value);
+        }
+    }
+
+    #[test]
+    fn clip_to_width_keeps_graphemes_across_style_boundaries() {
+        let value = "\u{1b}[1mab👍\u{1b}[31m🏽YZ";
+        assert_eq!(clip_to_width(value, 5), "\u{1b}[1mab…\u{1b}[0m");
+        assert_eq!(
+            clip_to_width(value, 7),
+            "\u{1b}[1mab👍\u{1b}[31m🏽…\u{1b}[0m"
+        );
+        let combining = "a\u{1b}[31me\u{1b}[0m\u{301}ZZ";
+        assert_eq!(strip_ansi(&clip_to_width(combining, 3)), "ae\u{301}…");
+        assert_eq!(clip_to_width("\u{1b}[31", 1), "\u{1b}[31");
+    }
+
+    #[test]
     fn dim_ansi_preserves_colours_but_removes_bold_and_closes_the_line() {
         let dimmed = dim_ansi("plain \u{1b}[1;36mtab\u{1b}[0m \u{1b}[31merror\u{1b}[0m");
 
@@ -751,6 +800,19 @@ mod tests {
         // 幅 1 の行に全角: 各文字が単独行で溢れる（落とさない）。
         assert_eq!(wrap_to_width("あい", 1), vec!["あ", "い"]);
         assert_eq!(wrap_to_width("a\nb\t\u{202e}c", 2), vec!["ab", "c"]);
+    }
+
+    #[test]
+    fn wrap_to_width_keeps_graphemes_at_row_edges() {
+        for grapheme in ["👍🏽", "🇯🇵", "👩‍👩‍👧‍👦"] {
+            let prefix = "a".repeat(68 - display_width(grapheme) + 1);
+            assert_eq!(
+                wrap_to_width(&format!("{prefix}{grapheme}X"), 68),
+                vec![prefix, format!("{grapheme}X")]
+            );
+            assert_eq!(wrap_to_width(grapheme, 1), vec![grapheme]);
+        }
+        assert_eq!(wrap_to_width("e\u{301}X", 1), vec!["e\u{301}", "X"]);
     }
 
     #[test]

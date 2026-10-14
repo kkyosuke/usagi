@@ -11,6 +11,13 @@ fn decision_selection_runtime() -> WorkspaceRuntime {
 }
 
 fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
+    decision_selection_runtime_with_context(title, Vec::new())
+}
+
+fn decision_selection_runtime_with_context(
+    title: &str,
+    context: Vec<usagi_core::domain::user_decision::UserDecisionContext>,
+) -> WorkspaceRuntime {
     use usagi_core::domain::agent::CallerRef;
     use usagi_core::domain::user_decision::{
         UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionSelectionMode,
@@ -44,7 +51,7 @@ fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
         recommendation: None,
         selection_limits: None,
         selection_mode: UserDecisionSelectionMode::Single,
-        context: Vec::new(),
+        context,
         expires_at: None,
         idempotency_key: None,
         status: UserDecisionStatus::Pending,
@@ -218,6 +225,75 @@ fn decision_drag_copies_complete_emoji_graphemes() {
                 widgets::strip_ansi(&frame[viewport.top]),
             );
         }
+    }
+}
+
+#[test]
+fn decision_drag_copies_whole_emoji_after_a_title_wrap() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    for (padding, emoji) in [(66, "👍🏽"), (67, "🇯🇵"), (66, "👩‍👩‍👧‍👦")]
+    {
+        let prefix = "a".repeat(padding);
+        let runtime = decision_selection_runtime_with_title(&format!("{prefix}{emoji}X"));
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        let row = viewport.top + 1;
+        let mut selection = DecisionTextSelection::default();
+        let mut term = FakeTerminal::default();
+        selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(
+                selection.handle_input(&decision_pointer(kind, viewport.left + 2, row), &mut term,)
+            );
+        }
+        assert_eq!(term.copied.last().unwrap(), emoji);
+        assert_eq!(
+            widgets::strip_ansi(&widgets::modal::columns(
+                &frame[viewport.top],
+                viewport.left,
+                viewport.cols,
+            ))
+            .trim_end(),
+            format!("  {prefix}"),
+        );
+        let mut painted = frame.clone();
+        selection.paint(&mut painted, 80);
+        assert!(painted[row].contains(&format!("\u{1b}[7m{emoji}\u{1b}[0m")));
+        assert_eq!(
+            widgets::strip_ansi(&painted[row]),
+            widgets::strip_ansi(&frame[row])
+        );
+    }
+}
+
+#[test]
+fn decision_diagram_clipping_omits_incomplete_emoji_graphemes() {
+    use usagi_core::domain::user_decision::UserDecisionContext;
+    for (padding, emoji, suffix) in [(65, "👍🏽", ""), (66, "🇯🇵", "X"), (65, "👩‍👩‍👧‍👦", "")]
+    {
+        let prefix = "a".repeat(padding);
+        let mut runtime = decision_selection_runtime_with_context(
+            "Diagram clipping",
+            vec![UserDecisionContext::Diagram {
+                title: "Diagram".into(),
+                text: format!("{prefix}{emoji}{suffix}"),
+            }],
+        );
+        let _ = runtime.apply_event(AppEvent::DecisionScrolled {
+            decision_id: runtime.state().decisions()[0].decision_id,
+            offset: 0,
+        });
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        let line = frame
+            .iter()
+            .find(|line| widgets::strip_ansi(line).contains(&prefix))
+            .unwrap();
+        assert_eq!(
+            widgets::strip_ansi(&widgets::modal::columns(line, viewport.left, viewport.cols))
+                .trim_end(),
+            format!("  {prefix}…"),
+        );
     }
 }
 
