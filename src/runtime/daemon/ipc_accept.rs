@@ -342,6 +342,11 @@ pub(super) fn spawn_ipc_server(
         data_dir.join("daemon"),
         Arc::clone(&shutdown),
     )?);
+    background_workers.push(super::notifications::start(
+        data_dir.join("daemon"),
+        fence.gate.clone(),
+        Arc::clone(&shutdown),
+    )?);
     let (teardown, teardown_worker) = start_session_teardown_worker(
         Arc::clone(&workspaces),
         Arc::clone(&agent),

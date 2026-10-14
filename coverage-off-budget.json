@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 548,
+  "total": 549,
   "owners": {
     "core": 16,
-    "daemon": 368,
+    "daemon": 370,
     "root-cli": 41,
-    "tui": 123
+    "tui": 122
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -83,6 +83,7 @@
     "src/runtime/daemon/instance_lock.rs": 13,
     "src/runtime/daemon/ipc_accept.rs": 19,
     "src/runtime/daemon/managed_update.rs": 1,
+    "src/runtime/daemon/notifications.rs": 2,
     "src/runtime/daemon/pty.rs": 11,
     "src/runtime/daemon/secure_path.rs": 3,
     "src/runtime/daemon/service_context.rs": 1,
@@ -96,7 +97,7 @@
     "src/runtime/platform_child_reaper.rs": 3,
     "src/runtime/systemd.rs": 1,
     "src/runtime/terminal_pump.rs": 1,
-    "src/runtime/tui.rs": 63,
+    "src/runtime/tui.rs": 62,
     "src/tui_input.rs": 4,
     "src/tui_input/sgr_mouse.rs": 1
   }

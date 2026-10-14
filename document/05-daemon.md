@@ -17,6 +17,7 @@ managed session と terminal を所有する daemon の現在の契約である�
 - [daemon data directory](#daemon-data-directory)
 - [PR 検出の投影](#pr-検出の投影)
 - [PR refresh scheduler](#pr-refresh-scheduler)
+- [desktop notifications](#desktop-notifications)
 - [failure logging](#failure-logging)
 - [durable operation](#durable-operation)
 - [background worker の待ち方](#background-worker-の待ち方)
@@ -1274,6 +1275,41 @@ dismissed・`headRefOid` 保存済みの merged を除く保存済み identity �
 されない。
 refresh worker は lifecycle SSoT の session 集合を各 tick で reconcile し、削除済み session の inventory と候補外の
 schedule を回収する。PR snapshot の公開 field が変わる操作（失敗時の `backing_off` を含む）は revision を進める。
+
+## desktop notifications
+
+この節が OS 通知の対象・配信・重複抑制の正本である。daemon の背景 worker が保存済みの判断待ちと
+PR inventory を約5秒間隔で観測し、TUI を閉じていても通知する。workspace の adopt や Agent の起動は行わず、
+retire 済みでも lifecycle に session が残る workspace を対象にする。PR の変化を知る速さは
+[PR refresh scheduler](#pr-refresh-scheduler)の取得間隔にも依存する。
+
+| 通知 | 条件 |
+|---|---|
+| `usagi: decision needed` | 未通知で期限内の pending decision。root または利用可能な session に属するもの |
+| `usagi: CI failed` | refresh 成功済みの open PR で CI が failing。draft も対象 |
+| `usagi: review ready` | refresh 成功済みの open・非 draft PR で CI が passing または check なし、修正要求なし |
+
+レビュー可能は人が PR を確認するタイミングを示し、必須 check・承認・マージ条件の充足を保証しない。
+通知本文は project・session 名と PR 番号だけで、質問の title・本文・選択肢・回答や PR 本文を含めない。
+TUI の質問 banner / badge / modal と Attention は従来どおり利用できる。
+
+通知の状態は `<data-dir>/daemon/desktop-notifications.json` に保存する。同じ decision ID、同じ PR head と
+通知状態は TUI の再接続・複数起動・daemon 再起動でも再送しない。PR head が変わるか、確認済みの状態が
+変化した場合は再通知する。取得中・取得失敗・CI pending は前回状態を保持し、成功や回復とは解釈しない。
+同じ workspace の複数 session にある同一 PR は一度だけ通知する。解決済み質問や削除済み session の記録は
+完全な観測後に回収する。保存上限は4096対象・2 MiB、1回の配信は8件までで、残りは次回に送る。
+観測・checkpoint の読み書きに失敗した場合は配信せず、次回に再試行する。
+
+active generation だけが配信し、rollover は進行中の通知処理が終わるまで待つ。checkpoint を OS helper 起動前に
+保存するため、保存直後の crash や OS 側の失敗でその通知が届かないことがある。OS の表示と保存は単一 transaction
+ではなく、同じ通知を繰り返さない best-effort 配信である。未対応 OS、通知コマンド不在、通知の拒否や desktop service
+の不在でも Agent・terminal・daemon の処理は継続する。失敗が続く間はログを一度だけ記録する。
+
+macOS は `launchctl asuser` で実行ユーザーの context を選び、`osascript` の `display notification` を呼ぶ。
+Linux は `notify-send` を使用する。ログイン中の desktop と
+OS 側の通知許可が必要であり、daemon 停止中・PC の sleep 中の配信は行わない。helper は固定プログラムと
+引数ベクトルで起動し、最大2秒、終了猶予100 ms、出力1 KiBで制限して回収する。runtime lock を保持して待たず、
+shutdown は helper を中断して worker を join する。
 
 ## failure logging
 
