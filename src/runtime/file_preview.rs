@@ -327,7 +327,11 @@ fn artifact_open_view_with(
         return Err(FilePreviewError::NotRegular);
     }
     let root = root.canonicalize().map_err(file_unavailable)?;
-    let file = open_beneath(&root, path)?;
+    // Keep the source directory pinned for the entire snapshot. Reopening its
+    // absolute path for each asset would follow swapped ancestors of a session
+    // root even though every component below that root rejects symlinks.
+    let source_directory = open_directory(&root)?;
+    let file = open_beneath_directory(&source_directory, path)?;
     if !file.metadata().map_err(file_unavailable)?.is_file() {
         return Err(FilePreviewError::NotRegular);
     }
@@ -358,8 +362,8 @@ fn artifact_open_view_with(
     copy_artifact_file(&file, &directory.path().join(&selected), &mut remaining)?;
     for relative in entries {
         if relative != selected {
-            let input = open_beneath(
-                &root,
+            let input = open_beneath_directory(
+                &source_directory,
                 artifact_root
                     .join(&relative)
                     .to_str()
@@ -446,11 +450,20 @@ pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, File
 /// `O_NOFOLLOW` on each hop makes the containment decision and the final read
 /// one descriptor chain rather than a check-then-open path race.
 pub(crate) fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePreviewError> {
-    let mut directory = OpenOptions::new()
+    let directory = open_directory(root)?;
+    open_beneath_directory(&directory, relative)
+}
+
+fn open_directory(root: &Path) -> Result<File, FilePreviewError> {
+    OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(root)
-        .map_err(file_unavailable)?;
+        .map_err(file_unavailable)
+}
+
+fn open_beneath_directory(root: &File, relative: &str) -> Result<File, FilePreviewError> {
+    let mut directory = None;
     let mut components = Path::new(relative).components().peekable();
     while let Some(Component::Normal(component)) = components.next() {
         let name = CString::new(component.as_bytes()).map_err(|_| FilePreviewError::OutsideRoot)?;
@@ -459,11 +472,12 @@ pub(crate) fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePrev
         } else {
             0
         };
-        // SAFETY: `directory` owns a live descriptor, `name` is NUL-terminated,
-        // and a successful raw descriptor is moved into exactly one `File`.
+        // SAFETY: the borrowed root or owned directory keeps the descriptor
+        // live, `name` is NUL-terminated, and each successful descriptor moves
+        // into exactly one `File`.
         let descriptor = unsafe {
             libc::openat(
-                directory.as_raw_fd(),
+                directory.as_ref().unwrap_or(root).as_raw_fd(),
                 name.as_ptr(),
                 // A FIFO must reach the descriptor type check without waiting
                 // for a writer. O_NONBLOCK has no effect on regular file reads.
@@ -482,7 +496,7 @@ pub(crate) fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePrev
         if components.peek().is_none() {
             return Ok(opened);
         }
-        directory = opened;
+        directory = Some(opened);
     }
     Err(FilePreviewError::OutsideRoot)
 }
@@ -1351,6 +1365,47 @@ mod tests {
         assert!(matches!(result, Err(FilePreviewError::OutsideRoot)));
         assert!(!staging.unwrap().exists());
         assert_eq!(fs::read_to_string(outside).unwrap(), "outside scope");
+    }
+
+    #[test]
+    fn native_snapshot_pins_source_directory_across_ancestor_replacement() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let sessions = workspace.join(".usagi/sessions");
+        let session = sessions.join("view");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(session.join("artifacts")).unwrap();
+        fs::create_dir_all(outside.join("view/artifacts")).unwrap();
+        fs::write(
+            session.join("artifacts/report.html"),
+            "<img src='chart.svg'>",
+        )
+        .unwrap();
+        fs::write(session.join("artifacts/chart.svg"), "validated asset").unwrap();
+        fs::write(
+            outside.join("view/artifacts/chart.svg"),
+            "outside private asset",
+        )
+        .unwrap();
+        let view = artifact_open_view_with(
+            &session,
+            "artifacts/report.html",
+            PreviewFileFilter::Artifacts,
+            &mut || {
+                fs::rename(&sessions, workspace.join(".usagi/sessions-original"))?;
+                std::os::unix::fs::symlink(&outside, &sessions)?;
+                native_view_directory()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(view.path()).unwrap(),
+            "<img src='chart.svg'>"
+        );
+        assert_eq!(
+            fs::read_to_string(view.path().parent().unwrap().join("chart.svg")).unwrap(),
+            "validated asset"
+        );
     }
 
     #[test]

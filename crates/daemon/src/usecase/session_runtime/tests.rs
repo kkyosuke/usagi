@@ -57,7 +57,7 @@ fn artifact_preparation_failure_can_be_removed_and_release_the_session_name() {
         &runtime,
         &TeardownSignal::new(),
         &operation(),
-        &json!({"name":"blocked","force":true}),
+        &json!({"name":"blocked"}),
     )
     .unwrap();
     let reports = drain_pending_teardowns(
