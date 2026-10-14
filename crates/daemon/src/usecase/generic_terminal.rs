@@ -672,6 +672,19 @@ impl GenericTerminalCoordinator {
             records: self.records.values().cloned().collect(),
         }
     }
+    /// All workspace runtime identities and states, including stopped records,
+    /// so cache scans can detect a process starting and exiting during IO.
+    #[must_use]
+    pub fn cache_cleanup_activity(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Vec<(usagi_core::domain::id::TerminalRef, TerminalRuntimeState)> {
+        self.records
+            .values()
+            .filter(|record| record.terminal.workspace_id == workspace)
+            .map(|record| (record.terminal.clone(), record.state))
+            .collect()
+    }
     /// Whether this workspace still has a generic terminal that is running.
     ///
     /// Unlike [`Self::inventory`], the question is about the whole workspace

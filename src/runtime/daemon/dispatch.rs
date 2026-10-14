@@ -1718,6 +1718,7 @@ pub(super) struct SessionDispatchContext<'a> {
     pub(super) bound: &'a ConnectionWorkspace,
     pub(super) teardown: &'a TeardownSignal,
     pub(super) agent: &'a SharedAgentRuntime,
+    pub(super) cache_jobs: &'a usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     pub(super) pr_inventory: &'a SharedPrInventory,
     pub(super) launch_client: Option<&'a AgentLaunchClient>,
 }
@@ -1907,6 +1908,7 @@ pub(super) fn session_response_envelope(
                 SessionAction::Create => Some("session.created"),
                 SessionAction::Remove => Some("session.removed"),
                 SessionAction::Clean
+                | SessionAction::Cache
                 | SessionAction::Sleep
                 | SessionAction::Agents
                 | SessionAction::List

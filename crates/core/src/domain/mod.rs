@@ -19,6 +19,7 @@ pub mod pullrequest;
 pub mod recent;
 pub mod role;
 pub mod session;
+pub mod session_cache;
 pub mod session_lifecycle;
 pub mod settings;
 pub mod terminal_launch;

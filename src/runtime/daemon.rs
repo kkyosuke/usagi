@@ -12,6 +12,7 @@ mod pty;
 mod secure_path;
 #[cfg(any(target_os = "macos", test))]
 mod service_context;
+mod session_cache;
 mod standby;
 mod tenant_control;
 mod workers;
@@ -1265,15 +1266,26 @@ fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<Sessio
 fn start_orphan_cleanup_worker(
     workspaces: &Workspaces,
     gate: AdmissionGate,
+    agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
+    cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_orphan_cleanup_worker(
         AutomaticOrphanCleanup {
             workspaces: Arc::clone(workspaces),
             gate,
+            agent,
+            terminal,
+            cache_jobs,
+            clock: SystemClock::new(),
+            schedule: usagi_daemon::usecase::session_cache_jobs::MaintenanceSchedule::new(
+                0,
+                u64::try_from(ORPHAN_CLEANUP_TICK.as_millis()).unwrap_or(u64::MAX),
+            ),
         },
         shutdown,
-        ORPHAN_CLEANUP_TICK,
+        Duration::from_secs(1),
     )
 }
 
