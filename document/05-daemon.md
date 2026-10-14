@@ -1296,7 +1296,8 @@ TUI の質問 banner / badge / modal と Attention は従来どおり利用で�
 通知の状態は `<data-dir>/daemon/desktop-notifications.json` に保存する。同じ decision ID、同じ PR head と
 通知状態は TUI の再接続・複数起動・daemon 再起動でも再送しない。PR head が変わるか、確認済みの状態が
 変化した場合は再通知する。取得中・取得失敗・CI pending は前回状態を保持し、成功や回復とは解釈しない。
-同じ workspace の複数 session にある同一 PR は一度だけ通知する。解決済み質問や削除済み session の記録は
+同じ workspace の複数 session にある同一 PR は一度だけ通知する。dismiss 済みのコピーは除外し、
+pin で固定されたコピーより自動 refresh されるコピーを優先する。解決済み質問や削除済み session の記録は
 完全な観測後に回収する。保存上限は4096対象・2 MiB、1回の配信は8件までで、残りは次回に送る。
 観測・checkpoint の読み書きに失敗した場合は配信せず、次回に再試行する。
 

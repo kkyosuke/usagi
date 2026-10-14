@@ -45,7 +45,9 @@ impl NotificationStore for FileLedger {
         )
     }
     fn save(&self, ledger: &Ledger) -> Result<()> {
-        if serde_json::to_vec(ledger)?.len() > LEDGER_BYTES {
+        // write_atomic writes pretty JSON followed by a newline. Bound those
+        // exact bytes so a successful checkpoint always remains readable.
+        if serde_json::to_vec_pretty(ledger)?.len() >= LEDGER_BYTES {
             bail!("notification checkpoint capacity exceeded");
         }
         json_file::write_atomic(&self.0, &self.0.join("desktop-notifications.json"), ledger)
@@ -93,18 +95,33 @@ fn snapshot(dir: &Path, now: DateTime<Utc>) -> Result<Vec<Observation>> {
             );
             observations.insert(item.key.clone(), item);
         }
+        let mut candidates = BTreeMap::new();
         for (id, name) in sessions {
             if let Some(inventory) = prs.sessions.get(&id) {
                 for pr in inventory.entries.values() {
-                    let item = Observation::pull_request(
-                        lifecycle.workspace_id,
-                        pr,
-                        &format!("{project} / {name}"),
-                    );
-                    // A PR announced in several sessions is still one notification.
-                    observations.entry(item.key.clone()).or_insert(item);
+                    if pr.is_dismissed() {
+                        continue;
+                    }
+                    // Dismissal and pinning belong to individual sessions.
+                    // Prefer an automatically refreshed, known copy so an old
+                    // user-owned state cannot hide another session's live PR.
+                    let priority = (pr.pinned, pr.head_oid.is_none());
+                    let candidate = candidates
+                        .entry(&pr.identity)
+                        .or_insert((priority, pr, name));
+                    if priority < candidate.0 {
+                        *candidate = (priority, pr, name);
+                    }
                 }
             }
+        }
+        for (_, pr, name) in candidates.into_values() {
+            let item = Observation::pull_request(
+                lifecycle.workspace_id,
+                pr,
+                &format!("{project} / {name}"),
+            );
+            observations.insert(item.key.clone(), item);
         }
         if observations.len() > MAX_SUBJECTS {
             bail!("notification snapshot capacity exceeded");
@@ -213,7 +230,7 @@ mod tests {
     use usagi_core::domain::{
         agent::CallerRef,
         id::{AgentId, DaemonGeneration, OperationId, SessionId, UserDecisionId, WorkspaceId},
-        pr_inventory::{PrChecksState, PrEntry, PrInventory, canonicalize},
+        pr_inventory::{PrChecksState, PrEntry, PrInventory, PrState, canonicalize},
         session_lifecycle::{ManagedSession, WorkspaceLifecycleState},
         user_decision::{
             UserDecision, UserDecisionOwner, UserDecisionSelectionMode, UserDecisionStatus,
@@ -373,6 +390,19 @@ mod tests {
         let store = FileLedger(temp.path().into());
         assert_eq!(store.load().unwrap(), Ledger::default());
         store.save(&Ledger::default()).unwrap();
+        let original = std::fs::read(temp.path().join("desktop-notifications.json")).unwrap();
+        let near_limit: Ledger = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "subjects": { "x".repeat(LEDGER_BYTES - 48): "Quiet" }
+        }))
+        .unwrap();
+        assert!(serde_json::to_vec(&near_limit).unwrap().len() < LEDGER_BYTES);
+        assert!(serde_json::to_vec_pretty(&near_limit).unwrap().len() >= LEDGER_BYTES);
+        assert!(store.save(&near_limit).is_err());
+        assert_eq!(
+            std::fs::read(temp.path().join("desktop-notifications.json")).unwrap(),
+            original
+        );
         std::fs::write(temp.path().join("desktop-notifications.json"), "corrupt").unwrap();
         assert!(store.load().is_err());
         let file = temp.path().join("not-a-directory");
@@ -384,6 +414,91 @@ mod tests {
         }))
         .unwrap();
         assert!(store.save(&oversized).is_err());
+    }
+
+    #[test]
+    fn duplicate_prs_use_a_refreshed_session_instead_of_dismissed_or_pinned_copies() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        workspace(dir, "project");
+        let states = workspace_state::adopted(dir).unwrap();
+        let lifecycle_store = DaemonLifecycleStore::new(states[0].dir());
+        let mut lifecycle = lifecycle_store.load().unwrap().unwrap();
+        lifecycle
+            .sessions
+            .push(ManagedSession::adopt_available("other".into(), Utc::now()));
+        lifecycle.sessions.sort_by_key(|session| session.session_id);
+        lifecycle.sessions[0].name = "stale".into();
+        lifecycle.sessions[1].name = "current".into();
+        lifecycle_store
+            .initialize(&lifecycle, states[0].root())
+            .unwrap();
+        let identity = canonicalize("https://github.com/acme/app/pull/1").unwrap();
+        let mut current = PrEntry::new(identity.clone());
+        current.head_oid = Some("b".repeat(40));
+        current.checks = Some(PrChecksState::Passing);
+        let store = PrInventoryStore::new(dir);
+        let mut prs = store.load().unwrap();
+        prs.sessions.insert(
+            lifecycle.sessions[1].session_id,
+            PrInventory {
+                revision: 1,
+                entries: [(identity.clone(), current.clone())].into(),
+            },
+        );
+        let (tx, rx) = mpsc::channel();
+        let mut notifier = Recording(tx);
+        for (state, pinned, head) in [
+            (PrState::Dismissed, false, Some("a".repeat(40))),
+            (PrState::Closed, true, Some("a".repeat(40))),
+            (PrState::Open, true, Some("a".repeat(40))),
+            (PrState::Open, false, None),
+        ] {
+            let mut stale = current.clone();
+            stale.state = state;
+            stale.pinned = pinned;
+            stale.head_oid = head;
+            stale.checks = Some(PrChecksState::Failing);
+            prs.sessions.insert(
+                lifecycle.sessions[0].session_id,
+                PrInventory {
+                    revision: 1,
+                    entries: [(identity.clone(), stale)].into(),
+                },
+            );
+            store.save(&prs).unwrap();
+            let items = snapshot(dir, Utc::now()).unwrap();
+            assert_eq!(items.len(), 1);
+            deliver(&items, &FileLedger(dir.into()), &mut notifier).unwrap();
+        }
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            [Notification {
+                title: "usagi: review ready",
+                body: "project / current · PR #1".into(),
+            }]
+        );
+        let checkpoint = std::fs::read(dir.join("desktop-notifications.json")).unwrap();
+        for inventory in prs.sessions.values_mut() {
+            inventory.entries.get_mut(&identity).unwrap().head_oid = None;
+        }
+        store.save(&prs).unwrap();
+        deliver(
+            &snapshot(dir, Utc::now()).unwrap(),
+            &FileLedger(dir.into()),
+            &mut notifier,
+        )
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            std::fs::read(dir.join("desktop-notifications.json")).unwrap(),
+            checkpoint
+        );
+        for inventory in prs.sessions.values_mut() {
+            inventory.entries.get_mut(&identity).unwrap().state = PrState::Dismissed;
+        }
+        store.save(&prs).unwrap();
+        assert!(snapshot(dir, Utc::now()).unwrap().is_empty());
     }
 
     #[test]
