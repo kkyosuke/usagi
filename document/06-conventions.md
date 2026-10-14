@@ -84,7 +84,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `unicode-width` は
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
-`unicode-segmentation` は `usagi-tui` の入力 widget だけで使い、domain には持ち込まない。
+`unicode-segmentation` は `usagi-tui` の入力 widget・表示の折り返しと省略・出力選択で使い、domain には持ち込まない。
 `clap` / `clap_complete` は `usagi-cli` が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、runtime が workspace・executable 別の bootstrap broker endpoint、IPC contract が rollover operation ID を
 作るほか、root runtime が設定 env の secret cache を分離する `op read` credential identity を作り、

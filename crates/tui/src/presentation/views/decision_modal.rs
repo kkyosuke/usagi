@@ -1511,6 +1511,34 @@ mod tests {
     }
 
     #[test]
+    fn context_tables_preserve_graphemes_wider_than_a_grid_cell() {
+        use usagi_core::domain::user_decision::UserDecisionContext;
+        let family = "👩‍👩‍👧‍👦";
+        for (label, value) in [("Family", family), (family, "value")] {
+            let mut columns = vec!["Column".into(); 5];
+            columns.push(label.into());
+            let mut row = vec!["value".into(); 5];
+            row.push(value.into());
+            let table = UserDecisionContext::Table {
+                title: "Families".into(),
+                columns,
+                rows: vec![row],
+            };
+            for (width, grid) in [(64, false), (76, true)] {
+                let rendered = context::render(&table, width, 0);
+                let text = rendered.join("\n");
+                assert!(text.contains(family), "{text}");
+                assert_eq!(text.contains('│'), grid);
+                assert!(
+                    rendered
+                        .iter()
+                        .all(|line| widgets::display_width(line) <= width)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rich_editor_shows_context_before_choices_and_explicit_multiselect_controls() {
         use usagi_core::domain::user_decision::UserDecisionContext;
         let workspace = WorkspaceId::new();
