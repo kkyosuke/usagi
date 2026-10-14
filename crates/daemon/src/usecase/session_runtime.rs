@@ -1071,6 +1071,7 @@ impl SessionRuntime {
             SessionAction::Status => self.status(operation_id),
             SessionAction::Agents
             | SessionAction::Clean
+            | SessionAction::Cache
             | SessionAction::Sleep
             | SessionAction::Setup
             | SessionAction::Prompt

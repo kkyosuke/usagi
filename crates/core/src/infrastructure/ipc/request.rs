@@ -569,6 +569,8 @@ pub enum SessionAction {
     Sleep,
     /// Inspect or remove Git resources absent from daemon lifecycle state.
     Clean,
+    /// Inspect or reclaim configured regenerable directories without removing sessions.
+    Cache,
     List,
     Status,
     Overview,

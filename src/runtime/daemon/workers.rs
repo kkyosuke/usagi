@@ -571,11 +571,53 @@ pub(super) trait OrphanCleanupPass: Send {
 pub(super) struct AutomaticOrphanCleanup {
     pub(super) workspaces: Workspaces,
     pub(super) gate: AdmissionGate,
+    pub(super) agent: SharedAgentRuntime,
+    pub(super) terminal: SharedTerminalRuntime,
+    pub(super) cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
+    pub(super) clock: super::SystemClock,
+    pub(super) schedule: usagi_daemon::usecase::session_cache_jobs::MaintenanceSchedule,
+}
+
+impl usagi_daemon::usecase::session_cache_jobs::CacheJobExecutor for AutomaticOrphanCleanup {
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_cache_cleanup_reports_usage_and_keeps_the_session
+    fn execute(
+        &mut self,
+        workspace: super::WorkspaceId,
+        apply: bool,
+    ) -> Result<serde_json::Value, String> {
+        let tenant = self
+            .workspaces
+            .workspace(workspace)
+            .ok_or("cache workspace is unavailable")?;
+        match super::session_cache::clean_session_caches(
+            &ConnectionWorkspace {
+                tenant,
+                workspaces: Arc::clone(&self.workspaces),
+            },
+            &self.agent,
+            &self.terminal,
+            apply,
+        ) {
+            Ok(result) => Ok(result),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 impl OrphanCleanupPass for AutomaticOrphanCleanup {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
     fn run(&mut self) {
+        let Some(_lease) = active_cleanup_lease(&self.gate) else {
+            return;
+        };
+        let jobs = self.cache_jobs.clone();
+        if let Err(error) = usagi_daemon::usecase::session_cache_jobs::drain(&jobs, self) {
+            ErrorLog::record(error);
+            return;
+        }
+        if !self.schedule.due(self.clock.now_ms()) {
+            return;
+        }
         for tenant in self.workspaces.all() {
             let Some(_lease) = active_cleanup_lease(&self.gate) else {
                 break;
@@ -591,6 +633,27 @@ impl OrphanCleanupPass for AutomaticOrphanCleanup {
                     root.display(),
                     error.safe_message()
                 ));
+            }
+            match super::session_cache::clean_session_caches(
+                &bound,
+                &self.agent,
+                &self.terminal,
+                true,
+            ) {
+                Ok(report)
+                    if report["removed"].as_u64().unwrap_or_default() != 0
+                        || report["deferred"].as_u64().unwrap_or_default() != 0 =>
+                {
+                    ErrorLog::record(&format!(
+                        "session cache cleanup for {}: {report}",
+                        root.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => ErrorLog::record(&format!(
+                    "session cache cleanup deferred for {}: {error}",
+                    root.display()
+                )),
             }
         }
     }

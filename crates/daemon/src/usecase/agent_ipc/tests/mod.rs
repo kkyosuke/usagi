@@ -908,6 +908,7 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     let launch_intent = intent(None);
     let workspace = launch_intent.workspace;
+    assert!(runtime.cache_cleanup_activity(workspace).is_empty());
     let admission = runtime
         .launch(
             &OperationId::new().to_string(),
@@ -917,6 +918,18 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
         .unwrap();
 
     assert_eq!(runtime.retirement_blocker_count(workspace), 1);
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        vec![(
+            admission.terminal.clone(),
+            super::super::runtime::RuntimeState::Running
+        )]
+    );
+    assert!(
+        runtime
+            .cache_cleanup_activity(WorkspaceId::new())
+            .is_empty()
+    );
     let running_snapshot = runtime.coordinator.snapshot();
     for (state, ownership_state, expected) in [
         (
@@ -953,6 +966,12 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
         snapshot.generation.terminals[0].state = ownership_state;
         runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
         assert_eq!(runtime.retirement_blocker_count(workspace), expected);
+        // Cache revalidation must retain unknown ownership even if no proven
+        // live process contributes to the retirement count.
+        assert_eq!(
+            runtime.cache_cleanup_activity(workspace),
+            vec![(admission.terminal.clone(), state)]
+        );
     }
     runtime.coordinator = RuntimeCoordinator::hydrate(running_snapshot, 16, 64 * 1024, 64).unwrap();
     runtime.reported_phases.insert(
@@ -963,11 +982,37 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
     assert_eq!(runtime.retirement_blocker_count(workspace), 0);
+    assert!(runtime.cache_cleanup_activity(workspace).is_empty());
     assert!(runtime.reported_phases.is_empty());
     assert!(
         !runtime
             .retained_resources()
             .contains(&admission.terminal.terminal_id.as_str())
+    );
+}
+
+#[test]
+fn cache_activity_detects_a_runtime_that_starts_and_exits_during_measurement() {
+    let mut runtime = runtime();
+    let launch_intent = intent(None);
+    let workspace = launch_intent.workspace;
+    let before = runtime.cache_cleanup_activity(workspace);
+    let admission = runtime
+        .launch(
+            &OperationId::new().to_string(),
+            &launch_intent,
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    runtime.exit(&admission.terminal, 0).unwrap();
+    let after = runtime.cache_cleanup_activity(workspace);
+    assert_ne!(after, before);
+    assert_eq!(
+        after,
+        vec![(
+            admission.terminal,
+            super::super::runtime::RuntimeState::Exited
+        )]
     );
 }
 
