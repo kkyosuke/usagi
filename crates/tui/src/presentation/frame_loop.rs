@@ -1443,15 +1443,6 @@ pub(super) fn drive_workspace_controller(
         };
         let key = adjust_project_bar_pointer(raw_key);
 
-        let selection_revision = decision_selection.revision();
-        if decision_selection.handle_input(&key, term) {
-            if decision_selection.revision() != selection_revision {
-                frame_source_key = None;
-                frame_material_key = None;
-            }
-            continue;
-        }
-
         // Process shortcuts and the remaining project-bar clicks win over the
         // unobscured workspace surface, including a focused live PTY. Foreground
         // overlays/drawers retain ownership through the target resolver below.
@@ -1763,6 +1754,16 @@ pub(super) fn drive_workspace_controller(
         let idle = idle_watch.observe(&key, pointer_clock.elapsed());
         if garden_fits(height, width) {
             let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
+        }
+        // Project-bar actions own their row first. Selection/copy is still
+        // user activity and must reset the idle deadline before consuming input.
+        let selection_revision = decision_selection.revision();
+        if decision_selection.handle_input(&key, term) {
+            if decision_selection.revision() != selection_revision {
+                frame_source_key = None;
+                frame_material_key = None;
+            }
+            continue;
         }
         // The Garden consumes input before the covered pane. List scrolling
         // and clicks need the drawn viewport below; other shell-owned input
