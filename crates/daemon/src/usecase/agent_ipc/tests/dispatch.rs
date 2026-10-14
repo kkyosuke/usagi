@@ -3,6 +3,68 @@
 use super::*;
 
 #[test]
+fn dispatch_provider_default_omits_model_flags_and_preserves_agent_identity() {
+    for (profile, mut runtime) in [
+        ("claude", structured_claude_runtime()),
+        ("codex", codex_runtime()),
+        ("agy", agy_runtime()),
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join(profile), "fixture").unwrap();
+        runtime.locator = Box::new(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let intent = DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: Some(SessionId::new()),
+                agent_id: AgentId::new(),
+            },
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new(profile).unwrap(),
+                model: ModelSelector::new("default").unwrap(),
+            },
+            prompt: "finish the task".into(),
+        };
+        let admission = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &intent,
+                session,
+                &FakeScope(Ok(ResolvedAgentScope {
+                    worktree_id: WorktreeId::new(),
+                    working_directory: workspace.path().to_path_buf(),
+                })),
+            )
+            .unwrap();
+        let record = &runtime.coordinator.snapshot().records[0];
+        assert!(record.launch.request.model.is_none(), "{profile}");
+        assert!(
+            record
+                .launch
+                .plan
+                .argv
+                .iter()
+                .all(|argument| !matches!(argument.as_str(), "--model" | "-m")),
+            "{profile}"
+        );
+        let binding = runtime
+            .dispatch
+            .binding(OperationId::parse(&admission.operation_id).unwrap())
+            .unwrap()
+            .unwrap();
+        let agent = runtime
+            .dispatch
+            .agent(binding.worker.agent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.model.as_str(), "default");
+        assert_eq!(agent.runtime.as_str(), profile);
+    }
+}
+
+#[test]
 fn daemon_dispatch_store_requires_ownership_without_reparenting() {
     let directory = tempfile::tempdir().unwrap();
     let store = DispatchStore::new(directory.path());

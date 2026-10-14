@@ -207,21 +207,45 @@ impl RuntimeModelSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
+    use super::{
+        ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig, supported_agent_runtimes,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
-    struct FakeRuntimeModelLocator(&'static [&'static str]);
-    impl ExecutableLocator for FakeRuntimeModelLocator {
+    struct FakeRuntimeModelLocator<'a>(&'a [&'static str]);
+    impl ExecutableLocator for FakeRuntimeModelLocator<'_> {
         fn is_available(&self, executable: &str) -> bool {
             self.0.contains(&executable)
         }
     }
 
     #[test]
-    fn default_workspace_config_can_delegate_to_claudes_provider_default() {
-        assert!(WorkspaceAgentConfig::default().allows("claude", "default"));
-        assert!(!WorkspaceAgentConfig::default().allows("codex", "default"));
+    fn default_workspace_config_can_delegate_to_each_installed_provider() {
+        for runtime in supported_agent_runtimes() {
+            let config = WorkspaceAgentConfig::default();
+            assert!(config.allows(runtime.id, "default"));
+            let available = [runtime.executable];
+            let snapshot =
+                RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&available));
+            let selector = json!({"runtime":runtime.id,"model":"default"});
+            assert!(snapshot.validate_new_agent(&selector).is_ok());
+            assert_eq!(
+                snapshot.new_agent_schema()["oneOf"][0]["properties"]["runtime"]["const"],
+                runtime.id
+            );
+            assert_eq!(
+                snapshot.new_agent_schema()["oneOf"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                !RuntimeModelSnapshot::capture(&config, &FakeRuntimeModelLocator(&[]))
+                    .can_create_agent()
+            );
+        }
     }
 
     #[test]
