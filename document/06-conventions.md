@@ -65,7 +65,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
 | `shell-words` | `usagi-core` の usecase（`workspace_guard`）による root モードの Bash command の字句分割 | 本依存 |
 | `unicode-width` | 端末セルの表示桁数測定（CJK など全角の 2 桁計上）。`usagi-core` の VT parser（`usecase::vt_screen`）と `usagi-tui` の描画が使う | 本依存 |
-| `unicode-segmentation` | `usagi-tui` のテキスト入力で結合文字・絵文字を見た目上の1文字単位に編集する | 本依存 |
+| `unicode-segmentation` | `usagi-tui` の入力編集・表示の折り返しと省略・出力選択で結合文字と絵文字を見た目上の1文字単位に扱う | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
