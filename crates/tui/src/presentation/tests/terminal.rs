@@ -298,6 +298,42 @@ fn decision_diagram_clipping_omits_incomplete_emoji_graphemes() {
 }
 
 #[test]
+fn decision_drag_copies_a_table_emoji_wider_than_its_grid_column() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    use usagi_core::domain::user_decision::UserDecisionContext;
+    let family = "👩‍👩‍👧‍👦";
+    let mut row = vec!["value".into(); 5];
+    row.push(family.into());
+    let mut runtime = decision_selection_runtime_with_context(
+        "Table selection",
+        vec![UserDecisionContext::Table {
+            title: "Families".into(),
+            columns: vec!["Column".into(); 6],
+            rows: vec![row],
+        }],
+    );
+    let _ = runtime.apply_event(AppEvent::DecisionScrolled {
+        decision_id: runtime.state().decisions()[0].decision_id,
+        offset: 0,
+    });
+    let frame = decision_selection_frame(&runtime, 40, 68);
+    let (row, line) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains(family))
+        .expect("the complete family emoji must remain visible");
+    let plain = widgets::strip_ansi(line);
+    let column = widgets::display_width(&plain[..plain.find(family).unwrap()]);
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 40, 68, runtime.state().decision_overlay());
+    for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+        assert!(selection.handle_input(&decision_pointer(kind, column, row), &mut term));
+    }
+    assert_eq!(term.copied, [family]);
+}
+
+#[test]
 fn decision_copy_retains_the_text_in_a_one_row_body() {
     use crate::presentation::decision_selection::DecisionTextSelection;
     let mut runtime = decision_selection_runtime();
