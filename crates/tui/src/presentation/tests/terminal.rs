@@ -82,6 +82,37 @@ fn decision_pointer(kind: PointerKind, column: usize, row: usize) -> Key {
     })
 }
 
+/// Translate the scripted Attention action into a click on the button actually
+/// displayed. Async attention badges can move it between frames.
+struct DecisionProjectBarTerminal(FakeTerminal);
+
+impl Terminal for DecisionProjectBarTerminal {
+    fn size(&mut self) -> io::Result<(usize, usize)> {
+        self.0.size()
+    }
+    fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+        self.0.draw(frame)
+    }
+    fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+        self.0.wait(duration)
+    }
+    fn copy_text(&mut self, text: &str) -> Result<(), String> {
+        self.0.copy_text(text)
+    }
+    fn read_key(&mut self) -> io::Result<Key> {
+        let key = self.0.read_key()?;
+        if key == Key::Live(LiveTerminalAction::OpenAttention) {
+            let bar = widgets::strip_ansi(&self.0.frames.last().unwrap()[0]);
+            let start = bar.find("! Attention").unwrap();
+            return Ok(Key::Click {
+                column: u16::try_from(widgets::display_width(&bar[..start])).unwrap(),
+                row: 0,
+            });
+        }
+        Ok(key)
+    }
+}
+
 #[test]
 fn decision_drag_copies_only_body_and_keeps_wide_glyphs_highlighted() {
     use crate::presentation::decision_selection::DecisionTextSelection;
@@ -158,6 +189,75 @@ fn decision_drag_keeps_combining_marks_and_following_cell_coordinates() {
             widgets::strip_ansi(&frame[viewport.top]),
         );
     }
+}
+
+#[test]
+fn decision_drag_copies_complete_emoji_graphemes() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    for emoji in ["👍🏽", "🇯🇵", "👩‍👩‍👧‍👦"] {
+        let runtime = decision_selection_runtime_with_title(&format!("{emoji}X"));
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        let mut selection = DecisionTextSelection::default();
+        let mut term = FakeTerminal::default();
+        selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+        let emoji_width = widgets::display_width(emoji);
+        for (column, expected) in [(2, emoji), (1 + emoji_width, emoji), (2 + emoji_width, "X")] {
+            for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+                assert!(selection.handle_input(
+                    &decision_pointer(kind, viewport.left + column, viewport.top),
+                    &mut term,
+                ));
+            }
+            assert_eq!(term.copied.last().unwrap(), expected);
+            let mut painted = frame.clone();
+            selection.paint(&mut painted, 80);
+            assert!(painted[viewport.top].contains(&format!("\u{1b}[7m{expected}\u{1b}[0m")));
+            assert_eq!(
+                widgets::strip_ansi(&painted[viewport.top]),
+                widgets::strip_ansi(&frame[viewport.top]),
+            );
+        }
+    }
+}
+
+#[test]
+fn decision_copy_retains_the_text_in_a_one_row_body() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let mut runtime = decision_selection_runtime();
+    let _ = runtime.apply_event(AppEvent::DecisionScrolled {
+        decision_id: runtime.state().decisions()[0].decision_id,
+        offset: 0,
+    });
+    let frame = decision_selection_frame(&runtime, 7, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(7, 80).unwrap();
+    assert_eq!(viewport.rows, 1);
+    let original = widgets::strip_ansi(&frame[viewport.top]);
+    assert!(original.contains("Copy 日本語"));
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 7, 80, runtime.state().decision_overlay());
+    for (kind, column) in [
+        (PointerKind::Down, viewport.left),
+        (PointerKind::Drag, viewport.left + viewport.cols - 1),
+        (PointerKind::Up, viewport.left + viewport.cols - 1),
+    ] {
+        assert!(selection.handle_input(&decision_pointer(kind, column, viewport.top), &mut term));
+    }
+    assert!(!term.copied[0].trim().is_empty());
+    let mut painted = frame.clone();
+    selection.paint(&mut painted, 80);
+    assert_eq!(widgets::strip_ansi(&painted[viewport.top]), original);
+    assert!(painted[viewport.top].contains("\u{1b}[7m"));
+    assert!(painted[viewport.top + viewport.rows].contains("copied 1 line(s)"));
+    selection.sync(&frame, 7, 80, runtime.state().decision_overlay());
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut term,
+    );
+    assert_eq!(term.copied[0], term.copied[1]);
 }
 
 #[test]
@@ -324,6 +424,7 @@ fn decision_copy_and_paste_work_through_the_workspace_frame_loop() {
             panic!("copying text must not submit an answer");
         }
     }
+    let snapshot = snapshot("decision");
     // The project bar takes one row above the Home frame.
     let viewport = crate::presentation::views::decision_modal::body_viewport(23, 80).unwrap();
     let row = viewport.top + 1;
@@ -345,10 +446,10 @@ fn decision_copy_and_paste_work_through_the_workspace_frame_loop() {
         Key::CtrlQ,
         Key::Char('y'),
     ];
-    let mut term = FakeTerminal {
+    let mut term = DecisionProjectBarTerminal(FakeTerminal {
         size: Some((24, 80)),
         ..FakeTerminal::with_keys(&keys)
-    };
+    });
     let runtime = decision_selection_runtime();
     let mut factory = FixedBackendFactory {
         sessions: Some(Box::new(UnavailableSessionCommandPort)),
@@ -364,11 +465,17 @@ fn decision_copy_and_paste_work_through_the_workspace_frame_loop() {
         session_worktrees: None,
     };
     assert_eq!(
-        run_workspace_controller_with_backend(&mut term, snapshot("decision"), &mut factory)
-            .unwrap(),
+        run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
         Exit::Quit
     );
+    let term = term.0;
     assert_eq!(term.copied, ["日本語", "日本語"]);
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("All projects"))
+    );
     assert!(
         term.frames
             .iter()

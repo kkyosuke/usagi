@@ -363,12 +363,15 @@ mod observation_worker_tests {
         let cancelled = Arc::clone(&job.cancelled);
         let dropper = std::thread::spawn(move || drop(job));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !cancelled.load(Ordering::Acquire) {
+        // Observe the timeout even if the dropper has already cancelled the job.
+        let mut waiting_for_cancellation = true;
+        while waiting_for_cancellation {
             assert!(
                 std::time::Instant::now() < deadline,
                 "job drop must request cancellation"
             );
             std::thread::yield_now();
+            waiting_for_cancellation = !cancelled.load(Ordering::Acquire);
         }
         release_tx.send(()).unwrap();
         dropper.join().unwrap();

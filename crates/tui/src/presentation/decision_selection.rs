@@ -1,6 +1,5 @@
 //! Selection of the visible decision body, fenced from the covered terminal.
 
-use unicode_width::UnicodeWidthChar;
 use usagi_core::domain::id::UserDecisionId;
 use usagi_core::domain::presentation_text::sanitize_presentation_line;
 
@@ -9,7 +8,9 @@ use super::widgets::live_terminal::ViewportGeometry;
 use super::widgets::{self, modal};
 use super::{Key, PointerKind, Terminal};
 use crate::usecase::application::controller::DecisionOverlayState;
-use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
+use crate::usecase::application::terminal_selection::{
+    TerminalPoint, TerminalSelection, whole_grapheme_columns,
+};
 
 const RESET: &str = "\u{1b}[0m";
 
@@ -160,7 +161,8 @@ impl DecisionTextSelection {
                 if let Some((first, last)) = selection.visual_columns_at(row) {
                     let line = &mut frame[viewport.top + row];
                     let body = modal::columns(line, viewport.left, viewport.cols);
-                    let (first, end) = glyph_bounds(&self.rows[row], first, last, viewport.cols);
+                    let (first, end) =
+                        whole_grapheme_columns(&self.rows[row], first, last, viewport.cols);
                     let selected = widgets::strip_ansi(&modal::columns(&body, first, end - first));
                     let content = format!(
                         "{}{RESET}{}{}",
@@ -172,15 +174,12 @@ impl DecisionTextSelection {
                 }
             }
         }
+        // The box already has a breathing row below its body. Keep feedback
+        // there so it cannot replace selected text, even in a one-row viewport.
         if let Some(feedback) = &self.feedback
-            && viewport.rows > 0
+            && let Some(line) = frame.get_mut(viewport.top + viewport.rows)
         {
-            replace_body(
-                &mut frame[viewport.top + viewport.rows - 1],
-                &modal::footer(feedback),
-                viewport,
-                width,
-            );
+            replace_body(line, &modal::footer(feedback), viewport, width);
         }
     }
 }
@@ -193,22 +192,4 @@ fn replace_body(line: &mut String, body: &str, viewport: ViewportGeometry, width
         modal::columns(body, 0, viewport.cols),
         modal::columns(line, right, width.saturating_sub(right)),
     );
-}
-
-/// Inclusive pointer cells expand to whole wide glyphs for highlighting.
-fn glyph_bounds(text: &str, first: usize, last: usize, width: usize) -> (usize, usize) {
-    let mut first = first.min(width);
-    let mut end = last.saturating_add(1).min(width);
-    let mut column = 0;
-    for character in text.chars() {
-        let next = column + UnicodeWidthChar::width(character).unwrap_or(0);
-        if column < first && next > first {
-            first = column;
-        }
-        if column < end && next > end {
-            end = next.min(width);
-        }
-        column = next;
-    }
-    (first, end)
 }
