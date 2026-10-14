@@ -1,12 +1,12 @@
 //! Safe file discovery and text loading for the Home Preview overlay.
 
 use std::ffi::CString;
-use std::fs::{File, OpenOptions};
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use usagi_core::domain::presentation_text::{
@@ -29,6 +29,8 @@ pub(crate) const MAX_PREVIEW_FILES: usize = 20_000;
 pub(crate) const MAX_PREVIEW_BYTES: usize = 512 * 1024;
 /// Maximum bytes retained from `git ls-files` before the child is terminated.
 pub(crate) const MAX_PREVIEW_LIST_BYTES: usize = 8 * 1024 * 1024;
+/// Total bytes retained for one native view, including relative HTML assets.
+const MAX_ARTIFACT_OPEN_BYTES: u64 = 64 * 1024 * 1024;
 
 const PREVIEW_LIST_POLICY: ChildPolicy = ChildPolicy {
     timeout: Duration::from_secs(2),
@@ -45,6 +47,7 @@ pub(crate) enum FilePreviewError {
     TooLarge,
     Binary,
     NotUtf8,
+    NativeViewTooLarge,
 }
 
 impl FilePreviewError {
@@ -57,6 +60,9 @@ impl FilePreviewError {
             Self::TooLarge => "Files larger than 512 KiB cannot be previewed.",
             Self::Binary => "Binary files cannot be previewed.",
             Self::NotUtf8 => "Only UTF-8 text files can be previewed.",
+            Self::NativeViewTooLarge => {
+                "Artifact files and assets larger than 64 MiB cannot be opened."
+            }
         }
     }
 
@@ -69,6 +75,7 @@ impl FilePreviewError {
             Self::TooLarge => "preview-too-large",
             Self::Binary => "preview-binary",
             Self::NotUtf8 => "preview-not-utf8",
+            Self::NativeViewTooLarge => "preview-native-too-large",
         }
     }
 }
@@ -238,13 +245,56 @@ fn load_preview_with(
     Ok((files, changed, Vec::new()))
 }
 
-/// Validate an explicit native-viewer request. Executables and application
-/// bundles are never handed to the OS opener.
-pub(crate) fn artifact_open_path(
+/// One private, disposable native-view snapshot. Its files are independent of
+/// source names so replacement or session teardown cannot redirect an OS open.
+pub(crate) struct ArtifactView {
+    directory: tempfile::TempDir,
+    selected: PathBuf,
+}
+
+impl ArtifactView {
+    pub(crate) fn path(&self) -> &Path {
+        &self.selected
+    }
+
+    /// Helpers return before their GUI app necessarily reads the file. Keep a
+    /// successful view in the OS temporary area, independent of TUI lifetime.
+    pub(crate) fn retain(self) {
+        let _ = self.directory.keep();
+    }
+}
+
+/// Snapshot an explicit native-view request and its relative assets. Executables
+/// and application bundles are never handed to the OS opener.
+pub(crate) fn artifact_open_view(
     root: &Path,
     path: &str,
     filter: PreviewFileFilter,
-) -> Result<std::path::PathBuf, FilePreviewError> {
+) -> Result<ArtifactView, FilePreviewError> {
+    artifact_open_view_with(root, path, filter, &mut native_view_directory)
+}
+
+fn native_view_directory() -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("usagi-artifact-view-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+}
+
+fn file_unavailable<T>(_: T) -> FilePreviewError {
+    FilePreviewError::FileUnavailable
+}
+
+fn files_unavailable<T>(_: T) -> FilePreviewError {
+    FilePreviewError::FilesUnavailable
+}
+
+fn artifact_open_view_with(
+    root: &Path,
+    path: &str,
+    filter: PreviewFileFilter,
+    create: &mut dyn FnMut() -> io::Result<tempfile::TempDir>,
+) -> Result<ArtifactView, FilePreviewError> {
     if !filter.is_artifacts()
         || !usagi_core::infrastructure::artifacts::contains(
             path,
@@ -276,18 +326,95 @@ pub(crate) fn artifact_open_path(
     ) {
         return Err(FilePreviewError::NotRegular);
     }
-    let root = root
-        .canonicalize()
-        .map_err(|_| FilePreviewError::FileUnavailable)?;
+    let root = root.canonicalize().map_err(file_unavailable)?;
     let file = open_beneath(&root, path)?;
-    if !file
-        .metadata()
-        .map_err(|_| FilePreviewError::FileUnavailable)?
-        .is_file()
-    {
+    if !file.metadata().map_err(file_unavailable)?.is_file() {
         return Err(FilePreviewError::NotRegular);
     }
-    Ok(root.join(path))
+    let prefix_len = if filter == PreviewFileFilter::Artifacts {
+        1
+    } else {
+        4
+    };
+    let artifact_root = Path::new(path)
+        .components()
+        .take(prefix_len)
+        .collect::<PathBuf>();
+    let selected = Path::new(path)
+        .components()
+        .skip(prefix_len)
+        .collect::<PathBuf>();
+    // Standalone images/PDFs/text need only the selected file. Documents with
+    // relative references need the artifact tree; unrelated large artifacts
+    // must not prevent opening a small standalone file.
+    let entries = if matches!(extension.as_str(), "html" | "htm" | "md" | "svg") {
+        usagi_core::infrastructure::artifacts::files(&root.join(&artifact_root))
+            .map_err(files_unavailable)?
+    } else {
+        Vec::new()
+    };
+    let directory = create().map_err(file_unavailable)?;
+    let mut remaining = MAX_ARTIFACT_OPEN_BYTES;
+    copy_artifact_file(&file, &directory.path().join(&selected), &mut remaining)?;
+    for relative in entries {
+        if relative != selected {
+            let input = open_beneath(
+                &root,
+                artifact_root
+                    .join(&relative)
+                    .to_str()
+                    .ok_or(FilePreviewError::FileUnavailable)?,
+            )?;
+            copy_artifact_file(&input, &directory.path().join(relative), &mut remaining)?;
+        }
+    }
+    let selected = directory.path().join(selected);
+    Ok(ArtifactView {
+        directory,
+        selected,
+    })
+}
+
+fn copy_artifact_file(
+    mut input: &File,
+    destination: &Path,
+    remaining: &mut u64,
+) -> Result<(), FilePreviewError> {
+    let metadata = input.metadata().map_err(file_unavailable)?;
+    if !metadata.is_file() {
+        return Err(FilePreviewError::NotRegular);
+    }
+    if metadata.len() > *remaining {
+        return Err(FilePreviewError::NativeViewTooLarge);
+    }
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(
+            destination
+                .parent()
+                .ok_or(FilePreviewError::FileUnavailable)?,
+        )
+        .map_err(file_unavailable)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+        .map_err(file_unavailable)?;
+    copy_with_budget(&mut input, &mut output, remaining)
+}
+
+fn copy_with_budget(
+    input: &mut dyn Read,
+    output: &mut dyn io::Write,
+    remaining: &mut u64,
+) -> Result<(), FilePreviewError> {
+    let copied = io::copy(&mut input.take(*remaining + 1), output).map_err(file_unavailable)?;
+    *remaining = remaining
+        .checked_sub(copied)
+        .ok_or(FilePreviewError::NativeViewTooLarge)?;
+    Ok(())
 }
 
 /// Read one UTF-8 regular file without allowing the requested path to escape
@@ -296,15 +423,8 @@ pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, File
     if !valid_relative_path(relative) {
         return Err(FilePreviewError::OutsideRoot);
     }
-    let file = open_beneath(
-        &root
-            .canonicalize()
-            .map_err(|_| FilePreviewError::FileUnavailable)?,
-        relative,
-    )?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| FilePreviewError::FileUnavailable)?;
+    let file = open_beneath(&root.canonicalize().map_err(file_unavailable)?, relative)?;
+    let metadata = file.metadata().map_err(file_unavailable)?;
     if !metadata.is_file() {
         return Err(FilePreviewError::NotRegular);
     }
@@ -318,7 +438,7 @@ pub(crate) fn read_file(root: &Path, relative: &str) -> Result<Vec<String>, File
     let mut bytes = Vec::with_capacity(capacity);
     file.take((MAX_PREVIEW_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| FilePreviewError::FileUnavailable)?;
+        .map_err(file_unavailable)?;
     decode_file(bytes)
 }
 
@@ -330,7 +450,7 @@ pub(crate) fn open_beneath(root: &Path, relative: &str) -> Result<File, FilePrev
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(root)
-        .map_err(|_| FilePreviewError::FileUnavailable)?;
+        .map_err(file_unavailable)?;
     let mut components = Path::new(relative).components().peekable();
     while let Some(Component::Normal(component)) = components.next() {
         let name = CString::new(component.as_bytes()).map_err(|_| FilePreviewError::OutsideRoot)?;
@@ -1002,6 +1122,7 @@ mod tests {
             FilePreviewError::TooLarge,
             FilePreviewError::Binary,
             FilePreviewError::NotUtf8,
+            FilePreviewError::NativeViewTooLarge,
         ] {
             assert!(!error.message().is_empty());
             assert!(error.error_id().starts_with("preview-"));
@@ -1036,19 +1157,20 @@ mod tests {
         assert!(!lines[1].contains('\u{1b}'));
         assert!(load_preview(&session, Some("Cargo.toml"), PreviewFileFilter::Artifacts).is_err());
         assert!(
-            artifact_open_path(
+            artifact_open_view(
                 &session,
                 "artifacts/image.PNG",
                 PreviewFileFilter::Artifacts
             )
             .unwrap()
+            .path()
             .is_absolute()
         );
         assert!(
-            artifact_open_path(&session, "artifacts/report.md", PreviewFileFilter::All).is_err()
+            artifact_open_view(&session, "artifacts/report.md", PreviewFileFilter::All).is_err()
         );
         assert!(
-            artifact_open_path(
+            artifact_open_view(
                 &session,
                 "artifacts/execute.sh",
                 PreviewFileFilter::Artifacts
@@ -1057,12 +1179,12 @@ mod tests {
         );
         fs::create_dir(session.join("artifacts/dir.pdf")).unwrap();
         assert!(
-            artifact_open_path(&session, "artifacts/dir.pdf", PreviewFileFilter::Artifacts)
+            artifact_open_view(&session, "artifacts/dir.pdf", PreviewFileFilter::Artifacts)
                 .is_err()
         );
         std::os::unix::fs::symlink(temp.path(), session.join("artifacts/link")).unwrap();
         assert!(
-            artifact_open_path(
+            artifact_open_view(
                 &session,
                 "artifacts/link/secret.pdf",
                 PreviewFileFilter::Artifacts
@@ -1070,5 +1192,199 @@ mod tests {
             .is_err()
         );
         assert!(load_preview(&session, None, PreviewFileFilter::Artifacts).is_err());
+    }
+
+    #[test]
+    fn native_snapshot_pins_files_and_relative_assets_across_replacement_and_removal() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempdir().unwrap();
+        let session = temp.path().join(".usagi/sessions/view");
+        fs::create_dir_all(session.join("artifacts/pages")).unwrap();
+        fs::create_dir_all(session.join("artifacts/images")).unwrap();
+        fs::write(
+            session.join("artifacts/pages/report.html"),
+            "<img src='../images/chart.svg'>",
+        )
+        .unwrap();
+        fs::write(session.join("artifacts/images/chart.svg"), "original chart").unwrap();
+        let view = artifact_open_view(
+            &session,
+            "artifacts/pages/report.html",
+            PreviewFileFilter::Artifacts,
+        )
+        .unwrap();
+        let copied_root = view.directory.path();
+        assert_eq!(
+            fs::metadata(copied_root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(view.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(view.path().parent().unwrap().join("../images/chart.svg")).unwrap(),
+            "original chart"
+        );
+
+        let outside = temp.path().join("private.html");
+        fs::write(&outside, "outside artifact scope").unwrap();
+        fs::remove_file(session.join("artifacts/pages/report.html")).unwrap();
+        symlink(&outside, session.join("artifacts/pages/report.html")).unwrap();
+        assert_eq!(
+            fs::read_to_string(view.path()).unwrap(),
+            "<img src='../images/chart.svg'>"
+        );
+        fs::remove_dir_all(&session).unwrap();
+        assert!(view.path().exists());
+        drop(view);
+
+        let retained = temp
+            .path()
+            .join(".usagi/artifacts/view/00000000-0000-4000-8000-000000000000");
+        fs::create_dir_all(&retained).unwrap();
+        fs::write(retained.join("report.md"), "retained").unwrap();
+        let view = artifact_open_view(
+            temp.path(),
+            ".usagi/artifacts/view/00000000-0000-4000-8000-000000000000/report.md",
+            PreviewFileFilter::AllArtifacts,
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(view.path()).unwrap(), "retained");
+    }
+
+    #[test]
+    fn native_snapshot_failures_leave_sources_and_never_open_unsafe_assets() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join("artifacts")).unwrap();
+        fs::write(temp.path().join("artifacts/report.md"), "source").unwrap();
+        let path = "artifacts/report.md";
+        let result =
+            artifact_open_view_with(temp.path(), path, PreviewFileFilter::Artifacts, &mut || {
+                Err(io::Error::other("full temporary storage"))
+            });
+        assert!(matches!(result, Err(FilePreviewError::FileUnavailable)));
+        std::os::unix::fs::symlink(temp.path(), temp.path().join("artifacts/link")).unwrap();
+        assert!(matches!(
+            artifact_open_view(temp.path(), path, PreviewFileFilter::Artifacts),
+            Err(FilePreviewError::FilesUnavailable)
+        ));
+        fs::remove_file(temp.path().join("artifacts/link")).unwrap();
+        let huge = File::create(temp.path().join("artifacts/large.pdf")).unwrap();
+        huge.set_len(MAX_ARTIFACT_OPEN_BYTES + 1).unwrap();
+        fs::write(temp.path().join("artifacts/image.png"), [1, 2, 3]).unwrap();
+        let image = artifact_open_view(
+            temp.path(),
+            "artifacts/image.png",
+            PreviewFileFilter::Artifacts,
+        )
+        .unwrap();
+        assert_eq!(fs::read(image.path()).unwrap(), [1, 2, 3]);
+        assert!(matches!(
+            artifact_open_view(
+                temp.path(),
+                "artifacts/large.pdf",
+                PreviewFileFilter::Artifacts
+            ),
+            Err(FilePreviewError::NativeViewTooLarge)
+        ));
+        assert!(matches!(
+            artifact_open_view(temp.path(), path, PreviewFileFilter::Artifacts),
+            Err(FilePreviewError::NativeViewTooLarge)
+        ));
+        assert!(matches!(
+            artifact_open_view(
+                &temp.path().join("missing"),
+                path,
+                PreviewFileFilter::Artifacts
+            ),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        assert_eq!(
+            fs::read_to_string(temp.path().join(path)).unwrap(),
+            "source"
+        );
+    }
+
+    #[test]
+    fn native_snapshot_reads_the_pinned_file_and_rejects_assets_swapped_before_copy() {
+        use std::os::unix::fs::symlink;
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join("artifacts")).unwrap();
+        let selected = temp.path().join("artifacts/report.html");
+        let asset = temp.path().join("artifacts/chart.svg");
+        let outside = temp.path().join("private.html");
+        fs::write(&selected, "validated document").unwrap();
+        fs::write(&asset, "validated asset").unwrap();
+        fs::write(&outside, "outside scope").unwrap();
+        let view = artifact_open_view_with(
+            temp.path(),
+            "artifacts/report.html",
+            PreviewFileFilter::Artifacts,
+            &mut || {
+                // This runs after descriptor validation and inventory, before copy.
+                fs::remove_file(&selected)?;
+                symlink(&outside, &selected)?;
+                native_view_directory()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(view.path()).unwrap(),
+            "validated document"
+        );
+        fs::remove_file(&selected).unwrap();
+        fs::write(&selected, "validated document").unwrap();
+        let mut staging = None;
+        let result = artifact_open_view_with(
+            temp.path(),
+            "artifacts/report.html",
+            PreviewFileFilter::Artifacts,
+            &mut || {
+                fs::remove_file(&asset)?;
+                symlink(&outside, &asset)?;
+                let directory = native_view_directory()?;
+                staging = Some(directory.path().to_path_buf());
+                Ok(directory)
+            },
+        );
+        assert!(matches!(result, Err(FilePreviewError::OutsideRoot)));
+        assert!(!staging.unwrap().exists());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside scope");
+    }
+
+    #[test]
+    fn native_copy_checks_file_types_destinations_and_growth_budget() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, "report").unwrap();
+        let copy = temp.path().join("copy");
+        let mut remaining = MAX_ARTIFACT_OPEN_BYTES;
+        fs::write(&copy, "occupied").unwrap();
+        assert!(matches!(
+            copy_artifact_file(&File::open(&source).unwrap(), &copy, &mut remaining),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        assert!(matches!(
+            copy_artifact_file(
+                &File::open(&source).unwrap(),
+                &copy.join("child"),
+                &mut remaining
+            ),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        assert!(matches!(
+            copy_artifact_file(&File::open(temp.path()).unwrap(), &copy, &mut remaining),
+            Err(FilePreviewError::NotRegular)
+        ));
+        let write_only = OpenOptions::new().write(true).open(&source).unwrap();
+        assert!(matches!(
+            copy_artifact_file(&write_only, &temp.path().join("unreadable"), &mut remaining),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        assert!(matches!(
+            copy_with_budget(&mut &b"grown"[..], &mut Vec::new(), &mut 2),
+            Err(FilePreviewError::NativeViewTooLarge)
+        ));
     }
 }

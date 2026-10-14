@@ -44,6 +44,8 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 | session ごとの生成物を探しづらい | [Artifacts](document/03-tui.md#artifacts) で横断検索し、削除後の保管済み成果物も開ける |
 
+Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
+
 複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 

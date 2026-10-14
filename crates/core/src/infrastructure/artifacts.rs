@@ -8,7 +8,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use crate::domain::presentation_text::presentation_character_is_safe;
@@ -97,7 +97,11 @@ fn walk(
     Ok(())
 }
 
-fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
+/// Discover bounded regular files relative to one artifact directory.
+///
+/// # Errors
+/// Refuses links, special entries, inaccessible files, and traversal limits.
+pub fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
     match fs::symlink_metadata(root) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -171,12 +175,15 @@ pub fn archive(session: &Path) -> io::Result<Option<PathBuf>> {
     File::open(&archives)?.sync_all()?;
     let id = uuid::Uuid::new_v4().to_string();
     let staging = owner.join(format!(".partial-{id}"));
-    fs::create_dir(&staging)?;
+    fs::DirBuilder::new().mode(0o700).create(&staging)?;
     let published = owner.join(id);
     let result = (|| {
         for relative in entries {
             let destination = staging.join(&relative);
-            fs::create_dir_all(destination.parent().ok_or_else(invalid)?)?;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(destination.parent().ok_or_else(invalid)?)?;
             let input = open_relative(session, &Path::new(ARTIFACTS_DIR).join(&relative))?;
             copy_regular(input, &destination)?;
         }
@@ -198,6 +205,7 @@ fn copy_regular(mut input: File, destination: &Path) -> io::Result<()> {
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(destination)?;
     io::copy(&mut input, &mut output)?;
     output.sync_all()
@@ -450,6 +458,37 @@ mod tests {
             ".usagi/artifacts/one/00000000-0000-4000-8000-000000000000/a.txt",
             true
         ));
+    }
+
+    #[test]
+    fn archives_keep_private_files_and_directories_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let session = session(temp.path(), "private");
+        let source = session.join("artifacts/private");
+        fs::create_dir(&source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(source.join("report.md"), "private report").unwrap();
+        fs::set_permissions(source.join("report.md"), fs::Permissions::from_mode(0o600)).unwrap();
+        let snapshot = archive(&session).unwrap().unwrap();
+        for path in [&snapshot, &snapshot.join("private")] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert_eq!(
+            fs::metadata(snapshot.join("private/report.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(snapshot.join("private/report.md")).unwrap(),
+            "private report"
+        );
     }
 
     #[test]
