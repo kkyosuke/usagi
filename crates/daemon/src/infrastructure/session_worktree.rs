@@ -140,25 +140,29 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         branch: &str,
         base_ref: Option<&str>,
     ) -> anyhow::Result<()> {
-        if self.is_repo_root(workspace_root) {
+        let mut created = Vec::new();
+        let result = if self.is_repo_root(workspace_root) {
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             add_worktree(git, workspace_root, destination, branch, base_ref)?;
-            usagi_core::infrastructure::artifacts::prepare(destination)?;
-            return Ok(());
+            created.push((workspace_root.to_path_buf(), destination.to_path_buf()));
+            Ok(())
+        } else {
+            std::fs::create_dir_all(destination)?;
+            mirror_directory(
+                self,
+                git,
+                workspace_root,
+                destination,
+                branch,
+                base_ref,
+                &mut created,
+            )
         }
-        std::fs::create_dir_all(destination)?;
-        let mut created = Vec::new();
-        let result = mirror_directory(
-            self,
-            git,
-            workspace_root,
-            destination,
-            branch,
-            base_ref,
-            &mut created,
-        );
+        .and_then(|()| {
+            usagi_core::infrastructure::artifacts::prepare(destination).map_err(Into::into)
+        });
         if let Err(error) = result {
             let mut cleanup = Vec::new();
             for (repository, worktree) in created.into_iter().rev() {
@@ -182,7 +186,6 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
                 cleanup.join("; ")
             ));
         }
-        usagi_core::infrastructure::artifacts::prepare(destination)?;
         Ok(())
     }
 
@@ -625,6 +628,95 @@ mod tests {
                 .is_err()
         );
         assert!(session.join("artifacts/report.md").exists());
+    }
+
+    #[test]
+    fn artifact_preparation_failure_compensates_real_and_mirrored_worktrees() {
+        for mirror in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let repository = if mirror {
+                root.join("repository")
+            } else {
+                root.to_path_buf()
+            };
+            std::fs::create_dir_all(&repository).unwrap();
+            std::fs::write(root.join("artifacts"), "project input").unwrap();
+            for args in [
+                vec!["init", "-b", "main"],
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            ] {
+                assert!(SystemGit.run(&repository, &args).unwrap().success);
+            }
+            let session = root.join(".usagi/sessions/blocked");
+            assert!(
+                SystemSessionWorktreeIo
+                    .build_session_tree(&SystemGit, root, &session, "usagi/blocked", None)
+                    .is_err()
+            );
+            assert!(
+                !session.exists(),
+                "failed {mirror:?} checkout must be rolled back"
+            );
+            assert_eq!(
+                usagi_core::infrastructure::git::list_worktrees(&SystemGit, &repository)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                !SystemGit
+                    .run(
+                        &repository,
+                        &["show-ref", "--verify", "refs/heads/usagi/blocked"]
+                    )
+                    .unwrap()
+                    .success
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("artifacts")).unwrap(),
+                "project input"
+            );
+
+            // Removing the naming collision allows reuse of the same branch/name.
+            std::fs::remove_file(root.join("artifacts")).unwrap();
+            if !mirror {
+                assert!(SystemGit.run(&repository, &["add", "-u"]).unwrap().success);
+                assert!(
+                    SystemGit
+                        .run(
+                            &repository,
+                            &[
+                                "-c",
+                                "user.name=Test",
+                                "-c",
+                                "user.email=test@example.com",
+                                "commit",
+                                "-m",
+                                "remove collision"
+                            ]
+                        )
+                        .unwrap()
+                        .success
+                );
+            }
+            SystemSessionWorktreeIo
+                .build_session_tree(&SystemGit, root, &session, "usagi/blocked", None)
+                .unwrap();
+            SystemSessionWorktreeIo
+                .remove_session_tree(&SystemGit, &session, false)
+                .unwrap();
+        }
     }
 }
 
