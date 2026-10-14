@@ -682,6 +682,7 @@ struct ProductionOverlayPort {
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
     pr_pump: RefreshPump<PrObservations>,
     preview_pump: PreviewPump,
+    artifact_opener: crate::runtime::artifact_opener::ArtifactOpener,
     browser: PlatformBrowserOpener,
     clipboard: PlatformClipboard,
 }
@@ -810,23 +811,13 @@ impl BackendOverlayPort for ProductionOverlayPort {
         filter: PreviewFileFilter,
         completions: Completions,
     ) {
-        let result = self
-            .target_root(target)
-            .and_then(|root| crate::runtime::file_preview::artifact_open_path(root, &path, filter));
-        let message = match result {
-            Ok(path) => self
-                .browser
-                .open(&path.to_string_lossy())
-                .err()
-                .map(|_| "Could not open this artifact in an external app."),
-            Err(_) => {
-                Some("Cannot open this artifact. Select a regular text, image, HTML, or PDF file.")
-            }
-        };
-        if let Some(message) = message {
-            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                message,
-            ))));
+        match self.target_root(target) {
+            Ok(root) => self
+                .artifact_opener
+                .request(root.to_path_buf(), path, filter, completions),
+            Err(error) => completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                error.message(),
+            )))),
         }
     }
 
@@ -1269,6 +1260,11 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             pr_sessions,
             pr_pump,
             preview_pump: PreviewPump::spawn(load_preview),
+            artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(Box::new(
+                PlatformBrowserOpener {
+                    reaper: self.helper_reaper.clone(),
+                },
+            )),
             browser: PlatformBrowserOpener {
                 reaper: self.helper_reaper.clone(),
             },

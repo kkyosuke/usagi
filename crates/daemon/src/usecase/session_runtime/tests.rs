@@ -8,6 +8,108 @@ use tempfile::TempDir;
 use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
 use usagi_core::infrastructure::git::GitOutput;
 
+#[test]
+fn artifact_preparation_failure_can_be_removed_and_release_the_session_name() {
+    use crate::infrastructure::session_worktree::SystemGit;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repository");
+    let data = temp.path().join("data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(root.join("artifacts"), "project input").unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["add", "artifacts"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    ] {
+        assert!(SystemGit.run(&root, &args).unwrap().success);
+    }
+    let runtime = Arc::new(Mutex::new(
+        SessionRuntime::open_at(
+            root.clone(),
+            &data.join("state"),
+            &data,
+            DaemonGeneration::new(),
+            SystemGit,
+            SystemSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    assert!(
+        perform_create(
+            &runtime,
+            &SystemGit,
+            &operation(),
+            &json!({"name":"blocked"})
+        )
+        .is_err()
+    );
+    assert!(!root.join(".usagi/sessions/blocked").exists());
+    perform_remove(
+        &runtime,
+        &TeardownSignal::new(),
+        &operation(),
+        &json!({"name":"blocked"}),
+    )
+    .unwrap();
+    let reports = drain_pending_teardowns(
+        &SharedSessionTeardown::new(Arc::clone(&runtime)),
+        &WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
+        &|| false,
+    );
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].effect_error.is_none(),
+        "{:?}",
+        reports[0].effect_error
+    );
+    assert!(reports[0].finalize_error.is_none());
+    assert!(
+        runtime.lock().unwrap().snapshot().unwrap()["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::remove_file(root.join("artifacts")).unwrap();
+    assert!(SystemGit.run(&root, &["add", "-u"]).unwrap().success);
+    assert!(
+        SystemGit
+            .run(
+                &root,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "remove collision"
+                ]
+            )
+            .unwrap()
+            .success
+    );
+    perform_create(
+        &runtime,
+        &SystemGit,
+        &operation(),
+        &json!({"name":"blocked"}),
+    )
+    .unwrap();
+    assert!(
+        root.join(".usagi/sessions/blocked/artifacts/.gitignore")
+            .is_file()
+    );
+}
+
 struct FakeSessionGit(bool);
 impl FakeSessionGit {
     fn ok() -> Self {
