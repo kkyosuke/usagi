@@ -1957,12 +1957,16 @@ public launch plan、durable snapshot、IPC response に残らない。注入し
 `mcp_servers.usagi.default_tools_approval_mode = "approve"` で注入した `usagi` server を事前許可する。子 server には
 daemon 接続に必要な環境だけを forward する。
 詳細な MCP caller contract は [7. MCP サーバ](07-mcp.md#起動と経路) を正本とする。Claude も
-`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Agent launch に配線するのはこの `usagi`
-server だけである。それ以外の MCP server・shell・ファイル編集・network の permission model は通常どおり維持され、
-無効化・緩和しない。
+`--allowedTools mcp__usagi` で同じ server のツールを事前許可する。Claude はそれ以外の MCP server・shell・
+ファイル編集・network の通常の permission model を維持する。Codex は CLI の承認を `never` とし、production の
+managed launch では filesystem 境界を daemon の外側 OS sandbox が強制する。内側 sandbox の起動 flag と
+launcher が無い構成での挙動は [Claude 起動の多層防御](02-architecture.md#claude-起動の多層防御) を参照する。
+daemon が Agent launch に追加する MCP server はこの `usagi` server だけである。
 
-Antigravity は daemon data の
-`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/mcp_config.json` から同じ server を起動する。
+Antigravity は server 単位の事前許可を指定する起動 flag がないため `--dangerously-skip-permissions` を渡す。
+これは CLI の承認要求を省略するが、書き込み範囲は daemon の外側 OS sandbox が制限する。
+同じ MCP server を daemon data の
+`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/mcp_config.json` に書いた設定から起動する。
 daemon は専用 plugin directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
 へだけ追加する。plugin root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
 作成前に拒否し、sandbox でも read-only に戻す。managed launch は `~/.gemini` を writable root にせず、
@@ -1990,7 +1994,7 @@ sidecar を持たない legacy Agent は、fence 済み workspace lifecycle が 
 workspace へ引き継ぐ。workspace を証明できない legacy root Agent は再利用せず新しい identity を発行する。legacy prompt
 も session scope だけを同じ証明で次回 launch へ配送・consume し、root の legacy slot は別 workspace へ推測配送しない。
 
-新規 worker の runtime/model は MCP schema snapshot を信頼せず、spawn の直前に resolved managed-session worktree の current `.usagi/config.toml` allowlist と current executable locator で再検証する。allowlist 外・不完全な runtime/model は safe `invalid_argument`、CLI 不在は safe `unavailable` となり、reservation や spawn を行わない。既存 `agent.id` はこの再選択を通らず、保存済み agent の session ownership と lifecycle scope をそのまま用いる。allowlist、executable、または MCP wire / durable registry に path、argv、environment、credential、raw CLI output、provider model list は保存しない。
+新規 worker の runtime/model は MCP schema snapshot を信頼せず、spawn の直前に resolved workspace root の current `.usagi/config.toml` allowlist と current executable locator で再検証する。session worktree は worker の cwd としてだけ使う。allowlist 外・不完全な runtime/model は safe `invalid_argument`、CLI 不在は safe `unavailable` となり、reservation や spawn を行わない。既存 `agent.id` はこの再選択を通らず、保存済み agent の session ownership と lifecycle scope をそのまま用いる。allowlist、executable、または MCP wire / durable registry に path、argv、environment、credential、raw CLI output、provider model list は保存しない。
 
 #### Agent CLI の readiness preflight
 

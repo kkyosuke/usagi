@@ -767,7 +767,7 @@ AGY 1.2.0 の `agy --help` と、公式の [headless mode](https://www.antigravi
 | 対話・初回 task・モデル指定 | `--prompt-interactive` と `--model` |
 | headless | `--print`。CLI 自体は headless の会話再開にも対応するが、usagi の exact resume は対話起動に限る |
 | 会話再開 | structured hook の `conversationId` を捕捉し、`--conversation` に渡す |
-| system prompt | 独立した起動 flag がないため、上記の初回 prompt 合成を使う。CLI の system message と同じ優先順位にはならない |
+| system prompt | 専用の起動 flag はない。CLI 自体は hook の `injectSteps.systemMessage` に対応するが、現行 usagi は上記の初回 user prompt 合成を使うため、system message と同じ優先順位にはならない |
 | MCP・phase hook | managed launch 専用 plugin を使う。設定の配線は [daemon の Agent ownership](05-daemon.md#agent-ownership) を参照する |
 | MCP tool の事前許可 | server 単位の起動 flag がないため `--dangerously-skip-permissions` を使う。書き込み範囲は daemon の外側 sandbox が制限する |
 | 許可要求・終了イベント | `PermissionRequest` / `Notification` / `SessionEnd` に相当する専用 hook はない。tool hook で phase を報告し、process 終了は PTY owner が観測する |
