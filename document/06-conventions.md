@@ -72,7 +72,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `portable-pty` | `usagi-daemon` の infrastructure（`pty`）による PTY の確保、子プロセス起動、入出力・resize・wait | 本依存 |
 | `libc` | `usagi-core` infrastructure の atomic temp file 検証（Unix の no-follow・所有者・link identity）と合成ルートでの daemon process-start identity 観測・exact-owner signal | 本依存 |
 | `signal-hook` | 合成ルートで daemon の SIGINT / SIGTERM handler と同期 wait を worker spawn 前に準備する | 本依存 |
-| `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
+| `tempfile` | 合成ルートの本人専用 Artifact 表示コピー、ユニットテスト用の一時ディレクトリ | 本依存・dev |
 | `syn` | Rust source の AST 検査（architecture・coverage attribute などの構造テスト） | dev |
 
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は

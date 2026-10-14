@@ -1679,6 +1679,11 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 対象は txt / md / csv / json / html / htm / pdf /
 png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bundle は渡さない。
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
+外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
+HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
+元の file の差し替えや session 削除で、外部アプリが別の path を開かないようにする。directory は `0700`、file は `0600` とする。
+1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
+アプリは helper 終了や TUI 終了後にも読み込むため、成功したコピーは OS の temporary 領域へ残す。失敗したコピーは取り除く。
 本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には `artifacts/` への保存案内を表示する。
 
 Git の tracked / changed / ignore 判定を使わず、`artifacts/` のファイルを列挙する。横断一覧は

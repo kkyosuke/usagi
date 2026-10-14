@@ -4,6 +4,7 @@
 //! クレートが定義する port を実装し、画面・CLI・daemon の面どうしは依存させない。
 
 pub(crate) mod agent_tab_intent;
+pub(crate) mod artifact_opener;
 pub(crate) mod bootstrap;
 pub(crate) mod clean;
 pub(crate) mod cli;

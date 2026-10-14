@@ -107,6 +107,7 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 
 生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `artifacts/` を用意する。
 新規の `artifacts/.gitignore` には `*` を書き、生成物を Git の未追跡差分から除外する。既存の ignore file は上書きしない。
+この準備に失敗した場合は、作成した Git worktree・branch と session tree を補償処理で取り消す。mirror 内の repository も対象とする。
 Agent の起動指示は調査結果・設計書・画像・HTML・検証レポートをこの場所へ保存するよう案内する。
 旧 session でディレクトリが無い場合は Agent が作成する。コードとして管理するファイルは従来どおり Git / PR に載せる。
 生成中の保存先は session 内の `artifacts/` であり、保管先の `.usagi/artifacts/` は workspace root を基準にする。
@@ -118,6 +119,7 @@ session の削除と orphan worktree の cleanup は、Git / filesystem の削�
 作業中の成果物が残る。再試行時には別の snapshot が作られることがある。
 
 コピーは `.partial-<id>` へ行い、ファイルとディレクトリを同期してから公開名へ rename する。
+snapshot の root・各 directory は本人だけが到達できる `0700`、file は `0600` で作成し、保管によって他の OS user へ公開しない。
 保管失敗時は force 指定でも session tree を削除しない。symlink と特殊ファイルは追跡せず保管を拒否する。
 走査は各出力で 20,000 entries・64 階層までとし、上限超過も削除を止める。
 保管済み生成物には session 削除や orphan cleanup による自動削除を適用しない。
