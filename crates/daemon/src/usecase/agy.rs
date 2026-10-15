@@ -1,7 +1,7 @@
 //! Google Antigravity CLI (`agy`) launch adapter.
 //!
 //! Antigravity owns its argv grammar and discovers MCP servers and lifecycle
-//! hooks from a provider-native plugin. The provisioner materializes that
+//! hooks from provider-native workspace configuration. The provisioner materializes that
 //! ephemeral integration before this adapter renders the public launch plan.
 
 use std::{collections::BTreeSet, path::PathBuf};
@@ -22,15 +22,20 @@ use super::runtime::{
     AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
 };
 
-/// Revision 3 scopes the plugin to managed launches through a private workspace.
-pub const PROFILE_REVISION: u32 = 3;
+/// Revision 4 uses native workspace configuration and transient system hooks,
+/// and supports a new headless turn in an exact conversation.
+pub const PROFILE_REVISION: u32 = 4;
+
+/// Private launch context consumed by the provider-native system prompt hook.
+/// Values exist only in the spawned process environment, never in snapshots.
+pub const SYSTEM_PROMPT_ENV: &str = "USAGI_AGY_SYSTEM_PROMPT";
 
 /// Product-private provisioning result for one Antigravity launch.
 pub struct AgyProvision {
     pub working_directory: PathBuf,
     pub environment_allowlist: BTreeSet<EnvironmentVariableName>,
     pub spawn: SpawnProvision,
-    /// Scope and role instructions prepended to the first provider turn.
+    /// Scope and role instructions injected as transient system context.
     pub system_prompt: String,
 }
 
@@ -41,11 +46,11 @@ pub enum AgyProvisionFailure {
     MaterializationFailed,
 }
 
-/// Materializes Antigravity's MCP/hook plugin and sandbox inputs for one scope.
+/// Materializes Antigravity's MCP/hook workspace configuration and sandbox inputs for one scope.
 pub trait AgyProvisioner {
     /// # Errors
     ///
-    /// Returns a typed failure when the executable, plugin, prompt, or sandbox
+    /// Returns a typed failure when the executable, configuration, prompt, or sandbox
     /// inputs cannot be prepared.
     fn provision(
         &mut self,
@@ -83,6 +88,7 @@ impl<P> AgyAdapter<P> {
                     AgentCapability::Resume,
                     AgentCapability::InitialPrompt,
                     AgentCapability::Headless,
+                    AgentCapability::HeadlessResume,
                     AgentCapability::PhaseReporting,
                     AgentCapability::McpWiring,
                     AgentCapability::SystemPrompt,
@@ -121,13 +127,8 @@ impl<P: AgyProvisioner> AgentAdapter for AgyAdapter<P> {
         if request.mode == LaunchMode::Headless && request.initial_prompt.is_none() {
             return Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt));
         }
-        if request.mode == LaunchMode::Headless && request.resume {
-            return Err(AdapterError::Validation(
-                LaunchValidationError::UnsupportedCapability {
-                    capability: AgentCapability::Resume,
-                },
-            ));
-        }
+        let provider_resume =
+            validate_provider_resume(request, &profile).map_err(AdapterError::Validation)?;
         let mut provision = self
             .provisioner
             .provision(&ProvisionContext::from_request(request))
@@ -135,22 +136,24 @@ impl<P: AgyProvisioner> AgentAdapter for AgyAdapter<P> {
                 AgyProvisionFailure::ExecutableUnavailable => AdapterError::ExecutableUnavailable,
                 AgyProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
             })?;
-        let provider_resume =
-            validate_provider_resume(request, &profile).map_err(AdapterError::Validation)?;
+        provision.spawn.insert_daemon_environment(
+            EnvironmentVariableName::new(SYSTEM_PROMPT_ENV)
+                .expect("literal environment variable name is valid"),
+            std::mem::take(&mut provision.system_prompt),
+        );
         if let Some(reference) = &provider_resume {
             provision.spawn.append_sensitive_arguments([
                 "--conversation".to_owned(),
                 reference.native_session_id.expose_sensitive().to_owned(),
             ]);
-        } else {
-            let prompt =
-                initial_prompt(&provision.system_prompt, request.initial_prompt.as_deref());
+        }
+        if let Some(prompt) = &request.initial_prompt {
             provision.spawn.append_sensitive_arguments([
                 match request.mode {
                     LaunchMode::Interactive => "--prompt-interactive".to_owned(),
                     LaunchMode::Headless => "--print".to_owned(),
                 },
-                prompt,
+                prompt.clone(),
             ]);
         }
         let plan = render_plan(request, &profile, &provision).map_err(AdapterError::Validation)?;
@@ -190,13 +193,6 @@ fn render_plan(
         provision.environment_allowlist.clone(),
         provision.working_directory.clone(),
     )
-}
-
-fn initial_prompt(system_prompt: &str, task: Option<&str>) -> String {
-    match task {
-        Some(task) => format!("{system_prompt}\n\nTask:\n{task}"),
-        None => system_prompt.to_owned(),
-    }
 }
 
 fn validate_provider_resume(
@@ -304,26 +300,37 @@ mod tests {
             [
                 "--plugin-materialized",
                 "--prompt-interactive",
-                "obey the scoped contract\n\nTask:\ninspect this workspace",
+                "inspect this workspace",
             ]
         );
         let durable = serde_json::to_string(&interactive.snapshot).unwrap();
         assert!(!durable.contains("secret"));
         assert!(!durable.contains("obey the scoped contract"));
         assert!(interactive.provider_resume.is_none());
+        assert_eq!(
+            interactive
+                .provision
+                .compose_environment(&std::collections::BTreeMap::default())[SYSTEM_PROMPT_ENV],
+            "obey the scoped contract"
+        );
 
         let headless = adapter().resolve(&request(LaunchMode::Headless)).unwrap();
         assert_eq!(headless.provision.arguments()[1], "--print");
     }
 
     #[test]
-    fn interactive_launch_without_task_still_receives_the_system_contract() {
+    fn interactive_launch_without_task_keeps_system_context_without_submitting_a_turn() {
         let mut request = request(LaunchMode::Interactive);
         request.initial_prompt = None;
         let resolved = adapter().resolve(&request).unwrap();
+        assert_eq!(resolved.provision.arguments(), ["--plugin-materialized"]);
+        let public = std::collections::BTreeMap::from([(
+            SYSTEM_PROMPT_ENV.to_owned(),
+            "untrusted override".to_owned(),
+        )]);
         assert_eq!(
-            &resolved.provision.arguments()[1..],
-            ["--prompt-interactive", "obey the scoped contract"]
+            resolved.provision.compose_environment(&public)[SYSTEM_PROMPT_ENV],
+            "obey the scoped contract"
         );
     }
 
@@ -367,6 +374,30 @@ mod tests {
                 .unwrap()
                 .contains("agy-conversation")
         );
+        request.mode = LaunchMode::Headless;
+        request.initial_prompt = Some("--version\n続きだけ答えて".to_owned());
+        let headless = adapter().resolve(&request).unwrap();
+        assert_eq!(
+            headless.provision.arguments(),
+            [
+                "--plugin-materialized",
+                "--conversation",
+                "agy-conversation",
+                "--print",
+                "--version\n続きだけ答えて"
+            ]
+        );
+        assert_eq!(
+            headless
+                .provision
+                .compose_environment(&std::collections::BTreeMap::default())[SYSTEM_PROMPT_ENV],
+            "obey the scoped contract"
+        );
+        assert!(
+            !serde_json::to_string(&headless.snapshot)
+                .unwrap()
+                .contains("agy-conversation")
+        );
     }
 
     #[test]
@@ -392,7 +423,7 @@ mod tests {
         assert!(matches!(
             adapter().resolve(&unsupported),
             Err(AdapterError::Validation(
-                LaunchValidationError::UnsupportedCapability { .. }
+                LaunchValidationError::ProviderResumeMismatch
             ))
         ));
     }

@@ -147,15 +147,46 @@ fn write_restartable_codex(bin: &Path, count: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Antigravity fixture which loads the daemon-private workspace plugin, runs
+/// Antigravity fixture which loads the daemon-private workspace configuration, runs
 /// its structured starting hook, and records exact argv for cold-restart resume.
 fn write_restartable_agy(bin: &Path, count: &Path, argv: &Path) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = models ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nplugin_workspace=\nconversation_id=\nprevious=\nfor argument in \"$@\"; do\n  if [ \"$previous\" = --add-dir ]; then plugin_workspace=\"$argument\"; fi\n  if [ \"$previous\" = --conversation ]; then conversation_id=\"$argument\"; fi\n  previous=\"$argument\"\ndone\n[ -n \"$plugin_workspace\" ] || exit 10\nplugin=\"$plugin_workspace/.agents/plugins/usagi-runtime\"\n[ -f \"$plugin/plugin.json\" ] || exit 11\n[ -f \"$plugin/mcp_config.json\" ] || exit 12\n[ -f \"$plugin/hooks.json\" ] || exit 13\ngrep -q '\"PreInvocation\"' \"$plugin/hooks.json\" || exit 14\nresuming=true\nif [ -z \"$conversation_id\" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi\nresponse=$(printf '%s' '{{\"conversationId\":\"'\"$conversation_id\"'\",\"workspacePaths\":[\"/fixture\"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15\n[ \"$response\" = '{{}}' ] || exit 16\nprintf '%s\\0' \"$@\" > \"{}\"\nprintf 'spawn\\n' >> \"{}\"\nprintf 'agy-ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
-        argv.display(),
-        count.display(),
+        r#"#!/bin/sh
+if [ "$1" = models ]; then exit 0; fi
+if [ "${{USAGI_PTY_SENTINEL+set}}" = set ]; then exit 9; fi
+plugin_workspace=
+conversation_id=
+headless=false
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --add-dir ]; then plugin_workspace="$argument"; fi
+  if [ "$previous" = --conversation ]; then conversation_id="$argument"; fi
+  if [ "$previous" = --print ]; then headless=true; fi
+  previous="$argument"
+done
+[ -n "$plugin_workspace" ] || exit 10
+configuration="$plugin_workspace/.agents"
+[ -f "$configuration/mcp_config.json" ] || exit 12
+[ -f "$configuration/hooks.json" ] || exit 13
+grep -q '"PreInvocation"' "$configuration/hooks.json" || exit 14
+resuming=true
+if [ -z "$conversation_id" ]; then conversation_id=fixture-agy-conversation; resuming=false; fi
+response=$(printf '%s' '{{"conversationId":"'"$conversation_id"'","workspacePaths":["/fixture"]}}' | {usagi} agent-phase running --hook-event PreInvocation) || exit 15
+[ "$response" = '{{}}' ] || exit 16
+{usagi} agy-system-prompt > {context} || exit 17
+printf '%s\0' "$@" > {argv}
+printf 'spawn\n' >> {count}
+printf 'agy-ready\n'
+if [ "$headless" = true ]; then exit 0; fi
+if [ "$resuming" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi
+IFS= read line || exit 0
+printf 'input:%s\n' "$line"
+"#,
+        context = shell_quote(argv.with_extension("context").to_str().unwrap()),
+        argv = shell_quote(argv.to_str().unwrap()),
+        count = shell_quote(count.to_str().unwrap()),
     );
     let path = bin.join("agy");
     fs::write(&path, script).unwrap();
@@ -1158,6 +1189,19 @@ fn resume(
     TerminalRef,
     usagi_core::domain::agent::AgentResumeTarget,
 ) {
+    resume_mode(client, workspace, session, None)
+}
+
+fn resume_mode(
+    client: &mut impl DaemonClient,
+    workspace: WorkspaceId,
+    session: SessionId,
+    headless_prompt: Option<&str>,
+) -> (
+    String,
+    TerminalRef,
+    usagi_core::domain::agent::AgentResumeTarget,
+) {
     let inventory = client
         .request(DaemonRequest::AgentInventory {
             workspace,
@@ -1183,13 +1227,23 @@ fn resume(
         "resume target must be unambiguous"
     );
     let operation = OperationId::new().to_string();
-    let reply = client
-        .request(DaemonRequest::ResumeAgent {
+    let request = if let Some(prompt) = headless_prompt {
+        DaemonRequest::ResumeAgentHeadless {
+            operation_id: operation.clone(),
+            target: target.clone(),
+            prompt: prompt.to_owned(),
+            caller_context: None,
+        }
+    } else {
+        DaemonRequest::ResumeAgent {
             operation_id: operation.clone(),
             target: target.clone(),
             caller_context: None,
-        })
-        .expect("captured Codex conversation resumes through root IPC");
+        }
+    };
+    let reply = client
+        .request(request)
+        .expect("captured conversation resumes through root IPC");
     let DaemonReply::Accepted { body, .. } = reply else {
         panic!("resume must be admitted as a daemon operation")
     };
@@ -1917,7 +1971,7 @@ fn wait_for_spawns(count: &Path, expected: usize) {
     }
 }
 
-fn assert_private_agy_plugin(
+fn assert_private_agy_workspace(
     arguments: &[String],
     data_dir: &Path,
     repo: &Path,
@@ -1928,15 +1982,15 @@ fn assert_private_agy_plugin(
         .position(|argument| argument == "--add-dir")
         .and_then(|position| arguments.get(position + 1))
         .map(PathBuf::from)
-        .expect("managed AGY launch carries its private plugin workspace");
+        .expect("managed AGY launch carries its private configuration workspace");
     assert!(
         add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
         "managed plugin workspace {} escaped daemon data {}",
         add_dir.display(),
         data_dir.display()
     );
-    let plugin = add_dir.join(".agents/plugins/usagi-runtime");
-    for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+    let plugin = add_dir.join(".agents");
+    for document in ["mcp_config.json", "hooks.json"] {
         assert!(plugin.join(document).is_file());
     }
     assert!(!repo.join(".agents/plugins/usagi-runtime").exists());
@@ -1962,10 +2016,20 @@ fn assert_agy_conversation_state(state: &Path) {
 }
 
 /// Shipping composition E2E for the AGY-specific chain: private workspace
-/// plugin discovery, structured hook capture, cold interruption, and exact
+/// configuration discovery, structured hook capture, cold interruption, and exact
 /// provider-native resume without a replacement prompt.
 #[test]
-fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
+fn agy_private_workspace_captures_and_exactly_resumes_one_conversation() {
+    exercise_agy_exact_resume(None);
+}
+
+#[test]
+fn agy_private_workspace_captures_and_headlessly_resumes_one_conversation() {
+    exercise_agy_exact_resume(Some("--version\n次の opaque turn"));
+}
+
+#[allow(clippy::too_many_lines)] // Both interaction modes share cold-restart, context, exact-target, and no-double-spawn assertions.
+fn exercise_agy_exact_resume(headless_prompt: Option<&str>) {
     let _serial = serial();
     let repo = fixture_repo();
     fs::create_dir(repo.path().join(".usagi")).unwrap();
@@ -1994,7 +2058,7 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
     wait_for_spawns(&count, 1);
 
     let initial = nul_arguments(&argv);
-    let add_dir = assert_private_agy_plugin(&initial, &data_dir, repo.path(), home.path());
+    let add_dir = assert_private_agy_workspace(&initial, &data_dir, repo.path(), home.path());
     assert_agy_conversation_state(&state);
     drop(first);
     drop(daemon);
@@ -2007,7 +2071,8 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
         Some(home.path()),
     );
     let mut second = client(&data_dir);
-    let (_, replacement, target) = resume(&mut second, workspace, session);
+    let (operation, replacement, target) =
+        resume_mode(&mut second, workspace, session, headless_prompt);
     assert_eq!(
         target.adapter_revision,
         usagi_daemon::usecase::agy::PROFILE_REVISION
@@ -2036,11 +2101,64 @@ fn agy_private_plugin_captures_and_exactly_resumes_one_conversation() {
     assert!(resumed.windows(2).any(|arguments| {
         arguments[0] == "--add-dir" && arguments[1] == add_dir.to_string_lossy()
     }));
+    let context: serde_json::Value =
+        serde_json::from_slice(&fs::read(argv.with_extension("context")).unwrap()).unwrap();
     assert!(
-        resumed
-            .iter()
-            .all(|argument| !matches!(argument.as_str(), "--prompt-interactive" | "--print"))
+        context["injectSteps"][0]["ephemeralMessage"]
+            .as_str()
+            .is_some_and(|prompt| !prompt.is_empty())
     );
+    if let Some(prompt) = headless_prompt {
+        assert!(
+            resumed
+                .windows(2)
+                .any(|arguments| arguments == ["--print", prompt])
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let request = DaemonRequest::ResumeAgentHeadless {
+                operation_id: operation.clone(),
+                target: target.clone(),
+                prompt: prompt.to_owned(),
+                caller_context: None,
+            };
+            let reply = second
+                .request(request)
+                .expect("headless replay remains available");
+            let body = match reply {
+                DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+            };
+            if body["completed"] == true {
+                break;
+            }
+            assert!(Instant::now() < deadline, "headless AGY did not complete");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let reply = second
+            .request(DaemonRequest::AgentInventory {
+                workspace,
+                caller_context: None,
+            })
+            .unwrap();
+        let body = match reply {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+        };
+        let inventory: usagi_core::domain::agent::AgentInventory =
+            serde_json::from_value(body).unwrap();
+        assert!(inventory.resumable.iter().any(|item| {
+            item.available
+                && item.target.as_ref().is_some_and(|next| {
+                    next.runtime_id != target.runtime_id && next.continuation == target.continuation
+                })
+        }));
+        assert_eq!(fs::read_to_string(count).unwrap().lines().count(), 2);
+    } else {
+        assert!(
+            resumed
+                .iter()
+                .all(|argument| !matches!(argument.as_str(), "--prompt-interactive" | "--print"))
+        );
+    }
 }
 
 /// #510 product E2E: after a cold restart every interrupted conversation becomes

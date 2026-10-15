@@ -1,6 +1,207 @@
 //! resume の振る舞いを固定するテスト。
 
 use super::*;
+use usagi_core::domain::agent::{AgentLaunchEntry, AgentLaunchSource};
+
+#[test]
+#[allow(clippy::too_many_lines)] // One conversation checks headless admission, replay, capture, and continuation identity together.
+fn agy_headless_resume_fences_the_new_turn_and_preserves_capture() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("agy"), "fixture").unwrap();
+    let mut runtime = agy_runtime();
+    runtime.locator = Box::new(FixtureLocator(fixture.path().to_path_buf()));
+    let launch = intent(Some("agy"));
+    let resolved = scope();
+    let scope = FakeScope(Ok(resolved));
+    let initial = runtime
+        .launch(&OperationId::new().to_string(), &launch, &scope)
+        .unwrap();
+    let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("agy-private-conversation").unwrap()),
+        )
+        .unwrap();
+    runtime.exit(&initial.terminal, 0).unwrap();
+    let target = runtime
+        .inventory(launch.workspace)
+        .resumable
+        .into_iter()
+        .find_map(|item| item.target)
+        .unwrap();
+    let operation = OperationId::new().to_string();
+    for prompt in ["", " \n", "invalid\0turn"] {
+        assert_eq!(
+            runtime
+                .prepare_headless_resume_readiness(&operation, &target, prompt)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+    }
+    let prompt = "--version\nresume only this turn";
+    let ticket = runtime
+        .prepare_headless_resume_readiness(&operation, &target, prompt)
+        .unwrap();
+    let context =
+        || AgentLaunchContext::new(AgentLaunchSource::Manual, AgentLaunchEntry::SessionResume);
+    let resumed = runtime
+        .resume_headless_from_after_readiness(
+            &operation,
+            &target,
+            prompt,
+            &scope,
+            ticket.as_ref(),
+            context(),
+        )
+        .unwrap();
+    let snapshot = runtime.coordinator.snapshot();
+    let record = snapshot
+        .records
+        .iter()
+        .find(|record| record.runtime == resumed.runtime)
+        .unwrap();
+    assert_eq!(record.launch.request.mode, LaunchMode::Headless);
+    assert_eq!(
+        record.launch.request.initial_prompt.as_deref(),
+        Some(prompt)
+    );
+    assert_eq!(resumed.continuation, initial.continuation);
+    assert_eq!(
+        record
+            .provider_resume
+            .as_ref()
+            .unwrap()
+            .native_session_id
+            .expose_sensitive(),
+        "agy-private-conversation"
+    );
+    assert!(
+        !serde_json::to_string(&record.launch)
+            .unwrap()
+            .contains("agy-private-conversation")
+    );
+    assert!(
+        runtime
+            .prepare_headless_resume_readiness(&operation, &target, prompt)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .resume_headless_from_after_readiness(
+                &operation,
+                &target,
+                prompt,
+                &scope,
+                None,
+                context()
+            )
+            .unwrap(),
+        resumed
+    );
+    assert_eq!(
+        runtime
+            .prepare_headless_resume_readiness(&operation, &target, "different turn")
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        runtime
+            .prepare_resume_readiness(&operation, &target)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    let duplicate_operation = OperationId::new().to_string();
+    let duplicate_ticket = runtime
+        .prepare_headless_resume_readiness(&duplicate_operation, &target, prompt)
+        .unwrap();
+    assert_eq!(
+        runtime
+            .resume_headless_from_after_readiness(
+                &duplicate_operation,
+                &target,
+                prompt,
+                &scope,
+                duplicate_ticket.as_ref(),
+                context()
+            )
+            .unwrap(),
+        resumed
+    );
+    let changed_operation = OperationId::new().to_string();
+    let changed_ticket = runtime
+        .prepare_headless_resume_readiness(&changed_operation, &target, "changed turn")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .resume_headless_from_after_readiness(
+                &changed_operation,
+                &target,
+                "changed turn",
+                &scope,
+                changed_ticket.as_ref(),
+                context()
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        runtime
+            .resume_exact(&OperationId::new().to_string(), &target, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("agy-refreshed-conversation").unwrap()),
+        )
+        .unwrap();
+    runtime.exit(&resumed.terminal, 0).unwrap();
+    let inventory = runtime.inventory(launch.workspace);
+    assert!(inventory.resumable.iter().any(|item| {
+        item.available
+            && item
+                .target
+                .as_ref()
+                .is_some_and(|target| target.runtime_id == resumed.runtime.agent_runtime_id)
+    }));
+}
+
+#[test]
+fn headless_resume_refuses_other_providers_before_spawn() {
+    let mut runtime = runtime();
+    let launch = intent(None);
+    let scope = FakeScope(Ok(scope()));
+    let initial = runtime
+        .launch(&OperationId::new().to_string(), &launch, &scope)
+        .unwrap();
+    runtime.exit(&initial.terminal, 0).unwrap();
+    let target = runtime
+        .inventory(launch.workspace)
+        .resumable
+        .into_iter()
+        .find_map(|item| item.target)
+        .unwrap();
+    let before = runtime.coordinator.snapshot();
+    assert_eq!(
+        runtime
+            .prepare_headless_resume_readiness(&OperationId::new().to_string(), &target, "next")
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+    assert_eq!(runtime.coordinator.snapshot(), before);
+}
 
 #[test]
 fn completion_report_does_not_make_an_active_turn_safe_to_sleep() {
@@ -290,6 +491,7 @@ fn readiness_ticket_is_revalidated_before_launch_effects() {
     let stale = AgentReadinessPreflight {
         profile: ticket.profile.clone(),
         profile_revision: ticket.profile_revision + 1,
+        capabilities: ticket.capabilities.clone(),
         generation: ticket.generation,
     };
     let error = runtime
@@ -647,6 +849,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
                 &target,
                 &resume_semantic_key(&target),
                 &FakeScope(Ok(resolved.clone())),
+                None,
                 None,
                 None,
             )

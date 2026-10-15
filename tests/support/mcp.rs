@@ -65,6 +65,7 @@ pub struct McpHarness {
 pub struct FixtureArgv {
     pub runtime: String,
     pub arguments: Vec<String>,
+    pub system_prompt: Option<String>,
 }
 
 struct McpProcess {
@@ -422,6 +423,7 @@ impl McpHarness {
                     .next()
                     .unwrap()
                     .to_owned();
+                let context_path = path.with_extension("context");
                 let bytes = fs::read(path).unwrap();
                 if bytes.last() != Some(&0) {
                     return None;
@@ -432,7 +434,19 @@ impl McpHarness {
                     .map(|argument| String::from_utf8(argument.to_vec()))
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
-                Some(FixtureArgv { runtime, arguments })
+                let system_prompt = fs::read(context_path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .and_then(|value| {
+                        value["injectSteps"][0]["ephemeralMessage"]
+                            .as_str()
+                            .map(str::to_owned)
+                    });
+                Some(FixtureArgv {
+                    runtime,
+                    arguments,
+                    system_prompt,
+                })
             })
             .collect()
     }
@@ -725,7 +739,9 @@ fn materialize_fixture_script(script: &str, log: &Path, argv: &Path) -> String {
             &shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
         );
     let capture = format!(
-        "if ! {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} && ! {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} && ! [ \"$1\" = models ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; fi\n",
+        "if ! {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} && ! {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} && ! [ \"$1\" = models ]; then printf '%s\\0' \"$@\" > \"{}/${{0##*/}}.$$.argv\"; if [ \"${{0##*/}}\" = agy ]; then \"{}\" agy-system-prompt > \"{}/${{0##*/}}.$$.context\" || exit 18; fi; fi\n",
+        argv.display(),
+        shell_double_quote_content(env!("CARGO_BIN_EXE_usagi")),
         argv.display()
     );
     script.strip_prefix("#!/bin/sh\n").map_or_else(
@@ -757,7 +773,7 @@ fn install_fixture_agent(
     output: &Path,
 ) {
     let relay_lock = input.with_extension("lock");
-    let agy_plugin_probe = if name == "agy" {
+    let agy_workspace_probe = if name == "agy" {
         r#"plugin_workspace=
 conversation_id="fixture-agy-$$"
 previous=
@@ -766,22 +782,20 @@ for argument in "$@"; do
   if [ "$previous" = --conversation ]; then conversation_id="$argument"; fi
   previous="$argument"
 done
-plugin="$plugin_workspace/.agents/plugins/usagi-runtime"
-[ -f "$plugin/plugin.json" ] || exit 10
+plugin="$plugin_workspace/.agents"
 [ -f "$plugin/mcp_config.json" ] || exit 11
 [ -f "$plugin/hooks.json" ] || exit 12
-grep -q '"name"[[:space:]]*:[[:space:]]*"usagi-runtime"' "$plugin/plugin.json" || exit 13
 grep -q '"mcpServers"' "$plugin/mcp_config.json" || exit 14
 grep -q '"PreInvocation"' "$plugin/hooks.json" || exit 15
 response=$(printf '{"conversationId":"%s","workspacePaths":["/fixture"]}' "$conversation_id" | "$USAGI_E2E_USAGI" agent-phase running --hook-event PreInvocation) || exit 16
 [ "$response" = '{}' ] || exit 17
-printf 'agy-plugin-ready\n' >> "$USAGI_MCP_FIXTURE_LOG"
+printf 'agy-workspace-ready\n' >> "$USAGI_MCP_FIXTURE_LOG"
 "#
     } else {
         ""
     };
     let script = format!(
-        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n{agy_plugin_probe}\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
+        "#!/bin/sh\nif {{ [ \"$1\" = login ] && [ \"$2\" = status ]; }} || {{ [ \"$1\" = auth ] && [ \"$2\" = status ]; }} || [ \"$1\" = models ]; then exit 0; fi\nprintf 'spawn:%s\\n' \"${{0##*/}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\nprintf 'credential:%s\\n' \"${{USAGI_MCP_CALLER_CREDENTIAL-unset}}\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n{agy_workspace_probe}\nprintf 'fixture-ready\\n' >> \"$USAGI_MCP_FIXTURE_LOG\"\nif mkdir \"{}\" 2>/dev/null; then\n  cd \"$USAGI_WORKSPACE_ROOT\" || exit 1\n  while true; do\n    \"$USAGI_E2E_USAGI\" mcp < \"{}\" > \"{}\" 2>&1\n    printf 'mcp-exit:%s\\n' \"$?\" >> \"$USAGI_MCP_FIXTURE_LOG\"\n  done\nelse\n  while IFS= read -r line; do printf 'fixture-input:%s\\n' \"$line\"; done\nfi\n",
         relay_lock.display(),
         input.display(),
         output.display()

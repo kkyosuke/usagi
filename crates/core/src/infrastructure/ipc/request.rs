@@ -154,6 +154,16 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
+    /// Resume one exact AGY conversation and execute a new headless turn.
+    /// A separate wire kind makes older daemons reject this intent instead of
+    /// silently treating it as an ordinary interactive resume.
+    ResumeAgentHeadless {
+        operation_id: String,
+        target: AgentResumeTarget,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
+    },
     /// Repair-only exact resume. The old revision still fences the retained
     /// source, while the active daemon re-resolves hooks/MCP with its current
     /// profile revision.
@@ -530,6 +540,15 @@ pub fn agent_resume_semantic_key(target: &AgentResumeTarget) -> String {
         target.source,
         target.runtime_id,
         target.adapter_revision,
+    )
+}
+
+/// Includes the new turn in replay identity without changing legacy resume keys.
+#[must_use]
+pub fn agent_headless_resume_semantic_key(target: &AgentResumeTarget, prompt: &str) -> String {
+    format!(
+        "{}\nheadless_prompt={prompt}",
+        agent_resume_semantic_key(target)
     )
 }
 

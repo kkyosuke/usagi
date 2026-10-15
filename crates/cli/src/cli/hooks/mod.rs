@@ -13,11 +13,13 @@
 //! [`usagi_core::usecase::workspace_guard`]）。
 
 pub mod agent_phase;
+pub mod agy_system_prompt;
 pub mod claude_sandbox;
 pub mod codex_session_capture;
 pub mod guard_workspace;
 
 pub use agent_phase::AgentPhase;
+pub use agy_system_prompt::AgySystemPrompt;
 pub use claude_sandbox::ClaudeSandbox;
 pub use codex_session_capture::CodexSessionCapture;
 pub use guard_workspace::GuardWorkspace;

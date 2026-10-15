@@ -169,7 +169,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_list` / `session_status` | 認証済み Agent では自身が作成した session だけを lifecycle snapshot から返す。`session_status` は agent phase と worktree の branch/status/dirty/merged も投影する |
 | `session_prompt` | 認証済み Agent が作成した session の live PTY または durable queue にだけ配送する。`live`（既定）は handshake で fence した対象 PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ使う。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `agent_resume_inventory` | 認証済み Agent が作成した session の Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
-| `session_resume` | `agent_resume_inventory` が返した、自身が作成した session の exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
+| `session_resume` | `agent_resume_inventory` が返した、自身が作成した session の exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。AGY は optional な `headless_prompt`（非空・NUL 不可）で新しい turn を headless 実行する。省略時は対話再開。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
 | `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
@@ -393,9 +393,9 @@ models = ["default"]
 
 `agy` の実行コマンドは `agy` である。Antigravity では daemon が
 daemon の selected data directory に
-`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
-managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、
-plugin root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
+`agent-integrations/<workspace-id>/agy/workspace/.agents/` を materialize し、その synthetic workspace を
+managed launch の private `--add-dir` にだけ渡す。`.agents/mcp_config.json` から同じ `usagi mcp` child を起動し、
+integration root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
 `~/.gemini` 全体を writable にせず、`~/.gemini/antigravity-cli/conversations/` と state 直下の
 `conversation_summaries.db{,-shm,-wal}` だけを書き込める。認証は OS keyring を使う。この allowlist により、
 `~/.gemini/GEMINI.md`、global config、state の plugin / skill / settings / import manifest / status・title script は
