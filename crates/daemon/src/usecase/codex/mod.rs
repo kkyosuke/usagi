@@ -201,13 +201,6 @@ impl<P: CodexProvisioner> AgentAdapter for CodexAdapter<P> {
         if request.mode == LaunchMode::Headless && request.initial_prompt.is_none() {
             return Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt));
         }
-        if request.mode == LaunchMode::Headless && request.resume {
-            return Err(AdapterError::Validation(
-                LaunchValidationError::UnsupportedCapability {
-                    capability: AgentCapability::Resume,
-                },
-            ));
-        }
         let mut provision = self
             .provisioner
             .provision(&ProvisionContext::from_request(request))

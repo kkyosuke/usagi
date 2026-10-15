@@ -41,6 +41,7 @@ fn adapter(name: &str, revision: u32) -> FakeAdapter {
                 AgentCapability::Resume,
                 AgentCapability::InitialPrompt,
                 AgentCapability::Headless,
+                AgentCapability::HeadlessResume,
             ],
             [LaunchMode::Interactive, LaunchMode::Headless],
         ),
@@ -109,6 +110,33 @@ fn unsupported_capability_and_unknown_profile_are_typed_rejections() {
         Err(LaunchValidationError::UnknownProfile {
             profile_id: AgentProfileId::new("unknown").unwrap()
         })
+    );
+}
+
+#[test]
+fn headless_resume_requires_explicit_combined_support() {
+    let mut catalog = adapter("fake-provider", 1);
+    catalog
+        .profile
+        .capabilities
+        .remove(&AgentCapability::HeadlessResume);
+    let mut intent = request(catalog.profile.id.clone());
+    assert_eq!(
+        validate_request(&catalog, &intent),
+        Err(LaunchValidationError::UnsupportedCapability {
+            capability: AgentCapability::HeadlessResume
+        })
+    );
+    intent.resume = false;
+    assert_eq!(
+        validate_request(&catalog, &intent).unwrap(),
+        catalog.profile
+    );
+    intent.resume = true;
+    intent.mode = LaunchMode::Interactive;
+    assert_eq!(
+        validate_request(&catalog, &intent).unwrap(),
+        catalog.profile
     );
 }
 
