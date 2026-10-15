@@ -6751,11 +6751,27 @@ fn root_agent_writable_roots_include_only_provider_state() {
 }
 
 #[test]
-fn agy_plugin_documents_are_scoped_and_shell_safe() {
+fn agy_workspace_documents_are_scoped_and_shell_safe() {
     let command = "/Applications/Usagi's Tools/usagi";
-    let (manifest, mcp, hooks) = agy_plugin_documents(command);
+    let (mcp, hooks) = agy_workspace_documents(command, true);
+    assert_eq!(
+        hooks["usagi-runtime"]["PreInvocation"][1]["command"],
+        format!("{} agy-system-prompt", shell_quote(command))
+    );
+    let (prompt_only_mcp, prompt_only_hooks) = agy_workspace_documents(command, false);
+    assert_eq!(prompt_only_mcp, serde_json::json!({"mcpServers":{}}));
+    assert_eq!(
+        prompt_only_hooks["usagi-runtime"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        prompt_only_hooks["usagi-runtime"]["PreInvocation"][0]["command"],
+        format!("{} agy-system-prompt", shell_quote(command))
+    );
 
-    assert_eq!(manifest, serde_json::json!({"name": "usagi-runtime"}));
     assert_eq!(mcp["mcpServers"]["usagi"]["command"], command);
     assert_eq!(
         mcp["mcpServers"]["usagi"]["args"],
@@ -6790,17 +6806,18 @@ fn agy_plugin_documents_are_scoped_and_shell_safe() {
     let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
     let workspace = WorkspaceId::new();
     let plugin_workspace =
-        materialize_agy_plugin(&data_home, workspace, Path::new(command)).unwrap();
+        materialize_agy_workspace(&data_home, workspace, Path::new(command), true).unwrap();
     let expected = fixture
         .path()
         .join("agent-integrations")
         .join(workspace.to_string())
         .join("agy")
+        .join("workspace")
         .canonicalize()
         .unwrap();
     assert_eq!(plugin_workspace, expected);
-    let plugin = plugin_workspace.join(".agents/plugins/usagi-runtime");
-    for document in ["plugin.json", "mcp_config.json", "hooks.json"] {
+    let plugin = plugin_workspace.join(".agents");
+    for document in ["mcp_config.json", "hooks.json"] {
         assert!(plugin.join(document).is_file());
     }
     assert!(
@@ -6829,7 +6846,7 @@ fn agy_plugin_documents_are_scoped_and_shell_safe() {
 }
 
 #[test]
-fn agy_plugin_arguments_materialize_only_outside_the_write_surface() {
+fn agy_workspace_arguments_materialize_only_outside_the_write_surface() {
     std::fs::create_dir_all("target").unwrap();
     let fixture = tempfile::tempdir_in("target").unwrap();
     let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
@@ -6846,19 +6863,25 @@ fn agy_plugin_arguments_materialize_only_outside_the_write_surface() {
         passthrough: false,
         read_only_roots: &[],
     };
+    let (prompt_arguments, prompt_integration) = agy_workspace_arguments(
+        &data_home,
+        workspace,
+        Path::new("usagi"),
+        false,
+        false,
+        &policy,
+    )
+    .unwrap();
+    let prompt_integration = prompt_integration.unwrap();
+    assert!(prompt_integration.ends_with("agy/prompt-only"));
     assert_eq!(
-        agy_plugin_arguments(
-            &data_home,
-            workspace,
-            Path::new("usagi"),
-            false,
-            false,
-            &policy
-        )
-        .unwrap(),
-        (Vec::new(), None)
+        prompt_arguments,
+        [
+            "--add-dir".to_owned(),
+            prompt_integration.to_str().unwrap().to_owned()
+        ]
     );
-    let (arguments, isolated) = agy_plugin_arguments(
+    let (arguments, isolated) = agy_workspace_arguments(
         &data_home,
         workspace,
         Path::new("usagi"),
@@ -6883,7 +6906,7 @@ fn agy_plugin_arguments_materialize_only_outside_the_write_surface() {
         ..policy
     };
     assert!(
-        agy_plugin_arguments(
+        agy_workspace_arguments(
             &temporary_data,
             workspace,
             Path::new("usagi"),
@@ -6897,7 +6920,7 @@ fn agy_plugin_arguments_materialize_only_outside_the_write_surface() {
 }
 
 #[test]
-fn agy_plugin_arguments_reject_invalid_materialization_inputs() {
+fn agy_workspace_arguments_reject_invalid_materialization_inputs() {
     std::fs::create_dir_all("target").unwrap();
     let fixture = tempfile::tempdir_in("target").unwrap();
     let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
@@ -6919,7 +6942,7 @@ fn agy_plugin_arguments_reject_invalid_materialization_inputs() {
         paths::RuntimeMode::Production,
     );
     assert!(
-        agy_plugin_arguments(
+        agy_workspace_arguments(
             &missing_data,
             workspace,
             Path::new("usagi"),
@@ -6937,7 +6960,7 @@ fn agy_plugin_arguments_reject_invalid_materialization_inputs() {
         let invalid_command = PathBuf::from(OsString::from_vec(vec![0xff]));
         assert!(agy_arguments_for_integration(&invalid_command).is_err());
         assert!(
-            agy_plugin_arguments(
+            agy_workspace_arguments(
                 &data_home,
                 WorkspaceId::new(),
                 &invalid_command,
@@ -6957,7 +6980,7 @@ fn agy_plugin_arguments_reject_invalid_materialization_inputs() {
             let non_utf8_data =
                 paths::DataHome::new(&non_utf8_root, paths::RuntimeMode::Production);
             assert!(
-                agy_plugin_arguments(
+                agy_workspace_arguments(
                     &non_utf8_data,
                     WorkspaceId::new(),
                     Path::new("usagi"),

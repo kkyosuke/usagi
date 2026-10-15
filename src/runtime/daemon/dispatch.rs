@@ -2240,9 +2240,12 @@ fn admit_agent_dispatch_request(
             AgentDispatchRequest::Launch(operation_id, intent) => {
                 owner.prepare_launch_readiness(operation_id, intent)
             }
-            AgentDispatchRequest::Resume(operation_id, target) => {
-                owner.prepare_resume_readiness(operation_id, target)
-            }
+            AgentDispatchRequest::Resume(operation_id, target, prompt) => match prompt {
+                Some(prompt) => {
+                    owner.prepare_headless_resume_readiness(operation_id, target, prompt)
+                }
+                None => owner.prepare_resume_readiness(operation_id, target),
+            },
             AgentDispatchRequest::RepairResume(operation_id, target, revision) => {
                 owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
             }
@@ -2251,7 +2254,7 @@ fn admit_agent_dispatch_request(
     run_agent_readiness(agent, preflight.as_ref())?;
     let workspace = match request {
         AgentDispatchRequest::Launch(_, intent) => intent.workspace,
-        AgentDispatchRequest::Resume(_, target)
+        AgentDispatchRequest::Resume(_, target, _)
         | AgentDispatchRequest::RepairResume(_, target, _) => target.workspace_id,
         _ => unreachable!("maintenance was handled before readiness"),
     };
@@ -2282,20 +2285,32 @@ fn admit_agent_dispatch_request(
                         None,
                     ),
                 ),
-            AgentDispatchRequest::Resume(operation_id, target) => owner
-                .resume_from_after_readiness(
-                    operation_id,
-                    target,
-                    scope,
-                    preflight.as_ref(),
-                    launch_context(
-                        resume_source,
-                        AgentLaunchEntry::SessionResume,
-                        Some(launch_client),
-                        resume_actor,
-                        resume_operation,
+            AgentDispatchRequest::Resume(operation_id, target, prompt) => {
+                let context = launch_context(
+                    resume_source,
+                    AgentLaunchEntry::SessionResume,
+                    Some(launch_client),
+                    resume_actor,
+                    resume_operation,
+                );
+                match prompt {
+                    Some(prompt) => owner.resume_headless_from_after_readiness(
+                        operation_id,
+                        target,
+                        prompt,
+                        scope,
+                        preflight.as_ref(),
+                        context,
                     ),
-                ),
+                    None => owner.resume_from_after_readiness(
+                        operation_id,
+                        target,
+                        scope,
+                        preflight.as_ref(),
+                        context,
+                    ),
+                }
+            }
             AgentDispatchRequest::RepairResume(operation_id, target, revision) => owner
                 .resume_with_current_integration_from_after_readiness(
                     operation_id,
@@ -2453,7 +2468,16 @@ pub(super) fn dispatch_agent(
                 target,
                 caller_context,
             } => Some((
-                AgentDispatchRequest::Resume(operation_id, target),
+                AgentDispatchRequest::Resume(operation_id, target, None),
+                caller_context,
+            )),
+            DaemonRequest::ResumeAgentHeadless {
+                operation_id,
+                target,
+                prompt,
+                caller_context,
+            } => Some((
+                AgentDispatchRequest::Resume(operation_id, target, Some(prompt)),
                 caller_context,
             )),
             DaemonRequest::ResumeAgentWithCurrentIntegration {
@@ -2506,7 +2530,7 @@ pub(super) fn dispatch_agent(
         resume_caller = Some(authenticated.clone());
         let requested_workspace = match &request {
             AgentDispatchRequest::Inventory(requested) => *requested,
-            AgentDispatchRequest::Resume(_, target) => target.workspace_id,
+            AgentDispatchRequest::Resume(_, target, _) => target.workspace_id,
             _ => workspace,
         };
         if requested_workspace != workspace {
@@ -2537,7 +2561,7 @@ pub(super) fn dispatch_agent(
             );
         }
     };
-    if let (Some(owned), AgentDispatchRequest::Resume(_, target)) = (&ownership, &request)
+    if let (Some(owned), AgentDispatchRequest::Resume(_, target, _)) = (&ownership, &request)
         && target
             .session_id
             .is_none_or(|session| !owned.contains(&session))

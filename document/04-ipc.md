@@ -720,6 +720,13 @@ inventory、IPC、hook、error、log へ出さない。provider capture、fence�
 CLI の `resume-exact`、TUI の exact resume port、MCP `session_resume` は同じ exact contract を使い、inventory は
 CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。session ID / name だけを指定する resume request は受け付けない。
 
+AGY の headless 再開は別 kind の `ResumeAgentHeadless`（wire: `resume_agent_headless`）を使い、同じ exact target と
+非空・NUL を含まない `prompt` を要求する。CLI の `--headless-prompt` / MCP の `headless_prompt` がこの kind を選ぶ。
+mode と prompt も operation semantic に含めるので、異なる turn への operation 再利用は拒否する。別 operation でも
+消費済み source を別の turn として再利用できず、次の turn は更新された inventory target を指定する。
+`HeadlessResume` capability のない profile は readiness / spawn 前に拒否する。旧 daemon は未知の kind として拒否し、
+optional field を無視して対話再開へ降格する互換経路は作らない。
+
 daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
 
 `daemon restart --restart-agents` は同じ exact resume 境界を daemon lifecycle に使う。

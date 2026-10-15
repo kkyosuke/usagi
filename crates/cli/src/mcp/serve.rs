@@ -721,12 +721,32 @@ fn execute_tool(
                     "target must be an exact Agent resume target",
                 );
             };
-            let request = DaemonRequest::ResumeAgent {
-                operation_id,
-                target,
-                caller_context: caller_credential.map(|credential| McpCallerContext {
-                    credential: credential.to_owned(),
-                }),
+            let caller_context = caller_credential.map(|credential| McpCallerContext {
+                credential: credential.to_owned(),
+            });
+            let request = if let Some(prompt) = arguments.get("headless_prompt") {
+                let Some(prompt) = prompt
+                    .as_str()
+                    .filter(|prompt| !prompt.trim().is_empty() && !prompt.contains('\0'))
+                else {
+                    return protocol::error(
+                        id,
+                        error_code::INVALID_PARAMS,
+                        "headless_prompt must be a non-empty string without NUL",
+                    );
+                };
+                DaemonRequest::ResumeAgentHeadless {
+                    operation_id,
+                    target,
+                    prompt: prompt.to_owned(),
+                    caller_context,
+                }
+            } else {
+                DaemonRequest::ResumeAgent {
+                    operation_id,
+                    target,
+                    caller_context,
+                }
             };
             daemon_body_response(id, client.request(request))
         }
@@ -1896,6 +1916,10 @@ mod tests {
                 serde_json::json!({"workspace_id": workspace}),
             ),
             ("session_resume", serde_json::json!({"target": target})),
+            (
+                "session_resume",
+                serde_json::json!({"target": target,"headless_prompt":"--version\n次の turn"}),
+            ),
         ] {
             let request = format!(
                 r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
@@ -1920,9 +1944,39 @@ mod tests {
                 (name == "agent_resume_inventory"
                     && matches!(actual, DaemonRequest::AgentInventory { workspace: actual, caller_context: Some(context) } if *actual == workspace && context.credential == "resume-secret"))
                     || (arguments.get("target").is_some()
+                        && arguments.get("headless_prompt").is_none()
                         && matches!(actual, DaemonRequest::ResumeAgent { target: actual, caller_context: Some(context), .. } if actual == &target && context.credential == "resume-secret"))
+                    || (arguments.get("headless_prompt").is_some()
+                        && matches!(actual, DaemonRequest::ResumeAgentHeadless {target: actual,prompt,caller_context:Some(context),..} if actual==&target && prompt=="--version\n次の turn" && context.credential=="resume-secret"))
             );
             assert!(String::from_utf8(out).unwrap().contains("safe"));
+        }
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!(3),
+            serde_json::json!(""),
+            serde_json::json!(" \n"),
+            serde_json::json!("bad\0turn"),
+        ] {
+            let call = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_resume","arguments":{"target":target,"headless_prompt":invalid}}});
+            let input = initialized_input(&format!("{call}\n"));
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+                requests: vec![],
+            };
+            serve_with_client_and_caller(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                "resume-secret",
+            )
+            .unwrap();
+            assert!(client.requests.is_empty());
+            let text = String::from_utf8(out).unwrap();
+            let response: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            assert_eq!(response["error"]["code"], super::error_code::INVALID_PARAMS);
         }
     }
 

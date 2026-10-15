@@ -100,7 +100,7 @@ TUI の cleanup と自動回収は [3. TUI](03-tui.md) を参照する。
 | `usagi session agents` | 現在の workspace の Agent runtime を session 名・状態・作成元・起動履歴とともに JSON で列挙する |
 | `usagi session cache [--apply \| --status]` | 成果物の計測・回収を背景処理に渡す。`--status` で進捗・容量・回収候補・完了結果を確認する |
 | `usagi session resume-inventory <workspace-id>` | root / session の再開候補を列挙する |
-| `usagi session resume-exact <target-json>` | inventory が返した secret-free target を完全一致で再開する |
+| `usagi session resume-exact <target-json>` | inventory が返した secret-free target を完全一致で再開する。AGY は `--headless-prompt <prompt>` で新しい turn を非対話実行する |
 | `usagi session setup <name> <command>` | session worktree で setup command を実行する |
 | `usagi session prompt <name> <prompt>` | live Agent へ prompt を配送する。live Agent が無ければ失敗し、暗黙に queue へ退避しない |
 

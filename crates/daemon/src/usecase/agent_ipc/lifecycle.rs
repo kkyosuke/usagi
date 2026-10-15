@@ -56,6 +56,35 @@ impl AgentRuntime {
         self.prepare_resume_readiness_for(operation_id, target, &semantic)
     }
 
+    /// Reject invalid turns and unsupported providers before readiness or spawn.
+    pub fn prepare_headless_resume_readiness(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        prompt: &str,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        if prompt.trim().is_empty() || prompt.contains('\0') {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "headless resume prompt must be non-empty and contain no NUL",
+            ));
+        }
+        let semantic =
+            usagi_core::infrastructure::ipc::agent_headless_resume_semantic_key(target, prompt);
+        let ticket = self.prepare_resume_readiness_for(operation_id, target, &semantic)?;
+        if ticket.as_ref().is_some_and(|ticket| {
+            !ticket
+                .capabilities
+                .contains(&AgentCapability::HeadlessResume)
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent profile does not support headless conversation resume",
+            ));
+        }
+        Ok(ticket)
+    }
+
     /// Readiness preflight for the repair-only revision migration semantic.
     pub fn prepare_current_integration_resume_readiness(
         &self,
@@ -163,6 +192,22 @@ impl AgentRuntime {
         let current = self.prepare_resume_readiness(operation_id, target)?;
         self.validate_readiness(preflight, current.as_ref())?;
         self.resume_exact_from(operation_id, target, scope, context)
+    }
+
+    /// Executes a headless turn after the owner-external readiness probe.
+    #[allow(clippy::too_many_arguments)] // The exact source, new turn, readiness evidence, and authenticated origin are independently fenced.
+    pub fn resume_headless_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        prompt: &str,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_headless_resume_readiness(operation_id, target, prompt)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_exact_with_prompt_from(operation_id, target, scope, context, Some(prompt))
     }
 
     /// Repair-only resume counterpart. The readiness ticket is taken from the
@@ -498,7 +543,23 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let semantic_key = resume_semantic_key(target);
+        self.resume_exact_with_prompt_from(operation_id, target, scope, context, None)
+    }
+
+    fn resume_exact_with_prompt_from(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+        headless_prompt: Option<&str>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let semantic_key = headless_prompt.map_or_else(
+            || resume_semantic_key(target),
+            |prompt| {
+                usagi_core::infrastructure::ipc::agent_headless_resume_semantic_key(target, prompt)
+            },
+        );
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic_key) {
                 return Err(ProtocolError::new(
@@ -510,8 +571,15 @@ impl AgentRuntime {
         }
         let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         let origin = context.origin(operation);
-        let outcome =
-            self.admit_resume_exact(operation, target, &semantic_key, scope, None, Some(origin));
+        let outcome = self.admit_resume_exact(
+            operation,
+            target,
+            &semantic_key,
+            scope,
+            None,
+            Some(origin),
+            headless_prompt,
+        );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -566,6 +634,7 @@ impl AgentRuntime {
             scope,
             Some(expected_revision),
             Some(context.origin(operation)),
+            None,
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome

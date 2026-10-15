@@ -684,7 +684,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
-| Antigravity / Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。Antigravity 固有の plugin materialization は子モジュール `agent_provisioning/agy.rs` に閉じ、provider argv、sandbox policy、role/launch contract、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
+| Antigravity / Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。Antigravity 固有の workspace configuration materialization は子モジュール `agent_provisioning/agy.rs` に閉じ、provider argv、sandbox policy、role/launch contract、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
 | admitted daemon request と concrete owner / store の接続 | 合成ルートの `src/runtime/daemon/dispatch.rs`。request family ごとの decode・authorization・response shaping を、注入済みの daemon runtime / store へ接続する composition adapter とする。session family の action table と delegation は子モジュール `dispatch/session.rs`、session scratchpad（note / todo / decision log）の読み書きは `dispatch/scratchpad.rs` に閉じる。Unix socket accept、signal、process lifecycle、background worker ownership は `src/runtime/daemon.rs` に残し、daemon の business rule は `crates/daemon/src/usecase/`、transport-independent な server loop は `crates/daemon/src/presentation/ipc.rs` に残す |
 | live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
@@ -746,10 +746,12 @@ dispatch / delegate 由来の initial prompt は untrusted な opaque data で�
 terminator `--` の直後に単一の positional value として置く。これにより `--version`、`--settings`、permission
 flag、subcommand に似た prompt も provider option として再解釈されない。
 
-Antigravity は `--prompt-interactive <prompt>`（対話）または `--print <prompt>`（headless）を使う。provider に
-独立した system-prompt flag がないため、ephemeral な scope/role contract と task を `\n\nTask:\n` で結んだ単一の
-opaque prompt value として渡す。exact resume は `--conversation <captured-id>` だけを private provision に足し、新しい
-prompt turn を送らない。
+Antigravity は task だけを `--prompt-interactive <prompt>`（対話）または `--print <prompt>`（headless）の
+単一の opaque value に渡す。scope / role / tool contract は `PreInvocation` hook の
+`injectSteps[].ephemeralMessage` から transient system message として毎回注入する。初回 user prompt との合成や
+永続 trajectory step の追加をせず、exact resume でも現在の contract を再解決する。task のない対話起動では
+user turn を自動送信しない。exact resume は private な `--conversation <captured-id>` を使い、明示的な
+headless prompt が指定された場合だけ `--print <prompt>` を追加する。
 
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
 secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・error detail に
@@ -765,15 +767,24 @@ AGY 1.2.0 の `agy --help` と、公式の [headless mode](https://www.antigravi
 | 機能 | AGY での扱い |
 |---|---|
 | 対話・初回 task・モデル指定 | `--prompt-interactive` と `--model` |
-| headless | `--print`。CLI 自体は headless の会話再開にも対応するが、usagi の exact resume は対話起動に限る |
+| headless | `--print`。CLI `session resume-exact --headless-prompt` / MCP `session_resume.headless_prompt` で exact conversation に新しい turn を実行する |
 | 会話再開 | structured hook の `conversationId` を捕捉し、`--conversation` に渡す |
-| system prompt | 専用の起動 flag はない。CLI 自体は hook の `injectSteps.systemMessage` に対応するが、現行 usagi は上記の初回 user prompt 合成を使うため、system message と同じ優先順位にはならない |
-| MCP・phase hook | managed launch 専用 plugin を使う。設定の配線は [daemon の Agent ownership](05-daemon.md#agent-ownership) を参照する |
+| system prompt | `PreInvocation` の `injectSteps[].ephemeralMessage` による transient system context。対話・headless・再開のすべてで注入する |
+| MCP・phase hook | managed launch 専用 synthetic workspace の `.agents/mcp_config.json` / `.agents/hooks.json` を使う。設定の配線は [daemon の Agent ownership](05-daemon.md#agent-ownership) を参照する |
 | MCP tool の事前許可 | server 単位の起動 flag がないため `--dangerously-skip-permissions` を使う。書き込み範囲は daemon の外側 sandbox が制限する |
 | 許可要求・終了イベント | `PermissionRequest` / `Notification` / `SessionEnd` に相当する専用 hook はない。tool hook で phase を報告し、process 終了は PTY owner が観測する |
 | 認証状態 | 専用 auth status command がないため `agy models` を preflight とする。budget は [readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight) を参照する |
 
 AGY の MCP 委譲 selector の設定は [MCP の runtime/model 選択](07-mcp.md#runtimemodel-選択) を参照する。
+AGY integration revision は 4。旧 integration の live Agent の更新は
+[daemon restart による Agent integration 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) に従う。
+
+実 CLI の検証には [scripts/smoke-agy.py](../scripts/smoke-agy.py) を使う。ビルド後、
+`python3 scripts/smoke-agy.py --usagi target/debug/usagi --work-dir target/agy-smoke-new` を実行する。
+実モデルを 2 回呼び、system context、probe MCP tool、同一 conversation の headless 再開、会話記憶、
+再開時の context 更新を検証する。AGY 1.2.0 の内部 `--gemini_dir` を検証専用に使い、state と raw output は
+指定した新規 directory に閉じる。shipping launch はこの flag を使わない。probe は認証付き daemon MCP の
+代用ではなく、shipping の ownership / credential 配線は Agent IPC / MCP E2E が検証する。
 
 ### Daemon runtime ownership
 
@@ -1141,10 +1152,10 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   自身の通常の trust review を通し、daemon は hook trust を一括 bypass しない。
   Claude と同様、すべての `SessionStart` は同じ phase hook で current provider session ID と phase を一緒に報告する。
   これにより startup / resume / clear / compact、および Claude の fork 後の現在の会話へ durable resume metadata が追従する。
-- **Antigravity plugin**: daemon は selected data directory の
-  `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を作成・更新し、synthetic workspace を private
-  `--add-dir` で managed launch にだけ追加する。`plugin.json`、`mcp_config.json`、`hooks.json` を atomic write し、
-  plugin root は実効 writable root / prefix（worktree、provider state、`TMPDIR`、`/tmp`、`/var/tmp` を含む）との
+- **Antigravity workspace integration**: daemon は selected data directory の
+  `agent-integrations/<workspace-id>/agy/workspace/.agents/` を作成・更新し、synthetic workspace を private
+  `--add-dir` で managed launch にだけ追加する。`mcp_config.json`、`hooks.json` を atomic write し、
+  integration root は実効 writable root / prefix（worktree、provider state、`TMPDIR`、`/tmp`、`/var/tmp` を含む）との
   双方向 overlap を作成前に拒否し、sandbox でも明示 read-only に戻す。managed AGY は
   `~/.gemini` 全体を writable にせず、`antigravity-cli/conversations/` と
   `conversation_summaries.db{,-shm,-wal}` だけを writable allowlist にする。したがって
@@ -1153,7 +1164,10 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   依存せず read-only のままである。Agent 自身による hook / MCP / command / prompt の永続注入と、管理外の
   `agy` への統合残留を防ぐ。利用者の既存 global/workspace customization は読み取れるが置換しない。`PreInvocation` で `running` と
   `conversationId`、`PreToolUse` / `PostToolUse` で `running` / `waiting`、`Stop` で `ended` を報告する。
-  hook は stdin を `usagi agent-phase` が一度だけ消費し、daemon が受理した後に Antigravity 所定の JSON を stdout へ返す。
+  phase hook は stdin を `usagi agent-phase` が一度だけ消費し、daemon が受理した後に Antigravity 所定の JSON を stdout へ返す。
+  追加の `PreInvocation` hook `usagi agy-system-prompt` が system context を返す。MCP を無効にした起動は
+  `agy/prompt-only/.agents/` を使い、system hook だけを配線する。両構成は別 directory なので互いの設定を上書きしない。
+  AGY 1.2.0 は追加 workspace 内の plugin directory を読み込まないため `.agents/` 直下へ配置する。
 - **`TMPDIR` 伝播**: agent child は公開 terminal 環境の `TMPDIR` を継承し、launcher が同じ値を writable
   root に足す。この policy path は daemon bootstrap が trusted environment から独立に確定・検証し、両 mode へ
   同じように渡す（agent child の環境変数は policy 解決に使わない）。

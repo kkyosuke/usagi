@@ -524,6 +524,7 @@ pub const AGENT_RUNTIME_LIMIT: usize = 16;
 pub struct AgentReadinessPreflight {
     profile: AgentProfileId,
     profile_revision: u32,
+    capabilities: BTreeSet<AgentCapability>,
     generation: DaemonGeneration,
 }
 
@@ -634,6 +635,7 @@ impl AgentRuntime {
         Ok(AgentReadinessPreflight {
             profile: profile.id,
             profile_revision: profile.revision,
+            capabilities: profile.capabilities,
             generation: self.active_generation()?,
         })
     }
@@ -1690,7 +1692,9 @@ impl AgentRuntime {
             .coordinator
             .record_for(runtime)
             .map_err(map_runtime_error)?;
-        if record.launch.request.mode != LaunchMode::Interactive {
+        if record.launch.request.mode != LaunchMode::Interactive
+            && provider_for_profile(&record.launch.plan.profile_id) != Some(ProviderKind::Agy)
+        {
             return Ok(false);
         }
         let provider = provider_for_profile(&record.launch.plan.profile_id).ok_or_else(|| {

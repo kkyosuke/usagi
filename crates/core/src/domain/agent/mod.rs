@@ -279,6 +279,7 @@ pub enum AgentCapability {
     Resume,
     InitialPrompt,
     Headless,
+    HeadlessResume,
     PhaseReporting,
     McpWiring,
     SystemPrompt,
@@ -675,6 +676,9 @@ impl LaunchRequest {
         }
         if self.mode == LaunchMode::Headless {
             required.insert(AgentCapability::Headless);
+            if self.resume {
+                required.insert(AgentCapability::HeadlessResume);
+            }
         }
         required
     }
@@ -971,6 +975,7 @@ mod tests {
                 AgentCapability::Resume,
                 AgentCapability::InitialPrompt,
                 AgentCapability::Headless,
+                AgentCapability::HeadlessResume,
                 AgentCapability::McpWiring
             ]
             .into_iter()
