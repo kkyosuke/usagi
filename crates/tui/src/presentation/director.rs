@@ -30,7 +30,23 @@ pub(super) fn handle_director_picker_input(
                 Key::Live(LiveTerminalAction::ScrollUp) => Some((false, 1)),
                 Key::Live(LiveTerminalAction::ScrollDown) => Some((true, 1)),
                 Key::Live(LiveTerminalAction::ScrollBottom) => Some((true, usize::MAX)),
-                Key::Live(LiveTerminalAction::Wheel { up, notches, .. }) => Some((!*up, *notches)),
+                Key::Live(LiveTerminalAction::Wheel {
+                    up,
+                    column,
+                    row,
+                    notches,
+                }) => {
+                    let (width, height) = runtime.state().size().unwrap_or((0, 0));
+                    super::director_drawer::terminal_point_at(
+                        usize::from(height),
+                        usize::from(width),
+                        0,
+                        0,
+                        *column,
+                        *row,
+                    )
+                    .map(|_| (!*up, *notches))
+                }
                 _ => None,
             };
             if let Some((down, rows)) = scroll {

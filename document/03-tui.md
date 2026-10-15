@@ -756,6 +756,7 @@ tree は選択 Conversation が作成した session とその子孫だけを含�
 作成者との対応が不明な session を別の Conversation に割り当てない（[所属情報の正本](10-session-roles.md#safe-projection-と非永続データ)）。
 Conversation 一覧は選択行に追従する viewport を持ち、長い一覧でも選択行と Console を開く操作を表示する。
 Agent / Session tree は `Ctrl-O ↑` / `Ctrl-O ↓` またはマウスホイールでスクロールし、`Ctrl-O End` で末尾へ移る。
+ホイールはフォーカス中の Director の本文内だけで受け付け、背景や Shell 上では tree を動かさない。
 表示位置と総行数、表示範囲外の件数を示し、Conversation の切替時はその tree の先頭へ戻る。
 親 session を削除しても保存済みの所属を使って生存中の子孫を表示する。tree の行を置けない高さでは resize を促す。
 Shell と同時に開いている場合、タブ切替はフォーカス中の drawer にだけ作用する。

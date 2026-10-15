@@ -120,12 +120,14 @@ fn organization_tree_scroll_reaches_every_row_and_resets_for_other_conversations
         ..DirectorDrawerProjection::default()
     };
     for height in [13, 24, 40] {
+        let _ = runtime.apply_event(AppEvent::Resize { width: 100, height });
         runtime.scroll_director_organization(false, usize::MAX);
         for i in 0..=20 {
             projection.organization_cursor = runtime.director_organization_cursor();
             runtime.set_director_projection(projection.clone());
             let text = widgets::strip_ansi(
-                &director_drawer::render_over(height, 100, &[], &projection).join("\n"),
+                &director_drawer::render_over(usize::from(height), 100, &[], &projection)
+                    .join("\n"),
             );
             assert!(text.contains(&format!("worker-{i:02}")), "{height}: {text}");
             assert_eq!(
@@ -165,6 +167,86 @@ fn organization_tree_scroll_reaches_every_row_and_resets_for_other_conversations
     assert_eq!(runtime.director_organization_cursor(), 0);
     runtime.set_director_projection(projection);
     assert_eq!(runtime.director_organization_cursor(), 0);
+}
+
+#[test]
+fn organization_wheel_only_scrolls_the_focused_drawer_body_outside_launch_picker() {
+    let workspace = WorkspaceId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let target = Target::Root(workspace);
+    let operation = OperationId::new();
+    let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+    let _ = runtime.complete_pane(target, operation, scoped_terminal_ref(workspace, None));
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+    let _ = runtime.apply_event(AppEvent::Resize {
+        width: 100,
+        height: 24,
+    });
+    runtime.set_director_projection(DirectorDrawerProjection {
+        organization: vec![
+            DirectorOrganizationRow {
+                depth: 0,
+                label: "row".into(),
+                status: "running".into(),
+            };
+            3
+        ],
+        ..DirectorDrawerProjection::default()
+    });
+    runtime.scroll_director_organization(true, 1);
+    let wheel = |column, row| {
+        Key::Live(LiveTerminalAction::Wheel {
+            up: false,
+            column,
+            row,
+            notches: 1,
+        })
+    };
+    for (column, row) in [(0, 15), (90, 0), (90, 23), (40, 15)] {
+        assert_eq!(
+            crate::presentation::handle_director_picker_input(&mut runtime, &wheel(column, row)),
+            Some(Vec::new())
+        );
+        assert_eq!(runtime.director_organization_cursor(), 1);
+    }
+    let inside = wheel(90, 15);
+    assert_eq!(
+        crate::presentation::handle_director_picker_input(&mut runtime, &inside),
+        Some(Vec::new())
+    );
+    assert_eq!(runtime.director_organization_cursor(), 2);
+    runtime.scroll_director_organization(false, 1);
+    runtime.set_agent_models(
+        AvailableModels::new([DefaultModel::Claude]),
+        DefaultModel::Claude,
+    );
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
+    assert!(matches!(
+        runtime.state().director_new(),
+        DirectorNew::Choosing(_)
+    ));
+    assert_eq!(
+        crate::presentation::handle_director_picker_input(&mut runtime, &inside),
+        Some(Vec::new())
+    );
+    assert_eq!(runtime.director_organization_cursor(), 1);
+    let _ = runtime.handle_key(Key::Enter);
+    assert!(runtime.state().director_launching().is_some());
+    assert_eq!(
+        crate::presentation::handle_director_picker_input(&mut runtime, &inside),
+        Some(Vec::new())
+    );
+    assert_eq!(runtime.director_organization_cursor(), 1);
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+    assert_eq!(
+        runtime.state().workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+    assert_eq!(
+        crate::presentation::handle_director_picker_input(&mut runtime, &inside),
+        None
+    );
+    assert_eq!(runtime.director_organization_cursor(), 1);
 }
 
 #[test]
