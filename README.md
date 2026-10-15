@@ -52,6 +52,8 @@ Artifacts は本人だけが読める状態で保管し、外部アプリでは�
 
 複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
+TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュー可能を desktop に通知します。
+通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
 AGY は Closeup の `agent -m agy` で選択でき、role の system context と headless での会話再開にも対応します。MCP 委譲の設定は

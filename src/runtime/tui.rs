@@ -97,9 +97,9 @@ use usagi_tui::usecase::application::metrics::{GitDiff, MetricsPort, MetricsUpda
 use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
-    DecisionCommandPort, DesktopNotificationPort, EnvironmentStorePort, ExternalTerminalPort,
-    RestoreConnectionPort, SessionBranchCatalogPort, SessionCatalogPort, SessionCommandPort,
-    SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
+    DecisionCommandPort, EnvironmentStorePort, ExternalTerminalPort, RestoreConnectionPort,
+    SessionBranchCatalogPort, SessionCatalogPort, SessionCommandPort, SessionCommandResult,
+    SessionRefreshPort, SessionWorktreeScanPort,
 };
 use usagi_tui::usecase::application::session_catalog::{
     project_branch_catalog, project_branch_default, project_session_role_catalog,
@@ -147,36 +147,6 @@ struct DaemonSessionCommandPort;
 /// The daemon remains the authority; this adapter only converts its safe
 /// snapshots and confirmations back into reducer events.
 struct DaemonDecisionCommandPort;
-
-/// Platform delivery is deliberately best-effort.  Fixed executable names and
-/// argument-vector spawning keep decision text out of a shell; a missing
-/// notification service must never stop the TUI.
-struct PlatformDesktopNotifier {
-    reaper: PlatformChildReaper,
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
-impl DesktopNotificationPort for PlatformDesktopNotifier {
-    fn notify(&mut self, title: &str, body: &str) {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = Command::new("osascript");
-            command
-                .arg("-e")
-                .arg("on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run")
-                .arg("--")
-                .arg(title)
-                .arg(body);
-            command
-        } else if cfg!(target_os = "linux") {
-            let mut command = Command::new("notify-send");
-            command.arg("--app-name=usagi").arg(title).arg(body);
-            command
-        } else {
-            return;
-        };
-        let _ = self.reaper.spawn(&mut command);
-    }
-}
 
 impl DaemonDecisionCommandPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=decision_port_completion_contract
@@ -589,12 +559,9 @@ impl BackendTargetStorePort for RepoEnvironmentStore {
 /// its own persistent connection at a bounded cadence and this port only hands
 /// the newest snapshot over, so `refresh` is a wake and `poll` is a drain.
 ///
-/// Desktop notification stays here rather than in the worker: the dedup set is
-/// render-thread state, and `notify` only spawns a detached process.
+/// Desktop delivery belongs to the daemon, including while the TUI is closed.
 struct ProductionDecisionPort {
     daemon: DaemonDecisionCommandPort,
-    notifier: PlatformDesktopNotifier,
-    notified: std::collections::BTreeSet<UserDecisionId>,
     /// The workspace every observation of this lane belongs to, fixed when the
     /// composition opened it.
     workspace: WorkspaceId,
@@ -608,7 +575,7 @@ struct ProductionDecisionPort {
 
 impl ProductionDecisionPort {
     /// Turn one completed observation into the reducer's event vocabulary,
-    /// notifying the desktop about decisions this run has not announced yet.
+    /// preserving the TUI banner and modal without sending OS notifications.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
     fn publish(
         &mut self,
@@ -618,12 +585,6 @@ impl ProductionDecisionPort {
         let event = match result {
             Ok(decisions) => {
                 self.reported_failure = false;
-                for decision in &decisions {
-                    if self.notified.insert(decision.decision_id) {
-                        self.notifier
-                            .notify("usagi: decision needed", &decision.title);
-                    }
-                }
                 BackendEvent::Decisions {
                     workspace: self.workspace,
                     decisions,
@@ -1246,10 +1207,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         }))
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
-            notifier: PlatformDesktopNotifier {
-                reaper: self.helper_reaper.clone(),
-            },
-            notified: std::collections::BTreeSet::new(),
             workspace: snapshot.workspace_id,
             pump: spawn_decision_pump(),
             reported_failure: false,

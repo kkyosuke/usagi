@@ -8,6 +8,7 @@ mod dispatch;
 mod instance_lock;
 mod ipc_accept;
 mod managed_update;
+mod notifications;
 mod pty;
 mod secure_path;
 #[cfg(any(target_os = "macos", test))]
