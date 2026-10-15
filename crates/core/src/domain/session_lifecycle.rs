@@ -969,6 +969,62 @@ mod tests {
         state.sessions[1].director_continuation = Some(continuation);
         assert_eq!(state.director_continuation(child_id), Some(continuation));
     }
+
+    #[test]
+    fn removal_preserves_legacy_child_membership_without_replacing_saved_membership() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let continuation = AgentContinuationRef::new();
+        let saved_continuation = AgentContinuationRef::new();
+        let mut root = ManagedSession::adopt_available("root".into(), now());
+        root.creator_continuation = Some(continuation);
+        let root_id = root.session_id;
+        let mut legacy = ManagedSession::adopt_available("legacy".into(), now());
+        legacy.parent_session_id = Some(root_id);
+        let legacy_id = legacy.session_id;
+        let mut saved = ManagedSession::adopt_available("saved".into(), now());
+        saved.parent_session_id = Some(root_id);
+        saved.director_continuation = Some(saved_continuation);
+        let saved_id = saved.session_id;
+        let unrelated = ManagedSession::adopt_available("unrelated".into(), now());
+        let unrelated_id = unrelated.session_id;
+        state.sessions = vec![root, legacy, saved, unrelated];
+        let operation = op();
+        reduce(
+            &mut state,
+            LifecycleEvent::BeginRemove {
+                session_id: root_id,
+                operation: operation.clone(),
+                delete_plan: DeletePlan {
+                    targets: vec!["root".into()],
+                    force: false,
+                    delete_branch: false,
+                    branch_name: None,
+                    force_delete_branch: false,
+                    merged_head_oid: None,
+                },
+            },
+            now(),
+        )
+        .unwrap();
+        let completion = fence(&state, &state.sessions[0], &operation);
+        reduce(
+            &mut state,
+            LifecycleEvent::Completed { fence: completion },
+            now(),
+        )
+        .unwrap();
+        assert_eq!(state.sessions.len(), 3);
+        assert_eq!(state.director_continuation(root_id), None);
+        assert_eq!(state.sessions[0].director_continuation, Some(continuation));
+        assert_eq!(state.director_continuation(legacy_id), Some(continuation));
+        assert_eq!(
+            state.director_continuation(saved_id),
+            Some(saved_continuation)
+        );
+        assert_eq!(state.director_continuation(unrelated_id), None);
+        assert_eq!(state.operations[0].status, OperationStatus::Succeeded);
+    }
+
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }

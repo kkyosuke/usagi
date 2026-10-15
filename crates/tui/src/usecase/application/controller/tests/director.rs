@@ -444,6 +444,26 @@ fn director_picker_submits_one_explicit_root_launch_until_matching_finish() {
     // operation fence.
     assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
     assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    // Hiding the drawer or focusing Shell must not let New bypass the same
+    // launch fence when it brings Director back to the foreground.
+    for background in [
+        AppKey::ToggleDirectorDrawer,
+        AppKey::ToggleRootTerminalDrawer,
+    ] {
+        let _ = update(&mut state, AppEvent::Key(background));
+        assert_ne!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+        assert_eq!(
+            state.workspace_drawer_focus(),
+            Some(WorkspaceDrawerFocus::Director)
+        );
+        assert_eq!(state.director_new(), DirectorNew::Idle);
+        assert_eq!(state.director_launching(), Some(*operation_id));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    }
     let _ = update(
         &mut state,
         AppEvent::DirectorLaunchFinished {
