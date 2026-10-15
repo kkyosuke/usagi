@@ -755,6 +755,9 @@ Organization は、root scope（`session_id: None`）の live / pending / interr
 tree は選択 Conversation が作成した session とその子孫だけを含む。
 作成者との対応が不明な session を別の Conversation に割り当てない（[所属情報の正本](10-session-roles.md#safe-projection-と非永続データ)）。
 Conversation 一覧は選択行に追従する viewport を持ち、長い一覧でも選択行と Console を開く操作を表示する。
+Agent / Session tree は `Ctrl-O ↑` / `Ctrl-O ↓` またはマウスホイールでスクロールし、`Ctrl-O End` で末尾へ移る。
+表示位置と総行数、表示範囲外の件数を示し、Conversation の切替時はその tree の先頭へ戻る。
+親 session を削除しても保存済みの所属を使って生存中の子孫を表示する。tree の行を置けない高さでは resize を促す。
 Shell と同時に開いている場合、タブ切替はフォーカス中の drawer にだけ作用する。
 Shell にフォーカスを移しても、Director Console は選択中の Conversation とその中断理由を保持する。
 generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
@@ -848,6 +851,7 @@ selection、attach/detach は変化しない。terminal resize と backend/timer
 Choosing / Empty の `Esc` は draft を破棄して開始前の exact Director route へ戻り、PTY へは届かない。launch pending の
 `Esc` / `Ctrl-O b` は route を変えず消費する。開始前 route の操作 hint を残さず breadcrumb / waiting
 body を表示する。pending operation と一致した launch 成功は Console へ進み、失敗は開始前の route を保つ。
+Organization から起動した場合も、pending 中の追加 `Enter`・会話選択・tree スクロールは消費し、route と選択を変えない。
 
 入力 context の優先順位と遷移は次のとおりである。
 

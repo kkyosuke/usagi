@@ -3796,6 +3796,7 @@ mod tests {
                 (
                     id,
                     SessionRoleProjection {
+                        director_continuation: None,
                         creator_continuation: None,
                         role_id: None,
                         role_summary: None,
@@ -4909,6 +4910,7 @@ mod tests {
             AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
                 session,
                 SessionRoleProjection {
+                    director_continuation: None,
                     creator_continuation: None,
                     role_id: None,
                     role_summary: None,
@@ -5436,6 +5438,7 @@ mod tests {
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
+            organization_cursor: 0,
             focused: true,
             route: crate::usecase::application::controller::DirectorRoute::Console,
             conversations: vec![DirectorConversation {
@@ -6019,6 +6022,7 @@ mod tests {
                 (
                     session_id,
                     SessionRoleProjection {
+                        director_continuation: None,
                         creator_continuation: None,
                         role_id: Some(RoleId::new("reviewer").unwrap()),
                         role_summary: None,
@@ -6029,6 +6033,7 @@ mod tests {
                 (
                     child_id,
                     SessionRoleProjection {
+                        director_continuation: None,
                         creator_continuation: None,
                         role_id: Some(RoleId::new("worker").unwrap()),
                         role_summary: None,

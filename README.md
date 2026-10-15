@@ -147,7 +147,7 @@ Agent は起動前に CLI の認証状態を確認し、確認失敗の理由を
 | workspace | `usagi` で開く Git リポジトリ |
 | session | ひとつの作業と、その worktree・Agent・terminal・差分・PR を束ねる単位 |
 | daemon | session と process の状態を所有し、TUI を閉じた後も作業を継続する process |
-| Director | 会話ごとの委譲先 session を確認し、root Agent と作業を進める画面（[操作方法](document/03-tui.md#指示モードdirector-mode)） |
+| Director | 会話ごとの委譲先 session を確認し、root Agent と作業を進める画面。親 session の削除後も所属を保持し、長い組織図はスクロールできます（[操作方法](document/03-tui.md#指示モードdirector-mode)） |
 | [Team](document/10-session-roles.md#catalog) | `none`（なし）/ `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から Agent の委譲構造を選ぶ設定 |
 
 Agent は組み込みの MCP server を通じて session の作成・観測・委譲、issue、memory などを扱えます。

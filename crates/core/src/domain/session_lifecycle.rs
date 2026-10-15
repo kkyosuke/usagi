@@ -269,6 +269,10 @@ pub struct ManagedSession {
     /// display association survives Agent reuse and runtime history retention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_continuation: Option<AgentContinuationRef>,
+    /// Root conversation whose organization owns this session. Unlike the
+    /// immediate creator, this association survives removal of an ancestor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub director_continuation: Option<AgentContinuationRef>,
     /// Stable role assignment for this incarnation. Missing on legacy records
     /// and never populated implicitly during migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,6 +340,7 @@ impl ManagedSession {
             parent_session_id,
             creator_agent_id,
             creator_continuation: None,
+            director_continuation: None,
             role_id,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
@@ -359,6 +364,7 @@ impl ManagedSession {
             parent_session_id: None,
             creator_agent_id: None,
             creator_continuation: None,
+            director_continuation: None,
             role_id: None,
             lifecycle: SessionLifecycle::Available,
             attempt: 1,
@@ -385,6 +391,7 @@ impl ManagedSession {
             parent_session_id: None,
             creator_agent_id: None,
             creator_continuation: None,
+            director_continuation: None,
             role_id: None,
             lifecycle: SessionLifecycle::Failed,
             attempt: 1,
@@ -469,6 +476,29 @@ impl std::fmt::Display for LifecycleError {
 impl std::error::Error for LifecycleError {}
 
 impl WorkspaceLifecycleState {
+    /// Resolve organization membership using only durable creation facts.
+    /// Older records can follow surviving parents; missing or cyclic ancestry
+    /// stays unknown and never borrows a later Agent runtime's conversation.
+    #[must_use]
+    pub fn director_continuation(&self, session_id: SessionId) -> Option<AgentContinuationRef> {
+        let mut current = session_id;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(current) {
+            let session = self
+                .sessions
+                .iter()
+                .find(|session| session.session_id == current)?;
+            if let Some(continuation) = session.director_continuation {
+                return Some(continuation);
+            }
+            match session.parent_session_id {
+                Some(parent) => current = parent,
+                None => return session.creator_continuation,
+            }
+        }
+        None
+    }
+
     pub const FORMAT: &'static str = "usagi-workspace-lifecycle";
     pub const MAJOR: u16 = 2;
     #[must_use]
@@ -764,6 +794,10 @@ fn reserve_create(
         creator_agent_id,
     );
     session.creator_continuation = creator_continuation;
+    session.director_continuation = match parent_session_id {
+        Some(parent) => state.director_continuation(parent),
+        None => creator_continuation,
+    };
     state.sessions.push(session);
     state.operations.push(operation);
     state.changed(now);
@@ -867,6 +901,16 @@ fn complete(
             session.changed_at = now;
         }
         SessionLifecycle::Deleting => {
+            // Backfill direct children of pre-field records atomically with
+            // removal. Their descendants can still follow these survivors.
+            let removed = state.sessions[pos].session_id;
+            let continuation = state.director_continuation(removed);
+            for child in &mut state.sessions {
+                if child.parent_session_id == Some(removed) && child.director_continuation.is_none()
+                {
+                    child.director_continuation = continuation;
+                }
+            }
             state.sessions.remove(pos);
         }
         SessionLifecycle::Creating | SessionLifecycle::Available | SessionLifecycle::Failed => {
@@ -902,6 +946,29 @@ fn fail(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn organization_resolution_uses_durable_facts_and_bounds_incomplete_ancestry() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let mut root = ManagedSession::adopt_available("root".into(), now());
+        let continuation = AgentContinuationRef::new();
+        root.creator_continuation = Some(continuation);
+        let mut child = ManagedSession::adopt_available("child".into(), now());
+        child.parent_session_id = Some(root.session_id);
+        child.creator_continuation = Some(AgentContinuationRef::new());
+        let child_id = child.session_id;
+        state.sessions = vec![root, child];
+        assert_eq!(state.director_continuation(child_id), Some(continuation));
+        assert_eq!(state.director_continuation(SessionId::new()), None);
+        state.sessions[0].creator_continuation = None;
+        assert_eq!(state.director_continuation(child_id), None);
+        state.sessions[0].parent_session_id = Some(child_id);
+        assert_eq!(state.director_continuation(child_id), None);
+        state.sessions[1].parent_session_id = Some(SessionId::new());
+        assert_eq!(state.director_continuation(child_id), None);
+        state.sessions[1].director_continuation = Some(continuation);
+        assert_eq!(state.director_continuation(child_id), Some(continuation));
+    }
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }

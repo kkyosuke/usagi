@@ -3,6 +3,169 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::{
+    DirectorConversation, DirectorDrawerProjection, DirectorOrganizationRow,
+    complete_director_launch, widgets,
+};
+
+#[test]
+fn starting_from_organization_consumes_navigation_and_preserves_failure_route() {
+    for key in [
+        Key::Enter,
+        Key::Down,
+        Key::Up,
+        Key::Live(LiveTerminalAction::NextTab),
+        Key::Live(LiveTerminalAction::PreviousTab),
+        Key::Live(LiveTerminalAction::ScrollDown),
+    ] {
+        let workspace = WorkspaceId::new();
+        let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+        runtime.set_agent_models(
+            AvailableModels::new([DefaultModel::Claude]),
+            DefaultModel::Claude,
+        );
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
+        let effects = runtime.handle_key(Key::Enter);
+        let [effect @ Effect::LaunchAgent { operation_id, .. }] = effects.as_slice() else {
+            panic!("missing launch")
+        };
+        runtime.on_effect(effect);
+        let selection = runtime.director_selection();
+        assert_eq!(
+            crate::presentation::handle_director_picker_input(&mut runtime, &key),
+            Some(Vec::new()),
+            "{key:?}"
+        );
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+        assert_eq!(runtime.director_selection(), selection);
+        let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
+        let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+        let _ = crate::presentation::select_director_tab(&key, &mut ui, &mut runtime);
+        assert_eq!(runtime.director_selection(), selection);
+        complete_director_launch(&mut runtime, Target::Root(workspace), *operation_id, false);
+        assert_eq!(
+            runtime.state().director_route(),
+            DirectorRoute::Organization
+        );
+    }
+}
+
+#[test]
+fn director_organization_keeps_orphans_with_saved_root_membership() {
+    use crate::usecase::application::controller::SessionRoleProjection;
+    let director = AgentContinuationRef::new();
+    let worker_conversation = AgentContinuationRef::new();
+    let child = SessionId::new();
+    let mut workspace_state = state("demo");
+    workspace_state.sessions.truncate(1);
+    workspace_state.sessions[0].name = "surviving-worker".into();
+    let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, vec![child]);
+    view.set_session_roles(BTreeMap::from([(
+        child,
+        SessionRoleProjection {
+            creator_continuation: Some(worker_conversation),
+            director_continuation: Some(director),
+            parent_session_id: Some(SessionId::new()),
+            role_id: None,
+            role_summary: None,
+            agent_status: None,
+        },
+    )]));
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let rows = director_organization(&ui, Some(director));
+    assert_eq!(rows.len(), 2);
+    assert!(rows[1].label.contains("surviving-worker"));
+    assert_eq!(rows[1].depth, 1);
+    assert_eq!(
+        director_organization(&ui, Some(AgentContinuationRef::new())).len(),
+        1
+    );
+}
+
+#[test]
+fn organization_tree_scroll_reaches_every_row_and_resets_for_other_conversations() {
+    let workspace = WorkspaceId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let first = interrupted_history(workspace, None, true);
+    let second = interrupted_history(workspace, None, true);
+    let second_id = second.continuation;
+    let fence = runtime.restore_fence();
+    assert!(runtime.restore_snapshot(
+        fence.0,
+        fence.1,
+        vec![PaneRestoreTarget {
+            target: Target::Root(workspace),
+            panes: Vec::new(),
+            selected: None,
+            selected_interrupted: Some(first.continuation),
+            interrupted: vec![first, second],
+        }]
+    ));
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+    let mut projection = DirectorDrawerProjection {
+        conversations: vec![DirectorConversation {
+            label: "Conversation".into(),
+            selected: true,
+        }],
+        organization: (0..=20)
+            .map(|i| DirectorOrganizationRow {
+                depth: usize::from(i != 0),
+                label: format!("worker-{i:02}"),
+                status: "running".into(),
+            })
+            .collect(),
+        ..DirectorDrawerProjection::default()
+    };
+    for height in [13, 24, 40] {
+        runtime.scroll_director_organization(false, usize::MAX);
+        for i in 0..=20 {
+            projection.organization_cursor = runtime.director_organization_cursor();
+            runtime.set_director_projection(projection.clone());
+            let text = widgets::strip_ansi(
+                &director_drawer::render_over(height, 100, &[], &projection).join("\n"),
+            );
+            assert!(text.contains(&format!("worker-{i:02}")), "{height}: {text}");
+            assert_eq!(
+                crate::presentation::handle_director_picker_input(
+                    &mut runtime,
+                    &Key::Live(LiveTerminalAction::ScrollDown)
+                ),
+                Some(Vec::new())
+            );
+        }
+        assert_eq!(runtime.director_organization_cursor(), 20);
+    }
+    let _ = crate::presentation::handle_director_picker_input(
+        &mut runtime,
+        &Key::Live(LiveTerminalAction::Wheel {
+            up: true,
+            column: 90,
+            row: 15,
+            notches: 4,
+        }),
+    );
+    assert_eq!(runtime.director_organization_cursor(), 16);
+    let _ = crate::presentation::handle_director_picker_input(
+        &mut runtime,
+        &Key::Live(LiveTerminalAction::ScrollUp),
+    );
+    assert_eq!(runtime.director_organization_cursor(), 15);
+    let _ = crate::presentation::handle_director_picker_input(
+        &mut runtime,
+        &Key::Live(LiveTerminalAction::ScrollBottom),
+    );
+    assert_eq!(runtime.director_organization_cursor(), 20);
+    projection.organization.truncate(3);
+    runtime.set_director_projection(projection.clone());
+    assert_eq!(runtime.director_organization_cursor(), 2);
+    let _ = runtime.select_tab_selection(TabSelection::Interrupted(second_id));
+    assert_eq!(runtime.director_organization_cursor(), 0);
+    runtime.set_director_projection(projection);
+    assert_eq!(runtime.director_organization_cursor(), 0);
+}
 
 #[test]
 fn director_organization_is_scoped_to_the_selected_conversation_and_descendants() {
@@ -21,6 +184,7 @@ fn director_organization_is_scoped_to_the_selected_conversation_and_descendants(
         .collect();
     let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids.clone());
     let role = |creator_continuation, parent_session_id| SessionRoleProjection {
+        director_continuation: None,
         creator_continuation,
         parent_session_id,
         role_id: None,
@@ -227,6 +391,7 @@ fn session_worktree_names_include_stale_directories_only() {
 
 #[test]
 fn director_organization_projects_statuses_hierarchy_and_orphans() {
+    use crate::usecase::application::controller::SessionRoleProjection;
     use usagi_core::domain::agent::AgentStatus;
 
     let conversation = AgentContinuationRef::new();
@@ -266,14 +431,13 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
     })
     .collect();
     let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids.clone());
-    let role = |parent_session_id, agent_status| {
-        crate::usecase::application::controller::SessionRoleProjection {
-            creator_continuation: Some(conversation),
-            role_id: None,
-            role_summary: None,
-            parent_session_id,
-            agent_status,
-        }
+    let role = |parent_session_id, agent_status| SessionRoleProjection {
+        director_continuation: None,
+        creator_continuation: Some(conversation),
+        role_id: None,
+        role_summary: None,
+        parent_session_id,
+        agent_status,
     };
     let mut roles = BTreeMap::from([
         (director_child, role(None, Some(AgentStatus::Starting))),

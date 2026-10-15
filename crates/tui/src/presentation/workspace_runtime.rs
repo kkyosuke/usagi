@@ -128,6 +128,7 @@ pub struct WorkspaceRuntime {
     /// The entry is dropped when the launch completes, fails, or is cancelled.
     pane_focus_at_request: BTreeMap<OperationId, u64>,
     director_projection: DirectorDrawerProjection,
+    director_organization_cursor: (Option<TabSelection>, usize),
     root_agent_selection: Option<TabSelection>,
     root_terminal_selection: Option<TabSelection>,
     material_revision: u64,
@@ -166,6 +167,7 @@ impl WorkspaceRuntime {
             modal_selection_mode,
             pane_focus_at_request: BTreeMap::new(),
             director_projection: DirectorDrawerProjection::default(),
+            director_organization_cursor: (None, 0),
             root_agent_selection: None,
             root_terminal_selection: None,
             material_revision: 0,
@@ -426,12 +428,46 @@ impl WorkspaceRuntime {
 
     /// Replace presentation-only material for the open root Agent drawer.
     pub fn set_director_projection(&mut self, projection: DirectorDrawerProjection) {
+        if self.state.director_drawer_open() {
+            let selection = self.director_selection();
+            let cursor = self
+                .director_organization_cursor()
+                .min(projection.organization.len().saturating_sub(1));
+            self.director_organization_cursor = (selection, cursor);
+        }
         self.director_projection = projection;
     }
 
     #[must_use]
     pub const fn director_projection(&self) -> &DirectorDrawerProjection {
         &self.director_projection
+    }
+
+    /// The organization viewport follows an anchor belonging to one exact
+    /// conversation; changing conversations starts its tree at the top.
+    #[must_use]
+    pub fn director_organization_cursor(&self) -> usize {
+        if self.director_organization_cursor.0 == self.director_selection() {
+            self.director_organization_cursor.1
+        } else {
+            0
+        }
+    }
+
+    pub fn scroll_director_organization(&mut self, down: bool, rows: usize) {
+        let last = self
+            .director_projection
+            .organization
+            .len()
+            .saturating_sub(1);
+        let current = self.director_organization_cursor().min(last);
+        let next = if down {
+            current.saturating_add(rows).min(last)
+        } else {
+            current.saturating_sub(rows)
+        };
+        self.director_organization_cursor = (self.director_selection(), next);
+        self.material_revision = self.material_revision.saturating_add(1);
     }
 
     /// Cache fence for controller/modal projection inputs. Pane state has its

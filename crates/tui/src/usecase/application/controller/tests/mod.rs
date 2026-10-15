@@ -217,6 +217,7 @@ fn role_projection_does_not_change_lifecycle_capabilities() {
         AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
             first,
             SessionRoleProjection {
+                director_continuation: None,
                 creator_continuation: None,
                 role_id: Some(RoleId::new("reviewer").unwrap()),
                 role_summary: None,

@@ -537,6 +537,7 @@ fn a_failed_lifecycle_flows_to_the_sidebar_rows_and_the_reducer() {
         },
     )]));
     let role = crate::usecase::application::controller::SessionRoleProjection {
+        director_continuation: None,
         creator_continuation: None,
         role_id: None,
         role_summary: Some("Reviewer".into()),
@@ -623,6 +624,7 @@ fn sidebar_groups_children_and_navigation_survives_snapshot_refresh() {
         (
             id,
             SessionRoleProjection {
+                director_continuation: None,
                 creator_continuation: None,
                 role_id: None,
                 role_summary: None,

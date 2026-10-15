@@ -23,15 +23,28 @@ pub(super) fn handle_director_picker_input(
         // Let only those navigation keys reach `select_director_tab`; every
         // other non-Console input remains exclusive to the drawer.
         if matches!(runtime.state().director_new(), DirectorNew::Idle)
+            && runtime.state().director_launching().is_none()
             && runtime.state().director_route() == DirectorRoute::Organization
-            && matches!(
+        {
+            let scroll = match key {
+                Key::Live(LiveTerminalAction::ScrollUp) => Some((false, 1)),
+                Key::Live(LiveTerminalAction::ScrollDown) => Some((true, 1)),
+                Key::Live(LiveTerminalAction::ScrollBottom) => Some((true, usize::MAX)),
+                Key::Live(LiveTerminalAction::Wheel { up, notches, .. }) => Some((!*up, *notches)),
+                _ => None,
+            };
+            if let Some((down, rows)) = scroll {
+                runtime.scroll_director_organization(down, rows);
+                return Some(Vec::new());
+            }
+            if matches!(
                 key,
                 Key::Up
                     | Key::Down
                     | Key::Live(LiveTerminalAction::PreviousTab | LiveTerminalAction::NextTab)
-            )
-        {
-            return None;
+            ) {
+                return None;
+            }
         }
         return match key {
             Key::Resize | Key::Other => None,
@@ -150,6 +163,7 @@ pub(super) fn director_drawer_projection(
         route: runtime.state().director_route(),
         conversations,
         organization,
+        organization_cursor: runtime.director_organization_cursor(),
         terminal_view,
         interrupted_detail,
         feedback,
@@ -211,7 +225,10 @@ pub(super) fn director_organization(
     let mut included = roles
         .iter()
         .filter_map(|(id, role)| {
-            (continuation.is_some() && role.creator_continuation == continuation).then_some(*id)
+            (continuation.is_some()
+                && (role.director_continuation == continuation
+                    || role.creator_continuation == continuation))
+                .then_some(*id)
         })
         .collect::<std::collections::BTreeSet<_>>();
     loop {
@@ -318,6 +335,11 @@ pub(super) fn select_director_tab_outcome(
         }
         _ => return DirectorTabSelection::Unhandled,
     };
+    if runtime.state().director_launching().is_some()
+        || !matches!(runtime.state().director_new(), DirectorNew::Idle)
+    {
+        return DirectorTabSelection::Handled;
+    }
     let Some(selection) = runtime.agent_selection_after_select(direction) else {
         return DirectorTabSelection::Handled;
     };
