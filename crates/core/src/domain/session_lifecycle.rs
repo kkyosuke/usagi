@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn removal_preserves_legacy_child_membership_without_replacing_saved_membership() {
+    fn child_membership_is_inherited_and_preserved_when_its_parent_is_removed() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let continuation = AgentContinuationRef::new();
         let saved_continuation = AgentContinuationRef::new();
@@ -988,6 +988,24 @@ mod tests {
         let unrelated = ManagedSession::adopt_available("unrelated".into(), now());
         let unrelated_id = unrelated.session_id;
         state.sessions = vec![root, legacy, saved, unrelated];
+        let immediate_creator = AgentContinuationRef::new();
+        reduce(
+            &mut state,
+            LifecycleEvent::ReserveCreate {
+                name: "new-child".into(),
+                role_id: None,
+                parent_session_id: Some(root_id),
+                creator_agent_id: Some(AgentId::new()),
+                creator_continuation: Some(immediate_creator),
+                operation: op(),
+            },
+            now(),
+        )
+        .unwrap();
+        let new_child = state.sessions.last().unwrap();
+        let new_child_id = new_child.session_id;
+        assert_eq!(new_child.creator_continuation, Some(immediate_creator));
+        assert_eq!(new_child.director_continuation, Some(continuation));
         let operation = op();
         reduce(
             &mut state,
@@ -1013,7 +1031,7 @@ mod tests {
             now(),
         )
         .unwrap();
-        assert_eq!(state.sessions.len(), 3);
+        assert_eq!(state.sessions.len(), 4);
         assert_eq!(state.director_continuation(root_id), None);
         assert_eq!(state.sessions[0].director_continuation, Some(continuation));
         assert_eq!(state.director_continuation(legacy_id), Some(continuation));
@@ -1022,7 +1040,11 @@ mod tests {
             Some(saved_continuation)
         );
         assert_eq!(state.director_continuation(unrelated_id), None);
-        assert_eq!(state.operations[0].status, OperationStatus::Succeeded);
+        assert_eq!(
+            state.director_continuation(new_child_id),
+            Some(continuation)
+        );
+        assert_eq!(state.operations[1].status, OperationStatus::Succeeded);
     }
 
     fn now() -> DateTime<Utc> {
