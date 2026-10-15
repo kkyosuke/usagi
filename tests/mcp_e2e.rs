@@ -1477,7 +1477,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         }
     }
 
-    // Editing the catalog cannot rewrite the already-running process argv.
+    // Editing the catalog cannot rewrite an already-running process's system context.
     write_session_role_catalog(
         &mcp,
         "shipping-reviewer",
@@ -1485,10 +1485,9 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
         UPDATED_SECRET,
     );
     assert!(captures.iter().all(|capture| {
-        capture
-            .arguments
-            .iter()
-            .any(|argument| argument.contains(ROLE_SECRET))
+        let context = shipping_system_prompt(capture);
+        context.contains(ROLE_SECRET)
+            && !context.contains(UPDATED_SECRET)
             && capture
                 .arguments
                 .iter()
