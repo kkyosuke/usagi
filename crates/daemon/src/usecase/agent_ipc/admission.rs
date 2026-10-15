@@ -259,6 +259,7 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
+    #[allow(clippy::too_many_arguments)] // Repair, audit origin, and an optional new headless turn must remain distinct from the exact source fence.
     pub(super) fn admit_resume_exact(
         &mut self,
         operation: OperationId,
@@ -267,6 +268,7 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         repair_revision: Option<u32>,
         launch_origin: Option<AgentLaunchOrigin>,
+        headless_prompt: Option<&str>,
     ) -> Result<AgentAdmission, ProtocolError> {
         if self
             .dispatch
@@ -323,6 +325,15 @@ impl AgentRuntime {
                     "agent resume replacement history was collected",
                 ));
             };
+            if (headless_prompt.is_some()
+                || replacement.launch.request.mode == LaunchMode::Headless)
+                && replacement.semantic_key.as_deref() != Some(semantic_key)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "agent resume source was consumed by a different turn; select its current target",
+                ));
+            }
             debug_assert_eq!(replacement.resumed_from, Some(target.source));
             debug_assert_eq!(replacement.continuation, Some(target.continuation));
             return durable_operation_outcome(replacement);
@@ -380,11 +391,15 @@ impl AgentRuntime {
         };
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
-            mode: LaunchMode::Interactive,
+            mode: if headless_prompt.is_some() {
+                LaunchMode::Headless
+            } else {
+                LaunchMode::Interactive
+            },
             model: source.launch.request.model.clone(),
             resume: true,
             provider_resume: Some(reference),
-            initial_prompt: None,
+            initial_prompt: headless_prompt.map(str::to_owned),
             scope: LaunchScope {
                 workspace_id: target.workspace_id,
                 session_id: target.session_id,

@@ -56,7 +56,7 @@ TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュ�
 通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。
 
 対応する Agent は Claude、Google Antigravity CLI（`agy`）、OpenAI Codex です。通常の shell も同じ画面で利用できます。
-AGY は Closeup の `agent -m agy` で選択できます。MCP 委譲の設定は
+AGY は Closeup の `agent -m agy` で選択でき、role の system context と headless での会話再開にも対応します。MCP 委譲の設定は
 [runtime/model 選択](document/07-mcp.md#runtimemodel-選択)、CLI による機能差は
 [Antigravity CLI の互換範囲](document/02-architecture.md#antigravity-cli-の互換範囲)を参照してください。
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、

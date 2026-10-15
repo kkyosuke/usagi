@@ -984,6 +984,7 @@ pub(super) fn start_ipc_accept_loop(
                                             | DaemonRequest::PlanDaemonRestartAgents { .. }
                                             | DaemonRequest::RestartAgents { .. }
                                             | DaemonRequest::ResumeAgent { .. }
+                                            | DaemonRequest::ResumeAgentHeadless { .. }
                                             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. } => dispatch_agent(&agent_launch, &bound, request_id, &body, hello, &launch_client),
                                             DaemonRequest::CodexSessionCapture { .. } => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
                                             DaemonRequest::AgentPhaseReport { .. } => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),

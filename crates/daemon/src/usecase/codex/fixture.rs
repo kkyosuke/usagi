@@ -324,7 +324,7 @@ fn headless_requires_a_prompt_and_does_not_accept_resume() {
         adapter.resolve(&resume),
         Err(AdapterError::Validation(
             LaunchValidationError::UnsupportedCapability {
-                capability: AgentCapability::Resume
+                capability: AgentCapability::HeadlessResume
             }
         ))
     ));

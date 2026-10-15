@@ -43,6 +43,7 @@ enum Action {
     Clean,
     CaptureCodexSession,
     ReportAgentPhase,
+    EmitAgySystemPrompt,
     GuardWorkspace,
     ClaudeSandbox,
     DaemonRequest,
@@ -85,6 +86,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::Clean { .. } => Self::Clean,
             RunOutcome::CaptureCodexSession => Self::CaptureCodexSession,
             RunOutcome::ReportAgentPhase { .. } => Self::ReportAgentPhase,
+            RunOutcome::EmitAgySystemPrompt => Self::EmitAgySystemPrompt,
             RunOutcome::GuardWorkspace => Self::GuardWorkspace,
             RunOutcome::ClaudeSandbox { .. } => Self::ClaudeSandbox,
             RunOutcome::DaemonRequest(_) => Self::DaemonRequest,
@@ -323,6 +325,17 @@ mod action_io {
                         write_client_error(err, "agent phase report failed", &error)?;
                         Ok(ExitCode::FAILURE)
                     }
+                }
+            }
+            (Action::EmitAgySystemPrompt, RunOutcome::EmitAgySystemPrompt) => {
+                let prompt = std::env::var(usagi_daemon::usecase::agy::SYSTEM_PROMPT_ENV).ok();
+                if usagi_cli::cli::hooks::agy_system_prompt::write_response(prompt.as_deref(), out)
+                    .is_ok()
+                {
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    writeln!(err, "AGY system context is unavailable")?;
+                    Ok(ExitCode::FAILURE)
                 }
             }
             (Action::GuardWorkspace, RunOutcome::GuardWorkspace) => guard_workspace(out),
@@ -1113,6 +1126,7 @@ mod tests {
             Action::Clean,
         );
         assert_route(RunOutcome::CaptureCodexSession, Action::CaptureCodexSession);
+        assert_route(RunOutcome::EmitAgySystemPrompt, Action::EmitAgySystemPrompt);
         assert_route(
             RunOutcome::ReportAgentPhase {
                 phase: "working".into(),

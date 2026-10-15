@@ -425,6 +425,41 @@ mod metrics_schema_tests {
     }
 
     #[test]
+    fn headless_resume_round_trips_as_a_distinct_durable_request() {
+        use crate::domain::{
+            agent::AgentResumeTarget,
+            id::{
+                AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, OperationId,
+                WorkspaceId, WorktreeId,
+            },
+        };
+        let request = DaemonRequest::ResumeAgentHeadless {
+            operation_id: OperationId::new().to_string(),
+            target: AgentResumeTarget {
+                continuation: AgentContinuationRef::new(),
+                source: AgentResumeSourceId::new(),
+                workspace_id: WorkspaceId::new(),
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+                runtime_id: AgentRuntimeId::new(),
+                adapter_revision: 3,
+            },
+            prompt: "--version\n次の turn".into(),
+            caller_context: None,
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["kind"], "resume_agent_headless");
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(encoded).unwrap(),
+            request
+        );
+        assert_eq!(
+            super::RetryEligibility::classify(&request),
+            super::RetryEligibility::DurableOperation
+        );
+    }
+
+    #[test]
     fn rollover_request_round_trips_with_its_durable_operation() {
         let request = DaemonRequest::Rollover {
             operation_id: "build-rollover-v1-test".into(),
@@ -1010,6 +1045,7 @@ impl RetryEligibility {
             DaemonRequest::Rollover { .. }
             | DaemonRequest::Agent { .. }
             | DaemonRequest::ResumeAgent { .. }
+            | DaemonRequest::ResumeAgentHeadless { .. }
             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::PrDismiss { .. }
@@ -3172,6 +3208,13 @@ mod deadline_and_retry_tests {
         };
         let key = agent_resume_semantic_key(&target);
         assert!(key.starts_with("resume:"));
+        let headless =
+            crate::infrastructure::ipc::agent_headless_resume_semantic_key(&target, "one");
+        assert_ne!(key, headless);
+        assert_ne!(
+            headless,
+            crate::infrastructure::ipc::agent_headless_resume_semantic_key(&target, "two")
+        );
         assert_eq!(key, agent_resume_semantic_key(&target));
         assert_ne!(
             key,

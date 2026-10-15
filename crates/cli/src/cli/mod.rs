@@ -115,6 +115,8 @@ pub enum RunOutcome {
         /// provider payload が event 名を含まない場合に、配線側が固定する event。
         hook_event: Option<String>,
     },
+    /// Emit daemon-issued Antigravity system context without starting a daemon.
+    EmitAgySystemPrompt,
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
     GuardWorkspace,
@@ -256,6 +258,9 @@ pub enum Command {
         #[arg(long)]
         hook_event: Option<String>,
     },
+    /// （ヘルプ非表示・内部）AGY のモデル呼び出し前に system context を注入する。
+    #[command(hide = true)]
+    AgySystemPrompt,
     /// （ヘルプ非表示・内部）Codex `SessionStart` の session ID を daemon へ渡す。
     #[command(hide = true)]
     CodexSessionCapture,
@@ -417,6 +422,9 @@ pub enum SessionCommand {
     /// secret-free JSON object; provider-native IDs are never accepted.
     ResumeExact {
         target: String,
+        /// Execute one new AGY turn non-interactively in the exact conversation.
+        #[arg(long)]
+        headless_prompt: Option<String>,
     },
     /// List root and managed-session Agent resume targets for one workspace ID.
     ResumeInventory {
@@ -464,6 +472,7 @@ impl Command {
             Command::AgentPhase { phase, hook_event } => {
                 Box::new(hooks::AgentPhase { phase, hook_event })
             }
+            Command::AgySystemPrompt => Box::new(hooks::AgySystemPrompt),
             Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
             Command::ClaudeSandbox {
@@ -592,13 +601,26 @@ impl Run for Session {
                 SessionAction::Cache,
                 serde_json::json!({"apply": apply,"status":status}),
             ),
-            SessionCommand::ResumeExact { target } => {
+            SessionCommand::ResumeExact {
+                target,
+                headless_prompt,
+            } => {
                 let target = serde_json::from_str(target).map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "resume target must be a valid exact-target JSON object",
                     )
                 })?;
+                if let Some(prompt) = headless_prompt {
+                    return Ok(RunOutcome::DaemonRequest(
+                        DaemonRequest::ResumeAgentHeadless {
+                            operation_id: usagi_core::domain::id::OperationId::new().as_str(),
+                            target,
+                            prompt: prompt.clone(),
+                            caller_context: None,
+                        },
+                    ));
+                }
                 return Ok(RunOutcome::DaemonRequest(DaemonRequest::ResumeAgent {
                     operation_id: usagi_core::domain::id::OperationId::new().as_str(),
                     target,
@@ -1048,6 +1070,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table verifies every session command and both exact-resume wire modes.
     fn session_commands_become_daemon_requests() {
         for (argv, action) in [
             (
@@ -1110,6 +1133,7 @@ mod tests {
         let (exact, _) = super::execute(Command::Session {
             command: SessionCommand::ResumeExact {
                 target: serde_json::to_string(&target).unwrap(),
+                headless_prompt: None,
             },
         });
         assert!(matches!(
@@ -1117,6 +1141,22 @@ mod tests {
             RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::ResumeAgent { target: actual, .. })
                 if actual == target
         ));
+        let target_json = serde_json::to_string(&target).unwrap();
+        let parsed = Cli::try_parse_from([
+            "usagi",
+            "session",
+            "resume-exact",
+            &target_json,
+            "--headless-prompt",
+            "next AGY turn",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        let (headless, _) = super::execute(parsed);
+        assert!(
+            matches!(headless, RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::ResumeAgentHeadless {prompt,..}) if prompt=="next AGY turn")
+        );
         let (inventory, _) = super::execute(Command::Session {
             command: SessionCommand::ResumeInventory {
                 workspace_id: target.workspace_id.to_string(),
@@ -1131,6 +1171,7 @@ mod tests {
         for command in [
             SessionCommand::ResumeExact {
                 target: "not-json".into(),
+                headless_prompt: None,
             },
             SessionCommand::ResumeInventory {
                 workspace_id: "not-a-resource-id".into(),

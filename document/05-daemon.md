@@ -1867,17 +1867,17 @@ resume では active owner が foreign shard を書き換えないため、repla
 current `session_id` または `conversationId` と phase を一緒に報告する。daemon は kernel 由来の hook PID・parent PID・
 process group と exact live runtime を照合し、runtime profile から provider を決める。provider と同じ process
 group の hook に加えて、provider の direct child で inherited / self-led process group の hook を受理する。hook は
-MCP caller credential を継承せず、dispatch scope も取得しない。interactive runtime の structured starting hook
+MCP caller credential を継承せず、dispatch scope も取得しない。interactive runtime と AGY headless runtime の structured starting hook
 （Claude / Codex の startup / resume / clear / compact と Claude の fork、Antigravity の model invocation）で
 `ProviderResumeRef` を `ProviderStructured` provenance の current ID へ
-置換するため、同じ process 内で会話が切り替わっても古い ID を再開対象に残さない。headless runtime は phase だけを
-反映し、resume metadata を作らない。再開時は検証済みの同一 ID を Claude では `claude --resume <id>`、Codex では
+置換するため、同じ process 内で会話が切り替わっても古い ID を再開対象に残さない。Claude / Codex の headless runtime は phase だけを
+反映し、resume metadata を作らない。AGY は headless 終了後も次の exact resume target を保持する。再開時は検証済みの同一 ID を Claude では `claude --resume <id>`、Codex では
 `codex resume <id>`、Antigravity では `agy --conversation <id>` の一時 provision に追加する。旧 Claude record の `DaemonIssued` provenance と、profile
 revision 4 以前の [Codex structured capture request](04-ipc.md#codex-structured-capture-request) は既存履歴・live
 process の移行互換にだけ使う。
 
 この経路の互換条件は provider が documented lifecycle hook と native conversation ID field を提供することである。
-Antigravity は managed launch 専用 `usagi-runtime` plugin の `hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
+Antigravity は managed launch 専用 synthetic workspace の `.agents/hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
 `--dangerously-bypass-hook-trust` を渡さない。managed policy による hooks 無効化、Codex hook の未 trust、
 非対応 CLI、hook の skip / timeout / non-zero exit、JSON・event name・ID・credential の欠落/不正、
 daemon/persistence failure のいずれでも `ProviderResumeRef` を作らず、resume 不可のまま fail-closed にする。
@@ -2003,9 +2003,9 @@ daemon が Agent launch に追加する MCP server はこの `usagi` server だ�
 Antigravity は server 単位の事前許可を指定する起動 flag がないため `--dangerously-skip-permissions` を渡す。
 これは CLI の承認要求を省略するが、書き込み範囲は daemon の外側 OS sandbox が制限する。
 同じ MCP server を daemon data の
-`agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/mcp_config.json` に書いた設定から起動する。
-daemon は専用 plugin directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
-へだけ追加する。plugin root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
+`agent-integrations/<workspace-id>/agy/workspace/.agents/mcp_config.json` に書いた設定から起動する。
+daemon は専用 workspace configuration directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
+へだけ追加する。integration root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
 作成前に拒否し、sandbox でも read-only に戻す。managed launch は `~/.gemini` を writable root にせず、
 `~/.gemini/antigravity-cli/conversations/` と state 直下の conversation summary DB 3 ファイルだけを
 writable allowlist にする。認証は OS keyring を使い、動的 log は `--log-file /dev/null` へ送る。

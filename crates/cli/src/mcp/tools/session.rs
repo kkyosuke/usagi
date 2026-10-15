@@ -458,10 +458,10 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "agent_resume_inventory が返した exact target を指定し、認証済み caller が作成した session の中断 runtime を再開する。"
+        "agent_resume_inventory が返した exact target を指定し、認証済み caller が作成した session の中断 runtime を再開する。AGY は任意の headless_prompt で新しい turn を非対話実行できる。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false},"headless_prompt":{"type":"string","minLength":1}},"required":["target"],"additionalProperties":false}"#
     }
 }
 

@@ -117,13 +117,13 @@ use dispatch::{
 #[cfg(test)]
 use agent_provisioning::{
     ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs, agent_writable_roots,
-    agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
+    agy_arguments_for_integration, agy_workspace_arguments, agy_workspace_documents,
     claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
     claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
     codex_developer_instructions_arguments, codex_integration_arguments,
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
-    lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
+    lexical_prefix_overlaps_path, materialize_agy_workspace, mcp_environment,
     mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
     repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
     sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,

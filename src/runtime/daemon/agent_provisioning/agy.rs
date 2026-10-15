@@ -1,4 +1,4 @@
-//! Antigravity-specific daemon provisioning and provider-native plugin files.
+//! Antigravity-specific daemon provisioning and provider-native workspace files.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -25,7 +25,7 @@ use super::{
 mod security;
 use security::prepare_agy_writable_paths;
 
-/// Resolves the checkout, Antigravity plugin, prompt, environment, and outer
+/// Resolves the checkout, Antigravity workspace integration, prompt, environment, and outer
 /// sandbox for the `agy` adapter.
 pub(in crate::runtime::daemon) struct RootAgyProvisioner {
     pub(in crate::runtime::daemon) workspaces: Workspaces,
@@ -41,7 +41,7 @@ pub(in crate::runtime::daemon) struct RootAgyProvisioner {
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 impl AgyProvisioner for RootAgyProvisioner {
-    #[allow(clippy::too_many_lines)] // One path keeps AGY plugin isolation, sandbox, prompt, and spawn arguments visibly atomic.
+    #[allow(clippy::too_many_lines)] // One path keeps AGY integration isolation, sandbox, prompt, and spawn arguments visibly atomic.
     fn provision(
         &mut self,
         context: &ProvisionContext,
@@ -94,7 +94,7 @@ impl AgyProvisioner for RootAgyProvisioner {
         };
         validate_claude_sandbox_policy(&policy)
             .map_err(|_| AgyProvisionFailure::MaterializationFailed)?;
-        let (arguments, integration) = agy_plugin_arguments(
+        let (arguments, integration) = agy_workspace_arguments(
             &self.data_home,
             context.scope.workspace_id,
             &self.mcp_command,
@@ -155,7 +155,7 @@ impl AgyProvisioner for RootAgyProvisioner {
     }
 }
 
-pub(in crate::runtime::daemon) fn agy_plugin_arguments(
+pub(in crate::runtime::daemon) fn agy_workspace_arguments(
     data_home: &paths::DataHome,
     workspace: usagi_core::domain::id::WorkspaceId,
     command: &std::path::Path,
@@ -163,14 +163,11 @@ pub(in crate::runtime::daemon) fn agy_plugin_arguments(
     passthrough: bool,
     policy: &SandboxPolicyInputs<'_>,
 ) -> Result<(Vec<String>, Option<PathBuf>), ()> {
-    if !enabled {
-        return Ok((Vec::new(), None));
-    }
-    let target = agy_integration_root(data_home, workspace)?;
+    let target = agy_integration_root(data_home, workspace, enabled)?;
     if !passthrough {
         validate_isolated_sandbox_root(policy, &target).map_err(|_| ())?;
     }
-    let integration = materialize_agy_plugin(data_home, workspace, command)?;
+    let integration = materialize_agy_workspace(data_home, workspace, command, enabled)?;
     agy_arguments_for_integration(&integration)
 }
 
@@ -187,88 +184,108 @@ pub(in crate::runtime::daemon) fn agy_arguments_for_integration(
 fn agy_integration_root(
     data_home: &paths::DataHome,
     workspace: usagi_core::domain::id::WorkspaceId,
+    inject_mcp: bool,
 ) -> Result<PathBuf, ()> {
     let selected = data_home.selected().canonicalize().map_err(|_| ())?;
-    Ok(selected
+    let integration = selected
         .join("agent-integrations")
         .join(workspace.to_string())
-        .join("agy"))
+        .join("agy");
+    Ok(if inject_mcp {
+        integration.join("workspace")
+    } else {
+        integration.join("prompt-only")
+    })
 }
 
-/// Provider-native workspace plugin documents loaded by Antigravity CLI.
+/// Provider-native workspace configuration documents loaded by Antigravity CLI.
 #[must_use]
-pub(in crate::runtime::daemon) fn agy_plugin_documents(
+pub(in crate::runtime::daemon) fn agy_workspace_documents(
     command: &str,
-) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    inject_mcp: bool,
+) -> (serde_json::Value, serde_json::Value) {
     let hook = |event: &str, phase: &str| {
         format!(
             "{} agent-phase {phase} --hook-event {event}",
             shell_quote(command)
         )
     };
-    let plugin = serde_json::json!({"name": "usagi-runtime"});
-    let mcp = serde_json::json!({
-        "mcpServers": {
-            "usagi": {
-                "command": command,
-                "args": ["mcp"]
+    let mcp = if inject_mcp {
+        serde_json::json!({
+            "mcpServers": {
+                "usagi": {
+                    "command": command,
+                    "args": ["mcp"]
+                }
             }
-        }
-    });
-    let hooks = serde_json::json!({
-        "usagi-runtime": {
-            "PreInvocation": [{
-                "type": "command",
-                "command": hook("PreInvocation", "running"),
-                "timeout": 10
-            }],
-            "PreToolUse": [{
-                "matcher": "*",
-                "hooks": [{
+        })
+    } else {
+        serde_json::json!({"mcpServers":{}})
+    };
+    let mut hooks = if inject_mcp {
+        serde_json::json!({
+            "usagi-runtime": {
+                "PreInvocation": [{
                     "type": "command",
-                    "command": hook("PreToolUse", "running"),
+                    "command": hook("PreInvocation", "running"),
                     "timeout": 10
-                }]
-            }],
-            "PostToolUse": [{
-                "matcher": "*",
-                "hooks": [{
+                }],
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": hook("PreToolUse", "running"),
+                        "timeout": 10
+                    }]
+                }],
+                "PostToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": hook("PostToolUse", "waiting"),
+                        "timeout": 10
+                    }]
+                }],
+                "Stop": [{
                     "type": "command",
-                    "command": hook("PostToolUse", "waiting"),
-                    "timeout": 10
+                    "command": hook("Stop", "ended"),
+                    "timeout": 3
                 }]
-            }],
-            "Stop": [{
-                "type": "command",
-                "command": hook("Stop", "ended"),
-                "timeout": 3
-            }]
-        }
-    });
-    (plugin, mcp, hooks)
+            }
+        })
+    } else {
+        serde_json::json!({"usagi-runtime":{"PreInvocation":[]}})
+    };
+    hooks["usagi-runtime"]["PreInvocation"]
+        .as_array_mut()
+        .expect("literal PreInvocation is an array")
+        .push(serde_json::json!({
+            "type":"command",
+            "command":format!("{} agy-system-prompt", shell_quote(command)),
+            "timeout":3
+        }));
+    (mcp, hooks)
 }
 
-/// Writes usagi's dedicated Antigravity plugin beneath daemon-private data and
+/// Writes usagi's dedicated Antigravity workspace configuration beneath daemon-private data and
 /// returns the synthetic workspace root passed only to this managed launch.
 /// The root is deliberately not a sandbox writable root, so the provider may
 /// read but cannot persistently replace its hook or MCP command documents.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_plugin_documents_are_scoped_and_shell_safe
-pub(in crate::runtime::daemon) fn materialize_agy_plugin(
+/// Use `.agents/` directly: AGY 1.2.0 does not discover workspace plugin folders.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_workspace_documents_are_scoped_and_shell_safe
+pub(in crate::runtime::daemon) fn materialize_agy_workspace(
     data_home: &paths::DataHome,
     workspace: usagi_core::domain::id::WorkspaceId,
     command: &std::path::Path,
+    inject_mcp: bool,
 ) -> Result<PathBuf, ()> {
-    let integration = agy_integration_root(data_home, workspace)?;
-    let plugin = integration.join(".agents/plugins/usagi-runtime");
+    let integration = agy_integration_root(data_home, workspace, inject_mcp)?;
+    let plugin = integration.join(".agents");
     ensure_private_dir_all(&plugin).map_err(|_| ())?;
     validate_owned_directory(&plugin).map_err(|_| ())?;
     let command = command.to_str().ok_or(())?;
-    let (manifest, mcp, hooks) = agy_plugin_documents(command);
-    for (name, value) in [
-        ("plugin.json", manifest),
-        ("mcp_config.json", mcp),
-        ("hooks.json", hooks),
-    ] {
+    let (mcp, hooks) = agy_workspace_documents(command, inject_mcp);
+    for (name, value) in [("mcp_config.json", mcp), ("hooks.json", hooks)] {
         json_file::write_atomic(&plugin, &plugin.join(name), &value).map_err(|_| ())?;
     }
     let integration = integration.canonicalize().map_err(|_| ())?;

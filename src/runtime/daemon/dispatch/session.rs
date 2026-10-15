@@ -1177,7 +1177,11 @@ pub(super) enum AgentDispatchRequest {
         Vec<usagi_core::domain::id::AgentRuntimeRef>,
         bool,
     ),
-    Resume(String, usagi_core::domain::agent::AgentResumeTarget),
+    Resume(
+        String,
+        usagi_core::domain::agent::AgentResumeTarget,
+        Option<String>,
+    ),
     RepairResume(String, usagi_core::domain::agent::AgentResumeTarget, u32),
 }
 
