@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use usagi_core::domain::agent::{AgentInventory, CallerRef, ProviderResumeReason};
+use usagi_core::domain::agent::{CallerRef, ProviderResumeReason};
 use usagi_core::domain::id::{
     AgentContinuationRef, AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId,
     WorkspaceId, WorktreeId,
@@ -1152,10 +1152,10 @@ impl SessionRuntime {
     /// Returns a storage error when lifecycle state cannot be read.
     pub fn session_creator_continuations(
         &self,
-        inventory: &AgentInventory,
+        identities: &super::agent_ipc::AgentConversationIdentities,
     ) -> Result<BTreeMap<SessionId, AgentContinuationRef>, SessionRuntimeError> {
         let state = self.state()?;
-        if inventory.workspace_id != state.workspace_id {
+        if identities.workspace_id != state.workspace_id {
             return Ok(BTreeMap::new());
         }
         Ok(state
@@ -1163,16 +1163,9 @@ impl SessionRuntime {
             .iter()
             .filter_map(|session| {
                 let creator = session.creator_agent_id?;
-                let continuations = inventory
-                    .runtimes
-                    .iter()
-                    .filter(|item| {
-                        item.agent_id == Some(creator)
-                            && item.runtime.terminal.workspace_id == state.workspace_id
-                            && item.runtime.session_id == session.parent_session_id
-                    })
-                    .map(|item| item.continuation)
-                    .collect::<BTreeSet<_>>();
+                let continuations = identities
+                    .by_creator
+                    .get(&(creator, session.parent_session_id))?;
                 if continuations.len() == 1 {
                     continuations
                         .first()

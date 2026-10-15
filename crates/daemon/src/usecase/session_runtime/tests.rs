@@ -1692,8 +1692,7 @@ fn existing_session_create_never_reparents_the_session() {
 
 #[test]
 fn creator_conversations_require_exact_unambiguous_retained_identity() {
-    use usagi_core::domain::agent::{AgentRuntimeInventoryItem, AgentRuntimeInventoryState};
-    use usagi_core::domain::id::{AgentRuntimeId, AgentRuntimeRef, TerminalId, TerminalRef};
+    use crate::usecase::agent_ipc::AgentConversationIdentities;
     let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let creator = AgentId::new();
     runtime
@@ -1718,78 +1717,53 @@ fn creator_conversations_require_exact_unambiguous_retained_identity() {
         .unwrap()
         .session_id;
     let continuation = AgentContinuationRef::new();
-    let record = AgentRuntimeInventoryItem {
-        runtime: AgentRuntimeRef::new(
-            AgentRuntimeId::new(),
-            TerminalRef {
-                daemon_generation: DaemonGeneration::new(),
-                terminal_id: TerminalId::new(),
-                workspace_id: state.workspace_id,
-                session_id: None,
-                worktree_id: WorktreeId::new(),
-            },
-            None,
-        )
-        .unwrap(),
-        operation_id: None,
-        agent_id: Some(creator),
-        continuation,
-        state: AgentRuntimeInventoryState::Exited,
-        resumed_from: None,
-        launch_provenance: None,
-    };
-    let mut inventory = AgentInventory {
+    let mut identities = AgentConversationIdentities {
         workspace_id: state.workspace_id,
-        runtimes: vec![record.clone(), record.clone()],
-        resumable: vec![],
+        by_creator: BTreeMap::from([((creator, None), BTreeSet::from([continuation]))]),
     };
     assert_eq!(
-        runtime.session_creator_continuations(&inventory).unwrap(),
+        runtime.session_creator_continuations(&identities).unwrap(),
         BTreeMap::from([(session, continuation)])
     );
-    // A resumed record of the same conversation preserves its children, but
-    // conflicting provenance must never pick an arbitrary conversation.
-    inventory.runtimes[1].continuation = AgentContinuationRef::new();
+    // Conflicting provenance must never pick an arbitrary conversation.
+    identities
+        .by_creator
+        .get_mut(&(creator, None))
+        .unwrap()
+        .insert(AgentContinuationRef::new());
     assert!(
         runtime
-            .session_creator_continuations(&inventory)
+            .session_creator_continuations(&identities)
             .unwrap()
             .is_empty()
     );
-    inventory.runtimes.clear();
+    identities.by_creator.clear();
     assert!(
         runtime
-            .session_creator_continuations(&inventory)
+            .session_creator_continuations(&identities)
             .unwrap()
             .is_empty()
     );
-    for invalid in 0..4 {
-        let mut candidate = record.clone();
-        match invalid {
-            0 => candidate.agent_id = None,
-            1 => candidate.agent_id = Some(AgentId::new()),
-            2 => candidate.runtime.terminal.workspace_id = WorkspaceId::new(),
-            _ => candidate.runtime.session_id = Some(SessionId::new()),
-        }
-        inventory.runtimes = vec![candidate];
+    for key in [(AgentId::new(), None), (creator, Some(SessionId::new()))] {
+        identities.by_creator = BTreeMap::from([(key, BTreeSet::from([continuation]))]);
         assert!(
             runtime
-                .session_creator_continuations(&inventory)
+                .session_creator_continuations(&identities)
                 .unwrap()
                 .is_empty()
         );
     }
-    inventory.runtimes = vec![record];
-    inventory.workspace_id = WorkspaceId::new();
+    identities.by_creator = BTreeMap::from([((creator, None), BTreeSet::from([continuation]))]);
+    identities.workspace_id = WorkspaceId::new();
     assert!(
         runtime
-            .session_creator_continuations(&inventory)
+            .session_creator_continuations(&identities)
             .unwrap()
             .is_empty()
     );
     std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
     assert_eq!(
-        runtime.session_creator_continuations(&inventory),
+        runtime.session_creator_continuations(&identities),
         Err(SessionRuntimeError::Storage)
     );
 }

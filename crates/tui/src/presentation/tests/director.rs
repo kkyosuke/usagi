@@ -89,6 +89,48 @@ fn director_organization_is_scoped_to_the_selected_conversation_and_descendants(
 }
 
 #[test]
+fn background_director_keeps_its_selected_interrupted_conversation_detail() {
+    let workspace = WorkspaceId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let interrupted = interrupted_history(workspace, None, true);
+    let continuation = interrupted.continuation;
+    let detail = interrupted.safe_detail().to_owned();
+    let fence = runtime.restore_fence();
+    assert!(runtime.restore_snapshot(
+        fence.0,
+        fence.1,
+        vec![crate::presentation::PaneRestoreTarget {
+            target: Target::Root(workspace),
+            panes: Vec::new(),
+            selected: None,
+            selected_interrupted: Some(continuation),
+            interrupted: vec![interrupted],
+        }]
+    ));
+    let shell = scoped_terminal_ref(workspace, None);
+    let operation = OperationId::new();
+    let _ = runtime.request_pane(Target::Root(workspace), operation, PaneKind::Terminal);
+    let _ = runtime.complete_pane(Target::Root(workspace), operation, shell.clone());
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+    let _ = runtime.handle_key(Key::Enter);
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let before = crate::presentation::director_drawer_projection(&ui, &runtime, None);
+    assert_eq!(before.route, DirectorRoute::Console);
+    assert_eq!(before.interrupted_detail.as_deref(), Some(detail.as_str()));
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+    assert_eq!(runtime.focused_terminal(), Some(shell));
+    assert_eq!(
+        runtime.director_selection(),
+        Some(TabSelection::Interrupted(continuation))
+    );
+    let background = crate::presentation::director_drawer_projection(&ui, &runtime, None);
+    assert!(!background.focused);
+    assert_eq!(background.interrupted_detail, before.interrupted_detail);
+    assert_eq!(background.organization, before.organization);
+}
+
+#[test]
 fn background_director_does_not_steal_shell_tab_navigation() {
     let workspace = WorkspaceId::new();
     let root = Target::Root(workspace);

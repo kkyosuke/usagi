@@ -110,9 +110,14 @@ pub(super) fn director_drawer_projection(
         view.feedback = pane.error().map(str::to_owned);
     }
     let interrupted_detail = if terminal_view.is_none() {
-        runtime
-            .focused_interrupted()
-            .map(|interrupted| interrupted.safe_detail().to_owned())
+        pane.tabs().iter().find_map(|tab| match tab {
+            PaneTab::Interrupted(interrupted)
+                if selected == Some(TabSelection::Interrupted(interrupted.tab.continuation)) =>
+            {
+                Some(interrupted.tab.safe_detail().to_owned())
+            }
+            _ => None,
+        })
     } else {
         None
     };

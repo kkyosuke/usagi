@@ -196,15 +196,16 @@ pub(super) fn dispatch_session_action(
                     .handle(action, operation_id, payload)?
             };
             let workspace = bound_workspace()?;
-            let inventory = agent
+            let identities = agent
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .inventory(workspace);
+                .retained_conversation_identities(workspace)
+                .map_err(|_| SessionRuntimeError::Storage)?;
             let creator_continuations = bound
                 .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .session_creator_continuations(&inventory)?;
+                .session_creator_continuations(&identities)?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let agent_statuses = runtime
                 .workspace_agent_statuses(workspace)
