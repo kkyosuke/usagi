@@ -2042,6 +2042,8 @@ exit 0
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0]["name"], "caller-owned");
     assert_eq!(visible[0]["parent_session_name"], "mcp-caller");
+    assert!(visible[0]["creator_continuation"].is_string());
+    assert!(visible[0].get("creator_agent_id").is_none());
 
     let dispatched = mcp.tool(
         "session_dispatch",
@@ -2083,6 +2085,10 @@ exit 0
         .find(|session| session["name"] == "caller-owned")
         .unwrap();
     assert!(durable["creator_agent_id"].is_string());
+    assert_eq!(
+        durable["creator_continuation"],
+        visible[0]["creator_continuation"]
+    );
 }
 
 #[test]

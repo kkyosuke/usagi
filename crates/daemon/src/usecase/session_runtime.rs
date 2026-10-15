@@ -5,7 +5,7 @@
 //! injected Git and filesystem ports, then applies the exact completion fence
 //! captured from the reservation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +13,8 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use usagi_core::domain::agent::{CallerRef, ProviderResumeReason};
 use usagi_core::domain::id::{
-    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentContinuationRef, AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId,
+    WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
@@ -1142,6 +1143,43 @@ impl SessionRuntime {
             .collect())
     }
 
+    /// Resolve safe conversation associations from exact durable creators.
+    /// Retained runtimes keep the association across exit/resume; unknown or
+    /// contradictory identities remain unassociated. This is display metadata,
+    /// never an authorization input.
+    ///
+    /// # Errors
+    /// Returns a storage error when lifecycle state cannot be read.
+    pub fn session_creator_continuations(
+        &self,
+        identities: &super::agent_ipc::AgentConversationIdentities,
+    ) -> Result<BTreeMap<SessionId, AgentContinuationRef>, SessionRuntimeError> {
+        let state = self.state()?;
+        if identities.workspace_id != state.workspace_id {
+            return Ok(BTreeMap::new());
+        }
+        Ok(state
+            .sessions
+            .iter()
+            .filter_map(|session| {
+                let creator = session.creator_agent_id?;
+                if let Some(continuation) = session.creator_continuation {
+                    return Some((session.session_id, continuation));
+                }
+                let continuations = identities
+                    .by_creator
+                    .get(&(creator, session.parent_session_id))?;
+                if continuations.len() == 1 {
+                    continuations
+                        .first()
+                        .map(|continuation| (session.session_id, *continuation))
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
     /// Proves that one available named session was created by the exact
     /// authenticated Agent.
     ///
@@ -1442,6 +1480,7 @@ impl SessionRuntime {
         let requested_role = requested_role(payload)?;
         let parent_session_id = parent_session_id(payload)?;
         let creator_agent_id = creator_agent_id(payload)?;
+        let creator_continuation = creator_continuation(payload, creator_agent_id)?;
         // Re-read both catalog layers at the daemon admission boundary; the
         // registered repository root is authoritative for workspace policy.
         let catalog = usagi_core::infrastructure::role_catalog::load_effective(
@@ -1468,20 +1507,28 @@ impl SessionRuntime {
         let setup_commands = WorkspaceSessionConfig::read(&self.repo_root)
             .setup_commands()
             .to_vec();
-        let semantic_key = create_semantic_key(
-            origin,
-            &name,
-            role_id.as_ref(),
-            parent_session_id,
-            creator_agent_id,
-            base_ref.as_deref(),
-        );
+        let request_key = |continuation| {
+            create_semantic_key(
+                origin,
+                &name,
+                role_id.as_ref(),
+                parent_session_id,
+                creator_agent_id,
+                continuation,
+                base_ref.as_deref(),
+            )
+        };
+        let semantic_key = request_key(creator_continuation);
         if let Some(existing) = before
             .operations
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
-            if existing.semantic_key != semantic_key {
+            // An upgraded daemon observes conversation metadata even when an
+            // older daemon admitted this producer operation without it. Match
+            // every original create input before replaying; do not rewrite the
+            // session's origin or relax conflicts between new-format requests.
+            if existing.semantic_key != semantic_key && existing.semantic_key != request_key(None) {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
             return self.replay(&before, existing).map(SessionCreateStep::Done);
@@ -1503,11 +1550,8 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
-        let path = self
-            .repo_root
-            .join(STATE_DIR)
-            .join(SESSIONS_DIR)
-            .join(&name);
+        let sessions_root = self.repo_root.join(STATE_DIR).join(SESSIONS_DIR);
+        let path = sessions_root.join(&name);
         // Do not reserve a lifecycle operation or invoke Git when a previous,
         // untracked session directory still occupies the destination.  The
         // durable snapshot cannot represent such a stale path, so the client
@@ -1526,6 +1570,7 @@ impl SessionRuntime {
                     role_id,
                     parent_session_id,
                     creator_agent_id,
+                    creator_continuation,
                     operation,
                 },
                 Utc::now(),
@@ -2341,6 +2386,23 @@ fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntim
         .map_err(|_| SessionRuntimeError::InvalidRequest)
 }
 
+fn creator_continuation(
+    payload: &Value,
+    creator_agent_id: Option<AgentId>,
+) -> Result<Option<AgentContinuationRef>, SessionRuntimeError> {
+    let creator_continuation = payload
+        .get("creator_continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<AgentContinuationRef>)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+    if creator_continuation.is_some() && creator_agent_id.is_none() {
+        return Err(SessionRuntimeError::InvalidRequest);
+    }
+    Ok(creator_continuation)
+}
+
 fn creator_agent_id(payload: &Value) -> Result<Option<AgentId>, SessionRuntimeError> {
     payload
         .get("creator_agent_id")
@@ -2619,6 +2681,7 @@ fn create_semantic_key(
     role_id: Option<&RoleId>,
     parent_session_id: Option<SessionId>,
     creator_agent_id: Option<AgentId>,
+    creator_continuation: Option<AgentContinuationRef>,
     base_ref: Option<&str>,
 ) -> String {
     let action = semantic_key(origin.semantic_action(), name);
@@ -2630,6 +2693,9 @@ fn create_semantic_key(
         parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"));
     let action = creator_agent_id.map_or(action.clone(), |creator| {
         format!("{action}:creator={creator}")
+    });
+    let action = creator_continuation.map_or(action.clone(), |continuation| {
+        format!("{action}:conversation={continuation}")
     });
     base_ref.map_or(action.clone(), |base_ref| {
         format!("{action}:base={base_ref}")
@@ -2722,6 +2788,7 @@ fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
 
 fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
     SessionRuntimeObservation {
+        creator_continuation: None,
         agent_phase: AgentPhase::Absent,
         agent_resumable: false,
         agent_resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,
@@ -2814,6 +2881,7 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
             .as_object_mut()
             .expect("managed sessions serialize as objects");
         session.remove("creator_agent_id");
+        session.remove("creator_continuation");
         // Setup command bodies belong to the trusted root configuration and
         // durable recovery state. Session-scoped callers may list lifecycle
         // rows, but never need the command text to act on their capabilities.

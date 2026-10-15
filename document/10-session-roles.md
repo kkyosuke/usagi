@@ -226,7 +226,16 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 `session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて lifecycle state に作成時だけ保存した `parent_session_id` と、そこから導出する `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、既存 session への dispatch や同一 session 内の Agent handoff は階層を変更しない。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
-TUI は `role_id` / `role_summary`、lifecycle state 由来の `parent_session_id`、dispatch state 由来の `agent_status` を stable session identity keyed の controller projection として保持し、
+list / status / overview の optional な `creator_continuation` は表示専用の Conversation identity である。
+daemon は認証済みの作成要求から会話を確定し、session の予約時に保存する。同じ Agent が別の会話を開始しても、
+既存 session の再利用、daemon 再起動、runtime 履歴の削除でも作成時の対応を維持する。
+旧版が受け付けた作成要求の再送は、会話情報を除く作成条件が一致すれば元の結果を返し、既存の所属を補記しない。
+この情報を持たない旧 session だけは、durable な作成者と同じ workspace・親 session の retained Agent runtime を
+一括照合する。作成者不明、履歴なし、複数 Conversation への曖昧な対応ではフィールドを省略し、
+既存 session を推測で割り当てない。認証用の `creator_agent_id` は公開せず、
+`creator_continuation` を session 操作の認可には使用しない。
+
+TUI は `role_id` / `role_summary`、lifecycle state 由来の `parent_session_id`、`creator_continuation`、dispatch state 由来の `agent_status` を stable session identity keyed の controller projection として保持し、
 legacy `SessionRecord` や `state.json` へコピーしない。sidebar は role ID だけを badge 表示し、role metadata を
 attach / remove などの lifecycle capability 判定には使わない。
 

@@ -752,6 +752,11 @@ managed-session Closeup の right pane viewport とは別の pure geometry と�
 
 Organization は、root scope（`session_id: None`）の live / pending / interrupted Conversation 一覧と、
 選択 Conversation の Agent / Session tree を表示する。Conversation が未選択なら tree を表示せず選択を促す。
+tree は選択 Conversation が作成した session とその子孫だけを含む。
+作成者との対応が不明な session を別の Conversation に割り当てない（[所属情報の正本](10-session-roles.md#safe-projection-と非永続データ)）。
+Conversation 一覧は選択行に追従する viewport を持ち、長い一覧でも選択行と Console を開く操作を表示する。
+Shell と同時に開いている場合、タブ切替はフォーカス中の drawer にだけ作用する。
+Shell にフォーカスを移しても、Director Console は選択中の Conversation とその中断理由を保持する。
 generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
 Diff と Terminal pending/action は Director の restore projection と pane admission で拒否する。`↑` / `↓` は Conversation を
 stable tab identity で選び、`Enter` は選択 Conversation の root Agent Console を開く。Console だけが terminal view を描き、

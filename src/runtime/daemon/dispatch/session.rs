@@ -196,6 +196,16 @@ pub(super) fn dispatch_session_action(
                     .handle(action, operation_id, payload)?
             };
             let workspace = bound_workspace()?;
+            let identities = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .retained_conversation_identities(workspace)
+                .map_err(|_| SessionRuntimeError::Storage)?;
+            let creator_continuations = bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .session_creator_continuations(&identities)?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let agent_statuses = runtime
                 .workspace_agent_statuses(workspace)
@@ -207,6 +217,7 @@ pub(super) fn dispatch_session_action(
                     session_organization(id, names, parents);
                 let (agent_resumable, agent_resume_reason) = runtime.session_resume_status(id);
                 SessionRuntimeObservation {
+                    creator_continuation: creator_continuations.get(&id).copied(),
                     agent_phase: runtime.session_phase(id),
                     agent_resumable,
                     agent_resume_reason,
@@ -463,6 +474,7 @@ pub(super) fn dispatch_session_action(
                     "role": requested_role,
                     "parent_session_id": caller.and_then(|caller| caller.session_id),
                     "creator_agent_id": caller.map(|caller| caller.agent_id),
+                    "creator_continuation": authenticated_caller.as_ref().and_then(|caller| caller.continuation),
                 }),
             )?;
             let id = record_session_lineage(agent, workspace, &created.body, &name)?;
@@ -515,6 +527,11 @@ pub(super) fn dispatch_session_action(
                 serde_json::json!(caller.and_then(|caller| caller.session_id));
             create_payload["creator_agent_id"] =
                 serde_json::json!(caller.map(|caller| caller.agent_id));
+            create_payload["creator_continuation"] = serde_json::json!(
+                authenticated_caller
+                    .as_ref()
+                    .and_then(|caller| caller.continuation)
+            );
             let mut created =
                 perform_create(bound.sessions(), &SystemGit, operation_id, &create_payload)?;
             let id =
@@ -859,7 +876,7 @@ fn delegate_brief(
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 
     let credential = required_payload_string(payload, "_caller_credential")?;
-    let (workspace, caller, repository_root, parent_dispatch_run) = {
+    let (workspace, caller, repository_root, parent_dispatch_run, creator_continuation) = {
         let agent_runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
         let authenticated = agent_runtime
             .mcp_dispatch_context(credential)
@@ -884,6 +901,7 @@ fn delegate_brief(
             authenticated.caller,
             sessions.repository_root().to_path_buf(),
             authenticated.run_id,
+            authenticated.continuation,
         )
     };
     let _delegation_permit = authorize_delegation(
@@ -914,6 +932,7 @@ fn delegate_brief(
             "role": payload.get("role").cloned(),
             "parent_session_id": caller.session_id,
             "creator_agent_id": caller.agent_id,
+            "creator_continuation": creator_continuation,
         }),
     )
     .map_err(|error| {

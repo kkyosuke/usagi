@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::id::{
-    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentContinuationRef, AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId,
+    WorkspaceId, WorktreeId,
 };
 use crate::domain::role::RoleId;
 
@@ -264,6 +265,10 @@ pub struct ManagedSession {
     /// from sessions created by a human control plane or another root Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_agent_id: Option<AgentId>,
+    /// Conversation that created this session, fixed at reservation. This
+    /// display association survives Agent reuse and runtime history retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_continuation: Option<AgentContinuationRef>,
     /// Stable role assignment for this incarnation. Missing on legacy records
     /// and never populated implicitly during migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -330,6 +335,7 @@ impl ManagedSession {
             name,
             parent_session_id,
             creator_agent_id,
+            creator_continuation: None,
             role_id,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
@@ -352,6 +358,7 @@ impl ManagedSession {
             name,
             parent_session_id: None,
             creator_agent_id: None,
+            creator_continuation: None,
             role_id: None,
             lifecycle: SessionLifecycle::Available,
             attempt: 1,
@@ -377,6 +384,7 @@ impl ManagedSession {
             name,
             parent_session_id: None,
             creator_agent_id: None,
+            creator_continuation: None,
             role_id: None,
             lifecycle: SessionLifecycle::Failed,
             attempt: 1,
@@ -574,6 +582,7 @@ pub enum LifecycleEvent {
         role_id: Option<RoleId>,
         parent_session_id: Option<SessionId>,
         creator_agent_id: Option<AgentId>,
+        creator_continuation: Option<AgentContinuationRef>,
         operation: OperationJournal,
     },
     CreateCompleted {
@@ -630,6 +639,7 @@ pub fn reduce(
             role_id,
             parent_session_id,
             creator_agent_id,
+            creator_continuation,
             operation,
         } => reserve_create(
             state,
@@ -637,6 +647,7 @@ pub fn reduce(
             role_id,
             parent_session_id,
             creator_agent_id,
+            creator_continuation,
             operation,
             now,
         ),
@@ -728,12 +739,14 @@ fn begin_remove(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the atomic reservation fields together.
 fn reserve_create(
     state: &mut WorkspaceLifecycleState,
     name: String,
     role_id: Option<RoleId>,
     parent_session_id: Option<SessionId>,
     creator_agent_id: Option<AgentId>,
+    creator_continuation: Option<AgentContinuationRef>,
     operation: OperationJournal,
     now: DateTime<Utc>,
 ) -> Result<(), LifecycleError> {
@@ -742,16 +755,16 @@ fn reserve_create(
         return Err(LifecycleError::DuplicateSessionName);
     }
     let id = operation.operation_id;
-    state
-        .sessions
-        .push(ManagedSession::new_creating_with_role_parent_and_creator(
-            name,
-            id,
-            now,
-            role_id,
-            parent_session_id,
-            creator_agent_id,
-        ));
+    let mut session = ManagedSession::new_creating_with_role_parent_and_creator(
+        name,
+        id,
+        now,
+        role_id,
+        parent_session_id,
+        creator_agent_id,
+    );
+    session.creator_continuation = creator_continuation;
+    state.sessions.push(session);
     state.operations.push(operation);
     state.changed(now);
     Ok(())
@@ -934,9 +947,11 @@ mod tests {
         let wire = serde_json::to_value(&legacy).unwrap();
         assert!(wire.get("role_id").is_none());
         assert!(wire.get("creator_agent_id").is_none());
+        assert!(wire.get("creator_continuation").is_none());
         let decoded: ManagedSession = serde_json::from_value(wire).unwrap();
         assert!(decoded.role_id.is_none());
         assert!(decoded.creator_agent_id.is_none());
+        assert!(decoded.creator_continuation.is_none());
 
         let assigned = ManagedSession::new_creating_with_role(
             "review".into(),
@@ -997,6 +1012,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1038,6 +1054,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1093,6 +1110,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: create.clone(),
             },
             now(),
@@ -1137,6 +1155,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: fresh,
             },
             now(),
@@ -1169,6 +1188,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1295,6 +1315,7 @@ mod tests {
                     role_id: None,
                     parent_session_id: None,
                     creator_agent_id: None,
+                    creator_continuation: None,
                     operation: op(),
                 },
                 now(),
@@ -1347,6 +1368,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1360,6 +1382,7 @@ mod tests {
                     role_id: None,
                     parent_session_id: None,
                     creator_agent_id: None,
+                    creator_continuation: None,
                     operation: op()
                 },
                 now()
@@ -1457,6 +1480,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: create.clone(),
             },
             now(),
@@ -1561,6 +1585,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: create.clone(),
             },
             now(),
@@ -1645,6 +1670,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),

@@ -303,6 +303,8 @@ struct McpChildLease {
 pub struct AuthenticatedDispatchCaller {
     pub workspace_id: WorkspaceId,
     pub run_id: OperationId,
+    /// Safe conversation identity resolved from the authenticated runtime.
+    pub continuation: Option<AgentContinuationRef>,
     pub caller: CallerRef,
     pub runtime: AgentRuntimeRef,
     /// Exact terminal scope owned by the authenticated Agent runtime.
@@ -516,6 +518,15 @@ impl AgentRuntime {
 /// retained generation and never implicitly summed with the generic terminal pool
 /// ([`crate::usecase::resources::allocator::CapacityPolicy`]).
 pub const AGENT_RUNTIME_LIMIT: usize = 16;
+
+/// Retained conversation identities for display-only session associations.
+/// Multiple continuations for one scoped Agent stay explicit so callers cannot
+/// silently assign a session to an arbitrary conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentConversationIdentities {
+    pub workspace_id: WorkspaceId,
+    pub by_creator: BTreeMap<(AgentId, Option<SessionId>), BTreeSet<AgentContinuationRef>>,
+}
 
 /// Immutable facts proved before an Agent readiness command runs outside the
 /// owner lock. Admission compares them with current owner state after the probe;
@@ -1129,6 +1140,7 @@ impl AgentRuntime {
             AuthenticatedDispatchCaller {
                 workspace_id,
                 run_id,
+                continuation: record.continuation,
                 caller,
                 runtime: mcp.runtime.clone(),
                 terminal_scope,
@@ -1427,6 +1439,50 @@ impl AgentRuntime {
         self.reported_phases
             .retain(|runtime, _| !runtime_ids.contains(&runtime.as_str()));
         Ok((result, diagnosis))
+    }
+
+    /// Reads only the exact identities needed by the session list projection.
+    /// Read the dispatch run registry once, rather than loading a binding per
+    /// retained runtime or computing provider resume availability on each poll.
+    ///
+    /// # Errors
+    /// Returns an unavailable error when dispatch history cannot be read.
+    pub fn retained_conversation_identities(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<AgentConversationIdentities, ProtocolError> {
+        let agents = self
+            .dispatch
+            .runs()
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .map(|run| (run.run_id, run.agent_id))
+            .collect::<BTreeMap<_, _>>();
+        let mut by_creator = BTreeMap::<_, BTreeSet<_>>::new();
+        for record in self.coordinator.snapshot().records {
+            if record.runtime.terminal.workspace_id != workspace {
+                continue;
+            }
+            let agent = agents
+                .get(&record.operation.operation_id)
+                .copied()
+                .or_else(|| {
+                    record
+                        .launch_provenance
+                        .as_ref()
+                        .and_then(|audit| audit.agent_id)
+                });
+            if let (Some(agent), Some(continuation)) = (agent, record.continuation) {
+                by_creator
+                    .entry((agent, record.runtime.session_id))
+                    .or_default()
+                    .insert(continuation);
+            }
+        }
+        Ok(AgentConversationIdentities {
+            workspace_id: workspace,
+            by_creator,
+        })
     }
 
     /// Returns one deterministic, secret-free inventory for workspace-root and

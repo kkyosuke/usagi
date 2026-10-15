@@ -314,12 +314,33 @@ fn organization_body(
     let footer_hint = "Ctrl-O n New · Enter Console · Esc close";
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if !projection.conversations.is_empty() {
-        rows.push(Role::Accent.style().bold().paint("Conversations"));
-        for conversation in &projection.conversations {
-            let marker = if conversation.selected { "›" } else { " " };
-            rows.push(format!("{marker} {}", conversation.label));
+        let selected = projection
+            .conversations
+            .iter()
+            .position(|conversation| conversation.selected)
+            .unwrap_or(0);
+        // Leave room for the selected Agent and its tree while following the
+        // cursor. In a tiny viewport the selected row outranks headings.
+        let list_capacity = content_capacity.saturating_sub(1).div_ceil(2).max(1);
+        if content_capacity > 1 {
+            rows.push(Role::Accent.style().bold().paint("Conversations"));
         }
-        rows.push(String::new());
+        let conversations = projection
+            .conversations
+            .iter()
+            .map(|conversation| {
+                let marker = if conversation.selected { "›" } else { " " };
+                format!("{marker} {}", conversation.label)
+            })
+            .collect::<Vec<_>>();
+        rows.extend(modal::bounded_list_rows(
+            &conversations,
+            selected,
+            list_capacity,
+        ));
+        if rows.len() + 3 < height {
+            rows.push(String::new());
+        }
     }
     let selected_conversation = projection
         .conversations
@@ -632,6 +653,39 @@ mod tests {
         assert!(!frame[0].contains("\u{1b}[2m"));
         assert!(strip_ansi(&frame[23]).contains('└'));
         assert!(strip_ansi(&frame[23]).ends_with('┘'));
+    }
+
+    #[test]
+    fn organization_viewport_follows_every_conversation_after_resize() {
+        for height in [4, 5, 8, 16, 24] {
+            for selected in 0..30 {
+                let projection = DirectorDrawerProjection {
+                    conversations: (0..30)
+                        .map(|index| DirectorConversation {
+                            label: format!("Conversation {index:02}"),
+                            selected: index == selected,
+                        })
+                        .collect(),
+                    organization: vec![DirectorOrganizationRow {
+                        depth: 0,
+                        label: "Selected Director".into(),
+                        status: "active".into(),
+                    }],
+                    ..DirectorDrawerProjection::default()
+                };
+                let rows = drawer_body(72, height, &projection);
+                assert_eq!(rows.len(), height);
+                let text = strip_ansi(&rows.join("\n"));
+                assert!(
+                    text.contains(&format!("› Conversation {selected:02}")),
+                    "{height}: {text}"
+                );
+                assert!(text.contains("Enter Console"));
+                if height >= 8 {
+                    assert!(text.contains("Selected Director"), "{text}");
+                }
+            }
+        }
     }
 
     #[test]

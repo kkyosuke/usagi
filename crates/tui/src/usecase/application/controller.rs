@@ -167,6 +167,7 @@ pub struct SessionRoleCatalog {
 /// Safe daemon-owned role metadata, kept separate from persisted session annotations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoleProjection {
+    pub creator_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
     pub role_id: Option<RoleId>,
     pub role_summary: Option<String>,
     pub parent_session_id: Option<SessionId>,
