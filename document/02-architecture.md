@@ -1051,7 +1051,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   `hook_event_name` が usagi の配線どおりその phase を意味することも検証する（event と phase の対応表は
   `usagi-core` の `domain::session_lifecycle` が正本で、hook を注入する adapter 側も同じ表を使う）。command hook は
   Claude には `command` と `args` を分けた exec form、Codex には起動時の inline TOML command hook、Antigravity には
-  専用 plugin の `hooks.json` command として注入する。Antigravity の stdin は event 名を含まないため、配線が
+  専用 synthetic workspace の `.agents/hooks.json` command として注入する。Antigravity の stdin は event 名を含まないため、配線が
   `--hook-event` で固定し、camelCase の `conversationId` を `PreInvocation` で capture する。成功時の stdout は provider の
   event 契約（`PreToolUse` は `{"decision":"allow"}`、他 event は所定の JSON object）を返す。報告は
   kernel から得た hook PID・parent PID・process group を exact live runtime と照合して束縛し、caller は runtime /

@@ -1679,9 +1679,9 @@ impl AgentRuntime {
             .map_err(map_runtime_error)
     }
 
-    /// Refreshes the current interactive conversation from the exact runtime's
-    /// documented structured starting hook. Headless runs still report phase
-    /// but never become resumable conversations.
+    /// Refreshes the current conversation from the exact runtime's documented
+    /// structured starting hook. AGY also captures headless conversations;
+    /// Claude and Codex headless runs only report phase.
     fn capture_provider_session_start(
         &mut self,
         runtime: &AgentRuntimeRef,

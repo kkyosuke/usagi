@@ -2875,6 +2875,7 @@ pub(super) fn daemon_request_surface(body: &serde_json::Value) -> &'static str {
             | "plan_daemon_restart_agents"
             | "restart_agents"
             | "resume_agent"
+            | "resume_agent_headless"
             | "resume_agent_with_current_integration",
         ) => "agent",
         Some("codex_session_capture") => "codex_session_capture",

@@ -91,8 +91,8 @@ def invoke(number, task, conversation=None):
         raise RuntimeError(f'Native turn {number} failed validation; inspect private worktree-local logs')
     return result['conversation_id']
 
-conversation = invoke(1, f'Remember this token for later: {memory}. Follow the current test role to complete its MCP probe.')
-resumed = invoke(2, 'Use the memory token from the previous turn as the MCP probe. Follow the current test role to complete its MCP probe.', conversation)
+conversation = invoke(1, f'--version\nRemember this token for later: {memory}. Follow the current test role to complete its MCP probe.')
+resumed = invoke(2, '--version\nUse the memory token from the previous turn as the MCP probe. Follow the current test role to complete its MCP probe.', conversation)
 calls = [json.loads(line) for line in (run / 'calls.jsonl').read_text().splitlines()]
 assert resumed == conversation, 'AGY changed the conversation identity during resume'
 assert calls == [{'probe': memory}, {'probe': memory}], 'MCP did not receive the remembered token on both turns'

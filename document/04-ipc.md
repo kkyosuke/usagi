@@ -643,8 +643,8 @@ phase は wire に載る前に hook 側で検証する。共通 validator の li
 Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 `PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
 `PermissionRequest` は発火せず、`Notification` も Codex event ではない。Antigravity は `PreInvocation` /
-`PreToolUse` / `PostToolUse` / `Stop` を専用 plugin から配線する。Antigravity の payload は event 名を含まないため、
-plugin command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
+`PreToolUse` / `PostToolUse` / `Stop` を専用 synthetic workspace の `.agents/hooks.json` から配線する。Antigravity の payload は event 名を含まないため、
+hook command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
 hook input または配線宣言と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `SessionStart` では current `session_id` と `ready`、`PreInvocation` では current `conversationId` と `running` を同じ
 request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。この 2 つ

@@ -2383,6 +2383,7 @@ mod tests {
             "agent",
             "restart_agents",
             "resume_agent",
+            "resume_agent_headless",
             "resume_agent_with_current_integration",
             "dispatch",
         ] {

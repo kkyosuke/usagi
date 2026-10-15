@@ -183,6 +183,7 @@ fn daemon_request_surface_never_copies_untrusted_kind_text() {
         ("plan_daemon_restart_agents", "agent"),
         ("restart_agents", "agent"),
         ("resume_agent", "agent"),
+        ("resume_agent_headless", "agent"),
         ("resume_agent_with_current_integration", "agent"),
         ("codex_session_capture", "codex_session_capture"),
         ("agent_phase_report", "agent_phase_report"),

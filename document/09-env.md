@@ -157,7 +157,7 @@ PTY を所有するのは daemon なので、**daemon が起動時に自分で 2
   OS ユーザー名を渡す（正本は [5. daemon#`USER` の解決](05-daemon.md#user-の解決)）。設定 env の `USER` は
   この解決値も上書きする。
 - AGY の system context は daemon 発行の `USAGI_AGY_SYSTEM_PROMPT` として launch 時だけ注入する。
-  設定 env より優先し、値を argv・durable snapshot・plugin file へ保存しない。`PreInvocation` の hidden hook が
+  設定 env より優先し、値を argv・durable snapshot・workspace 設定ファイルへ保存しない。`PreInvocation` の hidden hook が
   transient system message に変換する。MCP を無効にした起動でも同じ system context を渡す。
 - durable な launch snapshot に載るのは**変数名の allowlist だけ**で、値・secret は載らない。
 - 反映は**新しく開く pane から**。既に動いている pane は起動時の環境を保ち続ける。

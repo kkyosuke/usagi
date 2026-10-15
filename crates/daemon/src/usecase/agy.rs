@@ -1,7 +1,7 @@
 //! Google Antigravity CLI (`agy`) launch adapter.
 //!
 //! Antigravity owns its argv grammar and discovers MCP servers and lifecycle
-//! hooks from a provider-native plugin. The provisioner materializes that
+//! hooks from provider-native workspace configuration. The provisioner materializes that
 //! ephemeral integration before this adapter renders the public launch plan.
 
 use std::{collections::BTreeSet, path::PathBuf};
@@ -46,11 +46,11 @@ pub enum AgyProvisionFailure {
     MaterializationFailed,
 }
 
-/// Materializes Antigravity's MCP/hook plugin and sandbox inputs for one scope.
+/// Materializes Antigravity's MCP/hook workspace configuration and sandbox inputs for one scope.
 pub trait AgyProvisioner {
     /// # Errors
     ///
-    /// Returns a typed failure when the executable, plugin, prompt, or sandbox
+    /// Returns a typed failure when the executable, configuration, prompt, or sandbox
     /// inputs cannot be prepared.
     fn provision(
         &mut self,
