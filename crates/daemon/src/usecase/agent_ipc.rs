@@ -303,6 +303,8 @@ struct McpChildLease {
 pub struct AuthenticatedDispatchCaller {
     pub workspace_id: WorkspaceId,
     pub run_id: OperationId,
+    /// Safe conversation identity resolved from the authenticated runtime.
+    pub continuation: Option<AgentContinuationRef>,
     pub caller: CallerRef,
     pub runtime: AgentRuntimeRef,
     /// Exact terminal scope owned by the authenticated Agent runtime.
@@ -1138,6 +1140,7 @@ impl AgentRuntime {
             AuthenticatedDispatchCaller {
                 workspace_id,
                 run_id,
+                continuation: record.continuation,
                 caller,
                 runtime: mcp.runtime.clone(),
                 terminal_scope,

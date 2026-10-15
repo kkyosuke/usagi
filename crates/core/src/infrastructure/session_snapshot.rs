@@ -102,6 +102,7 @@ impl From<SessionListLifecycle> for ManagedSession {
             name: session.name,
             parent_session_id: session.parent_session_id,
             creator_agent_id: None,
+            creator_continuation: None,
             role_id: session.role_id,
             lifecycle: session.lifecycle,
             attempt: session.attempt,

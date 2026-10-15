@@ -878,6 +878,15 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
     assert_eq!(authenticated.run_id.to_string(), operation);
     assert_eq!(authenticated.caller.session_id, Some(session));
     assert_eq!(
+        authenticated.continuation,
+        runtime
+            .coordinator
+            .record_for(&authenticated.runtime)
+            .unwrap()
+            .continuation
+    );
+    assert!(authenticated.continuation.is_some());
+    assert_eq!(
         authenticated.terminal_scope,
         TerminalLaunchScope {
             workspace_id: admission.terminal.workspace_id,

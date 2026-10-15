@@ -201,6 +201,7 @@ mod tests {
                     role_id: None,
                     parent_session_id: None,
                     creator_agent_id: None,
+                    creator_continuation: None,
                     operation,
                 },
                 now(),
@@ -237,6 +238,7 @@ mod tests {
                         role_id: None,
                         parent_session_id: None,
                         creator_agent_id: None,
+                        creator_continuation: None,
                         operation
                     },
                     now()
@@ -267,6 +269,7 @@ mod tests {
                         role_id: None,
                         parent_session_id: None,
                         creator_agent_id: None,
+                        creator_continuation: None,
                         operation,
                     },
                     now(),

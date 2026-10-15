@@ -1163,6 +1163,9 @@ impl SessionRuntime {
             .iter()
             .filter_map(|session| {
                 let creator = session.creator_agent_id?;
+                if let Some(continuation) = session.creator_continuation {
+                    return Some((session.session_id, continuation));
+                }
                 let continuations = identities
                     .by_creator
                     .get(&(creator, session.parent_session_id))?;
@@ -1477,6 +1480,7 @@ impl SessionRuntime {
         let requested_role = requested_role(payload)?;
         let parent_session_id = parent_session_id(payload)?;
         let creator_agent_id = creator_agent_id(payload)?;
+        let creator_continuation = creator_continuation(payload, creator_agent_id)?;
         // Re-read both catalog layers at the daemon admission boundary; the
         // registered repository root is authoritative for workspace policy.
         let catalog = usagi_core::infrastructure::role_catalog::load_effective(
@@ -1509,6 +1513,7 @@ impl SessionRuntime {
             role_id.as_ref(),
             parent_session_id,
             creator_agent_id,
+            creator_continuation,
             base_ref.as_deref(),
         );
         if let Some(existing) = before
@@ -1561,6 +1566,7 @@ impl SessionRuntime {
                     role_id,
                     parent_session_id,
                     creator_agent_id,
+                    creator_continuation,
                     operation,
                 },
                 Utc::now(),
@@ -2376,6 +2382,23 @@ fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntim
         .map_err(|_| SessionRuntimeError::InvalidRequest)
 }
 
+fn creator_continuation(
+    payload: &Value,
+    creator_agent_id: Option<AgentId>,
+) -> Result<Option<AgentContinuationRef>, SessionRuntimeError> {
+    let creator_continuation = payload
+        .get("creator_continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<AgentContinuationRef>)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+    if creator_continuation.is_some() && creator_agent_id.is_none() {
+        return Err(SessionRuntimeError::InvalidRequest);
+    }
+    Ok(creator_continuation)
+}
+
 fn creator_agent_id(payload: &Value) -> Result<Option<AgentId>, SessionRuntimeError> {
     payload
         .get("creator_agent_id")
@@ -2654,6 +2677,7 @@ fn create_semantic_key(
     role_id: Option<&RoleId>,
     parent_session_id: Option<SessionId>,
     creator_agent_id: Option<AgentId>,
+    creator_continuation: Option<AgentContinuationRef>,
     base_ref: Option<&str>,
 ) -> String {
     let action = semantic_key(origin.semantic_action(), name);
@@ -2665,6 +2689,9 @@ fn create_semantic_key(
         parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"));
     let action = creator_agent_id.map_or(action.clone(), |creator| {
         format!("{action}:creator={creator}")
+    });
+    let action = creator_continuation.map_or(action.clone(), |continuation| {
+        format!("{action}:conversation={continuation}")
     });
     base_ref.map_or(action.clone(), |base_ref| {
         format!("{action}:base={base_ref}")
@@ -2850,6 +2877,7 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
             .as_object_mut()
             .expect("managed sessions serialize as objects");
         session.remove("creator_agent_id");
+        session.remove("creator_continuation");
         // Setup command bodies belong to the trusted root configuration and
         // durable recovery state. Session-scoped callers may list lifecycle
         // rows, but never need the command text to act on their capabilities.

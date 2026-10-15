@@ -241,6 +241,7 @@ pub(super) fn dispatch_agent_tool(
             ));
         }
         let parent_dispatch_run = authenticated.run_id;
+        let creator_continuation = authenticated.continuation;
         if matches!(
             action,
             DispatchToolAction::TerminalList | DispatchToolAction::TerminalRead
@@ -504,6 +505,7 @@ pub(super) fn dispatch_agent_tool(
                         "role": requested_role,
                         "parent_session_id": caller.session_id,
                         "creator_agent_id": caller.agent_id,
+                        "creator_continuation": creator_continuation,
                         }),
                     )
                     .map_err(|error| {
