@@ -229,6 +229,7 @@ catalog が読めない場合も lifecycle metadata を返し、summary は `nul
 list / status / overview の optional な `creator_continuation` は表示専用の Conversation identity である。
 daemon は認証済みの作成要求から会話を確定し、session の予約時に保存する。同じ Agent が別の会話を開始しても、
 既存 session の再利用、daemon 再起動、runtime 履歴の削除でも作成時の対応を維持する。
+旧版が受け付けた作成要求の再送は、会話情報を除く作成条件が一致すれば元の結果を返し、既存の所属を補記しない。
 この情報を持たない旧 session だけは、durable な作成者と同じ workspace・親 session の retained Agent runtime を
 一括照合する。作成者不明、履歴なし、複数 Conversation への曖昧な対応ではフィールドを省略し、
 既存 session を推測で割り当てない。認証用の `creator_agent_id` は公開せず、

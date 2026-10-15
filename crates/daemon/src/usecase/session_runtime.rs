@@ -1507,21 +1507,28 @@ impl SessionRuntime {
         let setup_commands = WorkspaceSessionConfig::read(&self.repo_root)
             .setup_commands()
             .to_vec();
-        let semantic_key = create_semantic_key(
-            origin,
-            &name,
-            role_id.as_ref(),
-            parent_session_id,
-            creator_agent_id,
-            creator_continuation,
-            base_ref.as_deref(),
-        );
+        let request_key = |continuation| {
+            create_semantic_key(
+                origin,
+                &name,
+                role_id.as_ref(),
+                parent_session_id,
+                creator_agent_id,
+                continuation,
+                base_ref.as_deref(),
+            )
+        };
+        let semantic_key = request_key(creator_continuation);
         if let Some(existing) = before
             .operations
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
-            if existing.semantic_key != semantic_key {
+            // An upgraded daemon observes conversation metadata even when an
+            // older daemon admitted this producer operation without it. Match
+            // every original create input before replaying; do not rewrite the
+            // session's origin or relax conflicts between new-format requests.
+            if existing.semantic_key != semantic_key && existing.semantic_key != request_key(None) {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
             return self.replay(&before, existing).map(SessionCreateStep::Done);
@@ -1543,11 +1550,8 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
-        let path = self
-            .repo_root
-            .join(STATE_DIR)
-            .join(SESSIONS_DIR)
-            .join(&name);
+        let sessions_root = self.repo_root.join(STATE_DIR).join(SESSIONS_DIR);
+        let path = sessions_root.join(&name);
         // Do not reserve a lifecycle operation or invoke Git when a previous,
         // untracked session directory still occupies the destination.  The
         // durable snapshot cannot represent such a stale path, so the client

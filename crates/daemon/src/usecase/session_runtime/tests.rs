@@ -1756,6 +1756,37 @@ fn creator_conversation_survives_agent_reuse_restart_and_history_retention() {
 }
 
 #[test]
+fn legacy_create_replay_accepts_newly_observed_creator_conversation_without_reassigning() {
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
+    let creator = AgentId::new();
+    let operation = operation();
+    let mut payload = json!({"name":"legacy-owned", "creator_agent_id":creator});
+    let original = runtime
+        .handle(SessionAction::Create, &operation, &payload)
+        .unwrap();
+    // After an upgrade the authenticated boundary adds conversation metadata
+    // even when the producer retries an operation admitted by the old daemon.
+    payload["creator_continuation"] = json!(AgentContinuationRef::new());
+    assert_eq!(
+        runtime
+            .handle(SessionAction::Create, &operation, &payload)
+            .unwrap()
+            .body,
+        original.body
+    );
+    assert!(
+        runtime.state().unwrap().sessions[0]
+            .creator_continuation
+            .is_none()
+    );
+    payload["name"] = json!("different-request");
+    assert_eq!(
+        runtime.handle(SessionAction::Create, &operation, &payload),
+        Err(SessionRuntimeError::IdempotencyConflict)
+    );
+}
+
+#[test]
 fn creator_conversation_is_validated_and_part_of_create_replay_identity() {
     let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let creator = AgentId::new();
