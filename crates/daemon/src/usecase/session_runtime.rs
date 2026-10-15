@@ -5,15 +5,16 @@
 //! injected Git and filesystem ports, then applies the exact completion fence
 //! captured from the reservation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use usagi_core::domain::agent::{CallerRef, ProviderResumeReason};
+use usagi_core::domain::agent::{AgentInventory, CallerRef, ProviderResumeReason};
 use usagi_core::domain::id::{
-    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentContinuationRef, AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId,
+    WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
@@ -1139,6 +1140,47 @@ impl SessionRuntime {
                     && session.creator_agent_id == Some(caller.agent_id)
             })
             .map(|session| session.session_id)
+            .collect())
+    }
+
+    /// Resolve safe conversation associations from exact durable creators.
+    /// Retained runtimes keep the association across exit/resume; unknown or
+    /// contradictory identities remain unassociated. This is display metadata,
+    /// never an authorization input.
+    ///
+    /// # Errors
+    /// Returns a storage error when lifecycle state cannot be read.
+    pub fn session_creator_continuations(
+        &self,
+        inventory: &AgentInventory,
+    ) -> Result<BTreeMap<SessionId, AgentContinuationRef>, SessionRuntimeError> {
+        let state = self.state()?;
+        if inventory.workspace_id != state.workspace_id {
+            return Ok(BTreeMap::new());
+        }
+        Ok(state
+            .sessions
+            .iter()
+            .filter_map(|session| {
+                let creator = session.creator_agent_id?;
+                let continuations = inventory
+                    .runtimes
+                    .iter()
+                    .filter(|item| {
+                        item.agent_id == Some(creator)
+                            && item.runtime.terminal.workspace_id == state.workspace_id
+                            && item.runtime.session_id == session.parent_session_id
+                    })
+                    .map(|item| item.continuation)
+                    .collect::<BTreeSet<_>>();
+                if continuations.len() == 1 {
+                    continuations
+                        .first()
+                        .map(|continuation| (session.session_id, *continuation))
+                } else {
+                    None
+                }
+            })
             .collect())
     }
 
@@ -2722,6 +2764,7 @@ fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
 
 fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
     SessionRuntimeObservation {
+        creator_continuation: None,
         agent_phase: AgentPhase::Absent,
         agent_resumable: false,
         agent_resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,

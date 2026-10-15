@@ -857,7 +857,9 @@ pub(super) fn copy_terminal_selection(
 }
 
 pub(super) fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
-    if !runtime.state().root_terminal_drawer_open() {
+    if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Terminal)
+        || runtime.state().overlay().is_some()
+    {
         return false;
     }
     let direction = match key {

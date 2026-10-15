@@ -196,6 +196,15 @@ pub(super) fn dispatch_session_action(
                     .handle(action, operation_id, payload)?
             };
             let workspace = bound_workspace()?;
+            let inventory = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .inventory(workspace);
+            let creator_continuations = bound
+                .sessions()
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .session_creator_continuations(&inventory)?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let agent_statuses = runtime
                 .workspace_agent_statuses(workspace)
@@ -207,6 +216,7 @@ pub(super) fn dispatch_session_action(
                     session_organization(id, names, parents);
                 let (agent_resumable, agent_resume_reason) = runtime.session_resume_status(id);
                 SessionRuntimeObservation {
+                    creator_continuation: creator_continuations.get(&id).copied(),
                     agent_phase: runtime.session_phase(id),
                     agent_resumable,
                     agent_resume_reason,

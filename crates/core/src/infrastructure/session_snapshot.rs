@@ -20,6 +20,10 @@ use crate::domain::session_lifecycle::{
 /// list, overview, and status replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRuntimeObservation {
+    /// Display-only association with the creator's retained conversation.
+    /// Missing or ambiguous provenance never implies ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_continuation: Option<crate::domain::id::AgentContinuationRef>,
     pub agent_phase: AgentPhase,
     pub agent_resumable: bool,
     pub agent_resume_reason: ProviderResumeReason,
@@ -264,6 +268,7 @@ mod tests {
 
     fn runtime() -> SessionRuntimeObservation {
         SessionRuntimeObservation {
+            creator_continuation: None,
             agent_phase: AgentPhase::Interrupted,
             agent_resumable: true,
             agent_resume_reason: ProviderResumeReason::ExplicitResumeAvailable,
@@ -276,6 +281,32 @@ mod tests {
                 "child".to_owned(),
             ],
         }
+    }
+
+    #[test]
+    fn creator_conversation_is_optional_display_metadata() {
+        let mut observation = runtime();
+        observation.creator_continuation = Some(crate::domain::id::AgentContinuationRef::new());
+        let encoded = serde_json::to_value(&observation).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionRuntimeObservation>(encoded.clone()).unwrap(),
+            observation
+        );
+        assert!(encoded.get("creator_agent_id").is_none());
+        let mut legacy = encoded.clone();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("creator_continuation");
+        assert_eq!(
+            serde_json::from_value::<SessionRuntimeObservation>(legacy)
+                .unwrap()
+                .creator_continuation,
+            None
+        );
+        let mut malformed = encoded;
+        malformed["creator_continuation"] = serde_json::json!("not-an-id");
+        assert!(serde_json::from_value::<SessionRuntimeObservation>(malformed).is_err());
     }
 
     #[test]

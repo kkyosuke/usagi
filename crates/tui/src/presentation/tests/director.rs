@@ -5,6 +5,172 @@
 use super::*;
 
 #[test]
+fn director_organization_is_scoped_to_the_selected_conversation_and_descendants() {
+    use crate::usecase::application::controller::SessionRoleProjection;
+    let first = AgentContinuationRef::new();
+    let second = AgentContinuationRef::new();
+    let ids = (0..5).map(|_| SessionId::new()).collect::<Vec<_>>();
+    let mut workspace_state = state("demo");
+    let template = workspace_state.sessions[0].clone();
+    workspace_state.sessions = ["first", "second", "legacy", "grandchild", "child"]
+        .into_iter()
+        .map(|name| SessionRecord {
+            name: name.into(),
+            ..template.clone()
+        })
+        .collect();
+    let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids.clone());
+    let role = |creator_continuation, parent_session_id| SessionRoleProjection {
+        creator_continuation,
+        parent_session_id,
+        role_id: None,
+        role_summary: None,
+        agent_status: None,
+    };
+    view.set_session_roles(BTreeMap::from([
+        (ids[0], role(Some(first), None)),
+        (ids[1], role(Some(second), None)),
+        (ids[2], role(None, None)),
+        (ids[3], role(None, Some(ids[4]))),
+        (ids[4], role(None, Some(ids[0]))),
+    ]));
+    let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let labels = |continuation| {
+        director_organization(&ui, continuation)
+            .into_iter()
+            .map(|row| row.label)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        labels(Some(first)),
+        [
+            "♛ Director",
+            "• Executor · first",
+            "• Executor · child",
+            "• Executor · grandchild"
+        ]
+    );
+    assert_eq!(labels(Some(second)), ["♛ Director", "• Executor · second"]);
+    assert_eq!(labels(None), ["♛ Director"]);
+    assert_eq!(labels(Some(AgentContinuationRef::new())), ["♛ Director"]);
+
+    // Restore interrupted conversations, then switch their stable selection.
+    // Projection must follow the chosen conversation without launching either.
+    let workspace = WorkspaceId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, ids);
+    let interrupted = [first, second]
+        .into_iter()
+        .map(|continuation| {
+            let mut history = interrupted_history(workspace, None, true);
+            history.continuation = continuation;
+            history
+        })
+        .collect();
+    let fence = runtime.restore_fence();
+    assert!(runtime.restore_snapshot(
+        fence.0,
+        fence.1,
+        vec![crate::presentation::PaneRestoreTarget {
+            target: Target::Root(workspace),
+            panes: Vec::new(),
+            selected: None,
+            selected_interrupted: Some(first),
+            interrupted,
+        }]
+    ));
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+    let projected = crate::presentation::director_drawer_projection(&ui, &runtime, None);
+    assert_eq!(projected.organization.len(), 4);
+    assert_eq!(projected.organization[0].status, "interrupted");
+    let _ = runtime.select_tab_selection(TabSelection::Interrupted(second));
+    let projected = crate::presentation::director_drawer_projection(&ui, &runtime, None);
+    assert_eq!(projected.organization.len(), 2);
+    assert_eq!(projected.organization[1].label, "• Executor · second");
+}
+
+#[test]
+fn background_director_does_not_steal_shell_tab_navigation() {
+    let workspace = WorkspaceId::new();
+    let root = Target::Root(workspace);
+    let agent = scoped_terminal_ref(workspace, None);
+    let shells = [
+        scoped_terminal_ref(workspace, None),
+        scoped_terminal_ref(workspace, None),
+    ];
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    for (terminal, kind) in [
+        (agent.clone(), PaneKind::Agent),
+        (shells[0].clone(), PaneKind::Terminal),
+        (shells[1].clone(), PaneKind::Terminal),
+    ] {
+        let operation = OperationId::new();
+        let _ = runtime.request_pane(root, operation, kind);
+        let _ = runtime.complete_pane(root, operation, terminal);
+    }
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
+    let shell_geometry = root_terminal_drawer::geometry(24, 100);
+    focus_workspace_drawer_from_pointer(
+        &mut runtime,
+        &Key::Click {
+            column: 2,
+            row: u16::try_from(shell_geometry.top + 3).unwrap(),
+        },
+        24,
+        100,
+    );
+    assert_eq!(
+        runtime.state().workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+    let before = runtime.focused_terminal().unwrap();
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let mut controls = LiveTerminalControls::default();
+    let mut term = FakeTerminal::default();
+    let mut browser = UnavailableBrowserOpener;
+    let mut pending = std::collections::HashMap::new();
+    assert!(intercept_live_terminal_control(
+        &Key::Live(LiveTerminalAction::NextTab),
+        &mut ui,
+        &mut runtime,
+        &mut controls,
+        &mut term,
+        &mut browser,
+        &mut pending,
+        24,
+        100,
+        0,
+        0
+    ));
+    assert_ne!(runtime.focused_terminal(), Some(before));
+    assert!(shells.contains(&runtime.focused_terminal().unwrap()));
+    assert_eq!(
+        runtime.director_selection(),
+        Some(TabSelection::Live(agent))
+    );
+    assert!(!crate::presentation::select_director_tab(
+        &Key::Down,
+        &mut ui,
+        &mut runtime
+    ));
+    let director = director_drawer::geometry(24, 100);
+    focus_workspace_drawer_from_pointer(
+        &mut runtime,
+        &Key::Click {
+            column: u16::try_from(director.left + 2).unwrap(),
+            row: u16::try_from(director.top + 4).unwrap(),
+        },
+        24,
+        100,
+    );
+    assert!(!crate::presentation::select_root_terminal_tab(
+        &Key::Live(LiveTerminalAction::NextTab),
+        &mut runtime
+    ));
+}
+
+#[test]
 fn session_worktree_names_include_stale_directories_only() {
     let temp = tempdir().unwrap();
     let sessions = temp.path().join(".usagi/sessions");
@@ -21,13 +187,15 @@ fn session_worktree_names_include_stale_directories_only() {
 fn director_organization_projects_statuses_hierarchy_and_orphans() {
     use usagi_core::domain::agent::AgentStatus;
 
-    let mut empty_state = state("empty");
-    empty_state.sessions.clear();
+    let conversation = AgentContinuationRef::new();
     let empty_ui = io_runtime(
-        WorkspaceView::with_runtime_ids(ws("empty"), empty_state, Vec::new()),
+        WorkspaceView::with_runtime_ids(ws("empty"), empty_state("empty"), Vec::new()),
         Box::new(UnavailableSessionCommandPort),
     );
-    assert_eq!(director_organization(&empty_ui)[0].label, "♛ Director");
+    assert_eq!(
+        director_organization(&empty_ui, None)[0].label,
+        "♛ Director"
+    );
 
     let director_child = SessionId::new();
     let manager_child = SessionId::new();
@@ -58,6 +226,7 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
     let mut view = WorkspaceView::with_runtime_ids(ws("demo"), workspace_state, ids.clone());
     let role = |parent_session_id, agent_status| {
         crate::usecase::application::controller::SessionRoleProjection {
+            creator_continuation: Some(conversation),
             role_id: None,
             role_summary: None,
             parent_session_id,
@@ -88,7 +257,7 @@ fn director_organization_projects_statuses_hierarchy_and_orphans() {
     view.set_session_roles(roles);
     let ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
 
-    let rows = director_organization(&ui);
+    let rows = director_organization(&ui, Some(conversation));
     assert_eq!(
         rows.iter()
             .map(|row| (row.depth, row.label.as_str(), row.status.as_str()))

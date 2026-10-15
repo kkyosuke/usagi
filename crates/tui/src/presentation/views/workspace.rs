@@ -3796,6 +3796,7 @@ mod tests {
                 (
                     id,
                     SessionRoleProjection {
+                        creator_continuation: None,
                         role_id: None,
                         role_summary: None,
                         parent_session_id: Some(parent),
@@ -4908,6 +4909,7 @@ mod tests {
             AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
                 session,
                 SessionRoleProjection {
+                    creator_continuation: None,
                     role_id: None,
                     role_summary: None,
                     parent_session_id: None,
@@ -6017,6 +6019,7 @@ mod tests {
                 (
                     session_id,
                     SessionRoleProjection {
+                        creator_continuation: None,
                         role_id: Some(RoleId::new("reviewer").unwrap()),
                         role_summary: None,
                         parent_session_id: None,
@@ -6026,6 +6029,7 @@ mod tests {
                 (
                     child_id,
                     SessionRoleProjection {
+                        creator_continuation: None,
                         role_id: Some(RoleId::new("worker").unwrap()),
                         role_summary: None,
                         parent_session_id: Some(session_id),

@@ -124,7 +124,19 @@ pub(super) fn director_drawer_projection(
         .iter()
         .any(|conversation| conversation.selected)
     {
-        director_organization(ui)
+        let continuation = match &selected {
+            Some(TabSelection::Live(terminal)) => ui.agent_continuation_for(terminal),
+            Some(TabSelection::Interrupted(continuation)) => Some(*continuation),
+            _ => None,
+        };
+        let mut rows = director_organization(ui, continuation);
+        match selected {
+            Some(TabSelection::Interrupted(_)) => "interrupted",
+            Some(TabSelection::Pending(_)) => "starting",
+            _ => "active",
+        }
+        .clone_into(&mut rows[0].status);
+        rows
     } else {
         Vec::new()
     };
@@ -169,7 +181,10 @@ pub(super) fn director_new_projection(runtime: &WorkspaceRuntime) -> DirectorNew
     }
 }
 
-pub(super) fn director_organization(ui: &WorkspaceIoRuntime) -> Vec<DirectorOrganizationRow> {
+pub(super) fn director_organization(
+    ui: &WorkspaceIoRuntime,
+    continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
+) -> Vec<DirectorOrganizationRow> {
     fn append_children(
         parent: Option<SessionId>,
         depth: usize,
@@ -188,6 +203,26 @@ pub(super) fn director_organization(ui: &WorkspaceIoRuntime) -> Vec<DirectorOrga
     }
 
     let roles = ui.workspace.session_roles();
+    let mut included = roles
+        .iter()
+        .filter_map(|(id, role)| {
+            (continuation.is_some() && role.creator_continuation == continuation).then_some(*id)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    loop {
+        let before = included.len();
+        for (id, role) in roles {
+            if role
+                .parent_session_id
+                .is_some_and(|parent| included.contains(&parent))
+            {
+                included.insert(*id);
+            }
+        }
+        if included.len() == before {
+            break;
+        }
+    }
     let mut members = Vec::new();
     for (session_id, session) in ui
         .workspace
@@ -195,6 +230,9 @@ pub(super) fn director_organization(ui: &WorkspaceIoRuntime) -> Vec<DirectorOrga
         .iter()
         .zip(ui.workspace.sessions())
     {
+        if !included.contains(session_id) {
+            continue;
+        }
         let role_identity = roles
             .get(session_id)
             .and_then(|role| role.role_id.as_ref())
@@ -219,7 +257,8 @@ pub(super) fn director_organization(ui: &WorkspaceIoRuntime) -> Vec<DirectorOrga
             *session_id,
             roles
                 .get(session_id)
-                .and_then(|role| role.parent_session_id),
+                .and_then(|role| role.parent_session_id)
+                .filter(|parent| included.contains(parent)),
             row,
         ));
     }
@@ -254,7 +293,9 @@ pub(super) fn select_director_tab_outcome(
     ui: &mut WorkspaceIoRuntime,
     runtime: &mut WorkspaceRuntime,
 ) -> DirectorTabSelection {
-    if !runtime.state().director_drawer_open() {
+    if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Director)
+        || runtime.state().overlay().is_some()
+    {
         return DirectorTabSelection::Unhandled;
     }
     let direction = match key {
