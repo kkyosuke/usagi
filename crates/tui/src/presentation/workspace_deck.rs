@@ -279,6 +279,24 @@ impl WorkspaceDeck {
         &self.slots
     }
 
+    /// Source labels for questions displayed while another project is active.
+    #[must_use]
+    pub fn decision_owner_names(&self) -> crate::presentation::views::decision_modal::OwnerNames {
+        crate::presentation::views::decision_modal::OwnerNames {
+            workspaces: self
+                .slots
+                .iter()
+                .map(|slot| (slot.workspace_id, slot.label.clone()))
+                .collect(),
+            sessions: self
+                .slots
+                .iter()
+                .flat_map(|slot| slot.sessions.iter())
+                .map(|session| (session.projected.id, session.projected.label.clone()))
+                .collect(),
+        }
+    }
+
     #[must_use]
     pub fn paths(&self) -> Vec<PathBuf> {
         self.slots.iter().map(|slot| slot.path.clone()).collect()

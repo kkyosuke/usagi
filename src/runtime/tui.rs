@@ -173,7 +173,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                 let mut client = Self::client()?;
                 let reply = client
                     .request(DaemonRequest::UserDecision {
-                        action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::List,
+                        action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::ListAll,
                         payload: serde_json::json!({}),
                     })
                     .map_err(daemon_error_reason)?;
@@ -203,7 +203,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
             match client
                 .request(DaemonRequest::UserDecision {
                     action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::Resolve,
-                    payload: serde_json::json!({"decision_id": decision_id, "answer": answer}),
+                    payload: serde_json::json!({"workspace": workspace, "decision_id": decision_id, "answer": answer}),
                 })
                 .map_err(daemon_error_reason)?
             {
@@ -2757,7 +2757,7 @@ fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::U
     let mut lane = LaneConnection::observing();
     RefreshPump::spawn(decision_cadence(), move || {
         let reply = lane.request(DaemonRequest::UserDecision {
-            action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::List,
+            action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::ListAll,
             payload: serde_json::json!({}),
         })?;
         let DaemonReply::Ok(value) = reply else {

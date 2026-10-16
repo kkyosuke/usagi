@@ -96,7 +96,7 @@ pub enum Overlay {
     Roles,
     /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
     CreateSession,
-    /// Workspace-scoped pending user decisions and their answer editor.
+    /// Daemon-wide pending user decisions and their answer editor.
     Decisions,
     /// Merge-confirmed sessions awaiting explicit, sequential cleanup.
     CleanupQueue,
@@ -1512,7 +1512,7 @@ impl AppState {
     pub const fn daemon_control(&self) -> &DaemonControlState {
         &self.daemon_control
     }
-    /// Pending decisions from the current workspace only.
+    /// Pending decisions across the daemon's workspaces.
     #[must_use]
     pub fn decisions(&self) -> &[UserDecision] {
         &self.decisions
@@ -2160,7 +2160,7 @@ pub enum AppKey {
     OpenPrs,
     /// Open the selected session's file preview overlay.
     OpenPreview,
-    /// Open the current workspace's durable pending decision list.
+    /// Open the daemon's durable pending decision list.
     OpenDecisions,
     /// Move within the pending list or current decision options.
     DecisionPrevious,
@@ -2533,7 +2533,7 @@ pub enum BackendEvent {
         scope: RoleEditorScope,
         error: SafeError,
     },
-    /// Atomic daemon snapshot; records outside `workspace` are rejected by the reducer.
+    /// Atomic daemon-wide snapshot, fenced to the observing workspace composition.
     Decisions {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
@@ -4448,7 +4448,6 @@ fn reconcile_decision_overlay(state: &mut AppState) {
 }
 
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
-    let workspace = state.workspace;
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
@@ -4462,7 +4461,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
-        return update_decision_editor(workspace, editor, key);
+        return update_decision_editor(editor.decision.owner.workspace_id, editor, key);
     }
     match key {
         AppKey::Escape => {

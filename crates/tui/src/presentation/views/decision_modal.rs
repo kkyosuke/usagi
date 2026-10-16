@@ -6,13 +6,21 @@ mod context;
 mod controls;
 mod layout;
 
+use usagi_core::domain::presentation_text::sanitize_presentation_line;
 use usagi_core::domain::user_decision::UserDecisionSelectionMode;
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::DecisionOverlayState;
 use std::collections::BTreeMap;
-use usagi_core::domain::id::SessionId;
+use usagi_core::domain::id::{SessionId, WorkspaceId};
+
+/// Display-only source names shared by the pending list, editor, and banner.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OwnerNames {
+    pub workspaces: BTreeMap<WorkspaceId, String>,
+    pub sessions: BTreeMap<SessionId, String>,
+}
 
 // The modal grows with the terminal so comparison tables, diagrams, and long
 // option lists stay readable, while the minimum keeps the historical 70x18
@@ -217,11 +225,11 @@ fn editor_intro(
 fn list_body(
     overlay: &DecisionOverlayState,
     decisions: &[usagi_core::domain::user_decision::UserDecision],
-    session_names: &BTreeMap<SessionId, String>,
+    owners: &OwnerNames,
     inner_width: usize,
     capacity: usize,
 ) -> Vec<String> {
-    let mut rows = vec![modal::caption("Pending decisions for this workspace")];
+    let mut rows = vec![modal::caption("Pending decisions across workspaces")];
     if decisions.is_empty() {
         rows.push(modal::empty_notice("(none)"));
     }
@@ -231,11 +239,7 @@ fn list_body(
         let start = rows.len();
         let marker = format!("{} ", modal::selection_marker(index == overlay.selected()));
         let card = layout::heading_rows(
-            &format!(
-                "{}: {}",
-                owner_label(decision, session_names),
-                decision.title
-            ),
+            &format!("{}: {}", owner_label(decision, owners), decision.title),
             &marker,
             layout::content_width(inner_width),
         );
@@ -266,22 +270,33 @@ fn list_body(
     body
 }
 
-/// Human-readable owner of a decision: the session name, `workspace root`, or
-/// a short ID when the session is not (yet) in the projected session list.
+/// Human-readable workspace and session, falling back to short stable IDs for
+/// projects or sessions that are not open in this TUI.
 #[must_use]
 pub fn owner_label(
     decision: &usagi_core::domain::user_decision::UserDecision,
-    session_names: &BTreeMap<SessionId, String>,
+    owners: &OwnerNames,
 ) -> String {
-    decision.owner.session_id.map_or_else(
+    let workspace = owners
+        .workspaces
+        .get(&decision.owner.workspace_id)
+        .cloned()
+        .unwrap_or_else(|| {
+            format!(
+                "workspace {}",
+                &decision.owner.workspace_id.to_string()[..8]
+            )
+        });
+    let session = decision.owner.session_id.map_or_else(
         || "workspace root".to_owned(),
         |session| {
-            session_names.get(&session).cloned().unwrap_or_else(|| {
+            owners.sessions.get(&session).cloned().unwrap_or_else(|| {
                 let id = session.to_string();
                 format!("session {}", id.get(..8).unwrap_or(&id))
             })
         },
-    )
+    );
+    sanitize_presentation_line(&format!("{workspace} / {session}"))
 }
 
 fn dimensions(height: usize, width: usize) -> (usize, usize, usize) {
@@ -306,7 +321,7 @@ pub(crate) fn page_event(
     editor_viewport(editor, inner_width, capacity).page_event(editor, forward, capacity)
 }
 
-/// Render either the workspace pending list or the selected decision editor.
+/// Render either the daemon-wide pending list or the selected decision editor.
 #[must_use]
 pub fn render_over(
     height: usize,
@@ -314,22 +329,25 @@ pub fn render_over(
     base: &[String],
     overlay: &DecisionOverlayState,
     decisions: &[usagi_core::domain::user_decision::UserDecision],
-    session_names: &BTreeMap<SessionId, String>,
+    owners: &OwnerNames,
 ) -> Vec<String> {
     let (inner_width, body_height, capacity) = dimensions(height, width);
     let (title, body) = if let Some(editor) = overlay.editor() {
-        ("User decision", editor_rows(editor, inner_width, capacity))
+        (
+            format!("User decision · {}", owner_label(editor.decision(), owners)),
+            editor_rows(editor, inner_width, capacity),
+        )
     } else {
         (
-            "Pending decisions",
-            list_body(overlay, decisions, session_names, inner_width, capacity),
+            "Pending decisions".to_owned(),
+            list_body(overlay, decisions, owners, inner_width, capacity),
         )
     };
     modal::render_over(
         height,
         width,
         base,
-        title,
+        &title,
         inner_width,
         &modal::fixed_body(body, body_height),
     )
@@ -647,7 +665,7 @@ mod tests {
                         &[],
                         state.decision_overlay().unwrap(),
                         state.decisions(),
-                        &BTreeMap::new(),
+                        &OwnerNames::default(),
                     );
                     assert_eq!(frame.len(), height);
                     assert!(frame.iter().all(|row| widgets::display_width(row) == width));
@@ -689,7 +707,7 @@ mod tests {
                     &[],
                     state.decision_overlay().unwrap(),
                     state.decisions(),
-                    &BTreeMap::new(),
+                    &OwnerNames::default(),
                 )
                 .join("\n")
             };
@@ -793,7 +811,7 @@ mod tests {
                                 &[],
                                 state.decision_overlay().unwrap(),
                                 state.decisions(),
-                                &BTreeMap::new(),
+                                &OwnerNames::default(),
                             )
                             .join("\n"),
                         );
@@ -914,7 +932,7 @@ mod tests {
                         &[],
                         state.decision_overlay().unwrap(),
                         state.decisions(),
-                        &BTreeMap::new(),
+                        &OwnerNames::default(),
                     );
                     assert!(frame.iter().any(|row| row.contains(INPUT_CURSOR_MARKER)));
                     assert!(frame.iter().all(|row| widgets::display_width(row) == width));
@@ -960,7 +978,7 @@ mod tests {
                 &[],
                 state.decision_overlay().unwrap(),
                 state.decisions(),
-                &BTreeMap::new(),
+                &OwnerNames::default(),
             )
             .join("\n"),
         );
@@ -1125,7 +1143,7 @@ mod tests {
                                 &[],
                                 state.decision_overlay().unwrap(),
                                 state.decisions(),
-                                &BTreeMap::new(),
+                                &OwnerNames::default(),
                             );
                             seen.push_str(&widgets::strip_ansi(&frame.join("\n")));
                             if page < full.len() {
@@ -1324,7 +1342,7 @@ mod tests {
             &["base".to_owned()],
             state.decision_overlay().unwrap(),
             &[],
-            &BTreeMap::new(),
+            &OwnerNames::default(),
         );
         assert!(empty.join("\n").contains("(none)"));
 
@@ -1343,7 +1361,10 @@ mod tests {
                 decisions: vec![root.clone(), scoped.clone()],
             }),
         );
-        let names = BTreeMap::from([(session, "issue-42".to_owned())]);
+        let names = OwnerNames {
+            workspaces: BTreeMap::from([(workspace, "project-a".to_owned())]),
+            sessions: BTreeMap::from([(session, "issue-42".to_owned())]),
+        };
         let list = render_over(
             24,
             80,
@@ -1364,7 +1385,7 @@ mod tests {
             &[],
             state.decision_overlay().unwrap(),
             &[root, scoped.clone()],
-            &BTreeMap::new(),
+            &OwnerNames::default(),
         );
         assert!(!fixed_options.join("\n").contains("freeform:"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
@@ -1377,7 +1398,7 @@ mod tests {
             &[],
             state.decision_overlay().unwrap(),
             &[scoped.clone()],
-            &BTreeMap::new(),
+            &OwnerNames::default(),
         );
         assert!(scrolled.join("\n").contains("context line"));
         let _ = update(&mut state, AppEvent::Key(AppKey::PageUp));
@@ -1402,7 +1423,7 @@ mod tests {
             &[],
             state.decision_overlay().unwrap(),
             &[scoped],
-            &BTreeMap::new(),
+            &OwnerNames::default(),
         );
         let text = editor.join("\n");
         assert!(text.contains("freeform: custom"));
@@ -1413,13 +1434,20 @@ mod tests {
     fn owner_label_falls_back_to_a_short_session_id() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
-        let names = BTreeMap::new();
+        let names = OwnerNames::default();
         let label = owner_label(&decision(workspace, Some(session)), &names);
         let id = session.to_string();
-        assert_eq!(label, format!("session {}", &id[..8]));
+        assert_eq!(
+            label,
+            format!(
+                "workspace {} / session {}",
+                &workspace.to_string()[..8],
+                &id[..8]
+            )
+        );
         assert_eq!(
             owner_label(&decision(workspace, None), &names),
-            "workspace root"
+            format!("workspace {} / workspace root", &workspace.to_string()[..8])
         );
     }
 
@@ -1445,7 +1473,7 @@ mod tests {
                 &[],
                 state.decision_overlay().unwrap(),
                 &[],
-                &BTreeMap::new(),
+                &OwnerNames::default(),
             )
         };
         let border_width = |lines: &[String]| {
@@ -1564,7 +1592,7 @@ mod tests {
                 &[],
                 state.decision_overlay().unwrap(),
                 &[request.clone()],
-                &BTreeMap::new(),
+                &OwnerNames::default(),
             )
             .join("\n")
         };

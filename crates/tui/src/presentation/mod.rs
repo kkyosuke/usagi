@@ -1562,7 +1562,10 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_workspace_deck_garden(mut self, deck: &WorkspaceDeck) -> Self {
+    fn with_workspace_deck(mut self, deck: &WorkspaceDeck) -> Self {
+        self.projection = self
+            .projection
+            .with_decision_owners(deck.decision_owner_names());
         let Some(active_sessions) = self.projection.garden_sessions().map(<[_]>::to_vec) else {
             return self;
         };

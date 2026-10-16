@@ -1317,7 +1317,7 @@ pub(super) fn drive_workspace_controller(
                 icon_mode,
             )
             .with_agent_inventory(ui.agent_inventory(), runtime.panes())
-            .with_workspace_deck_garden(deck)
+            .with_workspace_deck(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
             if garden_open {
