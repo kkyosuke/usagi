@@ -4,73 +4,6 @@ use usagi_core::domain::agent::{
 };
 
 #[test]
-fn retained_conversation_identities_are_scoped_and_omit_unknown_conversations() {
-    let mut agent = runtime();
-    let root = root_intent(None);
-    let child = AgentLaunchIntent {
-        workspace: root.workspace,
-        ..intent(None)
-    };
-    let foreign = root_intent(None);
-    let scope = FakeScope(Ok(scope()));
-    let mut expected = BTreeMap::new();
-    for intent in [&root, &child, &foreign] {
-        let operation = OperationId::new();
-        agent
-            .launch(&operation.to_string(), intent, &scope)
-            .unwrap();
-        if intent.workspace == root.workspace {
-            let creator = agent.dispatch.binding(operation).unwrap().unwrap().worker;
-            let continuation = agent
-                .coordinator
-                .snapshot()
-                .records
-                .into_iter()
-                .find(|record| record.operation.operation_id == operation)
-                .unwrap()
-                .continuation
-                .unwrap();
-            expected.insert(
-                (creator.agent_id, intent.session),
-                BTreeSet::from([continuation]),
-            );
-        }
-    }
-    let identities = agent
-        .retained_conversation_identities(root.workspace)
-        .unwrap();
-    assert_eq!(identities.workspace_id, root.workspace);
-    assert_eq!(identities.by_creator, expected);
-    assert!(
-        agent
-            .retained_conversation_identities(WorkspaceId::new())
-            .unwrap()
-            .by_creator
-            .is_empty()
-    );
-    let mut snapshot = agent.coordinator.snapshot();
-    for record in &mut snapshot.records {
-        record.continuation = None;
-    }
-    agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
-    assert!(
-        agent
-            .retained_conversation_identities(root.workspace)
-            .unwrap()
-            .by_creator
-            .is_empty()
-    );
-    std::fs::write(agent.dispatch.registry_path(), "broken").unwrap();
-    assert_eq!(
-        agent
-            .retained_conversation_identities(root.workspace)
-            .unwrap_err()
-            .code,
-        ErrorCode::Unavailable
-    );
-}
-
-#[test]
 fn manual_launches_record_distinct_origins_and_replay_the_same_audit() {
     let mut agent = runtime();
     let intent = intent(None);
@@ -249,9 +182,6 @@ fn resume_records_the_new_initiator_and_preserves_unknown_legacy_creation() {
             .target
             .clone()
             .unwrap();
-        let identities_before_resume = agent
-            .retained_conversation_identities(intent.workspace)
-            .unwrap();
         let operation = OperationId::new();
         let caller = CallerRef {
             session_id: None,
@@ -273,12 +203,6 @@ fn resume_records_the_new_initiator_and_preserves_unknown_legacy_creation() {
             )
             .unwrap();
         let inventory = agent.inventory(intent.workspace);
-        assert_eq!(
-            agent
-                .retained_conversation_identities(intent.workspace)
-                .unwrap(),
-            identities_before_resume
-        );
         let provenance = inventory
             .runtimes
             .iter()
@@ -361,14 +285,6 @@ fn redispatch_and_manual_reuse_keep_the_agent_creator_even_with_an_older_operati
         .unwrap();
     assert_eq!(provenance.created, original);
     assert_eq!(provenance.launched.source, AgentLaunchSource::Manual);
-    assert_eq!(
-        agent
-            .retained_conversation_identities(intent.workspace)
-            .unwrap()
-            .by_creator[&(worker, intent.session)]
-            .len(),
-        3
-    );
 }
 
 #[test]
@@ -418,25 +334,6 @@ fn legacy_wire_record_remains_unknown_after_a_fresh_manual_conversation() {
     assert_eq!(provenance.launched.source, AgentLaunchSource::Manual);
 }
 
-fn expire_dispatch_run(agent: &AgentRuntime, operation: OperationId) {
-    let mut old = agent.dispatch.run(operation).unwrap().unwrap();
-    old.ended_at = Some(Utc::now() - chrono::Duration::days(366));
-    agent.dispatch.upsert_run(old).unwrap();
-    for _ in 0..32 {
-        agent
-            .dispatch
-            .upsert_run(DispatchRun {
-                run_id: OperationId::new(),
-                agent_id: AgentId::new(),
-                prompt: String::new(),
-                started_at: Utc::now(),
-                ended_at: Some(Utc::now()),
-                status: RunStatus::Completed,
-            })
-            .unwrap();
-    }
-}
-
 #[test]
 fn collected_dispatch_history_keeps_a_reused_agent_creator_unknown() {
     for via_mcp in [false, true] {
@@ -456,23 +353,28 @@ fn collected_dispatch_history_keeps_a_reused_agent_creator_unknown() {
 
         // Age-based retention removes the old run and its admission/binding,
         // while the dispatchable Agent identity deliberately survives.
-        expire_dispatch_run(&agent, first);
+        let mut old = agent.dispatch.run(first).unwrap().unwrap();
+        old.ended_at = Some(Utc::now() - chrono::Duration::days(366));
+        agent.dispatch.upsert_run(old).unwrap();
+        for _ in 0..32 {
+            agent
+                .dispatch
+                .upsert_run(DispatchRun {
+                    run_id: OperationId::new(),
+                    agent_id: AgentId::new(),
+                    prompt: String::new(),
+                    started_at: Utc::now(),
+                    ended_at: Some(Utc::now()),
+                    status: RunStatus::Completed,
+                })
+                .unwrap();
+        }
         assert_eq!(agent.dispatch.run(first).unwrap(), None);
         assert_eq!(agent.dispatch.binding(first).unwrap(), None);
         assert!(agent.dispatch.agent(worker).unwrap().is_some());
         let known = agent.inventory(intent.workspace);
         assert_eq!(known.runtimes[0].operation_id, Some(first));
         assert_eq!(known.runtimes[0].agent_id, Some(worker));
-        assert_eq!(
-            agent
-                .retained_conversation_identities(intent.workspace)
-                .unwrap()
-                .by_creator,
-            BTreeMap::from([(
-                (worker, intent.session),
-                BTreeSet::from([known.runtimes[0].continuation])
-            )])
-        );
         // The audit alone still proves the identity after its binding expires.
         // If neither durable source remains, expose only the known operation.
         let snapshot = agent.coordinator.snapshot();
@@ -483,13 +385,6 @@ fn collected_dispatch_history_keeps_a_reused_agent_creator_unknown() {
         assert_eq!(unknown.runtimes[0].operation_id, Some(first));
         assert_eq!(unknown.runtimes[0].agent_id, None);
         assert_eq!(unknown.runtimes[0].launch_provenance, None);
-        assert!(
-            agent
-                .retained_conversation_identities(intent.workspace)
-                .unwrap()
-                .by_creator
-                .is_empty()
-        );
         agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
         let next = OperationId::new();
         let admitted = if via_mcp {

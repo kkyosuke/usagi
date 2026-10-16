@@ -168,6 +168,7 @@ pub struct SessionRoleCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoleProjection {
     pub creator_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
+    pub director_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
     pub role_id: Option<RoleId>,
     pub role_summary: Option<String>,
     pub parent_session_id: Option<SessionId>,
@@ -3693,6 +3694,9 @@ fn director_picker_shows_selection(state: &AppState) -> bool {
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_director_shell_key(state, &key) {
         return effects;
+    }
+    if state.director_launching.is_some() {
+        return Vec::new();
     }
     if update_director_route_key(state, &key) {
         return Vec::new();

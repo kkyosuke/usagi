@@ -39,6 +39,13 @@ use crate::usecase::session_teardown::{
     PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal,
 };
 
+/// Display associations, never authorization inputs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionConversations {
+    pub creator: Option<AgentContinuationRef>,
+    pub director: Option<AgentContinuationRef>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionReply {
     pub operation_id: String,
@@ -1143,39 +1150,26 @@ impl SessionRuntime {
             .collect())
     }
 
-    /// Resolve safe conversation associations from exact durable creators.
-    /// Retained runtimes keep the association across exit/resume; unknown or
-    /// contradictory identities remain unassociated. This is display metadata,
-    /// never an authorization input.
+    /// Project only durable creation facts. Runtime history is incomplete after
+    /// retention and cannot establish the creator of a legacy session.
     ///
     /// # Errors
     /// Returns a storage error when lifecycle state cannot be read.
-    pub fn session_creator_continuations(
+    pub fn session_conversations(
         &self,
-        identities: &super::agent_ipc::AgentConversationIdentities,
-    ) -> Result<BTreeMap<SessionId, AgentContinuationRef>, SessionRuntimeError> {
+    ) -> Result<BTreeMap<SessionId, SessionConversations>, SessionRuntimeError> {
         let state = self.state()?;
-        if identities.workspace_id != state.workspace_id {
-            return Ok(BTreeMap::new());
-        }
         Ok(state
             .sessions
             .iter()
-            .filter_map(|session| {
-                let creator = session.creator_agent_id?;
-                if let Some(continuation) = session.creator_continuation {
-                    return Some((session.session_id, continuation));
-                }
-                let continuations = identities
-                    .by_creator
-                    .get(&(creator, session.parent_session_id))?;
-                if continuations.len() == 1 {
-                    continuations
-                        .first()
-                        .map(|continuation| (session.session_id, *continuation))
-                } else {
-                    None
-                }
+            .map(|session| {
+                (
+                    session.session_id,
+                    SessionConversations {
+                        creator: session.creator_continuation,
+                        director: state.director_continuation(session.session_id),
+                    },
+                )
             })
             .collect())
     }
@@ -2789,6 +2783,7 @@ fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
 fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
     SessionRuntimeObservation {
         creator_continuation: None,
+        director_continuation: None,
         agent_phase: AgentPhase::Absent,
         agent_resumable: false,
         agent_resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,
@@ -2882,6 +2877,7 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
             .expect("managed sessions serialize as objects");
         session.remove("creator_agent_id");
         session.remove("creator_continuation");
+        session.remove("director_continuation");
         // Setup command bodies belong to the trusted root configuration and
         // durable recovery state. Session-scoped callers may list lifecycle
         // rows, but never need the command text to act on their capabilities.

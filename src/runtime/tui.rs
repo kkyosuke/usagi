@@ -3192,6 +3192,10 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
                 (
                     item.session.session_id,
                     SessionRoleProjection {
+                        director_continuation: item
+                            .runtime
+                            .as_ref()
+                            .and_then(|runtime| runtime.director_continuation),
                         creator_continuation: item
                             .runtime
                             .as_ref()
@@ -7247,6 +7251,11 @@ mod tests {
         );
         managed_object.insert("agent_status".to_owned(), json!("running"));
         let creator_continuation = AgentContinuationRef::new();
+        let director_continuation = AgentContinuationRef::new();
+        managed_object.insert(
+            "director_continuation".to_owned(),
+            json!(director_continuation),
+        );
         managed_object.insert(
             "creator_continuation".to_owned(),
             json!(creator_continuation),
@@ -7270,6 +7279,7 @@ mod tests {
         assert_eq!(role.role_summary.as_deref(), Some("Writes code"));
         assert_eq!(role.parent_session_id, Some(parent_session_id));
         assert_eq!(role.creator_continuation, Some(creator_continuation));
+        assert_eq!(role.director_continuation, Some(director_continuation));
         assert_eq!(
             role.agent_status,
             Some(usagi_core::domain::agent::AgentStatus::Running)

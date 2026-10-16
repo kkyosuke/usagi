@@ -9,6 +9,97 @@ use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
 use usagi_core::infrastructure::git::GitOutput;
 
 #[test]
+fn director_membership_survives_removing_ancestors_and_restart_for_old_and_new_records() {
+    for legacy in [false, true] {
+        let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
+        let director = AgentContinuationRef::new();
+        let mut parent = None;
+        let mut ids = Vec::new();
+        for name in ["manager", "worker", "grandchild"] {
+            let creator = if parent.is_none() {
+                director
+            } else {
+                AgentContinuationRef::new()
+            };
+            runtime
+                .handle(
+                    SessionAction::Create,
+                    &operation(),
+                    &json!({
+                        "name":name, "creator_agent_id":AgentId::new(),
+                        "creator_continuation":creator, "parent_session_id":parent,
+                        // A caller-supplied organization must never be trusted.
+                        "director_continuation":AgentContinuationRef::new()
+                    }),
+                )
+                .unwrap();
+            parent = Some(runtime.session_id(name).unwrap());
+            ids.push(parent.unwrap());
+        }
+        if legacy {
+            let mut state = runtime.state().unwrap();
+            for session in &mut state.sessions {
+                session.director_continuation = None;
+            }
+            runtime
+                .store
+                .replace_if_revision(state.state_revision, &state)
+                .unwrap();
+        }
+        assert!(
+            runtime
+                .session_conversations()
+                .unwrap()
+                .values()
+                .all(|value| value.director == Some(director))
+        );
+        runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"manager", "force":true}),
+            )
+            .unwrap();
+        drop(runtime);
+        let mut restored = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
+        let state = restored.state().unwrap();
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.sessions[0].parent_session_id, Some(ids[0]));
+        assert_eq!(state.sessions[0].director_continuation, Some(director));
+        assert_ne!(state.sessions[0].creator_continuation, Some(director));
+        assert!(
+            restored
+                .session_conversations()
+                .unwrap()
+                .values()
+                .all(|value| value.director == Some(director))
+        );
+        restored
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"worker", "force":true}),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.state().unwrap().sessions[0].director_continuation,
+            Some(director)
+        );
+        assert_eq!(
+            restored.session_conversations().unwrap()[&ids[2]].director,
+            Some(director)
+        );
+    }
+}
+
+#[test]
 fn artifact_preparation_failure_can_be_removed_and_release_the_session_name() {
     use crate::infrastructure::session_worktree::SystemGit;
     let temp = tempfile::tempdir().unwrap();
@@ -1694,7 +1785,6 @@ fn existing_session_create_never_reparents_the_session() {
 
 #[test]
 fn creator_conversation_survives_agent_reuse_restart_and_history_retention() {
-    use crate::usecase::agent_ipc::AgentConversationIdentities;
     let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let creator = AgentId::new();
     let first = AgentContinuationRef::new();
@@ -1710,7 +1800,13 @@ fn creator_conversation_survives_agent_reuse_restart_and_history_retention() {
                 }),
             )
             .unwrap();
-        expected.insert(runtime.session_id(name).unwrap(), continuation);
+        expected.insert(
+            runtime.session_id(name).unwrap(),
+            SessionConversations {
+                creator: Some(continuation),
+                director: Some(continuation),
+            },
+        );
     }
     // Reusing a session from a new conversation never rewrites its origin.
     runtime
@@ -1722,14 +1818,7 @@ fn creator_conversation_survives_agent_reuse_restart_and_history_retention() {
             }),
         )
         .unwrap();
-    let mut identities = AgentConversationIdentities {
-        workspace_id: runtime.workspace_id().unwrap(),
-        by_creator: BTreeMap::from([((creator, None), BTreeSet::from([first, second]))]),
-    };
-    assert_eq!(
-        runtime.session_creator_continuations(&identities).unwrap(),
-        expected
-    );
+    assert_eq!(runtime.session_conversations().unwrap(), expected);
     drop(runtime);
     let restored = SessionRuntime::open(
         tmp.path().to_path_buf(),
@@ -1739,11 +1828,7 @@ fn creator_conversation_survives_agent_reuse_restart_and_history_retention() {
         SystemSessionWorktreeIo,
     )
     .unwrap();
-    identities.by_creator.clear();
-    assert_eq!(
-        restored.session_creator_continuations(&identities).unwrap(),
-        expected
-    );
+    assert_eq!(restored.session_conversations().unwrap(), expected);
     assert_eq!(
         restored
             .created_session_ids(&CallerRef {
@@ -1821,79 +1906,34 @@ fn creator_conversation_is_validated_and_part_of_create_replay_identity() {
 }
 
 #[test]
-fn creator_conversations_require_exact_unambiguous_retained_identity() {
-    use crate::usecase::agent_ipc::AgentConversationIdentities;
+fn legacy_conversation_stays_unknown_when_an_agent_starts_new_conversations() {
     let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
     let creator = AgentId::new();
     runtime
         .handle(
             SessionAction::Create,
             &operation(),
-            &json!({"name":"owned", "creator_agent_id":creator}),
+            &json!({"name":"legacy", "creator_agent_id":creator}),
         )
         .unwrap();
-    runtime
-        .handle(
-            SessionAction::Create,
-            &operation(),
-            &json!({"name":"legacy"}),
-        )
-        .unwrap();
-    let state = runtime.state().unwrap();
-    let session = state
-        .sessions
-        .iter()
-        .find(|session| session.name == "owned")
-        .unwrap()
-        .session_id;
-    let continuation = AgentContinuationRef::new();
-    let mut identities = AgentConversationIdentities {
-        workspace_id: state.workspace_id,
-        by_creator: BTreeMap::from([((creator, None), BTreeSet::from([continuation]))]),
-    };
+    let legacy = runtime.session_id("legacy").unwrap();
     assert_eq!(
-        runtime.session_creator_continuations(&identities).unwrap(),
-        BTreeMap::from([(session, continuation)])
+        runtime.session_conversations().unwrap()[&legacy],
+        SessionConversations::default()
     );
-    // Conflicting provenance must never pick an arbitrary conversation.
-    identities
-        .by_creator
-        .get_mut(&(creator, None))
-        .unwrap()
-        .insert(AgentContinuationRef::new());
-    assert!(
-        runtime
-            .session_creator_continuations(&identities)
-            .unwrap()
-            .is_empty()
-    );
-    identities.by_creator.clear();
-    assert!(
-        runtime
-            .session_creator_continuations(&identities)
-            .unwrap()
-            .is_empty()
-    );
-    for key in [(AgentId::new(), None), (creator, Some(SessionId::new()))] {
-        identities.by_creator = BTreeMap::from([(key, BTreeSet::from([continuation]))]);
-        assert!(
-            runtime
-                .session_creator_continuations(&identities)
-                .unwrap()
-                .is_empty()
+    for name in ["new-a", "new-b"] {
+        runtime.handle(SessionAction::Create, &operation(), &json!({
+            "name":name, "creator_agent_id":creator, "creator_continuation":AgentContinuationRef::new()
+        })).unwrap();
+        assert_eq!(
+            runtime.session_conversations().unwrap()[&legacy],
+            SessionConversations::default()
         );
     }
-    identities.by_creator = BTreeMap::from([((creator, None), BTreeSet::from([continuation]))]);
-    identities.workspace_id = WorkspaceId::new();
-    assert!(
-        runtime
-            .session_creator_continuations(&identities)
-            .unwrap()
-            .is_empty()
-    );
+    // There is deliberately no runtime-history input: collection cannot change membership.
     std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
     assert_eq!(
-        runtime.session_creator_continuations(&identities),
+        runtime.session_conversations(),
         Err(SessionRuntimeError::Storage)
     );
 }

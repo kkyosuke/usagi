@@ -2043,6 +2043,9 @@ exit 0
     assert_eq!(visible[0]["name"], "caller-owned");
     assert_eq!(visible[0]["parent_session_name"], "mcp-caller");
     assert!(visible[0]["creator_continuation"].is_string());
+    // The caller's parent session was created by a human, so its root
+    // conversation is unknown even though this immediate creator is known.
+    assert!(visible[0].get("director_continuation").is_none());
     assert!(visible[0].get("creator_agent_id").is_none());
 
     let dispatched = mcp.tool(
@@ -2088,6 +2091,10 @@ exit 0
     assert_eq!(
         durable["creator_continuation"],
         visible[0]["creator_continuation"]
+    );
+    assert_eq!(
+        durable["director_continuation"],
+        visible[0]["director_continuation"]
     );
 }
 

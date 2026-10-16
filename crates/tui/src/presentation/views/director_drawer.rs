@@ -77,6 +77,7 @@ pub struct DirectorDrawerProjection {
     pub route: DirectorRoute,
     pub conversations: Vec<DirectorConversation>,
     pub organization: Vec<DirectorOrganizationRow>,
+    pub organization_cursor: usize,
     pub terminal_view: Option<TerminalViewProjection>,
     /// Safe reason for a selected interrupted conversation, outside PTY output.
     pub interrupted_detail: Option<String>,
@@ -311,7 +312,7 @@ fn organization_body(
     mut rows: Vec<String>,
     projection: &DirectorDrawerProjection,
 ) -> Vec<String> {
-    let footer_hint = "Ctrl-O n New · Enter Console · Esc close";
+    let mut footer_hint = "Ctrl-O n New · Enter Console · Esc close";
     let content_capacity = height.saturating_sub(rows.len() + 1);
     if !projection.conversations.is_empty() {
         let selected = projection
@@ -347,17 +348,35 @@ fn organization_body(
         .iter()
         .any(|conversation| conversation.selected);
     if selected_conversation && !projection.organization.is_empty() {
-        rows.push(Role::Accent.style().bold().paint("Agent / Sessions"));
-        for member in &projection.organization {
-            let branch = if member.depth == 0 { "" } else { "└─ " };
-            rows.push(format!(
-                "{}{}{}  {}",
-                "  ".repeat(member.depth),
-                branch,
-                member.label,
-                Style::new().dim().paint(&member.status)
-            ));
+        let cursor = projection
+            .organization_cursor
+            .min(projection.organization.len() - 1);
+        if rows.len() + 2 < height {
+            rows.push(Role::Accent.style().bold().paint(&format!(
+                "Agent / Sessions · {}/{} · Ctrl-O ↑↓",
+                cursor + 1,
+                projection.organization.len()
+            )));
         }
+        let members = projection
+            .organization
+            .iter()
+            .map(|member| {
+                let branch = if member.depth == 0 { "" } else { "└─ " };
+                format!(
+                    "{}{}{}  {}",
+                    "  ".repeat(member.depth),
+                    branch,
+                    member.label,
+                    Style::new().dim().paint(&member.status)
+                )
+            })
+            .collect::<Vec<_>>();
+        let capacity = height.saturating_sub(rows.len() + 1);
+        if capacity == 0 {
+            footer_hint = "Resize to view Sessions · Enter Console · Esc close";
+        }
+        rows.extend(modal::bounded_list_rows(&members, cursor, capacity));
     } else if projection.conversations.is_empty() {
         empty_conversation_rows(&mut rows, content_capacity);
     } else if rows.len() < height.saturating_sub(1) {

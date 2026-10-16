@@ -20,10 +20,12 @@ use crate::domain::session_lifecycle::{
 /// list, overview, and status replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRuntimeObservation {
-    /// Display-only association with the creator's retained conversation.
-    /// Missing or ambiguous provenance never implies ownership.
+    /// Display-only association captured from the authenticated creator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_continuation: Option<crate::domain::id::AgentContinuationRef>,
+    /// Root organization membership, retained when parent sessions are removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub director_continuation: Option<crate::domain::id::AgentContinuationRef>,
     pub agent_phase: AgentPhase,
     pub agent_resumable: bool,
     pub agent_resume_reason: ProviderResumeReason,
@@ -103,6 +105,7 @@ impl From<SessionListLifecycle> for ManagedSession {
             parent_session_id: session.parent_session_id,
             creator_agent_id: None,
             creator_continuation: None,
+            director_continuation: None,
             role_id: session.role_id,
             lifecycle: session.lifecycle,
             attempt: session.attempt,
@@ -269,6 +272,7 @@ mod tests {
 
     fn runtime() -> SessionRuntimeObservation {
         SessionRuntimeObservation {
+            director_continuation: None,
             creator_continuation: None,
             agent_phase: AgentPhase::Interrupted,
             agent_resumable: true,
@@ -288,6 +292,7 @@ mod tests {
     fn creator_conversation_is_optional_display_metadata() {
         let mut observation = runtime();
         observation.creator_continuation = Some(crate::domain::id::AgentContinuationRef::new());
+        observation.director_continuation = Some(crate::domain::id::AgentContinuationRef::new());
         let encoded = serde_json::to_value(&observation).unwrap();
         assert_eq!(
             serde_json::from_value::<SessionRuntimeObservation>(encoded.clone()).unwrap(),
@@ -299,12 +304,25 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("creator_continuation");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("director_continuation");
+        assert_eq!(
+            serde_json::from_value::<SessionRuntimeObservation>(legacy.clone())
+                .unwrap()
+                .director_continuation,
+            None
+        );
         assert_eq!(
             serde_json::from_value::<SessionRuntimeObservation>(legacy)
                 .unwrap()
                 .creator_continuation,
             None
         );
+        let mut malformed = encoded.clone();
+        malformed["director_continuation"] = serde_json::json!("not-an-id");
+        assert!(serde_json::from_value::<SessionRuntimeObservation>(malformed).is_err());
         let mut malformed = encoded;
         malformed["creator_continuation"] = serde_json::json!("not-an-id");
         assert!(serde_json::from_value::<SessionRuntimeObservation>(malformed).is_err());
