@@ -17,9 +17,9 @@ pub(super) fn unavailable(state: &mut AppState, workspace: WorkspaceId) -> Vec<E
     if workspace != state.workspace {
         return Vec::new();
     }
-    if let Some(overlay) = state.decision_overlay.as_mut()
+    if state.overlay == Some(Overlay::Decisions)
+        && let Some(overlay) = state.decision_overlay.as_mut()
         && overlay.requested.take().is_some()
-        && state.overlay == Some(Overlay::Decisions)
     {
         overlay.error = Some("This question could not be loaded. Close and try again.");
     }
@@ -32,7 +32,7 @@ fn open_requested(state: &mut AppState) -> bool {
     let requested = state.decision_overlay.as_mut().and_then(|overlay| {
         // A resident observer may deliver an old inventory before the
         // explicitly woken read. Recover only the originally chosen ID.
-        let retry = if visible && overlay.error.is_some() {
+        let retry = if overlay.error.is_some() {
             overlay.exact
         } else {
             None
