@@ -50,7 +50,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
 
-複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
+複数の workspace の対応待ちは、右上の黄色い `Attention` 通知からまとめて確認し、対象へ移動できます。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュー可能を desktop に通知します。
 通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。

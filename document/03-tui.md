@@ -215,8 +215,18 @@ Home の top-level `update` は event family の routing を担い、独立し�
 
 ### workspace 横断の対応待ち
 
-project bar の `! Attention` または `Ctrl-O i` は、開いている全 project の対応待ち一覧を開く。
+project bar 右端の `Attention` または `Ctrl-O i` は、開いている全 project の対応待ち一覧を開く。
 この節が横断一覧の表示・観測契約の正本である。登録済みでも deck に開いていない workspace は対象外とする。
+
+通知は project tab・`+ Open` と余白で分け、対応が必要なときは Home の notice と同じ黄色で表示する。
+件数は判断・レビュー・停止の合計であり、System wait と Running は数えない。
+
+| 右端の表示 | 意味 |
+|---|---|
+| `! Attention (N)`（黄色） | 全 project の新しい観測に対応待ちが N 件ある |
+| `! Attention (N+)`（黄色） | 確認できた対応待ちが N 件あり、未取得・古い観測の project もある |
+| `! Attention (?)`（黄色） | 確認できた対応待ちはなく、未取得・古い観測の project がある |
+| `Attention`（dim） | 全 project を確認済みで対応待ちがない |
 
 | 分類 | 対象 | Enter の移動先 |
 |---|---|---|
@@ -232,7 +242,7 @@ project bar の `! Attention` または `Ctrl-O i` は、開いている全 proj
 Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
 明示的な質問がなければ System wait として表示する。
 
-project tab の `!N` は判断・レビュー・停止の対応件数、`?` は未取得、`!?` は取得失敗または古い観測を示す。
+project tab の黄色い `!N` は判断・レビュー・停止の対応件数、`?` は未取得、黄色い `!?` は取得失敗または古い観測を示す。
 背景観測は Garden を閉じていても継続し、1 round 最大16 project を順番に巡回する。成功後3秒、全件取得失敗後5秒で再取得する。
 30秒以上更新されない結果は Stale とする。取得失敗時は以前の行を Stale で残し、件数集計と移動の対象から外す。
 一覧の Unknown projects は未取得・失敗した project 数であり、未取得を「対応待ちゼロ」とみなさない。
