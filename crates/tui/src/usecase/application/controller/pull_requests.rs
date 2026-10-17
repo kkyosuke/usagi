@@ -10,10 +10,30 @@ use usagi_core::domain::id::SessionId;
 use usagi_core::domain::pr_inventory::{PrEntry, PrIdentity, PrState};
 use usagi_core::domain::settings::PrAutoOpen;
 
-use super::{AppKey, AppState, Effect, HomeMode, Notice, Overlay, Route, SafeError, Target};
+use super::{
+    AppEvent, AppKey, AppState, Effect, HomeMode, Notice, Overlay, Route, SafeError, Target,
+};
 
 /// About three seconds at the shell's 16 ms logical tick.
 pub(super) const MERGE_CELEBRATION_TICKS: u64 = 192;
+
+/// A new user interaction supersedes an inbox visit that has not opened its modal.
+pub(super) fn cancel_inbox_wait(state: &mut AppState, event: &AppEvent) {
+    if matches!(
+        event,
+        AppEvent::Key(_)
+            | AppEvent::Pointer { .. }
+            | AppEvent::Input(_)
+            | AppEvent::WorkspaceDrawerFocused(_)
+            | AppEvent::GardenClick(_)
+            | AppEvent::VisitSession(_)
+    ) && state.pr_focus.is_some()
+        && let Some(target) = state.pr_request.take()
+    {
+        state.pr_cancelled.insert(target);
+        state.pr_focus = None;
+    }
+}
 
 impl AppState {
     /// Latest daemon PR rows for one target (workspace root or session).
@@ -196,28 +216,22 @@ impl PrOverlay {
 }
 /// Reduce one daemon inventory snapshot for `target`.
 pub(super) fn absorb(state: &mut AppState, target: Target, revision: u64, prs: &[PrEntry]) {
+    let mut cancelled = false;
     let detected = match absorb_pr_snapshot(state, target, revision, prs) {
         // A stale snapshot proves nothing, so it must not rebuild the modal's
         // rows or clear the error the last real answer left there. It still
         // answers the request that provoked it.
-        PrSnapshot::Ignored => {
-            if state
-                .pr_overlay
-                .as_ref()
-                .is_some_and(|overlay| overlay.target == target)
-            {
-                // An unchanged reply also finishes an explicit cached-row visit.
-                let _ = take_focus(state, target);
-            }
-            None
-        }
+        PrSnapshot::Ignored => None,
         PrSnapshot::Absorbed(detected) => {
+            cancelled = state.pr_cancelled.remove(&target);
             refresh_pr_modal(state, target, detected.as_ref());
             detected
         }
     };
     settle_pr_request(state, target, detected.as_ref());
-    announce_detected_pr(state, target, detected.as_ref());
+    if !cancelled {
+        announce_detected_pr(state, target, detected.as_ref());
+    }
 }
 
 /// Report why the inventory for `target` could not be read.
@@ -225,13 +239,6 @@ pub(super) fn absorb(state: &mut AppState, target: Target, revision: u64, prs: &
 /// An open modal keeps its rows and says they may be stale; a request that has
 /// no modal yet becomes one, so an explicit `p` never fails silently.
 pub(super) fn fail(state: &mut AppState, target: Target, error: &SafeError) {
-    if state
-        .pr_focus
-        .as_ref()
-        .is_some_and(|(focused, _)| *focused == target)
-    {
-        state.pr_focus = None;
-    }
     if let Some(overlay) = state
         .pr_overlay
         .as_mut()
@@ -249,6 +256,9 @@ pub(super) fn fail(state: &mut AppState, target: Target, error: &SafeError) {
 /// Drop the inventory, modal, and request of every target the workspace
 /// snapshot no longer contains, so a later session cannot inherit their rows.
 pub(super) fn forget_untracked_targets(state: &mut AppState) {
+    state
+        .pr_cancelled
+        .retain(|target| is_tracked(&state.sessions, *target));
     let before = state.prs.len();
     state
         .prs
@@ -340,7 +350,7 @@ fn refresh_pr_modal(state: &mut AppState, target: Target, detected: Option<&PrId
     else {
         return;
     };
-    if let Some(identity) = take_focus(state, target) {
+    if let Some(identity) = focused_identity(state, target) {
         show_focused(state, target, &identity);
         return;
     }
@@ -371,7 +381,7 @@ fn settle_pr_request(state: &mut AppState, target: Target, detected: Option<&PrI
         return;
     }
     state.pr_request = None;
-    if let Some(identity) = take_focus(state, target) {
+    if let Some(identity) = focused_identity(state, target) {
         if state.can_surface_pr_modal() {
             show_focused(state, target, &identity);
         }
@@ -446,16 +456,12 @@ pub(super) fn open_identity(state: &mut AppState, identity: &PrIdentity) -> Vec<
     open_with_focus(state, target, Some(identity))
 }
 
-fn take_focus(state: &mut AppState, target: Target) -> Option<PrIdentity> {
-    if state
+fn focused_identity(state: &AppState, target: Target) -> Option<PrIdentity> {
+    state
         .pr_focus
         .as_ref()
-        .is_some_and(|(focused, _)| *focused == target)
-    {
-        state.pr_focus.take().map(|(_, identity)| identity)
-    } else {
-        None
-    }
+        .filter(|(focused, _)| *focused == target)
+        .map(|(_, identity)| identity.clone())
 }
 
 fn show_focused(state: &mut AppState, target: Target, identity: &PrIdentity) {
@@ -501,14 +507,14 @@ fn open_with_focus(
 pub(super) fn update_key(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
     if matches!(
         key,
-        AppKey::Up
-            | AppKey::Down
-            | AppKey::Left
-            | AppKey::Right
-            | AppKey::Enter
-            | AppKey::Char('c')
-            | AppKey::CtrlX
-    ) {
+        AppKey::Up | AppKey::Down | AppKey::Left | AppKey::Right
+    ) || (matches!(key, AppKey::Enter | AppKey::Char('c') | AppKey::CtrlX)
+        && state
+            .pr_overlay
+            .as_ref()
+            .and_then(PrOverlay::selected_pr)
+            .is_some())
+    {
         state.pr_focus = None;
     }
     if matches!(key, AppKey::Left | AppKey::Right) {

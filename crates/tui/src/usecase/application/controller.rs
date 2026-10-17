@@ -575,6 +575,8 @@ pub struct DecisionOverlayState {
     editor: Option<DecisionEditor>,
     requested: Option<UserDecisionId>,
     error: Option<&'static str>,
+    /// A disappearing inbox editor must not fall back to another question.
+    exact: bool,
 }
 
 impl DecisionOverlayState {
@@ -1154,8 +1156,10 @@ pub struct AppState {
     /// it. The reducer keeps it only so the returning snapshot can open the
     /// modal on the target the user actually asked for.
     pr_request: Option<Target>,
-    /// Exact inbox destination while its inventory is being confirmed.
+    /// Exact inbox destination until the user changes or acts on its selection.
     pr_focus: Option<(Target, PrIdentity)>,
+    /// The next new inventory must not announce a cancelled inbox visit.
+    pr_cancelled: BTreeSet<Target>,
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
@@ -1353,6 +1357,7 @@ impl AppState {
             pr_overlay: None,
             pr_request: None,
             pr_focus: None,
+            pr_cancelled: BTreeSet::new(),
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
@@ -2725,6 +2730,7 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
 
 #[must_use]
 fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+    pull_requests::cancel_inbox_wait(state, &event);
     match event {
         AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
@@ -4325,6 +4331,10 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         }
         if !present {
             overlay.editor = None;
+            if overlay.exact {
+                overlay.error =
+                    Some("This question is no longer available. Close and refresh the inbox.");
+            }
         }
     }
     overlay.selected = overlay
@@ -4355,6 +4365,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         && matches!(&key, AppKey::Escape)
     {
         overlay.editor = None;
+        overlay.exact = false;
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
@@ -4469,6 +4480,7 @@ fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Ve
         editor: None,
         requested,
         error: None,
+        exact: requested.is_some(),
     });
     vec![Effect::RefreshDecisions {
         workspace: state.workspace,

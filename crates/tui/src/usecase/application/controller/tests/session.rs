@@ -2279,6 +2279,66 @@ fn inbox_question_opens_the_exact_refreshed_editor_and_never_a_replacement() {
 }
 
 #[test]
+fn inbox_question_disappearing_after_loading_never_opens_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        second.decision_id
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        first.decision_id
+    );
+}
+
+#[test]
 fn inbox_question_failures_and_cancellation_do_not_open_other_questions() {
     let workspace = WorkspaceId::new();
     let decision = pending_decision(workspace);

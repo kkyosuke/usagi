@@ -2277,6 +2277,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         editor: Some(DecisionEditor::new(decision)),
         requested: None,
         error: None,
+        exact: false,
     });
     state.decisions.clear();
     reconcile_decision_overlay(&mut state);
@@ -2304,6 +2305,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         editor: None,
         requested: None,
         error: None,
+        exact: false,
     });
     for key in [
         AppKey::Up,
@@ -2368,6 +2370,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         editor: Some(DecisionEditor::new(decision)),
         requested: None,
         error: None,
+        exact: false,
     });
     let _ = update_decisions_overlay(&mut state, AppKey::Enter);
     let _ = update_decisions_overlay(&mut state, AppKey::Home);
@@ -2382,6 +2385,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         editor: Some(DecisionEditor::new(second.clone())),
         requested: None,
         error: None,
+        exact: false,
     });
     reconcile_decision_overlay(&mut state);
     let _ = update(
@@ -2490,6 +2494,7 @@ fn coverage_contract_executes_guarded_reducer_success_paths() {
         editor: Some(DecisionEditor::new(decision.clone())),
         requested: None,
         error: None,
+        exact: false,
     });
     let _ = update(
         &mut state,

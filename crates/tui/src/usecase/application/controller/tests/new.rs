@@ -714,6 +714,7 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
         editor: Some(editor),
         requested: None,
         error: None,
+        exact: false,
     };
     assert_eq!(overlay.selected(), 0);
 

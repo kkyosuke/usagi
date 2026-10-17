@@ -130,6 +130,7 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                     editor: Some(DecisionEditor::new(decision)),
                     requested: None,
                     error: None,
+                    exact: false,
                 });
             }
         }

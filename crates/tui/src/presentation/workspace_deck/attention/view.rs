@@ -660,6 +660,27 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Safe error"))
         );
+        list.view = InboxView::Actions;
+        let tiny = layout(&deck.slots, &list, Some("Target unavailable"), 10, 40);
+        assert!(!tiny.items.is_empty());
+        assert!(tiny.body.iter().any(|line| line.contains("Resize")));
+        assert!(
+            tiny.body
+                .iter()
+                .any(|line| line.contains("Target unavailable"))
+        );
+        assert!(tiny.item_hits.is_empty());
+        assert_eq!(
+            handle_input(
+                &mut list,
+                &deck.slots,
+                Some("Target unavailable"),
+                &Key::Enter,
+                10,
+                40,
+            ),
+            OverlayIntent::Stay
+        );
         let defaults = layout(&deck.slots, &list, None, 0, 0);
         assert!(defaults.inner > 0);
     }
