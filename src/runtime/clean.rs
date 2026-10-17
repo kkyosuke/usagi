@@ -10,6 +10,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::domain::id::DaemonGeneration;
+use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, confined_git_command, delete_branch, list_worktrees, remove_worktree,
 };
@@ -235,7 +236,11 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
                 .ok_or_else(|| io::Error::other("worktree has no canonical session name"))?;
             ensure_unlinked(root, name)?;
             ensure_managed_worktree(&SystemGit, root, path, name)?;
-            usagi_core::infrastructure::artifacts::archive(path)?;
+            usagi_core::infrastructure::artifacts::archive_before_removal(
+                path,
+                force,
+                &ErrorLog::record,
+            )?;
             remove_worktree(&SystemGit, root, path, force).map_err(io::Error::other)
         }
         CleanCandidate::Branch { root, name, .. } => {

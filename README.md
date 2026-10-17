@@ -49,6 +49,8 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | session ごとの生成物を探しづらい | [Artifacts](document/03-tui.md#artifacts) で横断検索し、削除後の保管済み成果物も開ける |
 
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
+session 削除の `--force` は、保管に失敗した成果物も破棄します。
+詳細は [削除前の成果物保管](document/05-daemon.md#session-artifacts-と削除前の保管) を参照してください。
 
 複数の workspace の対応待ちは、右上の黄色い `Attention` 通知からまとめて確認し、対象へ移動できます。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。

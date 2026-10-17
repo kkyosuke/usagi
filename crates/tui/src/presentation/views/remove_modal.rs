@@ -68,6 +68,13 @@ fn body(state: &RemoveModal) -> Vec<String> {
             .paint("  force removes dirty worktrees and unmerged branches"),
         None => String::new(),
     });
+    if state.force && state.feedback.is_none() {
+        lines.push(
+            Role::Danger
+                .style()
+                .paint("  unarchived artifacts may also be discarded"),
+        );
+    }
     lines
 }
 
@@ -129,6 +136,7 @@ mod tests {
         assert!(text.contains("review"));
         assert!(text.contains("[…]"));
         assert!(text.contains("force removes dirty worktrees"));
+        assert!(text.contains("unarchived artifacts may also be discarded"));
 
         let empty = RemoveModal {
             entries: Vec::new(),

@@ -218,7 +218,7 @@ pub enum Command {
         /// 検出した安全な候補を実際に削除する（省略時は dry-run）
         #[arg(long)]
         apply: bool,
-        /// dirty worktree と未マージ branch も削除する（--apply が必要）
+        /// dirty worktree・未マージ branch・保管できない成果物も破棄する（--apply が必要）
         #[arg(long, requires = "apply")]
         force: bool,
     },
@@ -402,7 +402,7 @@ pub enum SessionCommand {
     },
     Remove {
         name: String,
-        /// Force removal of a dirty worktree.
+        /// Force removal of a dirty worktree, discarding artifacts if archiving fails.
         #[arg(long)]
         force: bool,
         /// Discard a daemon-diagnosed integrity orphan, including unregistered

@@ -2193,16 +2193,15 @@ pub(super) fn clean_orphan_session_resources(
         }
         let result = match candidate {
             CleanCandidate::Worktree { path, .. } => {
-                usagi_core::infrastructure::artifacts::archive(path)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| {
-                        remove_worktree(
-                            &SystemGit,
-                            &root,
-                            path,
-                            candidate.requires_force() && force,
-                        )
-                    })
+                usagi_core::infrastructure::artifacts::archive_before_removal(
+                    path,
+                    force,
+                    &ErrorLog::record,
+                )
+                .map_err(anyhow::Error::from)
+                .and_then(|()| {
+                    remove_worktree(&SystemGit, &root, path, candidate.requires_force() && force)
+                })
             }
             CleanCandidate::Branch { name, .. } => {
                 delete_branch(&SystemGit, &root, name, candidate.requires_force() && force)
