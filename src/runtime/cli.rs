@@ -136,15 +136,22 @@ mod action_io {
             (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
                 match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
                     Ok(outcome) => {
-                        let queued = matches!(outcome, daemon::ManagedUpdateSync::Deferred)
-                            && std::env::var("USAGI_MANAGED_UPDATE").as_deref() == Ok("1")
+                        let managed_request = std::env::var("USAGI_MANAGED_UPDATE").as_deref()
+                            == Ok("1")
                             && std::env::var("USAGI_UPDATE_SYNC_RETRY").as_deref() != Ok("1");
+                        let queued = managed_request
+                            && matches!(outcome, daemon::ManagedUpdateSync::Deferred);
                         if queued {
                             daemon::schedule_deferred_update()?;
                             writeln!(
                                 out,
                                 "daemon sync: queued for automatic retry after live runtimes finish"
                             )?;
+                        } else if managed_request {
+                            // A successful update also retires a reservation
+                            // whose detached worker exited before finishing.
+                            let data_dir = daemon::prepare_private_data_dir()?;
+                            daemon::complete_deferred_update(&data_dir)?;
                         }
                         Ok(managed_update_sync_exit_code(
                             outcome,

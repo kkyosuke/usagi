@@ -20,7 +20,7 @@ mod tenant_control;
 mod workers;
 
 pub(crate) use managed_update::{ManagedUpdateSync, sync_after_update};
-pub(crate) use pending_update::schedule_deferred_update;
+pub(crate) use pending_update::{complete_deferred_update, schedule_deferred_update};
 
 use ipc_accept::{
     AcceptedStream, EstablishedResponseWriter, IpcReady, ObservedChildren,

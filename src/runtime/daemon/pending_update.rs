@@ -16,6 +16,7 @@ use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::OperationId;
 use usagi_core::infrastructure::ipc::BuildIdentity;
+use usagi_core::infrastructure::paths::{self, DataHome};
 use usagi_core::infrastructure::persistence::json_file;
 
 use super::instance_lock::{
@@ -114,6 +115,19 @@ pub(crate) fn schedule_deferred_update() -> io::Result<()> {
     })
 }
 
+/// A later managed synchronization can complete while an earlier worker is no
+/// longer alive. The installer still owns publication custody here, so every
+/// reservation preceding this successful synchronization is satisfied.
+pub(crate) fn complete_deferred_update(data_dir: &Path) -> io::Result<()> {
+    let store = Store::new(data_dir);
+    let _state = store.lock()?;
+    match std::fs::remove_file(store.0.join(STATE_FILE)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Publication and the worker's final empty check share the state lock. The
 /// worker releases its lease *inside* that final section, so a newly queued
 /// update either wakes the existing worker or launches a successor.
@@ -123,35 +137,50 @@ fn enqueue(
     spawn: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<()> {
     let _state = store.lock()?;
-    store.write(&PendingUpdate {
+    let mut pending = PendingUpdate {
         schema_version: 1,
         request_id: OperationId::new(),
         target,
         queued_at: Utc::now(),
         state: RetryState::Waiting,
         attempts: 0,
-    })?;
+    };
+    store.write(&pending)?;
     if let Some(available) = store.worker()? {
         drop(available);
-        spawn()?;
+        if let Err(error) = spawn() {
+            pending.state = RetryState::Failed;
+            store.write(&pending)?;
+            return Err(error);
+        }
     }
     Ok(())
 }
 
-fn worker_command(executable: &Path, data_dir: &Path) -> Command {
+fn worker_command(
+    executable: &Path,
+    data_dir: &Path,
+    mode: paths::RuntimeMode,
+) -> io::Result<Command> {
+    // The worker deliberately leaves the invoking worktree. Freeze both halves
+    // of the selected data home before changing cwd so a relative USAGI_HOME
+    // cannot select another state directory or another installation afterward.
+    let data_home = DataHome::from_selected(std::path::absolute(data_dir)?, mode);
     let mut command = Command::new(executable);
     command
         .args(["daemon", "continue-update"])
-        .current_dir(data_dir)
+        .current_dir(data_home.selected())
+        .env(paths::DATA_DIR_ENV, data_home.base())
+        .env(paths::RUNTIME_MODE_ENV, data_home.mode().as_env_value())
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    command
+    Ok(command)
 }
 
 fn spawn_worker(executable: &Path, data_dir: &Path) -> io::Result<()> {
-    let child = worker_command(executable, data_dir).spawn()?;
+    let child = worker_command(executable, data_dir, paths::runtime_mode())?.spawn()?;
     // Reap when the caller remains alive, while letting the detached worker
     // outlive the update command or its TUI when that caller exits first.
     reap_child(child);

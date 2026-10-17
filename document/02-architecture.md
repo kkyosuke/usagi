@@ -999,8 +999,11 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   再試行には同じ検証済み embedded installer の同期専用 mode を使い、`update.lock` 内でその時点の installed binary を
   呼ぶ。download・binary 置換を行わず、後から選ばれた別 build を古い worker が上書きしない。
   request ID を照合して完了した予約だけを除去し、予約の書き込みと worker の最終 empty check を同じ record lock で
-  直列化するため、切り替え中に来た次の予約を取り落とさない。worker の process crash 後も予約は残り、次の update で再開する。
-  一時的な同期失敗は再試行し、未対応 binary は予約を失敗として残す。`daemon status` は予約先 build と状態を read-only に表示する。
+  直列化するため、切り替え中に来た次の予約を取り落とさない。worker の process crash 後も予約は残り、次の update が
+  再び保留されれば再開し、同期を完了すれば以前の予約も除去する。worker の data home base と runtime mode は、起動元の
+  相対 `USAGI_HOME` や cwd の寿命に依存しない絶対パスの組として渡す。
+  一時的な同期失敗は再試行し、worker の起動失敗や未対応 binary は予約を失敗として残す。
+  `daemon status` は予約先 build と状態を read-only に表示する。
   同期の安全条件と daemon 不在時に起動しない契約は初回と同じで、live runtime を強制終了しない。
   単一 workspace の Agent 継続による保留では、会話を引き継ぐ `usagi daemon restart --restart-agents` でも切り替えられる。
   選択した旧 release が managed daemon sync capability を解釈できない場合や、published daemon が server-side handoff fence を証明できない場合も、

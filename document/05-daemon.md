@@ -337,7 +337,7 @@ recovery、runtime state の hydrate、serve する workspace の adopt を経�
 
 ### macOS の service context
 
-macOS では `daemon serve`（active / standby）と bootstrap broker が worker を起動する前に、effective UID の
+macOS では `daemon serve`（active / standby）、bootstrap broker、保留した更新の自動再試行 process が worker を起動する前に、effective UID の
 per-user Background bootstrap namespace を選ぶ。process group の分離だけでは起動元の login namespace を
 引き継ぐため、logout 後も生存する daemon の子 process が OS ユーザー情報や DNS を参照できなくなる。
 kernel の bootstrap port と libSystem の cached port を同じ namespace に揃え、Agent・generic Terminal・broker からの

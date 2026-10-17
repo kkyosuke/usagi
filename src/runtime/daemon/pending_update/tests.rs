@@ -100,7 +100,7 @@ fn invalid_or_failed_requests_remain_visible_and_can_be_requeued() {
         Err(io::Error::other("spawn failed"))
     })
     .unwrap_err();
-    assert!(store.read().unwrap().is_some());
+    assert_eq!(store.read().unwrap().unwrap().state, RetryState::Failed);
     let worker = store.worker().unwrap().unwrap();
     let error = drain(&store, &worker, &mut || Ok(Some(2)), &mut || {
         panic!("unsupported binaries stop retrying")
@@ -160,6 +160,25 @@ fn status_reports_the_target_and_automatic_retry_state() {
 }
 
 #[test]
+fn a_later_successful_update_completes_an_orphaned_reservation() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::new(directory.path());
+    // The enqueuing process could have exited after launching a worker which
+    // then crashed. Successful synchronization by a later installer satisfies
+    // that earlier reservation even when its original worker never returns.
+    enqueue(&store, build("5.0.2"), &mut || Ok(())).unwrap();
+    assert!(store.worker().unwrap().is_some());
+    complete_deferred_update(directory.path()).unwrap();
+    assert!(store.read().unwrap().is_none());
+    complete_deferred_update(directory.path()).unwrap();
+
+    // An unexpected filesystem error must not turn completion into a silent
+    // success or let the caller claim that pending state has been retired.
+    std::fs::create_dir(store.0.join(STATE_FILE)).unwrap();
+    assert!(complete_deferred_update(directory.path()).is_err());
+}
+
+#[test]
 fn synchronization_reuses_only_the_verified_embedded_installer() {
     assert!(
         synchronization_script(&usagi_cli::cli::commands::update::installer_request(false))
@@ -181,12 +200,55 @@ fn synchronization_reuses_only_the_verified_embedded_installer() {
 #[test]
 fn the_worker_has_no_terminal_streams_or_original_worktree_dependency() {
     let directory = tempfile::tempdir().unwrap();
-    let command = worker_command(Path::new("/installed/usagi"), directory.path());
+    let data_home = DataHome::new(directory.path(), paths::runtime_mode());
+    let command = worker_command(
+        Path::new("/installed/usagi"),
+        &data_home.selected(),
+        data_home.mode(),
+    )
+    .unwrap();
     assert_eq!(command.get_program(), "/installed/usagi");
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         ["daemon", "continue-update"]
     );
-    assert_eq!(command.get_current_dir(), Some(directory.path()));
+    assert_eq!(
+        command.get_current_dir(),
+        Some(data_home.selected().as_path())
+    );
     assert!(spawn_worker(&directory.path().join("missing"), directory.path()).is_err());
+}
+
+#[test]
+fn a_relative_home_keeps_the_same_installation_after_the_worker_changes_cwd() {
+    for mode in [
+        paths::RuntimeMode::Production,
+        paths::RuntimeMode::Development,
+        paths::RuntimeMode::Local,
+    ] {
+        let relative = DataHome::new("relative-update-home", mode);
+        let absolute = DataHome::new(
+            std::env::current_dir()
+                .unwrap()
+                .join("relative-update-home"),
+            mode,
+        );
+        let command =
+            worker_command(Path::new("/installed/usagi"), &relative.selected(), mode).unwrap();
+        let environment = command
+            .get_envs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new(paths::DATA_DIR_ENV)),
+            Some(&Some(absolute.base().as_os_str()))
+        );
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new(paths::RUNTIME_MODE_ENV)),
+            Some(&Some(std::ffi::OsStr::new(mode.as_env_value())))
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(absolute.selected().as_path())
+        );
+    }
 }
