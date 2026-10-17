@@ -1440,7 +1440,7 @@ fn session_start_capture_replaces_the_current_conversation_for_both_providers() 
                 )
                 .unwrap_err()
                 .code,
-            ErrorCode::InvalidArgument
+            ErrorCode::StaleTarget
         );
         assert_eq!(
             runtime.coordinator.snapshot().records[0]
@@ -1450,6 +1450,68 @@ fn session_start_capture_replaces_the_current_conversation_for_both_providers() 
                 .native_session_id
                 .expose_sensitive(),
             "after-clear"
+        );
+    }
+}
+
+#[test]
+fn later_lifecycle_hooks_repair_a_missed_session_start_without_replacing_a_known_conversation() {
+    for (mut runtime, profile, provider) in [
+        (structured_claude_runtime(), "claude", ProviderKind::Claude),
+        (codex_runtime(), "codex", ProviderKind::Codex),
+    ] {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new(profile).unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert!(
+            runtime.coordinator.snapshot().records[0]
+                .provider_resume
+                .is_none()
+        );
+        let native_id = ProviderSessionId::new("recovered-conversation").unwrap();
+        for phase in [AgentPhase::Running, AgentPhase::Waiting, AgentPhase::Ended] {
+            runtime
+                .report_agent_phase_with_session(&credential, phase, Some(native_id.clone()))
+                .unwrap();
+            let snapshot = runtime.coordinator.snapshot();
+            let reference = snapshot.records[0].provider_resume.as_ref().unwrap();
+            assert_eq!(reference.provider, provider);
+            assert_eq!(reference.native_session_id, native_id);
+            assert_eq!(
+                reference.provenance,
+                ProviderCaptureProvenance::ProviderStructured
+            );
+            assert_eq!(
+                reference.last_known_phase,
+                Some(ProviderResumePhase::Running)
+            );
+            assert_eq!(runtime.session_phase(session), phase);
+        }
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new(profile).unwrap(),
+            revision: runtime.coordinator.snapshot().records[0]
+                .launch
+                .plan
+                .profile_revision,
+        }];
+        assert_eq!(
+            runtime
+                .plan_daemon_restart_agents(&expected, true)
+                .unwrap()
+                .agents
+                .len(),
+            1
         );
     }
 }
@@ -1491,6 +1553,25 @@ fn antigravity_pre_invocation_captures_conversation_and_running_phase() {
         Some(ProviderResumePhase::Running)
     );
     assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+
+    // A new AGY invocation can start another conversation in the same live
+    // process; only PreInvocation carries an ID for its Running phase.
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("next-agy-conversation").unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.coordinator.snapshot().records[0]
+            .provider_resume
+            .as_ref()
+            .unwrap()
+            .native_session_id
+            .expose_sensitive(),
+        "next-agy-conversation"
+    );
 }
 
 #[test]

@@ -18,7 +18,10 @@ use serde::Deserialize;
 use usagi_core::domain::{
     agent::ProviderSessionId, session_lifecycle::AgentPhase as ReportedPhase,
 };
-use usagi_core::infrastructure::ipc::{DaemonRequest, McpCallerContext};
+use usagi_core::infrastructure::{
+    client::DaemonClient,
+    ipc::{ClientError, DaemonReply, DaemonRequest, ErrorCode, McpCallerContext},
+};
 
 use crate::cli::{Run, RunOutcome};
 
@@ -38,7 +41,7 @@ impl Run for AgentPhase {
 }
 
 /// hook JSON のうち、この報告が読む field。`session_id` / `conversationId` は provider の
-/// structured starting event でだけ daemon へ渡し、transcript などの他 field は deserialize
+/// structured lifecycle event から daemon へ渡し、transcript などの他 field は deserialize
 /// 対象にせず file も開かない。
 #[derive(Debug, Deserialize)]
 struct PhaseHookInput {
@@ -109,17 +112,74 @@ pub fn request_from_hook(
     if canonical != Some(phase) && !legacy_post_tool {
         return Err(PhaseInputError::WrongEvent);
     }
-    let native_session_id = if matches!(event, "SessionStart" | "PreInvocation") {
-        Some(input.session_id.ok_or(PhaseInputError::InvalidPayload)?)
-    } else {
-        None
-    };
+    if matches!(event, "SessionStart" | "PreInvocation") && input.session_id.is_none() {
+        return Err(PhaseInputError::InvalidPayload);
+    }
+    // Claude/Codex's later hooks can repair a missed SessionStart. AGY uses
+    // Running for both PreInvocation and PreToolUse, so its later hooks omit
+    // the ID: existing daemons interpret an AGY Running ID as a starting event
+    // which may replace the current conversation. SessionEnd only reports phase.
+    let native_session_id = (phase != ReportedPhase::Exited
+        && (declared_event.is_none() || event == "PreInvocation"))
+        .then_some(input.session_id)
+        .flatten();
     Ok(DaemonRequest::AgentPhaseReport {
         phase,
         native_session_id,
         caller_context: credential
             .filter(|value| !value.is_empty())
             .map(|credential| McpCallerContext { credential }),
+    })
+}
+
+/// Report through the current daemon, including the compatibility boundary for
+/// an already-running daemon which only accepts session IDs on starting hooks.
+/// Its dedicated Codex capture request can still backfill a missed session ID
+/// without momentarily reporting the working Agent as ready.
+///
+/// # Errors
+///
+/// Returns authentication, transport, and capture failures unchanged. Only the
+/// exact old starting-hook restriction enables this compatibility path.
+pub fn report_to_daemon(
+    client: &mut dyn DaemonClient,
+    request: DaemonRequest,
+) -> Result<DaemonReply, ClientError> {
+    let result = client.request(request.clone());
+    if !matches!(&result, Err(ClientError::Protocol(error))
+        if error.code == ErrorCode::InvalidArgument
+            && error.message == "provider session ID is only valid for a starting hook")
+    {
+        return result;
+    }
+    let DaemonRequest::AgentPhaseReport {
+        phase,
+        native_session_id: Some(native_session_id),
+        caller_context,
+    } = request
+    else {
+        return result;
+    };
+    if phase == ReportedPhase::Ready {
+        return result;
+    }
+    match client.request(DaemonRequest::CodexSessionCapture {
+        native_session_id,
+        caller_context: caller_context.clone(),
+    }) {
+        Ok(_) => {}
+        // The old dedicated request is Codex-only. Other providers retain
+        // their original phase reporting until their daemon is replaced.
+        Err(ClientError::Protocol(error))
+            if error.code == ErrorCode::InvalidArgument
+                && error.message
+                    == "provider session metadata does not match the runtime profile" => {}
+        Err(error) => return Err(error),
+    }
+    client.request(DaemonRequest::AgentPhaseReport {
+        phase,
+        native_session_id: None,
+        caller_context,
     })
 }
 
@@ -138,10 +198,11 @@ pub fn response_for_declared_event(declared_event: Option<&str>) -> Option<&'sta
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{collections::VecDeque, io::Cursor};
 
-    use super::{PhaseInputError, request_from_hook, response_for_declared_event};
+    use super::*;
     use crate::cli::{Command, RunOutcome, execute};
+    use usagi_core::infrastructure::ipc::ProtocolError;
 
     #[test]
     fn hidden_handler_requests_composition_report_without_output() {
@@ -191,7 +252,7 @@ mod tests {
                 "phase": phase,
                 "caller_context": {"credential": "runtime-secret"}
             });
-            if event == "SessionStart" {
+            if event != "SessionEnd" {
                 expected["native_session_id"] = serde_json::json!("provider-session");
             }
             assert_eq!(serde_json::to_value(request).unwrap(), expected);
@@ -210,6 +271,131 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serde_json::to_value(request).unwrap()["phase"], "running");
+    }
+
+    struct Client {
+        replies: VecDeque<Result<DaemonReply, ClientError>>,
+        requests: Vec<DaemonRequest>,
+    }
+
+    impl DaemonClient for Client {
+        fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
+            self.requests.push(request);
+            self.replies.pop_front().expect("unexpected request")
+        }
+    }
+
+    fn legacy_restriction() -> Result<DaemonReply, ClientError> {
+        Err(ClientError::Protocol(ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "provider session ID is only valid for a starting hook",
+        )))
+    }
+
+    fn phase_request(phase: ReportedPhase, session: bool) -> DaemonRequest {
+        DaemonRequest::AgentPhaseReport {
+            phase,
+            native_session_id: session.then(|| ProviderSessionId::new("current-session").unwrap()),
+            caller_context: None,
+        }
+    }
+
+    #[test]
+    fn later_hook_backfills_codex_on_an_already_running_legacy_daemon() {
+        for capture in [
+            Ok(DaemonReply::Ok(serde_json::Value::Null)),
+            Err(ClientError::Protocol(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "provider session metadata does not match the runtime profile",
+            ))),
+        ] {
+            let mut client = Client {
+                replies: [
+                    legacy_restriction(),
+                    capture,
+                    Ok(DaemonReply::Ok(serde_json::Value::Null)),
+                ]
+                .into(),
+                requests: Vec::new(),
+            };
+            report_to_daemon(&mut client, phase_request(ReportedPhase::Waiting, true)).unwrap();
+            assert_eq!(client.requests.len(), 3);
+            assert!(
+                matches!(&client.requests[1], DaemonRequest::CodexSessionCapture { native_session_id, .. }
+                if native_session_id.expose_sensitive() == "current-session")
+            );
+            assert!(matches!(
+                &client.requests[2],
+                DaemonRequest::AgentPhaseReport {
+                    phase: ReportedPhase::Waiting,
+                    native_session_id: None,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn only_the_exact_legacy_restriction_enables_capture() {
+        for reply in [
+            Ok(DaemonReply::Ok(serde_json::Value::Null)),
+            Err(ClientError::Unavailable("transport".to_owned())),
+            Err(ClientError::Protocol(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "provider session ID is only valid for a starting hook",
+            ))),
+            Err(ClientError::Protocol(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "other validation",
+            ))),
+        ] {
+            let mut client = Client {
+                replies: [reply.clone()].into(),
+                requests: Vec::new(),
+            };
+            assert_eq!(
+                report_to_daemon(&mut client, phase_request(ReportedPhase::Running, true)),
+                reply
+            );
+            assert_eq!(client.requests.len(), 1);
+        }
+        for request in [
+            phase_request(ReportedPhase::Ready, true),
+            phase_request(ReportedPhase::Waiting, false),
+            DaemonRequest::McpChildClaim,
+        ] {
+            let mut client = Client {
+                replies: [legacy_restriction()].into(),
+                requests: Vec::new(),
+            };
+            assert_eq!(report_to_daemon(&mut client, request), legacy_restriction());
+            assert_eq!(client.requests.len(), 1);
+        }
+    }
+
+    #[test]
+    fn legacy_capture_failures_do_not_deliver_a_phase_or_retry_transport() {
+        for error in [
+            ClientError::Unavailable("capture transport".to_owned()),
+            ClientError::Protocol(ProtocolError::new(
+                ErrorCode::OwnershipUnknown,
+                "unknown runtime",
+            )),
+            ClientError::Protocol(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "other validation",
+            )),
+        ] {
+            let mut client = Client {
+                replies: [legacy_restriction(), Err(error.clone())].into(),
+                requests: Vec::new(),
+            };
+            assert_eq!(
+                report_to_daemon(&mut client, phase_request(ReportedPhase::Running, true)),
+                Err(error)
+            );
+            assert_eq!(client.requests.len(), 2);
+        }
     }
 
     #[test]
@@ -291,6 +477,26 @@ mod tests {
                 "caller_context": {"credential": "runtime-secret"}
             })
         );
+    }
+
+    #[test]
+    fn antigravity_later_hooks_never_send_a_replaceable_conversation_id() {
+        for (event, phase) in [
+            ("PreToolUse", "running"),
+            ("PostToolUse", "waiting"),
+            ("Stop", "ended"),
+        ] {
+            let request = request_from_hook(
+                &mut Cursor::new(br#"{"conversationId":"agy-conversation"}"#),
+                phase,
+                Some(event),
+                None,
+            )
+            .unwrap();
+            let value = serde_json::to_value(request).unwrap();
+            assert_eq!(value["phase"], phase);
+            assert!(value.get("native_session_id").is_none());
+        }
     }
 
     #[test]

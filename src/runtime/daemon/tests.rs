@@ -2581,6 +2581,14 @@ fn pending_daemon_agent_restart_round_trips_and_clears_only_its_operation() {
         root,
         &daemon_restart_plan(WorkspaceId::new()),
     );
+    assert!(pending.agents[0].continue_work);
+    let mut legacy = serde_json::to_value(&pending).unwrap();
+    legacy["agents"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("continue_work");
+    let legacy: PendingDaemonAgentRestart = serde_json::from_value(legacy).unwrap();
+    assert!(!legacy.agents[0].continue_work);
 
     write_pending_daemon_agent_restart(&data, &pending).unwrap();
     assert_eq!(
@@ -2590,6 +2598,30 @@ fn pending_daemon_agent_restart_round_trips_and_clears_only_its_operation() {
     assert!(!clear_pending_daemon_agent_restart(&data, "other-operation").unwrap());
     assert!(clear_pending_daemon_agent_restart(&data, &operation.0).unwrap());
     assert!(!clear_pending_daemon_agent_restart(&data, &operation.0).unwrap());
+}
+
+#[test]
+fn daemon_restart_continues_only_interrupted_work() {
+    use usagi_core::domain::session_lifecycle::AgentPhase;
+    for phase in [
+        AgentPhase::Ready,
+        AgentPhase::Running,
+        AgentPhase::Waiting,
+        AgentPhase::Ended,
+    ] {
+        let mut plan = daemon_restart_plan(WorkspaceId::new());
+        plan.agents[0].phase = phase;
+        let pending = PendingDaemonAgentRestart::new(
+            &OperationId("restart".to_owned()),
+            DaemonGeneration::new(),
+            PathBuf::from("/unused"),
+            &plan,
+        );
+        assert_eq!(
+            pending.agents[0].continue_work,
+            matches!(phase, AgentPhase::Running | AgentPhase::Waiting)
+        );
+    }
 }
 
 #[test]

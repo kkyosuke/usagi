@@ -88,6 +88,8 @@ usagi doctor  # 必要なツールと設定を確認
 `usagi update` は、実行中 Agent や複数プロジェクトの端末を継続するため daemon の切り替えを保留した場合も binary の更新成功を表示し、切り替えをバックグラウンドで自動再試行します。
 更新中の中断は非 0 で終了し、旧版へ戻した後も再更新できます。
 切り替えの扱いは [更新](document/12-installation.md#更新) を参照してください。
+Agent の作業を中断して切り替える場合は `usagi daemon restart --restart-agents` を使います。
+同じ会話での作業再開と再開できない場合の扱いは [daemon の Agent 更新](document/05-daemon.md#daemon-restart-による-agent-integration-更新) を参照してください。
 
 対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。

@@ -136,10 +136,19 @@ fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
 /// input. The original invocation still uses the ordinary one-line lifecycle;
 /// only the daemon-restart replacement parks until fixture cleanup.
 fn write_restartable_codex(bin: &Path, count: &Path) {
+    write_restartable_codex_with_capture(bin, count, true);
+}
+
+fn write_restartable_codex_with_capture(bin: &Path, count: &Path, capture_start: bool) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let (event, hook) = if capture_start {
+        ("SessionStart", "codex-session-capture")
+    } else {
+        ("PreToolUse", "agent-phase running")
+    };
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"{event}\",\"model\":\"fixture\"}}' | {usagi} {hook} || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
     );
     let path = bin.join("codex");
@@ -3233,7 +3242,9 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     let agent_spawns = home.path().join("agent-spawn-count");
-    write_restartable_codex(&bin, &agent_spawns);
+    // The provider missed SessionStart. A later tool hook must supply the
+    // exact conversation before restart stops anything.
+    write_restartable_codex_with_capture(&bin, &agent_spawns, false);
 
     let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
     let daemon = start_daemon(repo.path(), home.path(), &bin, None);
@@ -3298,7 +3309,6 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
             "daemon".as_ref(),
             "restart".as_ref(),
             "--restart-agents".as_ref(),
-            "--force".as_ref(),
         ],
     );
     restart_command.env("PATH", fixture_path).env(
@@ -3315,6 +3325,13 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         String::from_utf8_lossy(&restarted.stderr)
     );
     assert!(String::from_utf8_lossy(&restarted.stdout).contains("restarted 1 Agent(s)"));
+    let spawns = fs::read_to_string(&agent_spawns).unwrap();
+    let spawns = spawns.lines().collect::<Vec<_>>();
+    assert_eq!(spawns.len(), 2);
+    assert!(
+        spawns[1].contains("resume fixture-codex-session") && spawns[1].ends_with(" -- continue"),
+        "{spawns:?}"
+    );
     assert!(
         !data_dir.join("daemon/agent-restart.json").exists(),
         "restart success requires durable Agent recovery to be complete"

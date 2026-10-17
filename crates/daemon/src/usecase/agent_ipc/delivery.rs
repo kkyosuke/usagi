@@ -5,10 +5,10 @@ use anyhow::Result;
 use super::{
     AgentId, AgentPhase, AgentRuntime, AgentRuntimeRef, AgentStatus, CompletionFence,
     DispatchBinding, ErrorCode, InboxKind, InboxMessage, OperationId, PromptDelivery, PromptMode,
-    ProtocolError, ProviderKind, ProviderResumePhase, ProviderSessionId, ReportDelivery, RunStatus,
-    SessionId, TerminalRef, Utc, WorkspaceId, dispatch_agent_not_found,
-    dispatch_binding_unavailable, durable_provider_phase, map_dispatch_storage_error,
-    map_runtime_error, provider_for_profile, unknown_caller_provenance,
+    ProtocolError, ProviderKind, ProviderSessionId, ReportDelivery, RunStatus, SessionId,
+    TerminalRef, Utc, WorkspaceId, dispatch_agent_not_found, dispatch_binding_unavailable,
+    durable_provider_phase, map_dispatch_storage_error, map_runtime_error, provider_for_profile,
+    unknown_caller_provenance,
 };
 
 impl AgentRuntime {
@@ -30,7 +30,8 @@ impl AgentRuntime {
     }
 
     /// Reports a lifecycle phase and atomically refreshes the provider-owned
-    /// conversation identity carried by a provider's first structured hook.
+    /// conversation identity. Later hooks backfill a missed starting hook but
+    /// cannot replace a conversation already captured by `SessionStart`.
     pub fn report_agent_phase_with_session(
         &mut self,
         credential: &str,
@@ -55,30 +56,37 @@ impl AgentRuntime {
                 "agent runtime credential is not live",
             ));
         }
-        if native_session_id.is_some() && phase != AgentPhase::Ready {
+        let durable = durable_provider_phase(phase);
+        let captured = if let Some(native_session_id) = native_session_id {
             let record = self
                 .coordinator
                 .record_for(&caller.runtime)
                 .map_err(map_runtime_error)?;
-            let agy_start = phase == AgentPhase::Running
-                && provider_for_profile(&record.launch.plan.profile_id) == Some(ProviderKind::Agy);
-            if !agy_start {
+            let starting = phase == AgentPhase::Ready
+                || (phase == AgentPhase::Running
+                    && provider_for_profile(&record.launch.plan.profile_id)
+                        == Some(ProviderKind::Agy));
+            let existing = record.provider_resume.as_ref();
+            if !starting
+                && existing
+                    .is_some_and(|reference| reference.native_session_id != native_session_id)
+            {
                 return Err(ProtocolError::new(
-                    ErrorCode::InvalidArgument,
-                    "provider session ID is only valid for a starting hook",
+                    ErrorCode::StaleTarget,
+                    "lifecycle hook belongs to a different provider conversation",
                 ));
             }
-        }
-        let durable = durable_provider_phase(phase);
-        let captured = if let Some(native_session_id) = native_session_id {
-            let capture_phase = if phase == AgentPhase::Ready {
-                ProviderResumePhase::Starting
+            if (starting || existing.is_none())
+                && let Some(capture_phase) = durable
+            {
+                self.capture_provider_session_start(
+                    &caller.runtime,
+                    native_session_id,
+                    capture_phase,
+                )?
             } else {
-                // A session-bearing non-ready report was admitted above only
-                // for AGY's Running `PreInvocation` hook.
-                ProviderResumePhase::Running
-            };
-            self.capture_provider_session_start(&caller.runtime, native_session_id, capture_phase)?
+                false
+            }
         } else {
             false
         };

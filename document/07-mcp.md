@@ -358,6 +358,7 @@ control admission を close / drain した後に process-local credential を再
 利用者が `daemon restart --restart-agents` を明示した場合だけ、同じ barrier 内で全 live Agent を exact selection により停止し、
 対応する credential を old owner から除去してから handoff する。successor は保存済み provider conversation を exact resume し、
 新しい process-local credential を発行する。
+作業途中の Agent に渡す `continue` は [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する。
 この明示がない場合は、利用者が Agent を終了して `usagi daemon restart` を再実行するまで旧 daemon の
 control authority を維持する。Doctor はこの lifecycle に関与しない。
 
