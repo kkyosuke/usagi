@@ -63,7 +63,7 @@ pub(crate) fn sync_after_update(
                 writeln!(
                     out,
                     "daemon sync: deferred to preserve {workspaces} workspace connection(s); \
-                     finish live runtimes, then run 'usagi daemon restart' to switch builds"
+                     finish live runtimes to allow daemon synchronization"
                 )?;
                 return Ok(Ok(ManagedUpdateSync::Deferred));
             }

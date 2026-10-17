@@ -2866,6 +2866,7 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_usagi"), bin.join("usagi")).unwrap();
     let shell = bin.join("fixture-shell");
     let shell_spawns = home.path().join("shell-spawn-count");
     write_shell(&shell, &shell_spawns);
@@ -2927,12 +2928,14 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         &["daemon".as_ref(), "sync-after-update".as_ref()],
     )
     .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .env("USAGI_MANAGED_UPDATE", "1")
+    .env("USAGI_UPDATE_AUTO_SYNC", "1")
     .output()
     .unwrap();
     let output = String::from_utf8_lossy(&synchronized.stdout);
     assert_eq!(
         synchronized.status.code(),
-        Some(3),
+        Some(4),
         "{output}{}",
         String::from_utf8_lossy(&synchronized.stderr)
     );
@@ -2948,6 +2951,47 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         "deferral must not create a standby or commit a handoff"
     );
     assert_eq!(live_process_identities(&data_dir), children_before);
+
+    let worker_deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
+    let worker_pid = loop {
+        if let Some(pid) = fs::read_to_string(data_dir.join("daemon/pending-update-worker.lock"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < worker_deadline,
+            "queued update worker did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let duplicate = usagi_command(
+        home.path(),
+        Channel::Local,
+        sync_cwd.path(),
+        &["daemon".as_ref(), "continue-update".as_ref()],
+    )
+    .output()
+    .unwrap();
+    assert!(duplicate.status.success(), "duplicate workers coalesce");
+    // Observe an actual deferred retry before allowing the PTY to exit. A
+    // worker PID alone does not distinguish startup from a completed attempt.
+    loop {
+        let attempted = fs::read(data_dir.join("daemon/pending-update.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|request| request["attempts"].as_u64().is_some_and(|count| count > 0));
+        if attempted {
+            break;
+        }
+        assert!(
+            Instant::now() < worker_deadline,
+            "queued worker did not attempt synchronization: {}",
+            daemon_error_log(&data_dir)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 
     // The next installed binary can open both projects immediately, through
     // both the CLI's bound declaration and the TUI's selected declaration.
@@ -2995,31 +3039,27 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
             .unwrap(),
         })
         .expect("the original connection still delivers input to the same PTY");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Keep both projects' resident connections open, as a TUI would. No
+    // second update/restart command is needed after the final PTY exits.
+    let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
     loop {
-        assert_no_daemon_panic(&data_dir, "waiting for the preserved PTY to finish");
-        let DaemonReply::Ok(body) = reopened
-            .request(DaemonRequest::Tenant {
-                action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
-                root: None,
-                force: false,
-            })
-            .unwrap()
-        else {
-            panic!("tenant inventory is synchronous");
-        };
-        let inventory: usagi_core::infrastructure::ipc::TenantInventory =
-            serde_json::from_value(body).unwrap();
-        if inventory
-            .tenants
-            .iter()
-            .all(|tenant| tenant.live_runtimes == 0)
-        {
+        assert_no_daemon_panic(&data_dir, "waiting for the queued daemon update");
+        let changed = fs::read(data_dir.join("daemon/daemon.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|record| record["pid"].as_u64() != Some(old_pid));
+        let worker_finished = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data_dir.join("daemon/pending-update-worker.lock"))
+            .is_ok_and(|file| fs2::FileExt::try_lock_exclusive(&file).is_ok());
+        if changed && !data_dir.join("daemon/pending-update.json").exists() && worker_finished {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the preserved PTY did not finish"
+            "queued update did not finish: {}",
+            daemon_error_log(&data_dir)
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -3028,29 +3068,7 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         1
     );
     drop((first_client, second_client, reopened));
-
-    // Once nothing is live, both fences leave with the old process. Updating
-    // must now complete rather than defer just because two projects are open.
-    let synchronized = usagi_command(
-        home.path(),
-        Channel::Local,
-        sync_cwd.path(),
-        &["daemon".as_ref(), "sync-after-update".as_ref()],
-    )
-    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
-    .output()
-    .unwrap();
-    assert!(
-        synchronized.status.success(),
-        "{}{}\n{}",
-        String::from_utf8_lossy(&synchronized.stdout),
-        String::from_utf8_lossy(&synchronized.stderr),
-        daemon_error_log(&data_dir),
-    );
-    assert!(
-        String::from_utf8_lossy(&synchronized.stdout)
-            .contains("installed build is current and serving")
-    );
+    wait_for_dead(worker_pid);
     assert_ne!(daemon_pid(&data_dir), old_pid);
     let mut successor_second = IpcClient::connect(
         connect_current(&data_dir).unwrap(),

@@ -85,7 +85,7 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 usagi doctor  # 必要なツールと設定を確認
 ```
 
-`usagi update` は、実行中 Agent や複数プロジェクトの端末を継続するため daemon の切り替えを保留した場合も binary の更新成功を表示します。
+`usagi update` は、実行中 Agent や複数プロジェクトの端末を継続するため daemon の切り替えを保留した場合も binary の更新成功を表示し、切り替えをバックグラウンドで自動再試行します。
 更新中の中断は非 0 で終了し、旧版へ戻した後も再更新できます。
 切り替えの扱いは [更新](document/12-installation.md#更新) を参照してください。
 

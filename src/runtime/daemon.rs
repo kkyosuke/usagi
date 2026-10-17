@@ -9,6 +9,7 @@ mod instance_lock;
 mod ipc_accept;
 mod managed_update;
 mod notifications;
+mod pending_update;
 mod pty;
 mod secure_path;
 #[cfg(any(target_os = "macos", test))]
@@ -19,6 +20,7 @@ mod tenant_control;
 mod workers;
 
 pub(crate) use managed_update::{ManagedUpdateSync, sync_after_update};
+pub(crate) use pending_update::schedule_deferred_update;
 
 use ipc_accept::{
     AcceptedStream, EstablishedResponseWriter, IpcReady, ObservedChildren,
@@ -2634,6 +2636,9 @@ fn run_inner(
     if let Some(result) = run_broker_lifecycle_command(&command) {
         return result;
     }
+    if matches!(command, CliDaemonCommand::ContinueUpdate) {
+        return pending_update::continue_update();
+    }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
     let restart_agents = match &command {
@@ -2781,6 +2786,7 @@ fn run_inner(
                 "managed daemon synchronization must be routed through the update adapter",
             ));
         }
+        CliDaemonCommand::ContinueUpdate => unreachable!("handled before daemon lifecycle setup"),
     };
     ensure_private_dir(&daemon_dir)?;
     let store = DaemonRecordStore::new(FsRecordFile {
@@ -2875,6 +2881,7 @@ fn run_inner(
     }
     if reporting && outcome.is_ok() {
         append_live_tenant_inventory(out);
+        pending_update::report_pending_update(out, &data_dir)?;
     }
     outcome
 }

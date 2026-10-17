@@ -371,6 +371,9 @@ pub enum DaemonCommand {
     /// installer が update lock 内で daemon を同期する内部 capability
     #[command(hide = true)]
     SyncAfterUpdate,
+    /// Retry a queued managed update independently of the invoking TUI.
+    #[command(hide = true)]
+    ContinueUpdate,
     /// 現在 daemon の artifact を明示的に入れ替える trigger を要求する
     Replace {
         /// live な Agent / generic terminal を巻き添えに入れ替えることを明示する
@@ -804,6 +807,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!help.contains("sync-after-update"));
+        assert!(!help.contains("continue-update"));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "daemon", "continue-update"])
+                .unwrap()
+                .command,
+            Some(Command::Daemon {
+                command: Some(DaemonCommand::ContinueUpdate)
+            })
+        ));
     }
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。

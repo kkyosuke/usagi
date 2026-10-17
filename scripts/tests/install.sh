@@ -285,6 +285,31 @@ if grep -q 'daemon の build を同期した' "$CASE_DIR/out"; then
     exit 1
 fi
 
+prepare_case managed-update-automatic-retry-queued
+USAGI_SYNC_STATUS=4
+export USAGI_SYNC_STATUS
+run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"
+unset USAGI_SYNC_STATUS
+grep -q 'daemon の切り替えを予約' "$CASE_DIR/out"
+grep -q '終了後に自動で再試行' "$CASE_DIR/out"
+[ ! -s "$CASE_DIR/err" ]
+
+prepare_case deferred-sync-only
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+USAGI_SYNC_STATUS=3
+export USAGI_SYNC_LOG USAGI_SYNC_STATUS
+set +e
+HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" PATH="$FAKE_BIN:$PATH" \
+    bash "$INSTALLER" --sync-daemon-only >"$CASE_DIR/out" 2>"$CASE_DIR/err"
+SYNC_ONLY_STATUS=$?
+set -e
+unset USAGI_SYNC_LOG USAGI_SYNC_STATUS
+[ "$SYNC_ONLY_STATUS" -eq 3 ]
+assert_old_preserved
+grep -q 'sync-after-update' "$CASE_DIR/sync.log"
+[ ! -s "$CASE_DIR/out" ]
+[ ! -s "$CASE_DIR/err" ]
+
 prepare_case managed-update-lock-covers-daemon-sync
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
 USAGI_SYNC_WAIT_FOR="$CASE_DIR/release-sync"
