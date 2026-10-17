@@ -52,7 +52,7 @@ Artifacts は本人だけが読める状態で保管し、外部アプリでは�
 session 削除の `--force` は、保管に失敗した成果物も破棄します。
 詳細は [削除前の成果物保管](document/05-daemon.md#session-artifacts-と削除前の保管) を参照してください。
 
-複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
+複数の workspace の対応待ちは、右上の黄色い `Attention` 通知からまとめて確認し、対象へ移動できます。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュー可能を desktop に通知します。
 通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。
