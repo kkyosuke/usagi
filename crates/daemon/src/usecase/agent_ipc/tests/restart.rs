@@ -5,9 +5,11 @@ use super::*;
 #[test]
 #[allow(clippy::too_many_lines)] // One scenario checks persisted turn intent, audit provenance, and lost-response replay together.
 fn daemon_restart_resumes_with_a_durable_continue_prompt_and_replays_without_resending() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
     for integration_revision in [None, Some(crate::usecase::claude::PROFILE_REVISION)] {
         for continue_work in [false, true] {
-            let mut agent = runtime();
+            let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
             let spawn_counter = Arc::new(AtomicU32::new(0));
             agent
                 .pty
