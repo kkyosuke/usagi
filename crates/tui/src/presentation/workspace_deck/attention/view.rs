@@ -453,6 +453,19 @@ mod tests {
         handle_input(&mut list, &deck.slots, None, &Key::PageUp, 18, 80);
         assert_eq!(list.index(&drawn.items), 0);
         let before = list.clone();
+        let viewport = modal::body_viewport(18, 80, drawn.inner, drawn.height).unwrap();
+        // Explanatory text, filter, and footer cells never open a neighboring item.
+        for row in [0, 1, 2, 3, drawn.height - 1] {
+            let key = Key::Click {
+                column: viewport.left.try_into().unwrap(),
+                row: (viewport.top + row).try_into().unwrap(),
+            };
+            assert_eq!(
+                handle_input(&mut list, &deck.slots, None, &key, 18, 80),
+                OverlayIntent::Stay
+            );
+            assert_eq!(list, before);
+        }
         for key in [
             Key::Click { column: 0, row: 0 },
             Key::Click {
