@@ -190,7 +190,8 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
-    /// Workspace-scoped human decision surface used by the local TUI. Unlike
+    /// Human decision surface used by the local TUI, including cross-workspace
+    /// observation and explicitly workspace-addressed answers. Unlike
     /// `DispatchTool`, this path never accepts agent-originated requests and
     /// does not treat a missing agent credential as authorization.
     UserDecision {
@@ -360,6 +361,7 @@ impl DispatchToolAction {
 pub enum TuiUserDecisionAction {
     Get,
     List,
+    ListAll,
     Resolve,
     Cancel,
 }

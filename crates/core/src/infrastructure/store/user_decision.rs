@@ -202,12 +202,19 @@ impl UserDecisionStore {
     }
     pub fn pending(&self, workspace: WorkspaceId) -> Result<Vec<UserDecision>> {
         Ok(self
+            .pending_all()?
+            .into_iter()
+            .filter(|item| item.owner.workspace_id == workspace)
+            .collect())
+    }
+    /// Human-facing pending inventory across the daemon's workspaces. Agent
+    /// callers must continue using their authenticated workspace/owner scope.
+    pub fn pending_all(&self) -> Result<Vec<UserDecision>> {
+        Ok(self
             .load()?
             .decisions
             .into_iter()
-            .filter(|item| {
-                item.owner.workspace_id == workspace && item.status == UserDecisionStatus::Pending
-            })
+            .filter(|item| item.status == UserDecisionStatus::Pending)
             .collect())
     }
     /// Marks every due pending decision terminal. Expiry deliberately produces
@@ -644,6 +651,40 @@ mod tests {
             pending_global: 16,
         }
     }
+    #[test]
+    fn human_inventory_includes_pending_decisions_from_each_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let first = item();
+        let second = item();
+        let terminal = item();
+        assert!(store.pending_all().unwrap().is_empty());
+        for decision in [&first, &second, &terminal] {
+            store.create(decision.clone()).unwrap().unwrap();
+        }
+        store
+            .terminal(
+                terminal.owner.workspace_id,
+                terminal.decision_id,
+                UserDecisionStatus::Cancelled,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.pending_all().unwrap(),
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(
+            store.pending(first.owner.workspace_id).unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            store.pending(second.owner.workspace_id).unwrap(),
+            vec![second]
+        );
+    }
+
     #[test]
     fn retry_and_resolve_are_durable_and_once() {
         let temp = tempfile::tempdir().unwrap();

@@ -211,7 +211,7 @@ pub enum LiveTerminalAction {
     OpenPullRequests,
     /// Open the active target's file preview (`Ctrl-O v`).
     OpenPreview,
-    /// Open the workspace's pending decisions (`Ctrl-O d`).
+    /// Open the daemon's pending decisions (`Ctrl-O d`).
     OpenDecisions,
     /// Open the active target's scratchpad (`Ctrl-O s`).
     OpenNotes,

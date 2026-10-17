@@ -1094,7 +1094,7 @@ const fn session_action_is_durable_operation(action: SessionAction) -> bool {
 const fn user_decision_action_is_read_only(action: TuiUserDecisionAction) -> bool {
     matches!(
         action,
-        TuiUserDecisionAction::Get | TuiUserDecisionAction::List
+        TuiUserDecisionAction::Get | TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll
     )
 }
 
@@ -2495,6 +2495,10 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::List,
+                payload: session_payload(),
+            },
+            DaemonRequest::UserDecision {
+                action: TuiUserDecisionAction::ListAll,
                 payload: session_payload(),
             },
             // Resolving a durable input operation only reads the daemon's
