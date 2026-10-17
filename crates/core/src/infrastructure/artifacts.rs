@@ -352,6 +352,14 @@ mod tests {
         session
     }
 
+    fn archive_with_warnings(session: &Path, force: bool) -> (io::Result<()>, Vec<String>) {
+        let warnings = std::cell::RefCell::new(Vec::new());
+        let result = archive_before_removal(session, force, &|message| {
+            warnings.borrow_mut().push(message.to_owned());
+        });
+        (result, warnings.into_inner())
+    }
+
     #[test]
     fn artifacts_survive_removal_and_same_named_sessions_never_overwrite_archives() {
         let temp = tempfile::tempdir().unwrap();
@@ -457,15 +465,14 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("sentinel"), "keep").unwrap();
         symlink(&outside, session.join("artifacts/link")).unwrap();
-        let warnings = std::cell::RefCell::new(Vec::new());
-        let warn = |message: &str| warnings.borrow_mut().push(message.to_owned());
-
-        let error = archive_before_removal(&session, false, &warn).unwrap_err();
+        let (result, warnings) = archive_with_warnings(&session, false);
+        let error = result.unwrap_err();
         assert!(error.to_string().contains("--force"));
-        assert!(warnings.borrow().is_empty());
-        archive_before_removal(&session, true, &warn).unwrap();
-        assert_eq!(warnings.borrow().len(), 1);
-        assert!(warnings.borrow()[0].contains("forced removal will discard unarchived artifacts"));
+        assert!(warnings.is_empty());
+        let (result, warnings) = archive_with_warnings(&session, true);
+        result.unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("forced removal will discard unarchived artifacts"));
         assert_eq!(
             fs::read_to_string(outside.join("sentinel")).unwrap(),
             "keep"
@@ -480,7 +487,9 @@ mod tests {
         for force in [false, true] {
             let session = session(temp.path(), &format!("valid-{force}"));
             fs::write(session.join("artifacts/report.txt"), "report").unwrap();
-            archive_before_removal(&session, force, &|warning| panic!("{warning}")).unwrap();
+            let (result, warnings) = archive_with_warnings(&session, force);
+            result.unwrap();
+            assert!(warnings.is_empty());
             let snapshots = temp
                 .path()
                 .join(".usagi/artifacts")
@@ -592,12 +601,12 @@ mod tests {
             fs::write(many.join(index.to_string()), "").unwrap();
         }
         assert!(files(&many).is_err());
-        let warnings = std::cell::RefCell::new(Vec::new());
-        let warn = |message: &str| warnings.borrow_mut().push(message.to_owned());
-        assert!(archive_before_removal(&session, false, &warn).is_err());
-        assert!(warnings.borrow().is_empty());
-        archive_before_removal(&session, true, &warn).unwrap();
-        assert_eq!(warnings.borrow().len(), 1);
+        let (result, warnings) = archive_with_warnings(&session, false);
+        assert!(result.is_err());
+        assert!(warnings.is_empty());
+        let (result, warnings) = archive_with_warnings(&session, true);
+        result.unwrap();
+        assert_eq!(warnings.len(), 1);
         assert!(many.join("0").is_file());
         assert!(!temp.path().join(".usagi/artifacts").exists());
     }
