@@ -223,23 +223,34 @@ project bar 右端の `Action needed` または `Ctrl-O i` は、開いている
 
 | 表示 | 項目の先頭 | 内容 | 開く先 |
 |---|---|---|---|
-| Action needed | Answer question | 回答待ちの質問 | 対象 workspace の Questions |
-| Action needed | Review PR | 確認済みの open・非 draft PR | 対象 session の PR 一覧 |
-| Action needed | Check PR problem | CI 失敗・修正要求 | 対象 session の PR 一覧 |
+| Action needed | Answer question | 回答待ちの質問 | 選んだ質問の回答画面 |
+| Action needed | Review PR | 確認済みの open・非 draft PR | 対象 session の PR 一覧で該当 PR を選択 |
+| Action needed | Check PR problem | CI 失敗・修正要求 | 対象 session の PR 一覧で該当 PR を選択 |
 | Action needed | Check stopped task | session / Agent の失敗・中断 | 対象 session |
-| Updates | Waiting | 作成・削除、Agent の待機、CI 待ち、PR 状態の取得中 | 対象 session または PR 一覧 |
+| Updates | Waiting | 作成・削除、Agent の待機、CI 待ち | 対象 session または PR 一覧 |
+| Updates | Checking status | PR 状態の未確認・再取得 | 対象 session の PR 一覧で該当 PR を選択 |
 | Updates | Running | 実行中の Agent | 対象 session |
 
-各項目は「次にすること・project / session」と「理由」の 2 行で表示する。
-選択項目を開く操作は footer の `Enter: Open questions` / `Open PR` / `Open session` に示す。
+各項目は「次にすること・project / session」と「理由」の 2 行で表示する。狭幅では操作・対象・理由を 3 行に分ける。
+選択項目を開く操作は footer の `Enter: Answer question` / `Open PR` / `Open session` に示す。
 `Tab` または左右キー、見出しのクリックで要対応とお知らせを切り替える。文字入力は現在の表示の操作・名前・理由を検索する。
+検索は大文字・小文字を区別しない連続一致で、各 field 内の一致位置が早いもの、同順位では対応種別の順に並べる。
+離れた文字や field 間の文字をつなげて一致させず、一致部分を grapheme を壊さず強調する。
 `↑↓` は項目移動、`PageUp` / `PageDown` は表示中の項目数ずつ移動し、`Enter` または項目のクリックで対象を開く。
-`Esc` は受信箱を閉じる。項目を描けない小さい画面はリサイズを案内し、見えていない項目の Enter は実行しない。
+`Esc` は受信箱を閉じる。小さい画面では常設説明・空白・footer を縮め、理由と「選択位置 / 検索結果件数」を残す。
+横幅に応じて要対応タブを `Actions` と短縮する。理由まで描けない場合はリサイズを案内し、見えていない項目の Enter は実行しない。
 更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は別項目を開かない。
 移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
+質問 ID / PR identity を移動先まで引き継ぐ。質問は取得中に別項目を開けず、最新 snapshot の該当質問を回答画面で開く。
+個別の質問を開いても、ほかの質問の未読状態は保持する。
+対象が消失・取得失敗した場合は説明を表示し、一覧の先頭へ置き換えない。質問の読み込みを閉じた後の返答で再度開かない。
+PR も cache / 非同期取得のどちらでも該当番号を選び、確認中に対象が消えた場合は別 PR を開かない。
+旧応答で個別の識別情報がない場合は、従来どおり質問一覧 / PR 一覧を開く（wire 契約は [IPC](04-ipc.md) を参照）。
 
 対応待ちがなければ「対応不要」、状態を確認できていない場合は「確認済みの対応待ちはない」と区別して表示する。
 状態を取得できない project 数は、自動で再試行中の情報として本文の下に表示し、選択できる対応項目にしない。
+workspace の観測に成功しても PR の状態が未確認なら「確認中」とする。未確認の PR を対応ゼロと断定せず、
+Updates の説明も「確認中」に切り替える。確認済みの CI 待ちや実行中とは区別する。
 Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
 明示的な質問がなければ Updates に表示し、人に terminal の確認を促さない。
 
@@ -249,11 +260,11 @@ project bar の右端は操作から余白で分け、確認できた対応待�
 | 右端の表示 | 意味 |
 |---|---|
 | `! Action needed (N)`（黄色） | 全 project を確認済みで、対応待ちが N 件ある |
-| `! Action needed (N+)`（黄色） | 確認できた対応待ちが N 件あり、状態不明の project もある |
-| `Checking status…`（dim） | 確認できた対応待ちはなく、状態不明の project がある |
-| `No action needed`（dim） | 全 project を確認済みで対応待ちがない |
+| `! Action needed (N+)`（黄色） | 確認できた対応待ちが N 件あり、未確認の project / PR 状態もある |
+| `Checking status…`（dim） | 確認できた対応待ちはなく、未確認の project / PR 状態がある |
+| `No action needed`（dim） | 全 project / PR 状態を確認済みで対応待ちがない |
 
-project tab の黄色い `!N` は確認できた対応待ちの件数、控えめな `?` は未取得・失敗・古い観測を示す。
+project tab の黄色い `!N` は確認できた対応待ちの件数、`!N+` は未確認 PR もある状態、控えめな `?` は未取得・失敗・古い観測・PR の未確認を示す。
 背景観測は Garden を閉じていても継続し、1 round 最大16 project を順番に巡回する。成功後3秒、全件取得失敗後5秒で再取得する。
 30秒以上更新されない結果は Stale とする。取得失敗時は以前の観測を保持するが、受信箱の項目・件数・移動の対象から外す。
 状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。

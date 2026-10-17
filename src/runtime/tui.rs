@@ -188,7 +188,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                 workspace,
                 decisions,
             },
-            Err(_) => BackendEvent::Notice(Notice::new("User decisions are unavailable.")),
+            Err(_) => BackendEvent::DecisionsUnavailable { workspace },
         }
     }
 
@@ -593,7 +593,9 @@ impl ProductionDecisionPort {
             Err(_) if self.reported_failure => return,
             Err(_) => {
                 self.reported_failure = true;
-                BackendEvent::Notice(Notice::new("User decisions are unavailable."))
+                BackendEvent::DecisionsUnavailable {
+                    workspace: self.workspace,
+                }
             }
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
@@ -614,6 +616,7 @@ impl BackendDecisionPort for ProductionDecisionPort {
         // drives never reaches the daemon. Whatever the lane has already observed
         // is handed over now; the wake's own result arrives through `poll` on a
         // later frame.
+        self.reported_failure = false;
         self.pump.wake();
         if let Some(result) = self.pump.take() {
             self.publish(result, &completions);

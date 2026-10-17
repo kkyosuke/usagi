@@ -628,6 +628,8 @@ fn every_existing_modal_blocks_director_drawer_entry() {
                 state.decision_overlay = Some(DecisionOverlayState {
                     selected: 0,
                     editor: None,
+                    requested: None,
+                    error: None,
                 });
             }
             Overlay::CleanupQueue => {

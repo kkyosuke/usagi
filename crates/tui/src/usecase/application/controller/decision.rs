@@ -13,6 +13,51 @@ use super::{
 };
 use std::collections::BTreeSet;
 
+pub(super) fn unavailable(state: &mut AppState, workspace: WorkspaceId) -> Vec<Effect> {
+    if workspace != state.workspace {
+        return Vec::new();
+    }
+    if let Some(overlay) = state.decision_overlay.as_mut()
+        && overlay.requested.take().is_some()
+        && state.overlay == Some(Overlay::Decisions)
+    {
+        overlay.error = Some("This question could not be loaded. Close and try again.");
+    }
+    state.notice = Some(super::Notice::new("User decisions are unavailable."));
+    Vec::new()
+}
+
+fn open_requested(state: &mut AppState) -> bool {
+    let requested = state
+        .decision_overlay
+        .as_mut()
+        .and_then(|overlay| overlay.requested.take());
+    let Some(decision_id) = requested else {
+        return false;
+    };
+    if state.overlay == Some(Overlay::Decisions) {
+        let overlay = state
+            .decision_overlay
+            .as_mut()
+            .expect("requested decision overlay");
+        if let Some(index) = state
+            .decisions
+            .iter()
+            .position(|decision| decision.decision_id == decision_id)
+        {
+            overlay.selected = index;
+            overlay.editor = Some(DecisionEditor::new(state.decisions[index].clone()));
+            state.unread_decisions.remove(&decision_id);
+        } else {
+            overlay.error =
+                Some("This question is no longer available. Close and refresh the inbox.");
+        }
+    } else {
+        state.decision_overlay = None;
+    }
+    true
+}
+
 pub(super) enum Event {
     Snapshot {
         workspace: WorkspaceId,
@@ -64,6 +109,9 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                     .map(|decision| decision.decision_id),
             );
             reconcile_decision_overlay(state);
+            if open_requested(state) {
+                return Vec::new();
+            }
             // A newly created decision is actionable immediately. Open its
             // answer editor rather than making the user traverse the list.
             // Reconnect snapshots contain only known rows, so they preserve a
@@ -80,6 +128,8 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                 state.decision_overlay = Some(DecisionOverlayState {
                     selected: 0,
                     editor: Some(DecisionEditor::new(decision)),
+                    requested: None,
+                    error: None,
                 });
             }
         }

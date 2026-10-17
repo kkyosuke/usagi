@@ -844,8 +844,8 @@ impl AgentTabIntentPort for UnavailableAgentTabIntentPort {
 struct UnavailableDecisionCommandPort;
 #[cfg(test)]
 impl DecisionCommandPort for UnavailableDecisionCommandPort {
-    fn refresh(&mut self, _workspace: WorkspaceId) -> BackendEvent {
-        BackendEvent::Notice(Notice::new("User decisions are unavailable."))
+    fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent {
+        BackendEvent::DecisionsUnavailable { workspace }
     }
 
     fn resolve(

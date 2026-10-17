@@ -51,6 +51,7 @@ impl AppState {
     fn close_pr_modal(&mut self) {
         self.pr_overlay = None;
         self.pr_request = None;
+        self.pr_focus = None;
         if self.overlay == Some(Overlay::Prs) {
             self.overlay = None;
         }
@@ -199,7 +200,17 @@ pub(super) fn absorb(state: &mut AppState, target: Target, revision: u64, prs: &
         // A stale snapshot proves nothing, so it must not rebuild the modal's
         // rows or clear the error the last real answer left there. It still
         // answers the request that provoked it.
-        PrSnapshot::Ignored => None,
+        PrSnapshot::Ignored => {
+            if state
+                .pr_overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.target == target)
+            {
+                // An unchanged reply also finishes an explicit cached-row visit.
+                let _ = take_focus(state, target);
+            }
+            None
+        }
         PrSnapshot::Absorbed(detected) => {
             refresh_pr_modal(state, target, detected.as_ref());
             detected
@@ -214,6 +225,13 @@ pub(super) fn absorb(state: &mut AppState, target: Target, revision: u64, prs: &
 /// An open modal keeps its rows and says they may be stale; a request that has
 /// no modal yet becomes one, so an explicit `p` never fails silently.
 pub(super) fn fail(state: &mut AppState, target: Target, error: &SafeError) {
+    if state
+        .pr_focus
+        .as_ref()
+        .is_some_and(|(focused, _)| *focused == target)
+    {
+        state.pr_focus = None;
+    }
     if let Some(overlay) = state
         .pr_overlay
         .as_mut()
@@ -322,6 +340,10 @@ fn refresh_pr_modal(state: &mut AppState, target: Target, detected: Option<&PrId
     else {
         return;
     };
+    if let Some(identity) = take_focus(state, target) {
+        show_focused(state, target, &identity);
+        return;
+    }
     let inventory = state.prs_for(target).unwrap_or_default();
     if !inventory.iter().any(PrEntry::is_visible) {
         state.close_pr_modal();
@@ -349,6 +371,12 @@ fn settle_pr_request(state: &mut AppState, target: Target, detected: Option<&PrI
         return;
     }
     state.pr_request = None;
+    if let Some(identity) = take_focus(state, target) {
+        if state.can_surface_pr_modal() {
+            show_focused(state, target, &identity);
+        }
+        return;
+    }
     let visible = state.visible_prs(target);
     if visible.is_empty() || !state.can_surface_pr_modal() {
         return;
@@ -408,15 +436,62 @@ pub(super) fn open(state: &mut AppState) -> Vec<Effect> {
 /// [`settle_pr_request`] opens it when the snapshot proves there is something
 /// in it.
 pub(super) fn open_for(state: &mut AppState, target: Target) -> Vec<Effect> {
+    open_with_focus(state, target, None)
+}
+
+pub(super) fn open_identity(state: &mut AppState, identity: &PrIdentity) -> Vec<Effect> {
+    let Some(target) = state.active_target() else {
+        return Vec::new();
+    };
+    open_with_focus(state, target, Some(identity))
+}
+
+fn take_focus(state: &mut AppState, target: Target) -> Option<PrIdentity> {
+    if state
+        .pr_focus
+        .as_ref()
+        .is_some_and(|(focused, _)| *focused == target)
+    {
+        state.pr_focus.take().map(|(_, identity)| identity)
+    } else {
+        None
+    }
+}
+
+fn show_focused(state: &mut AppState, target: Target, identity: &PrIdentity) {
+    let visible = state.visible_prs(target);
+    if visible.iter().any(|pr| &pr.identity == identity) {
+        state.open_pr_modal(PrOverlay::showing(target, visible, Some(identity)));
+    } else {
+        state.open_pr_modal(PrOverlay::failed(
+            target,
+            SafeError {
+                message: super::SafeMessage::new(
+                    "This PR is no longer available. Close and refresh the inbox.",
+                ),
+                error_id: "inbox-pr-unavailable".into(),
+            },
+        ));
+    }
+}
+
+fn open_with_focus(
+    state: &mut AppState,
+    target: Target,
+    focus: Option<&PrIdentity>,
+) -> Vec<Effect> {
+    state.pr_focus = focus.cloned().map(|identity| (target, identity));
     let visible = state.visible_prs(target);
     // The request dismisses the surface it was asked from: the answer belongs in
     // the foreground the user just released, and anything opened after this
     // point is newer than the request and keeps it.
     state.overlay = None;
-    if visible.is_empty() {
+    if visible.is_empty()
+        || focus.is_some_and(|identity| !visible.iter().any(|pr| &pr.identity == identity))
+    {
         state.pr_request = Some(target);
     } else {
-        state.open_pr_modal(PrOverlay::showing(target, visible, None));
+        state.open_pr_modal(PrOverlay::showing(target, visible, focus));
     }
     vec![Effect::LoadPullRequests { target }]
 }
@@ -424,6 +499,18 @@ pub(super) fn open_for(state: &mut AppState, target: Target) -> Vec<Effect> {
 /// Enter で選択 PR を browser で開く effect を出す。Esc は overlay を閉じる。
 /// 素材の再取得はしない。
 pub(super) fn update_key(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    if matches!(
+        key,
+        AppKey::Up
+            | AppKey::Down
+            | AppKey::Left
+            | AppKey::Right
+            | AppKey::Enter
+            | AppKey::Char('c')
+            | AppKey::CtrlX
+    ) {
+        state.pr_focus = None;
+    }
     if matches!(key, AppKey::Left | AppKey::Right) {
         let Some((target, filter)) = state.pr_overlay.as_ref().map(|overlay| {
             let filter = if matches!(key, AppKey::Right) {

@@ -34,6 +34,17 @@ pub(crate) fn fuzzy_score(candidate: &str, query: &str) -> Option<usize> {
     fuzzy_match(candidate, query).map(|matched| matched.score)
 }
 
+/// A complete case-insensitive fragment, expressed in original character cells.
+#[must_use]
+pub(crate) fn contiguous_match(candidate: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    let query = query.chars().map(lowercase).collect::<Vec<_>>();
+    if query.is_empty() {
+        return Some(0..0);
+    }
+    let candidate = candidate.chars().map(lowercase).collect::<Vec<_>>();
+    contiguous_start(&candidate, &query).map(|start| start..start + query.len())
+}
+
 /// Rank a case-insensitive subsequence match and report where it landed.
 ///
 /// This is [`fuzzy_score`] with the matched positions retained; both share one
@@ -253,7 +264,7 @@ fn lowercase(character: char) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{FuzzyMatch, fuzzy_match, fuzzy_score, path_match};
+    use super::{FuzzyMatch, contiguous_match, fuzzy_match, fuzzy_score, path_match};
 
     fn cells(matched: FuzzyMatch) -> Vec<usize> {
         matched.into_positions()
@@ -377,5 +388,13 @@ mod tests {
         assert_eq!(matched.score(), 0);
         assert!(cells(matched).is_empty());
         assert_eq!(path_match("src/lib.rs", "zz"), None);
+    }
+    #[test]
+    fn complete_fragments_preserve_character_ranges_and_do_not_match_gaps() {
+        assert_eq!(contiguous_match("CI checks", "ci"), Some(0..2));
+        assert_eq!(contiguous_match("notice-ui", "CI"), None);
+        assert_eq!(contiguous_match("日本語の確認", "確認"), Some(4..6));
+        assert_eq!(contiguous_match("", ""), Some(0..0));
+        assert_eq!(contiguous_match("a", "long"), None);
     }
 }
