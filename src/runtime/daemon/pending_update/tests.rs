@@ -179,6 +179,22 @@ fn a_later_successful_update_completes_an_orphaned_reservation() {
 }
 
 #[test]
+fn the_worker_lease_rejects_a_symlink_without_changing_its_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::new(directory.path());
+    drop(store.lock().unwrap());
+    let target = directory.path().join("another-owner");
+    std::fs::write(&target, "another owner's state").unwrap();
+    std::os::unix::fs::symlink(&target, store.0.join("pending-update-worker.lock")).unwrap();
+
+    assert!(store.worker().is_err());
+    assert_eq!(
+        std::fs::read_to_string(target).unwrap(),
+        "another owner's state"
+    );
+}
+
+#[test]
 fn synchronization_reuses_only_the_verified_embedded_installer() {
     assert!(
         synchronization_script(&usagi_cli::cli::commands::update::installer_request(false))
