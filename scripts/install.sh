@@ -15,6 +15,7 @@ LOCK_NODE=""
 LOCK_ATTEMPTS=0
 SELECTOR_ACTIVE=0
 SELECT_VERSION=0
+SYNC_DAEMON_ONLY=0
 
 cleanup() {
     local status=$? retired node alone=1 legacy_owner
@@ -222,6 +223,9 @@ render_release_selector() {
 case "${1:-}" in
     --select-version)
         SELECT_VERSION=1
+        ;;
+    --sync-daemon-only)
+        SYNC_DAEMON_ONLY=1
         ;;
     '')
         ;;
@@ -491,6 +495,16 @@ verify_expected_version() {
     printf '%s\n' "$actual"
 }
 
+if [ "$SYNC_DAEMON_ONLY" -eq 1 ]; then
+    # Reuse the publication lock so a queued worker always invokes the currently
+    # installed binary, never an artifact superseded by a concurrent update.
+    # This path performs no download and does not replace any binary.
+    acquire_lock
+    publish_legacy_pid
+    USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_SYNC_RETRY=1 "$TARGET" daemon sync-after-update
+    exit 0
+fi
+
 ASSET_NAME="$(platform_asset)"
 if [ "$SELECT_VERSION" -eq 1 ]; then
     select_release
@@ -540,12 +554,13 @@ mv -f -- "$CANDIDATE" "$TARGET"
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     printf "daemon の状態を安全に同期中だよ！ぴょん\n"
     set +e
-    USAGI_UPDATE_SYNC_OUTCOMES=1 "$TARGET" daemon sync-after-update
+    USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_AUTO_SYNC=1 "$TARGET" daemon sync-after-update
     SYNC_STATUS=$?
     set -e
     case "$SYNC_STATUS" in
         0) ;;
         3) ;; # Binary installed; live connections defer daemon replacement.
+        4) ;; # Binary installed; the selected binary queued an automatic retry.
         2)
             fail "selected usagi does not support safe managed daemon synchronization; the existing daemon was left unchanged"
             ;;
@@ -589,7 +604,9 @@ printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$
 printf "\n"
 printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
-    if [ "$SYNC_STATUS" -eq 3 ]; then
+    if [ "$SYNC_STATUS" -eq 4 ]; then
+        printf "daemon の切り替えを予約したよ。Agent・terminal の終了後に自動で再試行するよ。\n"
+    elif [ "$SYNC_STATUS" -eq 3 ]; then
         printf "現在の接続を維持するため、daemon の切り替えは保留しているよ。\n"
     else
         printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"

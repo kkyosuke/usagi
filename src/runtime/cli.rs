@@ -135,10 +135,30 @@ mod action_io {
             }
             (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
                 match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
-                    Ok(outcome) => Ok(managed_update_sync_exit_code(
-                        outcome,
-                        std::env::var("USAGI_UPDATE_SYNC_OUTCOMES").as_deref() == Ok("1"),
-                    )),
+                    Ok(outcome) => {
+                        let managed_request = std::env::var("USAGI_MANAGED_UPDATE").as_deref()
+                            == Ok("1")
+                            && std::env::var("USAGI_UPDATE_SYNC_RETRY").as_deref() != Ok("1");
+                        let queued = managed_request
+                            && matches!(outcome, daemon::ManagedUpdateSync::Deferred);
+                        if queued {
+                            daemon::schedule_deferred_update()?;
+                            writeln!(
+                                out,
+                                "daemon sync: queued for automatic retry after live runtimes finish"
+                            )?;
+                        } else if managed_request {
+                            // A successful update also retires a reservation
+                            // whose detached worker exited before finishing.
+                            let data_dir = daemon::prepare_private_data_dir()?;
+                            daemon::complete_deferred_update(&data_dir)?;
+                        }
+                        Ok(managed_update_sync_exit_code(
+                            outcome,
+                            std::env::var("USAGI_UPDATE_SYNC_OUTCOMES").as_deref() == Ok("1"),
+                            queued && std::env::var("USAGI_UPDATE_AUTO_SYNC").as_deref() == Ok("1"),
+                        ))
+                    }
                     Err(error) => {
                         write_client_error(err, "daemon synchronization refused", &error)?;
                         Ok(ExitCode::FAILURE)
@@ -789,13 +809,15 @@ fn write_client_error(
 fn managed_update_sync_exit_code(
     outcome: daemon::ManagedUpdateSync,
     report_deferred: bool,
+    queued: bool,
 ) -> ExitCode {
     // Older binaries embed an installer that treats every nonzero sync status
     // as an update failure. A new installer opts into the deferred status so
     // upgrades from those binaries can still succeed without restarting Agents.
-    match (outcome, report_deferred) {
-        (daemon::ManagedUpdateSync::Deferred, true) => ExitCode::from(3),
-        (daemon::ManagedUpdateSync::Complete | daemon::ManagedUpdateSync::Deferred, _) => {
+    match (outcome, report_deferred, queued) {
+        (daemon::ManagedUpdateSync::Deferred, true, true) => ExitCode::from(4),
+        (daemon::ManagedUpdateSync::Deferred, true, false) => ExitCode::from(3),
+        (daemon::ManagedUpdateSync::Complete | daemon::ManagedUpdateSync::Deferred, _, _) => {
             ExitCode::SUCCESS
         }
     }
@@ -853,6 +875,25 @@ mod tests {
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn pending_update_acknowledgement_preserves_older_installers() {
+        use super::daemon::ManagedUpdateSync::{Complete, Deferred};
+        for (outcome, report_deferred, queued, expected) in [
+            (Complete, false, false, 0),
+            (Complete, true, false, 0),
+            (Complete, true, true, 0),
+            (Deferred, false, false, 0),
+            (Deferred, false, true, 0),
+            (Deferred, true, false, 3),
+            (Deferred, true, true, 4),
+        ] {
+            assert_eq!(
+                super::managed_update_sync_exit_code(outcome, report_deferred, queued),
+                ExitCode::from(expected)
+            );
+        }
+    }
 
     #[test]
     fn the_launch_agent_selector_resolves_a_provider_or_fails_closed() {

@@ -337,7 +337,7 @@ recovery、runtime state の hydrate、serve する workspace の adopt を経�
 
 ### macOS の service context
 
-macOS では `daemon serve`（active / standby）と bootstrap broker が worker を起動する前に、effective UID の
+macOS では `daemon serve`（active / standby）、bootstrap broker、保留した更新の自動再試行 process が worker を起動する前に、effective UID の
 per-user Background bootstrap namespace を選ぶ。process group の分離だけでは起動元の login namespace を
 引き継ぐため、logout 後も生存する daemon の子 process が OS ユーザー情報や DNS を参照できなくなる。
 kernel の bootstrap port と libSystem の cached port を同じ namespace に揃え、Agent・generic Terminal・broker からの
@@ -842,6 +842,9 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `daemon.lock` | lock file | active role の `serve` が保持する単一インスタンス lock（standby は取らない）。process 終了時に OS が解放する |
 | `bootstrap.lock` | lock file | client の connect/start/restart/recover bootstrap を cross-process で直列化する |
 | `lifecycle.lock` | lock file | 明示的な stop/restart と managed update の最終観測・handoff・serving 検証を直列化する |
+| `pending-update.json` | JSON | managed update が保留した最新の build・request ID・再試行状態。worker の寿命から独立して保持する |
+| `pending-update.lock` | lock file | 更新予約の保存・完了と worker の最終 empty check を直列化する |
+| `pending-update-worker.lock` | lock file | 同じ data home の自動再試行 worker を単一にする |
 | `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
 | `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |

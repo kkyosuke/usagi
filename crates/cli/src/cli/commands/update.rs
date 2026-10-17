@@ -7,10 +7,16 @@ use crate::cli::{InstallerRequest, Run, RunOutcome};
 /// この digest は `scripts/install.sh` と同じ build に固定する。変更時は unit test が
 /// 不一致を検出するため、review 可能な identity 更新として同時に変更する。
 const INSTALLER_SHA256: [u8; 32] = [
-    0x8f, 0x2e, 0x16, 0x6b, 0xcf, 0x1b, 0x01, 0xcd, 0xd3, 0x63, 0x0e, 0xc4, 0xb7, 0x32, 0x95, 0x43,
-    0xc3, 0xbc, 0x7c, 0x56, 0xfd, 0x0b, 0xff, 0xc9, 0x77, 0xd3, 0x35, 0x6b, 0xad, 0x69, 0x39, 0x77,
+    0xc7, 0x4a, 0x0d, 0x30, 0xad, 0x04, 0xd1, 0xd5, 0xfa, 0xeb, 0x4e, 0x0c, 0x33, 0xa0, 0xca, 0x4b,
+    0xfa, 0x54, 0x49, 0x79, 0x8a, 0x54, 0x61, 0x7c, 0x52, 0x48, 0xd7, 0x57, 0x5f, 0xfe, 0xe9, 0x30,
 ];
 const INSTALLER: &[u8] = include_bytes!("../../../../../scripts/install.sh");
+
+/// The same verified installer owns publication and deferred daemon synchronization.
+#[must_use]
+pub const fn installer_request(select_version: bool) -> InstallerRequest {
+    InstallerRequest::new(INSTALLER, INSTALLER_SHA256, select_version)
+}
 
 /// `usagi update` のハンドラ。実際の subprocess は合成ルートが実行する。
 pub struct Update {
@@ -24,9 +30,7 @@ impl Run for Update {
         } else {
             writeln!(out, "最新の usagi リリースをインストール中だよ！ぴょん")?;
         }
-        Ok(RunOutcome::SelfUpdate(InstallerRequest::new(
-            INSTALLER,
-            INSTALLER_SHA256,
+        Ok(RunOutcome::SelfUpdate(installer_request(
             self.select_version,
         )))
     }

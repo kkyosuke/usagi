@@ -90,11 +90,17 @@ Agent の MCP client も再接続し、新しい `usagi mcp` process から tool
 既存の MCP server は更新前のバイナリで動き続けるため、daemon の切り替えだけでは tool 一覧と guide は更新されない。
 実行中の Agent が daemon の切り替えを妨げる場合も binary の更新は成功し、切り替えの保留を表示する。
 複数プロジェクトを保持し、いずれかに実行中の端末や Agent が残る場合も切り替えを保留するため、更新後も各プロジェクトを
-開き直せる。保留中は既存 daemon と端末への接続を維持し、それらの終了後に `usagi daemon restart` で切り替える。
+開き直せる。自動再試行に対応する版は保留時に切り替えを予約し、独立した待機プロセスが5秒間隔で再試行する。
+`update` や TUI を終了しても待機は続く。TUI の接続だけでは保留せず、全プロジェクトの Agent・terminal が終了すれば
+切り替えられる。Agent の応答が終わって入力待ちになっても、プロセスと MCP 接続が残る間は保留が続く。
+予約先の build と待機・再試行・失敗の状態は `usagi daemon status` の `pending daemon update` で確認する。
+自動再試行に未対応の旧版を選んだ場合は予約したと表示せず、従来どおり終了後に `usagi daemon restart` で切り替える。
 更新時の download・検証・atomic replacement と内部 daemon 同期は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)、
 live Agent を含む daemon の安全な引き継ぎと拒否条件は
 [planned replacement](05-daemon.md#planned-replacement)を正本とする。
+予約の永続化と installer lock 内の再試行は
+[入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)を正本とする。
 
 同じ保存先への更新は順番に実行する。更新 process が crash しても、次の更新が残った owner を回収する。
 現行 installer で旧版へ戻した後も、旧版の `usagi update` から再更新できる。
