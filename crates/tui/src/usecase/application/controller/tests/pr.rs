@@ -833,8 +833,7 @@ fn inbox_pr_loading_is_cancelled_by_escape_or_a_new_interaction() {
             AppEvent::Key(AppKey::Escape),
             AppEvent::Key(AppKey::Down),
             AppEvent::Pointer {
-                column: 2,
-                row: 4,
+                target: None,
                 at: std::time::Duration::ZERO,
             },
         ] {
