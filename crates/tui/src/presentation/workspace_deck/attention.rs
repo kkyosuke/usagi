@@ -3,6 +3,7 @@ use super::{
     AttentionDestination, DeckOverlay, HashSet, Key, OverlayIntent, Path, PathBuf, Role, SessionId,
     WorkspaceDeck, WorkspaceId, WorkspaceSlot, fuzzy_score, modal, widgets,
 };
+use crate::presentation::theme::Style;
 use usagi_core::domain::{
     attention::WorkspaceAttention, presentation_text::sanitize_presentation_line,
 };
@@ -155,6 +156,34 @@ pub(super) fn badge(slot: &WorkspaceSlot) -> String {
             }
         }
     }
+}
+
+/// The bar counts only fresh work that needs a person. Unknown projects keep
+/// the total visibly incomplete instead of turning missing observations into zero.
+pub(super) fn indicator(slots: &[WorkspaceSlot]) -> (String, Style) {
+    let mut count = 0;
+    let mut unknown = false;
+    for slot in slots {
+        if let Some(snapshot) = slot.attention.as_ref().filter(|_| !slot.attention_stale) {
+            count += snapshot
+                .items
+                .iter()
+                .filter(|item| item.kind.needs_action())
+                .count();
+        } else {
+            unknown = true;
+        }
+    }
+    let total = match (count, unknown) {
+        (0, false) => return ("Attention".into(), Style::new().dim()),
+        (0, true) => "?".into(),
+        (_, true) => format!("{count}+"),
+        (_, false) => count.to_string(),
+    };
+    (
+        format!("! Attention ({total})"),
+        Role::Warning.style().bold(),
+    )
 }
 
 impl WorkspaceDeck {
@@ -540,6 +569,87 @@ mod tests {
         assert!(frame.contains("Running: 1"));
         let small = render_overlay(&deck, 5, 12, &vec![String::new(); 5]);
         assert_eq!(small.len(), 5);
+    }
+
+    #[test]
+    fn bar_notice_counts_fresh_actions_and_keeps_unknown_totals_explicit() {
+        let mut deck = deck();
+        let assert_notice = |deck: &WorkspaceDeck, label: &str, style: Style| {
+            let bar = project_bar(deck, 120);
+            assert!(bar.line.ends_with(&style.paint(&format!(" {label} "))));
+        };
+        let warning = Role::Warning.style().bold();
+        assert_notice(&deck, "! Attention (?)", warning);
+        let work = vec![
+            item("question", AttentionKind::Decision),
+            item("review", AttentionKind::Review),
+            item("blocked", AttentionKind::Blocked),
+            item("ci", AttentionKind::System),
+            item("agent", AttentionKind::Running),
+        ];
+        update(&mut deck, 0, work);
+        assert_notice(&deck, "! Attention (3+)", warning);
+        update(&mut deck, 1, vec![item("other", AttentionKind::Decision)]);
+        assert_notice(&deck, "! Attention (4)", warning);
+
+        let workspace = deck.slots[0].workspace_id;
+        deck.apply_attention(workspace, Err("offline".into()));
+        assert_notice(&deck, "! Attention (1+)", warning);
+        update(&mut deck, 1, vec![]);
+        assert_notice(&deck, "! Attention (?)", warning);
+        update(
+            &mut deck,
+            0,
+            vec![
+                item("ci", AttentionKind::System),
+                item("agent", AttentionKind::Running),
+            ],
+        );
+        assert_notice(&deck, "Attention", Style::new().dim());
+    }
+
+    #[test]
+    fn right_aligned_notice_separates_actions_and_preserves_click_targets() {
+        let mut deck = deck();
+        "日本語プロジェクト".clone_into(&mut deck.slots[0].label);
+        update(
+            &mut deck,
+            0,
+            vec![item("question", AttentionKind::Decision)],
+        );
+        update(&mut deck, 1, vec![]);
+        for width in 0..160 {
+            let bar = project_bar(&deck, width);
+            assert!(widgets::display_width(&bar.line) <= width);
+            for hit in &bar.hits {
+                assert!(hit.columns.end <= width);
+                for column in hit.columns.clone() {
+                    assert_eq!(bar.target_at(column), Some(&hit.target));
+                }
+            }
+            let Some(notice) = bar
+                .hits
+                .iter()
+                .find(|hit| hit.target == ProjectBarTarget::Attention)
+            else {
+                continue;
+            };
+            let add = bar
+                .hits
+                .iter()
+                .find(|hit| hit.target == ProjectBarTarget::Add)
+                .unwrap();
+            assert_eq!(notice.columns.end, width);
+            assert!(notice.columns.start >= add.columns.end + 2);
+            for column in add.columns.end..notice.columns.start {
+                assert_eq!(bar.target_at(column), None);
+            }
+        }
+        let bar = project_bar(&deck, 120);
+        assert!(
+            bar.line
+                .contains(&Role::Warning.style().bold().paint(" !1"))
+        );
     }
 
     #[test]

@@ -1053,14 +1053,14 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         .slots
         .iter()
         .enumerate()
-        .map(|(index, slot)| {
-            let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
-            format!(" {} {name}{} ", index + 1, attention::badge(slot))
-        })
+        .map(|(index, slot)| project_tab_label(index, active, slot))
         .collect::<Vec<_>>();
     let add_button = InlineButton::new(ADD_LABEL);
-    let attention_button = InlineButton::new("! Attention");
-    let add_width = add_button.width() + attention_button.width();
+    let (attention_label, attention_style) = attention::indicator(&deck.slots);
+    let attention_button = InlineButton::new(&attention_label);
+    // Reserve breathing room between project actions and the right-aligned
+    // notification, even when the bar has no spare cells.
+    let add_width = add_button.width() + 2 + attention_button.width();
 
     let mut best = (active, active + 1);
     let mut best_count = 1;
@@ -1081,7 +1081,7 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         let visible = widgets::clip_to_width(&labels[active], width);
         let span = widgets::display_width(&visible);
         return ProjectBar {
-            line: Role::Accent.style().bold().paint(&visible),
+            line: visible,
             hits: vec![ProjectBarHit {
                 columns: 0..span,
                 target: ProjectBarTarget::Workspace(deck.slots[active].path.clone()),
@@ -1100,12 +1100,7 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         let available = width.saturating_sub(column + add_width);
         let visible = widgets::clip_to_width(label, available);
         let span = widgets::display_width(&visible);
-        let styled = if index == active {
-            Role::Accent.style().bold().paint(&visible)
-        } else {
-            Style::new().dim().paint(&visible)
-        };
-        line.push_str(&styled);
+        line.push_str(&visible);
         hits.push(ProjectBarHit {
             columns: column..column + span,
             target: ProjectBarTarget::Workspace(deck.slots[index].path.clone()),
@@ -1130,8 +1125,10 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
             target: ProjectBarTarget::Add,
         });
         column += span;
-        let attention =
-            attention_button.render(width.saturating_sub(column), Role::Accent.style().bold());
+        let gap = width.saturating_sub(column + attention_button.width());
+        line.push_str(&" ".repeat(gap));
+        column += gap;
+        let attention = attention_button.render(width.saturating_sub(column), attention_style);
         line.push_str(&attention.line);
         hits.push(ProjectBarHit {
             columns: column..column + attention.width,
@@ -1139,6 +1136,26 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         });
     }
     ProjectBar { line, hits }
+}
+
+fn project_tab_label(index: usize, active: usize, slot: &WorkspaceSlot) -> String {
+    let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
+    let style = if index == active {
+        Role::Accent.style().bold()
+    } else {
+        Style::new().dim()
+    };
+    let badge = attention::badge(slot);
+    let badge_style = if badge.contains('!') {
+        Role::Warning.style().bold()
+    } else {
+        style
+    };
+    format!(
+        "{}{} ",
+        style.paint(&format!(" {} {name}", index + 1)),
+        badge_style.paint(&badge)
+    )
 }
 
 fn project_bar_window_width(
