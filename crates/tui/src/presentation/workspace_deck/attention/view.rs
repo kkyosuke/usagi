@@ -294,6 +294,7 @@ pub(in crate::presentation::workspace_deck) fn handle_input(
     if let Key::Click { column, row } = key {
         return click(
             list,
+            slots,
             &layout(slots, list, notice, height, width),
             *column,
             *row,
@@ -313,6 +314,7 @@ pub(in crate::presentation::workspace_deck) fn handle_input(
 
 fn click(
     list: &mut AttentionList,
+    slots: &[WorkspaceSlot],
     layout: &Layout,
     column: u16,
     row: u16,
@@ -335,7 +337,7 @@ fn click(
             .iter()
             .find(|(_, range)| range.contains(&column))
         {
-            list.set_view(*view);
+            list.set_view(*view, slots);
         }
     } else if let Some((index, _)) = layout
         .item_hits
@@ -485,6 +487,37 @@ mod tests {
         );
         handle_input(&mut list, &deck.slots, None, &Key::Down, 18, 80);
         assert_eq!(list.index(&drawn.items), 1);
+    }
+
+    #[test]
+    fn clicking_a_view_pins_selection_before_background_items_change() {
+        let mut deck = deck();
+        let first = item("first", AttentionKind::System);
+        let second = item("second", AttentionKind::System);
+        update(&mut deck, 0, vec![first.clone(), second.clone()]);
+        update(&mut deck, 1, vec![]);
+        let mut list = AttentionList::default();
+        let drawn = layout(&deck.slots, &list, None, 24, 120);
+        let viewport = modal::body_viewport(24, 120, drawn.inner, drawn.height).unwrap();
+        let (_, range) = drawn
+            .tabs
+            .iter()
+            .find(|(view, _)| *view == InboxView::Updates)
+            .unwrap();
+        let key = Key::Click {
+            column: (viewport.left + range.start).try_into().unwrap(),
+            row: viewport.top.try_into().unwrap(),
+        };
+        handle_input(&mut list, &deck.slots, None, &key, 24, 120);
+        update(&mut deck, 0, vec![second.clone(), first.clone()]);
+        assert!(
+            matches!(handle_input(&mut list, &deck.slots, None, &Key::Enter, 24, 120), OverlayIntent::AttentionVisit { session, .. } if session == first.session)
+        );
+        update(&mut deck, 0, vec![second]);
+        assert_eq!(
+            handle_input(&mut list, &deck.slots, None, &Key::Enter, 24, 120),
+            OverlayIntent::Stay
+        );
     }
 
     #[test]

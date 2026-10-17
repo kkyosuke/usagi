@@ -105,9 +105,15 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
 }
 
 impl AttentionList {
-    fn set_view(&mut self, view: InboxView) {
+    fn select_first(&mut self, slots: &[WorkspaceSlot]) {
+        self.selected = rows(slots, &self.filter, self.view)
+            .first()
+            .map(|row| row.identity.clone());
+    }
+
+    fn set_view(&mut self, view: InboxView, slots: &[WorkspaceSlot]) {
         self.view = view;
-        self.selected = None;
+        self.select_first(slots);
     }
 
     fn index(&self, rows: &[Row]) -> usize {
@@ -129,7 +135,7 @@ impl AttentionList {
             _ => None,
         };
         if let Some(view) = next_view {
-            self.set_view(view);
+            self.set_view(view, slots);
             return OverlayIntent::Stay;
         }
         let rows = rows(slots, &self.filter, self.view);
@@ -152,20 +158,20 @@ impl AttentionList {
             Key::Escape => return OverlayIntent::Cancel,
             Key::Char(character) => {
                 self.filter.push(*character);
-                self.selected = None;
+                self.select_first(slots);
                 return OverlayIntent::Stay;
             }
             Key::Paste(text) => {
                 self.filter.push_str(&sanitize_presentation_line(text));
-                self.selected = None;
+                self.select_first(slots);
                 return OverlayIntent::Stay;
             }
             Key::Backspace => {
                 self.filter.pop();
-                self.selected = None;
+                self.select_first(slots);
                 return OverlayIntent::Stay;
             }
-            _ => index,
+            _ => return OverlayIntent::Stay,
         };
         self.selected = rows.get(next).map(|row| row.identity.clone());
         OverlayIntent::Stay
@@ -337,7 +343,13 @@ impl WorkspaceDeck {
             }
             _ => slot.attention_stale = true,
         }
-        previous != (slot.attention.clone(), slot.attention_stale)
+        let changed = previous != (slot.attention.clone(), slot.attention_stale);
+        if let Some(DeckOverlay::Attention(list)) = self.overlay.as_mut()
+            && list.selected.is_none()
+        {
+            list.select_first(&self.slots);
+        }
+        changed
     }
 }
 
@@ -779,6 +791,76 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn switching_views_pins_selection_across_reordered_or_removed_items() {
+        for key in [Key::Right, Key::Tab] {
+            let mut deck = deck();
+            let first = item("first", AttentionKind::System);
+            let second = item("second", AttentionKind::System);
+            update(&mut deck, 0, vec![first.clone(), second.clone()]);
+            update(&mut deck, 1, vec![]);
+            deck.open_attention();
+            deck.handle_overlay_key_at(&key, 24, 120);
+            update(&mut deck, 0, vec![second.clone(), first.clone()]);
+            assert!(
+                matches!(deck.handle_overlay_key_at(&Key::Enter, 24, 120), OverlayIntent::AttentionVisit { session, .. } if session == first.session)
+            );
+            update(&mut deck, 0, vec![second]);
+            deck.handle_overlay_key_at(&Key::Other, 24, 120);
+            assert_eq!(
+                deck.handle_overlay_key_at(&Key::Enter, 24, 120),
+                OverlayIntent::Stay
+            );
+        }
+    }
+
+    #[test]
+    fn editing_a_filter_pins_selection_across_reordered_or_removed_items() {
+        for key in [Key::Char('b'), Key::Paste("build".into()), Key::Backspace] {
+            let mut deck = deck();
+            let first = item("first", AttentionKind::Decision);
+            let second = item("second", AttentionKind::Decision);
+            update(&mut deck, 0, vec![first.clone(), second.clone()]);
+            update(&mut deck, 1, vec![]);
+            deck.open_attention();
+            if key == Key::Backspace {
+                deck.handle_overlay_key_at(&Key::Paste("buildx".into()), 24, 120);
+            }
+            deck.handle_overlay_key_at(&key, 24, 120);
+            update(&mut deck, 0, vec![second.clone(), first.clone()]);
+            assert!(
+                matches!(deck.handle_overlay_key_at(&Key::Enter, 24, 120), OverlayIntent::AttentionVisit { session, .. } if session == first.session)
+            );
+            update(&mut deck, 0, vec![second]);
+            assert_eq!(
+                deck.handle_overlay_key_at(&Key::Enter, 24, 120),
+                OverlayIntent::Stay
+            );
+        }
+    }
+
+    #[test]
+    fn first_observed_items_pin_selection_in_an_empty_or_filtered_inbox() {
+        for filter in ["", "build"] {
+            let mut deck = deck();
+            deck.open_attention();
+            deck.handle_overlay_key_at(&Key::Paste(filter.into()), 24, 120);
+            let first = item("first", AttentionKind::Decision);
+            let second = item("second", AttentionKind::Decision);
+            update(&mut deck, 0, vec![first.clone(), second.clone()]);
+            update(&mut deck, 0, vec![second.clone(), first.clone()]);
+            assert!(
+                matches!(deck.handle_overlay_key_at(&Key::Enter, 24, 120), OverlayIntent::AttentionVisit { session, .. } if session == first.session)
+            );
+            update(&mut deck, 0, vec![second]);
+            deck.handle_overlay_key_at(&Key::Other, 24, 120);
+            assert_eq!(
+                deck.handle_overlay_key_at(&Key::Enter, 24, 120),
+                OverlayIntent::Stay
+            );
+        }
     }
 
     #[test]
