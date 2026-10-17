@@ -634,7 +634,7 @@ session request、response、event、status projection、error detail には現�
 
 `agent_phase_report` kind は、daemon が起動した agent のライフサイクルフックだけが送る private request である。
 field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）、
-provider の structured lifecycle hook が current ID を持つ場合に付ける opaque `native_session_id`、同じ process provision にだけ存在する
+Claude / Codex の structured lifecycle hook、または Antigravity の `PreInvocation` が current ID を持つ場合に付ける opaque `native_session_id`、同じ process provision にだけ存在する
 daemon-minted credential である。client は runtime / session / worktree / path / provider を指定できず、daemon は
 credential から exact live runtime を、runtime profile から provider を決める。成功 response は body を持たない。
 
@@ -648,10 +648,12 @@ hook command の hidden `--hook-event` で宣言し、camelCase の `conversatio
 hook input または配線宣言と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `SessionStart` では current `session_id` と `ready`、`PreInvocation` では current `conversationId` と `running` を同じ
 request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。
-他の hook（`SessionEnd` を除く）も ID を送り、metadata が欠けた runtime だけを補完する。既存 ID と異なる
+Claude / Codex の他の hook（`SessionEnd` を除く）も ID を送り、metadata が欠けた runtime だけを補完する。既存 ID と異なる
 起動後報告は `stale_target` で拒否し、既知の conversation を置換しない。旧 hook
 producer の ID 無し `ready` は phase だけを反映して wire compatibility を保つが、新しい resume metadata は作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
+Antigravity の後続 hook は phase だけを報告する。`running` の ID は旧 daemon でも `PreInvocation` の開始・置換を
+意味するため、同じ phase を使う `PreToolUse` に ID を付けない。
 
 旧 daemon が起動後報告の ID を effect-free に拒否した場合、更新済み producer は同じ接続で
 `codex_session_capture` による ID 補完を試みてから ID 無しの本来の phase を報告する。Codex 以外の profile は

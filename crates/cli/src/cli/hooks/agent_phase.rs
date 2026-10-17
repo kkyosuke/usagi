@@ -115,10 +115,12 @@ pub fn request_from_hook(
     if matches!(event, "SessionStart" | "PreInvocation") && input.session_id.is_none() {
         return Err(PhaseInputError::InvalidPayload);
     }
-    // Later hooks can repair a missed SessionStart. SessionEnd remains only a
-    // phase report: process death and retained conversation status are owned
-    // by the daemon's PTY observation.
-    let native_session_id = (phase != ReportedPhase::Exited)
+    // Claude/Codex's later hooks can repair a missed SessionStart. AGY uses
+    // Running for both PreInvocation and PreToolUse, so its later hooks omit
+    // the ID: existing daemons interpret an AGY Running ID as a starting event
+    // which may replace the current conversation. SessionEnd only reports phase.
+    let native_session_id = (phase != ReportedPhase::Exited
+        && (declared_event.is_none() || event == "PreInvocation"))
         .then_some(input.session_id)
         .flatten();
     Ok(DaemonRequest::AgentPhaseReport {
@@ -475,6 +477,26 @@ mod tests {
                 "caller_context": {"credential": "runtime-secret"}
             })
         );
+    }
+
+    #[test]
+    fn antigravity_later_hooks_never_send_a_replaceable_conversation_id() {
+        for (event, phase) in [
+            ("PreToolUse", "running"),
+            ("PostToolUse", "waiting"),
+            ("Stop", "ended"),
+        ] {
+            let request = request_from_hook(
+                &mut Cursor::new(br#"{"conversationId":"agy-conversation"}"#),
+                phase,
+                Some(event),
+                None,
+            )
+            .unwrap();
+            let value = serde_json::to_value(request).unwrap();
+            assert_eq!(value["phase"], phase);
+            assert!(value.get("native_session_id").is_none());
+        }
     }
 
     #[test]

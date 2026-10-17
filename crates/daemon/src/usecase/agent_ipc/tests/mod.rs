@@ -1553,6 +1553,25 @@ fn antigravity_pre_invocation_captures_conversation_and_running_phase() {
         Some(ProviderResumePhase::Running)
     );
     assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+
+    // A new AGY invocation can start another conversation in the same live
+    // process; only PreInvocation carries an ID for its Running phase.
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("next-agy-conversation").unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.coordinator.snapshot().records[0]
+            .provider_resume
+            .as_ref()
+            .unwrap()
+            .native_session_id
+            .expose_sensitive(),
+        "next-agy-conversation"
+    );
 }
 
 #[test]

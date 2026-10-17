@@ -1879,8 +1879,9 @@ MCP caller credential を継承せず、dispatch scope も取得しない。inte
 revision 4 以前の [Codex structured capture request](04-ipc.md#codex-structured-capture-request) は既存履歴・live
 process の移行互換にだけ使う。
 
-起動時 hook を取り逃した runtime は、その後の structured prompt / tool / Stop hook が持つ current ID で補完する。
+起動時 hook を取り逃した Claude / Codex runtime は、その後の structured prompt / tool / Stop hook が持つ current ID で補完する。
 既知の ID を異なる起動後 hook で上書きせず、同じ ID の報告は phase だけを更新する。
+Antigravity は各 invocation の `PreInvocation` だけで ID を capture し、後続 hook は phase だけを報告する。
 
 この経路の互換条件は provider が documented lifecycle hook と native conversation ID field を提供することである。
 Antigravity は managed launch 専用 synthetic workspace の `.agents/hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
@@ -1958,7 +1959,7 @@ control admission を close / drain した barrier 内で exact runtime 集合�
 新しい Agent admission を挟ませない。停止後に scope が stale、current adapter が resume 非対応と判明しても、別 conversation は推測しない。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
 
-会話 ID を欠く Agent は次の prompt / tool / Stop hook で補完できる。hook 自体が未設定・未承認・非対応なら、
+会話 ID を欠く Claude / Codex Agent は次の prompt / tool / Stop hook、Antigravity は次の `PreInvocation` で補完できる。hook 自体が未設定・未承認・非対応なら、
 該当 Agent を一度終了して開き直す必要がある。拒否エラーは profile、session、runtime を示し、対象外の Agent は停止しない。
 `--force` を追加しても、存在しない会話 ID を推測して再開することはない。
 
