@@ -325,7 +325,10 @@ mod action_io {
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
                 match daemon::attached_client(ClientPolicy::cli()) {
-                    Ok(mut client) => match client.request(request) {
+                    Ok(mut client) => match usagi_cli::cli::hooks::agent_phase::report_to_daemon(
+                        &mut client,
+                        request,
+                    ) {
                         Ok(_) => {
                             if let Some(response) =
                                 usagi_cli::cli::hooks::agent_phase::response_for_declared_event(

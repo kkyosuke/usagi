@@ -5,6 +5,7 @@ use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::workspace_state;
 use usagi_core::usecase::claude_sandbox;
+use usagi_daemon::usecase::agent_ipc::DaemonRestartResumeOptions;
 #[cfg(test)]
 use usagi_daemon::usecase::runtime::RuntimeStoreSnapshot;
 
@@ -646,6 +647,10 @@ pub(super) struct PendingDaemonAgentRestartItem {
     pub(super) agent: DaemonRestartAgent,
     #[serde(default)]
     pub(super) completed: bool,
+    /// Older transactions resume without injecting a new turn, preserving
+    /// their operation semantics across an executable update.
+    #[serde(default)]
+    pub(super) continue_work: bool,
 }
 
 impl PendingDaemonAgentRestart {
@@ -666,6 +671,11 @@ impl PendingDaemonAgentRestart {
                 .cloned()
                 .map(|agent| PendingDaemonAgentRestartItem {
                     resume_operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+                    continue_work: matches!(
+                        agent.phase,
+                        usagi_core::domain::session_lifecycle::AgentPhase::Running
+                            | usagi_core::domain::session_lifecycle::AgentPhase::Waiting
+                    ),
                     agent,
                     completed: false,
                 })
@@ -853,16 +863,17 @@ pub(super) fn restore_pending_daemon_agents(
             write_pending_daemon_agent_restart(data_dir, pending)?;
             continue;
         }
-        let preflight = if current_integration {
-            owner.prepare_current_integration_resume_readiness(
+        let options = DaemonRestartResumeOptions {
+            integration_revision: current_integration.then_some(item.agent.expected_revision),
+            continue_work: item.continue_work,
+        };
+        let preflight = owner
+            .prepare_daemon_restart_resume_readiness(
                 &item.resume_operation_id,
                 &item.agent.target,
-                item.agent.expected_revision,
+                options,
             )
-        } else {
-            owner.prepare_resume_readiness(&item.resume_operation_id, &item.agent.target)
-        }
-        .map_err(|error| std::io::Error::other(error.message))?;
+            .map_err(|error| std::io::Error::other(error.message))?;
         drop(owner);
         run_agent_readiness(agent, preflight.as_ref())
             .map_err(|error| std::io::Error::other(error.message))?;
@@ -872,30 +883,13 @@ pub(super) fn restore_pending_daemon_agents(
         let mut owner = agent
             .lock()
             .map_err(|_| std::io::Error::other("agent owner is unavailable"))?;
-        let resumed = if current_integration {
-            owner.resume_with_current_integration_from_after_readiness(
-                &item.resume_operation_id,
-                &item.agent.target,
-                item.agent.expected_revision,
-                scope,
-                preflight.as_ref(),
-                usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
-                    usagi_core::domain::agent::AgentLaunchSource::Daemon,
-                    usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
-                ),
-            )
-        } else {
-            owner.resume_from_after_readiness(
-                &item.resume_operation_id,
-                &item.agent.target,
-                scope,
-                preflight.as_ref(),
-                usagi_daemon::usecase::agent_ipc::AgentLaunchContext::new(
-                    usagi_core::domain::agent::AgentLaunchSource::Daemon,
-                    usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
-                ),
-            )
-        };
+        let resumed = owner.resume_after_daemon_restart(
+            &item.resume_operation_id,
+            &item.agent.target,
+            options,
+            scope,
+            preflight.as_ref(),
+        );
         resumed.map_err(|error| std::io::Error::other(error.message))?;
         drop(owner);
         restored += 1;

@@ -249,7 +249,7 @@ daemon verb を含む process argv は、合成ルートが side effect より�
 | `usagi daemon status` | lifecycle record と exact process-start identity の観測から running / stale / unverified / absent を表示し、running の場合はさらに [endpoint 観測](#endpoint-が応答するかは-process-の生存とは別の観測である)で応答するかを区別し、応答した hello が名乗る [daemon の build](#行頭の-version-は-client-の-build-である)を行末に添える。running daemon へ unbound な tenant inventory を問い合わせ、保持中 root と session / live-or-ownership-unknown runtime 数を続けて表示する。daemon 不在・stale なら従来の record 状態だけを表示する |
 | `usagi daemon retire <path>` | 稼働中 daemon の tenant 1 件を明示的に返す。起動 workspace と未完了 lifecycle work は拒否し、live Agent / generic terminal があれば `--force` を要求する |
 | `usagi daemon stop` | exact owner の稼働中 daemon に終了を要求し、endpoint cleanup の完了後に lifecycle record を消去する。live runtime を持つ daemon は `--force` なしでは拒否する（[planned replacement](#planned-replacement)）。stale / unverified recordはprocessにsignalを送らず、singleton lock取得とexact record再照合が成立した場合だけstale endpointを回収してから消去する |
-| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。`--restart-agents` は同一 workspace の全 live Agent を durable transaction から exact stop/resume し、`--restart-agents --force` は Running 中の Agent の中断も許可する。複数 workspace は停止前に拒否し、`--restart-agents` なしの `--force` だけが live runtime を破棄する cold transition |
+| `usagi daemon restart` | 稼働中 daemon を入れ替える。live runtime が無ければ cold transition、live runtime があれば standby を起動し、old active へ `rollover` IPC verb を送って gated handoff を行う。発行済み MCP credential を持つ live Agent がいれば handoff 前に拒否する。successor の active runtime が inventory request に応答してから成功を返す。Agent の中断と同じ会話での作業続行は [Agent integration 更新](#daemon-restart-による-agent-integration-更新) の `--restart-agents` を使う |
 | `usagi daemon replace` | exact artifact の意図的な replacement trigger を要求し、その operation で `restart` と同じ transition を実行する。同じ artifact pair / channel は同じ operation ID へ収束する |
 | `usagi daemon serve` | 前景で daemon を active role で serve する内部用 subcommand。[workspace / data directory の 2 段 fence](#単一-daemon-の-2-段-fence)を取得してから公開し、[custody を失うと自主終了する](#custody-喪失による-self-shutdown) |
 | `usagi daemon serve --standby` | 前景で daemon を standby role で常駐させる（内部用）。fence を取らず、`daemon.json` も `current.json` も書かず、private endpoint だけを bind して registry に standby として登録する（[standby process の lifecycle](#standby-process-の-lifecycle)） |
@@ -1862,7 +1862,7 @@ resume では active owner が foreign shard を書き換えないため、repla
 既に counterpart を回収した片側 relation は historical tombstone として受理する。replacement の `resumed_from` は
 回収済み source shard を retain せず、source の `superseded_by` は replacement 回収後も同じ source の再 resume を拒否する。
 
-各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。Claude / Codex は `SessionStart`、Antigravity は `PreInvocation` の [agent phase report request](04-ipc.md#agent-phase-report-request) だけが native ID を一度 IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は resume 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
+各 Agent runtime record は利用可能な場合だけ `ProviderResumeRef` を持ち、provider、opaque native session ID/name、adapter revision、完全な launch scope、capture provenance、last-known status / safe phase を保存する。native ID の `Debug` は redacted とし、IPC、status projection、response、event、error、日次 log へ出さない。[agent phase report request](04-ipc.md#agent-phase-report-request) の structured lifecycle hook が native ID を private IPC で運び、durable ID はこの専用 field だけに保存する。public `LaunchPlan.argv`、再現用 `LaunchRequest`、environment、transcript 本文、raw CLI output には複製しない。redaction が保証するのはこれら durable snapshot・IPC・projection・log の各面であり、provider ID は resume 時の一時 provision として子 process の argv に載るため、同一 host の process 一覧には露出し得る（provider CLI の入力契約上不可避）。
 
 新規 interactive launch は Antigravity / Claude / Codex のいずれにも daemon 発行の provider ID を渡さない。Claude / Codex adapter は
 `SessionStart` を hidden `usagi agent-phase ready`、Antigravity adapter は `PreInvocation` を
@@ -1878,6 +1878,9 @@ MCP caller credential を継承せず、dispatch scope も取得しない。inte
 `codex resume <id>`、Antigravity では `agy --conversation <id>` の一時 provision に追加する。旧 Claude record の `DaemonIssued` provenance と、profile
 revision 4 以前の [Codex structured capture request](04-ipc.md#codex-structured-capture-request) は既存履歴・live
 process の移行互換にだけ使う。
+
+起動時 hook を取り逃した runtime は、その後の structured prompt / tool / Stop hook が持つ current ID で補完する。
+既知の ID を異なる起動後 hook で上書きせず、同じ ID の報告は phase だけを更新する。
 
 この経路の互換条件は provider が documented lifecycle hook と native conversation ID field を提供することである。
 Antigravity は managed launch 専用 synthetic workspace の `.agents/hooks.json` と camelCase の `conversationId` を使う。Codex では通常の hook trust review も必要であり、daemon は
@@ -1933,10 +1936,10 @@ daemon restart reconciliation は unfinished record の provider status を `int
 `usagi doctor` は tool、settings、既存 daemon の状態を診断するが、daemon や Agent の起動・停止・入替を行わない。
 daemon lifecycle と Agent integration の更新は `usagi daemon restart` が所有する。通常の restart は live Agent の
 process-local MCP credential が残っていれば effect-zero で拒否する。`--restart-agents` は daemon 全体の live Agent を一覧化し、
-同一 workspace に属して exact resume metadata が全件揃う場合だけ old owner で停止して、successor の current integration で再開する。
+同一 workspace に属して exact resume metadata が全件揃う場合だけ、実行中の prompt / tool も old owner で中断して、successor の current integration で再開する。
 複数 workspace にまたがる Agent は、draining owner が保持する workspace fence を successor が奪えないため全件を停止前に拒否する。
-`--force` は `running` phase（tool / prompt の途中を含む）を破棄する追加 authority であり、
-`--restart-agents` と併用した場合は generic Terminal や daemon rollover の cold force ではない。
+`--restart-agents` 自体が実行中の中断を許可し、追加の `--force` は不要である。generic Terminal は維持する。
+`--restart-agents` なしの `--force` は Agent と generic Terminal を破棄する cold transition である。
 launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
 これにより restart は同じ build の runtime でも current adapter で再開できる。
 
@@ -1945,11 +1948,19 @@ close / drain、最初の停止より前の durable recovery transaction、old o
 による provider-native session ID の exact resume である。requester が W2 後に終了しても daemon worker が item ごとの同じ
 operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。これにより old owner の
 PTY handle を successor が推測して signal することも、old adapter が新設定を
-materialize することもない。provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
+materialize することもない。停止時の phase が `running` / `waiting` の Agent は、同じ provider conversation を指定した起動に
+初期 prompt `continue` を渡して作業を続行する。`ready` / `ended` は追加入力せず復元する。続行の有無は停止前の transaction に
+保存し、resume operation の semantic key と起動要求に含めるため、再試行で二重送信せず PTY の準備待ちも不要である。
+この field を持たない旧 transaction は従来どおり追加入力なしで再開する。
+provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が
 control admission を close / drain した barrier 内で exact runtime 集合を再検証し、Agent 停止と durable handoff write の間へ
 新しい Agent admission を挟ませない。停止後に scope が stale、current adapter が resume 非対応と判明しても、別 conversation は推測しない。
 IPC と revision migration の fence は [4. IPC](04-ipc.md#provider-conversation-resume-request) が正本である。
+
+会話 ID を欠く Agent は次の prompt / tool / Stop hook で補完できる。hook 自体が未設定・未承認・非対応なら、
+該当 Agent を一度終了して開き直す必要がある。拒否エラーは profile、session、runtime を示し、対象外の Agent は停止しない。
+`--force` を追加しても、存在しない会話 ID を推測して再開することはない。
 
 transaction の item が指す exact runtime record が既に存在しない場合（session teardown、source retention を超えた GC、
 retire 済み shard の消費などで削除された runtime）は resume できる source が残っていない。source の Agent identity が既に終了していない

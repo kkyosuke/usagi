@@ -259,7 +259,7 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
-    #[allow(clippy::too_many_arguments)] // Repair, audit origin, and an optional new headless turn must remain distinct from the exact source fence.
+    #[allow(clippy::too_many_arguments)] // Repair, audit origin, and an optional new provider turn must remain distinct from the exact source fence.
     pub(super) fn admit_resume_exact(
         &mut self,
         operation: OperationId,
@@ -268,7 +268,7 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         repair_revision: Option<u32>,
         launch_origin: Option<AgentLaunchOrigin>,
-        headless_prompt: Option<&str>,
+        prompt: Option<super::ResumePrompt<'_>>,
     ) -> Result<AgentAdmission, ProtocolError> {
         if self
             .dispatch
@@ -325,8 +325,7 @@ impl AgentRuntime {
                     "agent resume replacement history was collected",
                 ));
             };
-            if (headless_prompt.is_some()
-                || replacement.launch.request.mode == LaunchMode::Headless)
+            if (prompt.is_some() || replacement.launch.request.initial_prompt.is_some())
                 && replacement.semantic_key.as_deref() != Some(semantic_key)
             {
                 return Err(ProtocolError::new(
@@ -389,17 +388,18 @@ impl AgentRuntime {
             lifecycle_attempt: 1,
             expected_revision: 0,
         };
+        let (mode, initial_prompt) = match prompt {
+            Some(super::ResumePrompt::Interactive(text)) => (LaunchMode::Interactive, Some(text)),
+            Some(super::ResumePrompt::Headless(text)) => (LaunchMode::Headless, Some(text)),
+            None => (LaunchMode::Interactive, None),
+        };
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
-            mode: if headless_prompt.is_some() {
-                LaunchMode::Headless
-            } else {
-                LaunchMode::Interactive
-            },
+            mode,
             model: source.launch.request.model.clone(),
             resume: true,
             provider_resume: Some(reference),
-            initial_prompt: headless_prompt.map(str::to_owned),
+            initial_prompt: initial_prompt.map(str::to_owned),
             scope: LaunchScope {
                 workspace_id: target.workspace_id,
                 session_id: target.session_id,

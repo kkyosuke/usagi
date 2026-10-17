@@ -361,10 +361,10 @@ pub enum DaemonCommand {
     },
     /// daemon を再起動する
     Restart {
-        /// daemon-owned Agent を停止し、切替後に現在の integration で exact resume する
+        /// 実行中の Agent も中断し、daemon 切替後に同じ会話で作業を続行する
         #[arg(long)]
         restart_agents: bool,
-        /// `--restart-agents` では実行中 tool の中断を、それ以外では live runtime の破棄を許可する
+        /// 未完了の再開処理を放棄する。`--restart-agents` なしでは live runtime の破棄も許可する
         #[arg(long)]
         force: bool,
     },

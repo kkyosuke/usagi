@@ -3,6 +3,167 @@
 use super::*;
 
 #[test]
+#[allow(clippy::too_many_lines)] // One scenario checks persisted turn intent, audit provenance, and lost-response replay together.
+fn daemon_restart_resumes_with_a_durable_continue_prompt_and_replays_without_resending() {
+    for integration_revision in [None, Some(crate::usecase::claude::PROFILE_REVISION)] {
+        for continue_work in [false, true] {
+            let mut agent = runtime();
+            let spawn_counter = Arc::new(AtomicU32::new(0));
+            agent
+                .pty
+                .as_any_mut()
+                .downcast_mut::<Pty>()
+                .unwrap()
+                .spawn_counter = Some(spawn_counter.clone());
+            let launch = intent(None);
+            let resolved = scope();
+            let source = agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &launch,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap();
+            agent.exit(&source.terminal, 0).unwrap();
+            let target = agent.inventory(launch.workspace).resumable[0]
+                .target
+                .clone()
+                .unwrap();
+            let operation = OperationId::new().to_string();
+            let options = DaemonRestartResumeOptions {
+                integration_revision,
+                continue_work,
+            };
+            assert_eq!(
+                agent
+                    .resume_after_daemon_restart(
+                        "invalid",
+                        &target,
+                        options,
+                        &FakeScope(Ok(resolved.clone())),
+                        None,
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let ticket = agent
+                .prepare_daemon_restart_resume_readiness(&operation, &target, options)
+                .unwrap();
+            let resumed = agent
+                .resume_after_daemon_restart(
+                    &operation,
+                    &target,
+                    options,
+                    &FakeScope(Ok(resolved.clone())),
+                    ticket.as_ref(),
+                )
+                .unwrap();
+            let snapshot = agent.coordinator.snapshot();
+            let record = snapshot
+                .records
+                .iter()
+                .find(|record| record.runtime == resumed.runtime)
+                .unwrap();
+            assert_eq!(
+                record.launch.request.initial_prompt.as_deref(),
+                continue_work.then_some("continue")
+            );
+            assert_eq!(record.resumed_from, Some(target.source));
+            let provenance = record.launch_provenance.as_ref().unwrap();
+            assert_eq!(
+                provenance.launched.source,
+                usagi_core::domain::agent::AgentLaunchSource::Daemon
+            );
+            assert_eq!(
+                provenance.launched.entrypoint,
+                usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart
+            );
+            assert_eq!(
+                provenance.created,
+                snapshot
+                    .records
+                    .iter()
+                    .find(|record| record.runtime == source.runtime)
+                    .unwrap()
+                    .launch_provenance
+                    .as_ref()
+                    .unwrap()
+                    .created
+            );
+            let spawns = spawn_counter.load(Ordering::SeqCst);
+            assert_eq!(spawns, 2);
+            assert_eq!(
+                agent
+                    .resume_after_daemon_restart(
+                        &operation,
+                        &target,
+                        options,
+                        &FakeScope(Ok(resolved.clone())),
+                        None,
+                    )
+                    .unwrap(),
+                resumed
+            );
+            assert_eq!(spawn_counter.load(Ordering::SeqCst), spawns);
+            assert_eq!(
+                agent
+                    .prepare_daemon_restart_resume_readiness(
+                        &operation,
+                        &target,
+                        DaemonRestartResumeOptions {
+                            continue_work: !continue_work,
+                            ..options
+                        },
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::IdempotencyConflict
+            );
+        }
+    }
+}
+
+#[test]
+fn daemon_restart_identifies_the_agent_whose_exact_resume_metadata_is_missing() {
+    for session in [None, Some(SessionId::new())] {
+        let mut agent = structured_claude_runtime();
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session,
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+        let error = agent
+            .plan_daemon_restart_agents(&expected, true)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Busy);
+        assert!(error.message.contains("claude"));
+        assert!(
+            error
+                .message
+                .contains(&session.map_or_else(|| "root".to_owned(), |id| id.to_string()))
+        );
+        assert!(
+            error
+                .message
+                .contains(&admission.runtime.agent_runtime_id.to_string())
+        );
+        assert!(error.message.contains("no Agent was stopped"));
+        assert_eq!(pty(&agent).terminate_calls, 0);
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One end-to-end usecase scenario proves stop, lost response, migration, and replay together.
 fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
     let workspace = WorkspaceId::new();
