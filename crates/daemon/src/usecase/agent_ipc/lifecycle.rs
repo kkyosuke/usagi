@@ -7,8 +7,9 @@ use super::{
     AgentAdmission, AgentCapability, AgentId, AgentIntegrationRevision, AgentLaunchIntent,
     AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime, AgentRuntimeRef,
     BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan, DaemonRestartInterruptionError,
-    ErrorCode, OperationId, ProtocolError, ProviderCaptureProvenance, ProviderKind,
-    ProviderResumeReason, SessionId, SessionScopeResolver, expected_integration_revisions,
+    DaemonRestartResumeOptions, ErrorCode, OperationId, ProtocolError, ProviderCaptureProvenance,
+    ProviderKind, ProviderResumeReason, ResumePrompt, SessionId, SessionScopeResolver,
+    daemon_restart_resume_semantic_key, expected_integration_revisions,
     holds_live_or_unknown_agent, is_resume_source_state, map_dispatch_storage_error,
     map_runtime_error, provider_matches_profile, repair_resume_semantic_key, resume_semantic_key,
     resume_target, semantic_key,
@@ -93,6 +94,16 @@ impl AgentRuntime {
         expected_revision: u32,
     ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
         let semantic = repair_resume_semantic_key(target, expected_revision);
+        self.prepare_resume_readiness_for(operation_id, target, &semantic)
+    }
+
+    pub fn prepare_daemon_restart_resume_readiness(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        options: DaemonRestartResumeOptions,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        let semantic = daemon_restart_resume_semantic_key(target, options);
         self.prepare_resume_readiness_for(operation_id, target, &semantic)
     }
 
@@ -260,6 +271,43 @@ impl AgentRuntime {
         )
     }
 
+    /// Resumes the exact interrupted conversation with the restart's persisted
+    /// continuation policy after validating the owner-external readiness proof.
+    pub fn resume_after_daemon_restart(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        options: DaemonRestartResumeOptions,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        let current =
+            self.prepare_daemon_restart_resume_readiness(operation_id, target, options)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        let semantic = daemon_restart_resume_semantic_key(target, options);
+        if let Some(existing) = self.operations.get(operation_id) {
+            return existing.outcome.clone();
+        }
+        let context = super::AgentLaunchContext::new(
+            usagi_core::domain::agent::AgentLaunchSource::Daemon,
+            usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+        );
+        let outcome = self.admit_resume_exact(
+            operation,
+            target,
+            &semantic,
+            scope,
+            options.integration_revision,
+            Some(context.origin(operation)),
+            options
+                .continue_work
+                .then_some(ResumePrompt::Interactive("continue")),
+        );
+        self.remember_operation(operation_id, Some(&semantic), outcome.clone());
+        outcome
+    }
+
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
     /// different intent is a typed idempotency conflict.
@@ -349,11 +397,18 @@ impl AgentRuntime {
                             "a live Agent profile has no current integration revision",
                         )
                     })?;
-                let (available, _) = Self::repair_source_availability(record, &records);
+                let (available, reason) = Self::repair_source_availability(record, &records);
                 let target = resume_target(record).filter(|_| available).ok_or_else(|| {
                     ProtocolError::new(
                         ErrorCode::Busy,
-                        "a live Agent has no exact provider resume metadata; no Agent was stopped",
+                        format!(
+                            "a live {} Agent (session {}, runtime {}) has no exact provider resume metadata ({reason:?}); \
+                             no Agent was stopped. Retry after its next prompt/tool lifecycle hook; \
+                             if its launch predates session capture, exit and reopen that Agent once",
+                            record.launch.plan.profile_id.as_str(),
+                            record.runtime.session_id.map_or_else(|| "root".to_owned(), |id| id.to_string()),
+                            record.runtime.agent_runtime_id,
+                        ),
                     )
                 })?;
                 let phase = self.record_phase(record, &failed).1;
@@ -578,7 +633,7 @@ impl AgentRuntime {
             scope,
             None,
             Some(origin),
-            headless_prompt,
+            headless_prompt.map(ResumePrompt::Headless),
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome

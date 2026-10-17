@@ -2642,10 +2642,12 @@ fn run_inner(
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
     let restart_agents = match &command {
+        // Explicit Agent restart authorizes interrupting the current turn;
+        // its durable plan resumes that turn with `continue` after handoff.
         CliDaemonCommand::Restart {
             restart_agents: true,
-            force,
-        } => Some(*force),
+            ..
+        } => Some(true),
         _ => None,
     };
     // Stop and replacement observe and mutate one machine-wide daemon
@@ -2769,9 +2771,8 @@ fn run_inner(
         } => PresentationDaemonCommand::Replace {
             operation: operation
                 .or_else(|| manual_operation_id(&current_build(), runtime_channel())),
-            // With `--restart-agents`, force authorizes interrupting a Running
-            // Agent, never destruction of generic PTYs. The daemon transition
-            // itself therefore remains planned and uses the rollover barrier.
+            // Agent restart always keeps the daemon transition planned and
+            // uses the rollover barrier, preserving generic PTYs.
             mode: transition_mode(force && !restart_agents),
         },
         CliDaemonCommand::Replace { .. } => {
