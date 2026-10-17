@@ -575,8 +575,8 @@ pub struct DecisionOverlayState {
     editor: Option<DecisionEditor>,
     requested: Option<UserDecisionId>,
     error: Option<&'static str>,
-    /// A disappearing inbox editor must not fall back to another question.
-    exact: bool,
+    /// Keep the inbox identity across missing or delayed observations.
+    exact: Option<UserDecisionId>,
 }
 
 impl DecisionOverlayState {
@@ -4331,7 +4331,7 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         }
         if !present {
             overlay.editor = None;
-            if overlay.exact {
+            if overlay.exact.is_some() {
                 overlay.error =
                     Some("This question is no longer available. Close and refresh the inbox.");
             }
@@ -4350,11 +4350,9 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if overlay.requested.is_some() || overlay.error.is_some() {
         if key == AppKey::Escape {
             state.overlay = None;
-            // Keep an in-flight identity until its snapshot arrives so a
-            // cancelled request cannot reopen an unrelated question.
-            if overlay.requested.is_none() {
-                state.decision_overlay = None;
-            }
+            // Keep the cancelled identity until the next observation so a
+            // delayed result cannot reopen a question after closing its error.
+            overlay.requested = overlay.requested.or(overlay.exact);
         }
         return Vec::new();
     }
@@ -4365,7 +4363,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         && matches!(&key, AppKey::Escape)
     {
         overlay.editor = None;
-        overlay.exact = false;
+        overlay.exact = None;
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
@@ -4480,7 +4478,7 @@ fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Ve
         editor: None,
         requested,
         error: None,
-        exact: requested.is_some(),
+        exact: requested,
     });
     vec![Effect::RefreshDecisions {
         workspace: state.workspace,

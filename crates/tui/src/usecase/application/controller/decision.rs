@@ -28,14 +28,21 @@ pub(super) fn unavailable(state: &mut AppState, workspace: WorkspaceId) -> Vec<E
 }
 
 fn open_requested(state: &mut AppState) -> bool {
-    let requested = state
-        .decision_overlay
-        .as_mut()
-        .and_then(|overlay| overlay.requested.take());
+    let visible = state.overlay == Some(Overlay::Decisions);
+    let requested = state.decision_overlay.as_mut().and_then(|overlay| {
+        // A resident observer may deliver an old inventory before the
+        // explicitly woken read. Recover only the originally chosen ID.
+        let retry = if visible && overlay.error.is_some() {
+            overlay.exact
+        } else {
+            None
+        };
+        overlay.requested.take().or(retry)
+    });
     let Some(decision_id) = requested else {
         return false;
     };
-    if state.overlay == Some(Overlay::Decisions) {
+    if visible {
         let overlay = state
             .decision_overlay
             .as_mut()
@@ -47,6 +54,7 @@ fn open_requested(state: &mut AppState) -> bool {
         {
             overlay.selected = index;
             overlay.editor = Some(DecisionEditor::new(state.decisions[index].clone()));
+            overlay.error = None;
             state.unread_decisions.remove(&decision_id);
         } else {
             overlay.error =
@@ -130,7 +138,7 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                     editor: Some(DecisionEditor::new(decision)),
                     requested: None,
                     error: None,
-                    exact: false,
+                    exact: None,
                 });
             }
         }

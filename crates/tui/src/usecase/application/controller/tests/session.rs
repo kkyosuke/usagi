@@ -2339,6 +2339,61 @@ fn inbox_question_disappearing_after_loading_never_opens_a_replacement() {
 }
 
 #[test]
+fn inbox_question_recovers_its_identity_when_a_newer_observation_finds_it() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    // The resident observer can hand over an older inventory before the wake's
+    // fresh answer. Neither that reply nor a later disappearance may select A.
+    for available in [false, true, false, true] {
+        let decisions = if available {
+            vec![first.clone(), second.clone()]
+        } else {
+            vec![first.clone()]
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions,
+            }),
+        );
+        let overlay = state.decision_overlay().unwrap();
+        assert_eq!(overlay.request_error().is_none(), available);
+        assert_eq!(
+            overlay.editor().map(|editor| editor.decision().decision_id),
+            available.then_some(second.decision_id)
+        );
+        if !available {
+            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        }
+        assert!(state.unread_decisions.contains(&first.decision_id));
+    }
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first, second],
+        }),
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.decision_overlay().is_none());
+}
+
+#[test]
 fn inbox_question_failures_and_cancellation_do_not_open_other_questions() {
     let workspace = WorkspaceId::new();
     let decision = pending_decision(workspace);

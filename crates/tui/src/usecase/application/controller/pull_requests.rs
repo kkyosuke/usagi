@@ -247,7 +247,13 @@ pub(super) fn fail(state: &mut AppState, target: Target, error: &SafeError) {
         overlay.error = Some(error.clone());
     } else if state.pr_request == Some(target) {
         state.pr_request = None;
-        if state.can_surface_pr_modal() {
+        if state.can_surface_pr_modal()
+            || (state.overlay.is_none()
+                && state
+                    .pr_focus
+                    .as_ref()
+                    .is_some_and(|(focused, _)| *focused == target))
+        {
             state.open_pr_modal(PrOverlay::failed(target, error.clone()));
         }
     }
@@ -382,7 +388,9 @@ fn settle_pr_request(state: &mut AppState, target: Target, detected: Option<&PrI
     }
     state.pr_request = None;
     if let Some(identity) = focused_identity(state, target) {
-        if state.can_surface_pr_modal() {
+        // The explicit inbox choice may replace the drawer it came from.
+        // A newer interaction would already have cancelled this request.
+        if state.overlay.is_none() {
             show_focused(state, target, &identity);
         }
         return;

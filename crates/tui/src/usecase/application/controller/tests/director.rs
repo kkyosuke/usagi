@@ -630,7 +630,7 @@ fn every_existing_modal_blocks_director_drawer_entry() {
                     editor: None,
                     requested: None,
                     error: None,
-                    exact: false,
+                    exact: None,
                 });
             }
             Overlay::CleanupQueue => {
