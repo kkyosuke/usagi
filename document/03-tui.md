@@ -1538,7 +1538,8 @@ session checklist を開く。`↑`/`↓` または `j`/`k` で cursor を移動
 Enter、modal 表示中の背景入力は安全な no-op であり、追加の確認 step はない。modal は開いた snapshot の
 stable `SessionId` を entry の incarnation fence として保持する。refresh により削除不能または消失した entry は
 request 前に除外するため、同名再作成や一覧更新で別の session を削除しない。`--force` は dirty worktree と
-未マージの session branch の両方を破棄するため、modal 内にも警告を表示する。指定しなければ safe remove である。
+未マージの session branch に加えて保管に失敗した成果物も破棄するため、modal 内にも警告を表示する。
+成果物の扱いは [削除前の保管](05-daemon.md#session-artifacts-と削除前の保管) を参照する。指定しなければ safe remove である。
 
 modal の共通枠は本文の上下左右に 1 セル分の内側余白を持つ。短い端末でも overlay は上下に Home 背景を1行ずつ残す。
 modal は view ごとに予約した body 行数で描画する。候補数、empty state、result、error、loading、editor の

@@ -121,8 +121,10 @@ session の削除と orphan worktree の cleanup は、Git / filesystem の削�
 
 コピーは `.partial-<id>` へ行い、ファイルとディレクトリを同期してから公開名へ rename する。
 snapshot の root・各 directory は本人だけが到達できる `0700`、file は `0600` で作成し、保管によって他の OS user へ公開しない。
-保管失敗時は force 指定でも session tree を削除しない。symlink と特殊ファイルは追跡せず保管を拒否する。
-走査は各出力で 20,000 entries・64 階層までとし、上限超過も削除を止める。
+symlink と特殊ファイルは追跡せず保管を拒否する。走査は各出力で 20,000 entries・64 階層までとする。
+通常の削除は保管失敗・上限超過で停止し、元の成果物を保持する。`--force`（MCP は `force: true`）を明示すると、
+保管を試み、失敗した場合は理由と未保管成果物の破棄を error log に記録して削除を続ける。
+この場合は保管できなかった成果物も session tree とともに破棄される。orphan cleanup の `--force` も同じ扱いである。
 保管済み生成物には session 削除や orphan cleanup による自動削除を適用しない。
 閲覧入口は [TUI の Artifacts](03-tui.md#artifacts) を参照する。
 
