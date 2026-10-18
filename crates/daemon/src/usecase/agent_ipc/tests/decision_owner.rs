@@ -301,6 +301,53 @@ fn legacy_exact_lineage_recovers_original_decision_owner_and_dispatch_caller() {
 }
 
 #[test]
+fn live_legacy_credential_resolves_owners_without_creating_a_replacement() {
+    let mut conversation = Conversation::delegated();
+    let original = conversation.owner();
+    conversation.finish();
+    conversation.resume();
+    let credential = conversation.credential();
+    let mut binding = conversation
+        .agent
+        .dispatch
+        .binding(conversation.operation())
+        .unwrap()
+        .unwrap();
+    binding.caller = CallerRef {
+        session_id: binding.worker.session_id,
+        agent_id: binding.worker.agent_id,
+    };
+    let legacy_owner = UserDecisionOwner {
+        workspace_id: original.workspace_id,
+        session_id: binding.worker.session_id,
+        caller: binding.caller.clone(),
+        run_id: binding.run_id,
+    };
+    conversation.agent.dispatch.upsert_binding(binding).unwrap();
+    let mut snapshot = conversation.agent.coordinator.snapshot();
+    for record in &mut snapshot.records {
+        record.user_decision_owner = None;
+        record.user_decision_owner_aliases.clear();
+    }
+    let wire = serde_json::to_string(&snapshot).unwrap();
+    assert!(!wire.contains("user_decision_owner"));
+    conversation.restore(serde_json::from_str(&wire).unwrap());
+    let before = conversation.agent.coordinator.snapshot();
+    assert_eq!(
+        conversation.record().state,
+        crate::usecase::runtime::RuntimeState::Running
+    );
+    assert_eq!(
+        conversation
+            .agent
+            .mcp_user_decision_owners(&credential)
+            .unwrap(),
+        vec![legacy_owner, original]
+    );
+    assert_eq!(conversation.agent.coordinator.snapshot(), before);
+}
+
+#[test]
 fn legacy_missing_ancestor_binding_is_a_safe_authority_boundary() {
     let mut conversation = Conversation::delegated();
     let original = conversation.operation();
@@ -423,6 +470,41 @@ fn decision_owner_rejects_a_live_credential_registered_to_another_run() {
             .agent
             .mcp_user_decision_owners(&credential)
             .is_err()
+    );
+}
+
+#[test]
+fn decision_owner_refuses_a_binding_for_another_session_without_writing() {
+    let conversation = Conversation::delegated();
+    let credential = conversation.credential();
+    let mut binding = conversation
+        .agent
+        .dispatch
+        .binding(conversation.operation())
+        .unwrap()
+        .unwrap();
+    binding.worker.session_id = Some(SessionId::new());
+    conversation.agent.dispatch.upsert_binding(binding).unwrap();
+    let before_runtime = conversation.agent.coordinator.snapshot();
+    let before_binding = std::fs::read(conversation.agent.dispatch.registry_path()).unwrap();
+    assert!(
+        conversation
+            .agent
+            .mcp_dispatch_context(&credential)
+            .is_some()
+    );
+    assert_eq!(
+        conversation
+            .agent
+            .mcp_user_decision_owners(&credential)
+            .unwrap_err()
+            .code,
+        ErrorCode::OwnershipUnknown
+    );
+    assert_eq!(conversation.agent.coordinator.snapshot(), before_runtime);
+    assert_eq!(
+        std::fs::read(conversation.agent.dispatch.registry_path()).unwrap(),
+        before_binding
     );
 }
 

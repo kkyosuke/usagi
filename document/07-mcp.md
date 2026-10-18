@@ -240,7 +240,8 @@ exact resume では、元の decision owner（workspace / session / caller / run
 元の runtime / dispatch run が保持上限で回収されても保存済み owner と idempotency key の対応は失われない。
 旧 runtime の owner が未保存で履歴も既に失われている場合は、確認できる最古の binding を境界とし、失われた owner を推測しない。
 以後の exact resume は集合をそのままコピーし、新しい run ごとに owner を増やさない。
-同じ Agent identity を使う新規会話には引き継がず、別会話の decision や回答へアクセスさせない。
+同じ Agent identity を使っても、resume ではない新規 launch / admission は別 runtime / continuation とし、以前の decision 権限を引き継がない。
+同じ provider process 内の `/clear` や対話的な会話切替は usagi の run を切り替えず、発行済み credential の権限を維持する。
 
 質問の補足と選択方法は次の optional field で指定する。省略した既存 request / 保存済み record は単一選択・補足なしとして読む。
 

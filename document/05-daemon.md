@@ -1970,6 +1970,9 @@ owner は新 runtime の shard に保存するため、旧 generation の書き�
 復旧 transaction の作成・進捗更新・削除は同じ private lock で直列化する。進捗更新は既存 operation と停止済み source の集合を照合し、
 完了 item を未完了へ戻さない。消去済み transaction を遅れて動いた worker が再作成することも、別 operation の transaction を上書き・削除することもない。
 commit 前の失敗を old owner が巻き戻す間も active-control lease を保持し、再開処理と後片付けの完了まで次の handoff を待たせる。
+exact replacement の spawn が保存済みなら、進捗保存前にその Agent が終了しても item を再開済みとして閉じる。
+正常・異常終了の結果は runtime に残し、後の generation が異なる integration の指定で再試行したり `continue` を再送したりしない。
+予約だけの record や spawn 失敗は、この spawn 完了判定の根拠にしない。
 
 commit 後、draining owner は残存作業のない non-initial tenant の fence を、旧 client の参照が残っていても解放する。
 successor は各 root の fence を取得し、workspace identity を照合してから再開する。successor が追加取得する workspace で、
