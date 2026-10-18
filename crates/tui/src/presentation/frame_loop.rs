@@ -1977,6 +1977,7 @@ pub(super) fn drive_workspace_controller(
                         Vec::new()
                     }
                     (None, None) => runtime.apply_event(sidebar_pointer_event(
+                        drawn_material.as_ref(),
                         column,
                         row,
                         pointer_clock.elapsed(),

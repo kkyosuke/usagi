@@ -21,17 +21,7 @@ fn sidebar_reserved_pr_cells_without_a_visible_pr_do_not_open_a_modal() {
         }),
     );
 
-    assert!(
-        update(
-            &mut state,
-            AppEvent::Pointer {
-                column: 35,
-                row: 3,
-                at: std::time::Duration::ZERO,
-            },
-        )
-        .is_empty()
-    );
+    assert!(pointer_effects(&mut state, 35, 3, std::time::Duration::ZERO).is_empty());
     assert_eq!(state.overlay(), None);
 }
 

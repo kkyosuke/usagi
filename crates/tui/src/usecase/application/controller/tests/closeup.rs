@@ -380,6 +380,37 @@ fn live_pane_availability_reacts_on_the_edge_not_the_level() {
     assert!(state.ctrl_c_grace());
 }
 
+#[test]
+fn a_pane_becoming_live_dismisses_only_the_unforced_closeup_launcher() {
+    let (workspace, session, _) = ids();
+    for forced in [false, true] {
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        if forced {
+            let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.closeup_action_forced, forced);
+        if forced {
+            // An explicit action over a live pane stays forced even while its
+            // pane is interrupted and a replacement is becoming available.
+            let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+            assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        }
+
+        assert!(update(&mut state, AppEvent::LivePaneAvailability(true)).is_empty());
+        assert!(state.has_live_pane());
+        assert_eq!(state.active(), Some(session));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(
+            state.overlay(),
+            forced.then_some(Overlay::Closeup),
+            "only the unforced launcher should yield to the live pane"
+        );
+    }
+}
+
 /// Escape and Ctrl-C close only the Closeup action modal and return input to
 /// the underlying Closeup, while Ctrl-Q stays inert like every other overlay.
 #[test]
@@ -944,25 +975,20 @@ fn closeup_environment_source_reports_each_invalid_line_shape_and_limits() {
 }
 
 #[test]
-fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
-    let (workspace, session, _) = ids();
-    let mut state = AppState::home(workspace, vec![session]);
-    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-    assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
-
-    // A pane going live releases the Closeup foreground. Whatever modal held it
-    // must go with it: input is routed by the foreground alone, so a surviving
-    // modal would be drawn while every key reached Home instead.
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
-    assert_eq!(state.overlay(), Some(Overlay::Preview));
-    assert!(state.preview_overlay().is_some());
-    assert_eq!(
-        update(&mut state, AppEvent::LivePaneAvailability(true)),
-        vec![Effect::CancelPreview],
-        "closing the preview this way also ends the scan behind it"
-    );
-    assert_eq!(state.overlay(), None);
-    assert!(state.preview_overlay().is_none());
+fn a_pane_becoming_live_preserves_explicit_preview_and_artifacts() {
+    for key in [AppKey::OpenPreview, AppKey::OpenArtifacts] {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(key));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('報')));
+        let before = state.preview_overlay().cloned().unwrap();
+        assert!(update(&mut state, AppEvent::LivePaneAvailability(true)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert_eq!(state.preview_overlay(), Some(&before));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('告')));
+        assert_eq!(state.preview_overlay().unwrap().filter(), "報告");
+    }
 }
 
 #[test]

@@ -5,6 +5,92 @@
 use super::*;
 
 #[test]
+fn artifacts_opened_after_create_accept_keep_the_foreground_on_completion() {
+    for keyboard in [false, true] {
+        let (workspace, session, _) = ids();
+        let created = SessionId::new();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session create other".into())),
+        );
+        let token = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::CreateSession { token, .. } => Some(*token),
+                _ => None,
+            })
+            .unwrap();
+        let before = state.interaction_count();
+        if keyboard {
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        } else {
+            let _ = pointer_effects(&mut state, 35, 4, std::time::Duration::ZERO);
+        }
+        assert!(state.interaction_count() > before);
+        let overlay = state.preview_overlay().cloned().unwrap();
+        let effects = update(
+            &mut state,
+            AppEvent::OperationResult(OperationResult {
+                token,
+                succeeded: true,
+                created: Some(created),
+                notice: None,
+            }),
+        );
+        assert_ne!(state.active(), Some(created));
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert_eq!(state.preview_overlay(), Some(&overlay));
+        assert!(!effects.contains(&Effect::CancelPreview));
+    }
+}
+
+#[test]
+fn a_pointer_from_an_old_frame_cannot_retarget_a_removed_session() {
+    let (workspace, current, removed) = ids();
+    let mut state = AppState::home(workspace, vec![current]);
+    let before = state.interaction_count();
+    for target in [
+        SidebarPointerTarget::Row(Selection::Target(Target::Session(removed))),
+        SidebarPointerTarget::Artifacts(removed),
+        SidebarPointerTarget::PullRequests(removed),
+    ] {
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Pointer {
+                    target: Some(target),
+                    at: std::time::Duration::ZERO
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(current))
+        );
+        assert_eq!(state.interaction_count(), before);
+    }
+}
+
+#[test]
+fn a_session_that_becomes_unavailable_cannot_open_from_an_old_artifacts_action() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let event = AppEvent::Pointer {
+        target: Some(SidebarPointerTarget::Artifacts(session)),
+        at: std::time::Duration::ZERO,
+    };
+    state
+        .session_lifecycles
+        .insert(session, lifecycle(SessionLifecycle::Deleting));
+    assert!(update(&mut state, event).is_empty());
+    assert_eq!(state.overlay(), None);
+    assert!(state.preview_overlay().is_none());
+}
+
+#[test]
 fn artifacts_click_opens_the_clicked_session_and_preserves_the_active_pane() {
     let workspace = WorkspaceId::new();
     let active = SessionId::new();
@@ -19,14 +105,7 @@ fn artifacts_click_opens_the_clicked_session_and_preserves_the_active_pane() {
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert_eq!(state.overlay(), None);
-    let effects = update(
-        &mut state,
-        AppEvent::Pointer {
-            column: 35,
-            row: 7,
-            at: std::time::Duration::ZERO,
-        },
-    );
+    let effects = pointer_effects(&mut state, 35, 7, std::time::Duration::ZERO);
     assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
         target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
     }] if *target == clicked));
@@ -51,14 +130,7 @@ fn artifacts_click_matches_the_visible_width_and_lifecycle() {
             for column in [start - 1, start, sidebar_width - 1, sidebar_width] {
                 let mut state = sized_home(workspace, vec![session], sidebar_width + 2, 30);
                 state.session_lifecycles.insert(session, lifecycle(phase));
-                let effects = update(
-                    &mut state,
-                    AppEvent::Pointer {
-                        column,
-                        row: 4,
-                        at: std::time::Duration::ZERO,
-                    },
-                );
+                let effects = pointer_effects(&mut state, column, 4, std::time::Duration::ZERO);
                 let visible = phase.capabilities().can_use
                     && usize::from(sidebar_width) >= SIDEBAR_ARTIFACTS_MIN_WIDTH;
                 let opens_artifacts = visible && (start..sidebar_width).contains(&column);
@@ -133,14 +205,7 @@ fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() 
     // cell must open that session's PRs without changing the active sidebar
     // selection or contributing to a double-click.
     assert_eq!(
-        update(
-            &mut state,
-            AppEvent::Pointer {
-                column: 35,
-                row: 6,
-                at: std::time::Duration::ZERO,
-            },
-        ),
+        pointer_effects(&mut state, 35, 6, std::time::Duration::ZERO),
         vec![Effect::LoadPullRequests { target }]
     );
     assert_eq!(state.overlay(), Some(Overlay::Prs));

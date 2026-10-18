@@ -31,14 +31,7 @@ fn pointer_click_resolves_and_selects_each_sidebar_row() {
     // A click below every rendered row selects nothing new: the cursor stays
     // where it last landed.
     let before = state.selected();
-    let effects = update(
-        &mut state,
-        AppEvent::Pointer {
-            column: 5,
-            row: 8,
-            at: std::time::Duration::from_millis(4_000),
-        },
-    );
+    let effects = pointer_effects(&mut state, 5, 8, std::time::Duration::from_millis(4_000));
     assert!(effects.is_empty());
     assert_eq!(state.selected(), before);
     let _ = click_at(&mut state, 5, 9, 5_000);
@@ -51,17 +44,7 @@ fn pointer_click_outside_the_sidebar_body_is_inert() {
     let session = SessionId::new();
     // A pointer before the first resize has no geometry and cannot resolve.
     let mut ungeometried = AppState::home(workspace, vec![session]);
-    assert!(
-        update(
-            &mut ungeometried,
-            AppEvent::Pointer {
-                column: 5,
-                row: 2,
-                at: std::time::Duration::ZERO,
-            },
-        )
-        .is_empty()
-    );
+    assert!(pointer_effects(&mut ungeometried, 5, 2, std::time::Duration::ZERO).is_empty());
     assert_eq!(
         ungeometried.selected(),
         Selection::Target(Target::Session(session))
@@ -151,14 +134,7 @@ fn pointer_click_is_inert_while_an_overlay_owns_the_surface() {
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     let before = state.selected();
     state.pending_session_click = Some((session, std::time::Duration::from_millis(1_000)));
-    let effects = update(
-        &mut state,
-        AppEvent::Pointer {
-            column: 5,
-            row: 2,
-            at: std::time::Duration::from_millis(1_100),
-        },
-    );
+    let effects = pointer_effects(&mut state, 5, 2, std::time::Duration::from_millis(1_100));
     assert!(effects.is_empty());
     assert_eq!(state.selected(), before);
     assert_eq!(state.overlay(), Some(Overlay::Overview));
@@ -169,14 +145,7 @@ fn pointer_click_is_inert_while_an_overlay_owns_the_surface() {
 
     // The inline create form owns the same background pointer boundary.
     state.overlay = Some(Overlay::CreateSession);
-    let _ = update(
-        &mut state,
-        AppEvent::Pointer {
-            column: 5,
-            row: 2,
-            at: std::time::Duration::from_millis(1_300),
-        },
-    );
+    let _ = pointer_effects(&mut state, 5, 2, std::time::Duration::from_millis(1_300));
     assert!(state.pending_session_click.is_none());
     state.overlay = None;
     let _ = click_at(&mut state, 5, 2, 1_400);
