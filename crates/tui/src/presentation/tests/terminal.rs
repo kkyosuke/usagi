@@ -647,6 +647,10 @@ fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
         Some(AppEvent::Key(AppKey::OpenPreview))
     );
     assert_eq!(
+        app_event_from_key(Key::Live(LiveTerminalAction::OpenArtifacts)),
+        Some(AppEvent::Key(AppKey::OpenArtifacts))
+    );
+    assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::OpenDecisions)),
         Some(AppEvent::Key(AppKey::OpenDecisions))
     );

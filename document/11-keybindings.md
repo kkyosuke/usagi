@@ -91,6 +91,7 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | `Ctrl-O }` | MoveTabNext | pane tabを次へ並べ替え |
 | `Ctrl-O p` | OpenPullRequests | Pull Request一覧 |
 | `Ctrl-O v` | OpenPreview | File Preview |
+| `Ctrl-O f` | OpenArtifacts | session の成果物一覧。session 未選択時は workspace 全体 |
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |

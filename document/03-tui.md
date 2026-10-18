@@ -1693,9 +1693,14 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 
 | 入口 | 表示対象 |
 |---|---|
+| session 行の `Artifacts` をクリック | クリックした session の生成物 |
 | Closeup の `artifact` | 選択中 session の生成物 |
 | Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
+
+`Artifacts` は利用可能な session の Agent 状態行の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
+`Ctrl-O f` は Switch の cursor / Closeup の active session を開き、session 未選択時は保管済みを含む workspace 全体を開く。
+sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
 
 一覧は Pull Request と同じ中央モーダルで、session 名・active / retained・ファイル名を行に表示する。
 選択中の相対 path も表示するため、同名のファイルや異なる保管 snapshot を区別できる。
