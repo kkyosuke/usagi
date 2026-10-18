@@ -215,12 +215,21 @@ struct PreviewDisplay {
     wrap_lines: bool,
 }
 
+/// Result of asking the platform helper to open an artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactOpenOutcome {
+    /// The platform helper exited successfully; GUI display is not observed.
+    Sent,
+    /// The helper was admitted but did not provide a conclusive result in time.
+    Unconfirmed,
+}
+
 /// Native viewer work belonging to one selected artifact and request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactOpenState {
     request_id: RequestId,
     path: String,
-    result: Option<Result<(), SafeError>>,
+    result: Option<Result<ArtifactOpenOutcome, SafeError>>,
 }
 
 impl ArtifactOpenState {
@@ -232,6 +241,11 @@ impl ArtifactOpenState {
     #[must_use]
     pub fn is_opening(&self) -> bool {
         self.result.is_none()
+    }
+
+    #[must_use]
+    pub fn is_unconfirmed(&self) -> bool {
+        matches!(self.result, Some(Ok(ArtifactOpenOutcome::Unconfirmed)))
     }
 
     #[must_use]
@@ -685,6 +699,7 @@ pub(super) fn update_preview_overlay(state: &mut AppState, key: &AppKey) -> Vec<
 
     let overlay = state.preview_overlay.as_ref().unwrap();
     if overlay.file_filter.is_artifacts()
+        && !overlay.is_search_editing()
         && ((matches!(key, AppKey::Enter) && !document_open)
             || (matches!(key, AppKey::Tab) && document_open))
     {
@@ -741,7 +756,7 @@ pub(super) fn artifact_open_finished(
     request_id: RequestId,
     path: &str,
     filter: PreviewFileFilter,
-    result: &Result<(), SafeError>,
+    result: &Result<ArtifactOpenOutcome, SafeError>,
 ) {
     let Some(overlay) = state
         .preview_overlay
@@ -757,6 +772,20 @@ pub(super) fn artifact_open_finished(
     {
         open.result = Some(result.clone());
     }
+}
+
+/// A removed identity must not keep an overlay or accept its late completions.
+pub(super) fn forget_untracked_target(state: &mut AppState) -> Vec<Effect> {
+    if state.preview_overlay.as_ref().is_some_and(|overlay| {
+        matches!(overlay.target, Target::Session(id) if !state.sessions.contains(&id) || !state.session_can_use(id))
+    }) {
+        state.preview_overlay = None;
+        if state.overlay == Some(super::Overlay::Preview) {
+            state.overlay = None;
+        }
+        return vec![Effect::CancelPreview];
+    }
+    Vec::new()
 }
 
 /// Keep the finder's side pane on whatever the cursor is resting on.
@@ -1085,7 +1114,7 @@ mod tests {
         );
         let mut success = retry.clone();
         if let BackendEvent::ArtifactOpenFinished { result, .. } = &mut success {
-            *result = Ok(());
+            *result = Ok(ArtifactOpenOutcome::Sent);
         }
         let _ = update(&mut state, AppEvent::Backend(success));
         let _ = update(&mut state, AppEvent::Backend(retry));
@@ -1118,6 +1147,99 @@ mod tests {
         assert!(state.preview_overlay().unwrap().artifact_open().is_none());
         assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+    }
+
+    #[test]
+    fn removed_preview_targets_close_and_ignore_late_native_and_text_results() {
+        for document in [false, true] {
+            let mut state = artifacts();
+            let native = open_artifact(&mut state);
+            if document {
+                let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+            }
+            let overlay = state.preview_overlay().unwrap();
+            let late = BackendEvent::PreviewLoaded {
+                target: overlay.target(),
+                request_id: overlay.request_id(),
+                path: overlay.path().map(str::to_owned),
+                filter: overlay.file_filter(),
+                files: vec!["artifacts/recreated.log".into()],
+                changed: vec![],
+                lines: vec!["new session".into()],
+            };
+            let effects = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(vec![SessionId::new()])),
+            );
+            assert!(effects.contains(&Effect::CancelPreview));
+            assert!(state.preview_overlay().is_none());
+            let _ = update(&mut state, AppEvent::Backend(native));
+            let _ = update(&mut state, AppEvent::Backend(late));
+            assert!(state.preview_overlay().is_none());
+        }
+    }
+
+    #[test]
+    fn deleting_preview_targets_close_while_workspace_artifacts_survive_session_removal() {
+        let mut state = artifacts();
+        let id = state.sessions()[0];
+        let lifecycles = std::collections::BTreeMap::from([(
+            id,
+            super::super::SessionLifecycleProjection {
+                lifecycle: super::super::SessionLifecycle::Deleting,
+                failure_stage: None,
+                failure_summary: None,
+            },
+        )]);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::SessionLifecycles(lifecycles))
+            )
+            .contains(&Effect::CancelPreview)
+        );
+        assert!(state.preview_overlay().is_none());
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, vec![]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        let effects = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(vec![])),
+        );
+        assert!(!effects.contains(&Effect::CancelPreview));
+        assert_eq!(
+            state.preview_overlay().unwrap().target(),
+            Target::Root(workspace)
+        );
+    }
+
+    #[test]
+    fn artifact_search_owns_tab_until_search_finishes() {
+        let mut state = artifacts();
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let id = overlay.request_id();
+        complete(
+            &mut state,
+            target,
+            id,
+            Some("artifacts/one.log"),
+            PreviewFileFilter::Artifacts,
+            &[],
+            &["needle"],
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('/')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("needle".into())));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert!(state.preview_overlay().unwrap().is_search_editing());
+        assert_eq!(state.preview_overlay().unwrap().search(), "needle");
+        assert!(state.preview_overlay().unwrap().artifact_open().is_none());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Tab)).as_slice(),
+            [Effect::OpenArtifact { .. }]
+        ));
     }
 
     fn complete(

@@ -22,8 +22,8 @@ pub use new::{
 };
 pub use notes::{NoteCloseChoice, NoteEditor, NoteSection};
 pub use preview::{
-    ArtifactOpenState, PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane,
-    PreviewSearchMatch,
+    ArtifactOpenOutcome, ArtifactOpenState, PreviewCandidate, PreviewFileFilter, PreviewOverlay,
+    PreviewPane, PreviewSearchMatch,
 };
 pub use pull_requests::{PrFilter, PrOverlay};
 
@@ -2466,7 +2466,7 @@ pub enum BackendEvent {
         request_id: RequestId,
         path: String,
         filter: PreviewFileFilter,
-        result: Result<(), SafeError>,
+        result: Result<ArtifactOpenOutcome, SafeError>,
     },
 }
 
@@ -3238,6 +3238,7 @@ fn update_session_snapshot(state: &mut AppState, mut sessions: Vec<SessionId>) -
     let mut effects = vec![Effect::SyncPullRequestTargets {
         sessions: state.sessions.clone(),
     }];
+    effects.extend(preview::forget_untracked_target(state));
     effects.extend(continue_cleanup_after_snapshot(state));
     effects.extend(continue_remove_after_snapshot(state));
     effects
@@ -3293,7 +3294,7 @@ fn update_session_lifecycles(
     }
     reconcile_cleanup_queue(state);
     reconcile_remove_queue(state);
-    Vec::new()
+    preview::forget_untracked_target(state)
 }
 
 #[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.

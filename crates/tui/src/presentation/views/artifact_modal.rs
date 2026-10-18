@@ -63,6 +63,8 @@ pub(crate) fn open_feedback(state: &PreviewOverlay, inner: usize) -> Option<Stri
         modal::content_line(
             &Style::new().dim().paint(if open.is_opening() {
                 "Opening in external app…"
+            } else if open.is_unconfirmed() {
+                "Open result unconfirmed. Check the external app."
             } else {
                 "Open request sent."
             }),
@@ -357,7 +359,7 @@ mod tests {
                 request_id,
                 path: path.clone(),
                 filter,
-                result: Ok(()),
+                result: Ok(crate::usecase::application::controller::ArtifactOpenOutcome::Sent),
             }),
         );
         let rendered = text(&state);
@@ -368,5 +370,29 @@ mod tests {
             state.preview_overlay().unwrap().selected_file(),
             Some(path.as_str())
         );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let request_id = state
+            .preview_overlay()
+            .unwrap()
+            .artifact_open()
+            .unwrap()
+            .request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                target,
+                request_id,
+                path,
+                filter,
+                result: Ok(
+                    crate::usecase::application::controller::ArtifactOpenOutcome::Unconfirmed,
+                ),
+            }),
+        );
+        let open = state.preview_overlay().unwrap().artifact_open().unwrap();
+        assert!(open.is_unconfirmed());
+        assert!(!open.is_opening());
+        assert!(open.error().is_none());
+        assert!(text(&state).contains("Open result unconfirmed"));
     }
 }

@@ -2,6 +2,7 @@
 
 use std::io;
 use std::process::{Child, Command};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
@@ -10,7 +11,19 @@ const MAX_TRACKED_CHILDREN: usize = 32;
 const REAP_INTERVAL: Duration = Duration::from_millis(20);
 
 struct ReaperState {
-    children: Mutex<Vec<Child>>,
+    children: Mutex<Vec<TrackedChild>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HelperExit {
+    Success,
+    Failure,
+    Unconfirmed,
+}
+
+struct TrackedChild {
+    child: Child,
+    completion: Option<SyncSender<HelperExit>>,
 }
 
 /// Cloneable admission handle for one TUI process's platform helpers.
@@ -53,6 +66,21 @@ impl Default for PlatformChildReaper {
 impl PlatformChildReaper {
     /// Spawn and admit a helper without ever waiting on the caller's thread.
     pub(crate) fn spawn(&self, command: &mut Command) -> io::Result<()> {
+        self.admit(command, None)
+    }
+
+    /// Report a helper's exit while retaining the same bounded reaping owner.
+    pub(crate) fn spawn_observed(&self, command: &mut Command) -> io::Result<Receiver<HelperExit>> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.admit(command, Some(sender))?;
+        Ok(receiver)
+    }
+
+    fn admit(
+        &self,
+        command: &mut Command,
+        completion: Option<SyncSender<HelperExit>>,
+    ) -> io::Result<()> {
         let Some(state) = self.state.upgrade() else {
             return Err(io::Error::other("platform child reaper is unavailable"));
         };
@@ -65,7 +93,10 @@ impl PlatformChildReaper {
                 "too many platform helpers",
             ));
         }
-        children.push(command.spawn()?);
+        children.push(TrackedChild {
+            child: command.spawn()?,
+            completion,
+        });
         Ok(())
     }
 
@@ -92,11 +123,25 @@ fn reap_children(state: &ReaperState, lifetime: &Weak<()>) {
             let mut index = children.len();
             while index > 0 {
                 index -= 1;
-                if matches!(children[index].try_wait(), Ok(Some(_))) {
-                    let mut child = children.swap_remove(index);
-                    // `try_wait` already reaped it; `wait` returns the cached
-                    // status and makes the ownership contract explicit.
-                    let _ = child.wait();
+                match children[index].child.try_wait() {
+                    Ok(Some(status)) => {
+                        let mut tracked = children.swap_remove(index);
+                        let _ = tracked.child.wait();
+                        if let Some(sender) = tracked.completion.take() {
+                            let outcome = if status.success() {
+                                HelperExit::Success
+                            } else {
+                                HelperExit::Failure
+                            };
+                            let _ = sender.send(outcome);
+                        }
+                    }
+                    Err(_) => {
+                        if let Some(sender) = children[index].completion.take() {
+                            let _ = sender.send(HelperExit::Unconfirmed);
+                        }
+                    }
+                    Ok(None) => {}
                 }
             }
             children.is_empty()
