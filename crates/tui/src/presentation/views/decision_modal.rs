@@ -221,7 +221,7 @@ fn list_body(
     inner_width: usize,
     capacity: usize,
 ) -> Vec<String> {
-    let mut rows = vec![modal::caption("Pending decisions for this workspace")];
+    let mut rows = vec![modal::caption("Select a question to answer")];
     if decisions.is_empty() {
         rows.push(modal::empty_notice("(none)"));
     }
@@ -321,7 +321,7 @@ pub fn render_over(
         ("User decision", editor_rows(editor, inner_width, capacity))
     } else {
         (
-            "Pending decisions",
+            "Questions awaiting reply",
             list_body(overlay, decisions, session_names, inner_width, capacity),
         )
     };

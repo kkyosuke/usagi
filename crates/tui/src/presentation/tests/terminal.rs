@@ -110,7 +110,10 @@ impl Terminal for DecisionProjectBarTerminal {
         let key = self.0.read_key()?;
         if key == Key::Live(LiveTerminalAction::OpenAttention) {
             let bar = widgets::strip_ansi(&self.0.frames.last().unwrap()[0]);
-            let start = bar.find("! Attention").unwrap();
+            let start = ["! Action needed", "Checking status", "No action needed"]
+                .iter()
+                .find_map(|label| bar.find(label))
+                .unwrap();
             return Ok(Key::Click {
                 column: u16::try_from(widgets::display_width(&bar[..start])).unwrap(),
                 row: 0,
