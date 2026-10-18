@@ -2596,7 +2596,19 @@ fn pending_daemon_agent_restart_round_trips_and_clears_only_its_operation() {
         Some(pending)
     );
     assert!(!clear_pending_daemon_agent_restart(&data, "other-operation").unwrap());
+    let intent = super::restart_intent::RestartIntent::new(
+        &operation.0,
+        &daemon_restart_plan(WorkspaceId::new()),
+    )
+    .unwrap();
+    let intent_path = data.join("daemon/agent-restart-intent.json");
+    std::fs::create_dir(&intent_path).unwrap();
+    assert!(clear_pending_daemon_agent_restart(&data, &operation.0).is_err());
+    assert!(pending_daemon_agent_restart_path(&data).is_file());
+    std::fs::remove_dir(&intent_path).unwrap();
+    super::restart_intent::write(&data, &intent).unwrap();
     assert!(clear_pending_daemon_agent_restart(&data, &operation.0).unwrap());
+    assert!(!intent_path.exists());
     assert!(!clear_pending_daemon_agent_restart(&data, &operation.0).unwrap());
 }
 
@@ -2660,6 +2672,63 @@ fn planned_agent_workspace_is_resolved_by_durable_identity() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn completed_restart_workspaces_can_disappear_without_blocking_remaining_recovery() {
+    let temporary = tempfile::tempdir_in("/tmp").unwrap();
+    let data = temporary.path().join("data");
+    let daemon = data.join("daemon");
+    ensure_private_dir_all(&daemon).unwrap();
+    let first = temporary.path().join("first");
+    let second = temporary.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let first = paths::canonical_workspace_root(&first).unwrap();
+    let second = paths::canonical_workspace_root(&second).unwrap();
+    let first_workspace = WorkspaceId::new();
+    let second_workspace = WorkspaceId::new();
+    for (root, workspace) in [(&first, first_workspace), (&second, second_workspace)] {
+        let state = workspace_state::resolve(&daemon, root).unwrap();
+        usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(state.dir())
+            .initialize(
+                &usagi_core::domain::session_lifecycle::WorkspaceLifecycleState::new(
+                    workspace,
+                    chrono::Utc::now(),
+                ),
+                root,
+            )
+            .unwrap();
+    }
+    let mut plan = daemon_restart_plan(first_workspace);
+    plan.agents
+        .extend(daemon_restart_plan(second_workspace).agents);
+    let operation = OperationId("completed-workspace".to_owned());
+    let mut pending =
+        PendingDaemonAgentRestart::new(&operation, DaemonGeneration::new(), first.clone(), &plan);
+    pending.agents[0].completed = true;
+    write_pending_daemon_agent_restart(&data, &pending).unwrap();
+
+    std::fs::remove_dir(&first).unwrap();
+    let mut pending = read_pending_daemon_agent_restart(&data).unwrap().unwrap();
+    assert_eq!(
+        super::agent::pending_agent_workspace_roots(&data, &pending).unwrap(),
+        [(second_workspace, second.clone())].into()
+    );
+
+    pending.agents[1].completed = true;
+    write_pending_daemon_agent_restart(&data, &pending).unwrap();
+    std::fs::remove_dir(&second).unwrap();
+    // Once every item completed, finalization needs no workspace state at all.
+    std::fs::remove_dir_all(daemon.join(paths::WORKSPACE_STATE_DIR)).unwrap();
+    std::fs::write(daemon.join(paths::WORKSPACE_STATE_DIR), "unavailable").unwrap();
+    assert!(
+        super::agent::pending_agent_workspace_roots(&data, &pending)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(clear_pending_daemon_agent_restart(&data, &operation.0).unwrap());
+    assert!(read_pending_daemon_agent_restart(&data).unwrap().is_none());
 }
 
 #[test]

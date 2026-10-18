@@ -10,9 +10,21 @@ use usagi_core::domain::id::{AgentRuntimeRef, DaemonGeneration};
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::infrastructure::persistence::json_file;
 
+use super::instance_lock::{PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive};
 use super::{AGENT_RUNTIME_LIMIT, PendingDaemonAgentRestart};
 
 const FILE: &str = "agent-restart-intent.json";
+const LOCK_FILE: &str = "agent-restart-intent.lock";
+
+fn mutation_lock(data_dir: &Path) -> io::Result<std::fs::File> {
+    let daemon = data_dir.join("daemon");
+    lock_private_exclusive(
+        &daemon.join(LOCK_FILE),
+        "daemon Agent restart intent",
+        PrivateLockModePolicy::CrashResidue,
+        PrivateLockWait::RECORD,
+    )
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +92,7 @@ pub(super) fn read(data_dir: &Path) -> io::Result<Option<RestartIntent>> {
 }
 
 pub(super) fn write(data_dir: &Path, intent: &RestartIntent) -> io::Result<()> {
+    let _mutation = mutation_lock(data_dir)?;
     json_file::write_atomic(
         &data_dir.join("daemon"),
         &data_dir.join("daemon").join(FILE),
@@ -89,17 +102,73 @@ pub(super) fn write(data_dir: &Path, intent: &RestartIntent) -> io::Result<()> {
 }
 
 pub(super) fn clear(data_dir: &Path, operation_id: &str) -> io::Result<bool> {
+    clear_with(data_dir, operation_id, |path| std::fs::remove_file(path))
+}
+
+fn clear_with(
+    data_dir: &Path,
+    operation_id: &str,
+    remove: fn(&Path) -> io::Result<()>,
+) -> io::Result<bool> {
+    let _mutation = mutation_lock(data_dir)?;
     if read(data_dir)?.is_none_or(|intent| intent.operation_id != operation_id) {
         return Ok(false);
     }
-    std::fs::remove_file(data_dir.join("daemon").join(FILE))?;
-    Ok(true)
+    match remove(&data_dir.join("daemon").join(FILE)) {
+        Ok(()) => Ok(true),
+        // A missing intent is already complete, including an overlapping cleanup.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime::daemon::tests::daemon_restart_plan;
+
+    #[test]
+    fn concurrent_completion_cleanup_accepts_only_an_already_removed_intent() {
+        fn removed_by_other_completion(path: &Path) -> io::Result<()> {
+            use fs2::FileExt as _;
+            let observer = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path.parent().unwrap().join(LOCK_FILE))?;
+            // A later operation's writer cannot replace the matched intent
+            // before its conditional removal completes.
+            assert_eq!(
+                observer.try_lock_exclusive().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            std::fs::remove_file(path)?;
+            std::fs::remove_file(path)
+        }
+        fn denied(_: &Path) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let plan = daemon_restart_plan(usagi_core::domain::id::WorkspaceId::new());
+        let intent = RestartIntent::new("completed", &plan).unwrap();
+        write(directory.path(), &intent).unwrap();
+        assert_eq!(
+            clear_with(directory.path(), "completed", denied)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(read(directory.path()).unwrap().is_some());
+        assert!(!clear_with(directory.path(), "completed", removed_by_other_completion).unwrap());
+        assert!(read(directory.path()).unwrap().is_none());
+        let next = RestartIntent::new("next-operation", &plan).unwrap();
+        write(directory.path(), &next).unwrap();
+        assert!(!clear(directory.path(), "completed").unwrap());
+        assert_eq!(
+            read(directory.path()).unwrap().unwrap().operation_id,
+            "next-operation"
+        );
+    }
 
     #[test]
     fn only_the_matching_intent_adds_continue_to_an_uncompleted_legacy_item() {

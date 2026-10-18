@@ -695,14 +695,9 @@ impl PendingDaemonAgentRestart {
                 "pending daemon Agent restart has an unsupported shape",
             ));
         }
-        let canonical = paths::canonical_workspace_root(&self.workspace_root)
-            .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-        if canonical != self.workspace_root {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "pending daemon Agent restart has a non-canonical workspace",
-            ));
-        }
+        // Retained for old transaction readers. Recovery resolves each
+        // unfinished item's root from its durable workspace identity instead;
+        // a completed item's former root may no longer exist.
         let resume_operations = self
             .agents
             .iter()
@@ -775,10 +770,12 @@ pub(super) fn clear_pending_daemon_agent_restart(
     if pending.operation_id != operation_id {
         return Ok(false);
     }
+    // The transaction's absence admits the next lifecycle operation. Finish
+    // operation-scoped intent cleanup before publishing that boundary.
+    super::restart_intent::clear(data_dir, operation_id)?;
     let path = pending_daemon_agent_restart_path(data_dir);
     match std::fs::remove_file(&path) {
         Ok(()) => {
-            super::restart_intent::clear(data_dir, operation_id)?;
             if let Some(parent) = path.parent()
                 && let Ok(directory) = std::fs::File::open(parent)
             {
@@ -813,6 +810,9 @@ pub(super) fn planned_agent_workspace_roots(
         .iter()
         .map(|agent| agent.runtime.terminal.workspace_id)
         .collect::<BTreeSet<_>>();
+    if workspaces.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let mut roots = BTreeMap::new();
     for state in workspace_state::adopted(&data_dir.join("daemon"))
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?
@@ -841,6 +841,21 @@ pub(super) fn planned_agent_workspace_roots(
         ));
     }
     Ok(roots)
+}
+
+pub(super) fn pending_agent_workspace_roots(
+    data_dir: &Path,
+    pending: &PendingDaemonAgentRestart,
+) -> std::io::Result<BTreeMap<WorkspaceId, PathBuf>> {
+    let plan = DaemonRestartAgentPlan {
+        agents: pending
+            .agents
+            .iter()
+            .filter(|item| !item.completed)
+            .map(|item| item.agent.clone())
+            .collect(),
+    };
+    planned_agent_workspace_roots(data_dir, &plan)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_restart_recovers_agents_after_requester_exit
@@ -979,14 +994,7 @@ pub(super) fn recover_pending_daemon_agents_once(
         // Commit the continuation semantic before the first resume admission.
         write_pending_daemon_agent_restart(data_dir, &pending)?;
     }
-    let plan = DaemonRestartAgentPlan {
-        agents: pending
-            .agents
-            .iter()
-            .map(|item| item.agent.clone())
-            .collect(),
-    };
-    for (workspace_id, root) in planned_agent_workspace_roots(data_dir, &plan)? {
+    for (workspace_id, root) in pending_agent_workspace_roots(data_dir, &pending)? {
         let tenant = match tenants.tenant(&root) {
             Some(tenant) => tenant,
             None => tenants.adopt(&root).map_err(std::io::Error::from)?,

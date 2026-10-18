@@ -265,6 +265,8 @@ if run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/progress
 fi
 unset USAGI_SYNC_RESTART_SUPPORTED
 grep -q 'existing daemon was left unchanged' "$CASE_DIR/progress"
+grep -q '\[###---\] 3/6 本体更新済み・daemon の同期は未完了' "$CASE_DIR/progress"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 if grep -q '6/6' "$CASE_DIR/progress"; then exit 1; fi
 
 prepare_case managed-update-without-daemon
@@ -284,18 +286,23 @@ if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
 fi
 unset USAGI_SYNC_UNSUPPORTED
 grep -q 'does not support safe managed daemon synchronization' "$CASE_DIR/err"
+grep -q '\[###-\] 3/4 本体更新済み・daemon の同期は未完了' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
 [ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
 
 prepare_case managed-update-post-commit-failure
 USAGI_SYNC_STATUS=1
 export USAGI_SYNC_STATUS
-if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+if run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
     echo "expected a failed managed synchronization to fail the update" >&2
     exit 1
 fi
 unset USAGI_SYNC_STATUS
 grep -q 'could not complete daemon synchronization' "$CASE_DIR/err"
 grep -q "inspect 'usagi daemon status'" "$CASE_DIR/err"
+grep -q '\[###---\] 3/6 本体更新済み・daemon の同期は未完了' "$CASE_DIR/err"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+if grep -q '6/6' "$CASE_DIR/err"; then exit 1; fi
 if grep -q 'left unchanged' "$CASE_DIR/err"; then
     echo "generic synchronization failure made an invalid pre-commit guarantee" >&2
     exit 1

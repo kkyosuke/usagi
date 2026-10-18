@@ -2451,9 +2451,9 @@ impl IpcRolloverRequester<'_> {
 impl RolloverRequester for IpcRolloverRequester<'_> {
     fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
         let plan = self.prepare_agent_restart()?;
-        let Some(selected) = plan.as_ref().map(|plan| plan.agents.len()) else {
+        if plan.is_none() {
             return self.rollover_planned(operation, plan.as_ref());
-        };
+        }
         // The observer has no lifecycle authority. Its channel is dropped on
         // every return and unwind, and the scoped thread is always joined.
         let data_dir = self.data_dir;
@@ -2476,7 +2476,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
                     let committed = document.as_ref().is_some_and(|document| document.completed_operation.as_ref().is_some_and(|operation| operation.0 == operation_id))
                         || handoff.is_some_and(|handoff| handoff.phase == usagi_daemon::usecase::authority::registry::HandoffPhase::Committed);
                     let recovery = pending.as_ref().map(|pending| (pending.agents.iter().filter(|item| item.completed).count(), pending.agents.len()));
-                    let _ = progress.show(restart_stage(committed, handoff.is_some(), recovery, selected));
+                    let _ = progress.show(restart_stage(committed, handoff.is_some(), recovery));
                     if !matches!(stopped.recv_timeout(Duration::from_millis(150)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
                         break;
                     }

@@ -3656,6 +3656,10 @@ fn root_restart_recovers_agents_after_requester_exit() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    assert!(
+        !data_dir.join("daemon/agent-restart-intent.json").exists(),
+        "daemon recovery also owns continuation intent cleanup after requester exit"
+    );
     let mut current = client(&data_dir);
     let inventory = current
         .request(DaemonRequest::AgentInventory {

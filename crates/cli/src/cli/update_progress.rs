@@ -8,6 +8,7 @@ pub enum RestartStage {
     Stopping,
     Switching,
     Resuming { completed: usize, total: usize },
+    Verifying,
     Finished,
 }
 
@@ -17,11 +18,11 @@ pub fn restart_stage(
     committed: bool,
     switching: bool,
     recovery: Option<(usize, usize)>,
-    selected: usize,
 ) -> RestartStage {
     if committed {
-        let (completed, total) = recovery.unwrap_or((selected, selected));
-        RestartStage::Resuming { completed, total }
+        recovery.map_or(RestartStage::Verifying, |(completed, total)| {
+            RestartStage::Resuming { completed, total }
+        })
     } else if switching {
         RestartStage::Switching
     } else if recovery.is_some() {
@@ -59,7 +60,7 @@ impl<W: Write> RestartProgress<W> {
         let done = match stage {
             RestartStage::Preparing | RestartStage::Stopping => 0,
             RestartStage::Switching => 1,
-            RestartStage::Resuming { .. } => 2,
+            RestartStage::Resuming { .. } | RestartStage::Verifying => 2,
             RestartStage::Finished => 3,
         } + if self.update { 3 } else { 0 };
         let total = if self.update { 6 } else { 3 };
@@ -70,6 +71,7 @@ impl<W: Write> RestartProgress<W> {
             RestartStage::Resuming { completed, total } => {
                 format!("Agent を再開しています ({completed}/{total} 件)")
             }
+            RestartStage::Verifying => "Agent の再開状況を確認しています".to_owned(),
             RestartStage::Finished => "更新と再開が完了しました".to_owned(),
         };
         if self.terminal {
@@ -114,32 +116,23 @@ mod tests {
 
     #[test]
     fn phase_and_recovery_counts_never_claim_completion_before_serving() {
+        assert_eq!(restart_stage(false, false, None), RestartStage::Preparing);
         assert_eq!(
-            restart_stage(false, false, None, 4),
-            RestartStage::Preparing
-        );
-        assert_eq!(
-            restart_stage(false, false, Some((0, 4)), 4),
+            restart_stage(false, false, Some((0, 4))),
             RestartStage::Stopping
         );
         assert_eq!(
-            restart_stage(false, true, Some((0, 4)), 4),
+            restart_stage(false, true, Some((0, 4))),
             RestartStage::Switching
         );
         assert_eq!(
-            restart_stage(true, true, Some((2, 4)), 4),
+            restart_stage(true, true, Some((2, 4))),
             RestartStage::Resuming {
                 completed: 2,
                 total: 4
             }
         );
-        assert_eq!(
-            restart_stage(true, false, None, 4),
-            RestartStage::Resuming {
-                completed: 4,
-                total: 4
-            }
-        );
+        assert_eq!(restart_stage(true, false, None), RestartStage::Verifying);
         let mut output = Vec::new();
         let mut progress = RestartProgress::new(&mut output, false, true);
         for stage in [
@@ -151,6 +144,7 @@ mod tests {
                 completed: 2,
                 total: 4,
             },
+            RestartStage::Verifying,
         ] {
             progress.show(stage).unwrap();
         }
@@ -160,6 +154,8 @@ mod tests {
         assert!(!text.contains('\x1b'));
         assert_eq!(text.matches("Agent を停止").count(), 1);
         assert!(text.contains("(2/4 件)"));
+        assert!(text.contains("Agent の再開状況を確認しています"));
+        assert!(!text.contains("(4/4 件)"));
         assert!(text.contains("未完了"));
     }
 
@@ -177,6 +173,7 @@ mod tests {
         assert!(broken.show(RestartStage::Preparing).is_err());
         assert!(broken.finish(false).is_err());
         let mut broken = RestartProgress::new(&mut [][..], false, true);
+        assert!(broken.show(RestartStage::Preparing).is_err());
         assert!(broken.finish(false).is_err());
     }
 }

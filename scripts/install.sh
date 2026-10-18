@@ -588,6 +588,9 @@ if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
     USAGI_UPDATE_PROGRESS=1 USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_AUTO_SYNC=1 "$TARGET" "${SYNC_ARGS[@]}"
     SYNC_STATUS=$?
     set -e
+    if [ "$SYNC_STATUS" -ne 0 ] && [ "$SYNC_STATUS" -ne 3 ] && [ "$SYNC_STATUS" -ne 4 ]; then
+        progress 3 "$PROGRESS_TOTAL" "本体更新済み・daemon の同期は未完了です"
+    fi
     case "$SYNC_STATUS" in
         0) ;;
         3) ;; # Binary installed; live connections defer daemon replacement.

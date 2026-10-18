@@ -849,6 +849,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pending-update-worker.lock` | lock file | 同じ data home の自動再試行 worker を単一にする |
 | `agent-restart.json` | durable JSON | 停止前に記録する exact Agent 集合、item ごとの resume operation と完了状態 |
 | `agent-restart-intent.json` | durable JSON | 新 CLI が保存する続行 intent。operation・source generation・exact runtime 集合が transaction と一致する場合だけ successor が反映する |
+| `agent-restart-intent.lock` | private lock file | 続行 intent の保存と operation を照合した削除を直列化する |
 | `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
 | `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
@@ -1962,8 +1963,9 @@ materialize することもない。停止時の phase が `running` / `waiting`
 restart 中は停止・切替の段階と再開済み Agent 件数を stderr に表示し、全 item の完了と serving 検証後にだけ完了表示を出す。
 
 commit 後、draining owner は残存作業のない non-initial tenant の fence を、旧 client の参照が残っていても解放する。
-successor は各 root の fence を取得し、workspace identity を照合してから再開する。live generic PTY や未完了 lifecycle work が
-non-initial tenant の fence を保持している間は、その解放を待って recovery を再試行する。CLI の待ち時間を超えても recovery は daemon で継続する。
+successor は各 root の fence を取得し、workspace identity を照合してから再開する。successor が追加取得する workspace で、
+live generic PTY や未完了 lifecycle work が旧 owner の fence を保持している間は、その解放を待って recovery を再試行する。
+CLI の待ち時間を超えても recovery は daemon で継続する。
 provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が
 control admission を close / drain した barrier 内で exact runtime 集合を再検証し、Agent 停止と durable handoff write の間へ
