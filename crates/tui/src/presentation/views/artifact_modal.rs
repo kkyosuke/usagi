@@ -50,8 +50,31 @@ fn row(path: &str, selected: bool, inner: usize) -> String {
     )
 }
 
+/// Status stays inside the owning modal, where the request was made.
+pub(crate) fn open_feedback(state: &PreviewOverlay, inner: usize) -> Option<String> {
+    let open = state.artifact_open()?;
+    Some(if let Some(error) = open.error() {
+        let mut message = error.message.as_str().to_owned();
+        if state.path().is_none() && error.error_id == "preview-native-format" {
+            message.push_str(" Press Tab for a text preview.");
+        }
+        modal::error_line(&message, inner)
+    } else {
+        modal::content_line(
+            &Style::new().dim().paint(if open.is_opening() {
+                "Opening in external app…"
+            } else {
+                "Open request sent."
+            }),
+            inner,
+        )
+    })
+}
+
 fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
     let mut lines = Vec::new();
+    let feedback = open_feedback(state, inner).filter(|_| height > 0);
+    let footer = height > 1 || (height > 0 && feedback.is_none());
     if height >= 4 {
         lines.push(modal::caption(state.file_filter().label()));
         lines.push(format!(
@@ -68,7 +91,9 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
         }
     }
     let detail = height >= 7 && state.selected_file().is_some();
-    let capacity = height.saturating_sub(lines.len() + 1 + usize::from(detail));
+    let capacity = height.saturating_sub(
+        lines.len() + usize::from(footer) + usize::from(detail) + usize::from(feedback.is_some()),
+    );
     if capacity > 0 {
         if state.is_loading() {
             lines.push(modal::empty_notice("Loading artifacts…"));
@@ -95,6 +120,9 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
             ));
         }
     }
+    if let Some(feedback) = feedback {
+        lines.push(feedback);
+    }
     if detail {
         // The full storage location distinguishes repeated snapshots of a file.
         lines.push(modal::content_line(
@@ -102,7 +130,7 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
             inner,
         ));
     }
-    if height > 0 {
+    if footer {
         lines.push(modal::footer(
             "↑↓ select / Enter open / Tab preview / type filter / Esc close",
         ));
@@ -271,5 +299,67 @@ mod tests {
             }),
         );
         assert!(text(&state).contains("Artifacts unavailable"));
+    }
+
+    #[test]
+    fn native_open_feedback_keeps_the_finder_and_controls_visible() {
+        let mut state = loaded(vec![".usagi/sessions/reports/artifacts/tests.log".into()]);
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let (target, request_id, path, filter) = match &effects[0] {
+            crate::usecase::application::controller::Effect::OpenArtifact {
+                target,
+                request_id,
+                path,
+                filter,
+            } => (*target, *request_id, path.clone(), *filter),
+            _ => panic!("native open missing"),
+        };
+        assert!(text(&state).contains("Opening in external app"));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                target,
+                request_id,
+                path: path.clone(),
+                filter,
+                result: Err(SafeError {
+                    message: SafeMessage::new("This file type cannot be opened externally."),
+                    error_id: "preview-native-format".into(),
+                }),
+            }),
+        );
+        assert!(text(&state).contains("Press Tab for a text preview."));
+        for height in 0..16 {
+            let body = body(state.preview_overlay().unwrap(), height, 88);
+            assert!(body.len() <= height);
+            if height > 0 {
+                assert!(body.join("\n").contains("cannot be opened externally"));
+            }
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let request_id = state
+            .preview_overlay()
+            .unwrap()
+            .artifact_open()
+            .unwrap()
+            .request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                target,
+                request_id,
+                path: path.clone(),
+                filter,
+                result: Ok(()),
+            }),
+        );
+        let rendered = text(&state);
+        assert!(rendered.contains("Open request sent."));
+        assert!(rendered.contains("tests.log"));
+        assert!(rendered.contains("Enter open"));
+        assert_eq!(
+            state.preview_overlay().unwrap().selected_file(),
+            Some(path.as_str())
+        );
     }
 }

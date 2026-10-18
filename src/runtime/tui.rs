@@ -642,7 +642,7 @@ impl BackendDecisionPort for ProductionDecisionPort {
 
 struct ProductionOverlayPort {
     root: PathBuf,
-    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
+    sessions: Vec<(SessionId, PathBuf)>,
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
     pr_pump: RefreshPump<PrObservations>,
     preview_pump: PreviewPump,
@@ -650,6 +650,9 @@ struct ProductionOverlayPort {
     browser: PlatformBrowserOpener,
     clipboard: PlatformClipboard,
 }
+
+#[cfg(test)]
+mod artifact_tests;
 
 impl ProductionOverlayPort {
     fn publish_prs(&mut self, result: Result<PrObservations, String>, completions: &Completions) {
@@ -665,8 +668,8 @@ impl ProductionOverlayPort {
             Target::Session(id) => self
                 .sessions
                 .iter()
-                .find(|(known, _, _)| *known == id)
-                .map(|(_, _, path)| path.as_path())
+                .find(|(known, _)| *known == id)
+                .map(|(_, path)| path.as_path())
                 .ok_or(FilePreviewError::FileUnavailable),
         }
     }
@@ -724,6 +727,10 @@ impl BackendOverlayPort for ProductionOverlayPort {
         self.pr_pump.wake();
     }
 
+    fn sync_session_roots(&mut self, sessions: Vec<(SessionId, PathBuf)>) {
+        self.sessions = sessions;
+    }
+
     fn load_pull_requests(&mut self, target: Target, completions: Completions) {
         let Target::Session(session) = target else {
             completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
@@ -771,17 +778,30 @@ impl BackendOverlayPort for ProductionOverlayPort {
     fn open_artifact(
         &mut self,
         target: Target,
+        request_id: RequestId,
         path: String,
         filter: PreviewFileFilter,
         completions: Completions,
     ) {
         match self.target_root(target) {
-            Ok(root) => self
-                .artifact_opener
-                .request(root.to_path_buf(), path, filter, completions),
-            Err(error) => completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                error.message(),
-            )))),
+            Ok(root) => self.artifact_opener.request(
+                root.to_path_buf(),
+                target,
+                request_id,
+                path,
+                filter,
+                completions,
+            ),
+            Err(error) => completions.emit(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                target,
+                request_id,
+                path,
+                filter,
+                result: Err(SafeError {
+                    message: SafeMessage::new(error.message()),
+                    error_id: error.error_id().into(),
+                }),
+            })),
         }
     }
 
@@ -1150,25 +1170,14 @@ fn reduced_motion_from_environment(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
 
-#[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
-fn project_backend_sessions(
-    snapshot: &WorkspaceSnapshot,
-) -> (EnvironmentSessionNames, OverlaySessions) {
-    let mut names = Vec::new();
-    let mut overlays = Vec::new();
-    for (id, record) in snapshot.session_ids.iter().zip(&snapshot.state.sessions) {
-        names.push((*id, record.name.clone()));
-        let label = record
-            .display_name
-            .clone()
-            .unwrap_or_else(|| record.name.clone());
-        overlays.push((*id, label, record.root.clone()));
-    }
-    (names, overlays)
+fn project_backend_session_roots(snapshot: &WorkspaceSnapshot) -> Vec<(SessionId, PathBuf)> {
+    snapshot
+        .session_ids
+        .iter()
+        .zip(&snapshot.state.sessions)
+        .map(|(id, record)| (*id, record.root.clone()))
+        .collect()
 }
-
-type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
-type OverlaySessions = Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>;
 
 impl ControllerBackendFactory for ProductionBackendFactory {
     fn client_build(&self) -> Option<usagi_core::infrastructure::ipc::BuildIdentity> {
@@ -1184,7 +1193,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         snapshot: &WorkspaceSnapshot,
         host: ControllerHost,
     ) -> ControllerBackendComposition {
-        let (_session_names, sessions) = project_backend_sessions(snapshot);
+        let sessions = project_backend_session_roots(snapshot);
         let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let store = RepoEnvironmentStore::new(

@@ -58,9 +58,7 @@ impl FilePreviewError {
             Self::FileUnavailable => "This file is unavailable.",
             Self::OutsideRoot => "This file is outside the preview root.",
             Self::NotRegular => "Only regular files can be previewed.",
-            Self::UnsupportedFormat => {
-                "This file type cannot be opened externally. Press Tab for a text preview."
-            }
+            Self::UnsupportedFormat => "This file type cannot be opened externally.",
             Self::TooLarge => "Files larger than 512 KiB cannot be previewed.",
             Self::Binary => "Binary files cannot be previewed.",
             Self::NotUtf8 => "Only UTF-8 text files can be previewed.",
@@ -1161,7 +1159,7 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error, FilePreviewError::UnsupportedFormat);
-        assert!(error.message().contains("Press Tab"));
+        assert!(error.message().contains("cannot be opened externally"));
         assert_eq!(
             read_file(root.path(), "artifacts/tests.log").unwrap(),
             ["all tests passed"]

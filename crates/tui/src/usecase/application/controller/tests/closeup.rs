@@ -991,6 +991,25 @@ fn a_pane_becoming_live_preserves_explicit_preview_and_artifacts() {
     }
 }
 
+fn assert_artifact_open(
+    state: &AppState,
+    effects: &[Effect],
+    target: Target,
+    path: &str,
+    filter: PreviewFileFilter,
+) {
+    let request = state
+        .preview_overlay()
+        .unwrap()
+        .artifact_open()
+        .unwrap()
+        .request_id();
+    assert!(
+        matches!(effects, [Effect::OpenArtifact { target: actual_target, request_id, path: actual_path, filter: actual_filter }]
+        if *actual_target == target && *request_id == request && actual_path == path && *actual_filter == filter)
+    );
+}
+
 #[test]
 fn artifacts_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
     let (workspace, session, _) = ids();
@@ -1044,26 +1063,14 @@ fn artifacts_finder_scopes_session_and_workspace_and_opens_selected_artifacts() 
                 lines: vec![],
             }),
         );
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Enter)),
-            vec![Effect::OpenArtifact {
-                target,
-                path: path.clone(),
-                filter
-            }]
-        );
+        let native = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_artifact_open(&state, &native, target, &path, filter);
         let preview = update(&mut state, AppEvent::Key(AppKey::Tab));
         assert!(
             matches!(preview.as_slice(), [Effect::LoadPreview { path: Some(selected), .. }] if selected == &path)
         );
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::Tab)),
-            vec![Effect::OpenArtifact {
-                target,
-                path,
-                filter
-            }]
-        );
+        let native = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert_artifact_open(&state, &native, target, &path, filter);
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         for key in [AppKey::Left, AppKey::Right] {
             assert!(update(&mut state, AppEvent::Key(key)).is_empty());
