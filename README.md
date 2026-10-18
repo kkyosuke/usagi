@@ -54,6 +54,7 @@ session 削除の `--force` は、保管に失敗した成果物も破棄しま�
 
 複数の workspace の対応待ちは、右上の黄色い `Action needed` から確認し、回答・PR 確認へ進めます。
 一覧は「要対応」と進行状況の `Updates` に分かれ、最初に対応が必要な項目だけを表示します。
+選んだ質問の回答画面や該当 PR へ進め、未確認の情報は「確認中」として区別します。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュー可能を desktop に通知します。
 通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。

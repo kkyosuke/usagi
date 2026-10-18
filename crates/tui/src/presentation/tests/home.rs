@@ -945,7 +945,7 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
     let decision_id = UserDecisionId::new();
     assert!(matches!(
         UnavailableDecisionCommandPort.refresh(workspace_id),
-        BackendEvent::Notice(_)
+        BackendEvent::DecisionsUnavailable { .. }
     ));
     assert!(matches!(
         UnavailableDecisionCommandPort.resolve(
