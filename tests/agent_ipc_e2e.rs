@@ -64,7 +64,7 @@ const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 // Repository preparation and the daemon must resolve the same Git executable.
 // On macOS, the parent PATH can select Homebrew Git while the daemon selects
-// Apple's developer-tool launcher; prepare that toolchain before read deadlines.
+// Apple's developer-tool launcher. Preparation below also uses the daemon's HOME.
 const FIXTURE_SYSTEM_PATH: &str = "/usr/bin:/bin";
 
 /// Each case starts the shipping daemon binary. Serialising those startups
@@ -394,6 +394,9 @@ fn spawn_daemon_command(
         repo,
         &["daemon".as_ref(), "serve".as_ref()],
     );
+    if let Some(home) = sandbox_home {
+        prepare_sandbox_git(repo, home, &fixture_path);
+    }
     command
         .env("PATH", fixture_path)
         .env("USAGI_PTY_SENTINEL", "must-not-leak")
@@ -419,6 +422,35 @@ fn spawn_daemon_command(
         .spawn()
         .expect("root daemon starts");
     Daemon { child }
+}
+
+/// Keep external toolchain initialization outside the product's bounded Git
+/// observations. Sandbox cases use a committed `fixture_repo`, but a new HOME
+/// needs its own preparation with the daemon's cwd, PATH, and Git confinement.
+fn prepare_sandbox_git(repo: &Path, home: &Path, path: &str) {
+    use usagi_core::infrastructure::bounded_process::{ChildPolicy, execute_command_output};
+    use usagi_core::infrastructure::git::confined_git_command;
+
+    let mut command = confined_git_command(repo);
+    command
+        .args(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"])
+        .current_dir(repo)
+        .env("PATH", path)
+        .env("HOME", home);
+    let output = execute_command_output(
+        command,
+        ChildPolicy {
+            timeout: Duration::from_secs(30),
+            terminate_grace: Duration::from_millis(100),
+            output_limit: 64 * 1024,
+        },
+    )
+    .expect("the fixture Git toolchain is ready in the daemon environment");
+    assert!(
+        output.success,
+        "fixture HEAD resolves before the daemon starts: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// This test process's client incarnation, shared by every connection it opens.
@@ -607,6 +639,61 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, W
         serde_json::from_value(session["session_id"].clone()).unwrap(),
         serde_json::from_value(session["worktree_id"].clone()).unwrap(),
     )
+}
+
+/// A fresh sandbox HOME can require toolchain initialization before Git's
+/// ordinary two-second observations. Prepare the exact daemon environment;
+/// preparing only the parent HOME must not make this case pass.
+#[test]
+fn sandbox_home_prepares_git_before_bounded_session_creation() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-git-home-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let ready = home.path().join("git-ready");
+    let resolutions = home.path().join("git-resolutions");
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+[ "$HOME" = {home} ]
+[ "$PATH" = {fixture_path} ]
+[ "$(pwd -P)" = {repo} ]
+[ "$GIT_TERMINAL_PROMPT" = 0 ]
+[ "$LC_ALL" = C ]
+for argument in "$@"; do
+  if [ "$argument" = 'HEAD^{{commit}}' ]; then
+    if [ ! -f {ready} ]; then
+      sleep 3
+      printf 'ready\n' > {ready}
+    fi
+    printf 'resolved\n' >> {resolutions}
+  fi
+done
+PATH={system_path}
+export PATH
+exec git "$@"
+"#,
+        home = shell_quote(home.path().to_str().unwrap()),
+        fixture_path = shell_quote(&fixture_path),
+        repo = shell_quote(repo.path().canonicalize().unwrap().to_str().unwrap()),
+        ready = shell_quote(ready.to_str().unwrap()),
+        resolutions = shell_quote(resolutions.to_str().unwrap()),
+        system_path = shell_quote(FIXTURE_SYSTEM_PATH),
+    );
+    let shim = bin.join("git");
+    fs::write(&shim, script).unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
+    let mut client = client(&channel_data_dir(home.path()));
+    let _scope = available_scope(&mut client);
+    assert!(ready.is_file(), "the exact HOME toolchain was prepared");
+    assert!(
+        fs::read_to_string(resolutions).unwrap().lines().count() >= 2,
+        "both preparation and the real session create must resolve HEAD"
+    );
 }
 
 /// The shipped daemon must give its real PTY children a service namespace
