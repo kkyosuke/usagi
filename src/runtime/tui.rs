@@ -642,7 +642,7 @@ impl BackendDecisionPort for ProductionDecisionPort {
 
 struct ProductionOverlayPort {
     root: PathBuf,
-    sessions: Vec<(SessionId, PathBuf)>,
+    sessions: preview_access::PreviewRoots,
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
     pr_pump: RefreshPump<PrObservations>,
     preview_pump: PreviewPump,
@@ -653,6 +653,7 @@ struct ProductionOverlayPort {
 
 #[cfg(test)]
 mod artifact_tests;
+mod preview_access;
 
 impl ProductionOverlayPort {
     fn publish_prs(&mut self, result: Result<PrObservations, String>, completions: &Completions) {
@@ -662,14 +663,13 @@ impl ProductionOverlayPort {
         }
     }
 
-    fn target_root(&self, target: Target) -> Result<&Path, FilePreviewError> {
+    fn target_root(&self, target: Target) -> Result<PathBuf, FilePreviewError> {
         match target {
-            Target::Root(_) => Ok(&self.root),
-            Target::Session(id) => self
-                .sessions
+            Target::Root(_) => Ok(self.root.clone()),
+            Target::Session(id) => preview_access::lock_roots(&self.sessions)
                 .iter()
                 .find(|(known, _)| *known == id)
-                .map(|(_, path)| path.as_path())
+                .map(|(_, path)| path.clone())
                 .ok_or(FilePreviewError::FileUnavailable),
         }
     }
@@ -728,7 +728,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
     }
 
     fn sync_session_roots(&mut self, sessions: Vec<(SessionId, PathBuf)>) {
-        self.sessions = sessions;
+        *preview_access::lock_roots(&self.sessions) = sessions;
     }
 
     fn load_pull_requests(&mut self, target: Target, completions: Completions) {
@@ -756,7 +756,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
         completions: Completions,
     ) {
         let root = match self.target_root(target) {
-            Ok(root) => root.to_path_buf(),
+            Ok(root) => root,
             Err(error) => {
                 Self::publish_preview(
                     PreviewCompletion {
@@ -784,14 +784,10 @@ impl BackendOverlayPort for ProductionOverlayPort {
         completions: Completions,
     ) {
         match self.target_root(target) {
-            Ok(root) => self.artifact_opener.request(
-                root.to_path_buf(),
-                target,
-                request_id,
-                path,
-                filter,
-                completions,
-            ),
+            Ok(root) => {
+                self.artifact_opener
+                    .request(root, target, request_id, path, filter, completions);
+            }
             Err(error) => completions.emit(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
                 target,
                 request_id,
@@ -1193,7 +1189,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         snapshot: &WorkspaceSnapshot,
         host: ControllerHost,
     ) -> ControllerBackendComposition {
-        let sessions = project_backend_session_roots(snapshot);
+        let sessions = Arc::new(Mutex::new(project_backend_session_roots(snapshot)));
         let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let store = RepoEnvironmentStore::new(
@@ -1225,15 +1221,29 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         }))
         .with_overlay(Box::new(ProductionOverlayPort {
             root: snapshot.workspace.path.clone(),
-            sessions,
+            sessions: Arc::clone(&sessions),
             pr_sessions,
             pr_pump,
-            preview_pump: PreviewPump::spawn(load_preview),
-            artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(Box::new(
-                PlatformBrowserOpener {
-                    reaper: self.helper_reaper.clone(),
-                },
-            )),
+            preview_pump: PreviewPump::spawn(
+                load_preview,
+                Box::new(preview_access::PreviewAccess::new(
+                    snapshot.workspace_id,
+                    snapshot.workspace.path.clone(),
+                    Arc::clone(&sessions),
+                )),
+            ),
+            artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(
+                Box::new(
+                    crate::runtime::artifact_viewer::PlatformArtifactViewer::new(
+                        self.helper_reaper.clone(),
+                    ),
+                ),
+                Box::new(preview_access::PreviewAccess::new(
+                    snapshot.workspace_id,
+                    snapshot.workspace.path.clone(),
+                    sessions,
+                )),
+            ),
             browser: PlatformBrowserOpener {
                 reaper: self.helper_reaper.clone(),
             },
@@ -4402,6 +4412,34 @@ impl DoctorPort for RuntimeDoctorPort {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=native_viewer_observes_helpers_and_preserves_unconfirmed_launches
+pub(super) fn platform_open_command(url: &str) -> Result<Command, String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    } else if cfg!(target_os = "linux") {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    } else if cfg!(target_os = "windows") {
+        // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
+        // first quoted argument is the (empty) window title `start` consumes,
+        // so a URL beginning with `"` is never mistaken for the title. The URL
+        // stays a distinct argv item — `cmd` does not re-parse it as a command.
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    } else {
+        return Err("browser opening is unsupported on this platform".to_owned());
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Ok(command)
+}
+
 /// OS adapter for the browser effect. `Command` receives separate argv items; no
 /// URL is ever interpolated into a shell command.
 struct PlatformBrowserOpener {
@@ -4411,25 +4449,7 @@ struct PlatformBrowserOpener {
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BrowserOpener for PlatformBrowserOpener {
     fn open(&mut self, url: &str) -> Result<(), String> {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = Command::new("open");
-            command.arg(url);
-            command
-        } else if cfg!(target_os = "linux") {
-            let mut command = Command::new("xdg-open");
-            command.arg(url);
-            command
-        } else if cfg!(target_os = "windows") {
-            // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
-            // first quoted argument is the (empty) window title `start` consumes,
-            // so a URL beginning with `"` is never mistaken for the title. The URL
-            // stays a distinct argv item — `cmd` does not re-parse it as a command.
-            let mut command = Command::new("cmd");
-            command.args(["/C", "start", "", url]);
-            command
-        } else {
-            return Err("browser opening is unsupported on this platform".to_owned());
-        };
+        let mut command = platform_open_command(url)?;
         self.reaper
             .spawn(&mut command)
             .map_err(|_| "browser launch failed".to_owned())
@@ -9302,7 +9322,11 @@ mod tests {
             path: None,
             filter: PreviewFileFilter::All,
         });
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // A fresh worker observation may spend the bounded attach deadline
+        // before reporting that no daemon is available. Include scheduler slack.
+        let deadline = Instant::now()
+            + Duration::from_millis(ClientPolicy::tui().timeout_ms)
+            + Duration::from_secs(3);
         let preview_error = loop {
             let events = composition.backend.drain_events();
             if !events.is_empty() {
@@ -9320,7 +9344,7 @@ mod tests {
                     error,
                     ..
                 }
-            )] if *id == session_ids[0] && error.error_id == "preview-files"
+            )] if *id == session_ids[0] && error.error_id == "preview-scope"
         ));
 
         composition.backend.dispatch(Effect::SaveEnvironment {

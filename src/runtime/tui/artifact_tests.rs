@@ -11,8 +11,11 @@ struct Browser {
     opened: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
-impl BrowserOpener for Browser {
-    fn open(&mut self, path: &str) -> Result<(), String> {
+impl crate::runtime::artifact_opener::ArtifactViewer for Browser {
+    fn open(
+        &mut self,
+        path: &str,
+    ) -> Result<usagi_tui::usecase::application::controller::ArtifactOpenOutcome, String> {
         self.opened.lock().unwrap().push(fs::read(path).unwrap());
         Err("test opener unavailable".into())
     }
@@ -32,6 +35,40 @@ fn record(root: &Path, name: &str) -> SessionRecord {
     }
 }
 
+fn access(
+    root: &Path,
+    workspace: WorkspaceId,
+    roots: preview_access::PreviewRoots,
+) -> Box<dyn crate::runtime::preview_authority::PreviewAuthority> {
+    let observed = Arc::clone(&roots);
+    Box::new(preview_access::PreviewAccess::with_observer(
+        workspace,
+        root.to_path_buf(),
+        roots,
+        Box::new(move || {
+            let sessions = preview_access::lock_roots(&observed)
+                .iter()
+                .map(|(id, path)| {
+                    let mut session = ManagedSession::adopt_available(
+                        path.file_name().unwrap().to_string_lossy().into_owned(),
+                        Utc::now(),
+                    );
+                    session.session_id = *id;
+                    session
+                })
+                .collect();
+            Ok(LifecycleSnapshot {
+                workspace_id: workspace,
+                root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
+                revision: 1,
+                sessions,
+                agent_resumes: BTreeMap::new(),
+                session_roles: BTreeMap::new(),
+            })
+        }),
+    ))
+}
+
 fn port(
     root: &Path,
     workspace: WorkspaceId,
@@ -47,9 +84,10 @@ fn port(
         records.iter().map(|(id, _)| *id).collect(),
     );
     let opened = Arc::new(Mutex::new(Vec::new()));
+    let roots = Arc::new(Mutex::new(project_backend_session_roots(&snapshot)));
     let port = ProductionOverlayPort {
         root: root.to_path_buf(),
-        sessions: project_backend_session_roots(&snapshot),
+        sessions: Arc::clone(&roots),
         pr_sessions: Arc::new(Mutex::new(snapshot.session_ids)),
         pr_pump: RefreshPump::spawn(
             RefreshCadence::new(
@@ -59,12 +97,13 @@ fn port(
             ),
             || Ok(Vec::new()),
         ),
-        preview_pump: PreviewPump::spawn(load_preview),
-        artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(Box::new(
-            Browser {
+        preview_pump: PreviewPump::spawn(load_preview, access(root, workspace, Arc::clone(&roots))),
+        artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(
+            Box::new(Browser {
                 opened: Arc::clone(&opened),
-            },
-        )),
+            }),
+            access(root, workspace, roots),
+        ),
         browser: PlatformBrowserOpener {
             reaper: PlatformChildReaper::default(),
         },
@@ -108,6 +147,163 @@ fn native(port: &mut ProductionOverlayPort, target: Target, path: &str, id: Requ
         completions,
     );
     events.recv_timeout(Duration::from_secs(5)).unwrap()
+}
+
+fn wait_preview(port: &mut ProductionOverlayPort) -> AppEvent {
+    let (completion, events) = Completions::channel();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        port.poll(&completion);
+        if let Some(event) = events.try_iter().find(|event| {
+            matches!(
+                event,
+                AppEvent::Backend(
+                    BackendEvent::PreviewLoaded { .. } | BackendEvent::PreviewError { .. }
+                )
+            )
+        }) {
+            return event;
+        }
+        assert!(Instant::now() < deadline, "preview completion missing");
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn queued_and_in_flight_text_previews_reject_reused_session_paths() {
+    for queued in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let old = SessionId::new();
+        let row = record(root.path(), "same");
+        fs::create_dir_all(row.root.join("artifacts")).unwrap();
+        let path = row.root.join("artifacts/report.md");
+        fs::write(&path, "OLD").unwrap();
+        let (mut port, _) = port(root.path(), workspace, &[(old, row.clone())]);
+        let (started, waiting) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let checks = access(root.path(), workspace, Arc::clone(&port.sessions));
+        port.preview_pump = PreviewPump::spawn(
+            move |root, path, filter| {
+                started.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                load_preview(root, path, filter)
+            },
+            checks,
+        );
+        let (completion, immediate) = Completions::channel();
+        let request_id = RequestId::new();
+        if queued {
+            let (first_completion, _) = Completions::channel();
+            port.load_preview(
+                Target::Root(workspace),
+                RequestId::new(),
+                None,
+                PreviewFileFilter::AllArtifacts,
+                first_completion,
+            );
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        port.load_preview(
+            Target::Session(old),
+            request_id,
+            Some("artifacts/report.md".into()),
+            PreviewFileFilter::Artifacts,
+            completion,
+        );
+        if !queued {
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        fs::remove_dir_all(&row.root).unwrap();
+        fs::create_dir_all(row.root.join("artifacts")).unwrap();
+        fs::write(&path, "NEW").unwrap();
+        port.sync_session_roots(vec![(SessionId::new(), row.root)]);
+        release.send(()).unwrap();
+        assert!(matches!(wait_preview(&mut port),
+            AppEvent::Backend(BackendEvent::PreviewError { target: Target::Session(id), request_id: received, error, .. })
+                if id == old && received == request_id && error.error_id == "preview-scope"
+        ));
+        assert!(immediate.try_recv().is_err());
+        assert!(
+            waiting.try_recv().is_err(),
+            "the queued stale job must never read the replacement"
+        );
+    }
+}
+
+struct BlockingBrowser {
+    opened: mpsc::Sender<Vec<u8>>,
+    release: mpsc::Receiver<()>,
+}
+
+impl crate::runtime::artifact_opener::ArtifactViewer for BlockingBrowser {
+    fn open(
+        &mut self,
+        path: &str,
+    ) -> Result<usagi_tui::usecase::application::controller::ArtifactOpenOutcome, String> {
+        self.opened.send(fs::read(path).unwrap()).unwrap();
+        self.release.recv_timeout(Duration::from_secs(5)).unwrap();
+        Err("test helper failure".into())
+    }
+}
+
+#[test]
+fn queued_native_requests_never_dispatch_a_replacement_session() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = WorkspaceId::new();
+    let old = SessionId::new();
+    let row = record(root.path(), "same");
+    for scope in [root.path(), &row.root] {
+        fs::create_dir_all(scope.join("artifacts")).unwrap();
+        fs::write(scope.join("artifacts/report.md"), "OLD").unwrap();
+    }
+    let (mut port, _) = port(root.path(), workspace, &[(old, row.clone())]);
+    let (opened, received) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    port.artifact_opener = crate::runtime::artifact_opener::ArtifactOpener::spawn(
+        Box::new(BlockingBrowser {
+            opened,
+            release: gate,
+        }),
+        access(root.path(), workspace, Arc::clone(&port.sessions)),
+    );
+    let (first_completion, first_events) = Completions::channel();
+    port.open_artifact(
+        Target::Root(workspace),
+        RequestId::new(),
+        "artifacts/report.md".into(),
+        PreviewFileFilter::Artifacts,
+        first_completion,
+    );
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(5)).unwrap(),
+        b"OLD"
+    );
+    let request_id = RequestId::new();
+    let (completion, events) = Completions::channel();
+    port.open_artifact(
+        Target::Session(old),
+        request_id,
+        "artifacts/report.md".into(),
+        PreviewFileFilter::Artifacts,
+        completion,
+    );
+    fs::remove_dir_all(&row.root).unwrap();
+    fs::create_dir_all(row.root.join("artifacts")).unwrap();
+    fs::write(row.root.join("artifacts/report.md"), "NEW").unwrap();
+    port.sync_session_roots(vec![(SessionId::new(), row.root)]);
+    release.send(()).unwrap();
+    let _first = first_events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished { target: Target::Session(id), request_id: received, result: Err(error), .. })
+                if id == old && received == request_id && error.error_id == "preview-scope"
+        )
+    );
+    assert!(
+        received.try_recv().is_err(),
+        "the stale request must not reach an external app"
+    );
 }
 
 #[test]

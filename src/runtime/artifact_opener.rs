@@ -6,12 +6,17 @@ use std::thread::JoinHandle;
 
 use usagi_core::domain::id::RequestId;
 use usagi_tui::usecase::application::controller::{
-    AppEvent, BackendEvent, PreviewFileFilter, SafeError, SafeMessage, Target,
+    AppEvent, ArtifactOpenOutcome, BackendEvent, PreviewFileFilter, SafeError, SafeMessage, Target,
 };
 use usagi_tui::usecase::application::daemon_backend::Completions;
-use usagi_tui::usecase::application::pr::BrowserOpener;
 
 use super::file_preview::artifact_open_view;
+use super::preview_authority::PreviewAuthority;
+
+/// Native helpers run on this worker and report exit or bounded uncertainty.
+pub(crate) trait ArtifactViewer: Send {
+    fn open(&mut self, path: &str) -> Result<ArtifactOpenOutcome, String>;
+}
 
 struct Request {
     root: PathBuf,
@@ -29,11 +34,14 @@ pub(crate) struct ArtifactOpener {
 }
 
 impl ArtifactOpener {
-    pub(crate) fn spawn(mut browser: Box<dyn BrowserOpener>) -> Self {
+    pub(crate) fn spawn(
+        mut browser: Box<dyn ArtifactViewer>,
+        mut authority: Box<dyn PreviewAuthority>,
+    ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             while let Ok(request) = receiver.recv() {
-                open(&request, &mut *browser);
+                open(&request, &mut *browser, &mut *authority);
             }
         });
         Self {
@@ -73,7 +81,7 @@ impl ArtifactOpener {
     }
 }
 
-fn finish(request: &Request, result: Result<(), SafeError>) {
+fn finish(request: &Request, result: Result<ArtifactOpenOutcome, SafeError>) {
     request
         .completions
         .emit(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
@@ -85,24 +93,34 @@ fn finish(request: &Request, result: Result<(), SafeError>) {
         }));
 }
 
-fn open(request: &Request, browser: &mut dyn BrowserOpener) {
-    let result = match artifact_open_view(&request.root, &request.path, request.filter) {
-        Ok(view) => match browser.open(&view.path().to_string_lossy()) {
-            Ok(()) => {
-                view.retain();
-                Ok(())
-            }
-            Err(_) => Err(SafeError {
-                message: SafeMessage::new("Could not open this artifact in an external app."),
-                error_id: "artifact-viewer-open".into(),
-            }),
+fn open(request: &Request, browser: &mut dyn ArtifactViewer, authority: &mut dyn PreviewAuthority) {
+    let view = authority
+        .validate(request.target, &request.root)
+        .and_then(|()| artifact_open_view(&request.root, &request.path, request.filter));
+    let result = match view {
+        Ok(view) => match authority.validate(request.target, &request.root) {
+            Ok(()) => match browser.open(&view.path().to_string_lossy()) {
+                Ok(outcome) => {
+                    view.retain();
+                    Ok(outcome)
+                }
+                Err(_) => Err(SafeError {
+                    message: SafeMessage::new("Could not open this artifact in an external app."),
+                    error_id: "artifact-viewer-open".into(),
+                }),
+            },
+            Err(error) => Err(preview_error(error)),
         },
-        Err(error) => Err(SafeError {
-            message: SafeMessage::new(error.message()),
-            error_id: error.error_id().into(),
-        }),
+        Err(error) => Err(preview_error(error)),
     };
     finish(request, result);
+}
+
+fn preview_error(error: super::file_preview::FilePreviewError) -> SafeError {
+    SafeError {
+        message: SafeMessage::new(error.message()),
+        error_id: error.error_id().into(),
+    }
 }
 
 impl Drop for ArtifactOpener {
@@ -129,8 +147,8 @@ mod tests {
         fail: bool,
     }
 
-    impl BrowserOpener for Browser {
-        fn open(&mut self, path: &str) -> Result<(), String> {
+    impl ArtifactViewer for Browser {
+        fn open(&mut self, path: &str) -> Result<ArtifactOpenOutcome, String> {
             self.opened.send(PathBuf::from(path)).unwrap();
             if let Some(release) = &self.release {
                 release.recv_timeout(Duration::from_secs(30)).unwrap();
@@ -138,7 +156,7 @@ mod tests {
             if self.fail {
                 Err("unavailable".into())
             } else {
-                Ok(())
+                Ok(ArtifactOpenOutcome::Sent)
             }
         }
     }
@@ -167,11 +185,14 @@ mod tests {
     fn native_view_survives_helper_and_tui_lifetimes_and_source_removal() {
         let root = fixture();
         let (delivered, received) = mpsc::channel();
-        let opener = ArtifactOpener::spawn(Box::new(Browser {
-            opened: delivered,
-            release: None,
-            fail: false,
-        }));
+        let opener = ArtifactOpener::spawn(
+            Box::new(Browser {
+                opened: delivered,
+                release: None,
+                fail: false,
+            }),
+            Box::new(crate::runtime::preview_authority::AllowPreview),
+        );
         let events = request(&opener, root.path(), "artifacts/report.md");
         let path = received.recv_timeout(Duration::from_secs(5)).unwrap();
         drop(opener);
@@ -180,7 +201,7 @@ mod tests {
         assert!(matches!(
             events.try_recv(),
             Ok(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
-                result: Ok(()),
+                result: Ok(ArtifactOpenOutcome::Sent),
                 ..
             }))
         ));
@@ -191,11 +212,14 @@ mod tests {
     fn failures_report_results_and_discard_unopened_copies() {
         let root = fixture();
         let (delivered, received) = mpsc::channel();
-        let opener = ArtifactOpener::spawn(Box::new(Browser {
-            opened: delivered,
-            release: None,
-            fail: true,
-        }));
+        let opener = ArtifactOpener::spawn(
+            Box::new(Browser {
+                opened: delivered,
+                release: None,
+                fail: true,
+            }),
+            Box::new(crate::runtime::preview_authority::AllowPreview),
+        );
         let events = request(&opener, root.path(), "artifacts/report.md");
         let path = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(matches!(
@@ -216,11 +240,14 @@ mod tests {
         let root = fixture();
         let (delivered, received) = mpsc::channel();
         let (release, gate) = mpsc::channel();
-        let opener = ArtifactOpener::spawn(Box::new(Browser {
-            opened: delivered,
-            release: Some(gate),
-            fail: true,
-        }));
+        let opener = ArtifactOpener::spawn(
+            Box::new(Browser {
+                opened: delivered,
+                release: Some(gate),
+                fail: true,
+            }),
+            Box::new(crate::runtime::preview_authority::AllowPreview),
+        );
         let first = request(&opener, root.path(), "artifacts/report.md");
         let path = received.recv_timeout(Duration::from_secs(5)).unwrap();
         let second = request(&opener, root.path(), "artifacts/missing.md");
@@ -249,5 +276,49 @@ mod tests {
             events.try_recv().unwrap(),
             AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(_), .. })
         ));
+    }
+
+    struct Revoked {
+        checks: usize,
+        deny_at: usize,
+    }
+
+    impl PreviewAuthority for Revoked {
+        fn validate(
+            &mut self,
+            _: Target,
+            _: &Path,
+        ) -> Result<(), super::super::file_preview::FilePreviewError> {
+            self.checks += 1;
+            if self.checks == self.deny_at {
+                Err(super::super::file_preview::FilePreviewError::ScopeUnavailable)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn revoked_targets_are_rejected_before_copying_and_before_external_dispatch() {
+        for deny_at in [1, 2] {
+            let root = fixture();
+            let (delivered, received) = mpsc::channel();
+            let opener = ArtifactOpener::spawn(
+                Box::new(Browser {
+                    opened: delivered,
+                    release: None,
+                    fail: false,
+                }),
+                Box::new(Revoked { checks: 0, deny_at }),
+            );
+            let events = request(&opener, root.path(), "artifacts/report.md");
+            assert!(matches!(
+                events.recv_timeout(Duration::from_secs(5)).unwrap(),
+                AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(error), .. })
+                    if error.error_id == "preview-scope"
+            ));
+            drop(opener);
+            assert!(received.try_recv().is_err());
+        }
     }
 }

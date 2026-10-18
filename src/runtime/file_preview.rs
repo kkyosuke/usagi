@@ -49,6 +49,7 @@ pub(crate) enum FilePreviewError {
     NotUtf8,
     NativeViewTooLarge,
     UnsupportedFormat,
+    ScopeUnavailable,
 }
 
 impl FilePreviewError {
@@ -59,6 +60,9 @@ impl FilePreviewError {
             Self::OutsideRoot => "This file is outside the preview root.",
             Self::NotRegular => "Only regular files can be previewed.",
             Self::UnsupportedFormat => "This file type cannot be opened externally.",
+            Self::ScopeUnavailable => {
+                "The preview target changed or is unavailable. Reopen the file list."
+            }
             Self::TooLarge => "Files larger than 512 KiB cannot be previewed.",
             Self::Binary => "Binary files cannot be previewed.",
             Self::NotUtf8 => "Only UTF-8 text files can be previewed.",
@@ -79,6 +83,7 @@ impl FilePreviewError {
             Self::NotUtf8 => "preview-not-utf8",
             Self::NativeViewTooLarge => "preview-native-too-large",
             Self::UnsupportedFormat => "preview-native-format",
+            Self::ScopeUnavailable => "preview-scope",
         }
     }
 }
@@ -1141,6 +1146,7 @@ mod tests {
             FilePreviewError::NotUtf8,
             FilePreviewError::NativeViewTooLarge,
             FilePreviewError::UnsupportedFormat,
+            FilePreviewError::ScopeUnavailable,
         ] {
             assert!(!error.message().is_empty());
             assert!(error.error_id().starts_with("preview-"));

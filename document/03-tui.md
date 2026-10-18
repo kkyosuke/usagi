@@ -1728,6 +1728,8 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
 TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。
 削除後に同名の session を作り直した場合は、新しい session の成果物を表示する。
+削除・削除中を検知した session の一覧や本文は閉じる。読み込みと外部表示は worker 上で最新の daemon の
+session ID・利用可否を確認し、処理中に対象が変わった結果も破棄する。古い一覧から同名の新しい session を開かない。
 
 sidebar のクリック対象は表示済み frame の配置から解決する。警告の吹き出し・作成中の表示・スクロールで
 行の位置が変わっても、表示した session と操作対象の ID を一致させる。クリックで一覧を開いた操作も
@@ -1741,14 +1743,18 @@ png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bund
 外部表示に未対応の形式には、その旨と Tab によるテキスト表示の案内を出す。directory や
 特殊ファイルの拒否とは区別する。
 外部表示の処理中・成功・失敗は一覧内に表示し、失敗しても選択と絞り込みを保持する。
+成功表示は OS の起動 helper の正常終了を意味する。helper の異常終了は失敗として表示し、標準入出力は端末へ流さない。
+2 秒以内に終了を確認できない場合は `Open result unconfirmed. Check the external app.` と表示し、外部アプリでの確認を案内する。
 テキスト本文から外部表示を要求した場合も、結果をスクロール位置にかかわらず本文の上に表示する。
 別のファイルへ移動した場合や一覧を閉じた場合、遅れて返る結果は新しい閲覧へ表示しない。
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
+本文の検索入力中は Tab で外部表示せず、Enter / Esc で検索入力を終えてから受け付ける。
 外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
 HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
 元の file の差し替えや session 削除で、外部アプリが別の path を開かないようにする。directory は `0700`、file は `0600` とする。
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
-アプリは helper 終了や TUI 終了後にも読み込むため、成功したコピーは OS の temporary 領域へ残す。失敗したコピーは取り除く。
+アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。
+未確認の helper やアプリは終了させず、自然終了を回収する。失敗が確認できたコピーは取り除く。
 本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には `artifacts/` への保存案内を表示する。
 
 Git の tracked / changed / ignore 判定を使わず、`artifacts/` のファイルを列挙する。横断一覧は

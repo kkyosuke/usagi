@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "total": 549,
+  "total": 552,
   "owners": {
     "core": 16,
     "daemon": 370,
     "root-cli": 41,
-    "tui": 122
+    "tui": 125
   },
   "paths": {
     "crates/cli/src/mcp/mod.rs": 1,
@@ -68,6 +68,7 @@
     "crates/tui/src/usecase/overview/mod.rs": 1,
     "src/main.rs": 1,
     "src/runtime/agent_tab_intent.rs": 1,
+    "src/runtime/artifact_viewer.rs": 1,
     "src/runtime/bootstrap.rs": 3,
     "src/runtime/clean.rs": 19,
     "src/runtime/cli.rs": 10,
@@ -97,8 +98,9 @@
     "src/runtime/platform_child_reaper.rs": 3,
     "src/runtime/systemd.rs": 1,
     "src/runtime/terminal_pump.rs": 1,
-    "src/runtime/tui.rs": 61,
+    "src/runtime/tui.rs": 62,
     "src/runtime/tui/artifact_tests.rs": 1,
+    "src/runtime/tui/preview_access.rs": 1,
     "src/tui_input.rs": 4,
     "src/tui_input/sgr_mouse.rs": 1
   }

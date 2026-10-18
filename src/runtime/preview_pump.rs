@@ -12,6 +12,7 @@ use usagi_core::domain::id::RequestId;
 use usagi_tui::usecase::application::controller::{PreviewFileFilter, Target};
 
 use super::file_preview::FilePreviewError;
+use super::preview_authority::PreviewAuthority;
 
 pub(crate) use super::file_preview::PreviewPayload;
 
@@ -61,7 +62,7 @@ pub(crate) struct PreviewPump {
 }
 
 impl PreviewPump {
-    pub(crate) fn spawn<F>(mut fetch: F) -> Self
+    pub(crate) fn spawn<F>(mut fetch: F, mut authority: Box<dyn PreviewAuthority>) -> Self
     where
         F: FnMut(
                 &Path,
@@ -91,7 +92,11 @@ impl PreviewPump {
                     }
                     state.pending.take().expect("pending preview job")
                 };
-                let result = fetch(&job.root, job.path.as_deref(), job.filter);
+                let result = authority.validate(job.target, &job.root).and_then(|()| {
+                    let payload = fetch(&job.root, job.path.as_deref(), job.filter)?;
+                    authority.validate(job.target, &job.root)?;
+                    Ok(payload)
+                });
                 let mut state = lock(&worker);
                 if state.generation == job.generation && !state.stopped {
                     state.completed = Some(PreviewCompletion {
@@ -182,14 +187,17 @@ mod tests {
 
     #[test]
     fn a_request_runs_off_thread_and_returns_one_completion() {
-        let pump = PreviewPump::spawn(|root, path, filter| {
-            assert_eq!(filter, PreviewFileFilter::Tracked);
-            Ok((
-                vec![root.display().to_string()],
-                Vec::new(),
-                vec![path.unwrap_or_default().to_owned()],
-            ))
-        });
+        let pump = PreviewPump::spawn(
+            |root, path, filter| {
+                assert_eq!(filter, PreviewFileFilter::Tracked);
+                Ok((
+                    vec![root.display().to_string()],
+                    Vec::new(),
+                    vec![path.unwrap_or_default().to_owned()],
+                ))
+            },
+            Box::new(crate::runtime::preview_authority::AllowPreview),
+        );
         let target = Target::Root(WorkspaceId::new());
         let request_id = RequestId::new();
         pump.request(
@@ -220,18 +228,21 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let mut calls = 0;
-        let pump = PreviewPump::spawn(move |_, path, _| {
-            calls += 1;
-            if calls == 1 {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            }
-            Ok((
-                Vec::new(),
-                Vec::new(),
-                vec![path.unwrap_or_default().to_owned()],
-            ))
-        });
+        let pump = PreviewPump::spawn(
+            move |_, path, _| {
+                calls += 1;
+                if calls == 1 {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                Ok((
+                    Vec::new(),
+                    Vec::new(),
+                    vec![path.unwrap_or_default().to_owned()],
+                ))
+            },
+            Box::new(crate::runtime::preview_authority::AllowPreview),
+        );
         let target = Target::Root(WorkspaceId::new());
         pump.request(
             target,
@@ -269,11 +280,14 @@ mod tests {
     fn cancellation_discards_pending_and_in_flight_results() {
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let pump = PreviewPump::spawn(move |_, _, _| {
-            started_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            Err(FilePreviewError::FilesUnavailable)
-        });
+        let pump = PreviewPump::spawn(
+            move |_, _, _| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Err(FilePreviewError::FilesUnavailable)
+            },
+            Box::new(crate::runtime::preview_authority::AllowPreview),
+        );
         pump.request(
             Target::Root(WorkspaceId::new()),
             RequestId::new(),
