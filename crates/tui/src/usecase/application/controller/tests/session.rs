@@ -5,6 +5,58 @@
 use super::*;
 
 #[test]
+fn artifacts_click_opens_the_clicked_session_and_preserves_the_active_pane() {
+    let workspace = WorkspaceId::new();
+    let active = SessionId::new();
+    let clicked = SessionId::new();
+    let mut state = sized_home(workspace, vec![active, clicked], 100, 30);
+    let _ = update(
+        &mut state,
+        AppEvent::PaneTabAvailability {
+            available: true,
+            error: None,
+        },
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(state.overlay(), None);
+    let effects = update(
+        &mut state,
+        AppEvent::Pointer {
+            column: 35,
+            row: 7,
+            at: std::time::Duration::ZERO,
+        },
+    );
+    assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+        target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
+    }] if *target == clicked));
+    assert_eq!(state.active(), Some(active));
+    assert_eq!(state.selected(), Selection::Target(Target::Session(active)));
+    assert!(state.pending_session_click.is_none());
+}
+
+#[test]
+fn artifacts_shortcut_follows_switch_cursor_closeup_active_and_workspace_fallback() {
+    let workspace = WorkspaceId::new();
+    let active = SessionId::new();
+    let selected = SessionId::new();
+    for (mode, expected) in [(HomeMode::Switch, selected), (HomeMode::Closeup, active)] {
+        let mut state = AppState::home(workspace, vec![active, selected]);
+        state.selected = Selection::Target(Target::Session(selected));
+        state.route = Route::Home(mode);
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+            target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
+        }] if *target == expected));
+    }
+    let mut state = AppState::home(workspace, vec![]);
+    let effects = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+    assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+        target: Target::Root(target), filter: PreviewFileFilter::AllArtifacts, path: None, ..
+    }] if *target == workspace));
+}
+
+#[test]
 fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() {
     let workspace = WorkspaceId::new();
     let active = SessionId::new();

@@ -51,7 +51,8 @@ use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, Overlay, PrOverlay,
-    PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
+    PreviewOverlay, SIDEBAR_ARTIFACTS_LABEL, SIDEBAR_ARTIFACTS_MIN_WIDTH, Selection,
+    SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::metrics::GitDiff;
 use crate::usecase::application::pane::{
@@ -3161,21 +3162,47 @@ fn home_row_lines_at(
             .session_agents
             .get(&session.id)
             .map_or(&[][..], Vec::as_slice);
+        let agent_width = if width >= SIDEBAR_ARTIFACTS_MIN_WIDTH {
+            width - SIDEBAR_ARTIFACTS_LABEL.len() - 1
+        } else {
+            width
+        };
         vec![
             first,
             widgets::pad_to_width(&metadata, width),
-            sidebar_agent_line_with_icon_mode(
-                agents,
+            with_artifacts_action(
+                &sidebar_agent_line_with_icon_mode(
+                    agents,
+                    agent_width,
+                    selected,
+                    current_marker,
+                    inactive,
+                    home.icon_mode,
+                ),
                 width,
-                selected,
-                current_marker,
-                inactive,
-                home.icon_mode,
             ),
         ]
     } else {
         vec![first]
     }
+}
+
+fn with_artifacts_action(agents: &str, width: usize) -> String {
+    if width < SIDEBAR_ARTIFACTS_MIN_WIDTH {
+        return agents.to_owned();
+    }
+    let remaining = width - SIDEBAR_ARTIFACTS_LABEL.len();
+    format!(
+        "{}{}",
+        widgets::pad_to_width(
+            &widgets::clip_to_width(agents.trim_end(), remaining - 1),
+            remaining
+        ),
+        Role::Info
+            .style()
+            .underline()
+            .paint(SIDEBAR_ARTIFACTS_LABEL),
+    )
 }
 
 /// session 行の 3 行目: その session に属する Agent の状態。
@@ -3727,7 +3754,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{home_right_pane, home_right_pane_content};
+    use super::{home_right_pane, home_right_pane_content, with_artifacts_action};
     #[test]
     fn memo_preview_wraps_long_lines_and_editor_keeps_preview_geometry() {
         use super::{home_memo_preview, render_memo_editor_over};
@@ -4050,6 +4077,18 @@ mod tests {
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 1), None);
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 4), None);
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 18), None);
+    }
+
+    #[test]
+    fn artifacts_action_is_flush_right_and_keeps_narrow_rows_unchanged() {
+        for width in [16, 36] {
+            let line = with_artifacts_action("  Agents: running", width);
+            assert_eq!(widgets::display_width(&line), width);
+            assert!(widgets::strip_ansi(&line).ends_with("Artifacts"));
+        }
+        assert_eq!(with_artifacts_action("  —", 10), "  —");
+        let padded = widgets::pad_to_width("  —", 36);
+        assert!(!with_artifacts_action(&padded, 36).contains('…'));
     }
 
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
