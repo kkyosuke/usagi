@@ -127,6 +127,95 @@ fn daemon_restart_resumes_with_a_durable_continue_prompt_and_replays_without_res
 }
 
 #[test]
+fn daemon_restart_does_not_retry_a_completed_rollback_after_its_replacement_exits() {
+    for exit_status in [0, 1] {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let launch = intent(None);
+        let resolved = FakeScope(Ok(scope()));
+        let source = agent
+            .launch(&OperationId::new().to_string(), &launch, &resolved)
+            .unwrap();
+        agent.exit(&source.terminal, 0).unwrap();
+        let target = agent.inventory(launch.workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let operation = OperationId::new().to_string();
+        let rollback = DaemonRestartResumeOptions {
+            integration_revision: None,
+            continue_work: true,
+        };
+        let ticket = agent
+            .prepare_daemon_restart_resume_readiness(&operation, &target, rollback)
+            .unwrap();
+        let replacement = agent
+            .resume_after_daemon_restart(&operation, &target, rollback, &resolved, ticket.as_ref())
+            .unwrap();
+        // The old owner can crash after the successful rollback spawn and before
+        // its pending-item progress commit. A short final turn can already exit.
+        agent.exit(&replacement.terminal, exit_status).unwrap();
+        let (snapshot, _) = agent
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            agent
+                .prepare_daemon_restart_resume_readiness(
+                    &operation,
+                    &target,
+                    DaemonRestartResumeOptions {
+                        integration_revision: Some(crate::usecase::claude::PROFILE_REVISION),
+                        ..rollback
+                    },
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict,
+            "a later generation cannot replay the rollback with repair semantics"
+        );
+        assert!(
+            !agent.daemon_restart_restore_needed(&source.runtime),
+            "durable resume success completes the old source even after its replacement exits"
+        );
+    }
+}
+
+#[test]
+fn daemon_restart_keeps_a_failed_replacement_pending() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+    let launch = intent(None);
+    let resolved = FakeScope(Ok(scope()));
+    let source = agent
+        .launch(&OperationId::new().to_string(), &launch, &resolved)
+        .unwrap();
+    agent.exit(&source.terminal, 0).unwrap();
+    let target = agent.inventory(launch.workspace).resumable[0]
+        .target
+        .clone()
+        .unwrap();
+    pty_mut(&mut agent).spawn = Some(SpawnFailure::Definite);
+    let operation = OperationId::new().to_string();
+    let options = DaemonRestartResumeOptions {
+        integration_revision: None,
+        continue_work: true,
+    };
+    let ticket = agent
+        .prepare_daemon_restart_resume_readiness(&operation, &target, options)
+        .unwrap();
+    assert!(
+        agent
+            .resume_after_daemon_restart(&operation, &target, options, &resolved, ticket.as_ref())
+            .is_err()
+    );
+    assert!(agent.daemon_restart_restore_needed(&source.runtime));
+}
+
+#[test]
 fn daemon_restart_identifies_the_agent_whose_exact_resume_metadata_is_missing() {
     for session in [None, Some(SessionId::new())] {
         let mut agent = structured_claude_runtime();

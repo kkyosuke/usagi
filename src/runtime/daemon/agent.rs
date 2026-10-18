@@ -750,6 +750,30 @@ pub(super) fn write_pending_daemon_agent_restart(
     pending: &PendingDaemonAgentRestart,
 ) -> std::io::Result<()> {
     pending.validate()?;
+    let _mutation = pending_restart_mutation_lock(data_dir)?;
+    if read_pending_daemon_agent_restart(data_dir)?.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "an earlier daemon Agent restart is still recovering; no Agent was stopped",
+        ));
+    }
+    persist_pending_restart(data_dir, pending)
+}
+
+fn pending_restart_mutation_lock(data_dir: &Path) -> std::io::Result<std::fs::File> {
+    use super::instance_lock::{PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive};
+    lock_private_exclusive(
+        &data_dir.join("daemon/agent-restart.lock"),
+        "daemon Agent restart recovery",
+        PrivateLockModePolicy::CrashResidue,
+        PrivateLockWait::RECORD,
+    )
+}
+
+pub(super) fn persist_pending_restart(
+    data_dir: &Path,
+    pending: &PendingDaemonAgentRestart,
+) -> std::io::Result<()> {
     let daemon_dir = data_dir.join("daemon");
     json_file::write_atomic(
         &daemon_dir,
@@ -759,11 +783,63 @@ pub(super) fn write_pending_daemon_agent_restart(
     .map_err(|error| std::io::Error::other(format!("{error:#}")))
 }
 
+/// Merge progress without changing the stopped sources or undoing completion.
+pub(super) fn advance_pending_restart(
+    current: &PendingDaemonAgentRestart,
+    proposed: &PendingDaemonAgentRestart,
+) -> std::io::Result<PendingDaemonAgentRestart> {
+    if current.from_generation != proposed.from_generation
+        || current.workspace_root != proposed.workspace_root
+        || current.agents.len() != proposed.agents.len()
+        || current
+            .agents
+            .iter()
+            .zip(&proposed.agents)
+            .any(|(old, new)| {
+                old.agent != new.agent || old.resume_operation_id != new.resume_operation_id
+            })
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "daemon Agent restart progress changed its stopped sources",
+        ));
+    }
+    let mut next = current.clone();
+    for (item, proposed) in next.agents.iter_mut().zip(&proposed.agents) {
+        if !item.completed {
+            item.continue_work = proposed.continue_work;
+        }
+        item.completed |= proposed.completed;
+    }
+    Ok(next)
+}
+
+/// A cancelled or replaced transaction is never recreated by a late worker.
+pub(super) fn update_pending_daemon_agent_restart(
+    data_dir: &Path,
+    pending: &mut PendingDaemonAgentRestart,
+) -> std::io::Result<bool> {
+    pending.validate()?;
+    let _mutation = pending_restart_mutation_lock(data_dir)?;
+    let Some(current) = read_pending_daemon_agent_restart(data_dir)? else {
+        return Ok(false);
+    };
+    if current.operation_id != pending.operation_id {
+        return Ok(false);
+    }
+    let next = advance_pending_restart(&current, pending)?;
+    persist_pending_restart(data_dir, &next).map(|()| {
+        *pending = next;
+        true
+    })
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=pending_daemon_agent_restart_round_trips_and_clears_only_its_operation
 pub(super) fn clear_pending_daemon_agent_restart(
     data_dir: &Path,
     operation_id: &str,
 ) -> std::io::Result<bool> {
+    let _mutation = pending_restart_mutation_lock(data_dir)?;
     let Some(pending) = read_pending_daemon_agent_restart(data_dir)? else {
         return Ok(false);
     };
@@ -878,7 +954,9 @@ pub(super) fn restore_pending_daemon_agents(
         if !owner.daemon_restart_restore_needed(&item.agent.runtime) {
             drop(owner);
             pending.agents[index].completed = true;
-            write_pending_daemon_agent_restart(data_dir, pending)?;
+            if !update_pending_daemon_agent_restart(data_dir, pending)? {
+                return Ok(restored);
+            }
             continue;
         }
         let options = DaemonRestartResumeOptions {
@@ -916,7 +994,9 @@ pub(super) fn restore_pending_daemon_agents(
         // unavailable for longer than source retention, an already completed
         // item is never looked up again; a crash between spawn and this write
         // still replays the same durable resume operation.
-        write_pending_daemon_agent_restart(data_dir, pending)?;
+        if !update_pending_daemon_agent_restart(data_dir, pending)? {
+            return Ok(restored);
+        }
     }
     Ok(restored)
 }
@@ -992,7 +1072,9 @@ pub(super) fn recover_pending_daemon_agents_once(
         && intent.apply(&mut pending)?
     {
         // Commit the continuation semantic before the first resume admission.
-        write_pending_daemon_agent_restart(data_dir, &pending)?;
+        if !update_pending_daemon_agent_restart(data_dir, &mut pending)? {
+            return Ok(None);
+        }
     }
     for (workspace_id, root) in pending_agent_workspace_roots(data_dir, &pending)? {
         let tenant = match tenants.tenant(&root) {

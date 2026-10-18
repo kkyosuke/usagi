@@ -156,6 +156,8 @@ pub struct RuntimeAuthorization {
     pub operation: CompletionFence,
     pub mcp_allowed: bool,
     pub launch_provenance: Option<usagi_core::domain::agent::AgentLaunchProvenance>,
+    pub user_decision_owner: Option<usagi_core::domain::user_decision::UserDecisionOwner>,
+    pub user_decision_owner_aliases: Vec<usagi_core::domain::user_decision::UserDecisionOwner>,
 }
 
 impl RuntimeAuthorization {
@@ -344,6 +346,8 @@ impl Orchestrator {
                 semantic_key,
                 superseded,
                 authorization.launch_provenance.clone(),
+                authorization.user_decision_owner.clone(),
+                authorization.user_decision_owner_aliases.clone(),
             )
             .map_err(OrchestrationError::Runtime)
     }
@@ -703,6 +707,8 @@ mod tests {
         .unwrap();
         let authorization = RuntimeAuthorization {
             launch_provenance: None,
+            user_decision_owner: None,
+            user_decision_owner_aliases: Vec::new(),
             runtime,
             operation: CompletionFence {
                 workspace_id: scope.workspace_id,

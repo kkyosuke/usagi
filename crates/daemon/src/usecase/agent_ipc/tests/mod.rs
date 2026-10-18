@@ -1,6 +1,7 @@
 //! agent ipc の振る舞いを固定するテスト。
 
 mod admission;
+mod decision_owner;
 mod dispatch;
 mod provenance;
 mod restart;

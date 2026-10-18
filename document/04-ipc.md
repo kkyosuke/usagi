@@ -755,6 +755,7 @@ active generation の recovery worker が同じ transaction を current integrat
 拒否し、CLI は transaction の消去と successor serving の両方を確認してから成功する。current-integration resume は source の旧 adapter revision を fence として保持したまま、
 active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope / lineage を変えずに
 hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
+未完了 transaction に対する次の `rollover` は daemon が barrier 内で拒否するため、CLI の事前検証を通らない IPC caller も前の復旧記録を置き換えられない。
 commit 後の old owner は残存作業のない non-initial workspace の fence を解放し、successor は各 workspace を取得・照合してから recovery を進める。
 live generic PTY や未完了 lifecycle work が残る workspace は解放せず、recovery worker が再試行する。
 作業の続行 prompt と再試行の扱いは [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する。

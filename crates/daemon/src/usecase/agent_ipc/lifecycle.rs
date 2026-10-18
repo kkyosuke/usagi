@@ -524,7 +524,9 @@ impl AgentRuntime {
     /// Agent identity already has another non-terminal run (the operator
     /// relaunched or resumed it by hand), exact resume would refuse with "peer
     /// runtime already exists" forever; that Agent is already running again.
-    /// Every other state is left to that path's full fences.
+    /// An exact replacement which durably spawned also completes the source,
+    /// even if its final turn exited before progress was saved. Every other
+    /// state is left to that path's full fences.
     #[must_use]
     pub fn daemon_restart_restore_needed(&self, runtime: &AgentRuntimeRef) -> bool {
         let Ok(record) = self.coordinator.record_for(runtime) else {
@@ -535,6 +537,35 @@ impl AgentRuntime {
             crate::usecase::runtime::RuntimeState::Reserved
                 | crate::usecase::runtime::RuntimeState::Running
         ) {
+            return false;
+        }
+        if let (Some(replacement_id), Some(source_id), Some(continuation)) = (
+            record.superseded_by,
+            record.resume_source,
+            record.continuation,
+        ) && self
+            .coordinator
+            .snapshot()
+            .records
+            .iter()
+            .any(|replacement| {
+                use crate::usecase::runtime::DurableOperationOutcome;
+                replacement.runtime.agent_runtime_id == replacement_id
+                    && replacement.resumed_from == Some(source_id)
+                    && replacement.continuation == Some(continuation)
+                    && replacement.launch.request.scope == record.launch.request.scope
+                    && matches!(
+                        replacement.outcome,
+                        DurableOperationOutcome::ResumeSucceeded
+                            | DurableOperationOutcome::Completed
+                            | DurableOperationOutcome::ExitUnavailable
+                    )
+            })
+        {
+            // A later generation would use integration-repair semantics while
+            // an old-owner rollback used the original integration. A committed
+            // spawn closes this pending item; replaying its operation under the
+            // new semantic key would strand that completed item in a conflict.
             return false;
         }
         let source = record.operation.operation_id;
