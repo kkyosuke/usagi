@@ -1524,7 +1524,7 @@ pub(super) fn drive_workspace_controller(
             continue;
         }
         if deck.overlay_open() {
-            match deck.handle_overlay_key(&key) {
+            match deck.handle_overlay_key_at(&key, height, width) {
                 OverlayIntent::AttentionVisit {
                     path,
                     workspace,

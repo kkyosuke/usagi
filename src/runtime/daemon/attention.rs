@@ -180,7 +180,7 @@ fn session_attention(
     status: Option<AgentStatus>,
 ) -> Option<(AttentionKind, String)> {
     if session.lifecycle == SessionLifecycle::Failed {
-        return Some((AttentionKind::Blocked, "Session lifecycle failed".into()));
+        return Some((AttentionKind::Blocked, "Session failed".into()));
     }
     if session.lifecycle != SessionLifecycle::Available {
         return Some((
@@ -194,10 +194,7 @@ fn session_attention(
             Some(AgentStatus::Running | AgentStatus::Starting | AgentStatus::Failed)
         )
     {
-        return Some((
-            AttentionKind::System,
-            "Agent waiting — inspect terminal".into(),
-        ));
+        return Some((AttentionKind::System, "Agent is waiting".into()));
     }
     if phase == AgentPhase::Interrupted {
         return Some((AttentionKind::Blocked, "Agent interrupted".into()));
@@ -219,16 +216,17 @@ fn pr_attention(pr: &PrEntry) -> Option<(AttentionKind, &'static str)> {
     if pr.refresh != PrRefreshState::Idle || pr.head_oid.is_none() {
         return Some((AttentionKind::System, "PR status unknown / refreshing"));
     }
-    if pr.checks == Some(PrChecksState::Failing)
-        || pr.review == Some(PrReviewDecision::ChangesRequested)
-    {
-        return Some((AttentionKind::Blocked, "CI failed / changes requested"));
+    if pr.checks == Some(PrChecksState::Failing) {
+        return Some((AttentionKind::Blocked, "CI checks failed"));
+    }
+    if pr.review == Some(PrReviewDecision::ChangesRequested) {
+        return Some((AttentionKind::Blocked, "Changes requested"));
     }
     if pr.checks == Some(PrChecksState::Pending) {
         return Some((AttentionKind::System, "CI pending"));
     }
     if !pr.draft {
-        return Some((AttentionKind::Review, "Review / merge decision"));
+        return Some((AttentionKind::Review, "PR is ready for review or merge"));
     }
     None
 }
@@ -415,7 +413,7 @@ mod tests {
             result
                 .items
                 .iter()
-                .any(|item| item.reason == "PR #1 · Review / merge decision")
+                .any(|item| item.reason == "PR #1 · PR is ready for review or merge")
         );
         let failed_statuses = [(sessions[0].session_id, AgentStatus::Failed)].into();
         assert!(
