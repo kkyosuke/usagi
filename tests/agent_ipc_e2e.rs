@@ -156,6 +156,39 @@ fn write_restartable_codex_with_capture(bin: &Path, count: &Path, capture_start:
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// Each workspace captures a distinct native conversation and records both its
+/// actual launch directory and resume arguments, so cross-workspace swaps fail.
+fn write_workspace_codex(bin: &Path, count: &Path, first: &Path, second: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+case "$PWD/" in
+    {first}/*) session=fixture-first ;;
+    {second}/*) session=fixture-second ;;
+    *) exit 10 ;;
+esac
+resuming=false
+for argument in "$@"; do if [ "$argument" = resume ]; then resuming=true; fi; done
+if [ "$resuming" = false ]; then
+    printf '{{"session_id":"%s","hook_event_name":"SessionStart"}}' "$session" | {usagi} codex-session-capture || exit 8
+fi
+printf '{{"session_id":"%s","hook_event_name":"PreToolUse"}}' "$session" | {usagi} agent-phase running || exit 9
+printf '%s:%s\n' "$session" "$*" >> {count}
+printf 'ready\n'
+trap 'exit 0' TERM
+while :; do sleep 1; done
+"#,
+        first = shell_quote(fs::canonicalize(first).unwrap().to_str().unwrap()),
+        second = shell_quote(fs::canonicalize(second).unwrap().to_str().unwrap()),
+        usagi = shell_quote(env!("CARGO_BIN_EXE_usagi")),
+        count = shell_quote(count.to_str().unwrap()),
+    );
+    let path = bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Antigravity fixture which loads the daemon-private workspace configuration, runs
 /// its structured starting hook, and records exact argv for cold-restart resume.
 fn write_restartable_agy(bin: &Path, count: &Path, argv: &Path) {
@@ -3231,6 +3264,146 @@ fn managed_update_defers_live_agent_handoff_without_reporting_an_update_failure(
     );
 }
 
+#[test]
+#[allow(clippy::too_many_lines)] // Two workspace identities survive two real managed transitions.
+fn managed_update_restarts_agents_across_workspaces_and_reports_progress() {
+    let _serial = serial();
+    let first = fixture_repo();
+    let second = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    write_workspace_codex(&bin, &agent_spawns, first.path(), second.path());
+    let daemon = start_daemon_with_source_identity(
+        first.path(),
+        home.path(),
+        &bin,
+        Path::new("/bin/sh"),
+        &"a".repeat(64),
+    );
+    let data_dir = channel_data_dir(home.path());
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
+    Storage::new(&data_dir)
+        .save_settings(&Settings {
+            env: [("PATH".to_owned(), fixture_path.clone())].into(),
+            ..Settings::default()
+        })
+        .unwrap();
+    let mut owner = client(&data_dir);
+    let first_scope = available_scope(&mut owner);
+    let _ = launch(&mut owner, first_scope.0, first_scope.1, None);
+    let mut second_client = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                fs::canonicalize(second.path()).unwrap(),
+            ),
+        },
+    )
+    .unwrap();
+    let second_scope = available_scope(&mut second_client);
+    assert_ne!(first_scope.0, second_scope.0);
+    let _ = launch(&mut second_client, second_scope.0, second_scope.1, None);
+    wait_for_spawns(&agent_spawns, 2);
+
+    let mut sync = usagi_command(
+        home.path(),
+        Channel::Local,
+        second.path(),
+        &[
+            "daemon".as_ref(),
+            "sync-after-update".as_ref(),
+            "--restart-agents".as_ref(),
+        ],
+    );
+    sync.env("PATH", fixture_path)
+        .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+        .env("USAGI_UPDATE_PROGRESS", "1")
+        .env(
+            usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+            "1",
+        );
+    // Keep both old client handles alive. They no longer own control admission
+    // after commit and must not prevent the idle workspace fence from moving.
+    for transition in 1..=2 {
+        let old_pid = daemon_pid(&data_dir);
+        let result = sync.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+            daemon_error_log(&data_dir)
+        );
+        assert_ne!(daemon_pid(&data_dir), old_pid);
+        wait_for_spawns(&agent_spawns, 2 + 2 * transition);
+        let progress = String::from_utf8_lossy(&result.stderr);
+        assert!(progress.contains("[###---] 3/6"), "{progress}");
+        assert!(progress.contains("[######] 6/6"), "{progress}");
+        assert!(!progress.contains('\x1b'));
+        assert!(!data_dir.join("daemon/agent-restart.json").exists());
+        assert!(!data_dir.join("daemon/agent-restart-intent.json").exists());
+        for (root, scope, conversation) in [
+            (first.path(), first_scope, "fixture-first"),
+            (second.path(), second_scope, "fixture-second"),
+        ] {
+            let mut current = IpcClient::connect(
+                connect_current(&data_dir).unwrap(),
+                client_incarnation().to_owned(),
+                OperationId::new().to_string(),
+                ClientPolicy::cli(),
+                shipping_build_identity(),
+                usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+                    root: usagi_core::infrastructure::paths::wire_workspace_root(
+                        fs::canonicalize(root).unwrap(),
+                    ),
+                },
+            )
+            .unwrap();
+            let reply = current
+                .request(DaemonRequest::AgentInventory {
+                    workspace: scope.0,
+                    caller_context: None,
+                })
+                .unwrap();
+            let body = match reply {
+                DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+            };
+            let inventory: usagi_core::domain::agent::AgentInventory =
+                serde_json::from_value(body).unwrap();
+            assert_eq!(
+                inventory
+                    .runtimes
+                    .iter()
+                    .filter(|item| item.state == AgentRuntimeInventoryState::Live)
+                    .count(),
+                1,
+                "{inventory:?}"
+            );
+            let spawns = fs::read_to_string(&agent_spawns).unwrap();
+            let resumes = spawns
+                .lines()
+                .filter(|line| {
+                    line.starts_with(&format!("{conversation}:"))
+                        && line.contains(&format!("resume {conversation}"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(resumes.len(), transition, "{spawns}");
+            assert!(
+                resumes.iter().all(|line| line.ends_with(" -- continue")),
+                "{spawns}"
+            );
+        }
+    }
+    drop((owner, second_client));
+    daemon_fixture::reap(home.path());
+    drop(daemon);
+}
+
 /// A launched Agent owns a daemon-minted MCP credential before its MCP child
 /// connects. Plain replacement must preserve that authority by refusing the
 /// rollover, while the explicit Agent-restart path stops and exactly resumes it.
@@ -3483,6 +3656,10 @@ fn root_restart_recovers_agents_after_requester_exit() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    assert!(
+        !data_dir.join("daemon/agent-restart-intent.json").exists(),
+        "daemon recovery also owns continuation intent cleanup after requester exit"
+    );
     let mut current = client(&data_dir);
     let inventory = current
         .request(DaemonRequest::AgentInventory {

@@ -16,8 +16,8 @@ use super::agent_provisioning;
 use super::{
     AGENT_RUNTIME_LIMIT, AdapterRegistry, AdmissionGate, AgentConcurrencyGauge,
     AgentIntegrationRevision, AgentProfileId, AgentPty, AgentPtyObservation, AgentReadinessProbe,
-    AgentRuntime, AgentTerminalActor, AgyAdapter, Arc, BTreeSet, BackgroundWorker, ClaudeAdapter,
-    ClientPolicy, ClientWorkspace, CodexAdapter, ConnectionWorkspace, CurrentLocatorFile,
+    AgentRuntime, AgentTerminalActor, AgyAdapter, Arc, BTreeMap, BTreeSet, BackgroundWorker,
+    ClaudeAdapter, ClientPolicy, ClientWorkspace, CodexAdapter, CurrentLocatorFile,
     DECISION_MAINTENANCE_TICK, DEFAULT_GENERATION_LIMIT, DaemonRequest, DaemonRestartAgent,
     DaemonRestartAgentPlan, DefaultModel, Deserialize, DiscardJournal, DispatchStore, Duration,
     ErrorLog, FailureTransitionLog, FileWorkspaceFences, GenerationRegistry,
@@ -28,7 +28,7 @@ use super::{
     SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime, SharedSessionRuntime,
     SharedUserEnvironment, ShutdownRequest, SpawnProvision, SpawnedChildren, SyncSender,
     SystemAgentReadiness, TenantRegistry, TenantRuntimeOpener, TerminalOutcome,
-    TerminalPipelineMetrics, TrySendError, UserDecisionStore, Workspaces, Write,
+    TerminalPipelineMetrics, TrySendError, UserDecisionStore, WorkspaceId, Workspaces, Write,
     existing_policy_client, hydrate_runtime_state, implicit_bound_workspace, known_sessions,
     observe_generation_process, open_runtime_state, open_session_runtime,
     pending_daemon_agent_restart_path, recover_rollover, repair_agent_codex_arg0_permissions,
@@ -695,19 +695,9 @@ impl PendingDaemonAgentRestart {
                 "pending daemon Agent restart has an unsupported shape",
             ));
         }
-        let canonical = paths::canonical_workspace_root(&self.workspace_root)
-            .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-        if canonical != self.workspace_root {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "pending daemon Agent restart has a non-canonical workspace",
-            ));
-        }
-        let workspaces = self
-            .agents
-            .iter()
-            .map(|item| item.agent.runtime.terminal.workspace_id)
-            .collect::<BTreeSet<_>>();
+        // Retained for old transaction readers. Recovery resolves each
+        // unfinished item's root from its durable workspace identity instead;
+        // a completed item's former root may no longer exist.
         let resume_operations = self
             .agents
             .iter()
@@ -718,8 +708,7 @@ impl PendingDaemonAgentRestart {
             .iter()
             .map(|item| item.agent.runtime.agent_runtime_id)
             .collect::<BTreeSet<_>>();
-        if workspaces.len() != 1
-            || resume_operations.len() != self.agents.len()
+        if resume_operations.len() != self.agents.len()
             || runtimes.len() != self.agents.len()
             || self.agents.iter().any(|item| {
                 item.agent.runtime.agent_runtime_id != item.agent.target.runtime_id
@@ -781,6 +770,9 @@ pub(super) fn clear_pending_daemon_agent_restart(
     if pending.operation_id != operation_id {
         return Ok(false);
     }
+    // The transaction's absence admits the next lifecycle operation. Finish
+    // operation-scoped intent cleanup before publishing that boundary.
+    super::restart_intent::clear(data_dir, operation_id)?;
     let path = pending_daemon_agent_restart_path(data_dir);
     match std::fs::remove_file(&path) {
         Ok(()) => {
@@ -796,26 +788,32 @@ pub(super) fn clear_pending_daemon_agent_restart(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=planned_agent_workspace_is_resolved_by_durable_identity
 pub(super) fn planned_agent_workspace_root(
     data_dir: &Path,
     plan: &DaemonRestartAgentPlan,
 ) -> std::io::Result<Option<PathBuf>> {
+    let roots = planned_agent_workspace_roots(data_dir, plan)?;
+    Ok(plan
+        .agents
+        .first()
+        .and_then(|agent| roots.get(&agent.target.workspace_id))
+        .cloned())
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=planned_agent_workspace_is_resolved_by_durable_identity
+pub(super) fn planned_agent_workspace_roots(
+    data_dir: &Path,
+    plan: &DaemonRestartAgentPlan,
+) -> std::io::Result<BTreeMap<WorkspaceId, PathBuf>> {
     let workspaces = plan
         .agents
         .iter()
         .map(|agent| agent.runtime.terminal.workspace_id)
         .collect::<BTreeSet<_>>();
-    let Some(workspace) = workspaces.iter().next().copied() else {
-        return Ok(None);
-    };
-    if workspaces.len() != 1 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "live Agents span multiple workspaces; no Agent was stopped",
-        ));
+    if workspaces.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    let mut roots = Vec::new();
+    let mut roots = BTreeMap::new();
     for state in workspace_state::adopted(&data_dir.join("daemon"))
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?
     {
@@ -823,21 +821,41 @@ pub(super) fn planned_agent_workspace_root(
             usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore::new(state.dir())
                 .load()
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-        if lifecycle.is_some_and(|state| state.workspace_id == workspace) {
-            roots.push(state.root().to_path_buf());
+        if let Some(lifecycle) = lifecycle
+            && workspaces.contains(&lifecycle.workspace_id)
+        {
+            let root = paths::canonical_workspace_root(state.root())
+                .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+            if root != state.root() || roots.insert(lifecycle.workspace_id, root).is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "live Agent workspace identity is ambiguous or not canonical",
+                ));
+            }
         }
     }
-    match roots.as_slice() {
-        [root] => Ok(Some(root.clone())),
-        [] => Err(std::io::Error::new(
+    if roots.len() != workspaces.len() {
+        return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "live Agent workspace is not present in durable daemon state",
-        )),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "live Agent workspace identity is ambiguous in durable daemon state",
-        )),
+        ));
     }
+    Ok(roots)
+}
+
+pub(super) fn pending_agent_workspace_roots(
+    data_dir: &Path,
+    pending: &PendingDaemonAgentRestart,
+) -> std::io::Result<BTreeMap<WorkspaceId, PathBuf>> {
+    let plan = DaemonRestartAgentPlan {
+        agents: pending
+            .agents
+            .iter()
+            .filter(|item| !item.completed)
+            .map(|item| item.agent.clone())
+            .collect(),
+    };
+    planned_agent_workspace_roots(data_dir, &plan)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_restart_recovers_agents_after_requester_exit
@@ -969,27 +987,29 @@ pub(super) fn recover_pending_daemon_agents_once(
         }
     }
     let current_integration = generation != pending.from_generation;
-    let tenant = match tenants.tenant(&pending.workspace_root) {
-        Some(tenant) => tenant,
-        None => tenants
-            .adopt(&pending.workspace_root)
-            .map_err(std::io::Error::from)?,
-    };
-    let workspace_id = pending.agents[0].agent.target.workspace_id;
-    if tenant.workspace_id() != workspace_id {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "pending daemon Agent restart workspace identity changed",
-        ));
+    if current_integration
+        && let Some(intent) = super::restart_intent::read(data_dir)?
+        && intent.apply(&mut pending)?
+    {
+        // Commit the continuation semantic before the first resume admission.
+        write_pending_daemon_agent_restart(data_dir, &pending)?;
     }
-    let bound = ConnectionWorkspace {
-        tenant,
-        workspaces: Arc::clone(workspaces),
-    };
+    for (workspace_id, root) in pending_agent_workspace_roots(data_dir, &pending)? {
+        let tenant = match tenants.tenant(&root) {
+            Some(tenant) => tenant,
+            None => tenants.adopt(&root).map_err(std::io::Error::from)?,
+        };
+        if tenant.workspace_id() != workspace_id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "pending daemon Agent restart workspace identity changed",
+            ));
+        }
+    }
     let restored = restore_pending_daemon_agents(
         data_dir,
         agent,
-        &bound.scope_resolver(),
+        &super::SharedScopeResolver(Arc::clone(workspaces)),
         &mut pending,
         current_integration,
     )?;

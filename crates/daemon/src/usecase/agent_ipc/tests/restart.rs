@@ -575,7 +575,7 @@ fn daemon_restart_plan_refuses_every_unprovable_agent_authority() {
 }
 
 #[test]
-fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_any() {
+fn daemon_restart_plan_includes_every_workspace_before_stopping_any() {
     let first_workspace = WorkspaceId::new();
     let second_workspace = WorkspaceId::new();
     let mut agent = runtime();
@@ -602,12 +602,16 @@ fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_a
         revision: crate::usecase::claude::PROFILE_REVISION,
     }];
 
-    let refusal = agent
-        .plan_daemon_restart_agents(&expected, false)
-        .unwrap_err();
+    let plan = agent.plan_daemon_restart_agents(&expected, false).unwrap();
 
-    assert_eq!(refusal.code, ErrorCode::Busy);
-    assert!(refusal.message.contains("multiple workspaces"));
+    assert_eq!(plan.agents.len(), 2);
+    assert_eq!(
+        plan.agents
+            .iter()
+            .map(|item| item.target.workspace_id)
+            .collect::<BTreeSet<_>>(),
+        [first_workspace, second_workspace].into()
+    );
     assert_eq!(agent.provisioned_mcp_callers(), 2);
     assert!(
         agent
@@ -617,6 +621,7 @@ fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_a
             .iter()
             .all(|record| { record.state == crate::usecase::runtime::RuntimeState::Running })
     );
+    assert_eq!(pty(&agent).terminate_calls, 0);
 }
 
 #[test]

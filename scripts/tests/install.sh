@@ -9,6 +9,12 @@ cleanup_test() {
     local status=$? child
     trap - EXIT
     set +e
+    if [ "$status" -ne 0 ] && [ -n "${CASE_DIR:-}" ]; then
+        printf 'installer regression failed: %s\n' "$CASE_DIR" >&2
+        for child in "$CASE_DIR/err" "$CASE_DIR/progress"; do
+            if [ -f "$child" ]; then cat "$child" >&2; fi
+        done
+    fi
     # Unblock and reap fake daemon synchronization before deleting fixtures,
     # including when a startup assertion failed while the child was running.
     if [ -n "${USAGI_SYNC_WAIT_FOR:-}" ]; then touch "$USAGI_SYNC_WAIT_FOR"; fi
@@ -55,9 +61,10 @@ make_binary() {
         '  daemon)' \
         '    shift' \
         '    [ "${USAGI_SYNC_UNSUPPORTED:-}" != "1" ] || exit 2' \
-        '    [ "$#" -eq 1 ] && [ "$1" = "sync-after-update" ] || exit 2' \
+        '    [ "$#" -ge 1 ] && [ "$1" = "sync-after-update" ] || exit 2' \
+        '    if [ "$#" -ne 1 ]; then [ "$#" -eq 2 ] && [ "$2" = "--restart-agents" ] && [ "${USAGI_SYNC_RESTART_SUPPORTED:-1}" = 1 ] || exit 2; fi' \
         '    [ "${USAGI_UPDATE_SYNC_OUTCOMES:-}" = "1" ] || exit 74' \
-        '    [ -z "${USAGI_SYNC_LOG:-}" ] || printf "%s|%s\\n" "$PWD" "$1" >> "$USAGI_SYNC_LOG"' \
+        '    [ -z "${USAGI_SYNC_LOG:-}" ] || printf "%s|%s\\n" "$PWD" "$*" >> "$USAGI_SYNC_LOG"' \
         '    while [ -n "${USAGI_SYNC_WAIT_FOR:-}" ] && [ ! -e "$USAGI_SYNC_WAIT_FOR" ]; do sleep 0.01; done' \
         '    exit "${USAGI_SYNC_STATUS:-0}"' \
         '    ;;' \
@@ -167,7 +174,7 @@ run_installer_for_version() {
 run_managed_installer() {
     (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
         USAGI_MANAGED_UPDATE=1 PATH="$FAKE_BIN:$PATH" \
-        USAGI_VERSION=v2.0.0 bash "$INSTALLER")
+        USAGI_VERSION=v2.0.0 bash "$INSTALLER" "$@")
 }
 
 run_managed_installer_without_daemon() {
@@ -236,6 +243,32 @@ if grep -q "usagi doctor --fix" "$CASE_DIR/out"; then
     exit 1
 fi
 
+prepare_case managed-update-with-agent-restart
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+export USAGI_SYNC_LOG
+run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/progress"
+unset USAGI_SYNC_LOG
+grep -q '^.*|sync-after-update --restart-agents$' "$CASE_DIR/sync.log"
+grep -q '\[###---\] 3/6' "$CASE_DIR/progress"
+grep -q '\[######\] 6/6' "$CASE_DIR/progress"
+if LC_ALL=C grep -q $'\033' "$CASE_DIR/progress"; then
+    echo "redirected progress contains terminal escapes" >&2
+    exit 1
+fi
+
+prepare_case managed-update-with-unsupported-agent-restart
+USAGI_SYNC_RESTART_SUPPORTED=0
+export USAGI_SYNC_RESTART_SUPPORTED
+if run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/progress"; then
+    echo "unsupported Agent restart must not silently become ordinary synchronization" >&2
+    exit 1
+fi
+unset USAGI_SYNC_RESTART_SUPPORTED
+grep -q 'existing daemon was left unchanged' "$CASE_DIR/progress"
+grep -q '\[###---\] 3/6 本体更新済み・daemon の同期は未完了' "$CASE_DIR/progress"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+if grep -q '6/6' "$CASE_DIR/progress"; then exit 1; fi
+
 prepare_case managed-update-without-daemon
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
 export USAGI_SYNC_LOG
@@ -253,18 +286,23 @@ if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
 fi
 unset USAGI_SYNC_UNSUPPORTED
 grep -q 'does not support safe managed daemon synchronization' "$CASE_DIR/err"
+grep -q '\[###-\] 3/4 本体更新済み・daemon の同期は未完了' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
 [ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
 
 prepare_case managed-update-post-commit-failure
 USAGI_SYNC_STATUS=1
 export USAGI_SYNC_STATUS
-if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+if run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
     echo "expected a failed managed synchronization to fail the update" >&2
     exit 1
 fi
 unset USAGI_SYNC_STATUS
 grep -q 'could not complete daemon synchronization' "$CASE_DIR/err"
 grep -q "inspect 'usagi daemon status'" "$CASE_DIR/err"
+grep -q '\[###---\] 3/6 本体更新済み・daemon の同期は未完了' "$CASE_DIR/err"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+if grep -q '6/6' "$CASE_DIR/err"; then exit 1; fi
 if grep -q 'left unchanged' "$CASE_DIR/err"; then
     echo "generic synchronization failure made an invalid pre-commit guarantee" >&2
     exit 1
@@ -279,7 +317,8 @@ unset USAGI_SYNC_STATUS
 grep -q 'v1.0.0 から v2.0.0' "$CASE_DIR/out"
 grep -q 'daemon の切り替えは保留' "$CASE_DIR/out"
 grep -q '現在の接続を維持' "$CASE_DIR/out"
-[ ! -s "$CASE_DIR/err" ]
+grep -q '本体更新済み・daemon の切替は保留中' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
 if grep -q 'daemon の build を同期した' "$CASE_DIR/out"; then
     echo "deferred synchronization incorrectly reported a serving successor" >&2
     exit 1
@@ -292,7 +331,8 @@ run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"
 unset USAGI_SYNC_STATUS
 grep -q 'daemon の切り替えを予約' "$CASE_DIR/out"
 grep -q '終了後に自動で再試行' "$CASE_DIR/out"
-[ ! -s "$CASE_DIR/err" ]
+grep -q '本体更新済み・daemon の切替は保留中' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
 
 prepare_case deferred-sync-only
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
