@@ -380,6 +380,37 @@ fn live_pane_availability_reacts_on_the_edge_not_the_level() {
     assert!(state.ctrl_c_grace());
 }
 
+#[test]
+fn a_pane_becoming_live_dismisses_only_the_unforced_closeup_launcher() {
+    let (workspace, session, _) = ids();
+    for forced in [false, true] {
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        if forced {
+            let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.closeup_action_forced, forced);
+        if forced {
+            // An explicit action over a live pane stays forced even while its
+            // pane is interrupted and a replacement is becoming available.
+            let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+            assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        }
+
+        assert!(update(&mut state, AppEvent::LivePaneAvailability(true)).is_empty());
+        assert!(state.has_live_pane());
+        assert_eq!(state.active(), Some(session));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(
+            state.overlay(),
+            forced.then_some(Overlay::Closeup),
+            "only the unforced launcher should yield to the live pane"
+        );
+    }
+}
+
 /// Escape and Ctrl-C close only the Closeup action modal and return input to
 /// the underlying Closeup, while Ctrl-Q stays inert like every other overlay.
 #[test]
