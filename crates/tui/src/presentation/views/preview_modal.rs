@@ -460,6 +460,7 @@ fn render_document(
         base,
         &TextOverlay::new(title, document)
             .scrolled_to(projected_scroll)
+            .with_status(super::artifact_modal::open_feedback(state, inner))
             .with_footer(footer),
         desired_inner_width(width),
         desired_body_height(height),

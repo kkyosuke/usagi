@@ -67,7 +67,8 @@ use flow_steps::{
 use session_commands::{
     ActiveSessionCommand, SessionCommandCompletion, SessionCommandLane, adopt_session_command_lane,
     begin_session_command, deliver_carried_outcome, drain_session_completions,
-    drain_session_refresh, project_controller_sessions, session_name_for, sync_runtime_sessions,
+    drain_session_refresh, project_controller_sessions, session_name_for,
+    sync_overlay_session_roots, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{

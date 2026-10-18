@@ -1726,6 +1726,8 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 `Artifacts` は利用可能な session の Agent 状態行の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は Switch の cursor / Closeup の active session を開き、session 未選択時は保管済みを含む workspace 全体を開く。
 sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
+TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。
+削除後に同名の session を作り直した場合は、新しい session の成果物を表示する。
 
 sidebar のクリック対象は表示済み frame の配置から解決する。警告の吹き出し・作成中の表示・スクロールで
 行の位置が変わっても、表示した session と操作対象の ID を一致させる。クリックで一覧を開いた操作も
@@ -1738,6 +1740,9 @@ sidebar のクリック対象は表示済み frame の配置から解決する�
 png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bundle は渡さない。
 外部表示に未対応の形式には、その旨と Tab によるテキスト表示の案内を出す。directory や
 特殊ファイルの拒否とは区別する。
+外部表示の処理中・成功・失敗は一覧内に表示し、失敗しても選択と絞り込みを保持する。
+テキスト本文から外部表示を要求した場合も、結果をスクロール位置にかかわらず本文の上に表示する。
+別のファイルへ移動した場合や一覧を閉じた場合、遅れて返る結果は新しい閲覧へ表示しない。
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
 外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
 HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。

@@ -3,6 +3,7 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::session_commands::{adopt_session_snapshot, sync_overlay_session_roots};
 
 #[test]
 fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_modal() {
@@ -212,6 +213,7 @@ fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
 fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
     let snapshot = snapshot("pr-lane");
     let original = snapshot.session_ids[0];
+    let original_root = snapshot.state.sessions[0].root.clone();
     let added = SessionId::new();
     let mut added_record = snapshot.state.sessions[0].clone();
     added_record.name = "pr-lane-added".to_owned();
@@ -259,6 +261,80 @@ fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
         observed.iter().any(|targets| targets.contains(&added)),
         "the session created after entry never reached the PR lane: {observed:?}"
     );
+    assert_eq!(
+        lane.observed_roots(),
+        vec![
+            vec![(original, original_root.clone())],
+            vec![
+                (original, original_root),
+                (added, PathBuf::from("/tmp/pr-lane/pr-lane-added"))
+            ],
+        ],
+        "the actual frame loop must publish newly observed roots before input"
+    );
+}
+
+#[test]
+fn preview_roots_follow_only_current_snapshots_including_same_named_recreation() {
+    let initial = snapshot("preview-roots");
+    let old = initial.session_ids[0];
+    let original = initial.state.sessions[0].clone();
+    let view = WorkspaceView::with_runtime_ids(initial.workspace, initial.state, vec![old]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let lane = RecordingPrLane::default();
+    let (host, _) = ControllerHost::channel();
+    let mut backend = DaemonBackend::new(
+        Box::new(host.clone()),
+        Box::new(host),
+        Box::new(UnavailableBackendPort),
+        Box::new(UnavailableBackendPort),
+    )
+    .with_overlay(Box::new(lane.clone()));
+    let mut revision = None;
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots(),
+        vec![vec![(old, original.root.clone())]]
+    );
+
+    let changed = |revision, records, ids| SessionCommandResult {
+        message: String::new(),
+        sessions: Some(records),
+        session_ids: Some(ids),
+        revision: Some(revision),
+        agent_resumes: None,
+        session_lifecycles: None,
+        session_roles: None,
+        notes_updated_at: None,
+    };
+    let fresh = SessionId::new();
+    adopt_session_snapshot(&mut ui, changed(2, vec![original.clone()], vec![fresh]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots().last().unwrap(),
+        &vec![(fresh, original.root.clone())]
+    );
+    let count = lane.observed_roots().len();
+    adopt_session_snapshot(&mut ui, changed(1, vec![original.clone()], vec![old]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots().len(),
+        count,
+        "a late snapshot must not restore a removed identity"
+    );
+
+    let mut moved = original;
+    moved.root = PathBuf::from("/tmp/preview-roots/moved");
+    adopt_session_snapshot(&mut ui, changed(3, vec![moved.clone()], vec![fresh]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots().last().unwrap(),
+        &vec![(fresh, moved.root)]
+    );
+    adopt_session_snapshot(&mut ui, changed(4, vec![], vec![]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert!(lane.observed_roots().last().unwrap().is_empty());
 }
 
 /// Dispatching a batch of reducer effects is also where a stop takes effect.

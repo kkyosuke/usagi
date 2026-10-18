@@ -22,7 +22,8 @@ pub use new::{
 };
 pub use notes::{NoteCloseChoice, NoteEditor, NoteSection};
 pub use preview::{
-    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
+    ArtifactOpenState, PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane,
+    PreviewSearchMatch,
 };
 pub use pull_requests::{PrFilter, PrOverlay};
 
@@ -2459,6 +2460,14 @@ pub enum BackendEvent {
         filter: PreviewFileFilter,
         error: SafeError,
     },
+    /// Native viewer result, fenced independently from finder/document reads.
+    ArtifactOpenFinished {
+        target: Target,
+        request_id: RequestId,
+        path: String,
+        filter: PreviewFileFilter,
+        result: Result<(), SafeError>,
+    },
 }
 
 /// 非同期 request の成否。
@@ -2662,6 +2671,7 @@ pub enum Effect {
     /// Open a selected generated artifact using the platform viewer.
     OpenArtifact {
         target: Target,
+        request_id: RequestId,
         path: String,
         filter: PreviewFileFilter,
     },
@@ -3073,7 +3083,8 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
         | BackendEvent::PullRequestsLoaded { .. }
         | BackendEvent::PullRequestsError { .. }
         | BackendEvent::PreviewLoaded { .. }
-        | BackendEvent::PreviewError { .. }) => {
+        | BackendEvent::PreviewError { .. }
+        | BackendEvent::ArtifactOpenFinished { .. }) => {
             let _ = update_editor_backend(state, &event);
             // 候補が届いた直後の選択にも側 pane を追随させる。
             preview::sync_preview_pane(state)
@@ -3288,6 +3299,15 @@ fn update_session_lifecycles(
 #[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.
 fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     match event {
+        BackendEvent::ArtifactOpenFinished {
+            target,
+            request_id,
+            path,
+            filter,
+            result,
+        } => {
+            preview::artifact_open_finished(state, *target, *request_id, path, *filter, result);
+        }
         BackendEvent::NotesLoaded {
             request_id,
             target,

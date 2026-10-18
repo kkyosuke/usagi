@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::JoinHandle;
 
+use usagi_core::domain::id::RequestId;
 use usagi_tui::usecase::application::controller::{
-    AppEvent, BackendEvent, Notice, PreviewFileFilter,
+    AppEvent, BackendEvent, PreviewFileFilter, SafeError, SafeMessage, Target,
 };
 use usagi_tui::usecase::application::daemon_backend::Completions;
 use usagi_tui::usecase::application::pr::BrowserOpener;
@@ -14,12 +15,14 @@ use super::file_preview::artifact_open_view;
 
 struct Request {
     root: PathBuf,
+    target: Target,
+    id: RequestId,
     path: String,
     filter: PreviewFileFilter,
     completions: Completions,
 }
 
-/// One active request and one queued request; rejected requests report a notice.
+/// One active request and one queued request; every request reports a fenced result.
 pub(crate) struct ArtifactOpener {
     sender: Option<SyncSender<Request>>,
     worker: Option<JoinHandle<()>>,
@@ -42,12 +45,16 @@ impl ArtifactOpener {
     pub(crate) fn request(
         &self,
         root: PathBuf,
+        target: Target,
+        request_id: RequestId,
         path: String,
         filter: PreviewFileFilter,
         completions: Completions,
     ) {
         let request = Request {
             root,
+            target,
+            id: request_id,
             path,
             filter,
             completions,
@@ -55,31 +62,47 @@ impl ArtifactOpener {
         if let Err(mpsc::TrySendError::Full(request) | mpsc::TrySendError::Disconnected(request)) =
             self.sender.as_ref().unwrap().try_send(request)
         {
-            notice(
-                &request.completions,
-                "Artifact viewer is busy or unavailable. Try again.",
+            finish(
+                &request,
+                Err(SafeError {
+                    message: SafeMessage::new("Artifact viewer is busy or unavailable. Try again."),
+                    error_id: "artifact-viewer-busy".into(),
+                }),
             );
         }
     }
 }
 
-fn notice(completions: &Completions, message: &str) {
-    completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-        message,
-    ))));
+fn finish(request: &Request, result: Result<(), SafeError>) {
+    request
+        .completions
+        .emit(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+            target: request.target,
+            request_id: request.id,
+            path: request.path.clone(),
+            filter: request.filter,
+            result,
+        }));
 }
 
 fn open(request: &Request, browser: &mut dyn BrowserOpener) {
-    match artifact_open_view(&request.root, &request.path, request.filter) {
+    let result = match artifact_open_view(&request.root, &request.path, request.filter) {
         Ok(view) => match browser.open(&view.path().to_string_lossy()) {
-            Ok(()) => view.retain(),
-            Err(_) => notice(
-                &request.completions,
-                "Could not open this artifact in an external app.",
-            ),
+            Ok(()) => {
+                view.retain();
+                Ok(())
+            }
+            Err(_) => Err(SafeError {
+                message: SafeMessage::new("Could not open this artifact in an external app."),
+                error_id: "artifact-viewer-open".into(),
+            }),
         },
-        Err(error) => notice(&request.completions, error.message()),
-    }
+        Err(error) => Err(SafeError {
+            message: SafeMessage::new(error.message()),
+            error_id: error.error_id().into(),
+        }),
+    };
+    finish(request, result);
 }
 
 impl Drop for ArtifactOpener {
@@ -131,6 +154,8 @@ mod tests {
         let (completions, events) = Completions::channel();
         opener.request(
             root.to_path_buf(),
+            Target::Session(usagi_core::domain::id::SessionId::new()),
+            RequestId::new(),
             path.into(),
             PreviewFileFilter::Artifacts,
             completions,
@@ -152,12 +177,18 @@ mod tests {
         drop(opener);
         drop(root);
         assert_eq!(fs::read_to_string(&path).unwrap(), "report");
-        assert!(events.try_recv().is_err());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                result: Ok(()),
+                ..
+            }))
+        ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
-    fn failures_report_notices_and_discard_unopened_copies() {
+    fn failures_report_results_and_discard_unopened_copies() {
         let root = fixture();
         let (delivered, received) = mpsc::channel();
         let opener = ArtifactOpener::spawn(Box::new(Browser {
@@ -169,12 +200,12 @@ mod tests {
         let path = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(matches!(
             events.recv_timeout(Duration::from_secs(5)).unwrap(),
-            AppEvent::Backend(BackendEvent::Notice(_))
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(_), .. })
         ));
         let errors = request(&opener, root.path(), "artifacts/missing.md");
         assert!(matches!(
             errors.recv_timeout(Duration::from_secs(5)).unwrap(),
-            AppEvent::Backend(BackendEvent::Notice(_))
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(_), .. })
         ));
         drop(opener);
         assert!(!path.exists());
@@ -196,7 +227,7 @@ mod tests {
         let rejected = request(&opener, root.path(), "artifacts/report.md");
         assert!(matches!(
             rejected.recv_timeout(Duration::from_secs(5)).unwrap(),
-            AppEvent::Backend(BackendEvent::Notice(_))
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(_), .. })
         ));
         release.send(()).unwrap();
         drop(opener);
@@ -216,7 +247,7 @@ mod tests {
         let events = request(&opener, Path::new("/unused"), "artifacts/report.md");
         assert!(matches!(
             events.try_recv().unwrap(),
-            AppEvent::Backend(BackendEvent::Notice(_))
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(_), .. })
         ));
     }
 }

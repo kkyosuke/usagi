@@ -46,7 +46,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | Agent と terminal が散らばり、状態を追いにくい | workspace をまたいで TUI から一覧・操作する |
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
-| session ごとの生成物を探しづらい | session 行の [Artifacts](document/03-tui.md#artifacts) から対象を保って閲覧し、削除後の保管済み成果物も検索できる |
+| session ごとの生成物を探しづらい | session 行の [Artifacts](document/03-tui.md#artifacts) から新規 session の成果物も閲覧でき、開けない理由を一覧内で確認できる。削除後の保管済み成果物も検索できる |
 
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
 session 削除の `--force` は、保管に失敗した成果物も破棄します。
