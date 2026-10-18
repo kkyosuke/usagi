@@ -114,6 +114,16 @@ impl<W: Write> RestartProgress<W> {
 mod tests {
     use super::*;
 
+    // Exercise successful and failing writes through the same formatter
+    // instantiation; concrete Vec/slice writers otherwise split those paths.
+    fn renderer(
+        writer: &mut dyn Write,
+        terminal: bool,
+        update: bool,
+    ) -> RestartProgress<&mut dyn Write> {
+        RestartProgress::new(writer, terminal, update)
+    }
+
     #[test]
     fn phase_and_recovery_counts_never_claim_completion_before_serving() {
         assert_eq!(restart_stage(false, false, None), RestartStage::Preparing);
@@ -134,7 +144,7 @@ mod tests {
         );
         assert_eq!(restart_stage(true, false, None), RestartStage::Verifying);
         let mut output = Vec::new();
-        let mut progress = RestartProgress::new(&mut output, false, true);
+        let mut progress = renderer(&mut output, false, true);
         for stage in [
             RestartStage::Preparing,
             RestartStage::Stopping,
@@ -162,18 +172,74 @@ mod tests {
     #[test]
     fn terminals_replace_the_current_line_and_success_finishes_the_bar() {
         let mut output = Vec::new();
-        let mut progress = RestartProgress::new(&mut output, true, false);
+        let mut progress = renderer(&mut output, true, false);
         progress.show(RestartStage::Preparing).unwrap();
         progress.finish(true).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.starts_with("\r\x1b[2K"));
         assert!(text.contains("[###] 3/3"));
         assert!(text.ends_with('\n'));
-        let mut broken = RestartProgress::new(&mut [][..], true, true);
+        let mut empty = &mut [][..];
+        let mut broken = renderer(&mut empty, true, true);
         assert!(broken.show(RestartStage::Preparing).is_err());
         assert!(broken.finish(false).is_err());
-        let mut broken = RestartProgress::new(&mut [][..], false, true);
+        let mut broken = renderer(&mut empty, false, true);
         assert!(broken.show(RestartStage::Preparing).is_err());
         assert!(broken.finish(false).is_err());
+    }
+
+    #[test]
+    fn partial_bar_and_newline_write_failures_are_propagated() {
+        let mut complete = Vec::new();
+        renderer(&mut complete, false, true)
+            .show(RestartStage::Preparing)
+            .unwrap();
+        assert_eq!(complete.last(), Some(&b'\n'));
+
+        // Fill the output after `[`, after the filled bar, and immediately
+        // before the trailing newline. Each failure must preserve its prefix
+        // and leave the stage unacknowledged so it can be retried.
+        for capacity in [1, 4, complete.len() - 1] {
+            let mut bytes = vec![0; capacity];
+            let mut remaining = bytes.as_mut_slice();
+            let mut progress = renderer(&mut remaining, false, true);
+            assert_eq!(
+                progress.show(RestartStage::Preparing).unwrap_err().kind(),
+                io::ErrorKind::WriteZero
+            );
+            assert!(progress.last.is_none());
+            assert_eq!(bytes, complete[..capacity]);
+        }
+    }
+
+    #[test]
+    fn flush_failure_does_not_acknowledge_the_written_stage() {
+        struct FlushFailure {
+            bytes: Vec<u8>,
+            flushes: usize,
+        }
+        impl Write for FlushFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.write(bytes)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Err(io::Error::other("flush failed"))
+            }
+        }
+
+        let mut writer = FlushFailure {
+            bytes: Vec::new(),
+            flushes: 0,
+        };
+        let mut progress = renderer(&mut writer, false, true);
+        assert_eq!(
+            progress.show(RestartStage::Preparing).unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert!(progress.last.is_none());
+        assert!(writer.bytes.ends_with(b"\n"));
+        assert_eq!(writer.flushes, 1);
     }
 }
