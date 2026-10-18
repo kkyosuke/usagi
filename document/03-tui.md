@@ -1698,7 +1698,7 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 | Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
 
-`Artifacts` は session 行の Agent 状態の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
+`Artifacts` は利用可能な session の Agent 状態行の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は Switch の cursor / Closeup の active session を開き、session 未選択時は保管済みを含む workspace 全体を開く。
 sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
 

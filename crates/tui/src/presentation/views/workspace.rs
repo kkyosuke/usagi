@@ -3162,25 +3162,29 @@ fn home_row_lines_at(
             .session_agents
             .get(&session.id)
             .map_or(&[][..], Vec::as_slice);
-        let agent_width = if width >= SIDEBAR_ARTIFACTS_MIN_WIDTH {
+        let show_artifacts =
+            session.lifecycle.capabilities().can_use && width >= SIDEBAR_ARTIFACTS_MIN_WIDTH;
+        let agent_width = if show_artifacts {
             width - SIDEBAR_ARTIFACTS_LABEL.len() - 1
         } else {
             width
         };
+        let agent_line = sidebar_agent_line_with_icon_mode(
+            agents,
+            agent_width,
+            selected,
+            current_marker,
+            inactive,
+            home.icon_mode,
+        );
         vec![
             first,
             widgets::pad_to_width(&metadata, width),
-            with_artifacts_action(
-                &sidebar_agent_line_with_icon_mode(
-                    agents,
-                    agent_width,
-                    selected,
-                    current_marker,
-                    inactive,
-                    home.icon_mode,
-                ),
-                width,
-            ),
+            if show_artifacts {
+                with_artifacts_action(&agent_line, width)
+            } else {
+                agent_line
+            },
         ]
     } else {
         vec![first]
@@ -4089,6 +4093,40 @@ mod tests {
         assert_eq!(with_artifacts_action("  —", 10), "  —");
         let padded = widgets::pad_to_width("  —", 36);
         assert!(!with_artifacts_action(&padded, 36).contains('…'));
+    }
+
+    #[test]
+    fn session_artifacts_action_matches_lifecycle_and_available_width() {
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Available,
+            SessionLifecycle::Deleting,
+            SessionLifecycle::Failed,
+        ] {
+            for icon_mode in [IconMode::NerdFont, IconMode::Text] {
+                let home = home_with_session_states(&[(lifecycle, None)]).with_icon_mode(icon_mode);
+                let selection = Selection::Target(Target::Session(home.sessions[0].id));
+                for width in [15, 16, LEFT_WIDTH] {
+                    let lines = home_row_lines_at(
+                        width,
+                        &home,
+                        selection,
+                        SidebarDiffColumns::default(),
+                        0,
+                        now(),
+                    );
+                    let visible = lifecycle.capabilities().can_use
+                        && width >= super::SIDEBAR_ARTIFACTS_MIN_WIDTH;
+                    assert_eq!(
+                        strip(&lines[2]).ends_with("Artifacts"),
+                        visible,
+                        "{lifecycle:?}, {icon_mode:?}, width {width}"
+                    );
+                    assert_eq!(widgets::display_width(&lines[2]), width);
+                }
+            }
+        }
     }
 
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
