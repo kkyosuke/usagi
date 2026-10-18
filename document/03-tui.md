@@ -1713,11 +1713,17 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 `Ctrl-O f` は Switch の cursor / Closeup の active session を開き、session 未選択時は保管済みを含む workspace 全体を開く。
 sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
 
+sidebar のクリック対象は表示済み frame の配置から解決する。警告の吹き出し・作成中の表示・スクロールで
+行の位置が変わっても、表示した session と操作対象の ID を一致させる。クリックで一覧を開いた操作も
+後続入力として扱い、session 作成や pane 起動の完了で閲覧中の一覧や入力先を切り替えない。
+
 一覧は Pull Request と同じ中央モーダルで、session 名・active / retained・ファイル名を行に表示する。
 選択中の相対 path も表示するため、同名のファイルや異なる保管 snapshot を区別できる。
 文字入力で session 名や path を絞り、↑↓ で選ぶ。Enter は選択ファイルを OS の関連付けアプリで開く。
 対象は txt / md / csv / json / html / htm / pdf /
 png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bundle は渡さない。
+外部表示に未対応の形式には、その旨と Tab によるテキスト表示の案内を出す。directory や
+特殊ファイルの拒否とは区別する。
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
 外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
 HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。

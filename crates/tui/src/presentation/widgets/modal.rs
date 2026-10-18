@@ -282,16 +282,34 @@ pub fn filter_line(value: &str, cursor: usize, selection: Option<(usize, usize)>
 /// place of the list.
 #[must_use]
 pub fn bounded_list_rows(rows: &[String], selected: usize, capacity: usize) -> Vec<String> {
-    if capacity == 0 || rows.is_empty() {
+    bounded_list_rows_with(rows.len(), selected, capacity, |index| rows[index].clone())
+}
+
+/// Format only the candidate rows that fit the list viewport.
+#[must_use]
+pub fn bounded_list_rows_with(
+    len: usize,
+    selected: usize,
+    capacity: usize,
+    mut render: impl FnMut(usize) -> String,
+) -> Vec<String> {
+    if capacity == 0 || len == 0 {
         return Vec::new();
     }
-    let len = rows.len();
     let mut window = capacity;
     loop {
         let (start, end) = list_window(len, selected, window);
         let indicators = usize::from(start > 0) + usize::from(end < len);
         if end - start + indicators <= capacity {
-            return scroll_window(rows, start, end);
+            let mut rows = Vec::with_capacity(end - start + indicators);
+            if start > 0 {
+                rows.push(scroll_above(start));
+            }
+            rows.extend((start..end).map(&mut render));
+            if end < len {
+                rows.push(scroll_below(len - end));
+            }
+            return rows;
         }
         if window == 1 {
             break;
@@ -299,7 +317,7 @@ pub fn bounded_list_rows(rows: &[String], selected: usize, capacity: usize) -> V
         window -= 1;
     }
     let (start, end) = list_window(len, selected, capacity);
-    rows[start..end].to_vec()
+    (start..end).map(render).collect()
 }
 
 /// A dim inline subcommand row under a palette action: a plain `›` / space
@@ -866,6 +884,21 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
+    #[test]
+    fn large_lists_only_format_the_rows_in_the_viewport() {
+        for selected in [0, 10_000, 19_999] {
+            let mut formatted = Vec::new();
+            let lines = super::bounded_list_rows_with(20_000, selected, 10, |index| {
+                formatted.push(index);
+                format!("row {index}")
+            });
+            assert!(lines.len() <= 10);
+            assert!(formatted.len() <= 10);
+            assert!(formatted.contains(&selected));
+            assert!(lines.iter().any(|line| line == &format!("row {selected}")));
+        }
+    }
+
     use super::{
         ConfirmationModal, ConfirmationView, body_contains, bounded_list_rows, boxed, caption,
         columns, compact_boxed, confirmation_buttons, content_line, empty_notice, filter_line,

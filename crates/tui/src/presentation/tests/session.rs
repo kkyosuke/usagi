@@ -1363,11 +1363,16 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         width: 100,
         height: 30,
     });
-    let _ = runtime.apply_event(sidebar_pointer_event(
-        5,
-        2,
-        std::time::Duration::from_millis(1_000),
-    ));
+    let _ = runtime.apply_event(AppEvent::Pointer {
+        target: Some(
+            crate::usecase::application::controller::SidebarPointerTarget::Row(
+                crate::usecase::application::controller::Selection::Target(Target::Session(
+                    session,
+                )),
+            ),
+        ),
+        at: std::time::Duration::from_millis(1_000),
+    });
 
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
@@ -1402,11 +1407,16 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
     crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
     let _ = runtime.apply_event(receiver.recv().unwrap());
     assert_eq!(runtime.state().sessions(), &[session]);
-    let _ = runtime.apply_event(sidebar_pointer_event(
-        5,
-        2,
-        std::time::Duration::from_millis(1_100),
-    ));
+    let _ = runtime.apply_event(AppEvent::Pointer {
+        target: Some(
+            crate::usecase::application::controller::SidebarPointerTarget::Row(
+                crate::usecase::application::controller::Selection::Target(Target::Session(
+                    session,
+                )),
+            ),
+        ),
+        at: std::time::Duration::from_millis(1_100),
+    });
 
     let _ = workspace_id;
     assert_eq!(runtime.state().active(), Some(session));
