@@ -3404,6 +3404,133 @@ fn managed_update_restarts_agents_across_workspaces_and_reports_progress() {
     drop(daemon);
 }
 
+/// Raw IPC must protect unfinished recovery even when its caller bypasses the
+/// CLI's machine-wide lifecycle lock and pending-transaction preflight.
+#[test]
+#[allow(clippy::too_many_lines)] // One IPC refusal proves recovery custody, runtime, and authority remain untouched.
+fn rollover_preserves_an_earlier_unfinished_agent_recovery() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let spawns = home.path().join("agent-spawn-count");
+    write_restartable_codex(&bin, &spawns);
+    let daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data = channel_data_dir(home.path());
+    let mut owner = client(&data);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
+    wait_for_spawns(&spawns, 1);
+    let expected = vec![usagi_core::domain::agent::AgentIntegrationRevision {
+        profile_id: AgentProfileId::new("codex").unwrap(),
+        revision: 1,
+    }];
+    let reply = owner
+        .request(DaemonRequest::PlanDaemonRestartAgents {
+            expected: expected.clone(),
+            force: true,
+        })
+        .unwrap();
+    let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+    let plan: usagi_core::domain::agent::DaemonRestartAgentPlan =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(plan.agents.len(), 1);
+    let original_runtime = plan.agents[0].runtime.clone();
+    let old_pid = daemon_pid(&data);
+    let old_locator = read_locator(&data.join("daemon")).unwrap();
+
+    // A prior workspace's durable identity is temporarily unavailable. Its
+    // recovery must remain pending; an unrelated live Agent is not permission
+    // to replace that custody with the next restart's selection.
+    let mut unavailable = plan.agents[0].clone();
+    let missing_workspace = WorkspaceId::new();
+    unavailable.runtime.terminal.workspace_id = missing_workspace;
+    unavailable.target.workspace_id = missing_workspace;
+    let earlier_operation = OperationId::new().to_string();
+    let pending = serde_json::json!({
+        "schema_version": 1,
+        "operation_id": earlier_operation,
+        "from_generation": read_registry_document(&data).unwrap().unwrap().current.unwrap(),
+        "workspace_root": repo.path(),
+        "agents": [{
+            "resume_operation_id": OperationId::new().to_string(),
+            "agent": unavailable,
+            "completed": false,
+            "continue_work": true,
+        }],
+    });
+    let pending_path = data.join("daemon/agent-restart.json");
+    usagi_core::infrastructure::persistence::json_file::write_atomic(
+        &data.join("daemon"),
+        &pending_path,
+        &pending,
+    )
+    .unwrap();
+
+    let standby = Daemon {
+        child: usagi_command(
+            home.path(),
+            Channel::Local,
+            repo.path(),
+            &["daemon".as_ref(), "serve".as_ref(), "--standby".as_ref()],
+        )
+        .env("PATH", format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap(),
+    };
+    let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
+    loop {
+        if read_registry_document(&data)
+            .unwrap()
+            .unwrap()
+            .generations
+            .iter()
+            .any(|entry| entry.process.pid == standby.child.id() && entry.is_build_verified())
+        {
+            break;
+        }
+        let errors = daemon_error_log(&data);
+        assert!(!errors.contains("daemon panicked"), "{errors}");
+        assert!(
+            Instant::now() < deadline,
+            "standby never verified: {errors}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    for restart_agents in [
+        Some(usagi_core::infrastructure::ipc::DaemonRestartAgents {
+            expected,
+            runtimes: vec![original_runtime],
+            force: true,
+        }),
+        None,
+    ] {
+        let result = owner.request(DaemonRequest::Rollover {
+            operation_id: OperationId::new().to_string(),
+            restart_agents,
+        });
+        let retained = fs::read_to_string(&pending_path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+        assert_eq!(
+            retained.as_ref(),
+            Some(&pending),
+            "an unfinished recovery was replaced: {result:?}; {}",
+            daemon_error_log(&data)
+        );
+        let refusal = result.unwrap_err().to_string();
+        assert!(refusal.contains("still recovering"), "{refusal}");
+    }
+    assert_eq!(daemon_pid(&data), old_pid);
+    assert_eq!(read_locator(&data.join("daemon")).unwrap(), old_locator);
+    assert_eq!(fs::read_to_string(&spawns).unwrap().lines().count(), 1);
+    daemon_fixture::reap(home.path());
+    drop((owner, standby, daemon));
+}
+
 /// A launched Agent owns a daemon-minted MCP credential before its MCP child
 /// connects. Plain replacement must preserve that authority by refusing the
 /// rollover, while the explicit Agent-restart path stops and exactly resumes it.
@@ -3498,6 +3625,7 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         String::from_utf8_lossy(&restarted.stderr)
     );
     assert!(String::from_utf8_lossy(&restarted.stdout).contains("restarted 1 Agent(s)"));
+    wait_for_spawns(&agent_spawns, 2);
     let spawns = fs::read_to_string(&agent_spawns).unwrap();
     let spawns = spawns.lines().collect::<Vec<_>>();
     assert_eq!(spawns.len(), 2);
@@ -3533,21 +3661,6 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         fs::read_to_string(&agent_spawns).unwrap_or_default(),
         daemon_error_log(&data_dir)
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let observed_spawns = fs::read_to_string(&agent_spawns)
-            .map(|body| body.lines().count())
-            .unwrap_or_default();
-        if observed_spawns == 2 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the successor reported a live replacement without running the fixture provider:\n{inventory:?}\n{}",
-            daemon_error_log(&data_dir)
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
     drop(current);
 
     // A later deliberate restart is a new transition, not a replay of the

@@ -1468,6 +1468,18 @@ pub(super) fn dispatch_rollover(
         },
         &operation,
         &mut || {
+            match super::read_pending_daemon_agent_restart(data_dir) {
+                Ok(None) => {}
+                recovery => {
+                    let reason = recovery.map_or_else(
+                        |error| format!("could not read Agent restart recovery: {error}"),
+                        |_| "an earlier daemon Agent restart is still recovering; no Agent was stopped".to_owned(),
+                    );
+                    return Err(
+                        usagi_daemon::usecase::authority::routing::RolloverRefusal::AgentRestartRefused { reason },
+                    );
+                }
+            }
             let mut agent = agent.lock().map_err(|_| {
                 usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityUnavailable
             })?;
@@ -1578,7 +1590,14 @@ pub(super) fn dispatch_rollover(
                     .as_ref()
                     .is_some_and(|handoff| handoff.operation == operation)
         });
-        if old_still_active {
+        if old_still_active
+            && let Ok(_recovery_lease) = fence
+                .gate
+                .acquire(usagi_daemon::usecase::authority::admission::LeaseClass::ActiveControl)
+        {
+            // Rollback also produces control effects after the failed handoff
+            // reopened admission. Keep a later handoff behind every resumed
+            // child, progress write, and completion cleanup.
             // The old owner performed the stop, so it also owns effect-zero
             // recovery if the handoff failed before W2. The durable transaction and
             // its background worker are the second safety net when this request or
@@ -1614,7 +1633,8 @@ pub(super) fn dispatch_rollover(
                 ));
             }
         } else {
-            // The successor worker owns post-commit recovery.
+            // The active worker retries after admission reopens, or the
+            // successor owns recovery after a committed handoff.
         }
     }
     let result = result.map_err(|error| error.to_string());
