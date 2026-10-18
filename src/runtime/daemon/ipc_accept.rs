@@ -974,7 +974,7 @@ pub(super) fn start_ipc_accept_loop(
                                         };
                                         match request {
                                             DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
+                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, &connection_tenants, &tenant_terminal, request_id, &body, hello),
                                             DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
                                             DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, cache_jobs: &cache_jobs, pr_inventory: &pr_inventory, launch_client: Some(&launch_client) }, request_id, &body, hello),
                                             DaemonRequest::Agent { .. }
@@ -1757,9 +1757,9 @@ impl ServeLauncher {
             .stderr(std::process::Stdio::null());
         if let Some(workspace_root) = workspace_root {
             // Standby hydration chooses the initialized workspace containing
-            // its cwd. Pinning it to the sole planned Agent workspace makes
-            // that workspace the successor's initial tenant, so exact resume
-            // never has to steal a fence still held by the draining owner.
+            // its cwd. Pin the first planned Agent workspace as the successor's
+            // initial tenant. Other roots are adopted during recovery after
+            // the committed old owner releases their idle fences.
             command.current_dir(workspace_root);
         }
         #[cfg(unix)]

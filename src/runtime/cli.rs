@@ -80,7 +80,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
             RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
             RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
-            RunOutcome::SyncDaemonAfterUpdate => Self::SyncDaemonAfterUpdate,
+            RunOutcome::SyncDaemonAfterUpdate { .. } => Self::SyncDaemonAfterUpdate,
             RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
             RunOutcome::LaunchMcp => Self::LaunchMcp,
             RunOutcome::Clean { .. } => Self::Clean,
@@ -133,8 +133,11 @@ mod action_io {
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
-            (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
-                match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
+            (
+                Action::SyncDaemonAfterUpdate,
+                RunOutcome::SyncDaemonAfterUpdate { restart_agents },
+            ) => {
+                match daemon::sync_after_update(out, ClientPolicy::cli(), info, restart_agents)? {
                     Ok(outcome) => {
                         let managed_request = std::env::var("USAGI_MANAGED_UPDATE").as_deref()
                             == Ok("1")
@@ -420,7 +423,7 @@ fn execute_self_update(
     out.flush()?;
     err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
-        let mut command = update_installer_command(select_version);
+        let mut command = update_installer_command(select_version, request.restart_agents());
         let mut child = command.spawn()?;
         let write_result = child
             .stdin
@@ -440,7 +443,7 @@ fn execute_self_update(
     })
 }
 
-fn update_installer_command(select_version: bool) -> std::process::Command {
+fn update_installer_command(select_version: bool, restart_agents: bool) -> std::process::Command {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new("bash");
@@ -454,6 +457,9 @@ fn update_installer_command(select_version: bool) -> std::process::Command {
         .stderr(Stdio::inherit());
     if select_version {
         command.arg("--select-version");
+    }
+    if restart_agents {
+        command.arg("--restart-agents");
     }
     command
 }
@@ -1154,7 +1160,9 @@ mod tests {
             Action::LaunchDaemon,
         );
         assert_route(
-            RunOutcome::SyncDaemonAfterUpdate,
+            RunOutcome::SyncDaemonAfterUpdate {
+                restart_agents: false,
+            },
             Action::SyncDaemonAfterUpdate,
         );
         assert_route(
@@ -1333,7 +1341,7 @@ mod tests {
 
     #[test]
     fn managed_installer_environment_is_explicit_and_cwd_independent() {
-        let command = update_installer_command(true);
+        let command = update_installer_command(true, false);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["-s", "--", "--select-version"]
@@ -1346,9 +1354,14 @@ mod tests {
             environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
             Some(&Some(std::ffi::OsStr::new("1")))
         );
-        let no_daemon = update_installer_command(false);
+        let no_daemon = update_installer_command(false, false);
         assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
         assert!(no_daemon.get_current_dir().is_some());
+        let restart = update_installer_command(true, true);
+        assert_eq!(
+            restart.get_args().collect::<Vec<_>>(),
+            ["-s", "--", "--select-version", "--restart-agents"]
+        );
     }
 
     fn verified_installer_request() -> InstallerRequest {

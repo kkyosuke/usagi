@@ -847,6 +847,9 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pending-update.json` | JSON | managed update が保留した最新の build・request ID・再試行状態。worker の寿命から独立して保持する |
 | `pending-update.lock` | lock file | 更新予約の保存・完了と worker の最終 empty check を直列化する |
 | `pending-update-worker.lock` | lock file | 同じ data home の自動再試行 worker を単一にする |
+| `agent-restart.json` | durable JSON | 停止前に記録する exact Agent 集合、item ごとの resume operation と完了状態 |
+| `agent-restart-intent.json` | durable JSON | 新 CLI が保存する続行 intent。operation・source generation・exact runtime 集合が transaction と一致する場合だけ successor が反映する |
+| `agent-restart-intent.lock` | private lock file | 続行 intent の保存と operation を照合した削除を直列化する |
 | `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
 | `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
@@ -1939,14 +1942,14 @@ daemon restart reconciliation は unfinished record の provider status を `int
 `usagi doctor` は tool、settings、既存 daemon の状態を診断するが、daemon や Agent の起動・停止・入替を行わない。
 daemon lifecycle と Agent integration の更新は `usagi daemon restart` が所有する。通常の restart は live Agent の
 process-local MCP credential が残っていれば effect-zero で拒否する。`--restart-agents` は daemon 全体の live Agent を一覧化し、
-同一 workspace に属して exact resume metadata が全件揃う場合だけ、実行中の prompt / tool も old owner で中断して、successor の current integration で再開する。
-複数 workspace にまたがる Agent は、draining owner が保持する workspace fence を successor が奪えないため全件を停止前に拒否する。
+exact resume metadata が全件揃う場合だけ、実行中の prompt / tool も old owner で中断して、successor の current integration で再開する。
+複数 workspace の Agent も同じ transaction で扱い、durable workspace identity から各 root を解決する。
 `--restart-agents` 自体が実行中の中断を許可し、追加の `--force` は不要である。generic Terminal は維持する。
 `--restart-agents` なしの `--force` は Agent と generic Terminal を破棄する cold transition である。
 launch 時の hook、sandbox writable roots、argv、private config の変更は provider ごとの integration revision を増分する。
 これにより restart は同じ build の runtime でも current adapter で再開できる。
 
-順序は restart plan の effect-free 検証、sole workspace を initial tenant にした standby の起動、active-control admission の
+順序は restart plan の effect-free 検証、plan の最初の Agent の workspace を initial tenant にした standby の起動、active-control admission の
 close / drain、最初の停止より前の durable recovery transaction、old owner での exact Agent 停止、daemon build の rollover、active generation
 による provider-native session ID の exact resume である。requester が W2 後に終了しても daemon worker が item ごとの同じ
 operation を再試行し、source relation が二重 spawn を防ぐ。CLI は transaction が消えるまで成功を返さない。これにより old owner の
@@ -1954,7 +1957,15 @@ PTY handle を successor が推測して signal することも、old adapter �
 materialize することもない。停止時の phase が `running` / `waiting` の Agent は、同じ provider conversation を指定した起動に
 初期 prompt `continue` を渡して作業を続行する。`ready` / `ended` は追加入力せず復元する。続行の有無は停止前の transaction に
 保存し、resume operation の semantic key と起動要求に含めるため、再試行で二重送信せず PTY の準備待ちも不要である。
-この field を持たない旧 transaction は従来どおり追加入力なしで再開する。
+新 CLI は停止前に operation・source generation・exact runtime 集合を束ねた続行 intent も保存する。
+旧 owner が続行 field のない transaction を書く初回の更新でも、新 successor はこの intent と一致する未完了 item だけに続行の指定を反映し、resume 前に永続化する。
+一致する intent のない旧 transaction は従来どおり追加入力なしで再開する。
+restart 中は停止・切替の段階と再開済み Agent 件数を stderr に表示し、全 item の完了と serving 検証後にだけ完了表示を出す。
+
+commit 後、draining owner は残存作業のない non-initial tenant の fence を、旧 client の参照が残っていても解放する。
+successor は各 root の fence を取得し、workspace identity を照合してから再開する。successor が追加取得する workspace で、
+live generic PTY や未完了 lifecycle work が旧 owner の fence を保持している間は、その解放を待って recovery を再試行する。
+CLI の待ち時間を超えても recovery は daemon で継続する。
 provider metadata が無い、不整合、または exact lineage を確定できない runtime が1件でもあれば、
 modern daemon は全件 effect-before-zero で拒否する。plan 後に Agent が増減または差し替わった場合も、old active が
 control admission を close / drain した barrier 内で exact runtime 集合を再検証し、Agent 停止と durable handoff write の間へ

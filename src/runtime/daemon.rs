@@ -11,6 +11,7 @@ mod managed_update;
 mod notifications;
 mod pending_update;
 mod pty;
+mod restart_intent;
 mod secure_path;
 #[cfg(any(target_os = "macos", test))]
 mod service_context;
@@ -2330,12 +2331,10 @@ impl IpcRolloverRequester<'_> {
         if client.daemon_generation().0 != generation.as_str() {
             return false;
         }
-        if read_pending_daemon_agent_restart(self.data_dir)
-            .ok()
-            .flatten()
-            .is_some_and(|pending| pending.operation_id == operation.0)
-        {
-            return false;
+        match read_pending_daemon_agent_restart(self.data_dir) {
+            Ok(Some(pending)) if pending.operation_id == operation.0 => return false,
+            Err(_) => return false,
+            Ok(_) => {}
         }
         matches!(
             client.request(DaemonRequest::Tenant {
@@ -2376,17 +2375,20 @@ impl IpcRolloverRequester<'_> {
         };
         Err(std::io::Error::other(reason))
     }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
-impl RolloverRequester for IpcRolloverRequester<'_> {
-    fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
-        let agent_plan = self.prepare_agent_restart()?;
+    fn rollover_planned(
+        &self,
+        operation: &OperationId,
+        agent_plan: Option<&DaemonRestartAgentPlan>,
+    ) -> std::io::Result<String> {
         let agent_workspace = agent_plan
-            .as_ref()
             .map(|plan| planned_agent_workspace_root(self.data_dir, plan))
             .transpose()?
             .flatten();
+        if let Some(intent) =
+            agent_plan.and_then(|plan| restart_intent::RestartIntent::new(&operation.0, plan))
+        {
+            restart_intent::write(self.data_dir, &intent)?;
+        }
         let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
         let standby = self.launcher.launch_standby(agent_workspace.as_deref())?;
         let standby_record = standby.record.clone();
@@ -2402,7 +2404,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             .and_then(|mut client| {
                 client.request(DaemonRequest::Rollover {
                     operation_id: operation.0.clone(),
-                    restart_agents: agent_plan.as_ref().map(|plan| DaemonRestartAgents {
+                    restart_agents: agent_plan.map(|plan| DaemonRestartAgents {
                         expected: current_agent_integrations(),
                         runtimes: plan
                             .agents
@@ -2436,11 +2438,58 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
         // frame was lost.
         reap_child(standby.child);
         self.wait_until_serving(&standby_record, operation)?;
+        restart_intent::clear(self.data_dir, &operation.0)?;
         Ok(format!(
             "daemon authority handed off (operation {}), restarted {} Agent(s)",
             operation.0,
-            agent_plan.as_ref().map_or(0, |plan| plan.agents.len())
+            agent_plan.map_or(0, |plan| plan.agents.len())
         ))
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_restart_recovers_agents_after_requester_exit
+impl RolloverRequester for IpcRolloverRequester<'_> {
+    fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
+        let plan = self.prepare_agent_restart()?;
+        if plan.is_none() {
+            return self.rollover_planned(operation, plan.as_ref());
+        }
+        // The observer has no lifecycle authority. Its channel is dropped on
+        // every return and unwind, and the scoped thread is always joined.
+        let data_dir = self.data_dir;
+        let operation_id = operation.0.clone();
+        std::thread::scope(|scope| {
+            let (stop, stopped) = std::sync::mpsc::channel::<()>();
+            let observer = scope.spawn(move || {
+                use std::io::IsTerminal as _;
+                use usagi_cli::cli::update_progress::{RestartProgress, restart_stage};
+                let stderr = std::io::stderr();
+                let terminal = stderr.is_terminal();
+                let update = std::env::var("USAGI_UPDATE_PROGRESS").as_deref() == Ok("1");
+                let mut progress = RestartProgress::new(stderr, terminal, update);
+                loop {
+                    let pending = read_pending_daemon_agent_restart(data_dir).ok().flatten()
+                        .filter(|pending| pending.operation_id == operation_id);
+                    let document = read_registry_document(data_dir).ok().flatten();
+                    let handoff = document.as_ref().and_then(|document| document.handoff.as_ref())
+                        .filter(|handoff| handoff.operation.0 == operation_id);
+                    let committed = document.as_ref().is_some_and(|document| document.completed_operation.as_ref().is_some_and(|operation| operation.0 == operation_id))
+                        || handoff.is_some_and(|handoff| handoff.phase == usagi_daemon::usecase::authority::registry::HandoffPhase::Committed);
+                    let recovery = pending.as_ref().map(|pending| (pending.agents.iter().filter(|item| item.completed).count(), pending.agents.len()));
+                    let _ = progress.show(restart_stage(committed, handoff.is_some(), recovery));
+                    if !matches!(stopped.recv_timeout(Duration::from_millis(150)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                        break;
+                    }
+                }
+                progress
+            });
+            let result = self.rollover_planned(operation, plan.as_ref());
+            drop(stop);
+            if let Ok(mut progress) = observer.join() {
+                let _ = progress.finish(result.is_ok());
+            }
+            result
+        })
     }
 }
 
@@ -2781,7 +2830,7 @@ fn run_inner(
                 "daemon replace must be routed through the client trigger",
             ));
         }
-        CliDaemonCommand::SyncAfterUpdate => {
+        CliDaemonCommand::SyncAfterUpdate { .. } => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "managed daemon synchronization must be routed through the update adapter",
@@ -3951,19 +4000,24 @@ pub(crate) fn replace_running_daemon_during_update(
     policy: ClientPolicy,
     info: &AppInfo,
     lock: &ManagedUpdateLock,
+    restart_agents: bool,
 ) -> std::io::Result<Result<(), ClientError>> {
-    let trigger = match request_replacement_while_locked(policy) {
-        Ok(trigger) => trigger,
-        Err(error) => return Ok(Err(error)),
+    let operation = if restart_agents {
+        manual_operation_id(&current_build(), runtime_channel())
+    } else {
+        match request_replacement_while_locked(policy) {
+            Ok(trigger) => Some(trigger.operation_id),
+            Err(error) => return Ok(Err(error)),
+        }
     };
     run_with_lifecycle_custody(
         out,
         CliDaemonCommand::Restart {
-            restart_agents: false,
+            restart_agents,
             force: false,
         },
         info,
-        Some(trigger.operation_id),
+        operation,
         Some(&lock.lifecycle),
     )
     .map(Ok)
