@@ -1718,7 +1718,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             Role::Warning.style().bold()
         };
         style.paint(&format!(
-            "{} {} notice",
+            "{} Reply needed ({})",
             icons.decision,
             home.decisions.len()
         ))
@@ -2690,13 +2690,9 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
         .iter()
         .find(|item| home.unread_decision_ids.contains(&item.decision_id));
     if let Some(decision) = decision {
-        let control = match home.icon_mode {
-            IconMode::NerdFont => "bell",
-            IconMode::Text => "indicator",
-        };
         return widgets::clip_to_width(
             &Role::Warning.style().paint(&format!(
-                "  {} {}: {}  (click {control} to review)",
+                "  {} Reply needed · {}: {}  (click Reply needed)",
                 icon_set(home.icon_mode).decision,
                 decision_modal::owner_label(decision, &home.session_names()),
                 decision.title
@@ -5348,7 +5344,7 @@ mod tests {
             100,
             &home.clone().with_icon_mode(IconMode::Text),
         ));
-        assert!(text_banner.contains("click indicator to review"));
+        assert!(text_banner.contains("click Reply needed"));
         // The decision notice is highlighted in the warning color (yellow).
         assert!(home_notice_banner(100, &home).contains("\u{1b}[33m"));
 
@@ -5360,7 +5356,7 @@ mod tests {
         assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
         assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
-        assert!(strip(&layout.line).contains("notice"));
+        assert!(strip(&layout.line).contains("Reply needed"));
         assert!(layout.line.contains("\u{1b}[1;33m"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -5427,7 +5423,7 @@ mod tests {
         assert!(state.unread_decision_ids().is_empty());
         let home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
         let read_line = home_header_layout(100, &home).line;
-        assert!(strip(&read_line).contains("1 notice"));
+        assert!(strip(&read_line).contains("Reply needed (1)"));
         assert!(read_line.contains("\u{1b}[33m"));
         assert!(!read_line.contains("\u{1b}[1;33m"));
     }

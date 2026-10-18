@@ -448,6 +448,30 @@ impl WorkspaceDeck {
         }
     }
 
+    /// Use the same geometry as the inbox frame for clicks and visible actions.
+    /// Other deck overlays retain their existing keyboard reducer.
+    pub fn handle_overlay_key_at(
+        &mut self,
+        key: &Key,
+        height: usize,
+        width: usize,
+    ) -> OverlayIntent {
+        if let Some(DeckOverlay::Attention(list)) = self.overlay.as_mut() {
+            let intent = attention::handle_input(
+                list,
+                &self.slots,
+                self.notice.as_deref(),
+                key,
+                height,
+                width,
+            );
+            self.notice = None;
+            intent
+        } else {
+            self.handle_overlay_key(key)
+        }
+    }
+
     /// Remove one tab. The caller prepares a replacement before closing an
     /// active tab, so this reducer only commits the already-safe mutation.
     pub fn close_path(&mut self, path: &Path) {

@@ -215,37 +215,48 @@ Home の top-level `update` は event family の routing を担い、独立し�
 
 ### workspace 横断の対応待ち
 
-project bar 右端の `Attention` または `Ctrl-O i` は、開いている全 project の対応待ち一覧を開く。
+project bar 右端の `Action needed` または `Ctrl-O i` は、開いている全 project の受信箱を開く。
 この節が横断一覧の表示・観測契約の正本である。登録済みでも deck に開いていない workspace は対象外とする。
 
-通知は project tab・`+ Open` と余白で分け、対応が必要なときは Home の notice と同じ黄色で表示する。
-件数は判断・レビュー・停止の合計であり、System wait と Running は数えない。
+受信箱は `Action needed`（要対応）と `Updates`（お知らせ）の 2 つの表示を持ち、開くたびに要対応を選ぶ。
+質問・レビュー・問題の確認が必要な項目を最初に示し、実行中や CI 待ちなどの進行状況は Updates に表示する。
+
+| 表示 | 項目の先頭 | 内容 | 開く先 |
+|---|---|---|---|
+| Action needed | Answer question | 回答待ちの質問 | 対象 workspace の Questions |
+| Action needed | Review PR | 確認済みの open・非 draft PR | 対象 session の PR 一覧 |
+| Action needed | Check PR problem | CI 失敗・修正要求 | 対象 session の PR 一覧 |
+| Action needed | Check stopped task | session / Agent の失敗・中断 | 対象 session |
+| Updates | Waiting | 作成・削除、Agent の待機、CI 待ち、PR 状態の取得中 | 対象 session または PR 一覧 |
+| Updates | Running | 実行中の Agent | 対象 session |
+
+各項目は「次にすること・project / session」と「理由」の 2 行で表示する。
+選択項目を開く操作は footer の `Enter: Open questions` / `Open PR` / `Open session` に示す。
+`Tab` または左右キー、見出しのクリックで要対応とお知らせを切り替える。文字入力は現在の表示の操作・名前・理由を検索する。
+`↑↓` は項目移動、`PageUp` / `PageDown` は表示中の項目数ずつ移動し、`Enter` または項目のクリックで対象を開く。
+`Esc` は受信箱を閉じる。項目を描けない小さい画面はリサイズを案内し、見えていない項目の Enter は実行しない。
+更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は別項目を開かない。
+移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
+
+対応待ちがなければ「対応不要」、状態を確認できていない場合は「確認済みの対応待ちはない」と区別して表示する。
+状態を取得できない project 数は、自動で再試行中の情報として本文の下に表示し、選択できる対応項目にしない。
+Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
+明示的な質問がなければ Updates に表示し、人に terminal の確認を促さない。
+
+project bar の右端は操作から余白で分け、確認できた対応待ちがあるときだけ黄色で表示する。
+件数には最新の観測の判断・レビュー・停止だけを数え、進行状況や未確認の項目を加えない。
 
 | 右端の表示 | 意味 |
 |---|---|
-| `! Attention (N)`（黄色） | 全 project の新しい観測に対応待ちが N 件ある |
-| `! Attention (N+)`（黄色） | 確認できた対応待ちが N 件あり、未取得・古い観測の project もある |
-| `! Attention (?)`（黄色） | 確認できた対応待ちはなく、未取得・古い観測の project がある |
-| `Attention`（dim） | 全 project を確認済みで対応待ちがない |
+| `! Action needed (N)`（黄色） | 全 project を確認済みで、対応待ちが N 件ある |
+| `! Action needed (N+)`（黄色） | 確認できた対応待ちが N 件あり、状態不明の project もある |
+| `Checking status…`（dim） | 確認できた対応待ちはなく、状態不明の project がある |
+| `No action needed`（dim） | 全 project を確認済みで対応待ちがない |
 
-| 分類 | 対象 | Enter の移動先 |
-|---|---|---|
-| Your decision | pending decision | 対象 workspace の Decisions |
-| Review ready | 確認済みの open・非 draft PR | 対象 session の PR 一覧 |
-| Stopped / failed | session/Agent の失敗・中断、CI失敗・修正要求 | 対象 session または PR 一覧 |
-| System wait | session の作成・削除、Agent の待機、CI待ち、PR状態の未取得・再取得 | 対象 session または PR 一覧 |
-| Running | 実行中の Agent | 対象 session |
-
-一覧は対応待ちを先に表示し、文字入力で project・session・理由を絞り込める。`↑↓` / `PageUp` / `PageDown` で選択し、
-`Enter` で移動、`Esc` で閉じる。更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は
-別項目を開かない。移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
-Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
-明示的な質問がなければ System wait として表示する。
-
-project tab の黄色い `!N` は判断・レビュー・停止の対応件数、`?` は未取得、黄色い `!?` は取得失敗または古い観測を示す。
+project tab の黄色い `!N` は確認できた対応待ちの件数、控えめな `?` は未取得・失敗・古い観測を示す。
 背景観測は Garden を閉じていても継続し、1 round 最大16 project を順番に巡回する。成功後3秒、全件取得失敗後5秒で再取得する。
-30秒以上更新されない結果は Stale とする。取得失敗時は以前の行を Stale で残し、件数集計と移動の対象から外す。
-一覧の Unknown projects は未取得・失敗した project 数であり、未取得を「対応待ちゼロ」とみなさない。
+30秒以上更新されない結果は Stale とする。取得失敗時は以前の観測を保持するが、受信箱の項目・件数・移動の対象から外す。
+状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。
 観測は専用 worker が稼働済み daemon の保存済み状態だけを読み、workspace の adopt、daemon/Agent 起動、terminal attach、状態の変更は行わない。
 各接続・request は250ms・再試行なしで読み、workspace 切り替え時は次の request を中止して worker を回収する。
 
@@ -576,7 +587,7 @@ Enter で送信し、Esc で下書きを保持して編集に戻る。PgUp/PgDn 
 送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
 
 pending decision がある間、Home header の右上に Icons 設定に応じた bell または `!` indicator と
-`N notice`（N は pending 件数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
+`Reply needed (N)`（N は回答待ちの質問数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
 観測すると、その直下の banner に owner（一覧と同じ表記）と decision の title（summary）を warning 色で表示する。
 indicatorをクリックすると existing decision modal を開き、未読表示を既読にする。既読にしても pending の間は badge を残す。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
