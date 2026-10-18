@@ -2013,6 +2013,9 @@ pub(crate) const SIDEBAR_CHROME_ROWS: usize = 2;
 /// Desired Home sidebar left-pane width. The split clamps it to leave the right
 /// pane at least one column. Mirrors `views::workspace`'s `LEFT_WIDTH`.
 pub(crate) const SIDEBAR_LEFT_WIDTH: usize = 36;
+/// Shared geometry of the generated-file action on a session's Agent row.
+pub(crate) const SIDEBAR_ARTIFACTS_LABEL: &str = "Artifacts";
+pub(crate) const SIDEBAR_ARTIFACTS_MIN_WIDTH: usize = 16;
 /// Lines one session row occupies: its summary, its change history, and its
 /// Agent states. The count never varies with how many Agents a session has —
 /// this hit-test only knows runtime-local phases, while the view also folds in
@@ -2160,6 +2163,8 @@ pub enum AppKey {
     OpenPrs,
     /// Open the selected session's file preview overlay.
     OpenPreview,
+    /// Open the selected session's artifacts, or the workspace-wide inventory.
+    OpenArtifacts,
     /// Open the current workspace's durable pending decision list.
     OpenDecisions,
     /// Move within the pending list or current decision options.
@@ -4680,6 +4685,12 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => pull_requests::open(state),
         AppKey::OpenPreview => open_preview(state),
+        AppKey::OpenArtifacts => {
+            let target = state
+                .file_preview_target()
+                .unwrap_or(Target::Root(state.workspace));
+            open_artifacts(state, target, "")
+        }
         AppKey::Char('n')
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
@@ -4818,6 +4829,7 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::OpenGarden
         | AppKey::OpenPrs
         | AppKey::OpenPreview
+        | AppKey::OpenArtifacts
         | AppKey::OpenDecisions
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
@@ -5498,6 +5510,16 @@ fn update_pointer(
     if let Some(session) = state.sidebar_pr_at(column, row) {
         state.pending_session_click = None;
         return pull_requests::open_for(state, Target::Session(session));
+    }
+    if let Some(hit) = state.sidebar_hit_at(column, row)
+        && hit.line == 2
+        && hit.left >= SIDEBAR_ARTIFACTS_MIN_WIDTH
+        && usize::from(column) >= hit.left - SIDEBAR_ARTIFACTS_LABEL.len()
+        && let Selection::Target(Target::Session(session)) = hit.selection
+        && state.session_can_use(session)
+    {
+        state.pending_session_click = None;
+        return open_artifacts(state, Target::Session(session), "");
     }
     let Some(selection) = state.sidebar_selection_at(column, row) else {
         state.pending_session_click = None;

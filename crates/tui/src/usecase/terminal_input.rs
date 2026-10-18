@@ -211,6 +211,8 @@ pub enum LiveTerminalAction {
     OpenPullRequests,
     /// Open the active target's file preview (`Ctrl-O v`).
     OpenPreview,
+    /// Open generated files (`Ctrl-O f`).
+    OpenArtifacts,
     /// Open the workspace's pending decisions (`Ctrl-O d`).
     OpenDecisions,
     /// Open the active target's scratchpad (`Ctrl-O s`).
@@ -648,6 +650,12 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
         "Pull Requests / Preview",
     ),
     prefix_shortcut!(KeyCode::Char('v'), legacy = 22 => LiveTerminalAction::OpenPreview),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('f'), legacy = 6 => LiveTerminalAction::OpenArtifacts),
+        PrefixHelpScope::WorkspaceBase,
+        "Ctrl-O f",
+        "Artifacts",
+    ),
     with_help(
         prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
         PrefixHelpScope::WorkspaceBase,
@@ -1203,6 +1211,18 @@ mod tests {
                 action: LiveTerminalAction::OpenPreview,
             },
             Case {
+                follow_up: key(KeyCode::Char('f')),
+                action: LiveTerminalAction::OpenArtifacts,
+            },
+            Case {
+                follow_up: ctrl('f'),
+                action: LiveTerminalAction::OpenArtifacts,
+            },
+            Case {
+                follow_up: LiveInput::Raw(vec![6]),
+                action: LiveTerminalAction::OpenArtifacts,
+            },
+            Case {
                 follow_up: ctrl('d'),
                 action: LiveTerminalAction::OpenDecisions,
             },
@@ -1443,16 +1463,22 @@ mod tests {
             );
         }
 
-        for obsolete in ['f', 'u'] {
+        for (character, expected) in [
+            (
+                'f',
+                LiveInputOutput::Action(LiveTerminalAction::OpenArtifacts),
+            ),
+            ('u', LiveInputOutput::Swallowed),
+        ] {
             let mut classifier = LiveInputClassifier::default();
             assert_eq!(
                 classifier.classify(T0, ctrl('o')),
                 LiveInputOutput::Swallowed
             );
             assert_eq!(
-                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(obsolete)),),
-                LiveInputOutput::Swallowed,
-                "obsolete prefix must not remain as an alias: {obsolete}"
+                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(character)),),
+                expected,
+                "prefix must not alias tab movement: {character}"
             );
         }
     }
