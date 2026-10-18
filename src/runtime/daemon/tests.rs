@@ -2539,7 +2539,7 @@ fn standby_workspace_selection_skips_partial_adoptions_and_rejects_corruption() 
     );
 }
 
-fn daemon_restart_plan(workspace: WorkspaceId) -> DaemonRestartAgentPlan {
+pub(super) fn daemon_restart_plan(workspace: WorkspaceId) -> DaemonRestartAgentPlan {
     let session = SessionId::new();
     let runtime_id = AgentRuntimeId::new();
     let terminal = TerminalRef {
