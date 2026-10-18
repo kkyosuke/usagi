@@ -467,6 +467,47 @@ where
         self.lock().remove(workspace_root).is_some()
     }
 
+    /// Release non-initial workspace fences after a committed handoff, once
+    /// their owner-local work has ended. Stale client handles do not retain
+    /// authority: the admission gate now refuses every new control effect.
+    /// Live PTYs and unfinished lifecycle work still retain their fences.
+    pub fn release_draining(
+        &self,
+        gate: &super::authority::admission::AdmissionGate,
+        activity: &dyn WorkspaceActivity<O::Runtime>,
+    ) -> Vec<PathBuf> {
+        if !gate.handed_off() {
+            return Vec::new();
+        }
+        let candidates = self.with_held(|held| {
+            held.iter()
+                .filter(|(_, entry)| entry.fence.is_some() && !entry.retiring)
+                .map(|(root, entry)| {
+                    (
+                        root.clone(),
+                        entry.tenant.workspace_id(),
+                        entry.tenant.runtime().clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut released = Vec::new();
+        for (root, workspace, runtime) in candidates {
+            let _adoption = self.adoption_permit(&root);
+            if activity.has_work(workspace, &runtime) {
+                continue;
+            }
+            let mut held = self.lock();
+            if held.get(&root).is_some_and(|entry| {
+                entry.fence.is_some() && !entry.retiring && entry.tenant.workspace_id() == workspace
+            }) {
+                held.remove(&root);
+                released.push(root);
+            }
+        }
+        released
+    }
+
     /// Give back the workspace `serve` fenced for this process, once this
     /// generation has stopped being that workspace's authority.
     ///
@@ -481,7 +522,7 @@ where
     /// long as the draining process lived.
     ///
     /// Only the initial entry qualifies: every other tenant owns its fence and
-    /// is given back by [`Self::retire_idle`]. Unlike that sweep this does not
+    /// is given back by [`Self::retire_idle`] or [`Self::release_draining`]. Unlike the idle sweep this does not
     /// ask whether anything outside the registry still holds the tenant. The
     /// initial handle is retained for the process's lifetime — it is what an
     /// unbound connection is admitted against — so that question has one
@@ -1225,6 +1266,45 @@ mod tests {
 
         // Asking again is the ordinary answer, not a second release.
         assert!(!registry.release_initial(Path::new("/workspace/initial"), &activity));
+    }
+
+    #[test]
+    fn committed_handoff_releases_idle_fences_even_with_clients_but_keeps_live_work() {
+        use super::super::authority::admission::{AdmissionGate, LeaseClass};
+        use super::super::generation::GenerationRole;
+        struct Activity(Cell<bool>);
+        impl WorkspaceActivity<String> for Activity {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                self.0.get()
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (registry, live) = fixture(directory.path(), WorkspaceFenceOutcome::Acquired, 8);
+        let initial = registry.adopt_initial(Path::new("/initial")).unwrap();
+        let client = registry.adopt(Path::new("/second")).unwrap();
+        let gate = AdmissionGate::new(
+            usagi_core::domain::id::DaemonGeneration::new(),
+            GenerationRole::Active,
+        );
+        let activity = Activity(Cell::new(false));
+        assert!(registry.release_draining(&gate, &activity).is_empty());
+        gate.close(LeaseClass::ActiveControl);
+        gate.enter_draining().unwrap();
+        assert!(registry.release_draining(&gate, &activity).is_empty());
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        gate.confirm_draining();
+        activity.0.set(true);
+        assert!(registry.release_draining(&gate, &activity).is_empty());
+        activity.0.set(false);
+        assert_eq!(
+            registry.release_draining(&gate, &activity),
+            [PathBuf::from("/second")]
+        );
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(client.root(), Path::new("/second"));
+        assert!(registry.tenant(client.root()).is_none());
+        assert_eq!(registry.adopted(), [initial]);
+        assert!(registry.release_draining(&gate, &activity).is_empty());
     }
 
     /// The initial release observes the workspace with the registry lock free,

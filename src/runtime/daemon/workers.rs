@@ -743,6 +743,12 @@ where
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::TenantRetirement);
             while !shutdown.is_requested() {
+                for root in tenants.release_draining(&gate, &activity) {
+                    ErrorLog::record(&format!(
+                        "replaced daemon released workspace {}",
+                        root.display()
+                    ));
+                }
                 for root in tenants.retire_idle(&activity, chrono::Utc::now(), idle_for) {
                     ErrorLog::record(&format!(
                         "daemon released the idle workspace {}",

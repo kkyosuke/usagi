@@ -16,6 +16,27 @@ LOCK_ATTEMPTS=0
 SELECTOR_ACTIVE=0
 SELECT_VERSION=0
 SYNC_DAEMON_ONLY=0
+RESTART_AGENTS=0
+
+progress() {
+    local done=$1 total=$2 label=$3 bar="" i
+    for ((i=0; i<total; i++)); do
+        if [ "$i" -lt "$done" ]; then bar+="#"; else bar+="-"; fi
+    done
+    if [ -t 2 ]; then
+        printf '\r\033[2K[%s] %s/%s %s\n' "$bar" "$done" "$total" "$label" >&2
+    else
+        printf '[%s] %s/%s %s\n' "$bar" "$done" "$total" "$label" >&2
+    fi
+}
+
+download() {
+    if [ -t 2 ]; then
+        curl -fL --progress-bar "$1" -o "$2"
+    else
+        curl -fsSL "$1" -o "$2"
+    fi
+}
 
 cleanup() {
     local status=$? retired node alone=1 legacy_owner
@@ -220,19 +241,21 @@ render_release_selector() {
     printf '%s╰───────────────────────────────────────────╯%s\n' "$c_pink" "$c_reset" > /dev/tty
 }
 
-case "${1:-}" in
-    --select-version)
-        SELECT_VERSION=1
-        ;;
-    --sync-daemon-only)
-        SYNC_DAEMON_ONLY=1
-        ;;
-    '')
-        ;;
-    *)
-        fail "unknown option: $1"
-        ;;
-esac
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --select-version) SELECT_VERSION=1 ;;
+        --sync-daemon-only) SYNC_DAEMON_ONLY=1 ;;
+        --restart-agents) RESTART_AGENTS=1 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+    shift
+done
+if [ "$SYNC_DAEMON_ONLY" -eq 1 ] && [ "$RESTART_AGENTS" -eq 1 ]; then
+    fail "automatic synchronization cannot interrupt Agents"
+fi
+if [ "$RESTART_AGENTS" -eq 1 ] && [ "${USAGI_MANAGED_UPDATE:-}" != "1" ]; then
+    fail "Agent restart must be requested with usagi update --restart-agents"
+fi
 
 read_version() {
     local bin=$1 output
@@ -528,10 +551,14 @@ CHECKSUM="$STAGE_DIR/$ASSET_NAME.sha256"
 VERSION_FILE="$STAGE_DIR/$ASSET_NAME.version"
 
 echo "$ASSET_NAME をダウンロードして検証中だよ！ぴょん"
-curl -fsSL "$BASE_URL/$ASSET_NAME" -o "$ARCHIVE"
-curl -fsSL "$BASE_URL/$ASSET_NAME.sha256" -o "$CHECKSUM"
-curl -fsSL "$BASE_URL/$ASSET_NAME.version" -o "$VERSION_FILE"
+PROGRESS_TOTAL=4
+if [ "$RESTART_AGENTS" -eq 1 ]; then PROGRESS_TOTAL=6; fi
+progress 0 "$PROGRESS_TOTAL" "配布物をダウンロードしています"
+download "$BASE_URL/$ASSET_NAME" "$ARCHIVE"
+download "$BASE_URL/$ASSET_NAME.sha256" "$CHECKSUM"
+download "$BASE_URL/$ASSET_NAME.version" "$VERSION_FILE"
 
+progress 1 "$PROGRESS_TOTAL" "配布物を検証しています"
 verify_checksum "$CHECKSUM" "$ARCHIVE" "$ASSET_NAME"
 verify_archive "$ARCHIVE"
 tar -xzf "$ARCHIVE" -C "$STAGE_DIR" -- usagi
@@ -539,6 +566,7 @@ CANDIDATE="$STAGE_DIR/usagi"
 chmod 755 "$CANDIDATE"
 NEW_VERSION="$(verify_expected_version "$VERSION_FILE" "$CANDIDATE" "$USAGI_VERSION")"
 OLD_VERSION="$(read_version "$TARGET")"
+progress 2 "$PROGRESS_TOTAL" "usagi 本体を置き換えています"
 
 # STAGE_DIR is below BIN_DIR, so this rename stays on one filesystem. POSIX
 # rename either replaces TARGET atomically or leaves its bytes and mode intact.
@@ -552,9 +580,12 @@ mv -f -- "$CANDIDATE" "$TARGET"
 # authority. The hidden daemon verb is the capability boundary: older selected
 # releases reject it before any weaker replacement can run.
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
+    progress 3 "$PROGRESS_TOTAL" "daemon の更新を準備しています"
     printf "daemon の状態を安全に同期中だよ！ぴょん\n"
+    SYNC_ARGS=(daemon sync-after-update)
+    if [ "$RESTART_AGENTS" -eq 1 ]; then SYNC_ARGS+=(--restart-agents); fi
     set +e
-    USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_AUTO_SYNC=1 "$TARGET" daemon sync-after-update
+    USAGI_UPDATE_PROGRESS=1 USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_AUTO_SYNC=1 "$TARGET" "${SYNC_ARGS[@]}"
     SYNC_STATUS=$?
     set -e
     case "$SYNC_STATUS" in
@@ -568,6 +599,13 @@ if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
             fail "installed usagi could not complete daemon synchronization; inspect 'usagi daemon status' before retrying"
             ;;
     esac
+    if [ "$SYNC_STATUS" -eq 3 ] || [ "$SYNC_STATUS" -eq 4 ]; then
+        progress 3 "$PROGRESS_TOTAL" "本体更新済み・daemon の切替は保留中です"
+    else
+        progress "$PROGRESS_TOTAL" "$PROGRESS_TOTAL" "更新が完了しました"
+    fi
+else
+    progress "$PROGRESS_TOTAL" "$PROGRESS_TOTAL" "本体の更新が完了しました"
 fi
 
 if [ -z "$OLD_VERSION" ]; then

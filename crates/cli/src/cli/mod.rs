@@ -13,6 +13,7 @@
 
 pub mod commands;
 pub mod hooks;
+pub mod update_progress;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -29,6 +30,7 @@ pub struct InstallerRequest {
     script: &'static [u8],
     expected_sha256: [u8; 32],
     select_version: bool,
+    restart_agents: bool,
 }
 
 impl InstallerRequest {
@@ -43,6 +45,7 @@ impl InstallerRequest {
             script,
             expected_sha256,
             select_version,
+            restart_agents: false,
         }
     }
 
@@ -59,6 +62,18 @@ impl InstallerRequest {
     #[must_use]
     pub const fn select_version(&self) -> bool {
         self.select_version
+    }
+
+    /// Include the explicitly requested Agent interruption in this update.
+    #[must_use]
+    pub const fn with_agent_restart(mut self, restart_agents: bool) -> Self {
+        self.restart_agents = restart_agents;
+        self
+    }
+
+    #[must_use]
+    pub const fn restart_agents(&self) -> bool {
+        self.restart_agents
     }
 }
 
@@ -91,7 +106,7 @@ pub enum RunOutcome {
     /// daemon control plane の起動を依頼する。
     LaunchDaemon(DaemonCommand),
     /// installed binary から managed update の daemon 同期を依頼する。
-    SyncDaemonAfterUpdate,
+    SyncDaemonAfterUpdate { restart_agents: bool },
     /// Ask for a coalesced build-artifact replacement trigger and perform the
     /// replacement it keys. `force` gives up the live runtime the running
     /// daemon owns; without it a busy daemon is refused untouched.
@@ -227,6 +242,9 @@ pub enum Command {
         /// 更新先の release を一覧から選択する
         #[arg(short = 'v')]
         select_version: bool,
+        /// Agent を中断し、daemon 切替後に同じ会話で作業を続行する
+        #[arg(long)]
+        restart_agents: bool,
     },
     /// 指定シェルの補完スクリプトを標準出力に印字する（Tab 補完を有効化する）
     Completion {
@@ -370,7 +388,10 @@ pub enum DaemonCommand {
     },
     /// installer が update lock 内で daemon を同期する内部 capability
     #[command(hide = true)]
-    SyncAfterUpdate,
+    SyncAfterUpdate {
+        #[arg(long)]
+        restart_agents: bool,
+    },
     /// Retry a queued managed update independently of the invoking TUI.
     #[command(hide = true)]
     ContinueUpdate,
@@ -461,7 +482,13 @@ impl Command {
                 apply,
                 force,
             } => Box::new(Clean { apply, force }),
-            Command::Update { select_version } => Box::new(h::Update { select_version }),
+            Command::Update {
+                select_version,
+                restart_agents,
+            } => Box::new(h::Update {
+                select_version,
+                restart_agents,
+            }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
@@ -552,7 +579,9 @@ impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(match self.command.clone() {
             DaemonCommand::Replace { force } => RunOutcome::RequestDaemonReplacement { force },
-            DaemonCommand::SyncAfterUpdate => RunOutcome::SyncDaemonAfterUpdate,
+            DaemonCommand::SyncAfterUpdate { restart_agents } => {
+                RunOutcome::SyncDaemonAfterUpdate { restart_agents }
+            }
             command => RunOutcome::LaunchDaemon(command),
         })
     }
@@ -757,7 +786,8 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "update"]).unwrap().command,
             Some(Command::Update {
-                select_version: false
+                select_version: false,
+                restart_agents: false,
             })
         ));
         assert!(matches!(
@@ -765,7 +795,8 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Update {
-                select_version: true
+                select_version: true,
+                restart_agents: false,
             })
         ));
         assert!(matches!(
@@ -776,6 +807,25 @@ mod tests {
 
     #[test]
     fn doctor_and_daemon_restart_keep_diagnosis_and_lifecycle_flags_separate() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "update", "-v", "--restart-agents"])
+                .unwrap()
+                .command,
+            Some(Command::Update {
+                select_version: true,
+                restart_agents: true
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "daemon", "sync-after-update", "--restart-agents"])
+                .unwrap()
+                .command,
+            Some(Command::Daemon {
+                command: Some(DaemonCommand::SyncAfterUpdate {
+                    restart_agents: true
+                })
+            })
+        ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "doctor", "--fix"])
                 .unwrap()
@@ -800,7 +850,9 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Daemon {
-                command: Some(DaemonCommand::SyncAfterUpdate)
+                command: Some(DaemonCommand::SyncAfterUpdate {
+                    restart_agents: false
+                })
             })
         ));
         let help = Cli::try_parse_from(["usagi", "daemon", "--help"])

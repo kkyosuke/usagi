@@ -1415,11 +1415,14 @@ pub(super) fn record_session_lineage(
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 #[allow(clippy::too_many_lines)] // One guarded stop, handoff, and pre-commit recovery transaction.
+#[allow(clippy::too_many_arguments)] // The draining tenant and PTY owners release fences only after the shared handoff barrier commits.
 pub(super) fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
+    tenants: &super::TenantRegistry<super::FileWorkspaceFences, super::SystemTenantOpener>,
+    terminal: &SharedTerminalRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -1538,6 +1541,16 @@ pub(super) fn dispatch_rollover(
             }
         },
     );
+    let activity = super::DaemonWorkspaceActivity {
+        terminal: Arc::clone(terminal),
+        agent: Arc::clone(agent),
+    };
+    for root in tenants.release_draining(&fence.gate, &activity) {
+        ErrorLog::record(&format!(
+            "replaced daemon released workspace {}",
+            root.display()
+        ));
+    }
     if result.is_err()
         && let Some(pending) = &pending_restart
     {

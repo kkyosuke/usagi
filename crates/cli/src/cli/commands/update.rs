@@ -7,8 +7,8 @@ use crate::cli::{InstallerRequest, Run, RunOutcome};
 /// この digest は `scripts/install.sh` と同じ build に固定する。変更時は unit test が
 /// 不一致を検出するため、review 可能な identity 更新として同時に変更する。
 const INSTALLER_SHA256: [u8; 32] = [
-    0xc7, 0x4a, 0x0d, 0x30, 0xad, 0x04, 0xd1, 0xd5, 0xfa, 0xeb, 0x4e, 0x0c, 0x33, 0xa0, 0xca, 0x4b,
-    0xfa, 0x54, 0x49, 0x79, 0x8a, 0x54, 0x61, 0x7c, 0x52, 0x48, 0xd7, 0x57, 0x5f, 0xfe, 0xe9, 0x30,
+    0x35, 0x77, 0x04, 0x24, 0x4d, 0xaf, 0xcb, 0x01, 0x9a, 0xbc, 0x6d, 0x23, 0x8a, 0xa5, 0x73, 0x2e,
+    0x02, 0x69, 0xce, 0x91, 0x3b, 0x4d, 0x9d, 0x86, 0x97, 0x21, 0x4b, 0x3c, 0x09, 0x7d, 0x46, 0xbe,
 ];
 const INSTALLER: &[u8] = include_bytes!("../../../../../scripts/install.sh");
 
@@ -21,6 +21,7 @@ pub const fn installer_request(select_version: bool) -> InstallerRequest {
 /// `usagi update` のハンドラ。実際の subprocess は合成ルートが実行する。
 pub struct Update {
     pub select_version: bool,
+    pub restart_agents: bool,
 }
 
 impl Run for Update {
@@ -30,9 +31,9 @@ impl Run for Update {
         } else {
             writeln!(out, "最新の usagi リリースをインストール中だよ！ぴょん")?;
         }
-        Ok(RunOutcome::SelfUpdate(installer_request(
-            self.select_version,
-        )))
+        Ok(RunOutcome::SelfUpdate(
+            installer_request(self.select_version).with_agent_restart(self.restart_agents),
+        ))
     }
 }
 
@@ -59,6 +60,7 @@ mod tests {
         let mut out = Vec::new();
         let outcome = Update {
             select_version: false,
+            restart_agents: false,
         }
         .run(&mut out)
         .unwrap();
@@ -73,17 +75,25 @@ mod tests {
         let mut out = Vec::new();
         let outcome = Update {
             select_version: true,
+            restart_agents: true,
         }
         .run(&mut out)
         .unwrap();
-        assert!(matches!(outcome, RunOutcome::SelfUpdate(request) if request.select_version()));
+        assert!(
+            matches!(outcome, RunOutcome::SelfUpdate(request) if request.select_version() && request.restart_agents())
+        );
     }
 
     #[test]
     fn output_failure_prevents_both_update_modes_from_reaching_the_runtime() {
         for select_version in [false, true] {
             let mut output = &mut [][..];
-            let error = Update { select_version }.run(&mut output).unwrap_err();
+            let error = Update {
+                select_version,
+                restart_agents: true,
+            }
+            .run(&mut output)
+            .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
         }
     }

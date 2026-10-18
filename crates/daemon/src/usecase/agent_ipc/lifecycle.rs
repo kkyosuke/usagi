@@ -428,16 +428,6 @@ impl AgentRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         agents.sort_by_key(|item| item.runtime.agent_runtime_id.as_str());
-        let workspaces = agents
-            .iter()
-            .map(|item| item.runtime.terminal.workspace_id)
-            .collect::<BTreeSet<_>>();
-        if workspaces.len() > 1 {
-            return Err(ProtocolError::new(
-                ErrorCode::Busy,
-                "live Agents span multiple workspaces; no Agent was stopped",
-            ));
-        }
         let selected = agents
             .iter()
             .map(|item| item.runtime.agent_runtime_id)
