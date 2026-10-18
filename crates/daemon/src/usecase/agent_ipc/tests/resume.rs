@@ -323,6 +323,9 @@ fn saturated_capacity_selection_compares_every_completed_resume_candidate() {
     snapshot.records[0].operation.operation_id = operations[2];
     snapshot.records[1].operation.operation_id = operations[0];
     snapshot.records[2].operation.operation_id = operations[1];
+    for record in &mut snapshot.records {
+        record.user_decision_owner.as_mut().unwrap().run_id = record.operation.operation_id;
+    }
     let oldest = snapshot.records[1].runtime.clone();
     agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 3, 64 * 1024, 64).unwrap();
 
@@ -881,6 +884,11 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
     ambiguous_record.runtime.terminal.terminal_id = ambiguous_terminal_id;
     ambiguous_ownership.terminal.terminal_id = ambiguous_terminal_id;
     ambiguous_record.operation.operation_id = OperationId::new();
+    ambiguous_record
+        .user_decision_owner
+        .as_mut()
+        .unwrap()
+        .run_id = ambiguous_record.operation.operation_id;
     ambiguous_record.semantic_key = Some("ambiguous-resume-source".into());
     ambiguous_record
         .provider_resume
@@ -1027,6 +1035,8 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         }
         if record.resumed_from == Some(target.source) {
             record.resumed_from = None;
+            record.user_decision_owner.as_mut().unwrap().run_id = record.operation.operation_id;
+            record.user_decision_owner_aliases.clear();
         }
     }
     runtime.coordinator = RuntimeCoordinator::hydrate(live_replacement, 16, 64 * 1024, 64).unwrap();

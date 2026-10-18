@@ -94,6 +94,7 @@ usagi doctor  # 必要なツールと設定を確認
 Agent の停止・本体更新・daemon 切替・同じ会話での再開をまとめて行う場合は `usagi update --restart-agents` を使います。
 更新中はダウンロード・検証・切替の進捗バーと Agent の再開件数を表示します。
 導入済み binary へ切り替える場合は `usagi daemon restart --restart-agents` を使います。
+同じ会話への再開では、人への確認依頼と回答、委譲元への完了通知も引き継ぎます。
 同じ会話での作業再開と再開できない場合の扱いは [daemon の Agent 更新](document/05-daemon.md#daemon-restart-による-agent-integration-更新) を参照してください。
 
 対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は

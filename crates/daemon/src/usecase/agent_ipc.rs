@@ -42,6 +42,7 @@ use usagi_core::{
             WorkspaceId, WorktreeId,
         },
         terminal_launch::TerminalLaunchScope,
+        user_decision::UserDecisionOwner,
     },
     infrastructure::ipc::{
         AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, ErrorCode, ProtocolError,
@@ -2641,6 +2642,8 @@ mod delivery;
 mod lifecycle;
 
 mod dispatch;
+
+mod decision_owner;
 
 #[cfg(test)]
 mod tests;

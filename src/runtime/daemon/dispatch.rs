@@ -940,10 +940,9 @@ pub(super) fn dispatch_user_decision(
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use chrono::Utc;
-    use usagi_core::domain::agent::RunStatus;
     use usagi_core::domain::id::UserDecisionId;
     use usagi_core::domain::user_decision::{
-        UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionOwner, UserDecisionStatus,
+        UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionStatus,
     };
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
@@ -1046,7 +1045,7 @@ pub(super) fn dispatch_user_decision(
                 ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })
     })();
-    let owner = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
+    let owners = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
         if tui_access {
             return Ok((workspace, None));
         }
@@ -1059,72 +1058,25 @@ pub(super) fn dispatch_user_decision(
                 "decision caller provenance is unknown",
             )
         })?;
-        let authenticated = runtime
-            .mcp_dispatch_context(&credential.credential)
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "decision caller provenance is unknown",
-                )
-            })?;
-        if authenticated.workspace_id != workspace {
+        let owners = runtime.mcp_user_decision_owners(&credential.credential)?;
+        if owners.is_empty() || owners.iter().any(|owner| owner.workspace_id != workspace) {
             return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
                 "decision caller does not belong to this workspace",
             ));
         }
-        let run_id = authenticated.run_id;
-        let dispatch = runtime.dispatch_store();
-        let run = dispatch
-            .runs()
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
-            })?
-            .into_iter()
-            .find(|run| run.run_id == run_id && run.status == RunStatus::Running)
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "decision caller provenance is unknown",
-                )
-            })?;
-        let binding = dispatch
-            .binding(run_id)
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
-            })?
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "decision caller provenance is unavailable",
-                )
-            })?;
-        if binding.worker.agent_id != run.agent_id {
-            return Err(ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "decision caller provenance is inconsistent",
-            ));
-        }
-        Ok((
-            workspace,
-            Some(UserDecisionOwner {
-                workspace_id: workspace,
-                session_id: binding.worker.session_id,
-                caller: binding.caller,
-                run_id,
-            }),
-        ))
+        Ok((workspace, Some(owners)))
     });
-    let response = owner.and_then(|(workspace, owner)| {
-        let request_owner = owner.clone();
+    let response = owners.and_then(|(workspace, owners)| {
+        let request_owners = owners.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
                 .get(workspace, id)
                 .map_err(|_| UserDecisionError::Terminal)?
                 .ok_or(UserDecisionError::Terminal)?;
-            if request_owner
+            if request_owners
                 .as_ref()
-                .is_some_and(|expected| decision.owner != *expected)
+                .is_some_and(|expected| !expected.contains(&decision.owner))
             {
                 return Err(UserDecisionError::Terminal);
             }
@@ -1134,11 +1086,12 @@ pub(super) fn dispatch_user_decision(
         let result = (|| -> Result<serde_json::Value, UserDecisionDispatchError> {
             match action {
                 DispatchToolAction::UserDecisionRequest => {
-                    let owner = owner.ok_or(UserDecisionError::Terminal)?;
+                    let owners = owners.ok_or(UserDecisionError::Terminal)?;
+                    let owner = owners.first().cloned().ok_or(UserDecisionError::Terminal)?;
                     let input = serde_json::from_value::<RequestPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
                     let decision = store
-                        .create_with_default_expiry(UserDecision {
+                        .create_with_default_expiry_for_owners(UserDecision {
                             decision_id: UserDecisionId::new(),
                             owner,
                             title: input.title,
@@ -1157,7 +1110,7 @@ pub(super) fn dispatch_user_decision(
                             answer: None,
                             created_at: now,
                             resolved_at: None,
-                        })
+                        }, &owners)
                         .map_err(|_| UserDecisionError::Terminal)??;
                     Ok(serde_json::json!(decision))
                 }
@@ -1183,9 +1136,9 @@ pub(super) fn dispatch_user_decision(
                     let decisions = decisions
                         .into_iter()
                         .filter(|decision| {
-                            owner
+                            owners
                                 .as_ref()
-                                .is_none_or(|expected| decision.owner == *expected)
+                                .is_none_or(|expected| expected.contains(&decision.owner))
                         })
                         .collect::<Vec<_>>();
                     Ok(serde_json::json!({"workspace": workspace, "decisions": decisions}))
@@ -1515,7 +1468,6 @@ pub(super) fn dispatch_rollover(
                         workspace_root,
                         &planned,
                     );
-                    pending_restart = Some(pending.clone());
                     // Persist before the first signal. A process crash can now
                     // leave extra still-live entries, never an unrecorded
                     // stopped source; recovery skips those exact live entries.
@@ -1524,6 +1476,9 @@ pub(super) fn dispatch_rollover(
                             reason: format!("could not persist Agent restart recovery: {error}"),
                         }
                     })?;
+                    // A failed stage stopped no source and grants no rollback
+                    // authority, even if a selected Agent exits naturally.
+                    pending_restart = Some(pending);
                 }
                 match agent.interrupt_agents_for_daemon_restart(
                     &restart.expected,

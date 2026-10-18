@@ -1962,6 +1962,10 @@ materialize することもない。停止時の phase が `running` / `waiting`
 旧 owner が続行 field のない transaction を書く初回の更新でも、新 successor はこの intent と一致する未完了 item だけに続行の指定を反映し、resume 前に永続化する。
 一致する intent のない旧 transaction は従来どおり追加入力なしで再開する。
 restart 中は停止・切替の段階と再開済み Agent 件数を stderr に表示し、全 item の完了と serving 検証後にだけ完了表示を出す。
+exact resume は元の dispatch caller と人への確認依頼の owner も引き継ぐ。再開後の新しい credential で元の質問・回答を polling でき、
+同じ idempotency key の再送が質問を複製することも、完了・失敗報告の届け先が自分自身へ変わることもない。
+owner は新 runtime の shard に保存するため、旧 generation の書き込みや旧履歴の回収でも失われない。
+認証と旧 record の互換性は [MCP の user decision 契約](07-mcp.md#user-decision) を参照する。
 
 復旧 transaction の作成・進捗更新・削除は同じ private lock で直列化する。進捗更新は既存 operation と停止済み source の集合を照合し、
 完了 item を未完了へ戻さない。消去済み transaction を遅れて動いた worker が再作成することも、別 operation の transaction を上書き・削除することもない。
