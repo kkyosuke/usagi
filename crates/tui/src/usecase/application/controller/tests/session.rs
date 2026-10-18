@@ -2219,3 +2219,241 @@ fn session_favorites_stay_with_identity_after_reordering_and_refresh() {
     assert_eq!(state.sessions(), &[second, first]);
     assert_eq!(state.session_order_revision(), 1);
 }
+
+#[test]
+fn inbox_question_opens_the_exact_refreshed_editor_and_never_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    state.unread_decisions = [first.decision_id, second.decision_id].into();
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    assert_eq!(effects, vec![Effect::RefreshDecisions { workspace }]);
+    assert!(state.decision_overlay().unwrap().is_loading());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace: WorkspaceId::new(),
+            decisions: vec![],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().is_loading());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    let overlay = state.decision_overlay().unwrap();
+    assert_eq!(overlay.selected(), 1);
+    assert_eq!(
+        overlay.editor().unwrap().decision().decision_id,
+        second.decision_id
+    );
+    assert!(!overlay.is_loading());
+    assert!(state.unread_decision_ids().contains(&first.decision_id));
+    assert!(!state.unread_decision_ids().contains(&second.decision_id));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(state.overlay(), None);
+}
+
+#[test]
+fn inbox_question_disappearing_after_loading_never_opens_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        second.decision_id
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        first.decision_id
+    );
+}
+
+#[test]
+fn inbox_question_recovers_its_identity_when_a_newer_observation_finds_it() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    for close in [
+        AppEvent::Key(AppKey::Escape),
+        AppEvent::VisitSession(session),
+    ] {
+        let origin = SessionId::new();
+        let first = pending_decision(workspace);
+        let second = pending_decision(workspace);
+        let mut state = AppState::home(workspace, vec![origin, session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+        );
+        // The resident observer can hand over an older inventory before the wake's
+        // fresh answer. Neither that reply nor a later disappearance may select A.
+        for available in [false, true, false, true] {
+            let decisions = if available {
+                vec![first.clone(), second.clone()]
+            } else {
+                vec![first.clone()]
+            };
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions,
+                }),
+            );
+            let overlay = state.decision_overlay().unwrap();
+            assert_eq!(overlay.request_error().is_none(), available);
+            assert_eq!(
+                overlay.editor().map(|editor| editor.decision().decision_id),
+                available.then_some(second.decision_id)
+            );
+            if !available {
+                assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            }
+            assert!(state.unread_decisions.contains(&first.decision_id));
+        }
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first.clone()],
+            }),
+        );
+        let visiting = matches!(&close, AppEvent::VisitSession(_));
+        let _ = update(&mut state, close);
+        assert_eq!(
+            state.active(),
+            Some(if visiting { session } else { origin })
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first, second],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.decision_overlay().is_none());
+    }
+}
+
+#[test]
+fn inbox_question_failures_and_cancellation_do_not_open_other_questions() {
+    let workspace = WorkspaceId::new();
+    let decision = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(decision.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable {
+            workspace: WorkspaceId::new(),
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().is_loading());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(!state.decision_overlay().unwrap().is_loading());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(decision.decision_id)),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![decision],
+        }),
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.decision_overlay().is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    assert!(state.notice().is_some());
+}

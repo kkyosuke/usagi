@@ -982,10 +982,20 @@ pub(super) fn drive_workspace_controller(
             }
             let key = match destination {
                 AttentionDestination::Decisions => Some(AppKey::OpenDecisions),
+                AttentionDestination::Decision(decision_id) => {
+                    Some(AppKey::OpenDecision(decision_id))
+                }
                 AttentionDestination::PullRequests if runtime.state().active() == session => {
                     Some(AppKey::OpenPrs)
                 }
-                AttentionDestination::PullRequests | AttentionDestination::Session => None,
+                AttentionDestination::PullRequest(identity)
+                    if runtime.state().active() == session =>
+                {
+                    Some(AppKey::OpenPullRequest(identity))
+                }
+                AttentionDestination::PullRequests
+                | AttentionDestination::PullRequest(_)
+                | AttentionDestination::Session => None,
             };
             if let Some(key) = key {
                 let effects = runtime.apply_event(AppEvent::Key(key));

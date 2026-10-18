@@ -10,7 +10,7 @@ fn decision_selection_runtime() -> WorkspaceRuntime {
     decision_selection_runtime_with_title("Copy 日本語")
 }
 
-fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
+pub(super) fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
     decision_selection_runtime_with_context(title, Vec::new())
 }
 

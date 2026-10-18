@@ -12,7 +12,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
-use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, UserDecisionId, WorkspaceId};
+use usagi_core::domain::pr_inventory::PrIdentity;
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::workspace::Workspace;
@@ -206,10 +207,12 @@ pub enum OverlayIntent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionDestination {
     Decisions,
+    Decision(UserDecisionId),
     PullRequests,
+    PullRequest(PrIdentity),
     Session,
 }
 

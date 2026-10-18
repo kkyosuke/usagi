@@ -221,6 +221,15 @@ fn list_body(
     inner_width: usize,
     capacity: usize,
 ) -> Vec<String> {
+    if overlay.is_loading() || overlay.request_error().is_some() {
+        return vec![
+            overlay.request_error().map_or_else(
+                || modal::caption("Loading selected question…"),
+                |error| modal::error_line(error, inner_width),
+            ),
+            modal::footer("Esc: close"),
+        ];
+    }
     let mut rows = vec![modal::caption("Select a question to answer")];
     if decisions.is_empty() {
         rows.push(modal::empty_notice("(none)"));
@@ -1994,6 +2003,56 @@ mod tests {
                     .error()
                     .is_some()
             );
+        }
+    }
+    #[test]
+    fn targeted_question_loading_and_errors_never_show_other_question_rows() {
+        use crate::usecase::application::controller::{
+            AppEvent, AppKey, AppState, BackendEvent, update,
+        };
+        use usagi_core::domain::id::{UserDecisionId, WorkspaceId};
+        let workspace = WorkspaceId::new();
+        for unavailable in [false, true] {
+            let mut state = AppState::home(workspace, Vec::new());
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::OpenDecision(UserDecisionId::new())),
+            );
+            let frame = render_over(
+                24,
+                80,
+                &vec![String::new(); 24],
+                state.decision_overlay().unwrap(),
+                state.decisions(),
+                &BTreeMap::new(),
+            )
+            .join("\n");
+            assert!(frame.contains("Loading selected question"));
+            assert!(!frame.contains("Select a question"));
+            let event = if unavailable {
+                BackendEvent::DecisionsUnavailable { workspace }
+            } else {
+                BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![],
+                }
+            };
+            let _ = update(&mut state, AppEvent::Backend(event));
+            let frame = render_over(
+                24,
+                80,
+                &vec![String::new(); 24],
+                state.decision_overlay().unwrap(),
+                state.decisions(),
+                &BTreeMap::new(),
+            )
+            .join("\n");
+            assert!(frame.contains(if unavailable {
+                "could not be loaded"
+            } else {
+                "no longer available"
+            }));
+            assert!(!frame.contains("Select a question"));
         }
     }
 }

@@ -712,6 +712,9 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
     let overlay = DecisionOverlayState {
         selected: 0,
         editor: Some(editor),
+        requested: None,
+        error: None,
+        exact: None,
     };
     assert_eq!(overlay.selected(), 0);
 
