@@ -1,5 +1,7 @@
 //! Two explicit inbox views, sharing their drawn rows with pointer hit testing.
+use crate::usecase::fuzzy::contiguous_match;
 use std::ops::Range;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     AttentionList, InboxView, Key, OverlayIntent, Role, Row, Style, Summary, WorkspaceDeck,
@@ -9,8 +11,6 @@ use crate::presentation::widgets::button::InlineButton;
 
 const MAX_INNER_WIDTH: usize = 110;
 const MAX_BODY_HEIGHT: usize = 26;
-const HEADER_ROWS: usize = 4;
-const FOOTER_ROWS: usize = 2;
 
 struct Layout {
     inner: usize,
@@ -19,15 +19,32 @@ struct Layout {
     tabs: Vec<(InboxView, Range<usize>)>,
     item_hits: Vec<(usize, Range<usize>)>,
     items: Vec<Row>,
+    compact: bool,
+    footer_rows: usize,
+    item_height: usize,
 }
 
-fn tabs(list: &AttentionList, summary: &Summary) -> (String, Vec<(InboxView, Range<usize>)>) {
+fn tabs(
+    list: &AttentionList,
+    summary: &Summary,
+    inner: usize,
+) -> (String, Vec<(InboxView, Range<usize>)>) {
+    let full = format!(
+        "  Action needed ({})    Updates ({})    ",
+        summary.action_total(),
+        summary.updates
+    );
+    let actions = if widgets::display_width(&full) > inner {
+        "Actions"
+    } else {
+        "Action needed"
+    };
     let mut line = String::from("  ");
     let mut hits = Vec::new();
     for (view, label, role) in [
         (
             InboxView::Actions,
-            format!("Action needed ({})", summary.action_total()),
+            format!("{actions} ({})", summary.action_total()),
             if summary.actions > 0 {
                 Role::Warning
             } else {
@@ -56,31 +73,42 @@ fn tabs(list: &AttentionList, summary: &Summary) -> (String, Vec<(InboxView, Ran
     (line, hits)
 }
 
-fn item_window(
-    len: usize,
-    selected: usize,
-    capacity: usize,
-    item_height: usize,
-) -> (usize, usize, bool) {
-    let mut count = (capacity / item_height).max(1);
-    loop {
-        let (start, end) = modal::list_window(len, selected, count);
-        let extra = usize::from(start > 0) + usize::from(end < len);
-        if (end - start) * item_height + extra <= capacity {
-            return (start, end, true);
-        }
-        if count == 1 {
-            return (start, end, false);
-        }
-        count -= 1;
+fn highlight(text: &str, filter: &str, style: Style) -> String {
+    let Some(range) = contiguous_match(text, filter).filter(|range| !range.is_empty()) else {
+        return style.paint(text);
+    };
+    let mut spans = [String::new(), String::new(), String::new()];
+    let mut position = 0;
+    for grapheme in text.graphemes(true) {
+        let end = position + grapheme.chars().count();
+        let span = if end <= range.start {
+            0
+        } else if position >= range.end {
+            2
+        } else {
+            1
+        };
+        spans[span].push_str(grapheme);
+        position = end;
     }
+    format!(
+        "{}{}{}",
+        style.paint(&spans[0]),
+        style.bold().reverse().paint(&spans[1]),
+        style.paint(&spans[2])
+    )
 }
 
 fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
-    let item_height = if capacity >= 2 { 2 } else { 1 };
+    let available = if layout.compact {
+        capacity
+    } else {
+        capacity.saturating_sub(2)
+    };
+    let count = (available / layout.item_height).max(1);
     let selected = list.index(&layout.items);
-    let (start, end, indicators) = item_window(layout.items.len(), selected, capacity, item_height);
-    if indicators && start > 0 {
+    let (start, end) = modal::list_window(layout.items.len(), selected, count);
+    if !layout.compact && start > 0 {
         layout.body.push(modal::caption(&format!("↑ {start} more")));
     }
     let role = if list.view == InboxView::Actions {
@@ -91,38 +119,52 @@ fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
     for index in start..end {
         let item = &layout.items[index];
         let top = layout.body.len();
-        let label = format!(
-            "{}  {}",
-            widgets::pad_to_width(item.action, 18),
-            item.context
-        );
         let style = if index == selected {
             role.style().bold()
         } else {
             role.style()
         };
+        let action = if layout.item_height == 3 {
+            item.action.to_owned()
+        } else {
+            format!(
+                "{}  {}",
+                widgets::pad_to_width(item.action, 18),
+                item.context
+            )
+        };
         layout.body.push(format!(
             "  {} {}",
             modal::selection_marker(index == selected),
-            style.paint(&widgets::clip_to_width(
-                &label,
+            widgets::clip_to_width(
+                &highlight(&action, &list.filter, style),
                 layout.inner.saturating_sub(4)
-            ))
+            )
         ));
-        if item_height == 2 {
-            let reason_style = if index == selected {
-                Style::new()
-            } else {
-                Style::new().dim()
-            };
-            layout.body.push(reason_style.paint(&widgets::clip_to_width(
-                &format!("    {}", item.reason),
-                layout.inner,
-            )));
+        if layout.item_height == 3 {
+            layout.body.push(format!(
+                "    {}",
+                widgets::clip_to_width(
+                    &highlight(&item.context, &list.filter, style),
+                    layout.inner.saturating_sub(4)
+                )
+            ));
         }
+        let reason_style = if index == selected {
+            Style::new()
+        } else {
+            Style::new().dim()
+        };
+        layout.body.push(format!(
+            "    {}",
+            widgets::clip_to_width(
+                &highlight(&item.reason, &list.filter, reason_style),
+                layout.inner.saturating_sub(4)
+            )
+        ));
         layout.item_hits.push((index, top..layout.body.len()));
     }
-    if indicators && end < layout.items.len() {
+    if !layout.compact && end < layout.items.len() {
         layout.body.push(modal::caption(&format!(
             "↓ {} more",
             layout.items.len() - end
@@ -133,7 +175,7 @@ fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
 fn append_footer(layout: &mut Layout, list: &AttentionList) {
     layout
         .body
-        .resize(layout.height - FOOTER_ROWS, String::new());
+        .resize(layout.height - layout.footer_rows, String::new());
     let open_label = layout
         .items
         .get(list.index(&layout.items))
@@ -145,27 +187,45 @@ fn append_footer(layout: &mut Layout, list: &AttentionList) {
                     .is_none_or(|selected| *selected == item.identity)
         })
         .map_or("", |item| item.open_label);
-    layout.body.push(modal::footer(&format!(
-        "{}↑↓ select · PgUp/PgDn page",
-        if open_label.is_empty() {
+    if layout.compact {
+        let position = if layout.items.is_empty() {
             String::new()
         } else {
-            format!("Enter: {open_label} · click to open · ")
-        }
-    )));
-    layout.body.push(modal::footer(
-        "Tab / ←→ switch view · type to filter · Esc close",
-    ));
+            format!(
+                "{}/{} · ",
+                list.index(&layout.items) + 1,
+                layout.items.len()
+            )
+        };
+        layout.body.push(modal::footer(&format!(
+            "{position}{}↑↓ · Tab · Esc",
+            if open_label.is_empty() {
+                ""
+            } else {
+                "Enter · "
+            }
+        )));
+    } else {
+        layout.body.push(modal::footer(&format!(
+            "{}↑↓ select · PgUp/PgDn page",
+            if open_label.is_empty() {
+                String::new()
+            } else {
+                format!("Enter: {open_label} · click to open · ")
+            }
+        )));
+        layout.body.push(modal::footer(
+            "Tab / ←→ switch view · type to filter · Esc close",
+        ));
+    }
 }
 
-fn empty_message(list: &AttentionList, unknown: usize) -> &'static str {
+fn empty_message(list: &AttentionList, unknown: bool) -> &'static str {
     if !list.filter.is_empty() {
         return "No items match this filter.";
     }
     match list.view {
-        InboxView::Actions if unknown > 0 => {
-            "No confirmed actions. Some project statuses are still unknown."
-        }
+        InboxView::Actions if unknown => "No confirmed actions. Some statuses are still unknown.",
         InboxView::Actions => "No action needed. Ongoing work is in Updates.",
         InboxView::Updates => "No progress updates to show.",
     }
@@ -181,6 +241,9 @@ fn layout(
     let (height, width) = widgets::normalize_size(height, width);
     let inner = modal::modal_inner_width(width, MAX_INNER_WIDTH);
     let body_height = modal::reserved_body_height(height, width, MAX_BODY_HEIGHT);
+    let compact = body_height < 14 || inner < 70;
+    let footer_rows = if compact { 1 } else { 2 };
+    let item_height = if inner < 52 { 3 } else { 2 };
     let mut layout = Layout {
         inner,
         height: body_height,
@@ -188,16 +251,32 @@ fn layout(
         tabs: Vec::new(),
         item_hits: Vec::new(),
         items: rows(slots, &list.filter, list.view),
+        compact,
+        footer_rows,
+        item_height,
     };
     let summary = Summary::from_slots(slots);
-    let (tab_line, tab_hits) = tabs(list, &summary);
-    if body_height
-        < HEADER_ROWS
-            + FOOTER_ROWS
-            + 1
-            + usize::from(summary.unknown > 0)
-            + usize::from(notice.is_some())
-        || inner < widgets::display_width(&tab_line)
+    let (tab_line, tab_hits) = tabs(list, &summary, inner);
+    let mut header = vec![tab_line];
+    if !compact {
+        header.push(modal::caption(if list.view == InboxView::Actions {
+            "Only items that need your action appear here."
+        } else if summary.has_unknown() {
+            "Progress and status updates."
+        } else {
+            "Progress updates. No action needed here."
+        }));
+    }
+    header.push(format!(
+        "  Filter:{}",
+        modal::filter_line(&list.filter, list.filter.len(), None)
+    ));
+    if !compact {
+        header.push(String::new());
+    }
+    let extra = usize::from(summary.has_unknown()) + usize::from(notice.is_some());
+    if body_height < header.len() + footer_rows + item_height + extra
+        || inner < widgets::display_width(&header[0])
     {
         layout
             .body
@@ -208,40 +287,31 @@ fn layout(
         return layout;
     }
     layout.tabs = tab_hits;
-    layout.body = vec![
-        tab_line,
-        modal::caption(if list.view == InboxView::Actions {
-            "Only items that need your action appear here."
-        } else {
-            "Progress updates. No action needed here."
-        }),
-        format!(
-            "  Filter:{}",
-            modal::filter_line(&list.filter, list.filter.len(), None)
-        ),
-        String::new(),
-    ];
-    let content_height = body_height.saturating_sub(
-        HEADER_ROWS
-            + FOOTER_ROWS
-            + usize::from(summary.unknown > 0)
-            + usize::from(notice.is_some()),
-    );
+    let header_height = header.len();
+    layout.body = header;
+    let content_height = body_height - header_height - footer_rows - extra;
     if layout.items.is_empty() {
         layout
             .body
-            .push(modal::caption(empty_message(list, summary.unknown)));
+            .push(modal::caption(empty_message(list, summary.has_unknown())));
     } else {
         append_items(&mut layout, list, content_height);
     }
     layout
         .body
-        .resize(HEADER_ROWS + content_height, String::new());
-    if summary.unknown > 0 {
-        layout.body.push(modal::caption(&format!(
-            "Status unknown for {} project(s). Retrying automatically.",
-            summary.unknown
-        )));
+        .resize(header_height + content_height, String::new());
+    if summary.has_unknown() {
+        let message = if compact {
+            "Checking status…".to_owned()
+        } else if summary.unknown_items == 0 {
+            format!(
+                "Status unknown for {} project(s). Retrying automatically.",
+                summary.unknown
+            )
+        } else {
+            "Some statuses are still being checked. Retrying automatically.".to_owned()
+        };
+        layout.body.push(modal::caption(&message));
     }
     if let Some(notice) = notice {
         layout.body.push(modal::error_line(notice, inner));
@@ -418,7 +488,7 @@ mod tests {
                     }
                     for (index, range) in &layout.item_hits {
                         for row in range.clone() {
-                            assert!(row < layout.height - FOOTER_ROWS);
+                            assert!(row < layout.height - layout.footer_rows);
                             let key = Key::Click {
                                 column: (viewport.left + 2).try_into().unwrap(),
                                 row: (viewport.top + row).try_into().unwrap(),
@@ -455,7 +525,9 @@ mod tests {
         let before = list.clone();
         let viewport = modal::body_viewport(18, 80, drawn.inner, drawn.height).unwrap();
         // Explanatory text, filter, and footer cells never open a neighboring item.
-        for row in [0, 1, 2, 3, drawn.height - 1] {
+        for row in (0..drawn.height)
+            .filter(|row| !drawn.item_hits.iter().any(|(_, range)| range.contains(row)))
+        {
             let key = Key::Click {
                 column: viewport.left.try_into().unwrap(),
                 row: (viewport.top + row).try_into().unwrap(),
@@ -588,7 +660,68 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Safe error"))
         );
+        list.view = InboxView::Actions;
+        let tiny = layout(&deck.slots, &list, Some("Target unavailable"), 10, 40);
+        assert!(!tiny.items.is_empty());
+        assert!(tiny.body.iter().any(|line| line.contains("Resize")));
+        assert!(
+            tiny.body
+                .iter()
+                .any(|line| line.contains("Target unavailable"))
+        );
+        assert!(tiny.item_hits.is_empty());
+        assert_eq!(
+            handle_input(
+                &mut list,
+                &deck.slots,
+                Some("Target unavailable"),
+                &Key::Enter,
+                10,
+                40,
+            ),
+            OverlayIntent::Stay
+        );
         let defaults = layout(&deck.slots, &list, None, 0, 0);
         assert!(defaults.inner > 0);
+    }
+    #[test]
+    fn compact_inbox_keeps_reasons_position_and_click_targets_without_resize() {
+        let deck = populated();
+        let list = AttentionList::default();
+        for height in [12, 13, 14, 18, 24] {
+            for width in [40, 64] {
+                let drawn = layout(&deck.slots, &list, None, height, width);
+                let frame =
+                    render(&deck, &list, height, width, &vec![String::new(); height]).join("\n");
+                assert!(!frame.contains("Resize"), "{height}x{width}: {frame}");
+                assert!(
+                    frame.contains("確認したい内容"),
+                    "{height}x{width}: {frame}"
+                );
+                assert!(frame.contains("1/12"));
+                assert!(frame.contains("Enter"));
+                assert!(drawn.item_hits.iter().all(|(_, range)| range.len() >= 2));
+            }
+        }
+    }
+
+    #[test]
+    fn contiguous_search_highlights_complete_graphemes_without_changing_visible_text() {
+        let style = Role::Warning.style();
+        for (text, filter, emphasized) in [
+            ("PR CI checks failed", "ci", "CI"),
+            ("日本語 e\u{301} 👩‍💻", "e", "e\u{301}"),
+            ("日本語 👩‍💻", "👩", "👩‍💻"),
+        ] {
+            let painted = highlight(text, filter, style);
+            assert_eq!(widgets::strip_ansi(&painted), text);
+            assert_eq!(
+                widgets::display_width(&painted),
+                widgets::display_width(text)
+            );
+            assert!(painted.contains(&style.bold().reverse().paint(emphasized)));
+        }
+        assert_eq!(highlight("normal", "", style), style.paint("normal"));
+        assert_eq!(highlight("normal", "missing", style), style.paint("normal"));
     }
 }

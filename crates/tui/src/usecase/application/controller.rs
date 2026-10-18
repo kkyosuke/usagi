@@ -35,7 +35,7 @@ use usagi_core::domain::id::{
     UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::pr_inventory::{PrEntry, PrIdentity, PrState};
 use usagi_core::domain::presentation_text::{
     presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
 };
@@ -573,9 +573,23 @@ impl DecisionEditor {
 pub struct DecisionOverlayState {
     selected: usize,
     editor: Option<DecisionEditor>,
+    requested: Option<UserDecisionId>,
+    error: Option<&'static str>,
+    /// Keep the inbox identity across missing or delayed observations.
+    exact: Option<UserDecisionId>,
 }
 
 impl DecisionOverlayState {
+    #[must_use]
+    pub const fn is_loading(&self) -> bool {
+        self.requested.is_some()
+    }
+
+    #[must_use]
+    pub const fn request_error(&self) -> Option<&'static str> {
+        self.error
+    }
+
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
@@ -1142,6 +1156,10 @@ pub struct AppState {
     /// it. The reducer keeps it only so the returning snapshot can open the
     /// modal on the target the user actually asked for.
     pr_request: Option<Target>,
+    /// Exact inbox destination until the user changes or acts on its selection.
+    pr_focus: Option<(Target, PrIdentity)>,
+    /// The next new inventory must not announce a cancelled inbox visit.
+    pr_cancelled: BTreeSet<Target>,
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
@@ -1338,6 +1356,8 @@ impl AppState {
             decision_overlay: None,
             pr_overlay: None,
             pr_request: None,
+            pr_focus: None,
+            pr_cancelled: BTreeSet::new(),
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
@@ -2003,12 +2023,16 @@ pub enum AppKey {
     OpenEnvironment,
     /// Open the active target's Pull Request list overlay (`Ctrl-O p`).
     OpenPrs,
+    /// Open the exact PR selected in the cross-workspace inbox.
+    OpenPullRequest(PrIdentity),
     /// Open the selected session's file preview overlay.
     OpenPreview,
     /// Open the selected session's artifacts, or the workspace-wide inventory.
     OpenArtifacts,
     /// Open the current workspace's durable pending decision list.
     OpenDecisions,
+    /// Refresh and open the exact pending question selected in the inbox.
+    OpenDecision(UserDecisionId),
     /// Move within the pending list or current decision options.
     DecisionPrevious,
     /// Move within the pending list or current decision options.
@@ -2365,7 +2389,10 @@ pub enum BackendEvent {
         inherited: Vec<EnvironmentEntry>,
     },
     /// A safe environment read/save failure.
-    EnvironmentError { scope: EnvScope, error: SafeError },
+    EnvironmentError {
+        scope: EnvScope,
+        error: SafeError,
+    },
     RolesLoaded {
         scope: RoleEditorScope,
         source: String,
@@ -2378,6 +2405,9 @@ pub enum BackendEvent {
     Decisions {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
+    },
+    DecisionsUnavailable {
+        workspace: WorkspaceId,
     },
     /// Daemon confirmation after resolve.  The item remains visible until this arrives.
     DecisionResolved {
@@ -2399,7 +2429,10 @@ pub enum BackendEvent {
         prs: Vec<PrEntry>,
     },
     /// A safe Pull Request read failure.
-    PullRequestsError { target: Target, error: SafeError },
+    PullRequestsError {
+        target: Target,
+        error: SafeError,
+    },
     /// Repository file candidates or one selected file returned by the overlay
     /// data owner. `path: None` carries the finder candidates; `Some` carries
     /// that file's safe UTF-8 lines.
@@ -2677,6 +2710,15 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
     if state.overlay.is_some() {
         state.pr_request = None;
     }
+    if state.pr_focus.as_ref().is_some_and(|(target, _)| {
+        state.pr_request != Some(*target)
+            && state
+                .pr_overlay
+                .as_ref()
+                .is_none_or(|overlay| overlay.target() != *target)
+    }) {
+        state.pr_focus = None;
+    }
     // Dropping the preview also ends the scan behind it, like every other way
     // the overlay closes. `take` keeps this to the drop that happens here: the
     // Escape paths have already cleared the overlay and cancelled their own.
@@ -2688,6 +2730,7 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
 
 #[must_use]
 fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+    pull_requests::cancel_inbox_wait(state, &event);
     match event {
         AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
@@ -2984,6 +3027,7 @@ fn update_pane_tab_availability(
 /// update backend event.
 fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
     match event {
+        BackendEvent::DecisionsUnavailable { workspace } => decision::unavailable(state, workspace),
         BackendEvent::SessionFavorites(favorites) => update_session_favorites(state, favorites),
         BackendEvent::Decisions {
             workspace,
@@ -3438,6 +3482,11 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
 
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     state.interaction_count = state.interaction_count.saturating_add(1);
+    // These carry an explicit Inbox choice. The process-level owner has
+    // already checked unsaved surfaces before replacing its background modal.
+    if matches!(&key, AppKey::OpenDecision(_) | AppKey::OpenPullRequest(_)) {
+        return update_management_key(state, key);
+    }
     // Existing modal overlays have precedence even if an asynchronous
     // completion opened one while the drawer was already visible.
     if let Some(overlay) = state.overlay {
@@ -4282,6 +4331,10 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         }
         if !present {
             overlay.editor = None;
+            if overlay.exact.is_some() {
+                overlay.error =
+                    Some("This question is no longer available. Close and refresh the inbox.");
+            }
         }
     }
     overlay.selected = overlay
@@ -4294,6 +4347,15 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
+    if overlay.requested.is_some() || overlay.error.is_some() {
+        if key == AppKey::Escape {
+            state.overlay = None;
+            // Keep the cancelled identity until the next observation so a
+            // delayed result cannot reopen a question after closing its error.
+            overlay.requested = overlay.requested.or(overlay.exact);
+        }
+        return Vec::new();
+    }
     if overlay
         .editor
         .as_ref()
@@ -4301,6 +4363,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         && matches!(&key, AppKey::Escape)
     {
         overlay.editor = None;
+        overlay.exact = None;
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
@@ -4405,12 +4468,17 @@ fn navigate_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect
 }
 
 /// Open the pending-decision list and ask its owner for a fresh snapshot.
-fn open_decisions(state: &mut AppState) -> Vec<Effect> {
-    state.unread_decisions.clear();
+fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Vec<Effect> {
+    if requested.is_none() {
+        state.unread_decisions.clear();
+    }
     state.overlay = Some(Overlay::Decisions);
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,
         editor: None,
+        requested,
+        error: None,
+        exact: requested,
     });
     vec![Effect::RefreshDecisions {
         workspace: state.workspace,
@@ -4442,7 +4510,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         {
             reorder_selected_session(state, TabDirection::Next)
         }
-        AppKey::OpenDecisions => open_decisions(state),
+        AppKey::OpenDecisions => open_decisions(state, None),
+        AppKey::OpenDecision(decision_id) => open_decisions(state, Some(decision_id)),
         AppKey::Up => {
             state.move_selection(-1);
             Vec::new()
@@ -4521,6 +4590,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => pull_requests::open(state),
+        AppKey::OpenPullRequest(identity) => pull_requests::open_identity(state, &identity),
         AppKey::OpenPreview => open_preview(state),
         AppKey::OpenArtifacts => {
             let target = state
@@ -4665,9 +4735,11 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::OpenEnvironment
         | AppKey::OpenGarden
         | AppKey::OpenPrs
+        | AppKey::OpenPullRequest(_)
         | AppKey::OpenPreview
         | AppKey::OpenArtifacts
         | AppKey::OpenDecisions
+        | AppKey::OpenDecision(_)
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
         | AppKey::PageUp
