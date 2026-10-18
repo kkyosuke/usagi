@@ -989,23 +989,29 @@ mod tests {
 
     fn open_artifact(state: &mut AppState) -> BackendEvent {
         let effects = update(state, AppEvent::Key(AppKey::Enter));
-        match &effects[0] {
-            Effect::OpenArtifact {
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let request_id = overlay.artifact_open().unwrap().request_id();
+        let path = overlay.selected_file().unwrap().to_owned();
+        let filter = overlay.file_filter();
+        assert_eq!(
+            effects,
+            [Effect::OpenArtifact {
                 target,
                 request_id,
-                path,
-                filter,
-            } => BackendEvent::ArtifactOpenFinished {
-                target: *target,
-                request_id: *request_id,
                 path: path.clone(),
-                filter: *filter,
-                result: Err(SafeError {
-                    message: SafeMessage::new("Open failed"),
-                    error_id: "test-open".into(),
-                }),
-            },
-            _ => panic!("native open missing"),
+                filter,
+            }]
+        );
+        BackendEvent::ArtifactOpenFinished {
+            target,
+            request_id,
+            path,
+            filter,
+            result: Err(SafeError {
+                message: SafeMessage::new("Open failed"),
+                error_id: "test-open".into(),
+            }),
         }
     }
 
@@ -1013,23 +1019,37 @@ mod tests {
     fn native_results_match_target_request_path_filter_and_complete_once() {
         let mut state = artifacts();
         let event = open_artifact(&mut state);
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let request_id = overlay.artifact_open().unwrap().request_id();
         for field in 0..4 {
-            let mut wrong = event.clone();
-            if let BackendEvent::ArtifactOpenFinished {
-                target,
-                request_id,
-                path,
-                filter,
-                ..
-            } = &mut wrong
-            {
-                match field {
-                    0 => *target = Target::Session(SessionId::new()),
-                    1 => *request_id = RequestId::new(),
-                    2 => *path = "artifacts/two.log".into(),
-                    _ => *filter = PreviewFileFilter::AllArtifacts,
+            let wrong = BackendEvent::ArtifactOpenFinished {
+                target: if field == 0 {
+                    Target::Session(SessionId::new())
+                } else {
+                    target
+                },
+                request_id: if field == 1 {
+                    RequestId::new()
+                } else {
+                    request_id
+                },
+                path: if field == 2 {
+                    "artifacts/two.log"
+                } else {
+                    "artifacts/one.log"
                 }
-            }
+                .into(),
+                filter: if field == 3 {
+                    PreviewFileFilter::AllArtifacts
+                } else {
+                    PreviewFileFilter::Artifacts
+                },
+                result: Err(SafeError {
+                    message: SafeMessage::new("Wrong completion"),
+                    error_id: "test-open".into(),
+                }),
+            };
             let _ = update(&mut state, AppEvent::Backend(wrong));
             assert!(
                 state

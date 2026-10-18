@@ -305,15 +305,22 @@ mod tests {
     fn native_open_feedback_keeps_the_finder_and_controls_visible() {
         let mut state = loaded(vec![".usagi/sessions/reports/artifacts/tests.log".into()]);
         let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
-        let (target, request_id, path, filter) = match &effects[0] {
-            crate::usecase::application::controller::Effect::OpenArtifact {
-                target,
-                request_id,
-                path,
-                filter,
-            } => (*target, *request_id, path.clone(), *filter),
-            _ => panic!("native open missing"),
-        };
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let request_id = overlay.artifact_open().unwrap().request_id();
+        let path = overlay.selected_file().unwrap().to_owned();
+        let filter = overlay.file_filter();
+        assert_eq!(
+            effects,
+            [
+                crate::usecase::application::controller::Effect::OpenArtifact {
+                    target,
+                    request_id,
+                    path: path.clone(),
+                    filter,
+                }
+            ]
+        );
         assert!(text(&state).contains("Opening in external app"));
         let _ = update(
             &mut state,
