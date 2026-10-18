@@ -19,10 +19,11 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use usagi_core::domain::agent::{
-    AgentProfileId, DurableLaunchSnapshot, LaunchMode, LaunchPlan, LaunchRequest, LaunchScope,
+    AgentProfileId, CallerRef, DurableLaunchSnapshot, LaunchMode, LaunchPlan, LaunchRequest,
+    LaunchScope,
 };
 use usagi_core::domain::clock::LogicalClock;
-use usagi_core::domain::id::{AgentRuntimeId, AgentRuntimeRef};
+use usagi_core::domain::id::{AgentId, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef};
 use usagi_core::domain::id::{
     CompletionFence, DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef,
     WorkspaceId, WorktreeId,
@@ -30,6 +31,7 @@ use usagi_core::domain::id::{
 use usagi_core::domain::terminal_launch::{
     DurableTerminalLaunchSnapshot, TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
 };
+use usagi_core::domain::user_decision::UserDecisionOwner;
 use usagi_daemon::infrastructure::resource_store::{AllocatorFile, ShardArchiveFiles};
 use usagi_daemon::usecase::generation::GenerationRole;
 use usagi_daemon::usecase::generic_terminal::{
@@ -41,7 +43,7 @@ use usagi_daemon::usecase::resources::durable::{
     ShardedTerminalStore, UnprovenChildren, census, shipping_retention_limits,
 };
 use usagi_daemon::usecase::runtime::{
-    DurableOperationOutcome, DurableRuntimeRecord, RuntimeStoreSnapshot,
+    DurableOperationOutcome, DurableRuntimeRecord, RuntimeStore, RuntimeStoreSnapshot,
 };
 use usagi_daemon::usecase::terminal::{TerminalReconcileState, TerminalRuntimeState};
 
@@ -139,6 +141,8 @@ fn agent_record(owner: DaemonGeneration) -> DurableRuntimeRecord {
     };
     DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: AgentRuntimeRef {
             agent_runtime_id: AgentRuntimeId::new(),
             terminal: terminal.terminal.clone(),
@@ -220,6 +224,65 @@ fn two_generations_write_two_separate_shard_files() {
     assert_eq!(hydrated.interrupted, 2);
     assert!(hydrated.terminals.records.iter().all(|record| record.state
         == TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown)));
+}
+
+#[test]
+fn decision_authority_survives_a_foreign_generation_snapshot_write() {
+    let dir = TempDir::new().unwrap();
+    let old = DaemonGeneration::new();
+    let new = DaemonGeneration::new();
+    let legacy = agent_record(old);
+    let mut current = agent_record(new);
+    current.resumed_from = Some(AgentResumeSourceId::new());
+    let owner = UserDecisionOwner {
+        workspace_id: current.operation.workspace_id,
+        session_id: current.operation.session_id,
+        caller: CallerRef {
+            session_id: Some(SessionId::new()),
+            agent_id: AgentId::new(),
+        },
+        run_id: OperationId::new(),
+    };
+    current.user_decision_owner = Some(owner.clone());
+    current.user_decision_owner_aliases = vec![UserDecisionOwner {
+        run_id: OperationId::new(),
+        ..owner
+    }];
+    let mut old_store = ShardedAgentStore::new(state(dir.path(), old));
+    old_store
+        .save(RuntimeStoreSnapshot {
+            records: vec![legacy.clone()],
+            ..RuntimeStoreSnapshot::default()
+        })
+        .unwrap();
+    ShardedAgentStore::new(state(dir.path(), new))
+        .save(RuntimeStoreSnapshot {
+            records: vec![current.clone()],
+            ..RuntimeStoreSnapshot::default()
+        })
+        .unwrap();
+    let before = fs::read(shard_path(dir.path(), new)).unwrap();
+    old_store
+        .save(RuntimeStoreSnapshot {
+            records: vec![legacy],
+            ..RuntimeStoreSnapshot::default()
+        })
+        .unwrap();
+    assert_eq!(fs::read(shard_path(dir.path(), new)).unwrap(), before);
+    let hydrated = state(dir.path(), DaemonGeneration::new())
+        .hydrate()
+        .unwrap();
+    let restored = hydrated
+        .agents
+        .records
+        .iter()
+        .find(|record| record.runtime == current.runtime)
+        .unwrap();
+    assert_eq!(restored.user_decision_owner, current.user_decision_owner);
+    assert_eq!(
+        restored.user_decision_owner_aliases,
+        current.user_decision_owner_aliases
+    );
 }
 
 #[test]

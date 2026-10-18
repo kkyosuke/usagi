@@ -21,6 +21,7 @@ use usagi_core::domain::{
     },
     terminal_launch::TerminalKind,
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
+    user_decision::UserDecisionOwner,
 };
 
 pub use super::terminal::{
@@ -83,6 +84,16 @@ pub struct DurableRuntimeRecord {
     /// Public launch audit, retained through restart and exact resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_provenance: Option<AgentLaunchProvenance>,
+    /// Immutable decision authority for this exact conversation. Each replacement
+    /// carries it in its own owner shard so source/dispatch history may be collected.
+    /// Fresh launches create a new owner even when they reuse an Agent identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_decision_owner: Option<UserDecisionOwner>,
+    /// Owners already used by retained legacy exact-resume runs, newest first.
+    /// Migration captures these once; subsequent resumes copy them without adding
+    /// their new run. They never cross an ordinary fresh-conversation launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_decision_owner_aliases: Vec<UserDecisionOwner>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -612,6 +623,8 @@ impl RuntimeCoordinator {
             semantic_key,
             &[],
             None,
+            None,
+            Vec::new(),
         )
     }
 
@@ -643,6 +656,8 @@ impl RuntimeCoordinator {
             semantic_key,
             superseded,
             None,
+            None,
+            Vec::new(),
         )
     }
 
@@ -663,6 +678,8 @@ impl RuntimeCoordinator {
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
         launch_provenance: Option<AgentLaunchProvenance>,
+        user_decision_owner: Option<UserDecisionOwner>,
+        user_decision_owner_aliases: Vec<UserDecisionOwner>,
     ) -> Result<(), RuntimeError> {
         let terminal = runtime.terminal.clone();
         let outcome = self.admit_with_semantic_superseding(
@@ -677,6 +694,8 @@ impl RuntimeCoordinator {
             semantic_key,
             superseded,
             launch_provenance,
+            user_decision_owner,
+            user_decision_owner_aliases,
         );
         if outcome.is_err() {
             self.retention.release(&terminal);
@@ -698,8 +717,23 @@ impl RuntimeCoordinator {
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
         launch_provenance: Option<AgentLaunchProvenance>,
+        user_decision_owner: Option<UserDecisionOwner>,
+        user_decision_owner_aliases: Vec<UserDecisionOwner>,
     ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
+        if user_decision_owner.as_ref().is_some_and(|owner| {
+            owner.workspace_id != operation.workspace_id
+                || owner.session_id != operation.session_id
+                || (superseded.is_empty() && owner.run_id != operation.operation_id)
+        }) || (!user_decision_owner_aliases.is_empty()
+            && (user_decision_owner.is_none() || superseded.is_empty()))
+            || user_decision_owner_aliases.iter().any(|owner| {
+                owner.workspace_id != operation.workspace_id
+                    || owner.session_id != operation.session_id
+            })
+        {
+            return Err(RuntimeError::ScopeMismatch);
+        }
         if self.generation.current().is_none() {
             self.generation
                 .register_standby(
@@ -738,6 +772,12 @@ impl RuntimeCoordinator {
                 return Err(RuntimeError::ProviderResumeMismatch);
             }
             if record.superseded_by.is_some() {
+                return Err(RuntimeError::ProviderResumeMismatch);
+            }
+            if record.user_decision_owner.is_some()
+                && (record.user_decision_owner != user_decision_owner
+                    || record.user_decision_owner_aliases != user_decision_owner_aliases)
+            {
                 return Err(RuntimeError::ProviderResumeMismatch);
             }
             continuation = record.continuation;
@@ -860,6 +900,8 @@ impl RuntimeCoordinator {
                 outcome: DurableOperationOutcome::Accepted,
                 credential_provenance,
                 launch_provenance,
+                user_decision_owner,
+                user_decision_owner_aliases,
             },
         );
         self.generation
@@ -1917,6 +1959,31 @@ fn terminal_ownership_matches(state: RuntimeState, ownership: TerminalState) -> 
         || (state == RuntimeState::Reclaimed && ownership == TerminalState::Terminated)
 }
 
+fn validate_hydrated_scope(record: &DurableRuntimeRecord) -> Result<(), RuntimeSnapshotError> {
+    if record.runtime.terminal.session_id != record.runtime.session_id
+        || record.runtime.session_id != record.operation.session_id
+        || record.runtime.terminal.workspace_id != record.operation.workspace_id
+        || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
+        || record.launch.request.scope.workspace_id != record.runtime.terminal.workspace_id
+        || record.launch.request.scope.session_id != record.runtime.terminal.session_id
+        || record.launch.request.scope.worktree_id != record.runtime.terminal.worktree_id
+        || record.user_decision_owner.as_ref().is_some_and(|owner| {
+            owner.workspace_id != record.operation.workspace_id
+                || owner.session_id != record.operation.session_id
+                || (record.resumed_from.is_none() && owner.run_id != record.operation.operation_id)
+        })
+        || (!record.user_decision_owner_aliases.is_empty()
+            && (record.user_decision_owner.is_none() || record.resumed_from.is_none()))
+        || record.user_decision_owner_aliases.iter().any(|owner| {
+            owner.workspace_id != record.operation.workspace_id
+                || owner.session_id != record.operation.session_id
+        })
+    {
+        return Err(RuntimeSnapshotError::ScopeMismatch);
+    }
+    Ok(())
+}
+
 #[inline(never)]
 fn hydrated_records(
     snapshot: RuntimeStoreSnapshot,
@@ -1926,16 +1993,7 @@ fn hydrated_records(
     let mut operations = std::collections::BTreeSet::new();
     let mut resume_sources = std::collections::BTreeSet::new();
     for record in snapshot.records {
-        if record.runtime.terminal.session_id != record.runtime.session_id
-            || record.runtime.session_id != record.operation.session_id
-            || record.runtime.terminal.workspace_id != record.operation.workspace_id
-            || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
-            || record.launch.request.scope.workspace_id != record.runtime.terminal.workspace_id
-            || record.launch.request.scope.session_id != record.runtime.terminal.session_id
-            || record.launch.request.scope.worktree_id != record.runtime.terminal.worktree_id
-        {
-            return Err(RuntimeSnapshotError::ScopeMismatch);
-        }
+        validate_hydrated_scope(&record)?;
         if !operations.insert(record.operation.operation_id) {
             return Err(RuntimeSnapshotError::DuplicateOperation);
         }
@@ -1967,11 +2025,21 @@ fn hydrated_records(
                     record.runtime.terminal.daemon_generation,
                     record.continuation,
                     record.launch.request.scope.clone(),
+                    record.user_decision_owner.clone(),
+                    record.user_decision_owner_aliases.clone(),
                 )
             })
         })
         .collect::<Vec<_>>();
-    for (source_id, replacement_id, replacement_generation, continuation, scope) in source_backrefs
+    for (
+        source_id,
+        replacement_id,
+        replacement_generation,
+        continuation,
+        scope,
+        decision_owner,
+        decision_owner_aliases,
+    ) in source_backrefs
     {
         if !replacement_sources.insert(source_id) {
             return Err(RuntimeSnapshotError::ResumeRelation);
@@ -1987,6 +2055,13 @@ fn hydrated_records(
             continue;
         };
         if source.continuation != continuation || source.launch.request.scope != scope {
+            return Err(RuntimeSnapshotError::ResumeRelation);
+        }
+        if source.user_decision_owner.is_some()
+            && decision_owner.is_some()
+            && (source.user_decision_owner != decision_owner
+                || source.user_decision_owner_aliases != decision_owner_aliases)
+        {
             return Err(RuntimeSnapshotError::ResumeRelation);
         }
         match source.superseded_by {

@@ -9,10 +9,10 @@ use super::{
     DispatchBinding, DispatchCredentialProvenance, DispatchRun, ErrorCode, LaunchMode,
     LaunchRequest, LaunchScope, McpCaller, ModelSelector, OperationId, ProtocolError,
     ProviderResumeReason, RunStatus, RuntimeAuthorization, SessionScopeResolver, TerminalId,
-    TerminalRef, Utc, WorkerRef, agent_operation_digest, dispatch_admission_incomplete,
-    dispatch_agent_not_found, dispatch_binding_unavailable, durable_operation_outcome,
-    is_resume_source_state, map_dispatch_storage_error, map_orchestration_error, map_runtime_error,
-    map_scope_error,
+    TerminalRef, UserDecisionOwner, Utc, WorkerRef, agent_operation_digest,
+    dispatch_admission_incomplete, dispatch_agent_not_found, dispatch_binding_unavailable,
+    durable_operation_outcome, is_resume_source_state, map_dispatch_storage_error,
+    map_orchestration_error, map_runtime_error, map_scope_error,
 };
 use usagi_core::domain::agent::{AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource};
 
@@ -182,6 +182,13 @@ impl AgentRuntime {
             operation: fence,
             mcp_allowed: true,
             launch_provenance: Some(provenance),
+            user_decision_owner: Some(UserDecisionOwner {
+                workspace_id: launch.workspace,
+                session_id: worker.session_id,
+                caller: caller.clone(),
+                run_id: operation,
+            }),
+            user_decision_owner_aliases: Vec::new(),
         };
         let credential = OperationId::new().to_string();
         let mut reserved_worker = worker.clone();
@@ -415,6 +422,7 @@ impl AgentRuntime {
             .binding(source.operation.operation_id)
             .map_err(map_dispatch_storage_error)?
             .ok_or_else(dispatch_binding_unavailable)?;
+        let decision_authority = self.user_decision_authority_for_record(source, &records)?;
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
@@ -427,6 +435,8 @@ impl AgentRuntime {
                     .and_then(|provenance| provenance.created.clone()),
                 launched,
             }),
+            user_decision_owner: Some(decision_authority.owner.clone()),
+            user_decision_owner_aliases: decision_authority.aliases,
         };
         let credential = OperationId::new().to_string();
         // A tuple no longer identifies an Agent: same-session peers may use
@@ -440,10 +450,7 @@ impl AgentRuntime {
         self.require_peer_stopped_except(worker.agent_id, Some(source.operation.operation_id))?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
-        let caller = CallerRef {
-            session_id: worker.session_id,
-            agent_id: worker.agent_id,
-        };
+        let caller = decision_authority.owner.caller;
         self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission(
@@ -634,12 +641,6 @@ impl AgentRuntime {
         let fresh_identity = !existing_agents.contains(&worker.agent_id);
         let provenance =
             self.provenance_for_agent(worker.agent_id, context.origin(operation), fresh_identity)?;
-        let authorization = RuntimeAuthorization {
-            runtime,
-            operation: fence,
-            mcp_allowed: true,
-            launch_provenance: Some(provenance),
-        };
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         // A delayed delegation carries the authenticated parent in its durable
@@ -652,6 +653,19 @@ impl AgentRuntime {
                 session_id: worker.session_id,
                 agent_id: worker.agent_id,
             });
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+            launch_provenance: Some(provenance),
+            user_decision_owner: Some(UserDecisionOwner {
+                workspace_id: intent.workspace,
+                session_id: worker.session_id,
+                caller: caller.clone(),
+                run_id: operation,
+            }),
+            user_decision_owner_aliases: Vec::new(),
+        };
         self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission_for_workspace(

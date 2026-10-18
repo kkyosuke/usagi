@@ -848,6 +848,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `pending-update.lock` | lock file | 更新予約の保存・完了と worker の最終 empty check を直列化する |
 | `pending-update-worker.lock` | lock file | 同じ data home の自動再試行 worker を単一にする |
 | `agent-restart.json` | durable JSON | 停止前に記録する exact Agent 集合、item ごとの resume operation と完了状態 |
+| `agent-restart.lock` | private lock file | 復旧 transaction の作成、同じ operation の進捗更新、operation を照合した削除を直列化する |
 | `agent-restart-intent.json` | durable JSON | 新 CLI が保存する続行 intent。operation・source generation・exact runtime 集合が transaction と一致する場合だけ successor が反映する |
 | `agent-restart-intent.lock` | private lock file | 続行 intent の保存と operation を照合した削除を直列化する |
 | `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
@@ -1961,6 +1962,17 @@ materialize することもない。停止時の phase が `running` / `waiting`
 旧 owner が続行 field のない transaction を書く初回の更新でも、新 successor はこの intent と一致する未完了 item だけに続行の指定を反映し、resume 前に永続化する。
 一致する intent のない旧 transaction は従来どおり追加入力なしで再開する。
 restart 中は停止・切替の段階と再開済み Agent 件数を stderr に表示し、全 item の完了と serving 検証後にだけ完了表示を出す。
+exact resume は元の dispatch caller と人への確認依頼の owner も引き継ぐ。再開後の新しい credential で元の質問・回答を polling でき、
+同じ idempotency key の再送が質問を複製することも、完了・失敗報告の届け先が自分自身へ変わることもない。
+owner は新 runtime の shard に保存するため、旧 generation の書き込みや旧履歴の回収でも失われない。
+認証と旧 record の互換性は [MCP の user decision 契約](07-mcp.md#user-decision) を参照する。
+
+復旧 transaction の作成・進捗更新・削除は同じ private lock で直列化する。進捗更新は既存 operation と停止済み source の集合を照合し、
+完了 item を未完了へ戻さない。消去済み transaction を遅れて動いた worker が再作成することも、別 operation の transaction を上書き・削除することもない。
+commit 前の失敗を old owner が巻き戻す間も active-control lease を保持し、再開処理と後片付けの完了まで次の handoff を待たせる。
+exact replacement の spawn が保存済みなら、進捗保存前にその Agent が終了しても item を再開済みとして閉じる。
+正常・異常終了の結果は runtime に残し、後の generation が異なる integration の指定で再試行したり `continue` を再送したりしない。
+予約だけの record や spawn 失敗は、この spawn 完了判定の根拠にしない。
 
 commit 後、draining owner は残存作業のない non-initial tenant の fence を、旧 client の参照が残っていても解放する。
 successor は各 root の fence を取得し、workspace identity を照合してから再開する。successor が追加取得する workspace で、
