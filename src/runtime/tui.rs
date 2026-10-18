@@ -9322,7 +9322,11 @@ mod tests {
             path: None,
             filter: PreviewFileFilter::All,
         });
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // A fresh worker observation may spend the bounded attach deadline
+        // before reporting that no daemon is available. Include scheduler slack.
+        let deadline = Instant::now()
+            + Duration::from_millis(ClientPolicy::tui().timeout_ms)
+            + Duration::from_secs(3);
         let preview_error = loop {
             let events = composition.backend.drain_events();
             if !events.is_empty() {

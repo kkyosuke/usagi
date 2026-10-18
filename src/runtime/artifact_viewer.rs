@@ -168,6 +168,8 @@ mod tests {
         let reaper = PlatformChildReaper::default();
         let marker = root.path().join("late-helper-read");
         let late_marker = marker.clone();
+        let release = tempfile::NamedTempFile::new_in(root.path()).unwrap();
+        let helper_release = release.path().to_path_buf();
         let (delivered, received) = mpsc::channel();
         let viewer = PlatformArtifactViewer {
             reaper: reaper.clone(),
@@ -176,9 +178,14 @@ mod tests {
                 delivered.send(PathBuf::from(path)).unwrap();
                 let mut command = Command::new("/bin/sh");
                 command
-                    .args(["-c", "sleep 0.1; cat \"$1\" > \"$2\"; exit 7", "fixture"])
+                    .args([
+                        "-c",
+                        "while test -f \"$3\"; do sleep 0.01; done; cat \"$1\" > \"$2\"; exit 7",
+                        "fixture",
+                    ])
                     .arg(path)
-                    .arg(&late_marker);
+                    .arg(&late_marker)
+                    .arg(&helper_release);
                 Ok(command)
             }),
         };
@@ -193,6 +200,11 @@ mod tests {
             })
         ));
         drop(opener);
+        assert!(
+            !marker.exists(),
+            "the helper must still be awaiting release"
+        );
+        drop(release);
         wait_until(|| reaper.tracked() == Some(0));
         assert_eq!(fs::read_to_string(marker).unwrap(), "private report");
         fs::remove_dir_all(copy.parent().unwrap()).unwrap();

@@ -1,8 +1,8 @@
 //! Worker-side validation against both the displayed roots and fresh daemon state.
 
 use super::{
-    DaemonReply, DaemonRequest, LaneConnection, LifecycleRequestError, LifecycleSnapshot,
-    SessionAction, lifecycle_snapshot,
+    ClientPolicy, DaemonReply, DaemonRequest, LaneConnection, LifecycleRequestError,
+    LifecycleSnapshot, SessionAction, lifecycle_snapshot,
 };
 use crate::runtime::file_preview::FilePreviewError;
 use crate::runtime::preview_authority::PreviewAuthority;
@@ -10,19 +10,46 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
+use usagi_core::infrastructure::client::DaemonClient;
+use usagi_core::infrastructure::ipc::ClientWorkspace;
 use usagi_tui::usecase::application::controller::Target;
 
 pub(super) type PreviewRoots = Arc<Mutex<Vec<(SessionId, PathBuf)>>>;
+type ObservationConnector =
+    Box<dyn FnMut(ClientWorkspace) -> Result<Box<dyn DaemonClient + Send>, String> + Send>;
+
 enum Observer {
-    Daemon(LaneConnection),
+    Daemon {
+        lane: LaneConnection,
+        workspace: ClientWorkspace,
+        connect: ObservationConnector,
+    },
     #[cfg(test)]
     Fixture(Box<dyn FnMut() -> Result<LifecycleSnapshot, LifecycleRequestError> + Send>),
 }
 
 impl Observer {
+    fn daemon(root: &Path, connect: ObservationConnector) -> Self {
+        Self::Daemon {
+            lane: LaneConnection::observing(),
+            workspace: ClientWorkspace::Selected {
+                root: usagi_core::infrastructure::paths::wire_workspace_root(root),
+            },
+            connect,
+        }
+    }
+
     fn snapshot(&mut self) -> Result<LifecycleSnapshot, LifecycleRequestError> {
         match self {
-            Self::Daemon(lane) => {
+            Self::Daemon {
+                lane,
+                workspace,
+                connect,
+            } => {
+                if lane.client.is_none() {
+                    lane.client =
+                        Some(connect(workspace.clone()).map_err(LifecycleRequestError::Decode)?);
+                }
                 let reply = lane
                     .request(DaemonRequest::Session {
                         action: SessionAction::List,
@@ -45,6 +72,16 @@ impl Observer {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=worker_observations_bind_selected_root_on_connect_and_reconnect
+fn connect_observer(workspace: ClientWorkspace) -> Result<Box<dyn DaemonClient + Send>, String> {
+    // This adapter only attaches to an existing daemon. Capturing the explicit
+    // workspace also keeps PolicyClient reconnects independent of a concurrent
+    // inactive Garden refresh changing the process-wide selected workspace.
+    let client = crate::runtime::daemon::existing_policy_client(ClientPolicy::tui(), workspace)
+        .map_err(super::daemon_error_reason)?;
+    Ok(Box::new(client))
+}
+
 pub(super) fn lock_roots(roots: &PreviewRoots) -> MutexGuard<'_, Vec<(SessionId, PathBuf)>> {
     roots
         .lock()
@@ -60,13 +97,14 @@ pub(super) struct PreviewAccess {
 
 impl PreviewAccess {
     pub(super) fn new(workspace: WorkspaceId, root: PathBuf, sessions: PreviewRoots) -> Self {
+        let observe = Observer::daemon(&root, Box::new(connect_observer));
         Self {
             workspace,
             root,
             sessions,
             // Reuse this worker's observation connection. Previewing must not
             // bootstrap a missing daemon or pay for a new handshake per file.
-            observe: Observer::Daemon(LaneConnection::observing()),
+            observe,
         }
     }
 
@@ -170,10 +208,16 @@ mod tests {
             }),
             Err(super::super::ClientError::Unavailable("offline".into())),
         ];
-        let mut observer = Observer::Daemon(LaneConnection {
-            client: Some(Box::new(Replies(replies.into()))),
-            cold_start_budget: 0,
-        });
+        let mut observer = Observer::Daemon {
+            lane: LaneConnection {
+                client: Some(Box::new(Replies(replies.into()))),
+                cold_start_budget: 0,
+            },
+            workspace: ClientWorkspace::Selected {
+                root: "/workspace".into(),
+            },
+            connect: Box::new(connect_observer),
+        };
         assert_eq!(
             observer
                 .snapshot()
@@ -193,11 +237,59 @@ mod tests {
         for _ in 0..3 {
             assert!(observer.snapshot().is_err());
         }
-        let Observer::Daemon(lane) = observer else {
-            panic!("fixture observer replaced the real lane");
-        };
-        assert!(lane.client.is_none());
-        assert_eq!(lane.cold_start_budget, 0);
+        assert!(matches!(
+            observer,
+            Observer::Daemon {
+                lane: LaneConnection {
+                    client: None,
+                    cold_start_budget: 0,
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn worker_observations_bind_selected_root_on_connect_and_reconnect() {
+        let roots = Arc::new(Mutex::new(Vec::new()));
+        let claimed = Arc::clone(&roots);
+        let mut connections = 0;
+        let value = serde_json::json!({
+            "workspace_id": WorkspaceId::new(), "root_worktree_id": WorktreeId::new(),
+            "revision": 1, "sessions": []
+        });
+        let mut observer = Observer::daemon(
+            Path::new("/workspace/owned"),
+            Box::new(move |workspace| {
+                claimed.lock().unwrap().push(workspace);
+                connections += 1;
+                if connections == 1 {
+                    return Err("daemon temporarily unavailable".into());
+                }
+                Ok(Box::new(Replies(
+                    [
+                        Ok(DaemonReply::Ok(value.clone())),
+                        Err(super::super::ClientError::Unavailable(
+                            "disconnected".into(),
+                        )),
+                    ]
+                    .into(),
+                )))
+            }),
+        );
+        assert!(observer.snapshot().is_err());
+        assert!(observer.snapshot().is_ok());
+        assert!(observer.snapshot().is_err());
+        assert!(observer.snapshot().is_ok());
+        assert_eq!(
+            *roots.lock().unwrap(),
+            vec![
+                ClientWorkspace::Selected {
+                    root: "/workspace/owned".into(),
+                };
+                3
+            ]
+        );
     }
 
     fn snapshot(

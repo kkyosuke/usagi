@@ -1,7 +1,7 @@
 //! Bounded asynchronous reaping for platform helper processes.
 
 use std::io;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
@@ -19,6 +19,14 @@ pub(crate) enum HelperExit {
     Success,
     Failure,
     Unconfirmed,
+}
+
+fn classify_helper_exit(status: ExitStatus) -> HelperExit {
+    if status.success() {
+        HelperExit::Success
+    } else {
+        HelperExit::Failure
+    }
 }
 
 struct TrackedChild {
@@ -128,12 +136,7 @@ fn reap_children(state: &ReaperState, lifetime: &Weak<()>) {
                         let mut tracked = children.swap_remove(index);
                         let _ = tracked.child.wait();
                         if let Some(sender) = tracked.completion.take() {
-                            let outcome = if status.success() {
-                                HelperExit::Success
-                            } else {
-                                HelperExit::Failure
-                            };
-                            let _ = sender.send(outcome);
+                            let _ = sender.send(classify_helper_exit(status));
                         }
                     }
                     Err(_) => {
@@ -157,11 +160,23 @@ fn reap_children(state: &ReaperState, lifetime: &Weak<()>) {
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=platform_child_reaper_reaps_short_helpers_around_a_long_lived_child
 
-    use std::process::{Command, Stdio};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, ExitStatus, Stdio};
     use std::sync::{Arc, Weak};
     use std::time::{Duration, Instant};
 
-    use super::{MAX_TRACKED_CHILDREN, PlatformChildReaper};
+    use super::{HelperExit, MAX_TRACKED_CHILDREN, PlatformChildReaper, classify_helper_exit};
+
+    #[test]
+    fn helper_exit_classification_preserves_success_failure_and_signals() {
+        for (raw, expected) in [
+            (0, HelperExit::Success),
+            (7 << 8, HelperExit::Failure),
+            (libc::SIGTERM, HelperExit::Failure),
+        ] {
+            assert_eq!(classify_helper_exit(ExitStatus::from_raw(raw)), expected);
+        }
+    }
 
     fn helper(script: &str) -> Command {
         let mut command = Command::new("sh");
