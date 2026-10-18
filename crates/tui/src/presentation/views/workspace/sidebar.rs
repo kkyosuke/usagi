@@ -120,9 +120,13 @@ pub fn sidebar_pointer_target(
     let selection = hit.selection?;
     if let Selection::Target(Target::Session(id)) = selection {
         let session = home.sessions.iter().find(|session| session.id == id)?;
+        // These rows replace the metadata and Agent actions with status or
+        // blank lines, even before the daemon publishes a new lifecycle.
+        if session.removing || session.lifecycle == SessionLifecycle::Failed {
+            return Some(SidebarPointerTarget::Row(selection));
+        }
         let line = row - hit.top;
         if line == 1
-            && session.lifecycle == SessionLifecycle::Available
             && let Some(badge) = pr_summary(session.pr_count, home.icon_mode)
             && column >= left.saturating_sub(widgets::display_width(&badge))
         {
@@ -163,6 +167,92 @@ mod tests {
             result.push(character);
         }
         result
+    }
+
+    fn action_home(
+        lifecycle: SessionLifecycle,
+        removing: bool,
+        icon_mode: IconMode,
+    ) -> (SessionId, HomeProjection) {
+        let workspace = WorkspaceId::new();
+        let id = SessionId::new();
+        let state = AppState::home(workspace, vec![id]);
+        let mut session = ProjectedSession::from_record(
+            id,
+            &SessionRecord {
+                name: "working".into(),
+                display_name: None,
+                origin: SessionOrigin::Human,
+                started_from: None,
+                root: PathBuf::from("."),
+                created_at: DateTime::default(),
+                last_active: None,
+                notes: usagi_core::domain::note::Scratchpad::default(),
+                prs: Vec::new(),
+            },
+        );
+        session.lifecycle = lifecycle;
+        session.removing = removing;
+        session.pr_count = 1;
+        (
+            id,
+            HomeProjection::from_state(&state, "test", &[session]).with_icon_mode(icon_mode),
+        )
+    }
+
+    #[test]
+    fn sidebar_action_cells_are_inert_when_the_action_rows_are_hidden() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (lifecycle, removing) in [
+            (SessionLifecycle::Available, true),
+            (SessionLifecycle::Failed, false),
+            (SessionLifecycle::Failed, true),
+        ] {
+            for mode in [IconMode::NerdFont, IconMode::Text] {
+                let (id, home) = action_home(lifecycle, removing, mode);
+                let frame = render_home_at(30, 100, &home, now);
+                for row in [3, 4] {
+                    if removing {
+                        assert!(left(&frame[row], LEFT_WIDTH).trim().is_empty());
+                    }
+                    assert_eq!(
+                        sidebar_pointer_target(
+                            30,
+                            100,
+                            &home,
+                            now,
+                            35,
+                            u16::try_from(row).unwrap()
+                        ),
+                        Some(SidebarPointerTarget::Row(Selection::Target(
+                            Target::Session(id)
+                        )))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_action_pr_badges_stay_clickable_for_each_rendered_lifecycle() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Available,
+            SessionLifecycle::Deleting,
+        ] {
+            for mode in [IconMode::NerdFont, IconMode::Text] {
+                let (id, home) = action_home(lifecycle, false, mode);
+                let frame = render_home_at(30, 100, &home, now);
+                assert!(left(&frame[3], LEFT_WIDTH).ends_with('1'));
+                assert_eq!(
+                    sidebar_pointer_target(30, 100, &home, now, 35, 3),
+                    Some(SidebarPointerTarget::PullRequests(id)),
+                    "{lifecycle:?}, {mode:?}"
+                );
+            }
+        }
     }
 
     #[test]
