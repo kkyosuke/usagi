@@ -49,8 +49,7 @@ fn director_drawer_toggle_preserves_background_state_and_owns_input() {
         AppEvent::Key(AppKey::CtrlQ),
         AppEvent::Key(AppKey::Char('x')),
         AppEvent::Pointer {
-            column: 1,
-            row: 2,
+            target: Some(SidebarPointerTarget::Row(Selection::NewSession)),
             at: std::time::Duration::from_millis(1),
         },
     ] {

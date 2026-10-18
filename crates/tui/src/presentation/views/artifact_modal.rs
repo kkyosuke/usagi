@@ -81,13 +81,18 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
                 "No matching artifacts. Backspace edits the filter."
             }));
         } else {
-            let rows = state
-                .visible_candidates()
-                .iter()
-                .enumerate()
-                .map(|(index, candidate)| row(candidate.path(), index == state.selected(), inner))
-                .collect::<Vec<_>>();
-            lines.extend(modal::bounded_list_rows(&rows, state.selected(), capacity));
+            lines.extend(modal::bounded_list_rows_with(
+                state.visible_len(),
+                state.selected(),
+                capacity,
+                |index| {
+                    row(
+                        state.candidate_at(index).unwrap().path(),
+                        index == state.selected(),
+                        inner,
+                    )
+                },
+            ));
         }
     }
     if detail {
@@ -204,6 +209,7 @@ mod tests {
             assert!(rendered.contains(expected), "{rendered}");
         }
         assert!(state.preview_overlay().unwrap().pane().path().is_none());
+        assert!(state.preview_overlay().unwrap().candidate_at(100).is_none());
     }
 
     #[test]

@@ -1695,8 +1695,13 @@ fn double_clicked_append_restored_session_attaches_and_receives_input() {
     });
     for at in [1_000, 1_100] {
         let _ = runtime.apply_event(AppEvent::Pointer {
-            column: 5,
-            row: 2,
+            target: Some(
+                crate::usecase::application::controller::SidebarPointerTarget::Row(
+                    crate::usecase::application::controller::Selection::Target(Target::Session(
+                        session,
+                    )),
+                ),
+            ),
             at: std::time::Duration::from_millis(at),
         });
     }

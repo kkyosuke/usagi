@@ -1825,11 +1825,26 @@ fn resume_focused_interrupted_tab(
     );
 }
 
-/// Build the controller event for a sidebar click. The shell supplies the raw
-/// cell and an injected monotonic timestamp; stable identity and double-click
-/// detection remain controller responsibilities.
-fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppEvent {
-    AppEvent::Pointer { column, row, at }
+/// Resolve against the frame on screen, including its speech and pending rows.
+fn sidebar_pointer_event(
+    material: Option<&HomeFrameMaterial>,
+    column: u16,
+    row: u16,
+    at: std::time::Duration,
+) -> AppEvent {
+    AppEvent::Pointer {
+        target: material.and_then(|material| {
+            views::workspace::sidebar_pointer_target(
+                material.height,
+                material.width,
+                &material.projection,
+                material.now,
+                column,
+                row,
+            )
+        }),
+        at,
+    }
 }
 
 /// Whether a key read from the terminal is a *user* interaction.

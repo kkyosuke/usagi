@@ -2238,6 +2238,48 @@ mod tests {
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
 
     #[test]
+    fn pending_pane_completion_preserves_artifacts_and_their_input_owner() {
+        use crate::usecase::application::controller::SidebarPointerTarget;
+        use usagi_core::domain::id::{DaemonGeneration, TerminalId, WorktreeId};
+        for keyboard in [false, true] {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let target = Target::Session(session);
+            let operation = OperationId::new();
+            let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+            let _ = runtime.apply_event(AppEvent::Key(AppKey::Enter));
+            let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+            let event = if keyboard {
+                AppEvent::Key(AppKey::OpenArtifacts)
+            } else {
+                AppEvent::Pointer {
+                    target: Some(SidebarPointerTarget::Artifacts(session)),
+                    at: std::time::Duration::ZERO,
+                }
+            };
+            let _ = runtime.apply_event(event);
+            assert!(!runtime.pane_completion_will_focus(operation));
+            let overlay = runtime.state().preview_overlay().cloned().unwrap();
+            let _ = runtime.complete_pane_focus_if_uninterrupted(
+                target,
+                operation,
+                TerminalRef {
+                    daemon_generation: DaemonGeneration::new(),
+                    terminal_id: TerminalId::new(),
+                    workspace_id: workspace,
+                    session_id: Some(session),
+                    worktree_id: WorktreeId::new(),
+                },
+            );
+            assert_eq!(runtime.state().overlay(), Some(Overlay::Preview));
+            assert_eq!(runtime.state().preview_overlay(), Some(&overlay));
+            assert!(!runtime.wants_live_input());
+            let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+            assert!(runtime.wants_live_input());
+        }
+    }
+
+    #[test]
     fn effective_prompt_mode_is_used_for_both_workspace_modals() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -3053,8 +3095,13 @@ mod tests {
         // chrome 2 行 + 1 件目の session 行 3 行の直後が 2 件目の先頭行になる。
         for at in [1_000, 1_100] {
             let _ = runtime.apply_event(AppEvent::Pointer {
-                column: 5,
-                row: 5,
+                target: Some(
+                    crate::usecase::application::controller::SidebarPointerTarget::Row(
+                        crate::usecase::application::controller::Selection::Target(
+                            Target::Session(second_session),
+                        ),
+                    ),
+                ),
                 at: std::time::Duration::from_millis(at),
             });
         }

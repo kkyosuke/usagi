@@ -486,6 +486,15 @@ impl PreviewOverlay {
         self.visible.len()
     }
 
+    /// Borrow one already-ranked candidate without allocating the full list.
+    #[must_use]
+    pub fn candidate_at(&self, index: usize) -> Option<PreviewCandidate<'_>> {
+        self.visible.get(index).map(|row| PreviewCandidate {
+            path: &self.files[row.file],
+            positions: &row.positions,
+        })
+    }
+
     /// Selected repository-relative path, if the current filter has a match.
     #[must_use]
     pub fn selected_file(&self) -> Option<&str> {
