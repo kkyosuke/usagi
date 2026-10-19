@@ -67,7 +67,8 @@ use flow_steps::{
 use session_commands::{
     ActiveSessionCommand, SessionCommandCompletion, SessionCommandLane, adopt_session_command_lane,
     begin_session_command, deliver_carried_outcome, drain_session_completions,
-    drain_session_refresh, project_controller_sessions, session_name_for, sync_runtime_sessions,
+    drain_session_refresh, project_controller_sessions, session_name_for,
+    sync_overlay_session_roots, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{
@@ -844,8 +845,8 @@ impl AgentTabIntentPort for UnavailableAgentTabIntentPort {
 struct UnavailableDecisionCommandPort;
 #[cfg(test)]
 impl DecisionCommandPort for UnavailableDecisionCommandPort {
-    fn refresh(&mut self, _workspace: WorkspaceId) -> BackendEvent {
-        BackendEvent::Notice(Notice::new("User decisions are unavailable."))
+    fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent {
+        BackendEvent::DecisionsUnavailable { workspace }
     }
 
     fn resolve(
@@ -1825,11 +1826,26 @@ fn resume_focused_interrupted_tab(
     );
 }
 
-/// Build the controller event for a sidebar click. The shell supplies the raw
-/// cell and an injected monotonic timestamp; stable identity and double-click
-/// detection remain controller responsibilities.
-fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppEvent {
-    AppEvent::Pointer { column, row, at }
+/// Resolve against the frame on screen, including its speech and pending rows.
+fn sidebar_pointer_event(
+    material: Option<&HomeFrameMaterial>,
+    column: u16,
+    row: u16,
+    at: std::time::Duration,
+) -> AppEvent {
+    AppEvent::Pointer {
+        target: material.and_then(|material| {
+            views::workspace::sidebar_pointer_target(
+                material.height,
+                material.width,
+                &material.projection,
+                material.now,
+                column,
+                row,
+            )
+        }),
+        at,
+    }
 }
 
 /// Whether a key read from the terminal is a *user* interaction.

@@ -80,7 +80,7 @@ impl From<&RunOutcome> for Action {
             RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
             RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
             RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
-            RunOutcome::SyncDaemonAfterUpdate => Self::SyncDaemonAfterUpdate,
+            RunOutcome::SyncDaemonAfterUpdate { .. } => Self::SyncDaemonAfterUpdate,
             RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
             RunOutcome::LaunchMcp => Self::LaunchMcp,
             RunOutcome::Clean { .. } => Self::Clean,
@@ -133,12 +133,35 @@ mod action_io {
             (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
-            (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
-                match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
-                    Ok(outcome) => Ok(managed_update_sync_exit_code(
-                        outcome,
-                        std::env::var("USAGI_UPDATE_SYNC_OUTCOMES").as_deref() == Ok("1"),
-                    )),
+            (
+                Action::SyncDaemonAfterUpdate,
+                RunOutcome::SyncDaemonAfterUpdate { restart_agents },
+            ) => {
+                match daemon::sync_after_update(out, ClientPolicy::cli(), info, restart_agents)? {
+                    Ok(outcome) => {
+                        let managed_request = std::env::var("USAGI_MANAGED_UPDATE").as_deref()
+                            == Ok("1")
+                            && std::env::var("USAGI_UPDATE_SYNC_RETRY").as_deref() != Ok("1");
+                        let queued = managed_request
+                            && matches!(outcome, daemon::ManagedUpdateSync::Deferred);
+                        if queued {
+                            daemon::schedule_deferred_update()?;
+                            writeln!(
+                                out,
+                                "daemon sync: queued for automatic retry after live runtimes finish"
+                            )?;
+                        } else if managed_request {
+                            // A successful update also retires a reservation
+                            // whose detached worker exited before finishing.
+                            let data_dir = daemon::prepare_private_data_dir()?;
+                            daemon::complete_deferred_update(&data_dir)?;
+                        }
+                        Ok(managed_update_sync_exit_code(
+                            outcome,
+                            std::env::var("USAGI_UPDATE_SYNC_OUTCOMES").as_deref() == Ok("1"),
+                            queued && std::env::var("USAGI_UPDATE_AUTO_SYNC").as_deref() == Ok("1"),
+                        ))
+                    }
                     Err(error) => {
                         write_client_error(err, "daemon synchronization refused", &error)?;
                         Ok(ExitCode::FAILURE)
@@ -305,7 +328,10 @@ mod action_io {
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
                 match daemon::attached_client(ClientPolicy::cli()) {
-                    Ok(mut client) => match client.request(request) {
+                    Ok(mut client) => match usagi_cli::cli::hooks::agent_phase::report_to_daemon(
+                        &mut client,
+                        request,
+                    ) {
                         Ok(_) => {
                             if let Some(response) =
                                 usagi_cli::cli::hooks::agent_phase::response_for_declared_event(
@@ -397,7 +423,7 @@ fn execute_self_update(
     out.flush()?;
     err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
-        let mut command = update_installer_command(select_version);
+        let mut command = update_installer_command(select_version, request.restart_agents());
         let mut child = command.spawn()?;
         let write_result = child
             .stdin
@@ -417,7 +443,7 @@ fn execute_self_update(
     })
 }
 
-fn update_installer_command(select_version: bool) -> std::process::Command {
+fn update_installer_command(select_version: bool, restart_agents: bool) -> std::process::Command {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new("bash");
@@ -431,6 +457,9 @@ fn update_installer_command(select_version: bool) -> std::process::Command {
         .stderr(Stdio::inherit());
     if select_version {
         command.arg("--select-version");
+    }
+    if restart_agents {
+        command.arg("--restart-agents");
     }
     command
 }
@@ -789,13 +818,15 @@ fn write_client_error(
 fn managed_update_sync_exit_code(
     outcome: daemon::ManagedUpdateSync,
     report_deferred: bool,
+    queued: bool,
 ) -> ExitCode {
     // Older binaries embed an installer that treats every nonzero sync status
     // as an update failure. A new installer opts into the deferred status so
     // upgrades from those binaries can still succeed without restarting Agents.
-    match (outcome, report_deferred) {
-        (daemon::ManagedUpdateSync::Deferred, true) => ExitCode::from(3),
-        (daemon::ManagedUpdateSync::Complete | daemon::ManagedUpdateSync::Deferred, _) => {
+    match (outcome, report_deferred, queued) {
+        (daemon::ManagedUpdateSync::Deferred, true, true) => ExitCode::from(4),
+        (daemon::ManagedUpdateSync::Deferred, true, false) => ExitCode::from(3),
+        (daemon::ManagedUpdateSync::Complete | daemon::ManagedUpdateSync::Deferred, _, _) => {
             ExitCode::SUCCESS
         }
     }
@@ -853,6 +884,25 @@ mod tests {
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn pending_update_acknowledgement_preserves_older_installers() {
+        use super::daemon::ManagedUpdateSync::{Complete, Deferred};
+        for (outcome, report_deferred, queued, expected) in [
+            (Complete, false, false, 0),
+            (Complete, true, false, 0),
+            (Complete, true, true, 0),
+            (Deferred, false, false, 0),
+            (Deferred, false, true, 0),
+            (Deferred, true, false, 3),
+            (Deferred, true, true, 4),
+        ] {
+            assert_eq!(
+                super::managed_update_sync_exit_code(outcome, report_deferred, queued),
+                ExitCode::from(expected)
+            );
+        }
+    }
 
     #[test]
     fn the_launch_agent_selector_resolves_a_provider_or_fails_closed() {
@@ -1110,7 +1160,9 @@ mod tests {
             Action::LaunchDaemon,
         );
         assert_route(
-            RunOutcome::SyncDaemonAfterUpdate,
+            RunOutcome::SyncDaemonAfterUpdate {
+                restart_agents: false,
+            },
             Action::SyncDaemonAfterUpdate,
         );
         assert_route(
@@ -1289,7 +1341,7 @@ mod tests {
 
     #[test]
     fn managed_installer_environment_is_explicit_and_cwd_independent() {
-        let command = update_installer_command(true);
+        let command = update_installer_command(true, false);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["-s", "--", "--select-version"]
@@ -1302,9 +1354,14 @@ mod tests {
             environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
             Some(&Some(std::ffi::OsStr::new("1")))
         );
-        let no_daemon = update_installer_command(false);
+        let no_daemon = update_installer_command(false, false);
         assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
         assert!(no_daemon.get_current_dir().is_some());
+        let restart = update_installer_command(true, true);
+        assert_eq!(
+            restart.get_args().collect::<Vec<_>>(),
+            ["-s", "--", "--select-version", "--restart-agents"]
+        );
     }
 
     fn verified_installer_request() -> InstallerRequest {

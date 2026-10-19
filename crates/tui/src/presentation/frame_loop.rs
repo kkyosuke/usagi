@@ -43,9 +43,9 @@ use super::{
     save_config_responsive, save_config_source_responsive, scroll_key_help, select_right_pane_tab,
     session_name_for, sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
     step_config, step_new, step_open, step_welcome, surface_agent_tab_intent_error,
-    sync_runtime_sessions, sync_terminal_selection_motions, visit_garden_agent,
-    workspace_has_unsaved_surface, workspace_help_context, workspace_navigation_target,
-    workspace_terminal_attachments,
+    sync_overlay_session_roots, sync_runtime_sessions, sync_terminal_selection_motions,
+    visit_garden_agent, workspace_has_unsaved_surface, workspace_help_context,
+    workspace_navigation_target, workspace_terminal_attachments,
 };
 
 /// Render a single static Home frame from a workspace snapshot, using the same
@@ -752,6 +752,7 @@ pub(super) fn drive_workspace_controller(
     // completion sink of a workspace is a clone of the same channel, so keeping
     // the newest is keeping all of them.
     let mut pending_session_refresh: Option<Completions> = None;
+    let mut overlay_session_revision = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
     let mut _garden_job = None;
@@ -959,6 +960,7 @@ pub(super) fn drive_workspace_controller(
             session_refresh.as_mut(),
             &mut pending_session_refresh,
         );
+        sync_overlay_session_roots(&mut backend, &ui, &mut overlay_session_revision);
         let worktree_names = worktree_hint.names(
             runtime.state().create_session_form().is_some(),
             ui.workspace.path(),
@@ -982,10 +984,20 @@ pub(super) fn drive_workspace_controller(
             }
             let key = match destination {
                 AttentionDestination::Decisions => Some(AppKey::OpenDecisions),
+                AttentionDestination::Decision(decision_id) => {
+                    Some(AppKey::OpenDecision(decision_id))
+                }
                 AttentionDestination::PullRequests if runtime.state().active() == session => {
                     Some(AppKey::OpenPrs)
                 }
-                AttentionDestination::PullRequests | AttentionDestination::Session => None,
+                AttentionDestination::PullRequest(identity)
+                    if runtime.state().active() == session =>
+                {
+                    Some(AppKey::OpenPullRequest(identity))
+                }
+                AttentionDestination::PullRequests
+                | AttentionDestination::PullRequest(_)
+                | AttentionDestination::Session => None,
             };
             if let Some(key) = key {
                 let effects = runtime.apply_event(AppEvent::Key(key));
@@ -1524,7 +1536,7 @@ pub(super) fn drive_workspace_controller(
             continue;
         }
         if deck.overlay_open() {
-            match deck.handle_overlay_key(&key) {
+            match deck.handle_overlay_key_at(&key, height, width) {
                 OverlayIntent::AttentionVisit {
                     path,
                     workspace,
@@ -1977,6 +1989,7 @@ pub(super) fn drive_workspace_controller(
                         Vec::new()
                     }
                     (None, None) => runtime.apply_event(sidebar_pointer_event(
+                        drawn_material.as_ref(),
                         column,
                         row,
                         pointer_clock.elapsed(),

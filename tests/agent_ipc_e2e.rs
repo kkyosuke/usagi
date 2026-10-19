@@ -64,7 +64,7 @@ const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 // Repository preparation and the daemon must resolve the same Git executable.
 // On macOS, the parent PATH can select Homebrew Git while the daemon selects
-// Apple's developer-tool launcher; prepare that toolchain before read deadlines.
+// Apple's developer-tool launcher. Preparation below also uses the daemon's HOME.
 const FIXTURE_SYSTEM_PATH: &str = "/usr/bin:/bin";
 
 /// Each case starts the shipping daemon binary. Serialising those startups
@@ -136,11 +136,53 @@ fn write_codex(bin: &Path, count: &Path, ready_status: i32) {
 /// input. The original invocation still uses the ordinary one-line lifecycle;
 /// only the daemon-restart replacement parks until fixture cleanup.
 fn write_restartable_codex(bin: &Path, count: &Path) {
+    write_restartable_codex_with_capture(bin, count, true);
+}
+
+fn write_restartable_codex_with_capture(bin: &Path, count: &Path, capture_start: bool) {
     fs::create_dir_all(bin).unwrap();
     let usagi = shell_quote(env!("CARGO_BIN_EXE_usagi"));
+    let (event, hook) = if capture_start {
+        ("SessionStart", "codex-session-capture")
+    } else {
+        ("PreToolUse", "agent-phase running")
+    };
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"SessionStart\",\"model\":\"fixture\"}}' | {usagi} codex-session-capture || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
+        "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then exit 0; fi\nif [ \"${{USAGI_PTY_SENTINEL+set}}\" = set ]; then exit 9; fi\nresuming=false\nfor argument in \"$@\"; do if [ \"$argument\" = resume ]; then resuming=true; fi; done\nif [ \"$resuming\" = false ]; then\n  printf '%s' '{{\"session_id\":\"fixture-codex-session\",\"transcript_path\":\"/must/not/be/read.jsonl\",\"cwd\":\"/fixture\",\"hook_event_name\":\"{event}\",\"model\":\"fixture\"}}' | {usagi} {hook} || exit 8\nfi\nprintf 'spawn:%s\\n' \"$*\" >> \"{}\"\nprintf 'ready\\n'\nif [ \"$resuming\" = true ]; then trap 'exit 0' TERM; while :; do sleep 1; done; fi\nIFS= read line || exit 0\nprintf 'input:%s\\n' \"$line\"\n",
         count.display(),
+    );
+    let path = bin.join("codex");
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Each workspace captures a distinct native conversation and records both its
+/// actual launch directory and resume arguments, so cross-workspace swaps fail.
+fn write_workspace_codex(bin: &Path, count: &Path, first: &Path, second: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+case "$PWD/" in
+    {first}/*) session=fixture-first ;;
+    {second}/*) session=fixture-second ;;
+    *) exit 10 ;;
+esac
+resuming=false
+for argument in "$@"; do if [ "$argument" = resume ]; then resuming=true; fi; done
+if [ "$resuming" = false ]; then
+    printf '{{"session_id":"%s","hook_event_name":"SessionStart"}}' "$session" | {usagi} codex-session-capture || exit 8
+fi
+printf '{{"session_id":"%s","hook_event_name":"PreToolUse"}}' "$session" | {usagi} agent-phase running || exit 9
+printf '%s:%s\n' "$session" "$*" >> {count}
+printf 'ready\n'
+trap 'exit 0' TERM
+while :; do sleep 1; done
+"#,
+        first = shell_quote(fs::canonicalize(first).unwrap().to_str().unwrap()),
+        second = shell_quote(fs::canonicalize(second).unwrap().to_str().unwrap()),
+        usagi = shell_quote(env!("CARGO_BIN_EXE_usagi")),
+        count = shell_quote(count.to_str().unwrap()),
     );
     let path = bin.join("codex");
     fs::write(&path, script).unwrap();
@@ -352,6 +394,9 @@ fn spawn_daemon_command(
         repo,
         &["daemon".as_ref(), "serve".as_ref()],
     );
+    if let Some(home) = sandbox_home {
+        prepare_sandbox_git(repo, home, &fixture_path);
+    }
     command
         .env("PATH", fixture_path)
         .env("USAGI_PTY_SENTINEL", "must-not-leak")
@@ -377,6 +422,35 @@ fn spawn_daemon_command(
         .spawn()
         .expect("root daemon starts");
     Daemon { child }
+}
+
+/// Keep external toolchain initialization outside the product's bounded Git
+/// observations. Sandbox cases use a committed `fixture_repo`, but a new HOME
+/// needs its own preparation with the daemon's cwd, PATH, and Git confinement.
+fn prepare_sandbox_git(repo: &Path, home: &Path, path: &str) {
+    use usagi_core::infrastructure::bounded_process::{ChildPolicy, execute_command_output};
+    use usagi_core::infrastructure::git::confined_git_command;
+
+    let mut command = confined_git_command(repo);
+    command
+        .args(["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"])
+        .current_dir(repo)
+        .env("PATH", path)
+        .env("HOME", home);
+    let output = execute_command_output(
+        command,
+        ChildPolicy {
+            timeout: Duration::from_secs(30),
+            terminate_grace: Duration::from_millis(100),
+            output_limit: 64 * 1024,
+        },
+    )
+    .expect("the fixture Git toolchain is ready in the daemon environment");
+    assert!(
+        output.success,
+        "fixture HEAD resolves before the daemon starts: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// This test process's client incarnation, shared by every connection it opens.
@@ -565,6 +639,61 @@ fn available_scope(client: &mut impl DaemonClient) -> (WorkspaceId, SessionId, W
         serde_json::from_value(session["session_id"].clone()).unwrap(),
         serde_json::from_value(session["worktree_id"].clone()).unwrap(),
     )
+}
+
+/// A fresh sandbox HOME can require toolchain initialization before Git's
+/// ordinary two-second observations. Prepare the exact daemon environment;
+/// preparing only the parent HOME must not make this case pass.
+#[test]
+fn sandbox_home_prepares_git_before_bounded_session_creation() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-git-home-");
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let ready = home.path().join("git-ready");
+    let resolutions = home.path().join("git-resolutions");
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+[ "$HOME" = {home} ]
+[ "$PATH" = {fixture_path} ]
+[ "$(pwd -P)" = {repo} ]
+[ "$GIT_TERMINAL_PROMPT" = 0 ]
+[ "$LC_ALL" = C ]
+for argument in "$@"; do
+  if [ "$argument" = 'HEAD^{{commit}}' ]; then
+    if [ ! -f {ready} ]; then
+      sleep 3
+      printf 'ready\n' > {ready}
+    fi
+    printf 'resolved\n' >> {resolutions}
+  fi
+done
+PATH={system_path}
+export PATH
+exec git "$@"
+"#,
+        home = shell_quote(home.path().to_str().unwrap()),
+        fixture_path = shell_quote(&fixture_path),
+        repo = shell_quote(repo.path().canonicalize().unwrap().to_str().unwrap()),
+        ready = shell_quote(ready.to_str().unwrap()),
+        resolutions = shell_quote(resolutions.to_str().unwrap()),
+        system_path = shell_quote(FIXTURE_SYSTEM_PATH),
+    );
+    let shim = bin.join("git");
+    fs::write(&shim, script).unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _daemon = start_daemon_with_sandbox_home(repo.path(), home.path(), &bin);
+    let mut client = client(&channel_data_dir(home.path()));
+    let _scope = available_scope(&mut client);
+    assert!(ready.is_file(), "the exact HOME toolchain was prepared");
+    assert!(
+        fs::read_to_string(resolutions).unwrap().lines().count() >= 2,
+        "both preparation and the real session create must resolve HEAD"
+    );
 }
 
 /// The shipped daemon must give its real PTY children a service namespace
@@ -2866,6 +2995,7 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_usagi"), bin.join("usagi")).unwrap();
     let shell = bin.join("fixture-shell");
     let shell_spawns = home.path().join("shell-spawn-count");
     write_shell(&shell, &shell_spawns);
@@ -2927,12 +3057,14 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         &["daemon".as_ref(), "sync-after-update".as_ref()],
     )
     .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+    .env("USAGI_MANAGED_UPDATE", "1")
+    .env("USAGI_UPDATE_AUTO_SYNC", "1")
     .output()
     .unwrap();
     let output = String::from_utf8_lossy(&synchronized.stdout);
     assert_eq!(
         synchronized.status.code(),
-        Some(3),
+        Some(4),
         "{output}{}",
         String::from_utf8_lossy(&synchronized.stderr)
     );
@@ -2948,6 +3080,47 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         "deferral must not create a standby or commit a handoff"
     );
     assert_eq!(live_process_identities(&data_dir), children_before);
+
+    let worker_deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
+    let worker_pid = loop {
+        if let Some(pid) = fs::read_to_string(data_dir.join("daemon/pending-update-worker.lock"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < worker_deadline,
+            "queued update worker did not start"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let duplicate = usagi_command(
+        home.path(),
+        Channel::Local,
+        sync_cwd.path(),
+        &["daemon".as_ref(), "continue-update".as_ref()],
+    )
+    .output()
+    .unwrap();
+    assert!(duplicate.status.success(), "duplicate workers coalesce");
+    // Observe an actual deferred retry before allowing the PTY to exit. A
+    // worker PID alone does not distinguish startup from a completed attempt.
+    loop {
+        let attempted = fs::read(data_dir.join("daemon/pending-update.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|request| request["attempts"].as_u64().is_some_and(|count| count > 0));
+        if attempted {
+            break;
+        }
+        assert!(
+            Instant::now() < worker_deadline,
+            "queued worker did not attempt synchronization: {}",
+            daemon_error_log(&data_dir)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 
     // The next installed binary can open both projects immediately, through
     // both the CLI's bound declaration and the TUI's selected declaration.
@@ -2995,31 +3168,27 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
             .unwrap(),
         })
         .expect("the original connection still delivers input to the same PTY");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Keep both projects' resident connections open, as a TUI would. No
+    // second update/restart command is needed after the final PTY exits.
+    let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
     loop {
-        assert_no_daemon_panic(&data_dir, "waiting for the preserved PTY to finish");
-        let DaemonReply::Ok(body) = reopened
-            .request(DaemonRequest::Tenant {
-                action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
-                root: None,
-                force: false,
-            })
-            .unwrap()
-        else {
-            panic!("tenant inventory is synchronous");
-        };
-        let inventory: usagi_core::infrastructure::ipc::TenantInventory =
-            serde_json::from_value(body).unwrap();
-        if inventory
-            .tenants
-            .iter()
-            .all(|tenant| tenant.live_runtimes == 0)
-        {
+        assert_no_daemon_panic(&data_dir, "waiting for the queued daemon update");
+        let changed = fs::read(data_dir.join("daemon/daemon.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|record| record["pid"].as_u64() != Some(old_pid));
+        let worker_finished = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data_dir.join("daemon/pending-update-worker.lock"))
+            .is_ok_and(|file| fs2::FileExt::try_lock_exclusive(&file).is_ok());
+        if changed && !data_dir.join("daemon/pending-update.json").exists() && worker_finished {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the preserved PTY did not finish"
+            "queued update did not finish: {}",
+            daemon_error_log(&data_dir)
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -3028,29 +3197,7 @@ fn managed_update_preserves_multiple_workspace_connections_when_a_terminal_is_li
         1
     );
     drop((first_client, second_client, reopened));
-
-    // Once nothing is live, both fences leave with the old process. Updating
-    // must now complete rather than defer just because two projects are open.
-    let synchronized = usagi_command(
-        home.path(),
-        Channel::Local,
-        sync_cwd.path(),
-        &["daemon".as_ref(), "sync-after-update".as_ref()],
-    )
-    .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
-    .output()
-    .unwrap();
-    assert!(
-        synchronized.status.success(),
-        "{}{}\n{}",
-        String::from_utf8_lossy(&synchronized.stdout),
-        String::from_utf8_lossy(&synchronized.stderr),
-        daemon_error_log(&data_dir),
-    );
-    assert!(
-        String::from_utf8_lossy(&synchronized.stdout)
-            .contains("installed build is current and serving")
-    );
+    wait_for_dead(worker_pid);
     assert_ne!(daemon_pid(&data_dir), old_pid);
     let mut successor_second = IpcClient::connect(
         connect_current(&data_dir).unwrap(),
@@ -3204,6 +3351,273 @@ fn managed_update_defers_live_agent_handoff_without_reporting_an_update_failure(
     );
 }
 
+#[test]
+#[allow(clippy::too_many_lines)] // Two workspace identities survive two real managed transitions.
+fn managed_update_restarts_agents_across_workspaces_and_reports_progress() {
+    let _serial = serial();
+    let first = fixture_repo();
+    let second = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let agent_spawns = home.path().join("agent-spawn-count");
+    write_workspace_codex(&bin, &agent_spawns, first.path(), second.path());
+    let daemon = start_daemon_with_source_identity(
+        first.path(),
+        home.path(),
+        &bin,
+        Path::new("/bin/sh"),
+        &"a".repeat(64),
+    );
+    let data_dir = channel_data_dir(home.path());
+    let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
+    Storage::new(&data_dir)
+        .save_settings(&Settings {
+            env: [("PATH".to_owned(), fixture_path.clone())].into(),
+            ..Settings::default()
+        })
+        .unwrap();
+    let mut owner = client(&data_dir);
+    let first_scope = available_scope(&mut owner);
+    let _ = launch(&mut owner, first_scope.0, first_scope.1, None);
+    let mut second_client = IpcClient::connect(
+        connect_current(&data_dir).unwrap(),
+        client_incarnation().to_owned(),
+        OperationId::new().to_string(),
+        ClientPolicy::cli(),
+        shipping_build_identity(),
+        usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+            root: usagi_core::infrastructure::paths::wire_workspace_root(
+                fs::canonicalize(second.path()).unwrap(),
+            ),
+        },
+    )
+    .unwrap();
+    let second_scope = available_scope(&mut second_client);
+    assert_ne!(first_scope.0, second_scope.0);
+    let _ = launch(&mut second_client, second_scope.0, second_scope.1, None);
+    wait_for_spawns(&agent_spawns, 2);
+
+    let mut sync = usagi_command(
+        home.path(),
+        Channel::Local,
+        second.path(),
+        &[
+            "daemon".as_ref(),
+            "sync-after-update".as_ref(),
+            "--restart-agents".as_ref(),
+        ],
+    );
+    sync.env("PATH", fixture_path)
+        .env("USAGI_UPDATE_SYNC_OUTCOMES", "1")
+        .env("USAGI_UPDATE_PROGRESS", "1")
+        .env(
+            usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+            "1",
+        );
+    // Keep both old client handles alive. They no longer own control admission
+    // after commit and must not prevent the idle workspace fence from moving.
+    for transition in 1..=2 {
+        let old_pid = daemon_pid(&data_dir);
+        let result = sync.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+            daemon_error_log(&data_dir)
+        );
+        assert_ne!(daemon_pid(&data_dir), old_pid);
+        wait_for_spawns(&agent_spawns, 2 + 2 * transition);
+        let progress = String::from_utf8_lossy(&result.stderr);
+        assert!(progress.contains("[###---] 3/6"), "{progress}");
+        assert!(progress.contains("[######] 6/6"), "{progress}");
+        assert!(!progress.contains('\x1b'));
+        assert!(!data_dir.join("daemon/agent-restart.json").exists());
+        assert!(!data_dir.join("daemon/agent-restart-intent.json").exists());
+        for (root, scope, conversation) in [
+            (first.path(), first_scope, "fixture-first"),
+            (second.path(), second_scope, "fixture-second"),
+        ] {
+            let mut current = IpcClient::connect(
+                connect_current(&data_dir).unwrap(),
+                client_incarnation().to_owned(),
+                OperationId::new().to_string(),
+                ClientPolicy::cli(),
+                shipping_build_identity(),
+                usagi_core::infrastructure::ipc::ClientWorkspace::Selected {
+                    root: usagi_core::infrastructure::paths::wire_workspace_root(
+                        fs::canonicalize(root).unwrap(),
+                    ),
+                },
+            )
+            .unwrap();
+            let reply = current
+                .request(DaemonRequest::AgentInventory {
+                    workspace: scope.0,
+                    caller_context: None,
+                })
+                .unwrap();
+            let body = match reply {
+                DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body,
+            };
+            let inventory: usagi_core::domain::agent::AgentInventory =
+                serde_json::from_value(body).unwrap();
+            assert_eq!(
+                inventory
+                    .runtimes
+                    .iter()
+                    .filter(|item| item.state == AgentRuntimeInventoryState::Live)
+                    .count(),
+                1,
+                "{inventory:?}"
+            );
+            let spawns = fs::read_to_string(&agent_spawns).unwrap();
+            let resumes = spawns
+                .lines()
+                .filter(|line| {
+                    line.starts_with(&format!("{conversation}:"))
+                        && line.contains(&format!("resume {conversation}"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(resumes.len(), transition, "{spawns}");
+            assert!(
+                resumes.iter().all(|line| line.ends_with(" -- continue")),
+                "{spawns}"
+            );
+        }
+    }
+    drop((owner, second_client));
+    daemon_fixture::reap(home.path());
+    drop(daemon);
+}
+
+/// Raw IPC must protect unfinished recovery even when its caller bypasses the
+/// CLI's machine-wide lifecycle lock and pending-transaction preflight.
+#[test]
+#[allow(clippy::too_many_lines)] // One IPC refusal proves recovery custody, runtime, and authority remain untouched.
+fn rollover_preserves_an_earlier_unfinished_agent_recovery() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let spawns = home.path().join("agent-spawn-count");
+    write_restartable_codex(&bin, &spawns);
+    let daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data = channel_data_dir(home.path());
+    let mut owner = client(&data);
+    let (workspace, session, _) = available_scope(&mut owner);
+    let _ = launch(&mut owner, workspace, session, None);
+    wait_for_spawns(&spawns, 1);
+    let expected = vec![usagi_core::domain::agent::AgentIntegrationRevision {
+        profile_id: AgentProfileId::new("codex").unwrap(),
+        revision: 1,
+    }];
+    let reply = owner
+        .request(DaemonRequest::PlanDaemonRestartAgents {
+            expected: expected.clone(),
+            force: true,
+        })
+        .unwrap();
+    let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+    let plan: usagi_core::domain::agent::DaemonRestartAgentPlan =
+        serde_json::from_value(body).unwrap();
+    assert_eq!(plan.agents.len(), 1);
+    let original_runtime = plan.agents[0].runtime.clone();
+    let old_pid = daemon_pid(&data);
+    let old_locator = read_locator(&data.join("daemon")).unwrap();
+
+    // A prior workspace's durable identity is temporarily unavailable. Its
+    // recovery must remain pending; an unrelated live Agent is not permission
+    // to replace that custody with the next restart's selection.
+    let mut unavailable = plan.agents[0].clone();
+    let missing_workspace = WorkspaceId::new();
+    unavailable.runtime.terminal.workspace_id = missing_workspace;
+    unavailable.target.workspace_id = missing_workspace;
+    let earlier_operation = OperationId::new().to_string();
+    let pending = serde_json::json!({
+        "schema_version": 1,
+        "operation_id": earlier_operation,
+        "from_generation": read_registry_document(&data).unwrap().unwrap().current.unwrap(),
+        "workspace_root": repo.path(),
+        "agents": [{
+            "resume_operation_id": OperationId::new().to_string(),
+            "agent": unavailable,
+            "completed": false,
+            "continue_work": true,
+        }],
+    });
+    let pending_path = data.join("daemon/agent-restart.json");
+    usagi_core::infrastructure::persistence::json_file::write_atomic(
+        &data.join("daemon"),
+        &pending_path,
+        &pending,
+    )
+    .unwrap();
+
+    let standby = Daemon {
+        child: usagi_command(
+            home.path(),
+            Channel::Local,
+            repo.path(),
+            &["daemon".as_ref(), "serve".as_ref(), "--standby".as_ref()],
+        )
+        .env("PATH", format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap(),
+    };
+    let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
+    loop {
+        if read_registry_document(&data)
+            .unwrap()
+            .unwrap()
+            .generations
+            .iter()
+            .any(|entry| entry.process.pid == standby.child.id() && entry.is_build_verified())
+        {
+            break;
+        }
+        let errors = daemon_error_log(&data);
+        assert!(!errors.contains("daemon panicked"), "{errors}");
+        assert!(
+            Instant::now() < deadline,
+            "standby never verified: {errors}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    for restart_agents in [
+        Some(usagi_core::infrastructure::ipc::DaemonRestartAgents {
+            expected,
+            runtimes: vec![original_runtime],
+            force: true,
+        }),
+        None,
+    ] {
+        let result = owner.request(DaemonRequest::Rollover {
+            operation_id: OperationId::new().to_string(),
+            restart_agents,
+        });
+        let retained = fs::read_to_string(&pending_path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+        assert_eq!(
+            retained.as_ref(),
+            Some(&pending),
+            "an unfinished recovery was replaced: {result:?}; {}",
+            daemon_error_log(&data)
+        );
+        let refusal = result.unwrap_err().to_string();
+        assert!(refusal.contains("still recovering"), "{refusal}");
+    }
+    assert_eq!(daemon_pid(&data), old_pid);
+    assert_eq!(read_locator(&data.join("daemon")).unwrap(), old_locator);
+    assert_eq!(fs::read_to_string(&spawns).unwrap().lines().count(), 1);
+    daemon_fixture::reap(home.path());
+    drop((owner, standby, daemon));
+}
+
 /// A launched Agent owns a daemon-minted MCP credential before its MCP child
 /// connects. Plain replacement must preserve that authority by refusing the
 /// rollover, while the explicit Agent-restart path stops and exactly resumes it.
@@ -3215,7 +3629,9 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
     let home = short_dir("usagi-");
     let bin = home.path().join("bin");
     let agent_spawns = home.path().join("agent-spawn-count");
-    write_restartable_codex(&bin, &agent_spawns);
+    // The provider missed SessionStart. A later tool hook must supply the
+    // exact conversation before restart stops anything.
+    write_restartable_codex_with_capture(&bin, &agent_spawns, false);
 
     let fixture_path = format!("{}:{FIXTURE_SYSTEM_PATH}", bin.display());
     let daemon = start_daemon(repo.path(), home.path(), &bin, None);
@@ -3280,7 +3696,6 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
             "daemon".as_ref(),
             "restart".as_ref(),
             "--restart-agents".as_ref(),
-            "--force".as_ref(),
         ],
     );
     restart_command.env("PATH", fixture_path).env(
@@ -3297,6 +3712,14 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         String::from_utf8_lossy(&restarted.stderr)
     );
     assert!(String::from_utf8_lossy(&restarted.stdout).contains("restarted 1 Agent(s)"));
+    wait_for_spawns(&agent_spawns, 2);
+    let spawns = fs::read_to_string(&agent_spawns).unwrap();
+    let spawns = spawns.lines().collect::<Vec<_>>();
+    assert_eq!(spawns.len(), 2);
+    assert!(
+        spawns[1].contains("resume fixture-codex-session") && spawns[1].ends_with(" -- continue"),
+        "{spawns:?}"
+    );
     assert!(
         !data_dir.join("daemon/agent-restart.json").exists(),
         "restart success requires durable Agent recovery to be complete"
@@ -3325,21 +3748,6 @@ fn root_restart_refuses_then_explicitly_resumes_an_unclaimed_agent_credential() 
         fs::read_to_string(&agent_spawns).unwrap_or_default(),
         daemon_error_log(&data_dir)
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let observed_spawns = fs::read_to_string(&agent_spawns)
-            .map(|body| body.lines().count())
-            .unwrap_or_default();
-        if observed_spawns == 2 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the successor reported a live replacement without running the fixture provider:\n{inventory:?}\n{}",
-            daemon_error_log(&data_dir)
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
     drop(current);
 
     // A later deliberate restart is a new transition, not a replay of the
@@ -3448,6 +3856,10 @@ fn root_restart_recovers_agents_after_requester_exit() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    assert!(
+        !data_dir.join("daemon/agent-restart-intent.json").exists(),
+        "daemon recovery also owns continuation intent cleanup after requester exit"
+    );
     let mut current = client(&data_dir);
     let inventory = current
         .request(DaemonRequest::AgentInventory {

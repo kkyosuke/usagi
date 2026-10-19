@@ -5,6 +5,173 @@
 use super::*;
 
 #[test]
+fn artifacts_opened_after_create_accept_keep_the_foreground_on_completion() {
+    for keyboard in [false, true] {
+        let (workspace, session, _) = ids();
+        let created = SessionId::new();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session create other".into())),
+        );
+        let token = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::CreateSession { token, .. } => Some(*token),
+                _ => None,
+            })
+            .unwrap();
+        let before = state.interaction_count();
+        if keyboard {
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        } else {
+            let _ = pointer_effects(&mut state, 35, 4, std::time::Duration::ZERO);
+        }
+        assert!(state.interaction_count() > before);
+        let overlay = state.preview_overlay().cloned().unwrap();
+        let effects = update(
+            &mut state,
+            AppEvent::OperationResult(OperationResult {
+                token,
+                succeeded: true,
+                created: Some(created),
+                notice: None,
+            }),
+        );
+        assert_ne!(state.active(), Some(created));
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert_eq!(state.preview_overlay(), Some(&overlay));
+        assert!(!effects.contains(&Effect::CancelPreview));
+    }
+}
+
+#[test]
+fn a_pointer_from_an_old_frame_cannot_retarget_a_removed_session() {
+    let (workspace, current, removed) = ids();
+    let mut state = AppState::home(workspace, vec![current]);
+    let before = state.interaction_count();
+    for target in [
+        SidebarPointerTarget::Row(Selection::Target(Target::Session(removed))),
+        SidebarPointerTarget::Artifacts(removed),
+        SidebarPointerTarget::PullRequests(removed),
+    ] {
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Pointer {
+                    target: Some(target),
+                    at: std::time::Duration::ZERO
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(current))
+        );
+        assert_eq!(state.interaction_count(), before);
+    }
+}
+
+#[test]
+fn a_session_that_becomes_unavailable_cannot_open_from_an_old_artifacts_action() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let event = AppEvent::Pointer {
+        target: Some(SidebarPointerTarget::Artifacts(session)),
+        at: std::time::Duration::ZERO,
+    };
+    state
+        .session_lifecycles
+        .insert(session, lifecycle(SessionLifecycle::Deleting));
+    assert!(update(&mut state, event).is_empty());
+    assert_eq!(state.overlay(), None);
+    assert!(state.preview_overlay().is_none());
+}
+
+#[test]
+fn artifacts_click_opens_the_clicked_session_and_preserves_the_active_pane() {
+    let workspace = WorkspaceId::new();
+    let active = SessionId::new();
+    let clicked = SessionId::new();
+    let mut state = sized_home(workspace, vec![active, clicked], 100, 30);
+    let _ = update(
+        &mut state,
+        AppEvent::PaneTabAvailability {
+            available: true,
+            error: None,
+        },
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(state.overlay(), None);
+    let effects = pointer_effects(&mut state, 35, 7, std::time::Duration::ZERO);
+    assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+        target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
+    }] if *target == clicked));
+    assert_eq!(state.active(), Some(active));
+    assert_eq!(state.selected(), Selection::Target(Target::Session(active)));
+    assert!(state.pending_session_click.is_none());
+}
+
+#[test]
+fn artifacts_click_matches_the_visible_width_and_lifecycle() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    for phase in [
+        SessionLifecycle::Creating,
+        SessionLifecycle::Initializing,
+        SessionLifecycle::Available,
+        SessionLifecycle::Deleting,
+        SessionLifecycle::Failed,
+    ] {
+        for sidebar_width in [15_u16, 16, 36] {
+            let start = sidebar_width - u16::try_from(SIDEBAR_ARTIFACTS_LABEL.len()).unwrap();
+            for column in [start - 1, start, sidebar_width - 1, sidebar_width] {
+                let mut state = sized_home(workspace, vec![session], sidebar_width + 2, 30);
+                state.session_lifecycles.insert(session, lifecycle(phase));
+                let effects = pointer_effects(&mut state, column, 4, std::time::Duration::ZERO);
+                let visible = phase.capabilities().can_use
+                    && usize::from(sidebar_width) >= SIDEBAR_ARTIFACTS_MIN_WIDTH;
+                let opens_artifacts = visible && (start..sidebar_width).contains(&column);
+                assert_eq!(
+                    matches!(effects.as_slice(), [Effect::LoadPreview {
+                        target: Target::Session(target), filter: PreviewFileFilter::Artifacts,
+                        path: None, ..
+                    }] if *target == session),
+                    opens_artifacts,
+                    "{phase:?}, width {sidebar_width}, column {column}"
+                );
+                if !opens_artifacts {
+                    assert!(effects.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn artifacts_shortcut_follows_switch_cursor_closeup_active_and_workspace_fallback() {
+    let workspace = WorkspaceId::new();
+    let active = SessionId::new();
+    let selected = SessionId::new();
+    for (mode, expected) in [(HomeMode::Switch, selected), (HomeMode::Closeup, active)] {
+        let mut state = AppState::home(workspace, vec![active, selected]);
+        state.selected = Selection::Target(Target::Session(selected));
+        state.route = Route::Home(mode);
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+            target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
+        }] if *target == expected));
+    }
+    let mut state = AppState::home(workspace, vec![]);
+    let effects = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+    assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+        target: Target::Root(target), filter: PreviewFileFilter::AllArtifacts, path: None, ..
+    }] if *target == workspace));
+}
+
+#[test]
 fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() {
     let workspace = WorkspaceId::new();
     let active = SessionId::new();
@@ -38,14 +205,7 @@ fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() 
     // cell must open that session's PRs without changing the active sidebar
     // selection or contributing to a double-click.
     assert_eq!(
-        update(
-            &mut state,
-            AppEvent::Pointer {
-                column: 35,
-                row: 6,
-                at: std::time::Duration::ZERO,
-            },
-        ),
+        pointer_effects(&mut state, 35, 6, std::time::Duration::ZERO),
         vec![Effect::LoadPullRequests { target }]
     );
     assert_eq!(state.overlay(), Some(Overlay::Prs));
@@ -2058,4 +2218,242 @@ fn session_favorites_stay_with_identity_after_reordering_and_refresh() {
     assert!(!state.is_favorite(second));
     assert_eq!(state.sessions(), &[second, first]);
     assert_eq!(state.session_order_revision(), 1);
+}
+
+#[test]
+fn inbox_question_opens_the_exact_refreshed_editor_and_never_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    state.unread_decisions = [first.decision_id, second.decision_id].into();
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    assert_eq!(effects, vec![Effect::RefreshDecisions { workspace }]);
+    assert!(state.decision_overlay().unwrap().is_loading());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace: WorkspaceId::new(),
+            decisions: vec![],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().is_loading());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    let overlay = state.decision_overlay().unwrap();
+    assert_eq!(overlay.selected(), 1);
+    assert_eq!(
+        overlay.editor().unwrap().decision().decision_id,
+        second.decision_id
+    );
+    assert!(!overlay.is_loading());
+    assert!(state.unread_decision_ids().contains(&first.decision_id));
+    assert!(!state.unread_decision_ids().contains(&second.decision_id));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(state.overlay(), None);
+}
+
+#[test]
+fn inbox_question_disappearing_after_loading_never_opens_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        second.decision_id
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        first.decision_id
+    );
+}
+
+#[test]
+fn inbox_question_recovers_its_identity_when_a_newer_observation_finds_it() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    for close in [
+        AppEvent::Key(AppKey::Escape),
+        AppEvent::VisitSession(session),
+    ] {
+        let origin = SessionId::new();
+        let first = pending_decision(workspace);
+        let second = pending_decision(workspace);
+        let mut state = AppState::home(workspace, vec![origin, session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+        );
+        // The resident observer can hand over an older inventory before the wake's
+        // fresh answer. Neither that reply nor a later disappearance may select A.
+        for available in [false, true, false, true] {
+            let decisions = if available {
+                vec![first.clone(), second.clone()]
+            } else {
+                vec![first.clone()]
+            };
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions,
+                }),
+            );
+            let overlay = state.decision_overlay().unwrap();
+            assert_eq!(overlay.request_error().is_none(), available);
+            assert_eq!(
+                overlay.editor().map(|editor| editor.decision().decision_id),
+                available.then_some(second.decision_id)
+            );
+            if !available {
+                assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            }
+            assert!(state.unread_decisions.contains(&first.decision_id));
+        }
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first.clone()],
+            }),
+        );
+        let visiting = matches!(&close, AppEvent::VisitSession(_));
+        let _ = update(&mut state, close);
+        assert_eq!(
+            state.active(),
+            Some(if visiting { session } else { origin })
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first, second],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.decision_overlay().is_none());
+    }
+}
+
+#[test]
+fn inbox_question_failures_and_cancellation_do_not_open_other_questions() {
+    let workspace = WorkspaceId::new();
+    let decision = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(decision.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable {
+            workspace: WorkspaceId::new(),
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().is_loading());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(!state.decision_overlay().unwrap().is_loading());
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(decision.decision_id)),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![decision],
+        }),
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.decision_overlay().is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    assert!(state.notice().is_some());
 }

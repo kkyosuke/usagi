@@ -22,7 +22,8 @@ pub use new::{
 };
 pub use notes::{NoteCloseChoice, NoteEditor, NoteSection};
 pub use preview::{
-    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
+    ArtifactOpenOutcome, ArtifactOpenState, PreviewCandidate, PreviewFileFilter, PreviewOverlay,
+    PreviewPane, PreviewSearchMatch,
 };
 pub use pull_requests::{PrFilter, PrOverlay};
 
@@ -35,7 +36,7 @@ use usagi_core::domain::id::{
     UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::pr_inventory::{PrEntry, PrIdentity, PrState};
 use usagi_core::domain::presentation_text::{
     presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
 };
@@ -168,6 +169,7 @@ pub struct SessionRoleCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoleProjection {
     pub creator_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
+    pub director_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
     pub role_id: Option<RoleId>,
     pub role_summary: Option<String>,
     pub parent_session_id: Option<SessionId>,
@@ -572,9 +574,23 @@ impl DecisionEditor {
 pub struct DecisionOverlayState {
     selected: usize,
     editor: Option<DecisionEditor>,
+    requested: Option<UserDecisionId>,
+    error: Option<&'static str>,
+    /// Keep the inbox identity across missing or delayed observations.
+    exact: Option<UserDecisionId>,
 }
 
 impl DecisionOverlayState {
+    #[must_use]
+    pub const fn is_loading(&self) -> bool {
+        self.requested.is_some()
+    }
+
+    #[must_use]
+    pub const fn request_error(&self) -> Option<&'static str> {
+        self.error
+    }
+
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
@@ -1141,6 +1157,10 @@ pub struct AppState {
     /// it. The reducer keeps it only so the returning snapshot can open the
     /// modal on the target the user actually asked for.
     pr_request: Option<Target>,
+    /// Exact inbox destination until the user changes or acts on its selection.
+    pr_focus: Option<(Target, PrIdentity)>,
+    /// The next new inventory must not announce a cancelled inbox visit.
+    pr_cancelled: BTreeSet<Target>,
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
@@ -1337,6 +1357,8 @@ impl AppState {
             decision_overlay: None,
             pr_overlay: None,
             pr_request: None,
+            pr_focus: None,
+            pr_cancelled: BTreeSet::new(),
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
@@ -1827,111 +1849,13 @@ impl AppState {
     }
 
     /// Move the cursor directly to `selection` when it names a live row.
-    /// [`sidebar_selection_at`](Self::sidebar_selection_at) only ever resolves a
+    /// The presentation's sidebar layout only resolves a
     /// row that exists, but the reducer stays defensive so a stale pointer event
     /// can never point the cursor at a session that has since disappeared.
     fn select_row(&mut self, selection: Selection) {
         if self.rows().contains(&selection) {
             self.selected = selection;
         }
-    }
-
-    /// Resolve a 0-based terminal cell to the Home sidebar row it lands on, using
-    /// the same viewport geometry the frame is drawn with. Returns `None` for the
-    /// header, the mascot sidecar, the footer, or a click
-    /// outside the sidebar body.
-    ///
-    /// This is the controller-owned hit-test the pointer reducer shares with the
-    /// `home_left_pane` render: it mirrors the chrome rows, the left/right split,
-    /// the foot-of-sidebar mascot reservation, and the scroll offset so a click
-    /// always lands on the row the user sees. It reads the last terminal geometry
-    /// from [`AppState::size`], so a pointer event before the first resize is
-    /// inert.
-    fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
-        self.sidebar_hit_at(column, row).map(|hit| hit.selection)
-    }
-
-    fn sidebar_hit_at(&self, column: u16, row: u16) -> Option<SidebarHit> {
-        let (raw_width, raw_height) = self.size?;
-        let width = if raw_width == 0 {
-            80
-        } else {
-            usize::from(raw_width)
-        };
-        let height = if raw_height == 0 {
-            24
-        } else {
-            usize::from(raw_height)
-        };
-        let left = SIDEBAR_LEFT_WIDTH.min(width.saturating_sub(2));
-        if usize::from(column) >= left
-            || usize::from(row) < SIDEBAR_CHROME_ROWS
-            || height <= SIDEBAR_CHROME_ROWS
-        {
-            return None;
-        }
-        let rows = self.rows();
-        let body_height = height - SIDEBAR_CHROME_ROWS;
-        if body_height == 1 {
-            return (usize::from(row) == SIDEBAR_CHROME_ROWS).then(|| SidebarHit {
-                selection: rows[0],
-                line: 0,
-                left,
-            });
-        }
-        let body_capacity = body_height - 1;
-        let content_capacity =
-            body_capacity.saturating_sub(sidebar_mascot_rows(left, body_capacity));
-        let clicked = usize::from(row) - SIDEBAR_CHROME_ROWS;
-        if clicked >= content_capacity {
-            return None;
-        }
-        let selected_index = rows
-            .iter()
-            .position(|entry| *entry == self.selected)
-            .unwrap_or(0);
-        let start = sidebar_viewport_start(&rows, selected_index, content_capacity);
-        let mut offset = 0;
-        for entry in &rows[start..] {
-            let lines = sidebar_row_content_lines(*entry);
-            if offset + lines > content_capacity {
-                break;
-            }
-            if (offset..offset + lines).contains(&clicked) {
-                return Some(SidebarHit {
-                    selection: *entry,
-                    line: clicked - offset,
-                    left,
-                });
-            }
-            offset += lines;
-        }
-        None
-    }
-
-    /// Resolve only the visible `<PR icon> <count>` cells at the right edge of
-    /// a session metadata row. The count and width mirror the view's badge.
-    fn sidebar_pr_at(&self, column: u16, row: u16) -> Option<SessionId> {
-        let hit = self.sidebar_hit_at(column, row)?;
-        let Selection::Target(Target::Session(session)) = hit.selection else {
-            return None;
-        };
-        if hit.line != 1 {
-            return None;
-        }
-        let visible = self
-            .session_prs(session)?
-            .iter()
-            .filter(|pr| pr.is_visible())
-            .count();
-        if visible == 0 {
-            return None;
-        }
-        let badge_width = 2 + visible.to_string().len();
-        let start = hit.left.saturating_sub(badge_width);
-        (start..hit.left)
-            .contains(&usize::from(column))
-            .then_some(session)
     }
 
     fn reconcile_sessions(&mut self, previous_sessions: &[SessionId]) {
@@ -1972,13 +1896,15 @@ impl AppState {
     }
 }
 
+/// Semantic target resolved against the Home frame that was actually drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SidebarHit {
-    selection: Selection,
-    /// Zero-based line inside the logical sidebar row.
-    line: usize,
-    /// Width of the rendered left pane.
-    left: usize,
+pub enum SidebarPointerTarget {
+    /// Select a visible row, or activate it on a second press.
+    Row(Selection),
+    /// Open the visible pull-request badge for this stable session.
+    PullRequests(SessionId),
+    /// Open the visible generated-file action for this stable session.
+    Artifacts(SessionId),
 }
 
 /// Choose a deterministic surviving row at the removed session's former
@@ -2012,71 +1938,12 @@ pub(crate) const SIDEBAR_CHROME_ROWS: usize = 2;
 /// Desired Home sidebar left-pane width. The split clamps it to leave the right
 /// pane at least one column. Mirrors `views::workspace`'s `LEFT_WIDTH`.
 pub(crate) const SIDEBAR_LEFT_WIDTH: usize = 36;
-/// Lines one session row occupies: its summary, its change history, and its
-/// Agent states. The count never varies with how many Agents a session has —
-/// this hit-test only knows runtime-local phases, while the view also folds in
-/// the daemon Agent inventory, so an Agent-dependent height would drift by a
-/// row and land clicks on the wrong session. Mirrors `views::workspace`'s
-/// `SESSION_ROW_LINES`, which asserts the two agree at compile time.
+/// Shared geometry of the generated-file action on a session's Agent row.
+pub(crate) const SIDEBAR_ARTIFACTS_LABEL: &str = "Artifacts";
+pub(crate) const SIDEBAR_ARTIFACTS_MIN_WIDTH: usize = 16;
+/// Established session-row footprint: summary, change history, and Agent states.
+/// Presentation resolves pointer targets using its actual rendered layout.
 pub(crate) const SIDEBAR_SESSION_ROW_LINES: usize = 3;
-/// Rows the foot-of-sidebar mascot reserves in the controller Home: three rabbit
-/// lines and one trailing gap. The controller frame never renders a speech
-/// bubble, so the reservation is constant whenever the mascot is shown.
-pub(crate) const SIDEBAR_MASCOT_ROWS: usize = 4;
-/// Minimum left-pane width that fits the mascot rabbit (its nine-cell art plus a
-/// one-column indent). Below this the sidebar drops the mascot for list space.
-pub(crate) const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
-
-/// Rows the mascot sidecar reserves for a given left-pane width and body
-/// capacity, mirroring `home_left_pane`'s reservation. The rabbit shows only
-/// when the pane is wide enough for its art and the body has room for the
-/// reservation plus two list rows.
-fn sidebar_mascot_rows(left: usize, body_capacity: usize) -> usize {
-    if left >= SIDEBAR_MASCOT_MIN_LEFT && body_capacity >= SIDEBAR_MASCOT_ROWS + 2 {
-        SIDEBAR_MASCOT_ROWS
-    } else {
-        0
-    }
-}
-
-/// Scroll rows the sidebar viewport uses to weight one row: a session spans its
-/// summary, change-history, and Agent lines, and the `+ new session` action is a
-/// single line.
-fn sidebar_row_height(row: Selection) -> usize {
-    match row {
-        Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
-        // Root is not a Home row. Treat a stale/private synthetic value as one
-        // line so geometry remains total without reintroducing a divider.
-        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
-    }
-}
-
-/// Body lines a row actually draws: a session identity row carries a metadata
-/// row and an Agent row, while the action row is a single line.
-fn sidebar_row_content_lines(row: Selection) -> usize {
-    match row {
-        Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
-        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
-    }
-}
-
-/// First visible row so the selected row stays in view, mirroring the render's
-/// scroll math: advance the viewport start until the selected row and everything
-/// above it fits within `capacity`.
-fn sidebar_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> usize {
-    let mut start = 0;
-    while start < selected
-        && rows[start..=selected]
-            .iter()
-            .map(|row| sidebar_row_height(*row))
-            .sum::<usize>()
-            > capacity
-    {
-        start += 1;
-    }
-    start
-}
-
 /// terminal adapter が将来投影する入力語彙。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppKey {
@@ -2157,10 +2024,16 @@ pub enum AppKey {
     OpenEnvironment,
     /// Open the active target's Pull Request list overlay (`Ctrl-O p`).
     OpenPrs,
+    /// Open the exact PR selected in the cross-workspace inbox.
+    OpenPullRequest(PrIdentity),
     /// Open the selected session's file preview overlay.
     OpenPreview,
+    /// Open the selected session's artifacts, or the workspace-wide inventory.
+    OpenArtifacts,
     /// Open the current workspace's durable pending decision list.
     OpenDecisions,
+    /// Refresh and open the exact pending question selected in the inbox.
+    OpenDecision(UserDecisionId),
     /// Move within the pending list or current decision options.
     DecisionPrevious,
     /// Move within the pending list or current decision options.
@@ -2363,16 +2236,10 @@ pub enum AppEvent {
         decision_id: UserDecisionId,
         offset: usize,
     },
-    /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
-    /// reducer resolves the row with the same viewport geometry the frame draws
-    /// and either moves the cursor or, for two presses on the same stable
-    /// session identity within 400ms, activates that session. A click outside
-    /// the sidebar body clears the pending press and is otherwise inert.
-    /// Terminal-pane drag and copy stay a shell +
-    /// `TerminalSession` concern and never reach this vocabulary.
+    /// A sidebar press resolved by the presentation's rendered layout. A miss
+    /// clears the pending double click. Stable identities remain fenced here.
     Pointer {
-        column: u16,
-        row: u16,
+        target: Option<SidebarPointerTarget>,
         at: std::time::Duration,
     },
     /// Time elapsed since the last *user* interaction, measured by the shell on a
@@ -2523,7 +2390,10 @@ pub enum BackendEvent {
         inherited: Vec<EnvironmentEntry>,
     },
     /// A safe environment read/save failure.
-    EnvironmentError { scope: EnvScope, error: SafeError },
+    EnvironmentError {
+        scope: EnvScope,
+        error: SafeError,
+    },
     RolesLoaded {
         scope: RoleEditorScope,
         source: String,
@@ -2536,6 +2406,9 @@ pub enum BackendEvent {
     Decisions {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
+    },
+    DecisionsUnavailable {
+        workspace: WorkspaceId,
     },
     /// Daemon confirmation after resolve.  The item remains visible until this arrives.
     DecisionResolved {
@@ -2557,7 +2430,10 @@ pub enum BackendEvent {
         prs: Vec<PrEntry>,
     },
     /// A safe Pull Request read failure.
-    PullRequestsError { target: Target, error: SafeError },
+    PullRequestsError {
+        target: Target,
+        error: SafeError,
+    },
     /// Repository file candidates or one selected file returned by the overlay
     /// data owner. `path: None` carries the finder candidates; `Some` carries
     /// that file's safe UTF-8 lines.
@@ -2583,6 +2459,14 @@ pub enum BackendEvent {
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
         error: SafeError,
+    },
+    /// Native viewer result, fenced independently from finder/document reads.
+    ArtifactOpenFinished {
+        target: Target,
+        request_id: RequestId,
+        path: String,
+        filter: PreviewFileFilter,
+        result: Result<ArtifactOpenOutcome, SafeError>,
     },
 }
 
@@ -2787,6 +2671,7 @@ pub enum Effect {
     /// Open a selected generated artifact using the platform viewer.
     OpenArtifact {
         target: Target,
+        request_id: RequestId,
         path: String,
         filter: PreviewFileFilter,
     },
@@ -2835,6 +2720,15 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
     if state.overlay.is_some() {
         state.pr_request = None;
     }
+    if state.pr_focus.as_ref().is_some_and(|(target, _)| {
+        state.pr_request != Some(*target)
+            && state
+                .pr_overlay
+                .as_ref()
+                .is_none_or(|overlay| overlay.target() != *target)
+    }) {
+        state.pr_focus = None;
+    }
     // Dropping the preview also ends the scan behind it, like every other way
     // the overlay closes. `take` keeps this to the drop that happens here: the
     // Escape paths have already cleared the overlay and cancelled their own.
@@ -2846,6 +2740,7 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
 
 #[must_use]
 fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+    pull_requests::cancel_inbox_wait(state, &event);
     match event {
         AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
@@ -2884,7 +2779,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
+        AppEvent::Pointer { target, at } => update_pointer(state, target, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
         AppEvent::GardenHover { column, row } => {
@@ -3016,6 +2911,7 @@ fn update_live_pane_availability(state: &mut AppState, has_live_pane: bool) -> V
     if matches!(state.route, Route::Home(HomeMode::Closeup))
         && has_live_pane
         && !state.closeup_action_forced
+        && state.overlay == Some(Overlay::Closeup)
     {
         state.overlay = None;
     }
@@ -3141,6 +3037,7 @@ fn update_pane_tab_availability(
 /// update backend event.
 fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
     match event {
+        BackendEvent::DecisionsUnavailable { workspace } => decision::unavailable(state, workspace),
         BackendEvent::SessionFavorites(favorites) => update_session_favorites(state, favorites),
         BackendEvent::Decisions {
             workspace,
@@ -3186,7 +3083,8 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
         | BackendEvent::PullRequestsLoaded { .. }
         | BackendEvent::PullRequestsError { .. }
         | BackendEvent::PreviewLoaded { .. }
-        | BackendEvent::PreviewError { .. }) => {
+        | BackendEvent::PreviewError { .. }
+        | BackendEvent::ArtifactOpenFinished { .. }) => {
             let _ = update_editor_backend(state, &event);
             // 候補が届いた直後の選択にも側 pane を追随させる。
             preview::sync_preview_pane(state)
@@ -3340,6 +3238,7 @@ fn update_session_snapshot(state: &mut AppState, mut sessions: Vec<SessionId>) -
     let mut effects = vec![Effect::SyncPullRequestTargets {
         sessions: state.sessions.clone(),
     }];
+    effects.extend(preview::forget_untracked_target(state));
     effects.extend(continue_cleanup_after_snapshot(state));
     effects.extend(continue_remove_after_snapshot(state));
     effects
@@ -3395,12 +3294,21 @@ fn update_session_lifecycles(
     }
     reconcile_cleanup_queue(state);
     reconcile_remove_queue(state);
-    Vec::new()
+    preview::forget_untracked_target(state)
 }
 
 #[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.
 fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     match event {
+        BackendEvent::ArtifactOpenFinished {
+            target,
+            request_id,
+            path,
+            filter,
+            result,
+        } => {
+            preview::artifact_open_finished(state, *target, *request_id, path, *filter, result);
+        }
         BackendEvent::NotesLoaded {
             request_id,
             target,
@@ -3595,6 +3503,11 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
 
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     state.interaction_count = state.interaction_count.saturating_add(1);
+    // These carry an explicit Inbox choice. The process-level owner has
+    // already checked unsaved surfaces before replacing its background modal.
+    if matches!(&key, AppKey::OpenDecision(_) | AppKey::OpenPullRequest(_)) {
+        return update_management_key(state, key);
+    }
     // Existing modal overlays have precedence even if an asynchronous
     // completion opened one while the drawer was already visible.
     if let Some(overlay) = state.overlay {
@@ -3693,6 +3606,9 @@ fn director_picker_shows_selection(state: &AppState) -> bool {
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_director_shell_key(state, &key) {
         return effects;
+    }
+    if state.director_launching.is_some() {
+        return Vec::new();
     }
     if update_director_route_key(state, &key) {
         return Vec::new();
@@ -4436,6 +4352,10 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         }
         if !present {
             overlay.editor = None;
+            if overlay.exact.is_some() {
+                overlay.error =
+                    Some("This question is no longer available. Close and refresh the inbox.");
+            }
         }
     }
     overlay.selected = overlay
@@ -4448,6 +4368,15 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
+    if overlay.requested.is_some() || overlay.error.is_some() {
+        if key == AppKey::Escape {
+            state.overlay = None;
+            // Keep the cancelled identity until the next observation so a
+            // delayed result cannot reopen a question after closing its error.
+            overlay.requested = overlay.requested.or(overlay.exact);
+        }
+        return Vec::new();
+    }
     if overlay
         .editor
         .as_ref()
@@ -4455,6 +4384,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         && matches!(&key, AppKey::Escape)
     {
         overlay.editor = None;
+        overlay.exact = None;
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
@@ -4559,12 +4489,17 @@ fn navigate_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect
 }
 
 /// Open the pending-decision list and ask its owner for a fresh snapshot.
-fn open_decisions(state: &mut AppState) -> Vec<Effect> {
-    state.unread_decisions.clear();
+fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Vec<Effect> {
+    if requested.is_none() {
+        state.unread_decisions.clear();
+    }
     state.overlay = Some(Overlay::Decisions);
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,
         editor: None,
+        requested,
+        error: None,
+        exact: requested,
     });
     vec![Effect::RefreshDecisions {
         workspace: state.workspace,
@@ -4596,7 +4531,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         {
             reorder_selected_session(state, TabDirection::Next)
         }
-        AppKey::OpenDecisions => open_decisions(state),
+        AppKey::OpenDecisions => open_decisions(state, None),
+        AppKey::OpenDecision(decision_id) => open_decisions(state, Some(decision_id)),
         AppKey::Up => {
             state.move_selection(-1);
             Vec::new()
@@ -4675,7 +4611,14 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => pull_requests::open(state),
+        AppKey::OpenPullRequest(identity) => pull_requests::open_identity(state, &identity),
         AppKey::OpenPreview => open_preview(state),
+        AppKey::OpenArtifacts => {
+            let target = state
+                .file_preview_target()
+                .unwrap_or(Target::Root(state.workspace));
+            open_artifacts(state, target, "")
+        }
         AppKey::Char('n')
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {
@@ -4813,8 +4756,11 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::OpenEnvironment
         | AppKey::OpenGarden
         | AppKey::OpenPrs
+        | AppKey::OpenPullRequest(_)
         | AppKey::OpenPreview
+        | AppKey::OpenArtifacts
         | AppKey::OpenDecisions
+        | AppKey::OpenDecision(_)
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
         | AppKey::PageUp
@@ -5483,21 +5429,44 @@ const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_mill
 /// their single-click selection behavior but cannot become double clicks.
 fn update_pointer(
     state: &mut AppState,
-    column: u16,
-    row: u16,
+    target: Option<SidebarPointerTarget>,
     at: std::time::Duration,
 ) -> Vec<Effect> {
     if state.overlay.is_some() || state.workspace_drawer_open() {
         state.pending_session_click = None;
         return Vec::new();
     }
-    if let Some(session) = state.sidebar_pr_at(column, row) {
-        state.pending_session_click = None;
-        return pull_requests::open_for(state, Target::Session(session));
-    }
-    let Some(selection) = state.sidebar_selection_at(column, row) else {
+    let Some(target) = target else {
         state.pending_session_click = None;
         return Vec::new();
+    };
+    let session = match target {
+        SidebarPointerTarget::Row(Selection::Target(Target::Session(session)))
+        | SidebarPointerTarget::PullRequests(session)
+        | SidebarPointerTarget::Artifacts(session) => Some(session),
+        SidebarPointerTarget::Row(_) => None,
+    };
+    if session.is_some_and(|session| !state.sessions.contains(&session)) {
+        state.pending_session_click = None;
+        return Vec::new();
+    }
+    // A real press supersedes background auto-focus just like a keystroke.
+    state.ctrl_c_grace = false;
+    state.interaction_count = state.interaction_count.saturating_add(1);
+    let selection = match target {
+        SidebarPointerTarget::PullRequests(session) => {
+            state.pending_session_click = None;
+            return pull_requests::open_for(state, Target::Session(session));
+        }
+        SidebarPointerTarget::Artifacts(session) => {
+            state.pending_session_click = None;
+            return if state.session_can_use(session) {
+                open_artifacts(state, Target::Session(session), "")
+            } else {
+                Vec::new()
+            };
+        }
+        SidebarPointerTarget::Row(selection) => selection,
     };
     state.select_row(selection);
     let Selection::Target(Target::Session(session)) = selection else {

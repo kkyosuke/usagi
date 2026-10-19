@@ -27,6 +27,7 @@ pub struct TextOverlay {
     scroll: usize,
     dismiss_on_any_key: bool,
     footer: String,
+    status: Option<String>,
 }
 
 impl TextOverlay {
@@ -39,6 +40,7 @@ impl TextOverlay {
             scroll: 0,
             dismiss_on_any_key: false,
             footer: "↑↓ scroll   Esc: close".to_owned(),
+            status: None,
         }
     }
 
@@ -54,6 +56,12 @@ impl TextOverlay {
     #[must_use]
     pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
         self.footer = footer.into();
+        self
+    }
+
+    /// Pin caller-formatted feedback above a reserved document viewport.
+    pub(crate) fn with_status(mut self, status: Option<String>) -> Self {
+        self.status = status;
         self
     }
 
@@ -122,6 +130,15 @@ impl TextOverlay {
     /// one document row and the footer over showing every scroll indicator so
     /// the reader never loses its way back to the finder.
     fn body_with_reserved_footer(&self, body_height: usize) -> Vec<String> {
+        if let Some(status) = self.status.as_ref().filter(|_| body_height > 0) {
+            let mut body = vec![status.clone()];
+            body.extend(self.document_body_with_reserved_footer(body_height - 1));
+            return body;
+        }
+        self.document_body_with_reserved_footer(body_height)
+    }
+
+    fn document_body_with_reserved_footer(&self, body_height: usize) -> Vec<String> {
         if body_height >= 5 {
             return self.body(body_height);
         }
@@ -217,6 +234,27 @@ pub(crate) fn render_over_with_layout(
 mod tests {
     use super::{OverlayDocument, TextOverlay, render, render_over};
     use crate::presentation::widgets::display_width;
+
+    #[test]
+    fn reserved_status_stays_visible_while_the_document_scrolls() {
+        let overlay = TextOverlay::new(
+            "Preview",
+            OverlayDocument::Ready((0..40).map(|n| format!("line {n}")).collect()),
+        )
+        .with_status(Some("External app failed".into()))
+        .scrolled_to(30);
+        for height in 0..12 {
+            let body = overlay.body_with_reserved_footer(height);
+            assert_eq!(body.len(), height);
+            if height > 0 {
+                assert_eq!(body[0], "External app failed");
+            }
+            if height >= 3 {
+                assert!(body.iter().any(|line| line.contains("line 30")));
+                assert!(body.iter().any(|line| line.contains("Esc: close")));
+            }
+        }
+    }
 
     #[test]
     fn long_text_scrolls_without_losing_the_footer() {

@@ -1,4 +1,4 @@
-//! Persistent macOS service lookup for daemon-owned processes.
+//! Persistent macOS service lookup for long-lived usagi processes.
 //!
 //! A detached process still inherits its caller's Mach bootstrap namespace.
 //! That login namespace can disappear while the daemon and its PTYs survive.
@@ -15,7 +15,9 @@ pub(super) fn prepare_with(
 ) -> io::Result<()> {
     if matches!(
         command,
-        DaemonCommand::Serve { .. } | DaemonCommand::BootstrapBroker
+        DaemonCommand::Serve { .. }
+            | DaemonCommand::BootstrapBroker
+            | DaemonCommand::ContinueUpdate
     ) {
         select()?;
     }
@@ -109,7 +111,7 @@ pub(super) mod real_io {
             get_root: unsafe { std::mem::transmute::<*mut libc::c_void, GetRoot>(root) },
             lookup_user: unsafe { std::mem::transmute::<*mut libc::c_void, LookupUser>(user) },
         };
-        // SAFETY: Called once at daemon/broker startup, before any worker or
+        // SAFETY: Called once at persistent process startup, before any worker or
         // cached directory-service lookup. geteuid only reads credentials.
         let current = unsafe { bootstrap_port };
         let uid = unsafe { libc::geteuid() };
@@ -172,6 +174,7 @@ mod tests {
             DaemonCommand::Serve { standby: false },
             DaemonCommand::Serve { standby: true },
             DaemonCommand::BootstrapBroker,
+            DaemonCommand::ContinueUpdate,
         ] {
             let before = selections.get();
             prepare_with(&command, &mut select).unwrap();

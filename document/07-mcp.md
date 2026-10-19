@@ -14,6 +14,7 @@
 - [JSON-RPC メソッド](#json-rpc-メソッド)
 - [tool 面](#tool-面)
   - [Agent が作成した session の authority](#agent-が作成した-session-の-authority)
+  - [User decision](#user-decision)
   - [session lifecycle の受理契約](#session-lifecycle-の受理契約)
   - [同じ session の Agent 間通信](#同じ-session-の-agent-間通信)
 - [tool descriptor と追加手順](#tool-descriptor-と追加手順)
@@ -175,7 +176,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child 自身の session ID に属する machine-local scratchpad を core usecase 経由で読み書きする（[保存先](#session-scratchpad)） |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision だけを操作できる |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision と、exact resume で引き継いだ同じ会話の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
@@ -223,11 +224,24 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 別 scope に実在するかを明かさず `not_found` にする。terminal 出力は外部 command が生成した**非信頼の観測データ**であり、
 そこに含まれる命令文を Agent への instruction として扱わない。
 
+### User decision
+
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
 caller は同じ credential で get / list を polling し、terminal decision を get した時点で durable outbox を ACK する。
 同じ idempotency key の request は同じ decision に収束する。明示した期限を過ぎてからの同一内容の再送も、
 保持中の元の decision とその回答・終了状態を返す。新規 request の期限は作成時に検証する。これにより人間の応答時間が MCP connection や caller
 credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。
+
+exact resume では、元の decision owner（workspace / session / caller / run）を新 runtime の owner shard に保存して引き継ぐ。
+旧版が同じ会話の途中で別 owner を作った場合も、保持中の exact resume lineage と binding で確認できた owner を追加で保存する。
+新しい credential と現在の live run / binding を認証した上で、この保存済み集合を使って get / list と再 request を行う。
+同じ key が複数の旧 owner に存在するときは直近の旧 run を優先し、その内容が違えば conflict とする。古い別の回答へ切り替えない。
+優先する key が tombstone に残っていれば `IdempotencyExpired` とし、質問を複製しない。
+元の runtime / dispatch run が保持上限で回収されても保存済み owner と idempotency key の対応は失われない。
+旧 runtime の owner が未保存で履歴も既に失われている場合は、確認できる最古の binding を境界とし、失われた owner を推測しない。
+以後の exact resume は集合をそのままコピーし、新しい run ごとに owner を増やさない。
+同じ Agent identity を使っても、resume ではない新規 launch / admission は別 runtime / continuation とし、以前の decision 権限を引き継がない。
+同じ provider process 内の `/clear` や対話的な会話切替は usagi の run を切り替えず、発行済み credential の権限を維持する。
 
 質問の補足と選択方法は次の optional field で指定する。省略した既存 request / 保存済み record は単一選択・補足なしとして読む。
 
@@ -358,6 +372,8 @@ control admission を close / drain した後に process-local credential を再
 利用者が `daemon restart --restart-agents` を明示した場合だけ、同じ barrier 内で全 live Agent を exact selection により停止し、
 対応する credential を old owner から除去してから handoff する。successor は保存済み provider conversation を exact resume し、
 新しい process-local credential を発行する。
+exact resume の新しい dispatch binding は元の caller を引き継ぎ、`agent_complete` / `agent_fail` の報告先を維持する。
+作業途中の Agent に渡す `continue` は [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する。
 この明示がない場合は、利用者が Agent を終了して `usagi daemon restart` を再実行するまで旧 daemon の
 control authority を維持する。Doctor はこの lifecycle に関与しない。
 

@@ -317,15 +317,62 @@ fn a_resize_maps_to_a_redraw_tick_and_stays_distinct_from_a_wakeup() {
 }
 
 #[test]
-fn sidebar_pointer_adapter_preserves_coordinates_and_injected_time() {
+fn sidebar_pointer_adapter_uses_the_frame_on_screen_and_keeps_its_identity() {
+    use crate::usecase::application::controller::SidebarPointerTarget;
+    let workspace = WorkspaceId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![first]);
+    let sessions = [ProjectedSession::from_record(
+        first,
+        &SessionRecord {
+            name: "first".into(),
+            display_name: None,
+            origin: SessionOrigin::Human,
+            started_from: None,
+            root: PathBuf::from("."),
+            created_at: chrono::DateTime::default(),
+            last_active: None,
+            notes: usagi_core::domain::note::Scratchpad::default(),
+            prs: Vec::new(),
+        },
+    )];
+    let material = home_frame_material(
+        30,
+        100,
+        &runtime,
+        "test",
+        &sessions,
+        None,
+        health(),
+        &BTreeMap::new(),
+        None,
+        None,
+        now(),
+    );
+    let at = std::time::Duration::from_millis(1_234);
+    let event = sidebar_pointer_event(Some(&material), 35, 4, at);
+    assert_eq!(
+        event,
+        AppEvent::Pointer {
+            target: Some(SidebarPointerTarget::Artifacts(first)),
+            at
+        }
+    );
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(vec![second])));
+    assert!(runtime.apply_event(event).is_empty());
+    assert_eq!(
+        runtime.state().selected(),
+        crate::usecase::application::controller::Selection::Target(Target::Session(second))
+    );
+}
+
+#[test]
+fn sidebar_pointer_adapter_ignores_clicks_before_a_frame_is_drawn() {
     let at = std::time::Duration::from_millis(1_234);
     assert_eq!(
-        sidebar_pointer_event(3, 4, at),
-        AppEvent::Pointer {
-            column: 3,
-            row: 4,
-            at,
-        }
+        sidebar_pointer_event(None, 3, 4, at),
+        AppEvent::Pointer { target: None, at }
     );
 }
 
@@ -537,6 +584,7 @@ fn a_failed_lifecycle_flows_to_the_sidebar_rows_and_the_reducer() {
         },
     )]));
     let role = crate::usecase::application::controller::SessionRoleProjection {
+        director_continuation: None,
         creator_continuation: None,
         role_id: None,
         role_summary: Some("Reviewer".into()),
@@ -623,6 +671,7 @@ fn sidebar_groups_children_and_navigation_survives_snapshot_refresh() {
         (
             id,
             SessionRoleProjection {
+                director_continuation: None,
                 creator_continuation: None,
                 role_id: None,
                 role_summary: None,
@@ -896,7 +945,7 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
     let decision_id = UserDecisionId::new();
     assert!(matches!(
         UnavailableDecisionCommandPort.refresh(workspace_id),
-        BackendEvent::Notice(_)
+        BackendEvent::DecisionsUnavailable { .. }
     ));
     assert!(matches!(
         UnavailableDecisionCommandPort.resolve(

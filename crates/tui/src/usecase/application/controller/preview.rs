@@ -215,6 +215,47 @@ struct PreviewDisplay {
     wrap_lines: bool,
 }
 
+/// Result of asking the platform helper to open an artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactOpenOutcome {
+    /// The platform helper exited successfully; GUI display is not observed.
+    Sent,
+    /// The helper was admitted but did not provide a conclusive result in time.
+    Unconfirmed,
+}
+
+/// Native viewer work belonging to one selected artifact and request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactOpenState {
+    request_id: RequestId,
+    path: String,
+    result: Option<Result<ArtifactOpenOutcome, SafeError>>,
+}
+
+impl ArtifactOpenState {
+    #[must_use]
+    pub const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+
+    #[must_use]
+    pub fn is_opening(&self) -> bool {
+        self.result.is_none()
+    }
+
+    #[must_use]
+    pub fn is_unconfirmed(&self) -> bool {
+        matches!(self.result, Some(Ok(ArtifactOpenOutcome::Unconfirmed)))
+    }
+
+    #[must_use]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.result
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+    }
+}
+
 /// Selected-session file finder and read-only text preview state.
 ///
 /// Repository-relative paths and file lines return through [`Effect::LoadPreview`].
@@ -255,6 +296,7 @@ pub struct PreviewOverlay {
     display: PreviewDisplay,
     pub(super) loading: bool,
     pub(super) error: Option<SafeError>,
+    artifact_open: Option<ArtifactOpenState>,
 }
 
 impl PreviewOverlay {
@@ -281,6 +323,7 @@ impl PreviewOverlay {
             display: PreviewDisplay::default(),
             loading: true,
             error: None,
+            artifact_open: None,
         }
     }
 
@@ -303,6 +346,12 @@ impl PreviewOverlay {
     #[must_use]
     pub const fn file_filter(&self) -> PreviewFileFilter {
         self.file_filter
+    }
+
+    /// Status of the explicit external-open request for the current artifact.
+    #[must_use]
+    pub const fn artifact_open(&self) -> Option<&ArtifactOpenState> {
+        self.artifact_open.as_ref()
     }
     /// Filtered candidates in rank order, each carrying the query positions so
     /// the finder can show what the filter explains.
@@ -486,6 +535,15 @@ impl PreviewOverlay {
         self.visible.len()
     }
 
+    /// Borrow one already-ranked candidate without allocating the full list.
+    #[must_use]
+    pub fn candidate_at(&self, index: usize) -> Option<PreviewCandidate<'_>> {
+        self.visible.get(index).map(|row| PreviewCandidate {
+            path: &self.files[row.file],
+            positions: &row.positions,
+        })
+    }
+
     /// Selected repository-relative path, if the current filter has a match.
     #[must_use]
     pub fn selected_file(&self) -> Option<&str> {
@@ -641,19 +699,31 @@ pub(super) fn update_preview_overlay(state: &mut AppState, key: &AppKey) -> Vec<
 
     let overlay = state.preview_overlay.as_ref().unwrap();
     if overlay.file_filter.is_artifacts()
+        && !overlay.is_search_editing()
         && ((matches!(key, AppKey::Enter) && !document_open)
             || (matches!(key, AppKey::Tab) && document_open))
     {
-        let path = overlay.path.as_deref().or_else(|| overlay.selected_file());
-        return path
-            .map(|path| {
-                vec![Effect::OpenArtifact {
-                    target: overlay.target,
-                    path: path.to_owned(),
-                    filter: overlay.file_filter,
-                }]
-            })
-            .unwrap_or_default();
+        let Some(path) = overlay
+            .path
+            .as_deref()
+            .or_else(|| overlay.selected_file())
+            .map(str::to_owned)
+        else {
+            return Vec::new();
+        };
+        let overlay = state.preview_overlay.as_mut().unwrap();
+        let request_id = RequestId::new();
+        overlay.artifact_open = Some(ArtifactOpenState {
+            request_id,
+            path: path.clone(),
+            result: None,
+        });
+        return vec![Effect::OpenArtifact {
+            target: overlay.target,
+            request_id,
+            path,
+            filter: overlay.file_filter,
+        }];
     }
     let mut effects =
         if !document_open && overlay.file_filter.is_artifacts() && matches!(key, AppKey::Tab) {
@@ -665,7 +735,57 @@ pub(super) fn update_preview_overlay(state: &mut AppState, key: &AppKey) -> Vec<
         };
     // 本文から finder へ戻った直後も、cursor の下の file を読み直す。
     effects.extend(sync_preview_pane(state));
+    if let Some(overlay) = state.preview_overlay.as_mut() {
+        let selected = overlay.path.as_deref().or_else(|| overlay.selected_file());
+        if overlay
+            .artifact_open
+            .as_ref()
+            .is_some_and(|open| selected != Some(open.path.as_str()))
+        {
+            // Moving away ends this request's display ownership. Returning to
+            // the same path must not revive an older A-B-A completion.
+            overlay.artifact_open = None;
+        }
+    }
     effects
+}
+
+pub(super) fn artifact_open_finished(
+    state: &mut AppState,
+    target: Target,
+    request_id: RequestId,
+    path: &str,
+    filter: PreviewFileFilter,
+    result: &Result<ArtifactOpenOutcome, SafeError>,
+) {
+    let Some(overlay) = state
+        .preview_overlay
+        .as_mut()
+        .filter(|overlay| overlay.target == target && overlay.file_filter == filter)
+    else {
+        return;
+    };
+    if let Some(open) = overlay
+        .artifact_open
+        .as_mut()
+        .filter(|open| open.request_id == request_id && open.path == path && open.result.is_none())
+    {
+        open.result = Some(result.clone());
+    }
+}
+
+/// A removed identity must not keep an overlay or accept its late completions.
+pub(super) fn forget_untracked_target(state: &mut AppState) -> Vec<Effect> {
+    if state.preview_overlay.as_ref().is_some_and(|overlay| {
+        matches!(overlay.target, Target::Session(id) if !state.sessions.contains(&id) || !state.session_can_use(id))
+    }) {
+        state.preview_overlay = None;
+        if state.overlay == Some(super::Overlay::Preview) {
+            state.overlay = None;
+        }
+        return vec![Effect::CancelPreview];
+    }
+    Vec::new()
 }
 
 /// Keep the finder's side pane on whatever the cursor is resting on.
@@ -878,6 +998,249 @@ mod tests {
 
     use super::super::{AppEvent, BackendEvent, Overlay, SafeMessage, update};
     use super::*;
+
+    fn artifacts() -> AppState {
+        let session = SessionId::new();
+        let mut state = AppState::home(WorkspaceId::new(), vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        let id = state.preview_overlay().unwrap().request_id();
+        complete(
+            &mut state,
+            Target::Session(session),
+            id,
+            None,
+            PreviewFileFilter::Artifacts,
+            &["artifacts/one.log", "artifacts/two.log"],
+            &[],
+        );
+        state
+    }
+
+    fn open_artifact(state: &mut AppState) -> BackendEvent {
+        let effects = update(state, AppEvent::Key(AppKey::Enter));
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let request_id = overlay.artifact_open().unwrap().request_id();
+        let path = overlay.selected_file().unwrap().to_owned();
+        let filter = overlay.file_filter();
+        assert_eq!(
+            effects,
+            [Effect::OpenArtifact {
+                target,
+                request_id,
+                path: path.clone(),
+                filter,
+            }]
+        );
+        BackendEvent::ArtifactOpenFinished {
+            target,
+            request_id,
+            path,
+            filter,
+            result: Err(SafeError {
+                message: SafeMessage::new("Open failed"),
+                error_id: "test-open".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn native_results_match_target_request_path_filter_and_complete_once() {
+        let mut state = artifacts();
+        let event = open_artifact(&mut state);
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let request_id = overlay.artifact_open().unwrap().request_id();
+        for field in 0..4 {
+            let wrong = BackendEvent::ArtifactOpenFinished {
+                target: if field == 0 {
+                    Target::Session(SessionId::new())
+                } else {
+                    target
+                },
+                request_id: if field == 1 {
+                    RequestId::new()
+                } else {
+                    request_id
+                },
+                path: if field == 2 {
+                    "artifacts/two.log"
+                } else {
+                    "artifacts/one.log"
+                }
+                .into(),
+                filter: if field == 3 {
+                    PreviewFileFilter::AllArtifacts
+                } else {
+                    PreviewFileFilter::Artifacts
+                },
+                result: Err(SafeError {
+                    message: SafeMessage::new("Wrong completion"),
+                    error_id: "test-open".into(),
+                }),
+            };
+            let _ = update(&mut state, AppEvent::Backend(wrong));
+            assert!(
+                state
+                    .preview_overlay()
+                    .unwrap()
+                    .artifact_open()
+                    .unwrap()
+                    .is_opening()
+            );
+        }
+        let _ = update(&mut state, AppEvent::Backend(event.clone()));
+        assert_eq!(
+            state
+                .preview_overlay()
+                .unwrap()
+                .artifact_open()
+                .unwrap()
+                .error()
+                .unwrap()
+                .message
+                .as_str(),
+            "Open failed"
+        );
+        let retry = open_artifact(&mut state);
+        let _ = update(&mut state, AppEvent::Backend(event));
+        assert!(
+            state
+                .preview_overlay()
+                .unwrap()
+                .artifact_open()
+                .unwrap()
+                .is_opening()
+        );
+        let mut success = retry.clone();
+        if let BackendEvent::ArtifactOpenFinished { result, .. } = &mut success {
+            *result = Ok(ArtifactOpenOutcome::Sent);
+        }
+        let _ = update(&mut state, AppEvent::Backend(success));
+        let _ = update(&mut state, AppEvent::Backend(retry));
+        let status = state.preview_overlay().unwrap().artifact_open().unwrap();
+        assert!(!status.is_opening());
+        assert!(
+            status.error().is_none(),
+            "a duplicate completion must not replace success"
+        );
+        assert_eq!(
+            state.preview_overlay().unwrap().selected_file(),
+            Some("artifacts/one.log")
+        );
+    }
+
+    #[test]
+    fn native_results_cannot_reappear_after_moving_away_or_reopening() {
+        let mut state = artifacts();
+        let event = open_artifact(&mut state);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Backend(event.clone()));
+        assert!(state.preview_overlay().unwrap().artifact_open().is_none());
+        let event = open_artifact(&mut state);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Backend(event.clone()));
+        assert!(state.preview_overlay().is_none());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        let _ = update(&mut state, AppEvent::Backend(event));
+        assert!(state.preview_overlay().unwrap().artifact_open().is_none());
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+    }
+
+    #[test]
+    fn removed_preview_targets_close_and_ignore_late_native_and_text_results() {
+        for document in [false, true] {
+            let mut state = artifacts();
+            let native = open_artifact(&mut state);
+            if document {
+                let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+            }
+            let overlay = state.preview_overlay().unwrap();
+            let late = BackendEvent::PreviewLoaded {
+                target: overlay.target(),
+                request_id: overlay.request_id(),
+                path: overlay.path().map(str::to_owned),
+                filter: overlay.file_filter(),
+                files: vec!["artifacts/recreated.log".into()],
+                changed: vec![],
+                lines: vec!["new session".into()],
+            };
+            let effects = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Sessions(vec![SessionId::new()])),
+            );
+            assert!(effects.contains(&Effect::CancelPreview));
+            assert!(state.preview_overlay().is_none());
+            let _ = update(&mut state, AppEvent::Backend(native));
+            let _ = update(&mut state, AppEvent::Backend(late));
+            assert!(state.preview_overlay().is_none());
+        }
+    }
+
+    #[test]
+    fn deleting_preview_targets_close_while_workspace_artifacts_survive_session_removal() {
+        let mut state = artifacts();
+        let id = state.sessions()[0];
+        let lifecycles = std::collections::BTreeMap::from([(
+            id,
+            super::super::SessionLifecycleProjection {
+                lifecycle: super::super::SessionLifecycle::Deleting,
+                failure_stage: None,
+                failure_summary: None,
+            },
+        )]);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::SessionLifecycles(lifecycles))
+            )
+            .contains(&Effect::CancelPreview)
+        );
+        assert!(state.preview_overlay().is_none());
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, vec![]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        let effects = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(vec![])),
+        );
+        assert!(!effects.contains(&Effect::CancelPreview));
+        assert_eq!(
+            state.preview_overlay().unwrap().target(),
+            Target::Root(workspace)
+        );
+    }
+
+    #[test]
+    fn artifact_search_owns_tab_until_search_finishes() {
+        let mut state = artifacts();
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let id = overlay.request_id();
+        complete(
+            &mut state,
+            target,
+            id,
+            Some("artifacts/one.log"),
+            PreviewFileFilter::Artifacts,
+            &[],
+            &["needle"],
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('/')));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Paste("needle".into())));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert!(state.preview_overlay().unwrap().is_search_editing());
+        assert_eq!(state.preview_overlay().unwrap().search(), "needle");
+        assert!(state.preview_overlay().unwrap().artifact_open().is_none());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(matches!(
+            update(&mut state, AppEvent::Key(AppKey::Tab)).as_slice(),
+            [Effect::OpenArtifact { .. }]
+        ));
+    }
 
     fn complete(
         state: &mut AppState,

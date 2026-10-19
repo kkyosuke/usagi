@@ -1915,12 +1915,33 @@ fn a_direct_workspace_reports_leaving_and_quitting_as_different_exits() {
 mod attention {
     use super::*;
     use crate::presentation::WorkspaceStep;
+    use crate::presentation::widgets;
     use usagi_core::domain::attention::{AttentionItem, AttentionKind, WorkspaceAttention};
 
     struct AttentionFactory {
         inner: CountingBackendFactory,
         attention: WorkspaceAttention,
         pr_requests: Arc<Mutex<Vec<Target>>>,
+        decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    }
+
+    struct AttentionDecisions(Vec<usagi_core::domain::user_decision::UserDecision>);
+    impl BackendDecisionPort for AttentionDecisions {
+        fn poll(&mut self, _: &Completions) {}
+        fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+            completions.emit(AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: self.0.clone(),
+            }));
+        }
+        fn resolve(
+            &mut self,
+            _: WorkspaceId,
+            _: UserDecisionId,
+            _: UserDecisionAnswer,
+            _: Completions,
+        ) {
+        }
     }
 
     struct AttentionPort(WorkspaceAttention);
@@ -1943,6 +1964,7 @@ mod attention {
             composition.garden_inventory = Box::new(AttentionPort(self.attention.clone()));
             composition.backend = composition
                 .backend
+                .with_decisions(Box::new(AttentionDecisions(self.decisions.clone())))
                 .with_overlay(Box::new(AttentionPrRequests(Arc::clone(&self.pr_requests))));
             composition
         }
@@ -1960,6 +1982,8 @@ mod attention {
                 label: "selected-session".into(),
                 kind: AttentionKind::Decision,
                 reason: "Choose deployment target".into(),
+                target: None,
+                status_unknown: false,
             }],
         };
         deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
@@ -1967,6 +1991,7 @@ mod attention {
             inner: CountingBackendFactory::new(),
             attention,
             pr_requests: Arc::default(),
+            decisions: Vec::new(),
         };
         let mut term = FakeTerminal::with_keys(&[
             Key::Live(LiveTerminalAction::OpenAttention),
@@ -1998,7 +2023,93 @@ mod attention {
                 .any(|f| f.contains("All projects") && f.contains("Choose deployment target")),
             "{frames:#?}"
         );
-        assert!(frames.iter().any(|f| f.contains("Pending decisions")));
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("Questions awaiting reply"))
+        );
+    }
+
+    #[test]
+    fn inbox_question_b_reaches_its_answer_editor_through_the_real_frame_loop() {
+        use usagi_core::domain::attention::AttentionTarget;
+        let snapshot = snapshot("exact-question");
+        let session = snapshot.session_ids[0];
+        let template =
+            super::super::terminal::decision_selection_runtime_with_title("First question A");
+        let mut first = template.state().decisions()[0].clone();
+        first.owner.workspace_id = snapshot.workspace_id;
+        first.owner.session_id = Some(session);
+        first.owner.caller.session_id = Some(session);
+        let mut second = first.clone();
+        second.decision_id = UserDecisionId::new();
+        second.title = "Chosen question B".into();
+        let items = [first.clone(), second.clone()]
+            .iter()
+            .enumerate()
+            .map(|(index, question)| AttentionItem {
+                key: format!("decision:{index}"),
+                session: Some(session),
+                label: "questions".into(),
+                kind: AttentionKind::Decision,
+                reason: question.title.clone(),
+                target: Some(AttentionTarget::Decision {
+                    decision_id: question.decision_id,
+                }),
+                status_unknown: false,
+            })
+            .collect();
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items,
+        };
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::default(),
+            decisions: vec![first, second],
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Escape,
+            Key::Escape,
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Down,
+            Key::Enter,
+            Key::Other,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames.iter().any(|frame| frame.contains("User decision")
+                && frame.contains("Chosen question B")
+                && !frame.contains("First question A")),
+            "{frames:#?}"
+        );
     }
 
     struct AttentionPrRequests(Arc<Mutex<Vec<Target>>>);
@@ -2016,6 +2127,90 @@ mod attention {
         ) {
         }
         fn open_pull_request(&mut self, _: String, _: Completions) {}
+    }
+
+    #[test]
+    fn inbox_updates_tab_click_uses_the_drawn_home_coordinates() {
+        let snapshot = snapshot("inbox-click");
+        let session = snapshot.session_ids[0];
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items: vec![AttentionItem {
+                key: "pr:waiting".into(),
+                session: Some(session),
+                label: "checks".into(),
+                kind: AttentionKind::System,
+                reason: "CI is running".into(),
+                target: Some(
+                    usagi_core::domain::attention::AttentionTarget::PullRequest {
+                        identity: usagi_core::domain::pr_inventory::canonicalize(
+                            "https://github.com/example/repo/pull/2",
+                        )
+                        .unwrap(),
+                    },
+                ),
+                status_unknown: false,
+            }],
+        };
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        deck.open_attention();
+        let frame = crate::presentation::workspace_deck::render_overlay(
+            &deck,
+            29,
+            140,
+            &vec![String::new(); 29],
+        );
+        let (row, column) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let line = widgets::strip_ansi(line);
+                let index = line.find("Updates (1)")?;
+                Some((row + 1, widgets::display_width(&line[..index])))
+            })
+            .unwrap();
+        deck.close_overlay();
+        let requests = Arc::default();
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::clone(&requests),
+            decisions: Vec::new(),
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Click {
+                column: column.try_into().unwrap(),
+                row: row.try_into().unwrap(),
+            },
+            Key::Enter,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| { frame.iter().any(|line| line.contains("Progress updates")) })
+        );
+        assert_eq!(*requests.lock().unwrap(), vec![Target::Session(session)]);
     }
 
     #[test]
@@ -2045,6 +2240,8 @@ mod attention {
                     label: "target".into(),
                     kind: AttentionKind::Review,
                     reason: "Review target PR".into(),
+                    target: None,
+                    status_unknown: false,
                 }],
             };
             deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
@@ -2053,6 +2250,7 @@ mod attention {
                 inner: CountingBackendFactory::new(),
                 attention,
                 pr_requests: Arc::clone(&pr_requests),
+                decisions: Vec::new(),
             };
             let mut term = FakeTerminal::with_keys(&[
                 Key::Enter,

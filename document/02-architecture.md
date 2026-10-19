@@ -981,7 +981,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   `lifecycle.lock` の下で同期時点の exact owner を unbound 接続により再観測し、handoff、successor build、serving readiness の
   検証まで同じ直列化区間に含める。明示的な `daemon stop` / `restart` も `lifecycle.lock` を通るため、その途中へ割り込まない。
   daemon が無い場合や crash 後の stale owner を回収した場合は singleton lock でも不在を証明し、新規起動しない。
-  live Agent の process-local MCP authority を安全に移せない場合、内部同期は replacement を保留して Agent と旧 daemon を維持する。
+  `--restart-agents` を省略した通常の更新で live Agent の process-local MCP authority を安全に移せない場合、内部同期は replacement を保留して Agent と旧 daemon を維持する。
   複数 tenant を保持し、いずれかに live runtime（ownership unknown を含む）が残る場合も、live tenant inventory の観測により
   replacement を保留する。successor は起動 workspace だけを hydrate し、draining predecessor の他 workspace の fence を
   引き継げないため、この場合は旧 owner を active のまま維持して、更新後の各 workspace の接続を保つ。
@@ -991,11 +991,27 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
   installer は子の `USAGI_UPDATE_SYNC_OUTCOMES=1` で内部同期の保留結果を受け取る契約へ opt in する。
   opt in 時の exit code は、同期完了・daemon 不在が `0`、live Agent または複数 workspace の接続を維持した保留が `3`、未対応 command が `2`、
   その他の失敗が非 zero である。installer は `3` を binary 更新の成功として扱い、daemon の切り替えが保留中であることを表示する。
+  自動再試行に対応する installer は `USAGI_UPDATE_AUTO_SYNC=1` でも opt in し、予約を保存・worker 起動済みの保留だけを
+  `4` として受け取る。旧版が返す `3` を予約済みとは表示しない。
   この契約を持たない旧 binary の埋め込み installer から呼ばれた場合は、保留を stdout に表示して `0` を返す。
-  この契約へ opt in した installer は保留時に同期完了を表示しない。live runtime の終了後に `usagi daemon restart` で切り替える。
-  単一 workspace の Agent 継続による保留では、会話を引き継ぐ `usagi daemon restart --restart-agents` でも切り替えられる。
+  この契約へ opt in した installer は保留時に同期完了を表示しない。managed update の保留時は更新予約を永続化し、
+  detached worker が5秒間隔で同期を再試行する。worker は TUI / updater の寿命から独立し、process lock で単一にする。
+  再試行には同じ検証済み embedded installer の同期専用 mode を使い、`update.lock` 内でその時点の installed binary を
+  呼ぶ。download・binary 置換を行わず、後から選ばれた別 build を古い worker が上書きしない。
+  request ID を照合して完了した予約だけを除去し、予約の書き込みと worker の最終 empty check を同じ record lock で
+  直列化するため、切り替え中に来た次の予約を取り落とさない。worker の process crash 後も予約は残り、次の update が
+  再び保留されれば再開し、同期を完了すれば以前の予約も除去する。worker の data home base と runtime mode は、起動元の
+  相対 `USAGI_HOME` や cwd の寿命に依存しない絶対パスの組として渡す。
+  一時的な同期失敗は再試行し、worker の起動失敗や未対応 binary は予約を失敗として残す。
+  `daemon status` は予約先 build と状態を read-only に表示する。
+  同期の安全条件と daemon 不在時に起動しない契約は初回と同じで、live runtime を強制終了しない。
+  Agent 継続による保留では、会話を引き継ぐ `usagi daemon restart --restart-agents` でも切り替えられる。
   選択した旧 release が managed daemon sync capability を解釈できない場合や、published daemon が server-side handoff fence を証明できない場合も、
-  legacy の弱い replacement を実行せず非 0 で終える。内部 command は Agent integration 履歴の修復を行わず、daemon build の同期だけを担う。
+  legacy の弱い replacement を実行せず非 0 で終える。
+  明示的な `usagi update --restart-agents` は installer から内部同期へ同じ flag を渡し、同じ build の再導入でも新しい lifecycle operation を発行する。
+  この経路は [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を使い、複数 workspace を含む Agent の停止・daemon 切替・exact resume と作業続行までを installer lock 内で待つ。
+  自動再試行はこの flag を渡さず、後から Agent を中断する権限を持たない。未対応の選択版も flag を捨てず拒否させる。
+  installer と CLI observer は stderr に完了段階数を表示し、observer は durable recovery の item 完了件数を読むだけで lifecycle を変更しない。
   atomic rename 後の拒否では binary は選択版、daemon は旧 build のままであり、安全な現行版へ更新するか Agent 終了後に `usagi daemon restart` を実行する。
   installer lock の正本は `scripts/install.sh` である。mode 0700 の共有 `update.lock` directory を保持し、各 process は
   PID と choosing marker を private directory に準備してから固有 owner node として atomic に公開する。

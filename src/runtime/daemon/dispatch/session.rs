@@ -196,16 +196,11 @@ pub(super) fn dispatch_session_action(
                     .handle(action, operation_id, payload)?
             };
             let workspace = bound_workspace()?;
-            let identities = agent
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .retained_conversation_identities(workspace)
-                .map_err(|_| SessionRuntimeError::Storage)?;
-            let creator_continuations = bound
+            let conversations = bound
                 .sessions()
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
-                .session_creator_continuations(&identities)?;
+                .session_conversations()?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
             let agent_statuses = runtime
                 .workspace_agent_statuses(workspace)
@@ -217,7 +212,8 @@ pub(super) fn dispatch_session_action(
                     session_organization(id, names, parents);
                 let (agent_resumable, agent_resume_reason) = runtime.session_resume_status(id);
                 SessionRuntimeObservation {
-                    creator_continuation: creator_continuations.get(&id).copied(),
+                    creator_continuation: conversations.get(&id).and_then(|value| value.creator),
+                    director_continuation: conversations.get(&id).and_then(|value| value.director),
                     agent_phase: runtime.session_phase(id),
                     agent_resumable,
                     agent_resume_reason,

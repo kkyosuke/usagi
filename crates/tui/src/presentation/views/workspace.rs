@@ -51,7 +51,8 @@ use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, Overlay, PrOverlay,
-    PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
+    PreviewOverlay, SIDEBAR_ARTIFACTS_LABEL, SIDEBAR_ARTIFACTS_MIN_WIDTH, Selection,
+    SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::metrics::GitDiff;
 use crate::usecase::application::pane::{
@@ -63,19 +64,20 @@ use usagi_core::domain::id::{
     AgentContinuationRef, AgentRuntimeId, SessionId, TerminalRef, WorkspaceId,
 };
 
+mod sidebar;
+use sidebar::SidebarLayout;
+pub use sidebar::sidebar_pointer_target;
+
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
-// The controller reducer owns the pointer hit-test and must resolve rows with
-// the same sidebar geometry this view renders. Keep its mirrored constants in
-// lock-step with the render so a click never lands on the wrong row.
+// Keep the established sidebar dimensions stable. Rendering and pointer
+// resolution both use SidebarLayout, including variable-height decorations.
 const _: () = assert!(LEFT_WIDTH == crate::usecase::application::controller::SIDEBAR_LEFT_WIDTH);
 const _: () = assert!(CHROME_ROWS == crate::usecase::application::controller::SIDEBAR_CHROME_ROWS);
 /// session 1 行が占める行数（まとめ / 変更履歴 / Agent）。session の行数は Agent の
-/// 有無で変えない。controller の hit-test は runtime-local phase しか持たず、daemon
-/// inventory を重ねた view の Agent 集合とは一致しないため、行数を Agent に依存させると
-/// click が 1 行ずれる。
+/// 有無で変えず、Agent の状態変化でも session 一覧の並びを安定させる。
 const SESSION_ROW_LINES: usize = 3;
 const _: () = assert!(
     SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
@@ -1717,7 +1719,7 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
             Role::Warning.style().bold()
         };
         style.paint(&format!(
-            "{} {} notice",
+            "{} Reply needed ({})",
             icons.decision,
             home.decisions.len()
         ))
@@ -2689,13 +2691,9 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
         .iter()
         .find(|item| home.unread_decision_ids.contains(&item.decision_id));
     if let Some(decision) = decision {
-        let control = match home.icon_mode {
-            IconMode::NerdFont => "bell",
-            IconMode::Text => "indicator",
-        };
         return widgets::clip_to_width(
             &Role::Warning.style().paint(&format!(
-                "  {} {}: {}  (click {control} to review)",
+                "  {} Reply needed · {}: {}  (click Reply needed)",
                 icon_set(home.icon_mode).decision,
                 decision_modal::owner_label(decision, &home.session_names()),
                 decision.title
@@ -2715,9 +2713,7 @@ fn home_left_pane(
     if height == 0 {
         return Vec::new();
     }
-    let rows = home.rows();
-    // Size the Git summary columns once for the whole sidebar so every session's
-    // commit and line cells align, matching the legacy `left_pane` computation.
+    let layout = SidebarLayout::new(height, width, home, now);
     let session_ids = home
         .sessions
         .iter()
@@ -2725,79 +2721,28 @@ fn home_left_pane(
         .collect::<Vec<_>>();
     let columns = sidebar_diff_columns(&session_ids, &home.git_diffs);
     let pr_width = sidebar_pr_width(&home.sessions, home.icon_mode);
-    if height == 1 {
-        return home_row_lines_at(width, home, rows[0], columns, pr_width, now)
-            .into_iter()
-            .take(1)
-            .collect();
-    }
-    let body_capacity = height - 1;
-    // Reuse the legacy metric projection so both render paths draw an identical
-    // sidecar. An absent observation yields no metrics row, which keeps the
-    // pre-metrics home frame byte-for-byte unchanged. The diagnostic health
-    // badge is evaluated against the frame's own clock — the renderer stays the
-    // only place that reads time, so `now` remains the whole time input.
-    let sidecar = sidecar_labels_with_icon_mode(
-        width,
-        home.metrics.as_ref(),
-        home.health.evaluate(now.timestamp_millis()),
-        home.session_states,
-        home.icon_mode,
-    );
-    // 明示された mascot speech を優先し、無ければ正常系以外の daemon 状態を吹き出しへ落とす。
-    let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
-    let speech = home.mascot_speech.as_ref().or(daemon_speech.as_ref());
-    let mascot =
-        widgets::mascot::sidebar_block_with_sidecar(width, home.mascot_tick, speech, &sidecar);
-    let show_mascot = mascot
-        .as_ref()
-        .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
-    let mascot_rows = if show_mascot {
-        mascot
-            .as_ref()
-            .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
-    } else {
-        0
-    };
-    let content_capacity = body_capacity.saturating_sub(mascot_rows);
-    // Reserve the loading skeleton's rows outside the selectable-row budget so a
-    // pending create draws just above `+ new session` without scrolling it off.
-    let skeleton_rows = if home.create_pending.is_some() {
-        CREATE_SKELETON_ROWS
-    } else {
-        0
-    };
-    let viewport_capacity = content_capacity.saturating_sub(skeleton_rows);
-    let selected_index = rows
-        .iter()
-        .position(|row| *row == home.selected)
-        .unwrap_or(0);
-    let start = home_viewport_start(width, home, &rows, selected_index, viewport_capacity);
     let mut lines = Vec::with_capacity(height);
-    // Track only selectable-row lines against `viewport_capacity`; the skeleton
-    // lives in the space reserved above and never counts toward the break.
-    let mut row_line_count = 0;
-    for row in &rows[start..] {
-        if matches!(row, Selection::NewSession)
-            && let Some(name) = home.create_pending.as_deref()
-        {
-            lines.extend(create_skeleton_lines(
-                width,
-                name,
-                home.mascot_tick,
-                home.icon_mode,
-            ));
+    for row in &layout.rows {
+        if let Some(selection) = row.selection {
+            lines.extend(
+                home_row_lines_at(width, home, selection, columns, pr_width, now)
+                    .into_iter()
+                    .take(row.height),
+            );
+        } else if let Some(name) = home.create_pending.as_deref() {
+            lines.extend(
+                create_skeleton_lines(width, name, home.mascot_tick, home.icon_mode)
+                    .into_iter()
+                    .take(row.height),
+            );
         }
-        let row_lines = home_row_lines_at(width, home, *row, columns, pr_width, now);
-        if row_line_count + row_lines.len() > viewport_capacity {
-            break;
-        }
-        row_line_count += row_lines.len();
-        lines.extend(row_lines);
     }
-    lines.resize(content_capacity, String::new());
-    if show_mascot {
-        lines.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
+    lines.resize(layout.content_capacity, String::new());
+    if height == 1 {
+        return lines;
+    }
+    if let Some(mascot) = layout.mascot {
+        lines.extend(mascot.rows().iter().cloned());
         lines.push(String::new());
     }
     let footer = match home.mode {
@@ -3161,21 +3106,51 @@ fn home_row_lines_at(
             .session_agents
             .get(&session.id)
             .map_or(&[][..], Vec::as_slice);
+        let show_artifacts =
+            session.lifecycle.capabilities().can_use && width >= SIDEBAR_ARTIFACTS_MIN_WIDTH;
+        let agent_width = if show_artifacts {
+            width - SIDEBAR_ARTIFACTS_LABEL.len() - 1
+        } else {
+            width
+        };
+        let agent_line = sidebar_agent_line_with_icon_mode(
+            agents,
+            agent_width,
+            selected,
+            current_marker,
+            inactive,
+            home.icon_mode,
+        );
         vec![
             first,
             widgets::pad_to_width(&metadata, width),
-            sidebar_agent_line_with_icon_mode(
-                agents,
-                width,
-                selected,
-                current_marker,
-                inactive,
-                home.icon_mode,
-            ),
+            if show_artifacts {
+                with_artifacts_action(&agent_line, width)
+            } else {
+                agent_line
+            },
         ]
     } else {
         vec![first]
     }
+}
+
+fn with_artifacts_action(agents: &str, width: usize) -> String {
+    if width < SIDEBAR_ARTIFACTS_MIN_WIDTH {
+        return agents.to_owned();
+    }
+    let remaining = width - SIDEBAR_ARTIFACTS_LABEL.len();
+    format!(
+        "{}{}",
+        widgets::pad_to_width(
+            &widgets::clip_to_width(agents.trim_end(), remaining - 1),
+            remaining
+        ),
+        Role::Info
+            .style()
+            .underline()
+            .paint(SIDEBAR_ARTIFACTS_LABEL),
+    )
 }
 
 /// session 行の 3 行目: その session に属する Agent の状態。
@@ -3727,7 +3702,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{home_right_pane, home_right_pane_content};
+    use super::{home_right_pane, home_right_pane_content, with_artifacts_action};
     #[test]
     fn memo_preview_wraps_long_lines_and_editor_keeps_preview_geometry() {
         use super::{home_memo_preview, render_memo_editor_over};
@@ -3796,6 +3771,7 @@ mod tests {
                 (
                     id,
                     SessionRoleProjection {
+                        director_continuation: None,
                         creator_continuation: None,
                         role_id: None,
                         role_summary: None,
@@ -4049,6 +4025,52 @@ mod tests {
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 1), None);
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 4), None);
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 18), None);
+    }
+
+    #[test]
+    fn artifacts_action_is_flush_right_and_keeps_narrow_rows_unchanged() {
+        for width in [16, 36] {
+            let line = with_artifacts_action("  Agents: running", width);
+            assert_eq!(widgets::display_width(&line), width);
+            assert!(widgets::strip_ansi(&line).ends_with("Artifacts"));
+        }
+        assert_eq!(with_artifacts_action("  —", 10), "  —");
+        let padded = widgets::pad_to_width("  —", 36);
+        assert!(!with_artifacts_action(&padded, 36).contains('…'));
+    }
+
+    #[test]
+    fn session_artifacts_action_matches_lifecycle_and_available_width() {
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Available,
+            SessionLifecycle::Deleting,
+            SessionLifecycle::Failed,
+        ] {
+            for icon_mode in [IconMode::NerdFont, IconMode::Text] {
+                let home = home_with_session_states(&[(lifecycle, None)]).with_icon_mode(icon_mode);
+                let selection = Selection::Target(Target::Session(home.sessions[0].id));
+                for width in [15, 16, LEFT_WIDTH] {
+                    let lines = home_row_lines_at(
+                        width,
+                        &home,
+                        selection,
+                        SidebarDiffColumns::default(),
+                        0,
+                        now(),
+                    );
+                    let visible = lifecycle.capabilities().can_use
+                        && width >= super::SIDEBAR_ARTIFACTS_MIN_WIDTH;
+                    assert_eq!(
+                        strip(&lines[2]).ends_with("Artifacts"),
+                        visible,
+                        "{lifecycle:?}, {icon_mode:?}, width {width}"
+                    );
+                    assert_eq!(widgets::display_width(&lines[2]), width);
+                }
+            }
+        }
     }
 
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
@@ -4909,6 +4931,7 @@ mod tests {
             AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
                 session,
                 SessionRoleProjection {
+                    director_continuation: None,
                     creator_continuation: None,
                     role_id: None,
                     role_summary: None,
@@ -5269,7 +5292,7 @@ mod tests {
             100,
             &home.clone().with_icon_mode(IconMode::Text),
         ));
-        assert!(text_banner.contains("click indicator to review"));
+        assert!(text_banner.contains("click Reply needed"));
         // The decision notice is highlighted in the warning color (yellow).
         assert!(home_notice_banner(100, &home).contains("\u{1b}[33m"));
 
@@ -5281,7 +5304,7 @@ mod tests {
         assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
         assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
-        assert!(strip(&layout.line).contains("notice"));
+        assert!(strip(&layout.line).contains("Reply needed"));
         assert!(layout.line.contains("\u{1b}[1;33m"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -5348,7 +5371,7 @@ mod tests {
         assert!(state.unread_decision_ids().is_empty());
         let home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
         let read_line = home_header_layout(100, &home).line;
-        assert!(strip(&read_line).contains("1 notice"));
+        assert!(strip(&read_line).contains("Reply needed (1)"));
         assert!(read_line.contains("\u{1b}[33m"));
         assert!(!read_line.contains("\u{1b}[1;33m"));
     }
@@ -5436,6 +5459,7 @@ mod tests {
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
+            organization_cursor: 0,
             focused: true,
             route: crate::usecase::application::controller::DirectorRoute::Console,
             conversations: vec![DirectorConversation {
@@ -6019,6 +6043,7 @@ mod tests {
                 (
                     session_id,
                     SessionRoleProjection {
+                        director_continuation: None,
                         creator_continuation: None,
                         role_id: Some(RoleId::new("reviewer").unwrap()),
                         role_summary: None,
@@ -6029,6 +6054,7 @@ mod tests {
                 (
                     child_id,
                     SessionRoleProjection {
+                        director_continuation: None,
                         creator_continuation: None,
                         role_id: Some(RoleId::new("worker").unwrap()),
                         role_summary: None,
@@ -7069,7 +7095,7 @@ mod tests {
     }
 
     #[test]
-    fn a_modal_that_lost_the_foreground_is_not_drawn_over_the_surface_that_took_it() {
+    fn a_pending_pane_does_not_dismiss_the_decision_the_user_is_reading() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut state = AppState::home(workspace, vec![session]);
@@ -7124,14 +7150,13 @@ mod tests {
                 .contains("continue the deploy?")
         );
 
-        // A pane going live releases the Closeup foreground, so every key now
-        // reaches Home. The decision modal keeps its draft in the reducer but
-        // must stop being drawn: a box nothing can answer is worse than none.
+        // A background pane completion cannot take an explicitly opened
+        // decision off the screen or redirect its input to the terminal.
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
-        assert_eq!(state.overlay(), None);
+        assert_eq!(state.overlay(), Some(Overlay::Decisions));
         assert!(state.decision_overlay().is_some());
         assert!(
-            !joined_home(&HomeProjection::from_state(&state, "work", &rows))
+            joined_home(&HomeProjection::from_state(&state, "work", &rows))
                 .contains("continue the deploy?")
         );
     }
@@ -7380,15 +7405,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_mascot_reservation_matches_the_hit_test_constants() {
-        // The controller pointer hit-test mirrors this view's foot-of-sidebar
-        // mascot reservation with plain constants. The controller Home renders the
-        // rabbit without a speech bubble, so pin those constants to what the mascot
-        // widget actually reserves and where it drops out for width.
+    fn silent_mascot_footprint_is_independent_of_its_sidecar() {
+        // A silent rabbit has a fixed footprint. Speech height is resolved by
+        // SidebarLayout and covered by the rendered-cell pointer tests.
         use crate::presentation::widgets::mascot::sidebar_block_with_sidecar;
-        use crate::usecase::application::controller::{
-            SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
-        };
+        const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
+        const SIDEBAR_MASCOT_ROWS: usize = 4;
         let block = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &[])
             .expect("the rabbit fits the sidebar width");
         assert_eq!(block.reserved_rows(), SIDEBAR_MASCOT_ROWS);
@@ -7983,9 +8005,8 @@ mod tests {
     #[test]
     fn narrow_sidebar_clips_the_agent_concurrency_row() {
         use crate::presentation::widgets::mascot::sidebar_block_with_sidecar;
-        use crate::usecase::application::controller::{
-            SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
-        };
+        const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
+        const SIDEBAR_MASCOT_ROWS: usize = 4;
         let sidecar = vec![
             super::agent_concurrency_row(Some(AgentConcurrency {
                 in_use: 16,

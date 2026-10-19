@@ -215,27 +215,62 @@ Home の top-level `update` は event family の routing を担い、独立し�
 
 ### workspace 横断の対応待ち
 
-project bar の `! Attention` または `Ctrl-O i` は、開いている全 project の対応待ち一覧を開く。
+project bar 右端の `Action needed` または `Ctrl-O i` は、開いている全 project の受信箱を開く。
 この節が横断一覧の表示・観測契約の正本である。登録済みでも deck に開いていない workspace は対象外とする。
 
-| 分類 | 対象 | Enter の移動先 |
-|---|---|---|
-| Your decision | pending decision | 対象 workspace の Decisions |
-| Review ready | 確認済みの open・非 draft PR | 対象 session の PR 一覧 |
-| Stopped / failed | session/Agent の失敗・中断、CI失敗・修正要求 | 対象 session または PR 一覧 |
-| System wait | session の作成・削除、Agent の待機、CI待ち、PR状態の未取得・再取得 | 対象 session または PR 一覧 |
-| Running | 実行中の Agent | 対象 session |
+受信箱は `Action needed`（要対応）と `Updates`（お知らせ）の 2 つの表示を持ち、開くたびに要対応を選ぶ。
+質問・レビュー・問題の確認が必要な項目を最初に示し、実行中や CI 待ちなどの進行状況は Updates に表示する。
 
-一覧は対応待ちを先に表示し、文字入力で project・session・理由を絞り込める。`↑↓` / `PageUp` / `PageDown` で選択し、
-`Enter` で移動、`Esc` で閉じる。更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は
-別項目を開かない。移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
+| 表示 | 項目の先頭 | 内容 | 開く先 |
+|---|---|---|---|
+| Action needed | Answer question | 回答待ちの質問 | 選んだ質問の回答画面 |
+| Action needed | Review PR | 確認済みの open・非 draft PR | 対象 session の PR 一覧で該当 PR を選択 |
+| Action needed | Check PR problem | CI 失敗・修正要求 | 対象 session の PR 一覧で該当 PR を選択 |
+| Action needed | Check stopped task | session / Agent の失敗・中断 | 対象 session |
+| Updates | Waiting | 作成・削除、Agent の待機、CI 待ち | 対象 session または PR 一覧 |
+| Updates | Checking status | PR 状態の未確認・再取得 | 対象 session の PR 一覧で該当 PR を選択 |
+| Updates | Running | 実行中の Agent | 対象 session |
+
+各項目は「次にすること・project / session」と「理由」の 2 行で表示する。狭幅では操作・対象・理由を 3 行に分ける。
+選択項目を開く操作は footer の `Enter: Answer question` / `Open PR` / `Open session` に示す。
+`Tab` または左右キー、見出しのクリックで要対応とお知らせを切り替える。文字入力は現在の表示の操作・名前・理由を検索する。
+検索は大文字・小文字を区別しない連続一致で、各 field 内の一致位置が早いもの、同順位では対応種別の順に並べる。
+離れた文字や field 間の文字をつなげて一致させず、一致部分を grapheme を壊さず強調する。
+`↑↓` は項目移動、`PageUp` / `PageDown` は表示中の項目数ずつ移動し、`Enter` または項目のクリックで対象を開く。
+`Esc` は受信箱を閉じる。小さい画面では常設説明・空白・footer を縮め、理由と「選択位置 / 検索結果件数」を残す。
+横幅に応じて要対応タブを `Actions` と短縮する。理由まで描けない場合はリサイズを案内し、見えていない項目の Enter は実行しない。
+更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は別項目を開かない。
+移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
+質問 ID / PR identity を移動先まで引き継ぐ。質問は取得中に別項目を開けず、最新 snapshot の該当質問を回答画面で開く。
+個別の質問を開いても、ほかの質問の未読状態は保持する。
+古い観測で選んだ質問が見つからなくても、後続の更新で同じ ID を確認できればその回答画面を開く。
+対象が消失・取得失敗した場合は説明を表示し、一覧の先頭へ置き換えない。質問の読み込み・エラー画面を閉じた後の返答で再度開かない。
+PR も cache / 非同期取得のどちらでも該当番号を選ぶ。個別の質問・PR を表示した後も、更新や取得失敗だけで別項目へ置き換えない。
+受信箱を開く前から Director / Shell が表示されていても、個別 PR の取得結果・失敗を前面に表示する。
+PR の取得待ちは `Esc` または新しいキー・クリック操作で取り消し、遅延した返答で再び開かない。
+旧応答で個別の識別情報がない場合は、従来どおり質問一覧 / PR 一覧を開く（wire 契約は [IPC](04-ipc.md) を参照）。
+
+対応待ちがなければ「対応不要」、状態を確認できていない場合は「確認済みの対応待ちはない」と区別して表示する。
+状態を取得できない project 数は、自動で再試行中の情報として本文の下に表示し、選択できる対応項目にしない。
+workspace の観測に成功しても PR の状態が未確認なら「確認中」とする。未確認の PR を対応ゼロと断定せず、
+Updates の説明も「確認中」に切り替える。確認済みの CI 待ちや実行中とは区別する。
 Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
-明示的な質問がなければ System wait として表示する。
+明示的な質問がなければ Updates に表示し、人に terminal の確認を促さない。
 
-project tab の `!N` は判断・レビュー・停止の対応件数、`?` は未取得、`!?` は取得失敗または古い観測を示す。
+project bar の右端は操作から余白で分け、確認できた対応待ちがあるときだけ黄色で表示する。
+件数には最新の観測の判断・レビュー・停止だけを数え、進行状況や未確認の項目を加えない。
+
+| 右端の表示 | 意味 |
+|---|---|
+| `! Action needed (N)`（黄色） | 全 project を確認済みで、対応待ちが N 件ある |
+| `! Action needed (N+)`（黄色） | 確認できた対応待ちが N 件あり、未確認の project / PR 状態もある |
+| `Checking status…`（dim） | 確認できた対応待ちはなく、未確認の project / PR 状態がある |
+| `No action needed`（dim） | 全 project / PR 状態を確認済みで対応待ちがない |
+
+project tab の黄色い `!N` は確認できた対応待ちの件数、`!N+` は未確認 PR もある状態、控えめな `?` は未取得・失敗・古い観測・PR の未確認を示す。
 背景観測は Garden を閉じていても継続し、1 round 最大16 project を順番に巡回する。成功後3秒、全件取得失敗後5秒で再取得する。
-30秒以上更新されない結果は Stale とする。取得失敗時は以前の行を Stale で残し、件数集計と移動の対象から外す。
-一覧の Unknown projects は未取得・失敗した project 数であり、未取得を「対応待ちゼロ」とみなさない。
+30秒以上更新されない結果は Stale とする。取得失敗時は以前の観測を保持するが、受信箱の項目・件数・移動の対象から外す。
+状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。
 観測は専用 worker が稼働済み daemon の保存済み状態だけを読み、workspace の adopt、daemon/Agent 起動、terminal attach、状態の変更は行わない。
 各接続・request は250ms・再試行なしで読み、workspace 切り替え時は次の request を中止して worker を回収する。
 
@@ -566,7 +601,7 @@ Enter で送信し、Esc で下書きを保持して編集に戻る。PgUp/PgDn 
 送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
 
 pending decision がある間、Home header の右上に Icons 設定に応じた bell または `!` indicator と
-`N notice`（N は pending 件数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
+`Reply needed (N)`（N は回答待ちの質問数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
 観測すると、その直下の banner に owner（一覧と同じ表記）と decision の title（summary）を warning 色で表示する。
 indicatorをクリックすると existing decision modal を開き、未読表示を既読にする。既読にしても pending の間は badge を残す。modal が前面の場合はベル・banner を含む背景入力を受け取らない。未読は TUI-local の
 stable decision ID 集合であり、同じ snapshot の replay、reconnect、resync は再び未読にしない。decision が
@@ -755,6 +790,10 @@ Organization は、root scope（`session_id: None`）の live / pending / interr
 tree は選択 Conversation が作成した session とその子孫だけを含む。
 作成者との対応が不明な session を別の Conversation に割り当てない（[所属情報の正本](10-session-roles.md#safe-projection-と非永続データ)）。
 Conversation 一覧は選択行に追従する viewport を持ち、長い一覧でも選択行と Console を開く操作を表示する。
+Agent / Session tree は `Ctrl-O ↑` / `Ctrl-O ↓` またはマウスホイールでスクロールし、`Ctrl-O End` で末尾へ移る。
+ホイールはフォーカス中の Director の本文内だけで受け付け、背景や Shell 上では tree を動かさない。
+表示位置と総行数、表示範囲外の件数を示し、Conversation の切替時はその tree の先頭へ戻る。
+親 session を削除しても保存済みの所属を使って生存中の子孫を表示する。tree の行を置けない高さでは resize を促す。
 Shell と同時に開いている場合、タブ切替はフォーカス中の drawer にだけ作用する。
 Shell にフォーカスを移しても、Director Console は選択中の Conversation とその中断理由を保持する。
 generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
@@ -848,6 +887,7 @@ selection、attach/detach は変化しない。terminal resize と backend/timer
 Choosing / Empty の `Esc` は draft を破棄して開始前の exact Director route へ戻り、PTY へは届かない。launch pending の
 `Esc` / `Ctrl-O b` は route を変えず消費する。開始前 route の操作 hint を残さず breadcrumb / waiting
 body を表示する。pending operation と一致した launch 成功は Console へ進み、失敗は開始前の route を保つ。
+Organization から起動した場合も、pending 中の追加 `Enter`・会話選択・tree スクロールは消費し、route と選択を変えない。
 
 入力 context の優先順位と遷移は次のとおりである。
 
@@ -1533,7 +1573,8 @@ session checklist を開く。`↑`/`↓` または `j`/`k` で cursor を移動
 Enter、modal 表示中の背景入力は安全な no-op であり、追加の確認 step はない。modal は開いた snapshot の
 stable `SessionId` を entry の incarnation fence として保持する。refresh により削除不能または消失した entry は
 request 前に除外するため、同名再作成や一覧更新で別の session を削除しない。`--force` は dirty worktree と
-未マージの session branch の両方を破棄するため、modal 内にも警告を表示する。指定しなければ safe remove である。
+未マージの session branch に加えて保管に失敗した成果物も破棄するため、modal 内にも警告を表示する。
+成果物の扱いは [削除前の保管](05-daemon.md#session-artifacts-と削除前の保管) を参照する。指定しなければ safe remove である。
 
 modal の共通枠は本文の上下左右に 1 セル分の内側余白を持つ。短い端末でも overlay は上下に Home 背景を1行ずつ残す。
 modal は view ごとに予約した body 行数で描画する。候補数、empty state、result、error、loading、editor の
@@ -1677,21 +1718,43 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 
 | 入口 | 表示対象 |
 |---|---|
+| session 行の `Artifacts` をクリック | クリックした session の生成物 |
 | Closeup の `artifact` | 選択中 session の生成物 |
 | Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
+
+`Artifacts` は利用可能な session の Agent 状態行の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
+`Ctrl-O f` は Switch の cursor / Closeup の active session を開き、session 未選択時は保管済みを含む workspace 全体を開く。
+sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
+TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。
+削除後に同名の session を作り直した場合は、新しい session の成果物を表示する。
+削除・削除中を検知した session の一覧や本文は閉じる。読み込みと外部表示は worker 上で最新の daemon の
+session ID・利用可否を確認し、処理中に対象が変わった結果も破棄する。古い一覧から同名の新しい session を開かない。
+
+sidebar のクリック対象は表示済み frame の配置から解決する。警告の吹き出し・作成中の表示・スクロールで
+行の位置が変わっても、表示した session と操作対象の ID を一致させる。クリックで一覧を開いた操作も
+後続入力として扱い、session 作成や pane 起動の完了で閲覧中の一覧や入力先を切り替えない。
 
 一覧は Pull Request と同じ中央モーダルで、session 名・active / retained・ファイル名を行に表示する。
 選択中の相対 path も表示するため、同名のファイルや異なる保管 snapshot を区別できる。
 文字入力で session 名や path を絞り、↑↓ で選ぶ。Enter は選択ファイルを OS の関連付けアプリで開く。
 対象は txt / md / csv / json / html / htm / pdf /
 png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bundle は渡さない。
+外部表示に未対応の形式には、その旨と Tab によるテキスト表示の案内を出す。directory や
+特殊ファイルの拒否とは区別する。
+外部表示の処理中・成功・失敗は一覧内に表示し、失敗しても選択と絞り込みを保持する。
+成功表示は OS の起動 helper の正常終了を意味する。helper の異常終了は失敗として表示し、標準入出力は端末へ流さない。
+2 秒以内に終了を確認できない場合は `Open result unconfirmed. Check the external app.` と表示し、外部アプリでの確認を案内する。
+テキスト本文から外部表示を要求した場合も、結果をスクロール位置にかかわらず本文の上に表示する。
+別のファイルへ移動した場合や一覧を閉じた場合、遅れて返る結果は新しい閲覧へ表示しない。
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
+本文の検索入力中は Tab で外部表示せず、Enter / Esc で検索入力を終えてから受け付ける。
 外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
 HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
 元の file の差し替えや session 削除で、外部アプリが別の path を開かないようにする。directory は `0700`、file は `0600` とする。
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
-アプリは helper 終了や TUI 終了後にも読み込むため、成功したコピーは OS の temporary 領域へ残す。失敗したコピーは取り除く。
+アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。
+未確認の helper やアプリは終了させず、自然終了を回収する。失敗が確認できたコピーは取り除く。
 本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には `artifacts/` への保存案内を表示する。
 
 Git の tracked / changed / ignore 判定を使わず、`artifacts/` のファイルを列挙する。横断一覧は

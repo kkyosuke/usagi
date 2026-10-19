@@ -48,6 +48,8 @@ pub(crate) enum FilePreviewError {
     Binary,
     NotUtf8,
     NativeViewTooLarge,
+    UnsupportedFormat,
+    ScopeUnavailable,
 }
 
 impl FilePreviewError {
@@ -57,6 +59,10 @@ impl FilePreviewError {
             Self::FileUnavailable => "This file is unavailable.",
             Self::OutsideRoot => "This file is outside the preview root.",
             Self::NotRegular => "Only regular files can be previewed.",
+            Self::UnsupportedFormat => "This file type cannot be opened externally.",
+            Self::ScopeUnavailable => {
+                "The preview target changed or is unavailable. Reopen the file list."
+            }
             Self::TooLarge => "Files larger than 512 KiB cannot be previewed.",
             Self::Binary => "Binary files cannot be previewed.",
             Self::NotUtf8 => "Only UTF-8 text files can be previewed.",
@@ -76,6 +82,8 @@ impl FilePreviewError {
             Self::Binary => "preview-binary",
             Self::NotUtf8 => "preview-not-utf8",
             Self::NativeViewTooLarge => "preview-native-too-large",
+            Self::UnsupportedFormat => "preview-native-format",
+            Self::ScopeUnavailable => "preview-scope",
         }
     }
 }
@@ -303,6 +311,15 @@ fn artifact_open_view_with(
     {
         return Err(FilePreviewError::OutsideRoot);
     }
+    let root = root.canonicalize().map_err(file_unavailable)?;
+    // Keep the source directory pinned for the entire snapshot. Reopening its
+    // absolute path for each asset would follow swapped ancestors of a session
+    // root even though every component below that root rejects symlinks.
+    let source_directory = open_directory(&root)?;
+    let file = open_beneath_directory(&source_directory, path)?;
+    if !file.metadata().map_err(file_unavailable)?.is_file() {
+        return Err(FilePreviewError::NotRegular);
+    }
     let extension = Path::new(path)
         .extension()
         .and_then(|s| s.to_str())
@@ -324,16 +341,7 @@ fn artifact_open_view_with(
             | "webp"
             | "svg"
     ) {
-        return Err(FilePreviewError::NotRegular);
-    }
-    let root = root.canonicalize().map_err(file_unavailable)?;
-    // Keep the source directory pinned for the entire snapshot. Reopening its
-    // absolute path for each asset would follow swapped ancestors of a session
-    // root even though every component below that root rejects symlinks.
-    let source_directory = open_directory(&root)?;
-    let file = open_beneath_directory(&source_directory, path)?;
-    if !file.metadata().map_err(file_unavailable)?.is_file() {
-        return Err(FilePreviewError::NotRegular);
+        return Err(FilePreviewError::UnsupportedFormat);
     }
     let prefix_len = if filter == PreviewFileFilter::Artifacts {
         1
@@ -1137,11 +1145,50 @@ mod tests {
             FilePreviewError::Binary,
             FilePreviewError::NotUtf8,
             FilePreviewError::NativeViewTooLarge,
+            FilePreviewError::UnsupportedFormat,
+            FilePreviewError::ScopeUnavailable,
         ] {
             assert!(!error.message().is_empty());
             assert!(error.error_id().starts_with("preview-"));
         }
     }
+    #[test]
+    fn unsupported_regular_artifacts_have_an_accurate_text_preview_hint() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("artifacts")).unwrap();
+        fs::write(root.path().join("artifacts/tests.log"), "all tests passed").unwrap();
+        let error = artifact_open_view(
+            root.path(),
+            "artifacts/tests.log",
+            PreviewFileFilter::Artifacts,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, FilePreviewError::UnsupportedFormat);
+        assert!(error.message().contains("cannot be opened externally"));
+        assert_eq!(
+            read_file(root.path(), "artifacts/tests.log").unwrap(),
+            ["all tests passed"]
+        );
+        fs::create_dir(root.path().join("artifacts/directory.log")).unwrap();
+        assert!(matches!(
+            artifact_open_view(
+                root.path(),
+                "artifacts/directory.log",
+                PreviewFileFilter::Artifacts
+            ),
+            Err(FilePreviewError::NotRegular)
+        ));
+        assert!(matches!(
+            artifact_open_view(
+                root.path(),
+                "artifacts/missing.log",
+                PreviewFileFilter::Artifacts
+            ),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+    }
+
     #[test]
     fn artifacts_are_listed_without_git_and_native_open_is_confined() {
         let temp = tempdir().unwrap();

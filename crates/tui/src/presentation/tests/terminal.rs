@@ -10,7 +10,7 @@ fn decision_selection_runtime() -> WorkspaceRuntime {
     decision_selection_runtime_with_title("Copy 日本語")
 }
 
-fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
+pub(super) fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
     decision_selection_runtime_with_context(title, Vec::new())
 }
 
@@ -110,7 +110,10 @@ impl Terminal for DecisionProjectBarTerminal {
         let key = self.0.read_key()?;
         if key == Key::Live(LiveTerminalAction::OpenAttention) {
             let bar = widgets::strip_ansi(&self.0.frames.last().unwrap()[0]);
-            let start = bar.find("! Attention").unwrap();
+            let start = ["! Action needed", "Checking status", "No action needed"]
+                .iter()
+                .find_map(|label| bar.find(label))
+                .unwrap();
             return Ok(Key::Click {
                 column: u16::try_from(widgets::display_width(&bar[..start])).unwrap(),
                 row: 0,
@@ -645,6 +648,10 @@ fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
     assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::OpenPreview)),
         Some(AppEvent::Key(AppKey::OpenPreview))
+    );
+    assert_eq!(
+        app_event_from_key(Key::Live(LiveTerminalAction::OpenArtifacts)),
+        Some(AppEvent::Key(AppKey::OpenArtifacts))
     );
     assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::OpenDecisions)),

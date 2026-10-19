@@ -46,11 +46,15 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | Agent と terminal が散らばり、状態を追いにくい | workspace をまたいで TUI から一覧・操作する |
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
-| session ごとの生成物を探しづらい | [Artifacts](document/03-tui.md#artifacts) で横断検索し、削除後の保管済み成果物も開ける |
+| session ごとの生成物を探しづらい | session 行の [Artifacts](document/03-tui.md#artifacts) から閲覧でき、外部表示の失敗・未確認も一覧内で確認できる。削除後の保管済み成果物も検索できる |
 
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
+session 削除の `--force` は、保管に失敗した成果物も破棄します。
+詳細は [削除前の成果物保管](document/05-daemon.md#session-artifacts-と削除前の保管) を参照してください。
 
-複数の workspace の対応待ちは、上部の `! Attention` からまとめて確認し、対象へ移動できます。
+複数の workspace の対応待ちは、右上の黄色い `Action needed` から確認し、回答・PR 確認へ進めます。
+一覧は「要対応」と進行状況の `Updates` に分かれ、最初に対応が必要な項目だけを表示します。
+選んだ質問の回答画面や該当 PR へ進め、未確認の情報は「確認中」として区別します。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュー可能を desktop に通知します。
 通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。
@@ -85,9 +89,14 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 usagi doctor  # 必要なツールと設定を確認
 ```
 
-`usagi update` は、実行中 Agent や複数プロジェクトの端末を継続するため daemon の切り替えを保留した場合も binary の更新成功を表示します。
+`usagi update` は、実行中 Agent や複数プロジェクトの端末を継続するため daemon の切り替えを保留した場合も binary の更新成功を表示し、切り替えをバックグラウンドで自動再試行します。
 更新中の中断は非 0 で終了し、旧版へ戻した後も再更新できます。
 切り替えの扱いは [更新](document/12-installation.md#更新) を参照してください。
+Agent の停止・本体更新・daemon 切替・同じ会話での再開をまとめて行う場合は `usagi update --restart-agents` を使います。
+更新中はダウンロード・検証・切替の進捗バーと Agent の再開件数を表示します。
+導入済み binary へ切り替える場合は `usagi daemon restart --restart-agents` を使います。
+同じ会話への再開では、人への確認依頼と回答、委譲元への完了通知も引き継ぎます。
+同じ会話での作業再開と再開できない場合の扱いは [daemon の Agent 更新](document/05-daemon.md#daemon-restart-による-agent-integration-更新) を参照してください。
 
 対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。
@@ -147,7 +156,7 @@ Agent は起動前に CLI の認証状態を確認し、確認失敗の理由を
 | workspace | `usagi` で開く Git リポジトリ |
 | session | ひとつの作業と、その worktree・Agent・terminal・差分・PR を束ねる単位 |
 | daemon | session と process の状態を所有し、TUI を閉じた後も作業を継続する process |
-| Director | 会話ごとの委譲先 session を確認し、root Agent と作業を進める画面（[操作方法](document/03-tui.md#指示モードdirector-mode)） |
+| Director | 会話ごとの委譲先 session を確認し、root Agent と作業を進める画面。親 session の削除後も所属を保持し、長い組織図はスクロールできます（[操作方法](document/03-tui.md#指示モードdirector-mode)） |
 | [Team](document/10-session-roles.md#catalog) | `none`（なし）/ `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から Agent の委譲構造を選ぶ設定 |
 
 Agent は組み込みの MCP server を通じて session の作成・観測・委譲、issue、memory などを扱えます。

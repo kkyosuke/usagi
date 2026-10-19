@@ -617,7 +617,7 @@ client は final として受けずに安全に失敗する。
 ## Codex structured capture request
 
 `codex_session_capture` kind は profile revision 4 以前の Codex `SessionStart(startup)` command hook と、
-更新済み daemon binary の組み合わせを受けるためだけに残す互換 request である。新しい integration は
+更新済み daemon binary の組み合わせ、または起動後 hook の ID 補完を旧 daemon に送るための互換 request である。新しい integration は
 [`agent_phase_report`](#agent-phase-report-request) へ一本化する。旧 request は documented hook JSON の current
 `session_id` と、同じ process provision にだけ存在する daemon-minted credential を持つ。client は runtime /
 session / provider / path を指定できず、daemon は credential から exact live Codex runtime を逆引きする。同じ
@@ -634,7 +634,7 @@ session request、response、event、status projection、error detail には現�
 
 `agent_phase_report` kind は、daemon が起動した agent のライフサイクルフックだけが送る private request である。
 field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）、
-provider の structured starting hook（Claude / Codex の `SessionStart`、Antigravity の `PreInvocation`）でだけ current producer が付ける opaque `native_session_id`、同じ process provision にだけ存在する
+Claude / Codex の structured lifecycle hook、または Antigravity の `PreInvocation` が current ID を持つ場合に付ける opaque `native_session_id`、同じ process provision にだけ存在する
 daemon-minted credential である。client は runtime / session / worktree / path / provider を指定できず、daemon は
 credential から exact live runtime を、runtime profile から provider を決める。成功 response は body を持たない。
 
@@ -647,10 +647,17 @@ Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `Sessi
 hook command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
 hook input または配線宣言と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `SessionStart` では current `session_id` と `ready`、`PreInvocation` では current `conversationId` と `running` を同じ
-request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。この 2 つ
-以外の組み合わせで native ID を付けた報告は拒否する。旧 hook
+request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。
+Claude / Codex の他の hook（`SessionEnd` を除く）も ID を送り、metadata が欠けた runtime だけを補完する。既存 ID と異なる
+起動後報告は `stale_target` で拒否し、既知の conversation を置換しない。旧 hook
 producer の ID 無し `ready` は phase だけを反映して wire compatibility を保つが、新しい resume metadata は作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
+Antigravity の後続 hook は phase だけを報告する。`running` の ID は旧 daemon でも `PreInvocation` の開始・置換を
+意味するため、同じ phase を使う `PreToolUse` に ID を付けない。
+
+旧 daemon が起動後報告の ID を effect-free に拒否した場合、更新済み producer は同じ接続で
+`codex_session_capture` による ID 補完を試みてから ID 無しの本来の phase を報告する。Codex 以外の profile は
+補完 request の profile mismatch だけを無視して phase 報告を維持する。transport / 認証 / その他の失敗は再試行しない。
 
 daemon 側では credential の欠落・不一致・失効、runtime の非 live、malformed body、永続化失敗が safe error に
 なり、phase を記録しない。この request は producer `OperationId` を持たない mutation なので、
@@ -686,6 +693,9 @@ provider-native identity、prompt、path は map に含めない。この reques
 `workspace_attention { workspace: WorkspaceId }` は local TUI 用の read-only request で、daemon が既に adopt している
 workspace のみを参照する。応答の `WorkspaceAttention` は exact workspace identity と、stable key・optional SessionId・
 label・分類・短い理由を持つ一覧である。decision 本文、回答、provider identity、path は含めない。
+各項目は任意の `target`（`kind: decision` と `decision_id`、または `kind: pull_request` と canonical PR `identity`）を持つ。
+TUI は個別項目を開く際にこの stable identity を使う。`status_unknown: true` は workspace の取得自体に成功しても、
+項目の PR 状態をまだ確認できていないことを示し、対応不要とは判定しない。旧応答の欠落 field はそれぞれ `None` / `false` として読む。
 MCP caller context は拒否し、観測による adopt・状態変更・runtime 起動は行わない。取得に失敗した入力を空一覧へ
 置き換えず request 全体を unavailable とする。fresh connection で安全に retry できる。
 表示上の分類と移動先は [workspace 横断の対応待ち](03-tui.md#workspace-横断の対応待ち) を参照する。
@@ -732,11 +742,11 @@ daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent`
 `daemon restart --restart-agents` は同じ exact resume 境界を daemon lifecycle に使う。
 `plan_daemon_restart_agents` は daemon 全体の live Agent を列挙し、全 runtime ref、public resume target、current profile revision、
 reported phase を返す effect-free request である。provider ID・argv・設定本文・provider-native session ID は返さない。
-exact resume metadata が1件でも欠ける場合、ownership-unknown process がある場合、または `running` phase に `--force` が無い場合は
-全件 effect-before-zero で拒否する。successor が旧 owner の workspace fence を奪わず再開できるのは initial tenant だけなので、
-live Agent が複数 workspace にまたがる場合も停止前に拒否する。
+exact resume metadata が1件でも欠ける場合、ownership-unknown process がある場合、または request の `force` が false で `running` phase がある場合は
+全件 effect-before-zero で拒否する。複数 workspace の live Agent も同じ plan に含む。
+CLI の `--restart-agents` は実行中の中断を許可するため、この request と `rollover.restart_agents` の `force` を true にする。
 
-client は plan の exact runtime 集合を `rollover.restart_agents` に再送し、sole Agent workspace を standby の initial tenant に選ぶ。
+client は plan の exact runtime 集合を `rollover.restart_agents` に再送し、最初の Agent の workspace を standby の initial tenant に選ぶ。
 old active は `ActiveControl` admission を close / drain してから同じ daemon-wide 集合を再計算し、完全一致した場合だけ全 Agent を停止する。そのまま provisioned credential が 0 であることを
 検証して最初の durable handoff write へ進むため、plan 後に競合した Agent launch は停止も handoff も行わず stale として拒否される。
 選択した exact source と item ごとの resume operation は最初の停止より先に owner-only の durable transaction へ保存する。commit 前の handoff
@@ -745,6 +755,10 @@ active generation の recovery worker が同じ transaction を current integrat
 拒否し、CLI は transaction の消去と successor serving の両方を確認してから成功する。current-integration resume は source の旧 adapter revision を fence として保持したまま、
 active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope / lineage を変えずに
 hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
+未完了 transaction に対する次の `rollover` は daemon が barrier 内で拒否するため、CLI の事前検証を通らない IPC caller も前の復旧記録を置き換えられない。
+commit 後の old owner は残存作業のない non-initial workspace の fence を解放し、successor は各 workspace を取得・照合してから recovery を進める。
+live generic PTY や未完了 lifecycle work が残る workspace は解放せず、recovery worker が再試行する。
+作業の続行 prompt と再試行の扱いは [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する。
 
 daemon-wide plan vocabulary を持たない旧 daemon は `--restart-agents` を effect-zero で拒否する。`--restart-agents` なしの
 `--force` は従来どおり Agent と generic Terminal を破棄する cold replacement であり、自動 exact resume の互換経路ではない。

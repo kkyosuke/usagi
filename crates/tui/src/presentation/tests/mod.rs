@@ -3400,23 +3400,36 @@ const RESIDENT_PORTS_PER_COMPOSITION: usize = 13;
 /// frame loop hands over is kept in order, so a test can tell "never re-aimed"
 /// from "re-aimed at the wrong set".
 #[derive(Clone, Default)]
-struct RecordingPrLane(Arc<Mutex<Vec<Vec<SessionId>>>>);
+struct RecordingPrLane {
+    sessions: Arc<Mutex<Vec<Vec<SessionId>>>>,
+    roots: Arc<Mutex<Vec<PreviewRoots>>>,
+}
+
+type PreviewRoots = Vec<(SessionId, PathBuf)>;
 
 impl RecordingPrLane {
     fn observed(&self) -> Vec<Vec<SessionId>> {
-        self.0
+        self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn observed_roots(&self) -> Vec<PreviewRoots> {
+        self.roots.lock().unwrap().clone()
     }
 }
 
 impl super::BackendOverlayPort for RecordingPrLane {
     fn sync_pull_request_targets(&mut self, sessions: Vec<SessionId>) {
-        self.0
+        self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(sessions);
+    }
+
+    fn sync_session_roots(&mut self, sessions: PreviewRoots) {
+        self.roots.lock().unwrap().push(sessions);
     }
 
     fn load_pull_requests(&mut self, _: Target, _: Completions) {}
