@@ -2355,6 +2355,9 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
 /// value is held for the lifetime of that Help overlay, so background daemon
 /// updates cannot make the shortcut list jump while it is being read.
 fn workspace_help_context(deck: &WorkspaceDeck, runtime: &WorkspaceRuntime) -> KeyHelpContext {
+    if deck.palette_overlay_open() {
+        return KeyHelpContext::CommandPalette;
+    }
     let state = runtime.state();
     resolve_workspace_help_context(WorkspaceHelpState {
         deck: WorkspaceDeckHelp::new(deck.add_overlay_open(), deck.overlay_open()),

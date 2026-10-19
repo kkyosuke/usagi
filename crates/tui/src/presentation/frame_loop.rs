@@ -779,6 +779,8 @@ pub(super) fn drive_workspace_controller(
     restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
+    let mut pending_palette_visit = deck.take_palette_visit(&root_cwd);
+    let mut palette_tab_revision = None;
     runtime.set_pr_auto_open(pr_auto_open);
     let role_catalog = session_catalogs.roles(&root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
@@ -1036,6 +1038,26 @@ pub(super) fn drive_workspace_controller(
                 surface_agent_tab_intent_error(&mut runtime, error);
             }
         }
+        if let Some((workspace, action)) = pending_palette_visit.as_ref() {
+            let waiting_for_tabs =
+                matches!(action, super::workspace_deck::palette::Action::Tab { .. })
+                    && !runtime.palette_action_available(*workspace, action)
+                    && (restore_retry.in_flight
+                        || (restore_commands.is_some() && restore_retry.next_retry_at.is_some()));
+            if !waiting_for_tabs {
+                if let Err(message) = super::terminal_io::visit_palette_target(
+                    &mut ui,
+                    &mut runtime,
+                    *workspace,
+                    action,
+                ) {
+                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
+                        Notice::new(message),
+                    )));
+                }
+                pending_palette_visit = None;
+            }
+        }
         if let Some((session, agent)) = pending_garden_agent {
             let selected = visit_garden_agent(
                 &mut ui,
@@ -1260,6 +1282,18 @@ pub(super) fn drive_workspace_controller(
                 .collect();
             session_material_key = Some(next_session_key);
         }
+        // Retain only tab metadata for inactive projects; output stays with the
+        // resident runtime. Refresh membership before painting or accepting input.
+        let tab_revision = runtime.panes().revision();
+        if sessions_changed || palette_tab_revision != Some(tab_revision) {
+            deck.update_palette_tabs(&runtime);
+            palette_tab_revision = Some(tab_revision);
+        }
+        if deck.refresh_command_palette_selection() {
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+        }
         // Reflux daemon metrics / git diffs through the backend drain instead of
         // polling the port inline: the shell folds the updates into its own
         // projection cache, so the material does not ride on the IO runtime.
@@ -1413,6 +1447,10 @@ pub(super) fn drive_workspace_controller(
         // Contextual New is retargeted once here so PTY forwarding, pane
         // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
+        // A delayed restore must not steal focus after the user starts another action.
+        if !matches!(raw_key, Key::Other) {
+            let _ = pending_palette_visit.take();
+        }
         if handle_interrupted_removal_confirmation(&raw_key, &mut ui, &mut runtime) {
             // This prompt is the exclusive frontmost owner. In particular,
             // Ctrl-D and pane-close chords never reach a live tab behind it.
@@ -1486,6 +1524,13 @@ pub(super) fn drive_workspace_controller(
             frame_material_key = None;
             continue;
         }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenCommandPalette)) {
+            deck.open_command_palette();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
         if matches!(key, Key::Live(LiveTerminalAction::OpenWorkspaceSwitcher)) {
             deck.open_switcher();
             drawn_material = None;
@@ -1537,6 +1582,49 @@ pub(super) fn drive_workspace_controller(
         }
         if deck.overlay_open() {
             match deck.handle_overlay_key_at(&key, height, width) {
+                OverlayIntent::PaletteVisit {
+                    path,
+                    workspace,
+                    action,
+                } => {
+                    if runtime.palette_navigation_blocked()
+                        || workspace_has_unsaved_surface(&runtime)
+                    {
+                        deck.set_notice(
+                            "Close the palette and finish the current dialog or draft first.",
+                        );
+                    } else if path == deck.active_path() {
+                        match super::terminal_io::visit_palette_target(
+                            &mut ui,
+                            &mut runtime,
+                            workspace,
+                            &action,
+                        ) {
+                            Ok(()) => deck.close_overlay(),
+                            Err(message) => deck.set_notice(message),
+                        }
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                        && prepared.workspace_id == workspace
+                        && action
+                            .session()
+                            .is_none_or(|session| prepared.session_ids.contains(&session))
+                        && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        )
+                    {
+                        deck.schedule_palette_visit(path, workspace, action);
+                        remember_workspace_session_focus(deck, runtime.state());
+                        return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                    } else {
+                        super::restore_prepared_workspace(&mut loader, &root_cwd);
+                        deck.set_notice("Target is unavailable; refresh and select again.");
+                    }
+                }
                 OverlayIntent::AttentionVisit {
                     path,
                     workspace,

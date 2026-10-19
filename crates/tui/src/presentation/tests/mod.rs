@@ -2569,6 +2569,7 @@ enum FakeRegistryRefresh {
 
 #[derive(Default)]
 struct FakeLoader {
+    prepared_snapshots: Vec<WorkspaceSnapshot>,
     last_projects: Option<usagi_core::domain::recent::LastProjectSet>,
     last_projects_error: Option<&'static str>,
     save_projects_error: Option<&'static str>,
@@ -2646,7 +2647,12 @@ impl WorkspaceLoader for FakeLoader {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("workspace");
-        let mut snapshot = snapshot(name);
+        let mut snapshot = self
+            .prepared_snapshots
+            .iter()
+            .find(|snapshot| snapshot.workspace.path == path)
+            .cloned()
+            .unwrap_or_else(|| snapshot(name));
         if self.open_snapshot == FakeOpenSnapshot::Empty {
             snapshot.state.sessions.clear();
             snapshot.session_ids.clear();

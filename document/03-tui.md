@@ -11,6 +11,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [この文書の読み方](#この文書の読み方)
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
+- [横断コマンドパレット](#横断コマンドパレット)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
@@ -273,6 +274,34 @@ project tab の黄色い `!N` は確認できた対応待ちの件数、`!N+` �
 状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。
 観測は専用 worker が稼働済み daemon の保存済み状態だけを読み、workspace の adopt、daemon/Agent 起動、terminal attach、状態の変更は行わない。
 各接続・request は250ms・再試行なしで読み、workspace 切り替え時は次の request を中止して worker を回収する。
+
+## 横断コマンドパレット
+
+`Ctrl-O k` で、開いている project を横断して検索する。名前・project の path・session 名・説明を対象に、
+空白で区切った各語が一致する候補を表示する。検索入力は最大 256 文字で、Unicode の文字編集と貼り付けに対応する。
+キーの一覧は [11. キーバインド](11-keybindings.md#workspace-共通コマンド) を参照。
+
+| 候補 | Enter の動作 |
+|---|---|
+| Project | 対象 project の Switch を開く |
+| Session | 利用可能な session の Closeup を開く |
+| Tab · Agent / Terminal | 観測済みの該当タブを選択。workspace root のタブは対応する drawer を開く |
+| Command | 対象 workspace / session の Overview / Closeup にコマンド名を入力。引数を編集し、もう一度 Enter で通常の実行経路へ進む |
+
+コマンド候補は既存の Overview / Closeup 定義を使う。未実装の `diff` コマンドは候補に含めない。
+削除などの確認は通常の実行経路が担当する。パレットで対象を開くだけでは Agent の起動・再開は行わない。
+
+各候補に種別と project / session の文脈を表示し、project の同名は path で区別する。
+session 一覧は deck の最新観測、タブはその project を表示した際に観測した情報を使う。
+まだ表示していない project のタブや terminal 出力本文は検索対象に含めない。
+移動時には workspace・session・タブの内部 ID と利用可否を再確認する。
+削除・再作成で選択先が消えた場合は再選択を促し、同名の別対象へ移動しない。
+検索開始時に候補がない場合は、候補が現れた時に先頭を選択する。以降は並び替えで選択対象を変えない。
+別 project のタブ復元を待つ間にユーザーが操作した場合は、遅れてそのタブへ移動しない。
+
+検索中の文字・貼り付け・未割り当てキーは背面の terminal へ送らない。Esc で背面の入力に戻れる。
+入力中の Overview / Closeup、編集中の画面や確認ダイアログが背面にある場合は、完了またはキャンセルしてから移動する。
+検索結果が多い場合は選択位置を追ってスクロールし、低い画面では検索欄と選択候補を優先する。
 
 ## workspace の離脱と終了
 
