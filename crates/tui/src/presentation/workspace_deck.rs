@@ -6,13 +6,16 @@
 //! controller.
 
 mod attention;
+pub(crate) mod palette;
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
-use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, UserDecisionId, WorkspaceId};
+use usagi_core::domain::pr_inventory::PrIdentity;
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::workspace::Workspace;
@@ -24,6 +27,7 @@ use crate::presentation::widgets::garden::{GardenAgent, GardenSession};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
+use crate::usecase::application::controller::DecisionSnapshot;
 use crate::usecase::fuzzy::fuzzy_score;
 
 const TAB_NAME_WIDTH: usize = 18;
@@ -49,6 +53,7 @@ pub struct WorkspaceSlot {
     attention: Option<usagi_core::domain::attention::WorkspaceAttention>,
     attention_stale: bool,
     attention_observed_at: Option<std::time::Instant>,
+    palette_tabs: Vec<palette::CachedTab>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +148,7 @@ impl WorkspaceSlot {
             attention: None,
             attention_stale: false,
             attention_observed_at: None,
+            palette_tabs: Vec::new(),
         }
     }
 
@@ -177,6 +183,7 @@ enum DeckOverlay {
     Add(AddWorkspace),
     Switcher(ProjectSwitcher),
     Attention(attention::AttentionList),
+    Palette(palette::Palette),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +197,11 @@ enum AddWorkspaceMode {
 pub enum OverlayIntent {
     Stay,
     Cancel,
+    PaletteVisit {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        action: palette::Action,
+    },
     Add(Vec<PathBuf>),
     Activate(PathBuf),
     Visit {
@@ -206,10 +218,12 @@ pub enum OverlayIntent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionDestination {
     Decisions,
+    Decision(UserDecisionId),
     PullRequests,
+    PullRequest(PrIdentity),
     Session,
 }
 
@@ -226,6 +240,10 @@ pub struct WorkspaceDeck {
     icon_mode: IconMode,
     attention_cursor: usize,
     pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
+    pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
+    /// Parked only during controller replacement. Shared ownership keeps
+    /// loading-frame deck clones from copying question bodies every frame.
+    decisions: Option<Arc<DecisionSnapshot>>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -251,6 +269,8 @@ impl WorkspaceDeck {
             icon_mode: IconMode::default(),
             attention_cursor: 0,
             pending_attention: None,
+            pending_palette: None,
+            decisions: None,
         }
     }
 
@@ -277,6 +297,14 @@ impl WorkspaceDeck {
     #[must_use]
     pub fn slots(&self) -> &[WorkspaceSlot] {
         &self.slots
+    }
+
+    pub(super) fn remember_decisions(&mut self, snapshot: DecisionSnapshot) {
+        self.decisions = Some(Arc::new(snapshot));
+    }
+
+    pub(super) fn take_decisions(&mut self) -> Option<DecisionSnapshot> {
+        self.decisions.take().map(Arc::unwrap_or_clone)
     }
 
     /// Source labels for questions displayed while another project is active.
@@ -384,6 +412,7 @@ impl WorkspaceDeck {
         {
             let focused_session = slot.focused_session;
             if slot.workspace_id != snapshot.workspace_id {
+                slot.palette_tabs.clear();
                 slot.attention = None;
                 slot.attention_observed_at = None;
                 slot.attention_stale = false;
@@ -463,6 +492,34 @@ impl WorkspaceDeck {
             DeckOverlay::Add(add) => add.handle(key),
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
             DeckOverlay::Attention(list) => list.handle(key, &self.slots),
+            DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
+        }
+    }
+
+    /// Use the same geometry as the inbox frame for clicks and visible actions.
+    /// Other deck overlays retain their existing keyboard reducer.
+    pub fn handle_overlay_key_at(
+        &mut self,
+        key: &Key,
+        height: usize,
+        width: usize,
+    ) -> OverlayIntent {
+        if let Some(DeckOverlay::Palette(palette)) = self.overlay.as_mut() {
+            return palette.handle(key, &self.slots, palette::page_size(height));
+        }
+        if let Some(DeckOverlay::Attention(list)) = self.overlay.as_mut() {
+            let intent = attention::handle_input(
+                list,
+                &self.slots,
+                self.notice.as_deref(),
+                key,
+                height,
+                width,
+            );
+            self.notice = None;
+            intent
+        } else {
+            self.handle_overlay_key(key)
         }
     }
 
@@ -496,6 +553,13 @@ impl WorkspaceDeck {
         }
         if self.pending_closeup_path.as_deref() == Some(path) {
             self.pending_closeup_path = None;
+        }
+        if self
+            .pending_palette
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == path)
+        {
+            self.pending_palette = None;
         }
     }
 
@@ -1071,14 +1135,14 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         .slots
         .iter()
         .enumerate()
-        .map(|(index, slot)| {
-            let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
-            format!(" {} {name}{} ", index + 1, attention::badge(slot))
-        })
+        .map(|(index, slot)| project_tab_label(index, active, slot))
         .collect::<Vec<_>>();
     let add_button = InlineButton::new(ADD_LABEL);
-    let attention_button = InlineButton::new("! Attention");
-    let add_width = add_button.width() + attention_button.width();
+    let (attention_label, attention_style) = attention::indicator(&deck.slots);
+    let attention_button = InlineButton::new(&attention_label);
+    // Reserve breathing room between project actions and the right-aligned
+    // notification, even when the bar has no spare cells.
+    let add_width = add_button.width() + 2 + attention_button.width();
 
     let mut best = (active, active + 1);
     let mut best_count = 1;
@@ -1099,7 +1163,7 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         let visible = widgets::clip_to_width(&labels[active], width);
         let span = widgets::display_width(&visible);
         return ProjectBar {
-            line: Role::Accent.style().bold().paint(&visible),
+            line: visible,
             hits: vec![ProjectBarHit {
                 columns: 0..span,
                 target: ProjectBarTarget::Workspace(deck.slots[active].path.clone()),
@@ -1118,12 +1182,7 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         let available = width.saturating_sub(column + add_width);
         let visible = widgets::clip_to_width(label, available);
         let span = widgets::display_width(&visible);
-        let styled = if index == active {
-            Role::Accent.style().bold().paint(&visible)
-        } else {
-            Style::new().dim().paint(&visible)
-        };
-        line.push_str(&styled);
+        line.push_str(&visible);
         hits.push(ProjectBarHit {
             columns: column..column + span,
             target: ProjectBarTarget::Workspace(deck.slots[index].path.clone()),
@@ -1148,8 +1207,10 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
             target: ProjectBarTarget::Add,
         });
         column += span;
-        let attention =
-            attention_button.render(width.saturating_sub(column), Role::Accent.style().bold());
+        let gap = width.saturating_sub(column + attention_button.width());
+        line.push_str(&" ".repeat(gap));
+        column += gap;
+        let attention = attention_button.render(width.saturating_sub(column), attention_style);
         line.push_str(&attention.line);
         hits.push(ProjectBarHit {
             columns: column..column + attention.width,
@@ -1157,6 +1218,26 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         });
     }
     ProjectBar { line, hits }
+}
+
+fn project_tab_label(index: usize, active: usize, slot: &WorkspaceSlot) -> String {
+    let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
+    let style = if index == active {
+        Role::Accent.style().bold()
+    } else {
+        Style::new().dim()
+    };
+    let badge = attention::badge(slot);
+    let badge_style = if badge.contains('!') {
+        Role::Warning.style().bold()
+    } else {
+        style
+    };
+    format!(
+        "{}{} ",
+        style.paint(&format!(" {} {name}", index + 1)),
+        badge_style.paint(&badge)
+    )
 }
 
 fn project_bar_window_width(
@@ -1193,6 +1274,7 @@ pub fn render_overlay(
     match &deck.overlay {
         None => base.to_vec(),
         Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
+        Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {
             render_switcher(deck, switcher, height, width, base)
@@ -1351,7 +1433,11 @@ mod tests {
         snapshot_with_sessions(name, path, &[session])
     }
 
-    fn snapshot_with_sessions(name: &str, path: &str, sessions: &[&str]) -> WorkspaceSnapshot {
+    pub(super) fn snapshot_with_sessions(
+        name: &str,
+        path: &str,
+        sessions: &[&str],
+    ) -> WorkspaceSnapshot {
         let state = WorkspaceState {
             sessions: sessions
                 .iter()

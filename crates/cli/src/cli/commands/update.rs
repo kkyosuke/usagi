@@ -7,14 +7,21 @@ use crate::cli::{InstallerRequest, Run, RunOutcome};
 /// この digest は `scripts/install.sh` と同じ build に固定する。変更時は unit test が
 /// 不一致を検出するため、review 可能な identity 更新として同時に変更する。
 const INSTALLER_SHA256: [u8; 32] = [
-    0x8f, 0x2e, 0x16, 0x6b, 0xcf, 0x1b, 0x01, 0xcd, 0xd3, 0x63, 0x0e, 0xc4, 0xb7, 0x32, 0x95, 0x43,
-    0xc3, 0xbc, 0x7c, 0x56, 0xfd, 0x0b, 0xff, 0xc9, 0x77, 0xd3, 0x35, 0x6b, 0xad, 0x69, 0x39, 0x77,
+    0x6e, 0x32, 0xdb, 0xb1, 0x32, 0xcc, 0x86, 0xa4, 0x8e, 0x28, 0x7b, 0x32, 0x31, 0xd6, 0xe6, 0x6f,
+    0xe0, 0xfc, 0x3c, 0xac, 0x95, 0x82, 0xfe, 0x4d, 0x97, 0x6a, 0xcc, 0x94, 0xe3, 0xd3, 0xeb, 0x63,
 ];
 const INSTALLER: &[u8] = include_bytes!("../../../../../scripts/install.sh");
+
+/// The same verified installer owns publication and deferred daemon synchronization.
+#[must_use]
+pub const fn installer_request(select_version: bool) -> InstallerRequest {
+    InstallerRequest::new(INSTALLER, INSTALLER_SHA256, select_version)
+}
 
 /// `usagi update` のハンドラ。実際の subprocess は合成ルートが実行する。
 pub struct Update {
     pub select_version: bool,
+    pub restart_agents: bool,
 }
 
 impl Run for Update {
@@ -24,11 +31,9 @@ impl Run for Update {
         } else {
             writeln!(out, "最新の usagi リリースをインストール中だよ！ぴょん")?;
         }
-        Ok(RunOutcome::SelfUpdate(InstallerRequest::new(
-            INSTALLER,
-            INSTALLER_SHA256,
-            self.select_version,
-        )))
+        Ok(RunOutcome::SelfUpdate(
+            installer_request(self.select_version).with_agent_restart(self.restart_agents),
+        ))
     }
 }
 
@@ -55,6 +60,7 @@ mod tests {
         let mut out = Vec::new();
         let outcome = Update {
             select_version: false,
+            restart_agents: false,
         }
         .run(&mut out)
         .unwrap();
@@ -69,17 +75,25 @@ mod tests {
         let mut out = Vec::new();
         let outcome = Update {
             select_version: true,
+            restart_agents: true,
         }
         .run(&mut out)
         .unwrap();
-        assert!(matches!(outcome, RunOutcome::SelfUpdate(request) if request.select_version()));
+        assert!(
+            matches!(outcome, RunOutcome::SelfUpdate(request) if request.select_version() && request.restart_agents())
+        );
     }
 
     #[test]
     fn output_failure_prevents_both_update_modes_from_reaching_the_runtime() {
         for select_version in [false, true] {
             let mut output = &mut [][..];
-            let error = Update { select_version }.run(&mut output).unwrap_err();
+            let error = Update {
+                select_version,
+                restart_agents: true,
+            }
+            .run(&mut output)
+            .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::WriteZero);
         }
     }

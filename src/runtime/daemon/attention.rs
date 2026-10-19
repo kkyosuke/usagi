@@ -3,7 +3,9 @@ use super::{ConnectionWorkspace, SharedAgentRuntime, SharedPrInventory, envelope
 use serde::Deserialize;
 use usagi_core::domain::{
     agent::AgentStatus,
-    attention::{ATTENTION_ITEMS_MAX, AttentionItem, AttentionKind, WorkspaceAttention},
+    attention::{
+        ATTENTION_ITEMS_MAX, AttentionItem, AttentionKind, AttentionTarget, WorkspaceAttention,
+    },
     id::{SessionId, WorkspaceId},
     pr_inventory::{PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState},
     presentation_text::sanitize_presentation_line,
@@ -127,6 +129,10 @@ fn project(
                 label: safe(label),
                 kind: AttentionKind::Decision,
                 reason: safe(&decision.title),
+                target: Some(AttentionTarget::Decision {
+                    decision_id: decision.decision_id,
+                }),
+                status_unknown: false,
             });
         }
     }
@@ -148,6 +154,10 @@ fn project(
                 let mut item = session_item(session, kind, reason);
                 item.key = format!("pr:{}:{}", session.session_id, pr.identity.as_url());
                 item.reason = format!("PR #{} · {}", pr.identity.number(), reason);
+                item.target = Some(AttentionTarget::PullRequest {
+                    identity: pr.identity.clone(),
+                });
+                item.status_unknown = pr.refresh != PrRefreshState::Idle || pr.head_oid.is_none();
                 items.push(item);
             }
         }
@@ -171,6 +181,8 @@ fn session_item(session: &SessionRow, kind: AttentionKind, reason: &str) -> Atte
         label: safe(&session.name),
         kind,
         reason: safe(reason),
+        target: None,
+        status_unknown: false,
     }
 }
 
@@ -180,7 +192,7 @@ fn session_attention(
     status: Option<AgentStatus>,
 ) -> Option<(AttentionKind, String)> {
     if session.lifecycle == SessionLifecycle::Failed {
-        return Some((AttentionKind::Blocked, "Session lifecycle failed".into()));
+        return Some((AttentionKind::Blocked, "Session failed".into()));
     }
     if session.lifecycle != SessionLifecycle::Available {
         return Some((
@@ -194,10 +206,7 @@ fn session_attention(
             Some(AgentStatus::Running | AgentStatus::Starting | AgentStatus::Failed)
         )
     {
-        return Some((
-            AttentionKind::System,
-            "Agent waiting — inspect terminal".into(),
-        ));
+        return Some((AttentionKind::System, "Agent is waiting".into()));
     }
     if phase == AgentPhase::Interrupted {
         return Some((AttentionKind::Blocked, "Agent interrupted".into()));
@@ -219,16 +228,17 @@ fn pr_attention(pr: &PrEntry) -> Option<(AttentionKind, &'static str)> {
     if pr.refresh != PrRefreshState::Idle || pr.head_oid.is_none() {
         return Some((AttentionKind::System, "PR status unknown / refreshing"));
     }
-    if pr.checks == Some(PrChecksState::Failing)
-        || pr.review == Some(PrReviewDecision::ChangesRequested)
-    {
-        return Some((AttentionKind::Blocked, "CI failed / changes requested"));
+    if pr.checks == Some(PrChecksState::Failing) {
+        return Some((AttentionKind::Blocked, "CI checks failed"));
+    }
+    if pr.review == Some(PrReviewDecision::ChangesRequested) {
+        return Some((AttentionKind::Blocked, "Changes requested"));
     }
     if pr.checks == Some(PrChecksState::Pending) {
         return Some((AttentionKind::System, "CI pending"));
     }
     if !pr.draft {
-        return Some((AttentionKind::Review, "Review / merge decision"));
+        return Some((AttentionKind::Review, "PR is ready for review or merge"));
     }
     None
 }
@@ -415,8 +425,27 @@ mod tests {
             result
                 .items
                 .iter()
-                .any(|item| item.reason == "PR #1 · Review / merge decision")
+                .any(|item| item.reason == "PR #1 · PR is ready for review or merge")
         );
+        assert!(result.items.iter().any(|item| item.target
+            == Some(AttentionTarget::Decision {
+                decision_id: decisions[0].decision_id
+            })));
+        assert!(result.items.iter().any(|item| item.target
+            == Some(AttentionTarget::PullRequest {
+                identity: pr.identity.clone()
+            })));
+        assert!(result.items.iter().all(|item| !item.status_unknown));
+        let mut refreshing = prs.clone();
+        refreshing[0].entries[0].head_oid = None;
+        let unconfirmed =
+            project(workspace, &sessions, &[], &statuses, &phases, &refreshing).unwrap();
+        assert!(unconfirmed.items.iter().any(|item| item.status_unknown
+            && item.kind == AttentionKind::System
+            && item.target
+                == Some(AttentionTarget::PullRequest {
+                    identity: pr.identity.clone()
+                })));
         let failed_statuses = [(sessions[0].session_id, AgentStatus::Failed)].into();
         assert!(
             project(

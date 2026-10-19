@@ -1715,10 +1715,12 @@ fn production_cross_workspace_user_decision_reaches_its_agent_and_acks_only_owne
         payload:json!({"workspace":decision.owner.workspace_id,"decision_id":decision.decision_id}),
     }).unwrap();
     assert!(matches!(inspected, DaemonReply::Ok(ref body) if body["answer"] == answer));
+    let pending = tool_text(&mcp.tool("user_decision_list", &json!({})));
+    assert_eq!(pending["decisions"], json!([]));
     assert_eq!(
         store.events().unwrap().len(),
         1,
-        "TUI reads cannot ACK the agent's answer"
+        "TUI reads and pending lists cannot ACK the agent's answer"
     );
     let received = tool_text(&mcp.tool(
         "user_decision_get",
@@ -1742,6 +1744,524 @@ fn production_user_decision_round_trip_reaches_the_original_caller() {
 #[test]
 fn production_rich_multiple_user_decision_round_trip() {
     user_decision_round_trip(true);
+}
+
+#[test]
+fn production_restart_keeps_decisions_and_reports_on_the_exact_conversation() {
+    decision_restart_round_trip(false);
+}
+
+#[test]
+fn production_restart_keeps_legacy_decisions_and_reports_on_the_exact_conversation() {
+    decision_restart_round_trip(true);
+}
+
+#[allow(clippy::too_many_lines)] // One authenticated restart covers decision custody, report routing, and the fresh-conversation boundary.
+fn decision_restart_round_trip(legacy: bool) {
+    use usagi_core::infrastructure::store::dispatch::DispatchStore;
+
+    let mcp = McpHarness::start();
+    install_decision_restart_fixture(&mcp);
+    let lifecycle: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::daemon::lifecycle_state_path(&mcp.data_dir())).unwrap(),
+    )
+    .unwrap();
+    let workspace: WorkspaceId =
+        serde_json::from_value(lifecycle["state"]["workspace_id"].clone()).unwrap();
+    let caller = CallerRef {
+        session_id: None,
+        agent_id: AgentId::new(),
+    };
+    let mut client = mcp.daemon_client();
+    let initial = client
+        .request(DaemonRequest::Dispatch {
+            operation_id: OperationId::new().to_string(),
+            intent: DispatchIntent {
+                workspace,
+                session_name: "decision-restart".into(),
+                caller: caller.clone(),
+                agent: DispatchAgentIntent::New {
+                    runtime: AgentProfileId::new("codex").unwrap(),
+                    model: ModelSelector::new("fixture-codex").unwrap(),
+                },
+                prompt: "await a human decision, then report to the caller".into(),
+            },
+        })
+        .unwrap();
+    let DaemonReply::Accepted { body: initial, .. } = initial else {
+        panic!("the decision worker was not admitted");
+    };
+    let initial_responses = decision_restart_responses(&mcp, "initial");
+    let initial_continuation = decision_continuation(&mut client, workspace, &initial["terminal"]);
+    let pending: UserDecision =
+        serde_json::from_value(tool_text(decision_restart_reply(&initial_responses, 2))).unwrap();
+    let answered: UserDecision =
+        serde_json::from_value(tool_text(decision_restart_reply(&initial_responses, 3))).unwrap();
+    fs::write(
+        mcp.home().join("pending-decision-id"),
+        pending.decision_id.as_str(),
+    )
+    .unwrap();
+    fs::write(
+        mcp.home().join("answered-decision-id"),
+        answered.decision_id.as_str(),
+    )
+    .unwrap();
+    let dispatch = DispatchStore::new(mcp.data_dir().join("daemon"));
+    let source_binding = dispatch.binding(pending.owner.run_id).unwrap().unwrap();
+    assert_eq!(source_binding.caller, caller);
+    assert_eq!(pending.owner, answered.owner);
+
+    let answer = json!({"kind":"option", "option_id":"yes"});
+    assert!(matches!(
+        client
+            .request(DaemonRequest::UserDecision {
+                action: TuiUserDecisionAction::Resolve,
+                payload: json!({"decision_id":answered.decision_id,"answer":answer}),
+            })
+            .unwrap(),
+        DaemonReply::Ok(ref body) if body["status"] == "resolved"
+    ));
+    let decisions = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+    let inspected = client
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Get,
+            payload: json!({"decision_id":answered.decision_id}),
+        })
+        .unwrap();
+    assert!(matches!(inspected, DaemonReply::Ok(ref body) if body["answer"] == answer));
+    assert_eq!(decisions.events().unwrap().len(), 1);
+    drop(client);
+
+    let restarted = decision_daemon_command(
+        &mcp,
+        &[
+            "daemon".as_ref(),
+            "restart".as_ref(),
+            "--restart-agents".as_ref(),
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        restarted.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&restarted.stdout),
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&restarted.stdout).contains("restarted 1 Agent(s)"));
+    let resumed = decision_restart_responses(&mcp, "resumed");
+    assert_eq!(
+        tool_text(decision_restart_reply(&resumed, 2)),
+        json!(pending)
+    );
+    let listed = tool_text(decision_restart_reply(&resumed, 3));
+    assert_eq!(listed["decisions"], json!([pending]));
+    assert_eq!(
+        tool_text(decision_restart_reply(&resumed, 4)),
+        json!(pending)
+    );
+    let fetched_answer = tool_text(decision_restart_reply(&resumed, 5));
+    assert_eq!(fetched_answer["decision_id"], json!(answered.decision_id));
+    assert_eq!(fetched_answer["owner"], json!(answered.owner));
+    assert_eq!(fetched_answer["answer"], answer);
+    assert_eq!(fetched_answer["status"], "resolved");
+    assert!(decisions.events().unwrap().is_empty());
+    assert_eq!(decisions.pending(workspace).unwrap(), vec![pending.clone()]);
+    assert_eq!(
+        tool_text(decision_restart_reply(&resumed, 6))["delivered_to"],
+        json!(caller)
+    );
+    let reports = dispatch.inbox(&caller).unwrap();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert_eq!(reports[0].summary, "decision worker finished");
+    assert_eq!(
+        reports[0].kind,
+        usagi_core::domain::agent::InboxKind::Completed
+    );
+    let binding = dispatch.binding(reports[0].run_id).unwrap().unwrap();
+    assert_eq!(binding.caller, caller);
+    assert_eq!(binding.worker, source_binding.worker);
+    assert_ne!(binding.run_id, pending.owner.run_id);
+    assert!(
+        dispatch
+            .inbox(&CallerRef {
+                session_id: binding.worker.session_id,
+                agent_id: binding.worker.agent_id,
+            })
+            .unwrap()
+            .is_empty()
+    );
+    assert!(mcp.fixture_argv().iter().any(|capture| {
+        capture
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["resume", "decision-initial-conversation"])
+            && capture
+                .arguments
+                .ends_with(&["--".into(), "continue".into()])
+    }));
+
+    if legacy {
+        exercise_legacy_decision_restart(&mcp, &pending, &binding);
+    }
+
+    // Reuse this same Agent identity for a fresh provider conversation. Neither
+    // the retained source nor the stable mailbox grants it old decision access.
+    let mut client = mcp.daemon_client();
+    wait_until(|| {
+        let reply = client
+            .request(DaemonRequest::AgentInventory {
+                workspace,
+                caller_context: None,
+            })
+            .unwrap();
+        let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+        body["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|runtime| runtime["state"] != "live")
+    });
+    fs::write(mcp.home().join("fresh-decision-conversation"), "").unwrap();
+    let fresh = client
+        .request(DaemonRequest::Dispatch {
+            operation_id: OperationId::new().to_string(),
+            intent: DispatchIntent {
+                workspace,
+                session_name: "decision-restart".into(),
+                caller: caller.clone(),
+                agent: DispatchAgentIntent::Existing {
+                    agent_id: source_binding.worker.agent_id,
+                },
+                prompt: "begin a fresh conversation".into(),
+            },
+        })
+        .unwrap();
+    let DaemonReply::Accepted { body: fresh, .. } = fresh else {
+        panic!("the same Agent was not admitted for a fresh conversation");
+    };
+    assert_ne!(
+        initial_continuation,
+        decision_continuation(&mut client, workspace, &fresh["terminal"])
+    );
+    let fresh = decision_restart_responses(&mcp, "fresh");
+    for id in [2, 5] {
+        let denied = decision_restart_reply(&fresh, id);
+        assert_eq!(denied["error"]["code"], -32603, "{denied}");
+        assert!(
+            denied["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("RevisionConflict"),
+            "{denied}"
+        );
+    }
+    assert_eq!(
+        tool_text(decision_restart_reply(&fresh, 3))["decisions"],
+        json!([])
+    );
+    let fresh_decision: UserDecision =
+        serde_json::from_value(tool_text(decision_restart_reply(&fresh, 4))).unwrap();
+    assert_ne!(fresh_decision.decision_id, pending.decision_id);
+    assert_ne!(fresh_decision.owner.run_id, pending.owner.run_id);
+    assert_eq!(
+        dispatch
+            .binding(fresh_decision.owner.run_id)
+            .unwrap()
+            .unwrap()
+            .worker,
+        source_binding.worker
+    );
+    assert_eq!(
+        decisions.pending(workspace).unwrap().len(),
+        if legacy { 4 } else { 2 }
+    );
+    assert_eq!(
+        tool_text(decision_restart_reply(&fresh, 6))["delivered_to"],
+        json!(caller)
+    );
+}
+
+fn decision_continuation(
+    client: &mut impl DaemonClient,
+    workspace: WorkspaceId,
+    terminal: &serde_json::Value,
+) -> AgentContinuationRef {
+    let terminal: usagi_core::domain::id::TerminalRef =
+        serde_json::from_value(terminal.clone()).expect("dispatch returns its exact terminal");
+    let reply = client
+        .request(DaemonRequest::AgentInventory {
+            workspace,
+            caller_context: None,
+        })
+        .unwrap();
+    let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+    let inventory: usagi_core::domain::agent::AgentInventory =
+        serde_json::from_value(body).unwrap();
+    inventory
+        .runtimes
+        .into_iter()
+        .find(|item| item.runtime.terminal == terminal)
+        .expect("the exact dispatch runtime is retained")
+        .continuation
+}
+
+fn decision_daemon_command(mcp: &McpHarness, args: &[&std::ffi::OsStr]) -> Command {
+    let mut command = support::daemon::usagi_command(
+        mcp.home(),
+        support::daemon::Channel::Local,
+        mcp.workspace(),
+        args,
+    );
+    // Match the original fixture daemon. A host login shell must not replace
+    // PATH or provider settings when the successor starts its Agent.
+    command
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", mcp.fixture_bin().display()),
+        )
+        .env("HOME", mcp.home())
+        .env("SHELL", "/bin/sh")
+        .env(
+            usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+            "1",
+        )
+        .stdin(Stdio::null());
+    command
+}
+
+#[allow(clippy::too_many_lines)] // One offline legacy fixture keeps owner-shard, binding, and decision migration assertions together.
+fn exercise_legacy_decision_restart(
+    mcp: &McpHarness,
+    original: &UserDecision,
+    source: &usagi_core::domain::agent::DispatchBinding,
+) {
+    use usagi_core::domain::user_decision::UserDecisionOwner;
+    use usagi_core::infrastructure::store::dispatch::DispatchStore;
+
+    // Emulate the old producer's durable A -> B conversation only while every
+    // fixture daemon is stopped. B used a self caller and could create its own
+    // owner-fenced questions; the current producer must preserve those too.
+    support::daemon::reap(mcp.home());
+    let source_runtime = remove_decision_anchors(mcp, source.run_id, original.owner.run_id);
+    let dispatch = DispatchStore::new(mcp.data_dir().join("daemon"));
+    let mut legacy_binding = source.clone();
+    legacy_binding.caller = CallerRef {
+        session_id: source.worker.session_id,
+        agent_id: source.worker.agent_id,
+    };
+    dispatch.upsert_binding(legacy_binding.clone()).unwrap();
+    let legacy_owner = UserDecisionOwner {
+        workspace_id: original.owner.workspace_id,
+        session_id: source.worker.session_id,
+        caller: legacy_binding.caller,
+        run_id: source.run_id,
+    };
+    let decisions = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+    let mut duplicate = original.clone();
+    duplicate.decision_id = UserDecisionId::new();
+    duplicate.owner = legacy_owner;
+    decisions.create(duplicate.clone()).unwrap().unwrap();
+    let mut legacy_only = duplicate.clone();
+    legacy_only.decision_id = UserDecisionId::new();
+    legacy_only.title = "Legacy-only approval".into();
+    legacy_only.idempotency_key = Some("legacy-only".into());
+    decisions.create(legacy_only.clone()).unwrap().unwrap();
+    fs::write(mcp.home().join("legacy-decision-conversation"), "").unwrap();
+
+    let started = decision_daemon_command(mcp, &["daemon".as_ref(), "start".as_ref()])
+        .output()
+        .unwrap();
+    assert!(
+        started.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&started.stdout),
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let mut client = mcp.daemon_client();
+    let reply = client
+        .request(DaemonRequest::AgentInventory {
+            workspace: original.owner.workspace_id,
+            caller_context: None,
+        })
+        .unwrap();
+    let (DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) = reply;
+    let inventory: usagi_core::domain::agent::AgentInventory =
+        serde_json::from_value(body).unwrap();
+    let target = inventory
+        .resumable
+        .into_iter()
+        .find(|item| item.runtime_id == source_runtime && item.available)
+        .and_then(|item| item.target)
+        .expect("the retained legacy source is exactly resumable");
+    assert!(matches!(
+        client
+            .request(DaemonRequest::ResumeAgent {
+                operation_id: OperationId::new().to_string(),
+                target,
+                caller_context: None,
+            })
+            .unwrap(),
+        DaemonReply::Accepted { .. }
+    ));
+    let replies = decision_restart_responses(mcp, "legacy");
+    assert_eq!(
+        tool_text(decision_restart_reply(&replies, 2)),
+        json!(original)
+    );
+    let listed = tool_text(decision_restart_reply(&replies, 3));
+    let listed = listed["decisions"].as_array().unwrap();
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    for decision in [original, &duplicate, &legacy_only] {
+        assert!(listed.iter().any(|listed| listed == &json!(decision)));
+    }
+    // If the buggy old producer created the same key under A and B, preserve
+    // the most recent legacy owner's result without merging their answers.
+    assert_eq!(
+        tool_text(decision_restart_reply(&replies, 4)),
+        json!(duplicate)
+    );
+    assert_eq!(
+        tool_text(decision_restart_reply(&replies, 7)),
+        json!(legacy_only)
+    );
+    assert_eq!(
+        decisions
+            .pending(original.owner.workspace_id)
+            .unwrap()
+            .len(),
+        3
+    );
+    let fetched_answer = tool_text(decision_restart_reply(&replies, 5));
+    assert_eq!(fetched_answer["status"], "resolved");
+    assert_eq!(fetched_answer["owner"], json!(original.owner));
+    assert_eq!(
+        tool_text(decision_restart_reply(&replies, 6))["delivered_to"],
+        json!(source.caller)
+    );
+    let reports = dispatch.inbox(&source.caller).unwrap();
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(reports.iter().all(|report| {
+        report.kind == usagi_core::domain::agent::InboxKind::Completed
+            && report.from == source.worker
+    }));
+}
+
+fn remove_decision_anchors(
+    mcp: &McpHarness,
+    source: OperationId,
+    origin: OperationId,
+) -> AgentRuntimeId {
+    let mut retained_origin = false;
+    let mut source_runtime = None;
+    for entry in fs::read_dir(mcp.data_dir().join("daemon/shards")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for resource in document["resources"].as_array_mut().unwrap() {
+            let Some(payload) = resource["payload"].as_str() else {
+                continue;
+            };
+            let mut record: serde_json::Value = serde_json::from_str(payload).unwrap();
+            if !record["runtime"].is_object() {
+                continue;
+            }
+            retained_origin |= record["operation"]["operation_id"] == json!(origin);
+            if record["operation"]["operation_id"] == json!(source) {
+                source_runtime = Some(
+                    serde_json::from_value(record["runtime"]["agent_runtime_id"].clone()).unwrap(),
+                );
+            }
+            record
+                .as_object_mut()
+                .unwrap()
+                .remove("user_decision_owner");
+            record
+                .as_object_mut()
+                .unwrap()
+                .remove("user_decision_owner_aliases");
+            resource["payload"] = json!(serde_json::to_string(&record).unwrap());
+        }
+        fs::write(path, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+    }
+    assert!(
+        retained_origin,
+        "the legacy fixture must retain its exact origin"
+    );
+    source_runtime.expect("the legacy replacement source is retained")
+}
+
+fn install_decision_restart_fixture(mcp: &McpHarness) {
+    mcp.replace_fixture_agent(
+        "codex",
+        r#"#!/bin/sh
+if [ "$1 $2" = 'login status' ]; then exit 0; fi
+stage=initial
+for argument in "$@"; do if [ "$argument" = resume ]; then stage=resumed; fi; done
+if [ "$stage" = resumed ] && [ -f "$USAGI_HOME/legacy-decision-conversation" ]; then stage=legacy; fi
+if [ "$stage" = initial ] && [ -f "$USAGI_HOME/fresh-decision-conversation" ]; then stage=fresh; fi
+if [ "$stage" = initial ] || [ "$stage" = fresh ]; then
+  printf '{"session_id":"decision-%s-conversation","hook_event_name":"SessionStart","model":"fixture-codex"}' "$stage" | "$USAGI_E2E_USAGI" codex-session-capture || exit 8
+fi
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"decision-restart-agent","version":"1"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  if [ "$stage" = initial ]; then
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"user_decision_request","arguments":{"title":"Pending approval","prompt":"Choose","options":[{"id":"yes","label":"Yes"}],"idempotency_key":"pending-approval"}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"user_decision_request","arguments":{"title":"Answered approval","prompt":"Choose","options":[{"id":"yes","label":"Yes"}],"idempotency_key":"answered-approval"}}}'
+  else
+    pending=$(cat "$USAGI_HOME/pending-decision-id")
+    answered=$(cat "$USAGI_HOME/answered-decision-id")
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"user_decision_get","arguments":{"decision_id":"%s"}}}\n' "$pending"
+    printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"user_decision_list","arguments":{}}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"user_decision_request","arguments":{"title":"Pending approval","prompt":"Choose","options":[{"id":"yes","label":"Yes"}],"idempotency_key":"pending-approval"}}}'
+    printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"user_decision_get","arguments":{"decision_id":"%s"}}}\n' "$answered"
+    if [ "$stage" = legacy ]; then
+      printf '%s\n' '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"user_decision_request","arguments":{"title":"Legacy-only approval","prompt":"Choose","options":[{"id":"yes","label":"Yes"}],"idempotency_key":"legacy-only"}}}'
+    fi
+    printf '%s\n' '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"decision worker finished"}}}'
+  fi
+} | "$USAGI_E2E_USAGI" mcp > "$USAGI_HOME/decision-$stage.jsonl" 2>&1
+if [ "$stage" = initial ]; then
+  printf '%s' '{"session_id":"decision-initial-conversation","hook_event_name":"PostToolUse"}' | "$USAGI_E2E_USAGI" agent-phase waiting || exit 9
+fi
+: > "$USAGI_HOME/decision-$stage.done"
+if [ "$stage" = initial ]; then
+  trap 'exit 0' TERM
+  while :; do sleep 1; done
+fi
+"#,
+    );
+}
+
+fn decision_restart_responses(mcp: &McpHarness, stage: &str) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let output_path = mcp.home().join(format!("decision-{stage}.jsonl"));
+    while !mcp.home().join(format!("decision-{stage}.done")).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{stage} MCP calls did not complete:\n{}\ndispatch:\n{}",
+            fs::read_to_string(&output_path).unwrap_or_default(),
+            fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap_or_default()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    fs::read_to_string(output_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn decision_restart_reply(responses: &[serde_json::Value], id: u64) -> &serde_json::Value {
+    responses
+        .iter()
+        .find(|response| response["id"] == id)
+        .unwrap_or_else(|| panic!("MCP response {id} was not returned: {responses:?}"))
 }
 
 #[allow(clippy::too_many_lines)] // One process-spanning round trip keeps every last-mile assertion visible.

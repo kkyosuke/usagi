@@ -83,18 +83,37 @@ cargo install --path . --locked
 ```bash
 usagi update
 usagi update -v
+usagi update --restart-agents
+usagi update -v --restart-agents
 ```
+
+`--restart-agents` は、検証済み binary の導入後に実行中の Agent を中断し、daemon を切り替えて同じ provider conversation で再開する。
+複数プロジェクトの Agent も対象になり、作業中だった Agent には初期 prompt `continue` を渡す。追加の `daemon restart` は不要である。
+再開情報が揃わなければ Agent を停止せずエラーを返す。本体の導入後に切替が失敗した場合は、新 binary を維持し、未完了と表示する。
+選択した旧 release がこの flag に未対応の場合も、通常の同期へ降格せずエラーを返す。
+
+更新中は stderr に段階ごとの進捗バーを表示し、端末では download の転送進捗も表示する。
+`--restart-agents` は「取得 → 検証 → 導入 → Agent 停止 → daemon 切替 → Agent 再開」の6段階を示し、再開中は完了件数も表示する。
+時間から見積もった百分率ではなく、完了した段階数を示す。切替を保留した場合は本体の導入までを表示し、全体を完了扱いにしない。
+再開済みの件数を確認できない間は、件数を表示せず再開状況の確認中と表示する。
+出力をリダイレクトした場合は、制御文字を含まない行単位の進捗になる。
 
 更新後の CLI は次回起動から使われるため、起動中の TUI は終了して開き直す。
 Agent の MCP client も再接続し、新しい `usagi mcp` process から tool 一覧と guide を取得する。
 既存の MCP server は更新前のバイナリで動き続けるため、daemon の切り替えだけでは tool 一覧と guide は更新されない。
-実行中の Agent が daemon の切り替えを妨げる場合も binary の更新は成功し、切り替えの保留を表示する。
+`--restart-agents` を省略した通常の更新では、実行中の Agent が daemon の切り替えを妨げる場合も binary の更新は成功し、切り替えの保留を表示する。
 複数プロジェクトを保持し、いずれかに実行中の端末や Agent が残る場合も切り替えを保留するため、更新後も各プロジェクトを
-開き直せる。保留中は既存 daemon と端末への接続を維持し、それらの終了後に `usagi daemon restart` で切り替える。
+開き直せる。自動再試行に対応する版は保留時に切り替えを予約し、独立した待機プロセスが5秒間隔で再試行する。
+`update` や TUI を終了しても待機は続く。TUI の接続だけでは保留せず、全プロジェクトの Agent・terminal が終了すれば
+切り替えられる。Agent の応答が終わって入力待ちになっても、プロセスと MCP 接続が残る間は保留が続く。
+予約先の build と待機・再試行・失敗の状態は `usagi daemon status` の `pending daemon update` で確認する。
+自動再試行に未対応の旧版を選んだ場合は予約したと表示せず、従来どおり終了後に `usagi daemon restart` で切り替える。
 更新時の download・検証・atomic replacement と内部 daemon 同期は
 [入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)、
 live Agent を含む daemon の安全な引き継ぎと拒否条件は
 [planned replacement](05-daemon.md#planned-replacement)を正本とする。
+予約の永続化と installer lock 内の再試行は
+[入口面 CLI のコマンド dispatch](02-architecture.md#入口面-cli-のコマンド-dispatch)を正本とする。
 
 同じ保存先への更新は順番に実行する。更新 process が crash しても、次の更新が残った owner を回収する。
 現行 installer で旧版へ戻した後も、旧版の `usagi update` から再更新できる。

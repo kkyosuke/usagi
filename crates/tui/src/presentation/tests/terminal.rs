@@ -10,7 +10,7 @@ fn decision_selection_runtime() -> WorkspaceRuntime {
     decision_selection_runtime_with_title("Copy 日本語")
 }
 
-fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
+pub(super) fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
     decision_selection_runtime_with_context(title, Vec::new())
 }
 
@@ -110,7 +110,10 @@ impl Terminal for DecisionProjectBarTerminal {
         let key = self.0.read_key()?;
         if key == Key::Live(LiveTerminalAction::OpenAttention) {
             let bar = widgets::strip_ansi(&self.0.frames.last().unwrap()[0]);
-            let start = bar.find("! Attention").unwrap();
+            let start = ["! Action needed", "Checking status", "No action needed"]
+                .iter()
+                .find_map(|label| bar.find(label))
+                .unwrap();
             return Ok(Key::Click {
                 column: u16::try_from(widgets::display_width(&bar[..start])).unwrap(),
                 row: 0,
@@ -647,6 +650,10 @@ fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
         Some(AppEvent::Key(AppKey::OpenPreview))
     );
     assert_eq!(
+        app_event_from_key(Key::Live(LiveTerminalAction::OpenArtifacts)),
+        Some(AppEvent::Key(AppKey::OpenArtifacts))
+    );
+    assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::OpenDecisions)),
         Some(AppEvent::Key(AppKey::OpenDecisions))
     );
@@ -952,6 +959,7 @@ fn right_pane_click_selection_reaches_the_runtime_tab_owner() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The same durable fixture covers tab-strip and palette selection, including refused writes.
 fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
@@ -1025,6 +1033,26 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
 
     select_right_pane_tab(&mut ui, &mut runtime, 1);
 
+    for tab in runtime.palette_tabs() {
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &tab.action,
+        )
+        .unwrap();
+    }
+    assert!(
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut ui,
+            &mut runtime,
+            WorkspaceId::new(),
+            &crate::presentation::workspace_deck::palette::Action::Workspace,
+        )
+        .is_err()
+    );
+    select_right_pane_tab(&mut ui, &mut runtime, 1);
+
     assert_eq!(runtime.focused_terminal(), Some(second.clone()));
     assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
         mutation,
@@ -1054,7 +1082,66 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
     select_right_pane_tab(&mut failing_ui, &mut runtime, 0);
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let action = runtime.palette_tabs()[0].action.clone();
+    assert!(
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut failing_ui,
+            &mut runtime,
+            workspace,
+            &action,
+        )
+        .is_err()
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(runtime.focused_terminal(), Some(second));
+}
+
+#[test]
+fn palette_root_shell_selection_preserves_the_directors_saved_conversation() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let root_agent = scoped_terminal_ref(workspace, None);
+    let shell = scoped_terminal_ref(workspace, None);
+    let continuation = AgentContinuationRef::new();
+    let mut intent = AgentTabIntent::empty(workspace);
+    intent.apply(AgentTabIntentMutation::Upsert {
+        session_id: None,
+        continuation,
+        terminal: root_agent,
+        select: true,
+    });
+    let durable = Arc::new(Mutex::new(intent));
+    let mutations = Arc::new(Mutex::new(Vec::new()));
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![]);
+    let target = Target::Root(workspace);
+    let operation = OperationId::new();
+    let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+    let _ = runtime.complete_pane(target, operation, shell.clone());
+    let action = runtime.palette_tabs()[0].action.clone();
+
+    crate::presentation::terminal_io::visit_palette_target(
+        &mut ui,
+        &mut runtime,
+        workspace,
+        &action,
+    )
+    .unwrap();
+
+    assert_eq!(runtime.focused_terminal(), Some(shell));
+    assert_eq!(
+        durable.lock().unwrap().targets[0].selected,
+        Some(continuation)
+    );
+    assert!(mutations.lock().unwrap().is_empty());
 }
 
 #[test]

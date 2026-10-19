@@ -169,6 +169,135 @@ fn process() -> ProcessIdentity {
 }
 
 #[test]
+fn fresh_admission_rejects_decision_authority_from_another_conversation_before_effects() {
+    let request = request();
+    let (runtime, operation) = refs(&request);
+    let owner = UserDecisionOwner {
+        workspace_id: operation.workspace_id,
+        session_id: operation.session_id,
+        caller: usagi_core::domain::agent::CallerRef {
+            session_id: None,
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        },
+        run_id: operation.operation_id,
+    };
+    let invalid = [
+        (
+            Some(UserDecisionOwner {
+                run_id: OperationId::new(),
+                ..owner.clone()
+            }),
+            Vec::new(),
+        ),
+        (None, vec![owner.clone()]),
+        (Some(owner.clone()), vec![owner.clone()]),
+        (
+            Some(UserDecisionOwner {
+                session_id: Some(SessionId::new()),
+                ..owner.clone()
+            }),
+            Vec::new(),
+        ),
+    ];
+    for (owner, aliases) in invalid {
+        let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+        let mut resolver = Resolver::default();
+        let mut store = Store::default();
+        assert_eq!(
+            coordinator.launch_with_provenance(
+                &request,
+                runtime.clone(),
+                operation.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+                None,
+                "fresh".into(),
+                &[],
+                None,
+                owner,
+                aliases,
+            ),
+            Err(RuntimeError::ScopeMismatch)
+        );
+        assert_eq!(resolver.calls, 0);
+        assert!(store.0.is_empty());
+        assert!(coordinator.snapshot().records.is_empty());
+    }
+}
+
+#[test]
+fn exact_resume_cannot_replace_or_expand_existing_decision_authority() {
+    let request = request();
+    let (source, operation) = refs(&request);
+    let owner = UserDecisionOwner {
+        workspace_id: operation.workspace_id,
+        session_id: operation.session_id,
+        caller: usagi_core::domain::agent::CallerRef {
+            session_id: None,
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        },
+        run_id: operation.operation_id,
+    };
+    let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+    let mut resolver = Resolver::default();
+    let mut store = Store::default();
+    coordinator
+        .launch_with_provenance(
+            &request,
+            source.clone(),
+            operation.clone(),
+            Geometry { cols: 80, rows: 24 },
+            &mut resolver,
+            &mut store,
+            &mut Spawner(Ok(process())),
+            None,
+            "source".into(),
+            &[],
+            None,
+            Some(owner.clone()),
+            Vec::new(),
+        )
+        .unwrap();
+    coordinator.exit(&source, 0, &mut store).unwrap();
+    let before = coordinator.snapshot();
+    let changed_owner = UserDecisionOwner {
+        run_id: OperationId::new(),
+        ..owner.clone()
+    };
+    for (candidate, aliases) in [
+        (None, Vec::new()),
+        (Some(changed_owner.clone()), Vec::new()),
+        (Some(owner.clone()), vec![changed_owner]),
+    ] {
+        let (mut runtime, mut fence) = refs(&request);
+        runtime.terminal.daemon_generation = operation.owner_daemon_generation;
+        fence.owner_daemon_generation = operation.owner_daemon_generation;
+        assert_eq!(
+            coordinator.launch_with_provenance(
+                &request,
+                runtime,
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+                None,
+                "replacement".into(),
+                std::slice::from_ref(&source),
+                None,
+                candidate,
+                aliases,
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
+        assert_eq!(coordinator.snapshot(), before);
+        assert_eq!(resolver.calls, 1);
+    }
+}
+
+#[test]
 fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
     let request = request();
     let (runtime, operation) = refs(&request);
@@ -178,6 +307,8 @@ fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
         records: vec![
             DurableRuntimeRecord {
                 launch_provenance: None,
+                user_decision_owner: None,
+                user_decision_owner_aliases: Vec::new(),
                 runtime: runtime.clone(),
                 operation: operation.clone(),
                 launch: launch.clone(),
@@ -194,6 +325,8 @@ fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
             },
             DurableRuntimeRecord {
                 launch_provenance: None,
+                user_decision_owner: None,
+                user_decision_owner_aliases: Vec::new(),
                 runtime,
                 operation,
                 launch,
@@ -412,6 +545,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let launch = Resolver::default().resolve(&request).unwrap().snapshot;
     let record = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime,
         operation,
         launch,
@@ -477,6 +612,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     same_operation.operation_id = record.operation.operation_id;
     let duplicate_operation = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: other_runtime,
         operation: same_operation,
         ..record.clone()
@@ -499,6 +636,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (replacement_runtime, replacement_operation) = refs(&request);
     let mut replacement = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: replacement_runtime,
         operation: replacement_operation,
         ..record.clone()
@@ -572,6 +711,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (competing_runtime, competing_operation) = refs(&request);
     let mut competing_replacement = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: competing_runtime,
         operation: competing_operation,
         resume_source: Some(usagi_core::domain::id::AgentResumeSourceId::new()),
@@ -621,6 +762,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     unfenced_source.superseded_by = Some(unfenced_runtime.agent_runtime_id);
     let unfenced_replacement = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: unfenced_runtime,
         operation: unfenced_operation,
         ..record.clone()
@@ -640,6 +783,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (second_runtime, second_operation) = refs(&request);
     let mut first_cycle = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: first_runtime,
         operation: first_operation,
         continuation: Some(continuation),
@@ -649,6 +794,8 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     };
     let second_cycle = DurableRuntimeRecord {
         launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: second_runtime,
         operation: second_operation,
         continuation: Some(continuation),
@@ -773,6 +920,8 @@ fn durable_snapshot_schema_round_trips_every_safe_outcome_and_rejects_unknown_fi
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: vec![DurableRuntimeRecord {
                 launch_provenance: None,
+                user_decision_owner: None,
+                user_decision_owner_aliases: Vec::new(),
                 runtime: runtime.clone(),
                 operation: operation.clone(),
                 launch: launch.clone(),

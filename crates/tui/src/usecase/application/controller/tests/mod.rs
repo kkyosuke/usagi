@@ -189,15 +189,69 @@ fn sized_home(
     state
 }
 
-fn click_at(state: &mut AppState, column: u16, row: u16, at_ms: u64) -> Selection {
-    let _ = update(
-        state,
-        AppEvent::Pointer {
+fn pointer_event(state: &AppState, column: u16, row: u16, at: std::time::Duration) -> AppEvent {
+    use crate::presentation::views::workspace::{
+        HomeProjection, ProjectedSession, sidebar_pointer_target,
+    };
+    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+    let target = state.size().and_then(|(width, height)| {
+        let sessions = state
+            .sessions()
+            .iter()
+            .map(|id| {
+                ProjectedSession::from_record(
+                    *id,
+                    &SessionRecord {
+                        name: id.to_string(),
+                        display_name: None,
+                        origin: SessionOrigin::Human,
+                        started_from: None,
+                        root: std::path::PathBuf::from("."),
+                        created_at: chrono::DateTime::default(),
+                        last_active: None,
+                        notes: usagi_core::domain::note::Scratchpad::default(),
+                        prs: vec![],
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let home = HomeProjection::from_state(state, "test", &sessions);
+        sidebar_pointer_target(
+            usize::from(height),
+            usize::from(width),
+            &home,
+            chrono::Utc::now(),
             column,
             row,
-            at: std::time::Duration::from_millis(at_ms),
-        },
-    );
+        )
+    });
+    AppEvent::Pointer { target, at }
+}
+
+fn pointer_effects(
+    state: &mut AppState,
+    column: u16,
+    row: u16,
+    at: std::time::Duration,
+) -> Vec<Effect> {
+    let event = pointer_event(state, column, row, at);
+    update(state, event)
+}
+
+impl AppState {
+    fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
+        match pointer_event(self, column, row, std::time::Duration::ZERO) {
+            AppEvent::Pointer {
+                target: Some(SidebarPointerTarget::Row(selection)),
+                ..
+            } => Some(selection),
+            _ => None,
+        }
+    }
+}
+
+fn click_at(state: &mut AppState, column: u16, row: u16, at_ms: u64) -> Selection {
+    let _ = pointer_effects(state, column, row, std::time::Duration::from_millis(at_ms));
     state.selected()
 }
 
@@ -2221,6 +2275,9 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,
         editor: Some(DecisionEditor::new(decision)),
+        requested: None,
+        error: None,
+        exact: None,
     });
     state.decisions.clear();
     reconcile_decision_overlay(&mut state);
@@ -2246,6 +2303,9 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,
         editor: None,
+        requested: None,
+        error: None,
+        exact: None,
     });
     for key in [
         AppKey::Up,
@@ -2308,6 +2368,9 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,
         editor: Some(DecisionEditor::new(decision)),
+        requested: None,
+        error: None,
+        exact: None,
     });
     let _ = update_decisions_overlay(&mut state, AppKey::Enter);
     let _ = update_decisions_overlay(&mut state, AppKey::Home);
@@ -2320,6 +2383,9 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 1,
         editor: Some(DecisionEditor::new(second.clone())),
+        requested: None,
+        error: None,
+        exact: None,
     });
     reconcile_decision_overlay(&mut state);
     let _ = update(
@@ -2426,6 +2492,9 @@ fn coverage_contract_executes_guarded_reducer_success_paths() {
     state.decision_overlay = Some(DecisionOverlayState {
         selected: 0,
         editor: Some(DecisionEditor::new(decision.clone())),
+        requested: None,
+        error: None,
+        exact: None,
     });
     let _ = update(
         &mut state,

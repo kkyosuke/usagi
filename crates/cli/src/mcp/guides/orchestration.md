@@ -265,6 +265,6 @@ dirty worktree、未マージ commit も含めて破棄すると確認できた 
   stdio serve を開始しない。
 - session 名、worktree、branch の対応は daemon lifecycle state が権威を持つ。MCP server 側の cwd
   や名前だけを根拠に状態を補完しない。
-- `session_remove` の `force` は dirty worktree の保護だけを明示的に解除する。他 session や repository
-  root を削除対象へ広げない。`purge_orphan` も指定名の integrity orphan だけに作用し、daemon は effect
+- `session_remove` の `force` は dirty worktree の保護を明示的に解除し、保管失敗時は未保管の成果物も破棄する。
+  他 session や repository root を削除対象へ広げない。`purge_orphan` も指定名の integrity orphan だけに作用し、daemon は effect
   直前に canonical session container と target を再検証する。

@@ -940,10 +940,9 @@ pub(super) fn dispatch_user_decision(
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use chrono::Utc;
-    use usagi_core::domain::agent::RunStatus;
     use usagi_core::domain::id::UserDecisionId;
     use usagi_core::domain::user_decision::{
-        UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionOwner, UserDecisionStatus,
+        UserDecision, UserDecisionAnswer, UserDecisionError, UserDecisionStatus,
     };
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
@@ -1049,7 +1048,7 @@ pub(super) fn dispatch_user_decision(
                 ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })
     })();
-    let owner = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
+    let owners = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
         if tui_access {
             // Only the human surface may address a decision in another
             // workspace. MCP selectors never override credential provenance.
@@ -1069,72 +1068,25 @@ pub(super) fn dispatch_user_decision(
                 "decision caller provenance is unknown",
             )
         })?;
-        let authenticated = runtime
-            .mcp_dispatch_context(&credential.credential)
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "decision caller provenance is unknown",
-                )
-            })?;
-        if authenticated.workspace_id != workspace {
+        let owners = runtime.mcp_user_decision_owners(&credential.credential)?;
+        if owners.is_empty() || owners.iter().any(|owner| owner.workspace_id != workspace) {
             return Err(ProtocolError::new(
                 ErrorCode::OwnershipUnknown,
                 "decision caller does not belong to this workspace",
             ));
         }
-        let run_id = authenticated.run_id;
-        let dispatch = runtime.dispatch_store();
-        let run = dispatch
-            .runs()
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
-            })?
-            .into_iter()
-            .find(|run| run.run_id == run_id && run.status == RunStatus::Running)
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "decision caller provenance is unknown",
-                )
-            })?;
-        let binding = dispatch
-            .binding(run_id)
-            .map_err(|_| {
-                ProtocolError::new(ErrorCode::Unavailable, "dispatch provenance is unavailable")
-            })?
-            .ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::OwnershipUnknown,
-                    "decision caller provenance is unavailable",
-                )
-            })?;
-        if binding.worker.agent_id != run.agent_id {
-            return Err(ProtocolError::new(
-                ErrorCode::OwnershipUnknown,
-                "decision caller provenance is inconsistent",
-            ));
-        }
-        Ok((
-            workspace,
-            Some(UserDecisionOwner {
-                workspace_id: workspace,
-                session_id: binding.worker.session_id,
-                caller: binding.caller,
-                run_id,
-            }),
-        ))
+        Ok((workspace, Some(owners)))
     });
-    let response = owner.and_then(|(workspace, owner)| {
-        let request_owner = owner.clone();
+    let response = owners.and_then(|(workspace, owners)| {
+        let request_owners = owners.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
                 .get(workspace, id)
                 .map_err(|_| UserDecisionError::Terminal)?
                 .ok_or(UserDecisionError::Terminal)?;
-            if request_owner
+            if request_owners
                 .as_ref()
-                .is_some_and(|expected| decision.owner != *expected)
+                .is_some_and(|expected| !expected.contains(&decision.owner))
             {
                 return Err(UserDecisionError::Terminal);
             }
@@ -1144,11 +1096,12 @@ pub(super) fn dispatch_user_decision(
         let result = (|| -> Result<serde_json::Value, UserDecisionDispatchError> {
             match action {
                 DispatchToolAction::UserDecisionRequest => {
-                    let owner = owner.ok_or(UserDecisionError::Terminal)?;
+                    let owners = owners.ok_or(UserDecisionError::Terminal)?;
+                    let owner = owners.first().cloned().ok_or(UserDecisionError::Terminal)?;
                     let input = serde_json::from_value::<RequestPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
                     let decision = store
-                        .create_with_default_expiry(UserDecision {
+                        .create_with_default_expiry_for_owners(UserDecision {
                             decision_id: UserDecisionId::new(),
                             owner,
                             title: input.title,
@@ -1167,7 +1120,7 @@ pub(super) fn dispatch_user_decision(
                             answer: None,
                             created_at: now,
                             resolved_at: None,
-                        })
+                        }, &owners)
                         .map_err(|_| UserDecisionError::Terminal)??;
                     Ok(serde_json::json!(decision))
                 }
@@ -1175,7 +1128,7 @@ pub(super) fn dispatch_user_decision(
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
                     let decision = decision_for(input.decision_id)?;
-                    if owner.is_some() && decision.status != UserDecisionStatus::Pending {
+                    if owners.is_some() && decision.status != UserDecisionStatus::Pending {
                         // Resolution creates a durable outbox entry atomically.
                         // Polling the terminal decision is the acknowledgement;
                         // no synchronous connection is kept open while a human
@@ -1196,9 +1149,9 @@ pub(super) fn dispatch_user_decision(
                     let decisions = decisions
                         .into_iter()
                         .filter(|decision| {
-                            owner
+                            owners
                                 .as_ref()
-                                .is_none_or(|expected| decision.owner == *expected)
+                                .is_none_or(|expected| expected.contains(&decision.owner))
                         })
                         .collect::<Vec<_>>();
                     Ok(serde_json::json!({"workspace": workspace, "decisions": decisions}))
@@ -1428,11 +1381,14 @@ pub(super) fn record_session_lineage(
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 #[allow(clippy::too_many_lines)] // One guarded stop, handoff, and pre-commit recovery transaction.
+#[allow(clippy::too_many_arguments)] // The draining tenant and PTY owners release fences only after the shared handoff barrier commits.
 pub(super) fn dispatch_rollover(
     data_dir: &Path,
     fence: &GenerationFence,
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
+    tenants: &super::TenantRegistry<super::FileWorkspaceFences, super::SystemTenantOpener>,
+    terminal: &SharedTerminalRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
@@ -1478,6 +1434,18 @@ pub(super) fn dispatch_rollover(
         },
         &operation,
         &mut || {
+            match super::read_pending_daemon_agent_restart(data_dir) {
+                Ok(None) => {}
+                recovery => {
+                    let reason = recovery.map_or_else(
+                        |error| format!("could not read Agent restart recovery: {error}"),
+                        |_| "an earlier daemon Agent restart is still recovering; no Agent was stopped".to_owned(),
+                    );
+                    return Err(
+                        usagi_daemon::usecase::authority::routing::RolloverRefusal::AgentRestartRefused { reason },
+                    );
+                }
+            }
             let mut agent = agent.lock().map_err(|_| {
                 usagi_daemon::usecase::authority::routing::RolloverRefusal::McpAuthorityUnavailable
             })?;
@@ -1513,7 +1481,6 @@ pub(super) fn dispatch_rollover(
                         workspace_root,
                         &planned,
                     );
-                    pending_restart = Some(pending.clone());
                     // Persist before the first signal. A process crash can now
                     // leave extra still-live entries, never an unrecorded
                     // stopped source; recovery skips those exact live entries.
@@ -1522,6 +1489,9 @@ pub(super) fn dispatch_rollover(
                             reason: format!("could not persist Agent restart recovery: {error}"),
                         }
                     })?;
+                    // A failed stage stopped no source and grants no rollback
+                    // authority, even if a selected Agent exits naturally.
+                    pending_restart = Some(pending);
                 }
                 match agent.interrupt_agents_for_daemon_restart(
                     &restart.expected,
@@ -1551,6 +1521,16 @@ pub(super) fn dispatch_rollover(
             }
         },
     );
+    let activity = super::DaemonWorkspaceActivity {
+        terminal: Arc::clone(terminal),
+        agent: Arc::clone(agent),
+    };
+    for root in tenants.release_draining(&fence.gate, &activity) {
+        ErrorLog::record(&format!(
+            "replaced daemon released workspace {}",
+            root.display()
+        ));
+    }
     if result.is_err()
         && let Some(pending) = &pending_restart
     {
@@ -1578,7 +1558,14 @@ pub(super) fn dispatch_rollover(
                     .as_ref()
                     .is_some_and(|handoff| handoff.operation == operation)
         });
-        if old_still_active {
+        if old_still_active
+            && let Ok(_recovery_lease) = fence
+                .gate
+                .acquire(usagi_daemon::usecase::authority::admission::LeaseClass::ActiveControl)
+        {
+            // Rollback also produces control effects after the failed handoff
+            // reopened admission. Keep a later handoff behind every resumed
+            // child, progress write, and completion cleanup.
             // The old owner performed the stop, so it also owns effect-zero
             // recovery if the handoff failed before W2. The durable transaction and
             // its background worker are the second safety net when this request or
@@ -1614,7 +1601,8 @@ pub(super) fn dispatch_rollover(
                 ));
             }
         } else {
-            // The successor worker owns post-commit recovery.
+            // The active worker retries after admission reopens, or the
+            // successor owns recovery after a committed handoff.
         }
     }
     let result = result.map_err(|error| error.to_string());
@@ -2206,16 +2194,15 @@ pub(super) fn clean_orphan_session_resources(
         }
         let result = match candidate {
             CleanCandidate::Worktree { path, .. } => {
-                usagi_core::infrastructure::artifacts::archive(path)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| {
-                        remove_worktree(
-                            &SystemGit,
-                            &root,
-                            path,
-                            candidate.requires_force() && force,
-                        )
-                    })
+                usagi_core::infrastructure::artifacts::archive_before_removal(
+                    path,
+                    force,
+                    &ErrorLog::record,
+                )
+                .map_err(anyhow::Error::from)
+                .and_then(|()| {
+                    remove_worktree(&SystemGit, &root, path, candidate.requires_force() && force)
+                })
             }
             CleanCandidate::Branch { name, .. } => {
                 delete_branch(&SystemGit, &root, name, candidate.requires_force() && force)

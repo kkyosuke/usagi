@@ -2,10 +2,10 @@
 
 󰤇 alpha                             │ alpha
 | now            ↑2 ↓0 + 15 -  3    │
-|  —                               │  n: add memo
+|  —                      Artifacts│  n: add memo
   beta                              │
   now            ↑0 ↓1 +  4 - 40    │        (\(\
-   —                               │        (='-')
+   —                      Artifacts│        (='-')
   + new session                     │       o(_(")(")
   (\(\                              │
   (o.o)?                            │a: agent / t: terminal…

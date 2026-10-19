@@ -42,6 +42,7 @@ use usagi_core::{
             WorkspaceId, WorktreeId,
         },
         terminal_launch::TerminalLaunchScope,
+        user_decision::UserDecisionOwner,
     },
     infrastructure::ipc::{
         AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, ErrorCode, ProtocolError,
@@ -429,6 +430,20 @@ pub struct DaemonRestartInterruptionError {
     pub error: ProtocolError,
     /// Sources whose processes were already stopped and must be resumed.
     pub interrupted: DaemonRestartAgentPlan,
+}
+
+/// Durable restart policy. `continue_work` becomes the resumed provider's
+/// initial prompt, so retries cannot send it twice or race PTY readiness.
+#[derive(Debug, Clone, Copy)]
+pub struct DaemonRestartResumeOptions {
+    pub integration_revision: Option<u32>,
+    pub continue_work: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ResumePrompt<'a> {
+    Interactive(&'a str),
+    Headless(&'a str),
 }
 
 impl DaemonRestartInterruptionError {
@@ -1683,7 +1698,8 @@ impl AgentRuntime {
     }
 
     /// Refreshes the current conversation from the exact runtime's documented
-    /// structured starting hook. AGY also captures headless conversations;
+    /// structured hook. Callers allow replacement on starting hooks and only
+    /// backfill absent metadata on later hooks. AGY also captures headless conversations;
     /// Claude and Codex headless runs only report phase.
     fn capture_provider_session_start(
         &mut self,
@@ -2176,6 +2192,22 @@ fn repair_resume_semantic_key(target: &AgentResumeTarget, expected_revision: u32
     )
 }
 
+fn daemon_restart_resume_semantic_key(
+    target: &AgentResumeTarget,
+    options: DaemonRestartResumeOptions,
+) -> String {
+    let semantic = options.integration_revision.map_or_else(
+        || resume_semantic_key(target),
+        |revision| repair_resume_semantic_key(target, revision),
+    );
+    if options.continue_work {
+        format!("{semantic}\ncontinue=true")
+    } else {
+        // Existing pending transactions retain their original operation key.
+        semantic
+    }
+}
+
 fn resume_target(record: &super::runtime::DurableRuntimeRecord) -> Option<AgentResumeTarget> {
     Some(AgentResumeTarget {
         continuation: record.continuation?,
@@ -2610,6 +2642,8 @@ mod delivery;
 mod lifecycle;
 
 mod dispatch;
+
+mod decision_owner;
 
 #[cfg(test)]
 mod tests;

@@ -3,6 +3,258 @@
 use super::*;
 
 #[test]
+#[allow(clippy::too_many_lines)] // One scenario checks persisted turn intent, audit provenance, and lost-response replay together.
+fn daemon_restart_resumes_with_a_durable_continue_prompt_and_replays_without_resending() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+    for integration_revision in [None, Some(crate::usecase::claude::PROFILE_REVISION)] {
+        for continue_work in [false, true] {
+            let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+            let spawn_counter = Arc::new(AtomicU32::new(0));
+            agent
+                .pty
+                .as_any_mut()
+                .downcast_mut::<Pty>()
+                .unwrap()
+                .spawn_counter = Some(spawn_counter.clone());
+            let launch = intent(None);
+            let resolved = scope();
+            let source = agent
+                .launch(
+                    &OperationId::new().to_string(),
+                    &launch,
+                    &FakeScope(Ok(resolved.clone())),
+                )
+                .unwrap();
+            agent.exit(&source.terminal, 0).unwrap();
+            let target = agent.inventory(launch.workspace).resumable[0]
+                .target
+                .clone()
+                .unwrap();
+            let operation = OperationId::new().to_string();
+            let options = DaemonRestartResumeOptions {
+                integration_revision,
+                continue_work,
+            };
+            assert_eq!(
+                agent
+                    .resume_after_daemon_restart(
+                        "invalid",
+                        &target,
+                        options,
+                        &FakeScope(Ok(resolved.clone())),
+                        None,
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            let ticket = agent
+                .prepare_daemon_restart_resume_readiness(&operation, &target, options)
+                .unwrap();
+            let resumed = agent
+                .resume_after_daemon_restart(
+                    &operation,
+                    &target,
+                    options,
+                    &FakeScope(Ok(resolved.clone())),
+                    ticket.as_ref(),
+                )
+                .unwrap();
+            let snapshot = agent.coordinator.snapshot();
+            let record = snapshot
+                .records
+                .iter()
+                .find(|record| record.runtime == resumed.runtime)
+                .unwrap();
+            assert_eq!(
+                record.launch.request.initial_prompt.as_deref(),
+                continue_work.then_some("continue")
+            );
+            assert_eq!(record.resumed_from, Some(target.source));
+            let provenance = record.launch_provenance.as_ref().unwrap();
+            assert_eq!(
+                provenance.launched.source,
+                usagi_core::domain::agent::AgentLaunchSource::Daemon
+            );
+            assert_eq!(
+                provenance.launched.entrypoint,
+                usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart
+            );
+            assert_eq!(
+                provenance.created,
+                snapshot
+                    .records
+                    .iter()
+                    .find(|record| record.runtime == source.runtime)
+                    .unwrap()
+                    .launch_provenance
+                    .as_ref()
+                    .unwrap()
+                    .created
+            );
+            let spawns = spawn_counter.load(Ordering::SeqCst);
+            assert_eq!(spawns, 2);
+            assert_eq!(
+                agent
+                    .resume_after_daemon_restart(
+                        &operation,
+                        &target,
+                        options,
+                        &FakeScope(Ok(resolved.clone())),
+                        None,
+                    )
+                    .unwrap(),
+                resumed
+            );
+            assert_eq!(spawn_counter.load(Ordering::SeqCst), spawns);
+            assert_eq!(
+                agent
+                    .prepare_daemon_restart_resume_readiness(
+                        &operation,
+                        &target,
+                        DaemonRestartResumeOptions {
+                            continue_work: !continue_work,
+                            ..options
+                        },
+                    )
+                    .unwrap_err()
+                    .code,
+                ErrorCode::IdempotencyConflict
+            );
+        }
+    }
+}
+
+#[test]
+fn daemon_restart_does_not_retry_a_completed_rollback_after_its_replacement_exits() {
+    for exit_status in [0, 1] {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let launch = intent(None);
+        let resolved = FakeScope(Ok(scope()));
+        let source = agent
+            .launch(&OperationId::new().to_string(), &launch, &resolved)
+            .unwrap();
+        agent.exit(&source.terminal, 0).unwrap();
+        let target = agent.inventory(launch.workspace).resumable[0]
+            .target
+            .clone()
+            .unwrap();
+        let operation = OperationId::new().to_string();
+        let rollback = DaemonRestartResumeOptions {
+            integration_revision: None,
+            continue_work: true,
+        };
+        let ticket = agent
+            .prepare_daemon_restart_resume_readiness(&operation, &target, rollback)
+            .unwrap();
+        let replacement = agent
+            .resume_after_daemon_restart(&operation, &target, rollback, &resolved, ticket.as_ref())
+            .unwrap();
+        // The old owner can crash after the successful rollback spawn and before
+        // its pending-item progress commit. A short final turn can already exit.
+        agent.exit(&replacement.terminal, exit_status).unwrap();
+        let (snapshot, _) = agent
+            .coordinator
+            .snapshot()
+            .reconcile_after_daemon_restart();
+        agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
+        assert_eq!(
+            agent
+                .prepare_daemon_restart_resume_readiness(
+                    &operation,
+                    &target,
+                    DaemonRestartResumeOptions {
+                        integration_revision: Some(crate::usecase::claude::PROFILE_REVISION),
+                        ..rollback
+                    },
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict,
+            "a later generation cannot replay the rollback with repair semantics"
+        );
+        assert!(
+            !agent.daemon_restart_restore_needed(&source.runtime),
+            "durable resume success completes the old source even after its replacement exits"
+        );
+    }
+}
+
+#[test]
+fn daemon_restart_keeps_a_failed_replacement_pending() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+    let mut agent = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+    let launch = intent(None);
+    let resolved = FakeScope(Ok(scope()));
+    let source = agent
+        .launch(&OperationId::new().to_string(), &launch, &resolved)
+        .unwrap();
+    agent.exit(&source.terminal, 0).unwrap();
+    let target = agent.inventory(launch.workspace).resumable[0]
+        .target
+        .clone()
+        .unwrap();
+    pty_mut(&mut agent).spawn = Some(SpawnFailure::Definite);
+    let operation = OperationId::new().to_string();
+    let options = DaemonRestartResumeOptions {
+        integration_revision: None,
+        continue_work: true,
+    };
+    let ticket = agent
+        .prepare_daemon_restart_resume_readiness(&operation, &target, options)
+        .unwrap();
+    assert!(
+        agent
+            .resume_after_daemon_restart(&operation, &target, options, &resolved, ticket.as_ref())
+            .is_err()
+    );
+    assert!(agent.daemon_restart_restore_needed(&source.runtime));
+}
+
+#[test]
+fn daemon_restart_identifies_the_agent_whose_exact_resume_metadata_is_missing() {
+    for session in [None, Some(SessionId::new())] {
+        let mut agent = structured_claude_runtime();
+        let admission = agent
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace: WorkspaceId::new(),
+                    session,
+                    profile: None,
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            revision: crate::usecase::claude::PROFILE_REVISION,
+        }];
+        let error = agent
+            .plan_daemon_restart_agents(&expected, true)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Busy);
+        assert!(error.message.contains("claude"));
+        assert!(
+            error
+                .message
+                .contains(&session.map_or_else(|| "root".to_owned(), |id| id.to_string()))
+        );
+        assert!(
+            error
+                .message
+                .contains(&admission.runtime.agent_runtime_id.to_string())
+        );
+        assert!(error.message.contains("no Agent was stopped"));
+        assert_eq!(pty(&agent).terminate_calls, 0);
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One end-to-end usecase scenario proves stop, lost response, migration, and replay together.
 fn doctor_restarts_only_outdated_idle_integration_and_migrates_exact_resume() {
     let workspace = WorkspaceId::new();
@@ -412,7 +664,7 @@ fn daemon_restart_plan_refuses_every_unprovable_agent_authority() {
 }
 
 #[test]
-fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_any() {
+fn daemon_restart_plan_includes_every_workspace_before_stopping_any() {
     let first_workspace = WorkspaceId::new();
     let second_workspace = WorkspaceId::new();
     let mut agent = runtime();
@@ -439,12 +691,16 @@ fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_a
         revision: crate::usecase::claude::PROFILE_REVISION,
     }];
 
-    let refusal = agent
-        .plan_daemon_restart_agents(&expected, false)
-        .unwrap_err();
+    let plan = agent.plan_daemon_restart_agents(&expected, false).unwrap();
 
-    assert_eq!(refusal.code, ErrorCode::Busy);
-    assert!(refusal.message.contains("multiple workspaces"));
+    assert_eq!(plan.agents.len(), 2);
+    assert_eq!(
+        plan.agents
+            .iter()
+            .map(|item| item.target.workspace_id)
+            .collect::<BTreeSet<_>>(),
+        [first_workspace, second_workspace].into()
+    );
     assert_eq!(agent.provisioned_mcp_callers(), 2);
     assert!(
         agent
@@ -454,6 +710,7 @@ fn daemon_restart_plan_refuses_agents_from_multiple_workspaces_before_stopping_a
             .iter()
             .all(|record| { record.state == crate::usecase::runtime::RuntimeState::Running })
     );
+    assert_eq!(pty(&agent).terminate_calls, 0);
 }
 
 #[test]

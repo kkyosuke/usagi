@@ -100,8 +100,8 @@ pub enum DaemonRequest {
     /// and the phase itself is a closed non-sensitive vocabulary.
     AgentPhaseReport {
         phase: AgentPhase,
-        /// Present only for a provider's structured starting event:
-        /// `SessionStart` or Antigravity's `PreInvocation`.
+        /// Present for Claude/Codex structured lifecycle hooks except
+        /// `SessionEnd`, or Antigravity's starting `PreInvocation` event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_session_id: Option<ProviderSessionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

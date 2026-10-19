@@ -374,6 +374,18 @@ mod tests {
                 .unwrap()
                 .contains("agy-conversation")
         );
+        request.initial_prompt = Some("continue".to_owned());
+        let continued = adapter().resolve(&request).unwrap();
+        assert_eq!(
+            continued.provision.arguments(),
+            [
+                "--plugin-materialized",
+                "--conversation",
+                "agy-conversation",
+                "--prompt-interactive",
+                "continue"
+            ]
+        );
         request.mode = LaunchMode::Headless;
         request.initial_prompt = Some("--version\n続きだけ答えて".to_owned());
         let headless = adapter().resolve(&request).unwrap();

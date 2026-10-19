@@ -50,7 +50,7 @@ shell を同じ pane model で起動できる。画面、キー操作、設定 U
 | `usagi open [path]` | workspace を登録して TUI で開く。省略時はカレントディレクトリ |
 | `usagi config` | Global Config TUI を開く |
 | `usagi doctor [--fix]` | 必要ツール、settings、既存 daemon を診断し、daemon / Agent lifecycle 以外の修復可能項目だけを修復する |
-| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。`--restart-agents` は同一 workspace の全 live Agent を durable な計画から exact resume し、併用時の `--force` は Running 中の中断を許可する。複数 workspace は停止前に拒否し、`--force` 単独は live runtime を破棄する |
+| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。`--restart-agents` は実行中の Agent も中断して同じ会話から作業を続行する。再開条件は [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する |
 | `usagi clean [--dry-run\|--apply [--force]]` | 孤立 workspace data、worktree、branch、process を照合する。既定は dry-run |
 | `usagi update [-v]` | 最新 release、または `-v` で選択した release へ更新する（[利用手順](12-installation.md#更新)） |
 | `usagi completion <shell>` | shell 補完スクリプトを標準出力へ生成する（[設定例](12-installation.md#shell-補完)） |
@@ -82,7 +82,7 @@ TUI の cleanup と自動回収は [3. TUI](03-tui.md) を参照する。
 | `usagi daemon status` | active daemon と保持中 tenant の状態を表示する |
 | `usagi daemon retire <path> [--force]` | 指定 workspace tenant を解放する。live runtime は `--force` なしでは解放しない |
 | `usagi daemon stop [--force]` | daemon を停止する。live runtime は `--force` なしでは停止しない |
-| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。generic live PTY は seamless rollover で維持する。live Agent は通常拒否し、`--restart-agents` で exact resume、さらに `--force` を併用すると Running 中の中断も許可する |
+| `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。generic live PTY は seamless rollover で維持する。live Agent は通常拒否し、`--restart-agents` で中断・exact resume・作業続行する |
 | `usagi daemon replace [--force]` | 現在 daemon の artifact replacement を明示的に要求する |
 | `usagi daemon install-service` | macOS LaunchAgent / Linux systemd user service を登録する |
 | `usagi daemon uninstall-service` | 登録済み user service を削除する |

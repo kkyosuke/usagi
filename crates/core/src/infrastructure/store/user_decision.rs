@@ -298,7 +298,7 @@ impl UserDecisionStore {
         &self,
         decision: UserDecision,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
-        self.create_inner(decision, false)
+        self.create_inner(decision, false, &[])
     }
 
     /// Apply the daemon's default deadline once, anchored to the original
@@ -308,15 +308,47 @@ impl UserDecisionStore {
         decision: UserDecision,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
         let default_expiry = decision.expires_at.is_none();
-        self.create_inner(decision, default_expiry)
+        self.create_inner(decision, default_expiry, &[])
+    }
+
+    /// Replay a decision from the authenticated exact conversation, including
+    /// legacy runs that created decisions under different immutable owners.
+    /// Owners are ordered newest-first. A retained or expired key on the first
+    /// matching owner wins; a conflicting request never falls through to an
+    /// older owner's answer. Selection and creation share the same store lock.
+    pub fn create_with_default_expiry_for_owners(
+        &self,
+        decision: UserDecision,
+        owners: &[UserDecisionOwner],
+    ) -> Result<Result<UserDecision, UserDecisionError>> {
+        if owners.first() != Some(&decision.owner)
+            || owners.iter().any(|owner| {
+                owner.workspace_id != decision.owner.workspace_id
+                    || owner.session_id != decision.owner.session_id
+            })
+        {
+            return Ok(Err(UserDecisionError::InvalidRequest));
+        }
+        let default_expiry = decision.expires_at.is_none();
+        self.create_inner(decision, default_expiry, owners)
     }
 
     fn create_inner(
         &self,
         mut decision: UserDecision,
         default_expiry: bool,
+        inherited_owners: &[UserDecisionOwner],
     ) -> Result<Result<UserDecision, UserDecisionError>> {
         self.mutate_decision(|state| {
+            if let Some(key) = &decision.idempotency_key
+                && let Some(owner) = inherited_owners.iter().find(|owner| {
+                    state.decisions.iter().any(|item| {
+                        &item.owner == *owner && item.idempotency_key.as_ref() == Some(key)
+                    }) || state.expired_idempotency.contains(owner, key)
+                })
+            {
+                decision.owner = owner.clone();
+            }
             if let Some(key) = &decision.idempotency_key
                 && let Some(existing) = state.decisions.iter().find(|item| {
                     item.owner == decision.owner && item.idempotency_key.as_ref() == Some(key)
@@ -651,6 +683,182 @@ mod tests {
             pending_global: 16,
         }
     }
+
+    fn later_owner(owner: &UserDecisionOwner) -> UserDecisionOwner {
+        UserDecisionOwner {
+            run_id: OperationId::new(),
+            caller: CallerRef {
+                session_id: owner.session_id,
+                agent_id: AgentId::new(),
+            },
+            ..owner.clone()
+        }
+    }
+
+    #[test]
+    fn inherited_owners_replay_legacy_requests_without_rewriting_their_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut older = item();
+        older.idempotency_key = Some("older-only".into());
+        let mut newer = older.clone();
+        newer.decision_id = UserDecisionId::new();
+        newer.owner = later_owner(&older.owner);
+        newer.idempotency_key = Some("newer-only".into());
+        let owners = [newer.owner.clone(), older.owner.clone()];
+        let older = store.create_with_default_expiry(older).unwrap().unwrap();
+        let newer = store.create_with_default_expiry(newer).unwrap().unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        for original in [&older, &newer] {
+            let mut retry = original.clone();
+            retry.decision_id = UserDecisionId::new();
+            retry.owner = owners[0].clone();
+            retry.created_at += chrono::Duration::days(3);
+            retry.expires_at = None;
+            assert_eq!(
+                store
+                    .create_with_default_expiry_for_owners(retry, &owners)
+                    .unwrap()
+                    .unwrap(),
+                *original
+            );
+        }
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+
+        let mut fresh = newer;
+        fresh.decision_id = UserDecisionId::new();
+        fresh.idempotency_key = Some("new-key".into());
+        fresh.expires_at = None;
+        assert_eq!(
+            store
+                .create_with_default_expiry_for_owners(fresh.clone(), &owners)
+                .unwrap()
+                .unwrap()
+                .owner,
+            owners[0]
+        );
+        fresh.decision_id = UserDecisionId::new();
+        fresh.idempotency_key = None;
+        let first = store
+            .create_with_default_expiry_for_owners(fresh.clone(), &owners)
+            .unwrap()
+            .unwrap();
+        fresh.decision_id = UserDecisionId::new();
+        let second = store
+            .create_with_default_expiry_for_owners(fresh, &owners)
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.decision_id, second.decision_id);
+        assert_eq!(second.owner, owners[0]);
+    }
+
+    #[test]
+    fn inherited_duplicate_keys_choose_the_latest_owner_without_conflict_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let older = item();
+        let mut newer = older.clone();
+        newer.decision_id = UserDecisionId::new();
+        newer.owner = later_owner(&older.owner);
+        newer.title = "the newer question".into();
+        let owners = [newer.owner.clone(), older.owner.clone()];
+        let older = store.create_with_default_expiry(older).unwrap().unwrap();
+        let newer = store.create_with_default_expiry(newer).unwrap().unwrap();
+        let resolved = store
+            .resolve(
+                newer.owner.workspace_id,
+                newer.decision_id,
+                UserDecisionAnswer::Option {
+                    option_id: "a".into(),
+                    comment: None,
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut retry = newer;
+        retry.expires_at = None;
+        assert_eq!(
+            store
+                .create_with_default_expiry_for_owners(retry.clone(), &owners)
+                .unwrap()
+                .unwrap(),
+            resolved
+        );
+        let before = std::fs::read(store.path()).unwrap();
+        retry.title.clone_from(&older.title);
+        assert_eq!(
+            store
+                .create_with_default_expiry_for_owners(retry.clone(), &owners)
+                .unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+
+        // A new conversation has a disjoint authority set even with the same key.
+        retry.decision_id = UserDecisionId::new();
+        retry.owner = later_owner(&owners[0]);
+        let separate = store
+            .create_with_default_expiry_for_owners(retry.clone(), &[retry.owner.clone()])
+            .unwrap()
+            .unwrap();
+        assert_ne!(separate.decision_id, older.decision_id);
+        assert_ne!(separate.decision_id, resolved.decision_id);
+    }
+
+    #[test]
+    fn inherited_tombstones_do_not_recreate_questions_or_return_an_older_answer() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = store.create_with_default_expiry(item()).unwrap().unwrap();
+        let newer = later_owner(&decision.owner);
+        let owners = [newer.clone(), decision.owner.clone()];
+        let mut state = store.load().unwrap();
+        state.expired_idempotency.insert(&newer, "k");
+        state.expired_idempotency.insert(&decision.owner, "lost");
+        json_file::write_atomic(temp.path(), &store.path(), &state).unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        let mut retry = decision;
+        retry.owner = newer;
+        retry.expires_at = None;
+        for key in ["k", "lost"] {
+            retry.idempotency_key = Some(key.into());
+            assert_eq!(
+                store
+                    .create_with_default_expiry_for_owners(retry.clone(), &owners)
+                    .unwrap(),
+                Err(UserDecisionError::IdempotencyExpired)
+            );
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn inherited_owner_scope_mismatch_is_rejected_before_any_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        let later = later_owner(&decision.owner);
+        let mut other_workspace = later.clone();
+        other_workspace.workspace_id = WorkspaceId::new();
+        let mut other_session = later.clone();
+        other_session.session_id = None;
+        for owners in [
+            vec![],
+            vec![later],
+            vec![decision.owner.clone(), other_workspace],
+            vec![decision.owner.clone(), other_session],
+        ] {
+            assert_eq!(
+                store
+                    .create_with_default_expiry_for_owners(decision.clone(), &owners)
+                    .unwrap(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            assert!(!store.path().exists());
+        }
+    }
+
     #[test]
     fn human_inventory_includes_pending_decisions_from_each_workspace() {
         let temp = tempfile::tempdir().unwrap();

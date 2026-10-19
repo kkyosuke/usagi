@@ -42,10 +42,10 @@ use super::{
     open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
     prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
     prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
-    remember_workspace_session_focus, remove_registry_paths, render_controller_frame,
+    remember_workspace_controller_state, remove_registry_paths, render_controller_frame,
     render_home_material, render_home_snapshot, render_missing_workspace_prompt, render_open,
     reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
-    restore_workspace_closeup, restore_workspace_session_focus, retarget_drawer_chords,
+    restore_workspace_closeup, restore_workspace_controller_state, retarget_drawer_chords,
     route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
     run as run_from_start, run_screen_graph_with_backend, run_screen_graph_with_backend_and_notice,
     run_with_settings, run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
@@ -2569,6 +2569,7 @@ enum FakeRegistryRefresh {
 
 #[derive(Default)]
 struct FakeLoader {
+    prepared_snapshots: Vec<WorkspaceSnapshot>,
     last_projects: Option<usagi_core::domain::recent::LastProjectSet>,
     last_projects_error: Option<&'static str>,
     save_projects_error: Option<&'static str>,
@@ -2646,7 +2647,12 @@ impl WorkspaceLoader for FakeLoader {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("workspace");
-        let mut snapshot = snapshot(name);
+        let mut snapshot = self
+            .prepared_snapshots
+            .iter()
+            .find(|snapshot| snapshot.workspace.path == path)
+            .cloned()
+            .unwrap_or_else(|| snapshot(name));
         if self.open_snapshot == FakeOpenSnapshot::Empty {
             snapshot.state.sessions.clear();
             snapshot.session_ids.clear();
@@ -3400,23 +3406,36 @@ const RESIDENT_PORTS_PER_COMPOSITION: usize = 13;
 /// frame loop hands over is kept in order, so a test can tell "never re-aimed"
 /// from "re-aimed at the wrong set".
 #[derive(Clone, Default)]
-struct RecordingPrLane(Arc<Mutex<Vec<Vec<SessionId>>>>);
+struct RecordingPrLane {
+    sessions: Arc<Mutex<Vec<Vec<SessionId>>>>,
+    roots: Arc<Mutex<Vec<PreviewRoots>>>,
+}
+
+type PreviewRoots = Vec<(SessionId, PathBuf)>;
 
 impl RecordingPrLane {
     fn observed(&self) -> Vec<Vec<SessionId>> {
-        self.0
+        self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn observed_roots(&self) -> Vec<PreviewRoots> {
+        self.roots.lock().unwrap().clone()
     }
 }
 
 impl super::BackendOverlayPort for RecordingPrLane {
     fn sync_pull_request_targets(&mut self, sessions: Vec<SessionId>) {
-        self.0
+        self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(sessions);
+    }
+
+    fn sync_session_roots(&mut self, sessions: PreviewRoots) {
+        self.roots.lock().unwrap().push(sessions);
     }
 
     fn load_pull_requests(&mut self, _: Target, _: Completions) {}

@@ -17,6 +17,7 @@ use super::{
     SessionLifecycleProjection, SessionRefreshPort, SessionRoleProjection, WorkspaceIoRuntime,
     WorkspaceRuntime, runtime_identities_are_valid,
 };
+use crate::usecase::application::daemon_backend::DaemonBackend;
 
 #[cfg(test)]
 pub(super) struct UnavailableSessionCommandPort;
@@ -740,4 +741,26 @@ pub(super) fn sync_runtime_sessions(
         );
     }
     effects
+}
+
+/// Publish roots only when the revision-fenced workspace projection changes.
+/// Run before input so a newly rendered session is already readable by its ID.
+pub(super) fn sync_overlay_session_roots(
+    backend: &mut DaemonBackend,
+    ui: &WorkspaceIoRuntime,
+    observed_revision: &mut Option<u64>,
+) {
+    let revision = ui.workspace.material_revision();
+    if *observed_revision == Some(revision) {
+        return;
+    }
+    let sessions = ui
+        .workspace
+        .session_ids()
+        .iter()
+        .zip(ui.workspace.sessions())
+        .map(|(id, record)| (*id, record.root.clone()))
+        .collect();
+    backend.sync_session_roots(sessions);
+    *observed_revision = Some(revision);
 }

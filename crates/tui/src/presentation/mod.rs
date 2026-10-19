@@ -67,7 +67,8 @@ use flow_steps::{
 use session_commands::{
     ActiveSessionCommand, SessionCommandCompletion, SessionCommandLane, adopt_session_command_lane,
     begin_session_command, deliver_carried_outcome, drain_session_completions,
-    drain_session_refresh, project_controller_sessions, session_name_for, sync_runtime_sessions,
+    drain_session_refresh, project_controller_sessions, session_name_for,
+    sync_overlay_session_roots, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{
@@ -77,7 +78,7 @@ use session_commands::{
 
 use restore::{
     RestoreRetryState, apply_restore_completion, restore_prepared_workspace,
-    restore_workspace_closeup, restore_workspace_session_focus, spawn_restore_job,
+    restore_workspace_closeup, restore_workspace_controller_state, spawn_restore_job,
 };
 #[cfg(test)]
 use restore::{
@@ -844,8 +845,8 @@ impl AgentTabIntentPort for UnavailableAgentTabIntentPort {
 struct UnavailableDecisionCommandPort;
 #[cfg(test)]
 impl DecisionCommandPort for UnavailableDecisionCommandPort {
-    fn refresh(&mut self, _workspace: WorkspaceId) -> BackendEvent {
-        BackendEvent::Notice(Notice::new("User decisions are unavailable."))
+    fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent {
+        BackendEvent::DecisionsUnavailable { workspace }
     }
 
     fn resolve(
@@ -1828,11 +1829,26 @@ fn resume_focused_interrupted_tab(
     );
 }
 
-/// Build the controller event for a sidebar click. The shell supplies the raw
-/// cell and an injected monotonic timestamp; stable identity and double-click
-/// detection remain controller responsibilities.
-fn sidebar_pointer_event(column: u16, row: u16, at: std::time::Duration) -> AppEvent {
-    AppEvent::Pointer { column, row, at }
+/// Resolve against the frame on screen, including its speech and pending rows.
+fn sidebar_pointer_event(
+    material: Option<&HomeFrameMaterial>,
+    column: u16,
+    row: u16,
+    at: std::time::Duration,
+) -> AppEvent {
+    AppEvent::Pointer {
+        target: material.and_then(|material| {
+            views::workspace::sidebar_pointer_target(
+                material.height,
+                material.width,
+                &material.projection,
+                material.now,
+                column,
+                row,
+            )
+        }),
+        at,
+    }
 }
 
 /// Whether a key read from the terminal is a *user* interaction.
@@ -1858,10 +1874,10 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
         || state.role_editor().is_some()
 }
 
-/// Carry the active workspace's sidebar cursor across the composition teardown.
-/// Only stable session rows are remembered; transient action rows remain local
-/// to the controller that owns them.
-fn remember_workspace_session_focus(deck: &mut WorkspaceDeck, state: &AppState) {
+/// Carry sidebar state and the shared decision observation across composition
+/// teardown. Transient action rows and modal editors remain controller-local.
+fn remember_workspace_controller_state(deck: &mut WorkspaceDeck, state: &AppState) {
+    deck.remember_decisions(state.decision_snapshot());
     if state.session_order_revision() != 0 {
         deck.remember_session_order(state.workspace(), state.sessions());
     }
@@ -2342,6 +2358,9 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
 /// value is held for the lifetime of that Help overlay, so background daemon
 /// updates cannot make the shortcut list jump while it is being read.
 fn workspace_help_context(deck: &WorkspaceDeck, runtime: &WorkspaceRuntime) -> KeyHelpContext {
+    if deck.palette_overlay_open() {
+        return KeyHelpContext::CommandPalette;
+    }
     let state = runtime.state();
     resolve_workspace_help_context(WorkspaceHelpState {
         deck: WorkspaceDeckHelp::new(deck.add_overlay_open(), deck.overlay_open()),

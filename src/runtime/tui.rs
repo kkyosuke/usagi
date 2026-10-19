@@ -188,7 +188,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
                 workspace,
                 decisions,
             },
-            Err(_) => BackendEvent::Notice(Notice::new("User decisions are unavailable.")),
+            Err(_) => BackendEvent::DecisionsUnavailable { workspace },
         }
     }
 
@@ -593,7 +593,9 @@ impl ProductionDecisionPort {
             Err(_) if self.reported_failure => return,
             Err(_) => {
                 self.reported_failure = true;
-                BackendEvent::Notice(Notice::new("User decisions are unavailable."))
+                BackendEvent::DecisionsUnavailable {
+                    workspace: self.workspace,
+                }
             }
         };
         completions.emit(usagi_tui::usecase::application::controller::AppEvent::Backend(event));
@@ -614,6 +616,7 @@ impl BackendDecisionPort for ProductionDecisionPort {
         // drives never reaches the daemon. Whatever the lane has already observed
         // is handed over now; the wake's own result arrives through `poll` on a
         // later frame.
+        self.reported_failure = false;
         self.pump.wake();
         if let Some(result) = self.pump.take() {
             self.publish(result, &completions);
@@ -639,7 +642,7 @@ impl BackendDecisionPort for ProductionDecisionPort {
 
 struct ProductionOverlayPort {
     root: PathBuf,
-    sessions: Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>,
+    sessions: preview_access::PreviewRoots,
     pr_sessions: Arc<Mutex<Vec<SessionId>>>,
     pr_pump: RefreshPump<PrObservations>,
     preview_pump: PreviewPump,
@@ -647,6 +650,10 @@ struct ProductionOverlayPort {
     browser: PlatformBrowserOpener,
     clipboard: PlatformClipboard,
 }
+
+#[cfg(test)]
+mod artifact_tests;
+mod preview_access;
 
 impl ProductionOverlayPort {
     fn publish_prs(&mut self, result: Result<PrObservations, String>, completions: &Completions) {
@@ -656,14 +663,13 @@ impl ProductionOverlayPort {
         }
     }
 
-    fn target_root(&self, target: Target) -> Result<&Path, FilePreviewError> {
+    fn target_root(&self, target: Target) -> Result<PathBuf, FilePreviewError> {
         match target {
-            Target::Root(_) => Ok(&self.root),
-            Target::Session(id) => self
-                .sessions
+            Target::Root(_) => Ok(self.root.clone()),
+            Target::Session(id) => preview_access::lock_roots(&self.sessions)
                 .iter()
-                .find(|(known, _, _)| *known == id)
-                .map(|(_, _, path)| path.as_path())
+                .find(|(known, _)| *known == id)
+                .map(|(_, path)| path.clone())
                 .ok_or(FilePreviewError::FileUnavailable),
         }
     }
@@ -721,6 +727,10 @@ impl BackendOverlayPort for ProductionOverlayPort {
         self.pr_pump.wake();
     }
 
+    fn sync_session_roots(&mut self, sessions: Vec<(SessionId, PathBuf)>) {
+        *preview_access::lock_roots(&self.sessions) = sessions;
+    }
+
     fn load_pull_requests(&mut self, target: Target, completions: Completions) {
         let Target::Session(session) = target else {
             completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
@@ -746,7 +756,7 @@ impl BackendOverlayPort for ProductionOverlayPort {
         completions: Completions,
     ) {
         let root = match self.target_root(target) {
-            Ok(root) => root.to_path_buf(),
+            Ok(root) => root,
             Err(error) => {
                 Self::publish_preview(
                     PreviewCompletion {
@@ -768,17 +778,26 @@ impl BackendOverlayPort for ProductionOverlayPort {
     fn open_artifact(
         &mut self,
         target: Target,
+        request_id: RequestId,
         path: String,
         filter: PreviewFileFilter,
         completions: Completions,
     ) {
         match self.target_root(target) {
-            Ok(root) => self
-                .artifact_opener
-                .request(root.to_path_buf(), path, filter, completions),
-            Err(error) => completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-                error.message(),
-            )))),
+            Ok(root) => {
+                self.artifact_opener
+                    .request(root, target, request_id, path, filter, completions);
+            }
+            Err(error) => completions.emit(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                target,
+                request_id,
+                path,
+                filter,
+                result: Err(SafeError {
+                    message: SafeMessage::new(error.message()),
+                    error_id: error.error_id().into(),
+                }),
+            })),
         }
     }
 
@@ -1147,25 +1166,14 @@ fn reduced_motion_from_environment(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
 
-#[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=production_backend_factory_preserves_terminal_arguments_and_completes_store_routes
-fn project_backend_sessions(
-    snapshot: &WorkspaceSnapshot,
-) -> (EnvironmentSessionNames, OverlaySessions) {
-    let mut names = Vec::new();
-    let mut overlays = Vec::new();
-    for (id, record) in snapshot.session_ids.iter().zip(&snapshot.state.sessions) {
-        names.push((*id, record.name.clone()));
-        let label = record
-            .display_name
-            .clone()
-            .unwrap_or_else(|| record.name.clone());
-        overlays.push((*id, label, record.root.clone()));
-    }
-    (names, overlays)
+fn project_backend_session_roots(snapshot: &WorkspaceSnapshot) -> Vec<(SessionId, PathBuf)> {
+    snapshot
+        .session_ids
+        .iter()
+        .zip(&snapshot.state.sessions)
+        .map(|(id, record)| (*id, record.root.clone()))
+        .collect()
 }
-
-type EnvironmentSessionNames = Vec<(usagi_core::domain::id::SessionId, String)>;
-type OverlaySessions = Vec<(usagi_core::domain::id::SessionId, String, PathBuf)>;
 
 impl ControllerBackendFactory for ProductionBackendFactory {
     fn client_build(&self) -> Option<usagi_core::infrastructure::ipc::BuildIdentity> {
@@ -1181,7 +1189,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         snapshot: &WorkspaceSnapshot,
         host: ControllerHost,
     ) -> ControllerBackendComposition {
-        let (_session_names, sessions) = project_backend_sessions(snapshot);
+        let sessions = Arc::new(Mutex::new(project_backend_session_roots(snapshot)));
         let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
         let store = RepoEnvironmentStore::new(
@@ -1213,15 +1221,29 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         }))
         .with_overlay(Box::new(ProductionOverlayPort {
             root: snapshot.workspace.path.clone(),
-            sessions,
+            sessions: Arc::clone(&sessions),
             pr_sessions,
             pr_pump,
-            preview_pump: PreviewPump::spawn(load_preview),
-            artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(Box::new(
-                PlatformBrowserOpener {
-                    reaper: self.helper_reaper.clone(),
-                },
-            )),
+            preview_pump: PreviewPump::spawn(
+                load_preview,
+                Box::new(preview_access::PreviewAccess::new(
+                    snapshot.workspace_id,
+                    snapshot.workspace.path.clone(),
+                    Arc::clone(&sessions),
+                )),
+            ),
+            artifact_opener: crate::runtime::artifact_opener::ArtifactOpener::spawn(
+                Box::new(
+                    crate::runtime::artifact_viewer::PlatformArtifactViewer::new(
+                        self.helper_reaper.clone(),
+                    ),
+                ),
+                Box::new(preview_access::PreviewAccess::new(
+                    snapshot.workspace_id,
+                    snapshot.workspace.path.clone(),
+                    sessions,
+                )),
+            ),
             browser: PlatformBrowserOpener {
                 reaper: self.helper_reaper.clone(),
             },
@@ -4390,6 +4412,34 @@ impl DoctorPort for RuntimeDoctorPort {
     }
 }
 
+#[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=native_viewer_observes_helpers_and_preserves_unconfirmed_launches
+pub(super) fn platform_open_command(url: &str) -> Result<Command, String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    } else if cfg!(target_os = "linux") {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    } else if cfg!(target_os = "windows") {
+        // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
+        // first quoted argument is the (empty) window title `start` consumes,
+        // so a URL beginning with `"` is never mistaken for the title. The URL
+        // stays a distinct argv item — `cmd` does not re-parse it as a command.
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    } else {
+        return Err("browser opening is unsupported on this platform".to_owned());
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    Ok(command)
+}
+
 /// OS adapter for the browser effect. `Command` receives separate argv items; no
 /// URL is ever interpolated into a shell command.
 struct PlatformBrowserOpener {
@@ -4399,25 +4449,7 @@ struct PlatformBrowserOpener {
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BrowserOpener for PlatformBrowserOpener {
     fn open(&mut self, url: &str) -> Result<(), String> {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = Command::new("open");
-            command.arg(url);
-            command
-        } else if cfg!(target_os = "linux") {
-            let mut command = Command::new("xdg-open");
-            command.arg(url);
-            command
-        } else if cfg!(target_os = "windows") {
-            // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
-            // first quoted argument is the (empty) window title `start` consumes,
-            // so a URL beginning with `"` is never mistaken for the title. The URL
-            // stays a distinct argv item — `cmd` does not re-parse it as a command.
-            let mut command = Command::new("cmd");
-            command.args(["/C", "start", "", url]);
-            command
-        } else {
-            return Err("browser opening is unsupported on this platform".to_owned());
-        };
+        let mut command = platform_open_command(url)?;
         self.reaper
             .spawn(&mut command)
             .map_err(|_| "browser launch failed".to_owned())
@@ -9290,7 +9322,11 @@ mod tests {
             path: None,
             filter: PreviewFileFilter::All,
         });
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // A fresh worker observation may spend the bounded attach deadline
+        // before reporting that no daemon is available. Include scheduler slack.
+        let deadline = Instant::now()
+            + Duration::from_millis(ClientPolicy::tui().timeout_ms)
+            + Duration::from_secs(3);
         let preview_error = loop {
             let events = composition.backend.drain_events();
             if !events.is_empty() {
@@ -9308,7 +9344,7 @@ mod tests {
                     error,
                     ..
                 }
-            )] if *id == session_ids[0] && error.error_id == "preview-files"
+            )] if *id == session_ids[0] && error.error_id == "preview-scope"
         ));
 
         composition.backend.dispatch(Effect::SaveEnvironment {

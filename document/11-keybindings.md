@@ -80,7 +80,8 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 |---|---|---|
 | `Ctrl-O +` | OpenWorkspace | workspace 追加 |
 | `Ctrl-O 0` | OpenWorkspaceSwitcher | project / session finder |
-| `Ctrl-O i` | OpenAttention | 全 project の対応待ち一覧 |
+| `Ctrl-O k` | OpenCommandPalette | 開いている project の session・観測済みタブ・コマンドを横断検索 |
+| `Ctrl-O i` | OpenAttention | 全 project の受信箱（Action needed / Updates） |
 | `Ctrl-O 1` … `9` | ActivateWorkspace | project tab を番号で選択 |
 | `Ctrl-O ?` | KeyboardHelp | live paneで使えるキーボードショートカットを表示 |
 | `Ctrl-O o` | Switch | Switchへ戻る |
@@ -91,6 +92,7 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | `Ctrl-O }` | MoveTabNext | pane tabを次へ並べ替え |
 | `Ctrl-O p` | OpenPullRequests | Pull Request一覧 |
 | `Ctrl-O v` | OpenPreview | File Preview |
+| `Ctrl-O f` | OpenArtifacts | session の成果物一覧。session 未選択時は workspace 全体 |
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
 | `Ctrl-O ,` | OpenGarden | Session Garden |
@@ -191,6 +193,10 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | tabのないCloseup | `Enter` | Action modal |
 | tabのあるCloseup | `Ctrl-O ?` | live paneで使えるキーボードショートカットを表示 |
 | Overview palette | `↑` / `↓` | candidate / history |
+| 横断コマンドパレット | 文字入力 / 貼り付け | 名前・project・session・説明を空白区切りで絞り込み |
+| 横断コマンドパレット | `↑` / `↓` / `PgUp` / `PgDn` | 検索結果の選択 |
+| 横断コマンドパレット | `←` / `→` / `Home` / `End` / `Backspace` / `Delete` | 検索文字列の編集 |
+| 横断コマンドパレット | `Enter` / `Esc` | 対象を開く（コマンドは既存入力画面へ引き継ぐ） / 閉じる |
 | Overview palette | `←` / `→` | caret移動 |
 | Overview palette | `Tab` / `Enter` / `Esc` | complete / run / close |
 | Closeup Action | `↑` / `↓` | action選択 |

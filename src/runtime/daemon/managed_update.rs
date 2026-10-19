@@ -32,6 +32,7 @@ pub(crate) fn sync_after_update(
     out: &mut dyn Write,
     policy: ClientPolicy,
     info: &AppInfo,
+    restart_agents: bool,
 ) -> std::io::Result<Result<ManagedUpdateSync, ClientError>> {
     let expected_build = current_build();
     let (lock, client) = match managed_update_diagnostic_client(policy) {
@@ -43,7 +44,12 @@ pub(crate) fn sync_after_update(
         return Ok(Ok(ManagedUpdateSync::Complete));
     };
     let published_build = owner.server_build().clone();
-    if published_build != expected_build {
+    if restart_agents {
+        drop(owner);
+        if let Err(error) = replace_running_daemon_during_update(out, policy, info, &lock, true)? {
+            return Ok(Err(error));
+        }
+    } else if published_build != expected_build {
         // A seamless successor hydrates only the startup workspace. The
         // predecessor retains its other fences while serving PTYs, so replacing
         // a multi-workspace owner would strand those projects on the next open.
@@ -63,7 +69,7 @@ pub(crate) fn sync_after_update(
                 writeln!(
                     out,
                     "daemon sync: deferred to preserve {workspaces} workspace connection(s); \
-                     finish live runtimes, then run 'usagi daemon restart' to switch builds"
+                     finish live runtimes to allow daemon synchronization"
                 )?;
                 return Ok(Ok(ManagedUpdateSync::Deferred));
             }
@@ -128,7 +134,7 @@ pub(crate) fn sync_after_update(
             }
         }
         drop(owner);
-        if let Err(error) = replace_running_daemon_during_update(out, policy, info, &lock)? {
+        if let Err(error) = replace_running_daemon_during_update(out, policy, info, &lock, false)? {
             return Ok(Err(error));
         }
     }

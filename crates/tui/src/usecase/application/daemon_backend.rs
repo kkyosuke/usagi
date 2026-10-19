@@ -330,6 +330,7 @@ impl DecisionPort for NoDecisions {
 /// `PreviewError`), so a fetch failure surfaces as a display-safe error inside
 /// the open overlay instead of discarding it. Opening a URL is a fire-and-forget
 /// side effect; a launch failure reflues as a safe [`BackendEvent::Notice`].
+/// Artifact opening returns a request-scoped `ArtifactOpenFinished` result.
 pub trait OverlayPort {
     /// Non-blocking drain for resident PR observation workers. Ports without a
     /// worker keep the default no-op.
@@ -337,6 +338,9 @@ pub trait OverlayPort {
     /// Replace the resident observer's stable session set and wake it. The
     /// default keeps fake/embedded ports inert.
     fn sync_pull_request_targets(&mut self, _sessions: Vec<SessionId>) {}
+    /// Replace preview/open roots from the same authoritative snapshot as the
+    /// sidebar. Missing IDs are removed; names never recover an old identity.
+    fn sync_session_roots(&mut self, _sessions: Vec<(SessionId, std::path::PathBuf)>) {}
     /// Read a target's Pull Request list.
     fn load_pull_requests(&mut self, target: Target, completions: Completions);
     /// List filtered preview candidates (`path: None`) or read one
@@ -354,12 +358,23 @@ pub trait OverlayPort {
     /// Open a generated artifact after validating its scope.
     fn open_artifact(
         &mut self,
-        _target: Target,
-        _path: String,
-        _filter: PreviewFileFilter,
+        target: Target,
+        request_id: RequestId,
+        path: String,
+        filter: PreviewFileFilter,
         completions: Completions,
     ) {
-        unavailable(&completions, "artifact viewer is unavailable");
+        use super::controller::{BackendEvent, SafeError, SafeMessage};
+        completions.emit(AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+            target,
+            request_id,
+            path,
+            filter,
+            result: Err(SafeError {
+                message: SafeMessage::new("Artifact viewer is unavailable."),
+                error_id: "artifact-unavailable".into(),
+            }),
+        }));
     }
     /// Open one already-selected Pull Request URL in the browser.
     fn open_pull_request(&mut self, url: String, completions: Completions);
@@ -486,6 +501,12 @@ impl DaemonBackend {
     pub fn with_overlay(mut self, overlay: Box<dyn OverlayPort>) -> Self {
         self.overlay = overlay;
         self
+    }
+
+    /// Deliver coherent session metadata before dispatching file requests.
+    /// This only replaces cached roots; it performs no filesystem or daemon IO.
+    pub fn sync_session_roots(&mut self, sessions: Vec<(SessionId, std::path::PathBuf)>) {
+        self.overlay.sync_session_roots(sessions);
     }
 
     /// Run one reducer-issued effect against its owning port.
@@ -642,11 +663,12 @@ impl DaemonBackend {
             Effect::CancelPreview => self.overlay.cancel_preview(),
             Effect::OpenArtifact {
                 target,
+                request_id,
                 path,
                 filter,
             } => self
                 .overlay
-                .open_artifact(target, path, filter, self.completions()),
+                .open_artifact(target, request_id, path, filter, self.completions()),
             Effect::OpenPullRequest { url } => {
                 self.overlay.open_pull_request(url, self.completions());
             }
@@ -1605,6 +1627,7 @@ mod tests {
         assert_eq!(
             backend.dispatch(Effect::OpenArtifact {
                 target: Target::Session(SessionId::new()),
+                request_id: RequestId::new(),
                 path: "artifacts/report.pdf".to_owned(),
                 filter: PreviewFileFilter::Artifacts,
             }),
@@ -1612,7 +1635,10 @@ mod tests {
         );
         assert!(matches!(
             backend.drain_events().as_slice(),
-            [AppEvent::Backend(BackendEvent::Notice(_))]
+            [AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                result: Err(_),
+                ..
+            })]
         ));
     }
 }

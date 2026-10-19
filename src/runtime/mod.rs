@@ -5,6 +5,7 @@
 
 pub(crate) mod agent_tab_intent;
 pub(crate) mod artifact_opener;
+pub(crate) mod artifact_viewer;
 pub(crate) mod bootstrap;
 pub(crate) mod clean;
 pub(crate) mod cli;
@@ -14,6 +15,7 @@ pub(crate) mod file_preview;
 pub(crate) mod inventory_pump;
 pub(crate) mod launchd;
 pub(crate) mod platform_child_reaper;
+pub(crate) mod preview_authority;
 pub(crate) mod preview_pump;
 pub(crate) mod refresh_pump;
 pub(crate) mod systemd;

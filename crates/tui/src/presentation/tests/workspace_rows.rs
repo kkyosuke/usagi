@@ -3,6 +3,9 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::{
+    ControllerBackendComposition, ControllerBackendFactory, WorkspaceEntryPolicy, WorkspaceStep,
+};
 
 #[test]
 fn project_bar_click_closes_the_pr_modal_without_reaching_the_bar() {
@@ -1915,12 +1918,33 @@ fn a_direct_workspace_reports_leaving_and_quitting_as_different_exits() {
 mod attention {
     use super::*;
     use crate::presentation::WorkspaceStep;
+    use crate::presentation::widgets;
     use usagi_core::domain::attention::{AttentionItem, AttentionKind, WorkspaceAttention};
 
     struct AttentionFactory {
         inner: CountingBackendFactory,
         attention: WorkspaceAttention,
         pr_requests: Arc<Mutex<Vec<Target>>>,
+        decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    }
+
+    struct AttentionDecisions(Vec<usagi_core::domain::user_decision::UserDecision>);
+    impl BackendDecisionPort for AttentionDecisions {
+        fn poll(&mut self, _: &Completions) {}
+        fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+            completions.emit(AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: self.0.clone(),
+            }));
+        }
+        fn resolve(
+            &mut self,
+            _: WorkspaceId,
+            _: UserDecisionId,
+            _: UserDecisionAnswer,
+            _: Completions,
+        ) {
+        }
     }
 
     struct AttentionPort(WorkspaceAttention);
@@ -1943,6 +1967,7 @@ mod attention {
             composition.garden_inventory = Box::new(AttentionPort(self.attention.clone()));
             composition.backend = composition
                 .backend
+                .with_decisions(Box::new(AttentionDecisions(self.decisions.clone())))
                 .with_overlay(Box::new(AttentionPrRequests(Arc::clone(&self.pr_requests))));
             composition
         }
@@ -1960,6 +1985,8 @@ mod attention {
                 label: "selected-session".into(),
                 kind: AttentionKind::Decision,
                 reason: "Choose deployment target".into(),
+                target: None,
+                status_unknown: false,
             }],
         };
         deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
@@ -1967,6 +1994,7 @@ mod attention {
             inner: CountingBackendFactory::new(),
             attention,
             pr_requests: Arc::default(),
+            decisions: Vec::new(),
         };
         let mut term = FakeTerminal::with_keys(&[
             Key::Live(LiveTerminalAction::OpenAttention),
@@ -1998,7 +2026,93 @@ mod attention {
                 .any(|f| f.contains("All projects") && f.contains("Choose deployment target")),
             "{frames:#?}"
         );
-        assert!(frames.iter().any(|f| f.contains("Pending decisions")));
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("Questions awaiting reply"))
+        );
+    }
+
+    #[test]
+    fn inbox_question_b_reaches_its_answer_editor_through_the_real_frame_loop() {
+        use usagi_core::domain::attention::AttentionTarget;
+        let snapshot = snapshot("exact-question");
+        let session = snapshot.session_ids[0];
+        let template =
+            super::super::terminal::decision_selection_runtime_with_title("First question A");
+        let mut first = template.state().decisions()[0].clone();
+        first.owner.workspace_id = snapshot.workspace_id;
+        first.owner.session_id = Some(session);
+        first.owner.caller.session_id = Some(session);
+        let mut second = first.clone();
+        second.decision_id = UserDecisionId::new();
+        second.title = "Chosen question B".into();
+        let items = [first.clone(), second.clone()]
+            .iter()
+            .enumerate()
+            .map(|(index, question)| AttentionItem {
+                key: format!("decision:{index}"),
+                session: Some(session),
+                label: "questions".into(),
+                kind: AttentionKind::Decision,
+                reason: question.title.clone(),
+                target: Some(AttentionTarget::Decision {
+                    decision_id: question.decision_id,
+                }),
+                status_unknown: false,
+            })
+            .collect();
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items,
+        };
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::default(),
+            decisions: vec![first, second],
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Escape,
+            Key::Escape,
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Down,
+            Key::Enter,
+            Key::Other,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames.iter().any(|frame| frame.contains("User decision")
+                && frame.contains("Chosen question B")
+                && !frame.contains("First question A")),
+            "{frames:#?}"
+        );
     }
 
     struct AttentionPrRequests(Arc<Mutex<Vec<Target>>>);
@@ -2016,6 +2130,90 @@ mod attention {
         ) {
         }
         fn open_pull_request(&mut self, _: String, _: Completions) {}
+    }
+
+    #[test]
+    fn inbox_updates_tab_click_uses_the_drawn_home_coordinates() {
+        let snapshot = snapshot("inbox-click");
+        let session = snapshot.session_ids[0];
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items: vec![AttentionItem {
+                key: "pr:waiting".into(),
+                session: Some(session),
+                label: "checks".into(),
+                kind: AttentionKind::System,
+                reason: "CI is running".into(),
+                target: Some(
+                    usagi_core::domain::attention::AttentionTarget::PullRequest {
+                        identity: usagi_core::domain::pr_inventory::canonicalize(
+                            "https://github.com/example/repo/pull/2",
+                        )
+                        .unwrap(),
+                    },
+                ),
+                status_unknown: false,
+            }],
+        };
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        deck.open_attention();
+        let frame = crate::presentation::workspace_deck::render_overlay(
+            &deck,
+            29,
+            140,
+            &vec![String::new(); 29],
+        );
+        let (row, column) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let line = widgets::strip_ansi(line);
+                let index = line.find("Updates (1)")?;
+                Some((row + 1, widgets::display_width(&line[..index])))
+            })
+            .unwrap();
+        deck.close_overlay();
+        let requests = Arc::default();
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::clone(&requests),
+            decisions: Vec::new(),
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Click {
+                column: column.try_into().unwrap(),
+                row: row.try_into().unwrap(),
+            },
+            Key::Enter,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| { frame.iter().any(|line| line.contains("Progress updates")) })
+        );
+        assert_eq!(*requests.lock().unwrap(), vec![Target::Session(session)]);
     }
 
     #[test]
@@ -2045,6 +2243,8 @@ mod attention {
                     label: "target".into(),
                     kind: AttentionKind::Review,
                     reason: "Review target PR".into(),
+                    target: None,
+                    status_unknown: false,
                 }],
             };
             deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
@@ -2053,6 +2253,7 @@ mod attention {
                 inner: CountingBackendFactory::new(),
                 attention,
                 pr_requests: Arc::clone(&pr_requests),
+                decisions: Vec::new(),
             };
             let mut term = FakeTerminal::with_keys(&[
                 Key::Enter,
@@ -2089,4 +2290,318 @@ mod attention {
             );
         }
     }
+}
+
+#[test]
+fn command_palette_prepares_commands_and_preserves_existing_input_in_the_frame_loop() {
+    let snapshot = snapshot("palette-project");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Help,
+        Key::Escape,
+        Key::Paste("Command terminal palette-project-session".into()),
+        Key::Enter,
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Enter,
+        Key::Escape,
+        Key::Escape,
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Paste("Session palette-project-session".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    let frames = term
+        .frames
+        .iter()
+        .map(|frame| frame.join("\n"))
+        .collect::<Vec<_>>();
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("finish the current dialog or draft"))
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("Command · terminal"))
+    );
+}
+
+struct PaletteStreamFactory {
+    inner: CountingBackendFactory,
+    terminal: TerminalRef,
+    calls: Arc<Mutex<StreamCalls>>,
+}
+
+impl ControllerBackendFactory for PaletteStreamFactory {
+    fn create(
+        &mut self,
+        snapshot: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        let mut composition = self.inner.create(snapshot, host);
+        composition.agent_commands = Box::new(RecordingStreamPort(Arc::clone(&self.calls)));
+        composition.restore_commands = Box::new(RetryRestorePort {
+            workspace: snapshot.workspace_id,
+            entries: vec![TerminalInventoryEntry {
+                terminal: self.terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            }],
+            runtimes: vec![],
+            fail_attempts: 0,
+            terminal_attempts: Arc::default(),
+            agent_attempts: Arc::default(),
+        });
+        composition
+    }
+}
+
+struct PaletteRestoreTerminal {
+    inner: FakeTerminal,
+    wait_for: &'static str,
+    deadline: std::time::Instant,
+}
+
+impl Terminal for PaletteRestoreTerminal {
+    fn size(&mut self) -> io::Result<(usize, usize)> {
+        self.inner.size()
+    }
+    fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+        self.inner.draw(frame)
+    }
+    fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+        self.inner.wait(duration)
+    }
+    fn read_key(&mut self) -> io::Result<Key> {
+        if self.inner.keys.front() == Some(&Key::Other) {
+            if !self
+                .inner
+                .frames
+                .last()
+                .is_some_and(|frame| frame.join("\n").contains(self.wait_for))
+            {
+                assert!(
+                    std::time::Instant::now() < self.deadline,
+                    "restored tab must become searchable"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Ok(Key::Other);
+            }
+            self.inner.keys.pop_front();
+        }
+        self.inner.read_key()
+    }
+}
+
+#[test]
+fn command_palette_owns_text_paste_and_control_input_over_a_live_terminal() {
+    let snapshot = snapshot("palette-terminal");
+    let calls = Arc::new(Mutex::new(StreamCalls::default()));
+    let terminal = live_terminal_ref(snapshot.workspace_id, snapshot.session_ids[0]);
+    let mut factory = PaletteStreamFactory {
+        inner: CountingBackendFactory::new(),
+        terminal,
+        calls: Arc::clone(&calls),
+    };
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        // The ordinal excludes fuzzy command matches before the tab is observed.
+        Key::Paste("Tab Terminal 1".into()),
+        Key::Other,
+        Key::Enter,
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Char('s'),
+        Key::Paste("private query".into()),
+        Key::Passthrough(vec![4]),
+        Key::Enter,
+        Key::Escape,
+        Key::Char('x'),
+        Key::Live(LiveTerminalAction::Switch),
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        wait_for: "Tab · Terminal",
+        inner,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    let calls = calls.lock().unwrap();
+    assert!(calls.attaches > 0);
+    assert_eq!(calls.inputs, vec![b"x".to_vec()]);
+    assert_eq!(calls.launches, 0);
+}
+
+#[test]
+fn command_palette_revalidates_workspace_identity_and_carries_command_to_target() {
+    for replaced in [false, true] {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let mut loader = FakeLoader {
+            prepared_snapshots: vec![if replaced {
+                snapshot("beta")
+            } else {
+                beta.clone()
+            }],
+            ..FakeLoader::default()
+        };
+        let mut factory = CountingBackendFactory::new();
+        let mut keys = vec![
+            Key::Live(LiveTerminalAction::OpenCommandPalette),
+            Key::Paste("Command terminal beta-session".into()),
+            Key::Enter,
+        ];
+        if replaced {
+            keys.extend([Key::Escape, Key::CtrlQ, Key::Char('y')]);
+        }
+        let mut term = FakeTerminal::with_keys(&keys);
+        term.size = Some((28, 120));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            alpha,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            Some(&mut loader),
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        if replaced {
+            assert!(matches!(result, WorkspaceStep::Quit));
+            assert!(
+                term.frames
+                    .iter()
+                    .any(|frame| frame.join("\n").contains("Target is unavailable"))
+            );
+            continue;
+        }
+        let WorkspaceStep::Activate(prepared) = result else {
+            panic!("expected target activation")
+        };
+        assert_eq!(prepared.workspace_id, beta.workspace_id);
+        deck.activate_snapshot(&prepared);
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenCommandPalette),
+            Key::Enter,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((28, 120));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            *prepared,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        assert!(term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("finish the current dialog or draft")
+        }));
+    }
+}
+
+#[test]
+fn command_palette_pending_tab_visit_survives_idle_ticks_until_restore_completes() {
+    use crate::presentation::workspace_deck::palette::Action;
+    use crate::usecase::application::pane::TabSelection;
+    let snapshot = snapshot("pending-palette");
+    let terminal = scoped_terminal_ref(snapshot.workspace_id, None);
+    let calls = Arc::new(Mutex::new(StreamCalls::default()));
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    deck.schedule_palette_visit(
+        snapshot.workspace.path.clone(),
+        snapshot.workspace_id,
+        Action::Tab {
+            target: Target::Root(snapshot.workspace_id),
+            selection: TabSelection::Live(terminal.clone()),
+            kind: PaneKind::Terminal,
+        },
+    );
+    let mut factory = PaletteStreamFactory {
+        inner: CountingBackendFactory::new(),
+        terminal,
+        calls: Arc::clone(&calls),
+    };
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Other,
+        Key::Char('x'),
+        Key::Live(LiveTerminalAction::RootTerminal),
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        inner,
+        wait_for: "Workspace Terminal",
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    assert_eq!(calls.lock().unwrap().inputs, vec![b"x".to_vec()]);
 }
