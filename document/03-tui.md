@@ -827,6 +827,8 @@ Agent / Session tree は `Ctrl-O ↑` / `Ctrl-O ↓` またはマウスホイー
 ホイールはフォーカス中の Director の本文内だけで受け付け、背景や Shell 上では tree を動かさない。
 表示位置と総行数、表示範囲外の件数を示し、Conversation の切替時はその tree の先頭へ戻る。
 親 session を削除しても保存済みの所属を使って生存中の子孫を表示する。tree の行を置けない高さでは resize を促す。
+組織図の状態は session の作成中・初期化中・削除中・失敗を Agent の活動状態より優先して表示する。
+利用可能な session は Agent の状態を表示し、Agent がまだ無ければ `ready` とする。
 Shell と同時に開いている場合、タブ切替はフォーカス中の drawer にだけ作用する。
 Shell にフォーカスを移しても、Director Console は選択中の Conversation とその中断理由を保持する。
 generic Terminal は専用の [workspace terminal drawer](#workspace-terminal-drawer) に投影し、
@@ -869,8 +871,11 @@ root New の pending / completion は terminal の `workspace_id` と `session_i
 conversation だけで、managed Closeup の tab count・identity・selection は変わらない。
 
 成功時は root `AgentTabIntent` の order への追加と新 conversation の selection を 1 回の CAS mutation で commit
-してから pending slot を live にする。write / CAS / future-schema failure、profile rejection、daemon 不通、
-wrong workspace / session / operation / semantic final は pending を失敗表示へ遷移させ、既存 conversation・selection・
+してから pending slot を live にする。Starting 中に追加の Enter や戻る操作を消費しても、成功時は新しい
+conversation を選択する。待機中に Shell へ入力を移した場合は Shell の選択と入力先を保ち、Director 側だけを
+新 conversation に更新する。閉じた drawer を完了通知で開き直すことはない。
+write / CAS / future-schema failure、profile rejection、daemon 不通、
+wrong workspace / session / operation / semantic final は pending を失敗表示へ遷移させ、元の route・既存 conversation・selection・
 terminal bytes を変更しない。daemon runtime が既に成功していて intent の commit だけが失敗した場合も、TUI は
 local success を捏造せず、既存 intent contract の safe error を表示する。
 
