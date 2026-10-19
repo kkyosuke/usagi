@@ -229,7 +229,10 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
 caller は同じ credential と `decision_id` で `get` を polling し、terminal decision を取得した時点で durable outbox を ACK する。
 `list` は pending だけを返すため、回答の受信には `get` を使う。TUI の参照は agent の受信 ACK を変更しない。
-TUI 専用の `ListAll` は全 workspace の pending を返し、`Get` / `Resolve` / `Cancel` は optional な `workspace` ID で
+TUI 専用の `ListAll` は全 workspace の pending を IPC frame 上限内のページに分けて返す。`next_cursor` がある間は
+それを `cursor` として次ページを取得する。cursor は一覧の revision と offset を持ち、途中で一覧が変わると
+`RevisionConflict` を返す。全ページの取得が成功して初めて完全な一覧として扱い、失敗時は先頭から取り直す。
+`Get` / `Resolve` / `Cancel` は optional な `workspace` ID で
 質問元を指定できる。省略時は接続先 workspace を使う。この指定と全体一覧は agent の MCP scope を拡張しない。
 同じ idempotency key の request は同じ decision に収束する。明示した期限を過ぎてからの同一内容の再送も、
 保持中の元の decision とその回答・終了状態を返す。新規 request の期限は作成時に検証する。これにより人間の応答時間が MCP connection や caller

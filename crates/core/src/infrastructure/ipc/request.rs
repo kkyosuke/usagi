@@ -366,6 +366,22 @@ pub enum TuiUserDecisionAction {
     Cancel,
 }
 
+/// Continuation within one immutable observation of the pending inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserDecisionCursor {
+    pub revision: String,
+    pub offset: usize,
+}
+
+/// A byte-bounded part of the human-facing pending inventory. Consumers publish
+/// only after following every cursor from the same revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDecisionPage {
+    pub decisions: Vec<crate::domain::user_decision::UserDecision>,
+    pub next_cursor: Option<UserDecisionCursor>,
+}
+
 /// Control vocabulary for the daemon metrics stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

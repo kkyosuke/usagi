@@ -7,6 +7,9 @@
 
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
+mod page;
+pub use page::UserDecisionPageError;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -216,6 +219,15 @@ impl UserDecisionStore {
             .into_iter()
             .filter(|item| item.status == UserDecisionStatus::Pending)
             .collect())
+    }
+    /// Observe one page from a stable pending snapshot. The caller subtracts
+    /// transport envelope overhead before supplying the serialized page budget.
+    pub fn pending_page(
+        &self,
+        cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
+        max_page_bytes: usize,
+    ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
+        page::pending_page(self.pending_all()?, cursor, max_page_bytes)
     }
     /// Marks every due pending decision terminal. Expiry deliberately produces
     /// no delivery event: an answer must never be invented for a timed-out
@@ -891,6 +903,168 @@ mod tests {
             store.pending(second.owner.workspace_id).unwrap(),
             vec![second]
         );
+    }
+
+    #[test]
+    fn human_inventory_pages_preserve_large_cross_workspace_backlogs() {
+        use crate::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, UserDecisionPage};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let workspaces = [WorkspaceId::new(), WorkspaceId::new()];
+        let mut expected = Vec::new();
+        for workspace in workspaces {
+            for _ in 0..40 {
+                let mut decision = item();
+                decision.owner.workspace_id = workspace;
+                decision.prompt = "p".repeat(UserDecisionPolicy::PROMPT_MAX_BYTES);
+                decision.idempotency_key = None;
+                expected.push(store.create(decision).unwrap().unwrap());
+            }
+            assert!(
+                serde_json::to_vec(&store.pending(workspace).unwrap())
+                    .unwrap()
+                    .len()
+                    < DEFAULT_MAX_FRAME_BYTES
+            );
+        }
+        assert!(serde_json::to_vec(&expected).unwrap().len() > DEFAULT_MAX_FRAME_BYTES);
+        // Reserve enough for the outer IPC envelope; the daemon tests measure
+        // its exact size rather than relying on this fixture's conservative cap.
+        let budget = DEFAULT_MAX_FRAME_BYTES - 1024;
+        let mut collected = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let page = store
+                .pending_page(cursor.as_ref(), budget)
+                .unwrap()
+                .unwrap();
+            let encoded = serde_json::to_vec(&page).unwrap();
+            assert!(encoded.len() <= budget);
+            assert_eq!(
+                serde_json::from_slice::<UserDecisionPage>(&encoded).unwrap(),
+                page
+            );
+            assert!(!page.decisions.is_empty());
+            collected.extend(page.decisions);
+            pages += 1;
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            assert_eq!(next.offset, collected.len());
+            if let Some(previous) = &cursor {
+                assert_eq!(next.revision, previous.revision);
+            }
+            cursor = Some(next);
+        }
+        assert!(pages > 1);
+        assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn human_inventory_pages_keep_empty_observations_bounded() {
+        use crate::infrastructure::ipc::UserDecisionPage;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let empty = UserDecisionPage {
+            decisions: vec![],
+            next_cursor: None,
+        };
+        let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
+        assert_eq!(store.pending_page(None, empty_bytes).unwrap(), Ok(empty));
+        assert_eq!(
+            store.pending_page(None, empty_bytes - 1).unwrap(),
+            Err(UserDecisionPageError::PageTooSmall)
+        );
+    }
+
+    #[test]
+    fn human_inventory_pages_enforce_exact_byte_and_cursor_boundaries() {
+        use crate::infrastructure::ipc::{UserDecisionCursor, UserDecisionPage};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let first = item();
+        let mut second = item();
+        // JSON escaping must count toward the transport budget.
+        second.prompt = "\"\\\n".repeat(1024);
+        store.create(first.clone()).unwrap().unwrap();
+        store.create(second.clone()).unwrap().unwrap();
+        let cursor = store
+            .pending_page(None, 2048)
+            .unwrap()
+            .unwrap()
+            .next_cursor
+            .unwrap();
+        let first_page = UserDecisionPage {
+            decisions: vec![first.clone()],
+            next_cursor: Some(cursor.clone()),
+        };
+        let first_bytes = serde_json::to_vec(&first_page).unwrap().len();
+        assert_eq!(
+            store.pending_page(None, first_bytes).unwrap(),
+            Ok(first_page)
+        );
+        assert_eq!(
+            store.pending_page(None, first_bytes - 1).unwrap(),
+            Err(UserDecisionPageError::PageTooSmall)
+        );
+        let last_page = UserDecisionPage {
+            decisions: vec![second],
+            next_cursor: None,
+        };
+        let last_bytes = serde_json::to_vec(&last_page).unwrap().len();
+        assert_eq!(
+            store.pending_page(Some(&cursor), last_bytes).unwrap(),
+            Ok(last_page)
+        );
+        assert_eq!(
+            store.pending_page(Some(&cursor), last_bytes - 1).unwrap(),
+            Err(UserDecisionPageError::PageTooSmall)
+        );
+        for offset in [0, 2, usize::MAX] {
+            assert_eq!(
+                store
+                    .pending_page(
+                        Some(&UserDecisionCursor {
+                            offset,
+                            ..cursor.clone()
+                        }),
+                        last_bytes
+                    )
+                    .unwrap(),
+                Err(UserDecisionPageError::InvalidCursor)
+            );
+        }
+        assert_eq!(
+            store
+                .pending_page(
+                    Some(&UserDecisionCursor {
+                        revision: "old".into(),
+                        ..cursor.clone()
+                    }),
+                    last_bytes
+                )
+                .unwrap(),
+            Err(UserDecisionPageError::RevisionConflict)
+        );
+        store
+            .terminal(
+                first.owner.workspace_id,
+                first.decision_id,
+                UserDecisionStatus::Cancelled,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.pending_page(Some(&cursor), last_bytes).unwrap(),
+            Err(UserDecisionPageError::RevisionConflict)
+        );
+        std::fs::write(store.path(), "{").unwrap();
+        assert!(store.pending_page(None, last_bytes).is_err());
     }
 
     #[test]

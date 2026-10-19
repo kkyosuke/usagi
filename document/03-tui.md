@@ -987,6 +987,8 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   ときに 1 回だけ notice を出し、次に成功したらその抑止を解く。session lane の失敗は refresh を要求した完了経路の
   notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。PR lane の失敗表示は
   [PR modal と browser effect](#pr-modal-と-browser-effect) が正本である。
+- **decision 一覧は全ページを揃えてから反映する**。[一覧取得の契約](07-mcp.md#user-decision)に従い、途中で一覧が
+  変わった場合や通信に失敗した場合は直前の一覧と未読状態を保持し、次の観測で先頭から再取得する。
 
 ## frame 予算
 

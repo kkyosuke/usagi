@@ -1734,6 +1734,77 @@ fn production_cross_workspace_user_decision_reaches_its_agent_and_acks_only_owne
         &json!({"decision_id":decision.decision_id}),
     ));
     assert_eq!(received, replayed);
+    assert_large_decision_inventory_pages(&mut tui, &store, &decision, &foreign);
+}
+
+fn assert_large_decision_inventory_pages(
+    tui: &mut dyn DaemonClient,
+    store: &UserDecisionStore,
+    first: &UserDecision,
+    second: &UserDecision,
+) {
+    use std::collections::BTreeSet;
+    use usagi_core::infrastructure::ipc::{
+        ClientError, ErrorCode, UserDecisionCursor, UserDecisionPage,
+    };
+
+    let mut expected = BTreeSet::from([second.decision_id]);
+    for template in [first, second] {
+        for _ in 0..40 {
+            let mut question = template.clone();
+            question.decision_id = UserDecisionId::new();
+            question.idempotency_key = None;
+            question.prompt = "p".repeat(16 * 1024);
+            expected.insert(question.decision_id);
+            store.create(question).unwrap().unwrap();
+        }
+    }
+    let mut cursor: Option<UserDecisionCursor> = None;
+    let mut first_cursor = None;
+    let mut actual = BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let DaemonReply::Ok(body) = tui
+            .request(DaemonRequest::UserDecision {
+                action: TuiUserDecisionAction::ListAll,
+                payload: json!({ "cursor": cursor }),
+            })
+            .expect("each complete IPC envelope must fit the negotiated frame limit")
+        else {
+            panic!("expected a decision page")
+        };
+        let page: UserDecisionPage = serde_json::from_value(body).unwrap();
+        pages += 1;
+        assert!(pages <= expected.len(), "every page must advance");
+        for decision in page.decisions {
+            assert!(actual.insert(decision.decision_id), "duplicate decision");
+        }
+        if pages == 1 {
+            first_cursor.clone_from(&page.next_cursor);
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(pages >= 2, "the combined inventory exceeds one IPC frame");
+    assert_eq!(actual, expected);
+
+    let mut changed = second.clone();
+    changed.decision_id = UserDecisionId::new();
+    changed.idempotency_key = None;
+    store.create(changed).unwrap().unwrap();
+    let error = tui
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::ListAll,
+            payload: json!({ "cursor": first_cursor.unwrap() }),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, ClientError::Protocol(ref problem) if problem.code == ErrorCode::RevisionConflict),
+        "a changed inventory must invalidate earlier continuations"
+    );
+    assert!(store.events().unwrap().is_empty());
 }
 
 #[test]

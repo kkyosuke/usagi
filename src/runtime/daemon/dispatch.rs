@@ -6,6 +6,7 @@
 
 mod scratchpad;
 pub(super) mod session;
+mod user_decision_page;
 
 use session::{AgentDispatchRequest, authorize_delegation, dispatch_session_action};
 use usagi_core::domain::agent::{AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource};
@@ -1078,6 +1079,9 @@ pub(super) fn dispatch_user_decision(
         Ok((workspace, Some(owners)))
     });
     let response = owners.and_then(|(workspace, owners)| {
+        if list_all {
+            return user_decision_page::response(store, hello, &request_id, workspace, payload);
+        }
         let request_owners = owners.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
@@ -1140,12 +1144,9 @@ pub(super) fn dispatch_user_decision(
                     Ok(serde_json::json!(decision))
                 }
                 DispatchToolAction::UserDecisionList => {
-                    let decisions = if list_all {
-                        store.pending_all()
-                    } else {
-                        store.pending(workspace)
-                    }
-                    .map_err(|_| UserDecisionError::Terminal)?;
+                    let decisions = store
+                        .pending(workspace)
+                        .map_err(|_| UserDecisionError::Terminal)?;
                     let decisions = decisions
                         .into_iter()
                         .filter(|decision| {
