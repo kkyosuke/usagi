@@ -189,6 +189,8 @@ pub enum LiveTerminalAction {
     OpenWorkspaceSwitcher,
     /// Find open sessions, observed tabs, and existing commands (`Ctrl-O k`).
     OpenCommandPalette,
+    /// Search retained terminal output across open projects.
+    OpenOutputSearch,
     /// Open attention across all open projects (`Ctrl-O i`).
     OpenAttention,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
@@ -600,6 +602,12 @@ macro_rules! prefix_shortcut {
 /// is optional for every entry so users may keep holding Control after
 /// pressing the leader on any workspace surface.
 const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
+    with_help(
+        prefix_shortcut!(KeyCode::Char('/') => LiveTerminalAction::OpenOutputSearch),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O /",
+        "search retained terminal output",
+    ),
     with_help(
         prefix_shortcut!(KeyCode::Char('k'), legacy = 11 => LiveTerminalAction::OpenCommandPalette),
         PrefixHelpScope::Workspace,

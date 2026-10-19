@@ -726,6 +726,34 @@ impl TerminalSession {
         )
     }
 
+    /// Validate the exact searched snapshot before revealing its cells.
+    #[must_use]
+    pub fn search_selection(
+        &self,
+        source: &usagi_core::usecase::terminal_search::TerminalSearchResult,
+        found: &usagi_core::usecase::terminal_search::OutputMatch,
+        query: &str,
+    ) -> Option<TerminalSelection> {
+        if self.terminal() != &source.terminal
+            || self.cursor != source.output_offset
+            || u32::from(self.geometry.rows) != source.geometry.rows
+            || u32::from(self.geometry.cols) != source.geometry.cols
+            || self.display_row_origin() != source.origin
+            || !self.display_buffer().matches(source.buffer)
+        {
+            return None;
+        }
+        let mut selection = self.begin_selection(TerminalPoint {
+            row: found.row,
+            column: found.column,
+        });
+        selection.extend(TerminalPoint {
+            row: found.row,
+            column: found.end_column,
+        });
+        (selection.text() == query).then_some(selection)
+    }
+
     /// Drain visual row-coordinate changes accumulated while applying output.
     pub fn take_retained_row_motions(&mut self) -> Vec<RetainedRowMotion> {
         std::mem::take(&mut self.retained_row_motions)
@@ -1662,6 +1690,50 @@ mod tests {
             end_offset: start + data.len() as u64,
             data: data.to_vec(),
         }
+    }
+
+    #[test]
+    fn output_search_selection_rejects_changed_snapshot_evicted_rows_and_replaced_terminal() {
+        use usagi_core::usecase::terminal_search::{
+            SearchBudget, SearchTerminalKind, TerminalSearchResult,
+        };
+        let mut port = FakeTerminalPort {
+            attach: vec![Ok(attach(1, 20, b"before\r\nerror\r\nafter", false))],
+            ..FakeTerminalPort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let mut screen = VtScreen::new(3, 20);
+        screen.advance(b"before\r\nerror\r\nafter");
+        let mut source = TerminalSearchResult::unavailable(
+            session.terminal().clone(),
+            SearchTerminalKind::Agent,
+        );
+        source.output_offset = 20;
+        source.search(&screen.checkpoint(), "error", &mut SearchBudget::default());
+        let found = source.matches[0].clone();
+        let selected = session.search_selection(&source, &found, "error").unwrap();
+        assert_eq!(selected.text(), "error");
+        for variant in 0..7 {
+            let mut changed = source.clone();
+            match variant {
+                0 => changed.output_offset += 1,
+                1 => changed.geometry.rows += 1,
+                2 => changed.geometry.cols += 1,
+                3 => changed.origin += 1,
+                4 => changed.buffer = usagi_core::usecase::vt_screen::ActiveBuffer::Alternate,
+                5 => changed.terminal.terminal_id = TerminalId::new(),
+                _ => changed.terminal.daemon_generation = DaemonGeneration::new(),
+            }
+            assert!(
+                session
+                    .search_selection(&changed, &found, "error")
+                    .is_none()
+            );
+        }
+        assert!(session.search_selection(&source, &found, "other").is_none());
+        assert!(session.clear_for_user());
+        assert!(session.search_selection(&source, &found, "error").is_none());
     }
 
     #[test]

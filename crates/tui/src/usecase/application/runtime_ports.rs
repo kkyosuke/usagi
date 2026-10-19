@@ -62,6 +62,17 @@ pub trait DesktopNotificationPort {
 
 /// Read-only daemon lane used to observe other projects in the Garden.
 pub trait GardenInventoryPort: Send {
+    /// Search retained terminal output without attaching or sending input.
+    /// # Errors
+    /// Returns feedback when the workspace snapshot cannot be read.
+    fn search_terminal_output(
+        &mut self,
+        _workspace: WorkspaceId,
+        _query: &str,
+    ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
+        Err("Terminal output search is unavailable".into())
+    }
+
     /// Returns the safe Agent observation for `workspace`, with interrupted
     /// history filtered through the saved display intent and tab projection.
     /// Refresh that intent on every observation so another TUI's dismissal or

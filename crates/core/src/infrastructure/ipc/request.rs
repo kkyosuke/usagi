@@ -123,6 +123,11 @@ pub enum DaemonRequest {
     AgentWorkspaceObservation { workspace: WorkspaceId },
     /// Human-only read of attention in an already adopted workspace.
     WorkspaceAttention { workspace: WorkspaceId },
+    /// Human-only bounded search of retained terminal screens; no attachment or input.
+    SearchTerminalOutput {
+        workspace: WorkspaceId,
+        query: String,
+    },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.
     DiagnoseAgents {

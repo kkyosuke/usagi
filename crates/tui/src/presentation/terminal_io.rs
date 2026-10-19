@@ -432,6 +432,7 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::KeyboardHelp
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
+        | LiveTerminalAction::OpenOutputSearch
         | LiveTerminalAction::OpenCommandPalette
         | LiveTerminalAction::OpenAttention
         | LiveTerminalAction::ActivateWorkspace(_)

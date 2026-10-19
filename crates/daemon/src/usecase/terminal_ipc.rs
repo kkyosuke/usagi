@@ -353,6 +353,19 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         self.coordinator.inventory(scope)
     }
 
+    /// All retained generic terminal identities in an adopted workspace.
+    #[must_use]
+    pub fn search_targets(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Vec<TerminalRef> {
+        self.coordinator
+            .cache_cleanup_activity(workspace)
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect()
+    }
+
     /// Captures one terminal's semantic screen without attaching, resizing, or
     /// creating a subscription.
     ///
@@ -2516,6 +2529,11 @@ mod tests {
         let resized = runtime.pty.resized.clone();
         let written = runtime.pty.writes.clone();
 
+        assert_eq!(
+            runtime.search_targets(terminal.workspace_id),
+            vec![terminal.clone()]
+        );
+        assert!(runtime.search_targets(WorkspaceId::new()).is_empty());
         let snapshot = runtime.inspect(&terminal).unwrap();
 
         assert_eq!(snapshot.terminal, terminal);
