@@ -1737,6 +1737,35 @@ mod tests {
     }
 
     #[test]
+    fn output_search_selection_after_emoji_uses_the_snapshot_cell_columns() {
+        use usagi_core::usecase::terminal_search::{
+            SearchBudget, SearchTerminalKind, TerminalSearchResult,
+        };
+        let output = "👍🏽 error";
+        let offset = output.len() as u64;
+        let mut port = FakeTerminalPort {
+            attach: vec![Ok(attach(1, offset, output.as_bytes(), false))],
+            ..FakeTerminalPort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let mut screen = VtScreen::new(3, 20);
+        screen.advance(output.as_bytes());
+        let mut source = TerminalSearchResult::unavailable(
+            session.terminal().clone(),
+            SearchTerminalKind::Agent,
+        );
+        source.output_offset = offset;
+        source.search(&screen.checkpoint(), "error", &mut SearchBudget::default());
+        let selection = session
+            .search_selection(&source, &source.matches[0], "error")
+            .unwrap();
+        assert_eq!(selection.anchor(), TerminalPoint { row: 0, column: 5 });
+        assert_eq!(selection.focus(), TerminalPoint { row: 0, column: 9 });
+        assert_eq!(selection.text(), "error");
+    }
+
+    #[test]
     fn projection_key_gates_terminal_row_and_link_scan_across_one_thousand_idle_ticks() {
         let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 20, b"https://example.com", false))],

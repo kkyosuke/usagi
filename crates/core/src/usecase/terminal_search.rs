@@ -129,12 +129,12 @@ impl TerminalSearchResult {
                     self.limited = true;
                     break;
                 }
-                let column = unicode_width::UnicodeWidthStr::width(&text[..byte]);
-                let width = unicode_width::UnicodeWidthStr::width(found);
+                let column = cell_column(cells, byte);
+                let end_column = cell_column(cells, byte + found.len()).saturating_sub(1);
                 self.matches.push(OutputMatch {
                     row,
                     column,
-                    end_column: column.saturating_add(width.saturating_sub(1)),
+                    end_column,
                     before: row
                         .checked_sub(1)
                         .map_or_else(String::new, |row| context(&row_text(&screen, row))),
@@ -149,6 +149,21 @@ impl TerminalSearchResult {
             }
         }
     }
+}
+
+// String display width can combine adjacent emoji into one grapheme. The VT
+// stores each scalar in its own cells, so use those cells as the column authority.
+fn cell_column(cells: &[super::vt_screen::Cell], mut byte: usize) -> usize {
+    for (column, cell) in cells.iter().enumerate() {
+        if cell.continuation() {
+            continue;
+        }
+        if byte == 0 {
+            return column;
+        }
+        byte -= cell.ch().len_utf8();
+    }
+    cells.len()
 }
 
 fn cells(screen: &VtScreen, row: usize) -> &[super::vt_screen::Cell] {

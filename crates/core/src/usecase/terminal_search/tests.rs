@@ -33,6 +33,17 @@ fn searches_semantic_cells_with_context_and_unicode_columns() {
 }
 
 #[test]
+fn match_columns_follow_the_terminal_cells_after_emoji_sequences() {
+    let mut screen = VtScreen::new(2, 10);
+    screen.advance("👍🏽 error".as_bytes());
+    let mut result = result();
+    result.search(&screen.checkpoint(), "error", &mut SearchBudget::default());
+    assert_eq!(screen.grid()[0][5].ch(), 'e');
+    assert_eq!(result.matches[0].column, 5);
+    assert_eq!(result.matches[0].end_column, 9);
+}
+
+#[test]
 fn invalid_queries_and_checkpoints_are_not_empty_successes() {
     for query in ["", "\n", &"a".repeat(QUERY_MAX + 1)] {
         assert!(!valid_query(query));
