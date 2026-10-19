@@ -44,6 +44,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 |---|---|
 | 複数の作業が同じ checkout で衝突する | session ごとに独立した worktree を作る |
 | Agent と terminal が散らばり、状態を追いにくい | workspace をまたいで TUI から一覧・操作する |
+| session・タブ・操作の場所を探すのに時間がかかる | [横断コマンドパレット](document/03-tui.md#横断コマンドパレット) で検索して開く |
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 | session ごとの生成物を探しづらい | session 行の [Artifacts](document/03-tui.md#artifacts) から閲覧でき、外部表示の失敗・未確認も一覧内で確認できる。削除後の保管済み成果物も検索できる |

@@ -6,6 +6,7 @@
 //! controller.
 
 mod attention;
+pub(crate) mod palette;
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
@@ -50,6 +51,7 @@ pub struct WorkspaceSlot {
     attention: Option<usagi_core::domain::attention::WorkspaceAttention>,
     attention_stale: bool,
     attention_observed_at: Option<std::time::Instant>,
+    palette_tabs: Vec<palette::CachedTab>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +146,7 @@ impl WorkspaceSlot {
             attention: None,
             attention_stale: false,
             attention_observed_at: None,
+            palette_tabs: Vec::new(),
         }
     }
 
@@ -178,6 +181,7 @@ enum DeckOverlay {
     Add(AddWorkspace),
     Switcher(ProjectSwitcher),
     Attention(attention::AttentionList),
+    Palette(palette::Palette),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,6 +195,11 @@ enum AddWorkspaceMode {
 pub enum OverlayIntent {
     Stay,
     Cancel,
+    PaletteVisit {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        action: palette::Action,
+    },
     Add(Vec<PathBuf>),
     Activate(PathBuf),
     Visit {
@@ -229,6 +238,7 @@ pub struct WorkspaceDeck {
     icon_mode: IconMode,
     attention_cursor: usize,
     pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
+    pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -254,6 +264,7 @@ impl WorkspaceDeck {
             icon_mode: IconMode::default(),
             attention_cursor: 0,
             pending_attention: None,
+            pending_palette: None,
         }
     }
 
@@ -369,6 +380,7 @@ impl WorkspaceDeck {
         {
             let focused_session = slot.focused_session;
             if slot.workspace_id != snapshot.workspace_id {
+                slot.palette_tabs.clear();
                 slot.attention = None;
                 slot.attention_observed_at = None;
                 slot.attention_stale = false;
@@ -448,6 +460,7 @@ impl WorkspaceDeck {
             DeckOverlay::Add(add) => add.handle(key),
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
             DeckOverlay::Attention(list) => list.handle(key, &self.slots),
+            DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
         }
     }
 
@@ -459,6 +472,9 @@ impl WorkspaceDeck {
         height: usize,
         width: usize,
     ) -> OverlayIntent {
+        if let Some(DeckOverlay::Palette(palette)) = self.overlay.as_mut() {
+            return palette.handle(key, &self.slots, palette::page_size(height));
+        }
         if let Some(DeckOverlay::Attention(list)) = self.overlay.as_mut() {
             let intent = attention::handle_input(
                 list,
@@ -505,6 +521,13 @@ impl WorkspaceDeck {
         }
         if self.pending_closeup_path.as_deref() == Some(path) {
             self.pending_closeup_path = None;
+        }
+        if self
+            .pending_palette
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == path)
+        {
+            self.pending_palette = None;
         }
     }
 
@@ -1219,6 +1242,7 @@ pub fn render_overlay(
     match &deck.overlay {
         None => base.to_vec(),
         Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
+        Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {
             render_switcher(deck, switcher, height, width, base)
@@ -1377,7 +1401,11 @@ mod tests {
         snapshot_with_sessions(name, path, &[session])
     }
 
-    fn snapshot_with_sessions(name: &str, path: &str, sessions: &[&str]) -> WorkspaceSnapshot {
+    pub(super) fn snapshot_with_sessions(
+        name: &str,
+        path: &str,
+        sessions: &[&str],
+    ) -> WorkspaceSnapshot {
         let state = WorkspaceState {
             sessions: sessions
                 .iter()

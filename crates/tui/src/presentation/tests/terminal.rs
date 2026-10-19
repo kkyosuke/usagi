@@ -959,6 +959,7 @@ fn right_pane_click_selection_reaches_the_runtime_tab_owner() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The same durable fixture covers tab-strip and palette selection, including refused writes.
 fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
@@ -1032,6 +1033,26 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
 
     select_right_pane_tab(&mut ui, &mut runtime, 1);
 
+    for tab in runtime.palette_tabs() {
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &tab.action,
+        )
+        .unwrap();
+    }
+    assert!(
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut ui,
+            &mut runtime,
+            WorkspaceId::new(),
+            &crate::presentation::workspace_deck::palette::Action::Workspace,
+        )
+        .is_err()
+    );
+    select_right_pane_tab(&mut ui, &mut runtime, 1);
+
     assert_eq!(runtime.focused_terminal(), Some(second.clone()));
     assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
         mutation,
@@ -1061,6 +1082,17 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
     select_right_pane_tab(&mut failing_ui, &mut runtime, 0);
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let action = runtime.palette_tabs()[0].action.clone();
+    assert!(
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut failing_ui,
+            &mut runtime,
+            workspace,
+            &action,
+        )
+        .is_err()
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(runtime.focused_terminal(), Some(second));
 }
 

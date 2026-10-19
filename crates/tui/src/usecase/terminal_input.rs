@@ -187,6 +187,8 @@ pub enum LiveTerminalAction {
     OpenWorkspace,
     /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
     OpenWorkspaceSwitcher,
+    /// Find open sessions, observed tabs, and existing commands (`Ctrl-O k`).
+    OpenCommandPalette,
     /// Open attention across all open projects (`Ctrl-O i`).
     OpenAttention,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
@@ -598,6 +600,12 @@ macro_rules! prefix_shortcut {
 /// is optional for every entry so users may keep holding Control after
 /// pressing the leader on any workspace surface.
 const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
+    with_help(
+        prefix_shortcut!(KeyCode::Char('k'), legacy = 11 => LiveTerminalAction::OpenCommandPalette),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O k",
+        "find sessions, tabs and commands",
+    ),
     prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::KeyboardHelp),
     with_help(
         prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),

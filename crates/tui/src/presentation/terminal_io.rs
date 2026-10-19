@@ -432,6 +432,7 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::KeyboardHelp
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
+        | LiveTerminalAction::OpenCommandPalette
         | LiveTerminalAction::OpenAttention
         | LiveTerminalAction::ActivateWorkspace(_)
         | LiveTerminalAction::PreviousWorkspace
@@ -912,6 +913,34 @@ pub(super) fn select_right_pane_tab(
             false
         }
     }
+}
+
+/// Commit the same durable Agent selection used by the tab strip before moving
+/// the visible focus. Searching and visiting interrupted history never resumes it.
+pub(super) fn visit_palette_target(
+    ui: &mut WorkspaceIoRuntime,
+    runtime: &mut WorkspaceRuntime,
+    workspace: WorkspaceId,
+    action: &super::workspace_deck::palette::Action,
+) -> Result<(), &'static str> {
+    runtime.validate_palette_action(workspace, action)?;
+    if let super::workspace_deck::palette::Action::Tab {
+        target, selection, ..
+    } = action
+        && ui.has_agent_intent_for(target.session_id())
+    {
+        let continuation = match selection {
+            TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+            TabSelection::Interrupted(continuation) => Some(*continuation),
+            TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+        };
+        ui.mutate_agent_intent(AgentTabIntentMutation::Select {
+            session_id: target.session_id(),
+            continuation,
+        })
+        .map_err(|_| "Could not save tab selection; try again.")?;
+    }
+    runtime.activate_palette_action(workspace, action)
 }
 
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。

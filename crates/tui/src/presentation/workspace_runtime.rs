@@ -13,6 +13,8 @@
 //! unit-testable while the live-terminal machinery stays in the composition
 //! shell.
 
+mod palette;
+
 use std::collections::BTreeMap;
 
 use usagi_core::domain::agent::{AgentInventory, AgentResumeRelation};
