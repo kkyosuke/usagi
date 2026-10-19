@@ -92,6 +92,35 @@ fn disappearing_selection_never_falls_through_to_a_same_name_replacement() {
 }
 
 #[test]
+fn first_observed_result_is_selected_once_and_never_retargeted_after_removal() {
+    let mut deck = deck();
+    assert!(!deck.refresh_command_palette_selection());
+    deck.slots[1].sessions[0].projected.lifecycle = SessionLifecycle::Creating;
+    deck.open_command_palette();
+    deck.handle_overlay_key(&Key::Paste("Session duplicate beta".into()));
+    assert!(!deck.refresh_command_palette_selection());
+    assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
+
+    deck.slots[1].sessions[0].projected.lifecycle = SessionLifecycle::Available;
+    let observed = deck.slots[1].sessions[0].projected.id;
+    assert!(deck.refresh_command_palette_selection());
+    assert!(!deck.refresh_command_palette_selection());
+    assert!(matches!(
+        deck.handle_overlay_key(&Key::Enter),
+        OverlayIntent::PaletteVisit { action: Action::Session(id), .. } if id == observed
+    ));
+
+    deck.slots[1].sessions[0].projected.id = SessionId::new();
+    assert!(!deck.refresh_command_palette_selection());
+    assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
+    assert!(
+        render_overlay(&deck, 24, 100, &[])
+            .join("\n")
+            .contains("no longer available")
+    );
+}
+
+#[test]
 fn query_editing_is_bounded_unicode_aware_and_swallows_unhandled_keys() {
     let deck = deck();
     let mut palette = Palette::default();

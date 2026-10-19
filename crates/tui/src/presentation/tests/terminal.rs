@@ -1097,6 +1097,54 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
 }
 
 #[test]
+fn palette_root_shell_selection_preserves_the_directors_saved_conversation() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let root_agent = scoped_terminal_ref(workspace, None);
+    let shell = scoped_terminal_ref(workspace, None);
+    let continuation = AgentContinuationRef::new();
+    let mut intent = AgentTabIntent::empty(workspace);
+    intent.apply(AgentTabIntentMutation::Upsert {
+        session_id: None,
+        continuation,
+        terminal: root_agent,
+        select: true,
+    });
+    let durable = Arc::new(Mutex::new(intent));
+    let mutations = Arc::new(Mutex::new(Vec::new()));
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![]);
+    let target = Target::Root(workspace);
+    let operation = OperationId::new();
+    let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+    let _ = runtime.complete_pane(target, operation, shell.clone());
+    let action = runtime.palette_tabs()[0].action.clone();
+
+    crate::presentation::terminal_io::visit_palette_target(
+        &mut ui,
+        &mut runtime,
+        workspace,
+        &action,
+    )
+    .unwrap();
+
+    assert_eq!(runtime.focused_terminal(), Some(shell));
+    assert_eq!(
+        durable.lock().unwrap().targets[0].selected,
+        Some(continuation)
+    );
+    assert!(mutations.lock().unwrap().is_empty());
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // One barrier fixture keeps both panes' IO in sequence.
 fn a_blocked_pane_launch_keeps_every_live_pane_streaming() {
     let workspace = WorkspaceId::new();

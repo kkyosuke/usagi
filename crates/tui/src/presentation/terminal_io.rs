@@ -7,7 +7,7 @@ use super::{
     AgentTabIntentMutation, AppEvent, AppKey, BrowserOpener, ExactAgentResume,
     ExternalTerminalPort, FRAME_EVENT_BUDGET, Geometry, Key, LiveTerminalAction,
     LiveTerminalControls, Notice, OperationId, PANE_LAUNCH_BUSY, PANE_LAUNCH_FIRST,
-    PANE_LAUNCH_QUEUE_LIMIT, PANE_LAUNCH_UNADMITTED, PANE_LAUNCH_WORKER_FAILED,
+    PANE_LAUNCH_QUEUE_LIMIT, PANE_LAUNCH_UNADMITTED, PANE_LAUNCH_WORKER_FAILED, PaneKind,
     PaneLaunchCommandPort, PasteMode, Path, PointerEvent, PointerKind, PointerRelease, SessionId,
     TabSelection, Target, Terminal, TerminalRef, TerminalViewProjection, WHEEL_LINES,
     WorkspaceDrawerFocus, WorkspaceId, WorkspaceIoRuntime, WorkspaceRuntime,
@@ -925,8 +925,13 @@ pub(super) fn visit_palette_target(
 ) -> Result<(), &'static str> {
     runtime.validate_palette_action(workspace, action)?;
     if let super::workspace_deck::palette::Action::Tab {
-        target, selection, ..
+        target,
+        selection,
+        kind,
     } = action
+        // Root Shell and Director keep independent selections. Choosing a shell
+        // must not clear the Director's durable conversation selection.
+        && (*kind == PaneKind::Agent || target.session_id().is_some())
         && ui.has_agent_intent_for(target.session_id())
     {
         let continuation = match selection {

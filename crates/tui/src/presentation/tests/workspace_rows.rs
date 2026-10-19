@@ -2426,7 +2426,8 @@ fn command_palette_owns_text_paste_and_control_input_over_a_live_terminal() {
     let mut deck = WorkspaceDeck::new(&snapshot);
     let mut inner = FakeTerminal::with_keys(&[
         Key::Live(LiveTerminalAction::OpenCommandPalette),
-        Key::Paste("Tab Terminal".into()),
+        // The ordinal excludes fuzzy command matches before the tab is observed.
+        Key::Paste("Tab Terminal 1".into()),
         Key::Other,
         Key::Enter,
         Key::Live(LiveTerminalAction::OpenCommandPalette),

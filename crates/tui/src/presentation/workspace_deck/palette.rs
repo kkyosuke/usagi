@@ -327,6 +327,20 @@ impl WorkspaceDeck {
         self.notice = None;
     }
 
+    /// Select a first result when asynchronous observation fills an empty list.
+    /// Capture its identity before drawing; a vanished selection never falls
+    /// through to a different result on the next Enter.
+    pub(crate) fn refresh_command_palette_selection(&mut self) -> bool {
+        let Some(DeckOverlay::Palette(palette)) = self.overlay.as_mut() else {
+            return false;
+        };
+        if palette.selected.is_some() {
+            return false;
+        }
+        palette.select_first(&self.slots);
+        palette.selected.is_some()
+    }
+
     pub(crate) fn update_palette_tabs(&mut self, runtime: &WorkspaceRuntime) {
         if let Some(slot) = self
             .slots

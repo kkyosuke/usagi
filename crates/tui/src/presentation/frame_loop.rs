@@ -1289,6 +1289,11 @@ pub(super) fn drive_workspace_controller(
             deck.update_palette_tabs(&runtime);
             palette_tab_revision = Some(tab_revision);
         }
+        if deck.refresh_command_palette_selection() {
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+        }
         // Reflux daemon metrics / git diffs through the backend drain instead of
         // polling the port inline: the shell folds the updates into its own
         // projection cache, so the material does not ride on the IO runtime.
