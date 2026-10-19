@@ -1281,6 +1281,43 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Validate Agent admission before committing its durable display intent.
+    pub(super) fn accepts_agent_completion(
+        &self,
+        target: Target,
+        operation: OperationId,
+        terminal: &TerminalRef,
+    ) -> bool {
+        terminal_belongs_to_target(terminal, target, self.state.workspace())
+            && self.panes.pane(target).is_some_and(|pane| {
+                pane.tabs().iter().any(|tab| {
+                    matches!(tab, PaneTab::Pending(pending)
+                        if pending.operation == operation && pending.kind == PaneKind::Agent)
+                })
+            })
+    }
+
+    /// Apply an admitted Agent after its display intent commits. A root launch
+    /// selects the new conversation even after consumed Starting keys, while a
+    /// foreground Shell keeps its own tab and input focus.
+    pub(super) fn complete_agent_pane(
+        &mut self,
+        target: Target,
+        operation: OperationId,
+        terminal: TerminalRef,
+    ) -> Vec<PaneRegistryEffect> {
+        if !matches!(target, Target::Root(_)) {
+            return self.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+        }
+        self.pane_focus_at_request.remove(&operation);
+        let mut effects = self.complete_pane(target, operation, terminal.clone());
+        self.root_agent_selection = Some(TabSelection::Live(terminal.clone()));
+        if self.state.workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Terminal) {
+            effects.extend(self.focus_terminal(target, terminal));
+        }
+        effects
+    }
+
     /// Whether the completion for `operation` is still allowed to select its
     /// pane. Callers use this preview when durable display intent must commit
     /// before the pending tab is promoted into visible runtime state.

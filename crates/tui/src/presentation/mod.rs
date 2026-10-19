@@ -1610,7 +1610,13 @@ fn apply_agent_launch_completion(
     let Some(target) = pending_targets.remove(&operation) else {
         return;
     };
-    let admission = match result {
+    let admission = match result.and_then(|admission| {
+        if runtime.accepts_agent_completion(target, operation, &admission.terminal) {
+            Ok(admission)
+        } else {
+            Err("daemon returned an Agent outside the pending launch".to_owned())
+        }
+    }) {
         Ok(admission) => admission,
         Err(message) => {
             let _ = runtime.fail_pane(target, operation, message.clone());
@@ -1623,19 +1629,16 @@ fn apply_agent_launch_completion(
     if let Some(continuation) = admission.continuation {
         let select =
             matches!(target, Target::Root(_)) || runtime.pane_completion_will_focus(operation);
-        match ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
+        if let Err(error) = ui.mutate_agent_intent(AgentTabIntentMutation::Upsert {
             session_id: target.session_id(),
             continuation,
             terminal: terminal.clone(),
             select,
         }) {
-            Ok(()) => {
-                let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
-            }
-            Err(error) => {
-                let _ = runtime.fail_pane(target, operation, error.safe_message().to_owned());
-                surface_agent_tab_intent_error(runtime, error);
-            }
+            let _ = runtime.fail_pane(target, operation, error.safe_message().to_owned());
+            surface_agent_tab_intent_error(runtime, error);
+            complete_director_launch(runtime, target, operation, false);
+            return;
         }
     } else if matches!(target, Target::Root(_)) && ui.agent_tab_intent.is_some() {
         let _ = runtime.fail_pane(
@@ -1643,9 +1646,10 @@ fn apply_agent_launch_completion(
             operation,
             "daemon did not return a root Agent conversation".to_owned(),
         );
-    } else {
-        let _ = runtime.complete_pane_focus_if_uninterrupted(target, operation, terminal);
+        complete_director_launch(runtime, target, operation, false);
+        return;
     }
+    let _ = runtime.complete_agent_pane(target, operation, terminal);
     complete_director_launch(runtime, target, operation, true);
 }
 

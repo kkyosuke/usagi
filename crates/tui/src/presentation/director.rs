@@ -216,6 +216,28 @@ pub(super) fn director_new_projection(runtime: &WorkspaceRuntime) -> DirectorNew
     }
 }
 
+fn organization_status(
+    lifecycle: Option<usagi_core::domain::session_lifecycle::SessionLifecycle>,
+    agent: Option<usagi_core::domain::agent::AgentStatus>,
+) -> &'static str {
+    use usagi_core::domain::agent::AgentStatus;
+    use usagi_core::domain::session_lifecycle::SessionLifecycle;
+    match lifecycle {
+        Some(SessionLifecycle::Creating) => "creating",
+        Some(SessionLifecycle::Initializing) => "initializing",
+        Some(SessionLifecycle::Deleting) => "deleting",
+        Some(SessionLifecycle::Failed) => "failed",
+        Some(SessionLifecycle::Available) | None => match agent {
+            Some(AgentStatus::Starting) => "starting",
+            Some(AgentStatus::Running) => "running",
+            Some(AgentStatus::Idle) => "waiting",
+            Some(AgentStatus::Exited) => "stopped",
+            Some(AgentStatus::Failed) => "failed",
+            None => "ready",
+        },
+    }
+}
+
 pub(super) fn director_organization(
     ui: &WorkspaceIoRuntime,
     continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
@@ -278,14 +300,13 @@ pub(super) fn director_organization(
                 || "• Executor".to_owned(),
                 |role| super::views::workspace::role_identity(role.as_str()),
             );
-        let status = match roles.get(session_id).and_then(|role| role.agent_status) {
-            Some(usagi_core::domain::agent::AgentStatus::Starting) => "starting",
-            Some(usagi_core::domain::agent::AgentStatus::Running) => "running",
-            Some(usagi_core::domain::agent::AgentStatus::Idle) => "waiting",
-            Some(usagi_core::domain::agent::AgentStatus::Exited) => "stopped",
-            Some(usagi_core::domain::agent::AgentStatus::Failed) => "failed",
-            None => "ready",
-        };
+        let status = organization_status(
+            ui.workspace
+                .session_lifecycles()
+                .get(session_id)
+                .map(|projection| projection.lifecycle),
+            roles.get(session_id).and_then(|role| role.agent_status),
+        );
         let row = DirectorOrganizationRow {
             depth: 0,
             label: format!("{role_identity} · {}", session.name),
