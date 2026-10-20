@@ -14,6 +14,10 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -125,6 +129,7 @@ fn memory_file_name(name: &str) -> Result<String> {
 /// File-based persistence rooted at a repository's `.usagi/memory/` directory.
 pub struct MemoryStore {
     inner: MarkdownStore<MemoryEntry>,
+    lock_cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl MemoryStore {
@@ -133,7 +138,15 @@ impl MemoryStore {
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
             inner: MarkdownStore::new(repo_root.as_ref().join(STATE_DIR).join(MEMORY_DIR_NAME)),
+            lock_cancellation: None,
         }
+    }
+
+    /// Allow a background reader to cancel waits for the store lock.
+    #[must_use]
+    pub fn with_lock_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.lock_cancellation = Some(cancelled);
+        self
     }
 
     #[must_use]
@@ -158,7 +171,11 @@ impl MemoryStore {
     ///
     /// Returns an error when the lock cannot be acquired.
     pub fn lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire(self.dir())
+        StoreLock::acquire_cancellable(self.dir(), || {
+            self.lock_cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        })
     }
 
     /// Read and parse every memory markdown file, sorted by name.

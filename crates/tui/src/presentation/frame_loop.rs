@@ -734,6 +734,10 @@ pub(super) fn drive_workspace_controller(
     let session_lifecycles = snapshot.session_lifecycles.clone();
     let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
+    let mut knowledge_port = Some(backend_factory.knowledge_search(&root_cwd));
+    let (knowledge_sender, knowledge_completions) =
+        mpsc::channel::<super::knowledge_search::Completion>();
+    let mut knowledge_job: Option<super::knowledge_search::Job> = None;
     let composition = backend_factory.create(&snapshot, host);
     let session_catalogs = composition.session_catalogs;
     let mut backend = composition.backend;
@@ -1076,6 +1080,16 @@ pub(super) fn drive_workspace_controller(
             if selected || ui.agent_inventory().is_some() {
                 pending_garden_agent = None;
             }
+        }
+        if let Some(job) = &knowledge_job {
+            job.cancel_unless_current(deck.knowledge_search_token());
+        }
+        for completion in knowledge_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            if deck.apply_knowledge_response(completion.token, completion.response) {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            knowledge_port = Some(completion.port);
+            knowledge_job = None;
         }
         for completion in output_completions.try_iter().take(FRAME_EVENT_BUDGET) {
             if deck.apply_output_search(completion.token, completion.responses) {
@@ -1434,6 +1448,19 @@ pub(super) fn drive_workspace_controller(
             frame_source_key = Some(next_source_key);
             frame_material_key = Some(next_frame_key);
         }
+        if knowledge_job.is_none()
+            && knowledge_port.is_some()
+            && let Some((token, request)) = deck.take_knowledge_request()
+        {
+            knowledge_job = Some(super::knowledge_search::spawn(
+                knowledge_port
+                    .take()
+                    .expect("search admission checked the port"),
+                token,
+                request,
+                knowledge_sender.clone(),
+            ));
+        }
         // Attention is always observed; detailed Agent inventory is only read
         // while Garden is visible. Both use the same bounded background lane.
         if garden_inventory.is_some()
@@ -1560,6 +1587,13 @@ pub(super) fn drive_workspace_controller(
             || matches!(bar_target, Some(ProjectBarTarget::Attention))
         {
             deck.open_attention();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenKnowledgeSearch)) {
+            deck.open_knowledge_search();
             drawn_material = None;
             frame_source_key = None;
             frame_material_key = None;

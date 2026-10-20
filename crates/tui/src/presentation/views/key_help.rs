@@ -597,7 +597,11 @@ mod tests {
 
     #[test]
     fn workspace_base_help_includes_launchers_but_modal_help_does_not() {
-        let base = render_over(30, 100, &vec![String::new(); 30], help(Context::Switch)).join("\n");
+        let mut state = help(Context::Switch);
+        let first = render_over(30, 100, &vec![String::new(); 30], state).join("\n");
+        // Workspace launchers remain reachable when search shortcuts fill the first page.
+        state.scroll_end();
+        let last = render_over(30, 100, &vec![String::new(); 30], state).join("\n");
         let modal = render_over(
             30,
             100,
@@ -606,7 +610,9 @@ mod tests {
         )
         .join("\n");
 
-        assert!(base.contains("Pull Requests / Preview"));
+        assert!(first.contains("search Issue and Memory"));
+        assert!(first.contains("search retained terminal output"));
+        assert!(last.contains("Pull Requests / Preview"));
         assert!(modal.contains("activate project"));
         assert!(!modal.contains("Pull Requests / Preview"));
     }

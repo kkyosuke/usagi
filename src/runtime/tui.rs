@@ -1169,6 +1169,13 @@ fn project_backend_session_roots(snapshot: &WorkspaceSnapshot) -> Vec<(SessionId
 }
 
 impl ControllerBackendFactory for ProductionBackendFactory {
+    fn knowledge_search(
+        &self,
+        root: &Path,
+    ) -> Box<dyn usagi_tui::usecase::application::knowledge_search::KnowledgeSearchPort> {
+        Box::new(super::knowledge_search::KnowledgeSearch::new(root))
+    }
+
     fn client_build(&self) -> Option<usagi_core::infrastructure::ipc::BuildIdentity> {
         Some(crate::runtime::daemon::current_build())
     }
@@ -4986,6 +4993,18 @@ mod tests {
         assert_eq!(
             version_detail(VersionProbeResult::EmptyOutput),
             Err("version output is empty".to_owned())
+        );
+    }
+
+    #[test]
+    fn knowledge_search_factory_scopes_the_reader_to_the_current_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = ProductionBackendFactory::default();
+        let mut port = factory.knowledge_search(tmp.path());
+        assert!(
+            port.search("", std::sync::Arc::default())
+                .documents
+                .is_empty()
         );
     }
 

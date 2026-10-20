@@ -16,6 +16,7 @@ mod flow_steps;
 pub mod frame;
 mod frame_loop;
 mod garden;
+mod knowledge_search;
 pub mod layouts;
 pub mod live_terminal;
 mod output_search;
@@ -503,6 +504,14 @@ impl SessionCatalogPort for UnavailableSessionCatalogPort {
 
 /// Single factory used by direct launch and every screen-graph workspace entry.
 pub trait ControllerBackendFactory {
+    /// Dedicated workspace-local reader, moved off the frame thread.
+    fn knowledge_search(
+        &self,
+        _root: &Path,
+    ) -> Box<dyn crate::usecase::application::knowledge_search::KnowledgeSearchPort> {
+        Box::new(crate::usecase::application::knowledge_search::UnavailableKnowledgeSearch)
+    }
+
     /// Process-level motion preference resolved by the composition root. Fakes
     /// keep full motion unless a test opts in explicitly.
     fn garden_reduced_motion(&self) -> bool {

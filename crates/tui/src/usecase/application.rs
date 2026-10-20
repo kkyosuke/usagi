@@ -40,6 +40,8 @@ pub mod environment_source;
 /// interrupted Agent runtime を tab へ投影し、tab 単位の明示 resume を検証する
 /// 純粋 reducer（#510）。
 pub mod interrupted_tab;
+/// Human Issue / Memory search contracts.
+pub mod knowledge_search;
 /// Daemon metrics / Git observation ports and application-owned polling flow.
 pub mod metrics;
 /// Single-flight cadence policy shared by background observation lanes.
