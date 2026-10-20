@@ -11,6 +11,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [この文書の読み方](#この文書の読み方)
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
+- [Issue・Memory 検索](#issue-と-memory-の検索)
 - [横断コマンドパレット](#横断コマンドパレット)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
@@ -274,6 +275,31 @@ project tab の黄色い `!N` は確認できた対応待ちの件数、`!N+` �
 状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。
 観測は専用 worker が稼働済み daemon の保存済み状態だけを読み、workspace の adopt、daemon/Agent 起動、terminal attach、状態の変更は行わない。
 各接続・request は250ms・再試行なしで読み、workspace 切り替え時は次の request を中止して worker を回収する。
+
+## Issue と Memory の検索
+
+`Ctrl-O m` で現在の workspace の `.usagi/issues/` と `.usagi/memory/` を検索する。
+既存の Issue / Memory 検索と同じ大文字小文字を区別しない部分一致で、Issue はタイトル・本文、
+Memory は名前・タイトル・本文を対象にする。空の検索語では一覧を表示し、検索語は最大 256 文字。
+選択中 session の worktree や他の project のストアは含めない。検索画面で再度 `Ctrl-O m` を押すと検索語を保って再取得する。
+
+| 操作 | 動作 |
+|---|---|
+| 文字入力・貼り付け | 全文検索を更新する |
+| `Tab` | All / Issues / Memory を切り替える |
+| `↑` / `↓` / `PgUp` / `PgDn` | 結果の選択、本文ではスクロール |
+| `Enter` | 選択した正確な source file の現在の本文を開く |
+| 本文の `←` / `→`、`Home` / `End` | 横に移動、先頭 / 末尾行に移動 |
+| `Esc` | 本文から結果に戻る、結果から閉じる |
+
+結果は Issue、Memory の順に各ストア更新日時の降順で最大 100 件ずつ表示し、省略件数と取得失敗を明示する。
+Issue の状態・優先度・依存充足と番号衝突、Memory の種別を確認できる。番号衝突がある Issue も
+source filename ごとに表示する。本文は最大 512 KiB の UTF-8 通常ファイルだけを読み、symlink・範囲外の
+パス・バイナリは拒否する。本文を開いた時点で検索語が残っていれば最初の一致行から表示する。
+検索時点からファイルが変更・削除された場合、現在の内容または取得失敗を表示する。
+
+検索・本文読み取りは単一の背景 worker で処理し、入力変更や画面を閉じた後の古い応答は破棄する。
+入力・貼り付け・未割り当てキーを背面の terminal へ送らない。Issue / Memory の編集や実行は行わない。
 
 ## 横断コマンドパレット
 

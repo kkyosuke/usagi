@@ -6,6 +6,7 @@
 //! controller.
 
 mod attention;
+mod knowledge_search;
 pub(crate) mod palette;
 
 use std::collections::{BTreeMap, HashSet};
@@ -182,6 +183,7 @@ enum DeckOverlay {
     Switcher(ProjectSwitcher),
     Attention(attention::AttentionList),
     Palette(palette::Palette),
+    Knowledge(knowledge_search::Search),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +233,7 @@ pub struct WorkspaceDeck {
     slots: Vec<WorkspaceSlot>,
     active: WorkspaceId,
     overlay: Option<DeckOverlay>,
+    knowledge_epoch: u64,
     notice: Option<String>,
     pending_garden_visit: Option<(PathBuf, GardenVisit)>,
     pending_closeup_path: Option<PathBuf>,
@@ -258,6 +261,7 @@ impl WorkspaceDeck {
             active: slot.workspace_id,
             slots: vec![slot],
             overlay: None,
+            knowledge_epoch: 0,
             notice: None,
             pending_garden_visit: None,
             pending_closeup_path: None,
@@ -460,6 +464,7 @@ impl WorkspaceDeck {
             DeckOverlay::Add(add) => add.handle(key),
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
             DeckOverlay::Attention(list) => list.handle(key, &self.slots),
+            DeckOverlay::Knowledge(search) => search.handle(key),
             DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
         }
     }
@@ -1242,6 +1247,9 @@ pub fn render_overlay(
     match &deck.overlay {
         None => base.to_vec(),
         Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
+        Some(DeckOverlay::Knowledge(search)) => {
+            knowledge_search::render(deck, search, height, width, base)
+        }
         Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {

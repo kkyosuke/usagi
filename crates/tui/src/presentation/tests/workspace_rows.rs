@@ -2605,3 +2605,41 @@ fn command_palette_pending_tab_visit_survives_idle_ticks_until_restore_completes
     assert!(matches!(result, WorkspaceStep::Quit));
     assert_eq!(calls.lock().unwrap().inputs, vec![b"x".to_vec()]);
 }
+
+#[test]
+fn knowledge_search_frame_owns_queries_and_control_keys() {
+    let snapshot = snapshot("knowledge-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenKnowledgeSearch),
+        Key::Paste("search body".into()),
+        Key::Passthrough(vec![3]),
+        Key::Enter,
+        Key::Tab,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Search Issue / Memory"))
+    );
+}

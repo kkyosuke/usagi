@@ -92,6 +92,7 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | `Ctrl-O }` | MoveTabNext | pane tabを次へ並べ替え |
 | `Ctrl-O p` | OpenPullRequests | Pull Request一覧 |
 | `Ctrl-O v` | OpenPreview | File Preview |
+| `Ctrl-O m` | OpenKnowledgeSearch | 現在の workspace の Issue・Memory 本文を検索・閲覧 |
 | `Ctrl-O f` | OpenArtifacts | session の成果物一覧。session 未選択時は workspace 全体 |
 | `Ctrl-O d` | OpenDecisions | pending Decision一覧 |
 | `Ctrl-O s` | OpenNotes | Scratchpad |
@@ -193,6 +194,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | tabのないCloseup | `Enter` | Action modal |
 | tabのあるCloseup | `Ctrl-O ?` | live paneで使えるキーボードショートカットを表示 |
 | Overview palette | `↑` / `↓` | candidate / history |
+| Issue・Memory 検索 | 文字入力 / 貼り付け、`Tab` | 全文検索、All / Issues / Memory の切り替え |
+| Issue・Memory 検索 | `Enter`、`Esc`、`Ctrl-O m` | 本文を開く、結果へ戻る / 閉じる、再取得 |
+| Issue・Memory 本文 | `↑↓` / `PgUp` / `PgDn`、`←→`、`Home` / `End` | 縦移動、横移動、先頭 / 末尾行 |
 | 横断コマンドパレット | 文字入力 / 貼り付け | 名前・project・session・説明を空白区切りで絞り込み |
 | 横断コマンドパレット | `↑` / `↓` / `PgUp` / `PgDn` | 検索結果の選択 |
 | 横断コマンドパレット | `←` / `→` / `Home` / `End` / `Backspace` / `Delete` | 検索文字列の編集 |

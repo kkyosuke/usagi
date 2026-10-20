@@ -13,6 +13,7 @@ pub(crate) mod clipboard;
 pub(crate) mod daemon;
 pub(crate) mod file_preview;
 pub(crate) mod inventory_pump;
+mod knowledge_search;
 pub(crate) mod launchd;
 pub(crate) mod platform_child_reaper;
 pub(crate) mod preview_authority;
