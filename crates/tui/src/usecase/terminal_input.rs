@@ -215,7 +215,7 @@ pub enum LiveTerminalAction {
     OpenPreview,
     /// Open generated files (`Ctrl-O f`).
     OpenArtifacts,
-    /// Open the workspace's pending decisions (`Ctrl-O d`).
+    /// Open the daemon's pending decisions (`Ctrl-O d`).
     OpenDecisions,
     /// Open the active target's scratchpad (`Ctrl-O s`).
     OpenNotes,

@@ -1592,6 +1592,222 @@ fn production_user_decision_retry_without_deadline_is_idempotent() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Follow the same durable question through two TUI scopes and its real MCP owner.
+fn production_cross_workspace_user_decision_reaches_its_agent_and_acks_only_owner_reads() {
+    use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
+    use usagi_core::infrastructure::ipc::{ClientWorkspace, SessionAction};
+    use usagi_daemon::infrastructure::unix_transport::connect_current;
+
+    let mut mcp = McpHarness::start();
+    mcp.launch_caller();
+    let requested = tool_text(&mcp.tool(
+        "user_decision_request",
+        &json!({
+            "title":"Question from project A", "prompt":"Choose", "allow_comment":true,
+            "options":[{"id":"yes", "label":"Yes"}]
+        }),
+    ));
+    let decision: UserDecision = serde_json::from_value(requested).unwrap();
+    let store = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+
+    let other = mcp.workspace().join("other-project");
+    fs::create_dir(&other).unwrap();
+    let initialized = Command::new("git")
+        .arg("-C")
+        .arg(&other)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let mut tui = IpcClient::connect(
+        connect_current(&mcp.data_dir()).unwrap(),
+        "decision-tui-e2e".into(),
+        OperationId::new().to_string(),
+        ClientPolicy::tui(),
+        usagi_core::infrastructure::ipc::build_identity(
+            env!("CARGO_PKG_VERSION"),
+            env!("USAGI_BUILD_COMMIT"),
+            env!("USAGI_BUILD_TARGET"),
+            env!("USAGI_BUILD_PROFILE"),
+            env!("USAGI_BUILD_SOURCE_ID"),
+        ),
+        ClientWorkspace::Selected {
+            root: other.canonicalize().unwrap().to_string_lossy().into_owned(),
+        },
+    )
+    .unwrap();
+    let DaemonReply::Ok(project) = tui
+        .request(DaemonRequest::Session {
+            action: SessionAction::List,
+            operation_id: OperationId::new().to_string(),
+            payload: json!({}),
+        })
+        .unwrap()
+    else {
+        panic!("expected the other workspace snapshot")
+    };
+    let other_workspace: WorkspaceId =
+        serde_json::from_value(project["workspace_id"].clone()).unwrap();
+    assert_ne!(other_workspace, decision.owner.workspace_id);
+
+    let mut foreign = decision.clone();
+    foreign.decision_id = UserDecisionId::new();
+    foreign.owner.workspace_id = other_workspace;
+    foreign.idempotency_key = None;
+    store.create(foreign.clone()).unwrap().unwrap();
+    let DaemonReply::Ok(local) = tui
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::List,
+            payload: json!({}),
+        })
+        .unwrap()
+    else {
+        panic!("expected the local question")
+    };
+    assert_eq!(local["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        local["decisions"][0]["decision_id"],
+        json!(foreign.decision_id)
+    );
+    let DaemonReply::Ok(all) = tui
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::ListAll,
+            payload: json!({}),
+        })
+        .unwrap()
+    else {
+        panic!("expected all pending questions")
+    };
+    assert_eq!(all["decisions"].as_array().unwrap().len(), 2);
+    let owned = tool_text(&mcp.tool("user_decision_list", &json!({})));
+    assert_eq!(owned["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        owned["decisions"][0]["decision_id"],
+        json!(decision.decision_id)
+    );
+    let denied = mcp.tool(
+        "user_decision_get",
+        &json!({"decision_id":foreign.decision_id}),
+    );
+    assert!(denied.get("error").is_some(), "{denied}");
+
+    let answer = json!({"kind":"option", "option_id":"yes", "comment":"Answered from project B"});
+    assert!(
+        tui.request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Resolve,
+            payload: json!({"decision_id":decision.decision_id,"answer":answer}),
+        })
+        .is_err(),
+        "the current workspace must never replace the question owner"
+    );
+    assert!(tui.request(DaemonRequest::UserDecision {
+        action:TuiUserDecisionAction::Resolve,
+        payload:json!({"workspace":"invalid", "decision_id":decision.decision_id,"answer":answer}),
+    }).is_err());
+    let resolved = tui.request(DaemonRequest::UserDecision {
+        action:TuiUserDecisionAction::Resolve,
+        payload:json!({"workspace":decision.owner.workspace_id,"decision_id":decision.decision_id,"answer":answer}),
+    }).unwrap();
+    assert!(matches!(resolved, DaemonReply::Ok(ref body) if body["status"] == "resolved"));
+    assert_eq!(store.events().unwrap().len(), 1);
+    let inspected = tui.request(DaemonRequest::UserDecision {
+        action:TuiUserDecisionAction::Get,
+        payload:json!({"workspace":decision.owner.workspace_id,"decision_id":decision.decision_id}),
+    }).unwrap();
+    assert!(matches!(inspected, DaemonReply::Ok(ref body) if body["answer"] == answer));
+    let pending = tool_text(&mcp.tool("user_decision_list", &json!({})));
+    assert_eq!(pending["decisions"], json!([]));
+    assert_eq!(
+        store.events().unwrap().len(),
+        1,
+        "TUI reads and pending lists cannot ACK the agent's answer"
+    );
+    let received = tool_text(&mcp.tool(
+        "user_decision_get",
+        &json!({"decision_id":decision.decision_id}),
+    ));
+    assert_eq!(received["status"], "resolved");
+    assert_eq!(received["answer"], answer);
+    assert!(store.events().unwrap().is_empty());
+    let replayed = tool_text(&mcp.tool(
+        "user_decision_get",
+        &json!({"decision_id":decision.decision_id}),
+    ));
+    assert_eq!(received, replayed);
+    assert_large_decision_inventory_pages(&mut tui, &store, &decision, &foreign);
+}
+
+fn assert_large_decision_inventory_pages(
+    tui: &mut dyn DaemonClient,
+    store: &UserDecisionStore,
+    first: &UserDecision,
+    second: &UserDecision,
+) {
+    use std::collections::BTreeSet;
+    use usagi_core::infrastructure::ipc::{
+        ClientError, ErrorCode, UserDecisionCursor, UserDecisionPage,
+    };
+
+    let mut expected = BTreeSet::from([second.decision_id]);
+    for template in [first, second] {
+        for _ in 0..40 {
+            let mut question = template.clone();
+            question.decision_id = UserDecisionId::new();
+            question.idempotency_key = None;
+            question.prompt = "p".repeat(16 * 1024);
+            expected.insert(question.decision_id);
+            store.create(question).unwrap().unwrap();
+        }
+    }
+    let mut cursor: Option<UserDecisionCursor> = None;
+    let mut first_cursor = None;
+    let mut actual = BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let DaemonReply::Ok(body) = tui
+            .request(DaemonRequest::UserDecision {
+                action: TuiUserDecisionAction::ListAll,
+                payload: json!({ "cursor": cursor }),
+            })
+            .expect("each complete IPC envelope must fit the negotiated frame limit")
+        else {
+            panic!("expected a decision page")
+        };
+        let page: UserDecisionPage = serde_json::from_value(body).unwrap();
+        pages += 1;
+        assert!(pages <= expected.len(), "every page must advance");
+        for decision in page.decisions {
+            assert!(actual.insert(decision.decision_id), "duplicate decision");
+        }
+        if pages == 1 {
+            first_cursor.clone_from(&page.next_cursor);
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert!(pages >= 2, "the combined inventory exceeds one IPC frame");
+    assert_eq!(actual, expected);
+
+    let mut changed = second.clone();
+    changed.decision_id = UserDecisionId::new();
+    changed.idempotency_key = None;
+    store.create(changed).unwrap().unwrap();
+    let error = tui
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::ListAll,
+            payload: json!({ "cursor": first_cursor.unwrap() }),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, ClientError::Protocol(ref problem) if problem.code == ErrorCode::RevisionConflict),
+        "a changed inventory must invalidate earlier continuations"
+    );
+    assert!(store.events().unwrap().is_empty());
+}
+
+#[test]
 fn production_user_decision_round_trip_reaches_the_original_caller() {
     user_decision_round_trip(false);
 }
@@ -1678,6 +1894,13 @@ fn decision_restart_round_trip(legacy: bool) {
         DaemonReply::Ok(ref body) if body["status"] == "resolved"
     ));
     let decisions = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+    let inspected = client
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Get,
+            payload: json!({"decision_id":answered.decision_id}),
+        })
+        .unwrap();
+    assert!(matches!(inspected, DaemonReply::Ok(ref body) if body["answer"] == answer));
     assert_eq!(decisions.events().unwrap().len(), 1);
     drop(client);
 
@@ -2344,7 +2567,11 @@ fi
     }
     let durable: serde_json::Value =
         serde_json::from_slice(&fs::read(decision_path).unwrap()).unwrap();
-    assert!(durable["events"].as_array().unwrap().is_empty());
+    assert_eq!(
+        durable["events"].as_array().unwrap().len(),
+        1,
+        "TUI inspection leaves delivery pending until the authenticated owner reads it"
+    );
 }
 
 /// The Agent child is handed the **mode-neutral** data home plus the runtime

@@ -11,6 +11,7 @@ pub(crate) mod palette;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
 use usagi_core::domain::id::{AgentRuntimeId, SessionId, UserDecisionId, WorkspaceId};
@@ -26,6 +27,7 @@ use crate::presentation::widgets::garden::{GardenAgent, GardenSession};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
+use crate::usecase::application::controller::DecisionSnapshot;
 use crate::usecase::fuzzy::fuzzy_score;
 
 const TAB_NAME_WIDTH: usize = 18;
@@ -239,6 +241,9 @@ pub struct WorkspaceDeck {
     attention_cursor: usize,
     pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
     pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
+    /// Parked only during controller replacement. Shared ownership keeps
+    /// loading-frame deck clones from copying question bodies every frame.
+    decisions: Option<Arc<DecisionSnapshot>>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -265,6 +270,7 @@ impl WorkspaceDeck {
             attention_cursor: 0,
             pending_attention: None,
             pending_palette: None,
+            decisions: None,
         }
     }
 
@@ -291,6 +297,32 @@ impl WorkspaceDeck {
     #[must_use]
     pub fn slots(&self) -> &[WorkspaceSlot] {
         &self.slots
+    }
+
+    pub(super) fn remember_decisions(&mut self, snapshot: DecisionSnapshot) {
+        self.decisions = Some(Arc::new(snapshot));
+    }
+
+    pub(super) fn take_decisions(&mut self) -> Option<DecisionSnapshot> {
+        self.decisions.take().map(Arc::unwrap_or_clone)
+    }
+
+    /// Source labels for questions displayed while another project is active.
+    #[must_use]
+    pub fn decision_owner_names(&self) -> crate::presentation::views::decision_modal::OwnerNames {
+        crate::presentation::views::decision_modal::OwnerNames {
+            workspaces: self
+                .slots
+                .iter()
+                .map(|slot| (slot.workspace_id, slot.label.clone()))
+                .collect(),
+            sessions: self
+                .slots
+                .iter()
+                .flat_map(|slot| slot.sessions.iter())
+                .map(|session| (session.projected.id, session.projected.label.clone()))
+                .collect(),
+        }
     }
 
     #[must_use]

@@ -78,7 +78,7 @@ use session_commands::{
 
 use restore::{
     RestoreRetryState, apply_restore_completion, restore_prepared_workspace,
-    restore_workspace_closeup, restore_workspace_session_focus, spawn_restore_job,
+    restore_workspace_closeup, restore_workspace_controller_state, spawn_restore_job,
 };
 #[cfg(test)]
 use restore::{
@@ -1563,7 +1563,10 @@ impl HomeFrameMaterial {
         self
     }
 
-    fn with_workspace_deck_garden(mut self, deck: &WorkspaceDeck) -> Self {
+    fn with_workspace_deck(mut self, deck: &WorkspaceDeck) -> Self {
+        self.projection = self
+            .projection
+            .with_decision_owners(deck.decision_owner_names());
         let Some(active_sessions) = self.projection.garden_sessions().map(<[_]>::to_vec) else {
             return self;
         };
@@ -1875,10 +1878,10 @@ fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
         || state.role_editor().is_some()
 }
 
-/// Carry the active workspace's sidebar cursor across the composition teardown.
-/// Only stable session rows are remembered; transient action rows remain local
-/// to the controller that owns them.
-fn remember_workspace_session_focus(deck: &mut WorkspaceDeck, state: &AppState) {
+/// Carry sidebar state and the shared decision observation across composition
+/// teardown. Transient action rows and modal editors remain controller-local.
+fn remember_workspace_controller_state(deck: &mut WorkspaceDeck, state: &AppState) {
+    deck.remember_decisions(state.decision_snapshot());
     if state.session_order_revision() != 0 {
         deck.remember_session_order(state.workspace(), state.sessions());
     }

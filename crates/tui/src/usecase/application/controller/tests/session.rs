@@ -1566,6 +1566,90 @@ fn a_project_return_focuses_the_stable_session_without_opening_closeup() {
 }
 
 #[test]
+fn cross_workspace_decisions_send_and_confirm_against_the_question_owner() {
+    let workspace = WorkspaceId::new();
+    let owner = WorkspaceId::new();
+    let mut decision = pending_decision(owner);
+    decision.require_confirmation = true;
+    let mut state = AppState::home(workspace, Vec::new());
+    let snapshot = BackendEvent::Decisions {
+        workspace,
+        decisions: vec![decision.clone()],
+    };
+    let _ = update(&mut state, AppEvent::Backend(snapshot.clone()));
+    assert_eq!(state.overlay(), Some(Overlay::Decisions));
+    assert_eq!(state.decisions(), std::slice::from_ref(&decision));
+    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let answer = UserDecisionAnswer::Option {
+        comment: None,
+        option_id: "safe".into(),
+    };
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        vec![Effect::ResolveDecision {
+            workspace: owner,
+            decision_id: decision.decision_id,
+            answer,
+        }]
+    );
+    let error = |workspace| BackendEvent::DecisionError {
+        workspace,
+        decision_id: decision.decision_id,
+        error: SafeError {
+            message: SafeMessage::new("retry"),
+            error_id: "resolve".into(),
+        },
+    };
+    let _ = update(&mut state, AppEvent::Backend(error(workspace)));
+    assert!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .error()
+            .is_none()
+    );
+    let _ = update(&mut state, AppEvent::Backend(error(owner)));
+    assert!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .error()
+            .is_some()
+    );
+    let _ = update(&mut state, AppEvent::Backend(snapshot));
+    assert!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .confirmation()
+            .is_some()
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionResolved {
+            workspace,
+            decision_id: decision.decision_id,
+        }),
+    );
+    assert_eq!(state.decisions().len(), 1);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionResolved {
+            workspace: owner,
+            decision_id: decision.decision_id,
+        }),
+    );
+    assert!(state.decisions().is_empty());
+    assert_eq!(state.overlay(), None);
+}
+
+#[test]
 fn decisions_are_workspace_fenced_retryable_and_removed_only_on_confirmation() {
     let workspace = WorkspaceId::new();
     let foreign = WorkspaceId::new();

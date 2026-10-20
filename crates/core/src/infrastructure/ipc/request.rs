@@ -190,7 +190,8 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
-    /// Workspace-scoped human decision surface used by the local TUI. Unlike
+    /// Human decision surface used by the local TUI, including cross-workspace
+    /// observation and explicitly workspace-addressed answers. Unlike
     /// `DispatchTool`, this path never accepts agent-originated requests and
     /// does not treat a missing agent credential as authorization.
     UserDecision {
@@ -360,8 +361,25 @@ impl DispatchToolAction {
 pub enum TuiUserDecisionAction {
     Get,
     List,
+    ListAll,
     Resolve,
     Cancel,
+}
+
+/// Continuation within one immutable observation of the pending inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserDecisionCursor {
+    pub revision: String,
+    pub offset: usize,
+}
+
+/// A byte-bounded part of the human-facing pending inventory. Consumers publish
+/// only after following every cursor from the same revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDecisionPage {
+    pub decisions: Vec<crate::domain::user_decision::UserDecision>,
+    pub next_cursor: Option<UserDecisionCursor>,
 }
 
 /// Control vocabulary for the daemon metrics stream.

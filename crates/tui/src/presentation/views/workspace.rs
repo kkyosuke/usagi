@@ -390,6 +390,7 @@ pub struct HomeProjection {
     foreground_overlay: Option<Overlay>,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    decision_owners: decision_modal::OwnerNames,
     unread_decision_ids: std::collections::BTreeSet<usagi_core::domain::id::UserDecisionId>,
     /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
     pr_overlay: Option<PrOverlay>,
@@ -673,6 +674,20 @@ pub(crate) fn project_sessions(
         .collect()
 }
 
+fn project_decision_owners(
+    workspace: WorkspaceId,
+    name: &str,
+    sessions: &[ProjectedSession],
+) -> decision_modal::OwnerNames {
+    decision_modal::OwnerNames {
+        workspaces: BTreeMap::from([(workspace, name.to_owned())]),
+        sessions: sessions
+            .iter()
+            .map(|session| (session.id, session.label.clone()))
+            .collect(),
+    }
+}
+
 impl HomeProjection {
     /// The Home surface whose pane geometry this projection describes.
     #[must_use]
@@ -722,6 +737,7 @@ impl HomeProjection {
         let garden_sessions = project_garden_sessions(state, &sessions, &session_agents);
         let garden_workspaces =
             garden_workspace_index(state.workspace(), garden_sessions.as_deref());
+        let decision_owners = project_decision_owners(state.workspace(), workspace_name, &sessions);
         Self {
             workspace_name: workspace_name.to_owned(),
             icon_mode: IconMode::default(),
@@ -762,6 +778,7 @@ impl HomeProjection {
                 .filter(|_| state.overlay() == Some(Overlay::Decisions))
                 .cloned(),
             decisions: state.decisions().to_vec(),
+            decision_owners,
             unread_decision_ids: state.unread_decision_ids().clone(),
             // The foreground overlay is the single source of truth for what a
             // modal owns, so a PR modal that is not the foreground is not drawn
@@ -865,12 +882,22 @@ impl HomeProjection {
     pub(crate) fn with_deck_garden(
         mut self,
         scope: String,
-        sessions: Vec<(WorkspaceId, widgets::garden::GardenSession)>,
+        mut sessions: Vec<(WorkspaceId, widgets::garden::GardenSession)>,
     ) -> Self {
         if self.garden_sessions.is_none() {
             return self;
         }
         self.garden_scope = scope;
+        for (workspace, session) in &mut sessions {
+            session.pending_decisions = self
+                .decisions
+                .iter()
+                .filter(|decision| {
+                    decision.owner.workspace_id == *workspace
+                        && decision.owner.session_id == Some(session.id)
+                })
+                .count();
+        }
         self.garden_workspaces = sessions
             .iter()
             .map(|(workspace, session)| (session.id, *workspace))
@@ -881,6 +908,16 @@ impl HomeProjection {
 
     pub(crate) fn garden_sessions(&self) -> Option<&[widgets::garden::GardenSession]> {
         self.garden_sessions.as_deref()
+    }
+
+    /// Add cached source names from other project tabs; current session labels
+    /// keep priority over a deck cache last observed before a project switch.
+    #[must_use]
+    pub(crate) fn with_decision_owners(mut self, mut owners: decision_modal::OwnerNames) -> Self {
+        owners.workspaces.extend(self.decision_owners.workspaces);
+        owners.sessions.extend(self.decision_owners.sessions);
+        self.decision_owners = owners;
+        self
     }
 
     /// Canonical tick that materially identifies the visible Garden pose.
@@ -1307,14 +1344,6 @@ impl HomeProjection {
     /// the cursor; Closeup names the target it operates on.
     fn preview_label(&self) -> &str {
         self.session_label(self.preview)
-    }
-
-    /// Session display names keyed by ID, used to label decision owners.
-    fn session_names(&self) -> BTreeMap<SessionId, String> {
-        self.sessions
-            .iter()
-            .map(|session| (session.id, session.label.clone()))
-            .collect()
     }
 
     fn session_label(&self, session: Option<SessionId>) -> &str {
@@ -2608,7 +2637,7 @@ fn render_home_modals(
             &frame,
             overlay,
             &home.decisions,
-            &home.session_names(),
+            &home.decision_owners,
         )
     } else if home.closeup_action_visible {
         // Prefer the runtime's persisted action modal (its caret and selection),
@@ -2695,7 +2724,7 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
             &Role::Warning.style().paint(&format!(
                 "  {} Reply needed · {}: {}  (click Reply needed)",
                 icon_set(home.icon_mode).decision,
-                decision_modal::owner_label(decision, &home.session_names()),
+                decision_modal::owner_label(decision, &home.decision_owners),
                 decision.title
             )),
             width,
