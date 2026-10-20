@@ -6,6 +6,7 @@
 //! controller.
 
 mod attention;
+pub(crate) mod output_search;
 pub(crate) mod palette;
 
 use std::collections::{BTreeMap, HashSet};
@@ -184,6 +185,7 @@ enum DeckOverlay {
     Switcher(ProjectSwitcher),
     Attention(attention::AttentionList),
     Palette(palette::Palette),
+    OutputSearch(output_search::Search),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +197,7 @@ enum AddWorkspaceMode {
 /// Result of reducing one key while a deck overlay is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayIntent {
+    OutputVisit(Box<output_search::Hit>),
     Stay,
     Cancel,
     PaletteVisit {
@@ -241,6 +244,8 @@ pub struct WorkspaceDeck {
     attention_cursor: usize,
     pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
     pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
+    pub(crate) pending_output_hit: Option<output_search::Hit>,
+    search_epoch: u64,
     /// Parked only during controller replacement. Shared ownership keeps
     /// loading-frame deck clones from copying question bodies every frame.
     decisions: Option<Arc<DecisionSnapshot>>,
@@ -270,6 +275,8 @@ impl WorkspaceDeck {
             attention_cursor: 0,
             pending_attention: None,
             pending_palette: None,
+            pending_output_hit: None,
+            search_epoch: 0,
             decisions: None,
         }
     }
@@ -493,6 +500,7 @@ impl WorkspaceDeck {
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
             DeckOverlay::Attention(list) => list.handle(key, &self.slots),
             DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
+            DeckOverlay::OutputSearch(search) => search.handle(key),
         }
     }
 
@@ -1275,6 +1283,9 @@ pub fn render_overlay(
         None => base.to_vec(),
         Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
         Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
+        Some(DeckOverlay::OutputSearch(search)) => {
+            output_search::render(deck, search, height, width, base)
+        }
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {
             render_switcher(deck, switcher, height, width, base)

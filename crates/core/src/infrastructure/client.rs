@@ -1004,6 +1004,7 @@ impl RetryEligibility {
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
             | DaemonRequest::WorkspaceAttention { .. }
+            | DaemonRequest::SearchTerminalOutput { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::PlanDaemonRestartAgents { .. }
             | DaemonRequest::Tenant {
@@ -2463,6 +2464,10 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::WorkspaceAttention {
                 workspace: WorkspaceId::new(),
+            },
+            DaemonRequest::SearchTerminalOutput {
+                workspace: WorkspaceId::new(),
+                query: "error".into(),
             },
             DaemonRequest::Session {
                 action: SessionAction::List,

@@ -2081,6 +2081,32 @@ struct DaemonGardenInventoryPort;
 impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
     for DaemonGardenInventoryPort
 {
+    fn search_terminal_output(
+        &mut self,
+        workspace: WorkspaceId,
+        query: &str,
+    ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
+        let mut client = crate::runtime::daemon::existing_policy_client(
+            usagi_core::infrastructure::client::ClientPolicy {
+                timeout_ms: 500,
+                reconnect_attempts: 0,
+                ..usagi_core::infrastructure::client::ClientPolicy::tui()
+            },
+            usagi_core::infrastructure::ipc::ClientWorkspace::Unbound,
+        )
+        .map_err(|_| "Terminal output search is unavailable".to_owned())?;
+        let reply = client
+            .request(
+                usagi_core::infrastructure::ipc::DaemonRequest::SearchTerminalOutput {
+                    workspace,
+                    query: query.to_owned(),
+                },
+            )
+            .map_err(|_| "Terminal output search is unavailable".to_owned())?;
+        let (DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) = reply;
+        serde_json::from_value(body).map_err(|_| "Invalid terminal output search".to_owned())
+    }
+
     fn attention(
         &mut self,
         workspace: WorkspaceId,

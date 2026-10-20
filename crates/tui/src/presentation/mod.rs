@@ -18,6 +18,7 @@ mod frame_loop;
 mod garden;
 pub mod layouts;
 pub mod live_terminal;
+mod output_search;
 mod restore;
 mod session_commands;
 mod startup;

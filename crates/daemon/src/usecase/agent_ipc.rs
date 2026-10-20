@@ -1447,6 +1447,30 @@ impl AgentRuntime {
         Ok((result, diagnosis))
     }
 
+    /// Captures an exact Agent screen without attaching or changing its viewport.
+    pub fn inspect_terminal(
+        &self,
+        terminal: &TerminalRef,
+    ) -> Result<super::terminal::Snapshot, ProtocolError> {
+        let runtime = self
+            .coordinator
+            .runtime_for_terminal(terminal)
+            .ok_or_else(stale_terminal)?;
+        self.coordinator
+            .terminal_snapshot(&runtime)
+            .map_err(map_runtime_error)
+    }
+
+    /// Retained Agent terminal identities available to the human search lane.
+    #[must_use]
+    pub fn search_targets(&self, workspace: WorkspaceId) -> Vec<TerminalRef> {
+        self.inventory(workspace)
+            .runtimes
+            .into_iter()
+            .map(|entry| entry.runtime.terminal)
+            .collect()
+    }
+
     /// Returns one deterministic, secret-free inventory for workspace-root and
     /// managed-session Agent runtimes.
     #[must_use]

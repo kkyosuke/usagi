@@ -784,3 +784,30 @@ fn trimmed_agent_output_maps_to_a_resync_protocol_error() {
 
     assert_eq!(error.code, ErrorCode::ResyncRequired);
 }
+
+#[test]
+fn search_inspection_does_not_attach_or_write_and_rejects_replaced_identity() {
+    let mut agent = runtime();
+    let admission = agent
+        .launch(
+            &OperationId::new().to_string(),
+            &intent(None),
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    agent
+        .output(&admission.terminal, b"error".to_vec())
+        .unwrap();
+    let writes = pty(&agent).writes.clone();
+    assert_eq!(
+        agent.search_targets(admission.terminal.workspace_id),
+        vec![admission.terminal.clone()]
+    );
+    assert!(agent.search_targets(WorkspaceId::new()).is_empty());
+    let snapshot = agent.inspect_terminal(&admission.terminal).unwrap();
+    assert_eq!(snapshot.output_offset, 5);
+    assert_eq!(pty(&agent).writes, writes);
+    let mut foreign = admission.terminal;
+    foreign.terminal_id = usagi_core::domain::id::TerminalId::new();
+    assert!(agent.inspect_terminal(&foreign).is_err());
+}

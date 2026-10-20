@@ -80,6 +80,7 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 |---|---|---|
 | `Ctrl-O +` | OpenWorkspace | workspace 追加 |
 | `Ctrl-O 0` | OpenWorkspaceSwitcher | project / session finder |
+| `Ctrl-O /` | OpenOutputSearch | 開いている project の Agent / Terminal の保持出力を検索 |
 | `Ctrl-O k` | OpenCommandPalette | 開いている project の session・観測済みタブ・コマンドを横断検索 |
 | `Ctrl-O i` | OpenAttention | 全 project の受信箱（Action needed / Updates） |
 | `Ctrl-O 1` … `9` | ActivateWorkspace | project tab を番号で選択 |
@@ -193,6 +194,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | tabのないCloseup | `Enter` | Action modal |
 | tabのあるCloseup | `Ctrl-O ?` | live paneで使えるキーボードショートカットを表示 |
 | Overview palette | `↑` / `↓` | candidate / history |
+| ターミナル出力検索 | 文字入力 / 貼り付け・編集キー | 検索文字列を編集（大文字小文字を区別する文字列検索） |
+| ターミナル出力検索 | `↑` / `↓` / `PgUp` / `PgDn` | 一致の選択 |
+| ターミナル出力検索 | `Enter` / `Tab` / `Esc` | 一致位置を開く / 再検索 / 閉じる |
 | 横断コマンドパレット | 文字入力 / 貼り付け | 名前・project・session・説明を空白区切りで絞り込み |
 | 横断コマンドパレット | `↑` / `↓` / `PgUp` / `PgDn` | 検索結果の選択 |
 | 横断コマンドパレット | `←` / `→` / `Home` / `End` / `Backspace` / `Delete` | 検索文字列の編集 |

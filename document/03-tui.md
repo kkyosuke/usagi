@@ -12,6 +12,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
 - [横断コマンドパレット](#横断コマンドパレット)
+- [ターミナル出力の横断検索](#ターミナル出力の横断検索)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
 - [workspace の選択と daemon](#workspace-の選択と-daemon)
@@ -302,6 +303,33 @@ session 一覧は deck の最新観測、タブはその project を表示した
 検索中の文字・貼り付け・未割り当てキーは背面の terminal へ送らない。Esc で背面の入力に戻れる。
 入力中の Overview / Closeup、編集中の画面や確認ダイアログが背面にある場合は、完了またはキャンセルしてから移動する。
 検索結果が多い場合は選択位置を追ってスクロールし、低い画面では検索欄と選択候補を優先する。
+
+## ターミナル出力の横断検索
+
+`Ctrl-O /` で、開いている project の Agent / Terminal が daemon のメモリに保持する出力を検索する。
+表示済みのタブに加え、開いている別 project のタブも対象になる。ANSI 制御列を除いた表示セルに対する、
+大文字小文字を区別する文字列検索で、物理行ごとに照合する。自動折り返しをまたぐ文字列は一致しない。
+検索入力は最大 256 文字。結果には project / session / terminal の所属、一致行と前後の文脈を表示する。
+
+検索は画面描画と独立した worker で行う。文字列の変更・閉じ直し後に古い検索結果を適用しない。
+結果は検索時点の snapshot で、追加出力は `Tab` の再検索で取り込む。空の結果と取得不能を区別し、
+保持履歴の欠落・検索上限による省略を `limited/omitted`、取得不能を `unavailable` として表示する。
+
+| 境界 | 上限・扱い |
+|---|---|
+| project | deck で開いている先頭 16 件。成功した project 数 / 開いている総数を表示 |
+| terminal | project ごとに最大 64 件。Agent と Terminal の保持対象を含む |
+| 検索量 | project ごとに最大 20,000 行・表示文字の UTF-8 2 MiB・100 一致 |
+| 古い出力 | daemon が捨てた履歴、別 generation の画面、再起動前のログを復元・永続収集しない |
+| 終了した terminal | snapshot が残っていれば検索し、終了状態を表示。タブがなくなった場合は移動を拒否 |
+
+`Enter` は内部 ID とタブの利用可否を確認して対象を開く。検索時と同じ出力位置・画面サイズ・buffer・
+履歴起点で、現在のセルも一致する場合にスクロールして強調する。検索後に出力・サイズ・保持範囲が変わった場合は
+再検索を促し、別の行を一致位置として開かない。入力中のダイアログや draft がある場合は先に完了・キャンセルする。
+文字入力・貼り付け・未割り当てキーを背面の PTY へ送らない。
+
+検索は人間の TUI 専用の読み取りであり、検索だけでは terminal の attach・resize・入力・Agent 再開を行わない。
+MCP の `terminal_read` が持つ同一 scope の読み取り権限は広げない。
 
 ## workspace の離脱と終了
 

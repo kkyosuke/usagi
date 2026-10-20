@@ -2605,3 +2605,248 @@ fn command_palette_pending_tab_visit_survives_idle_ticks_until_restore_completes
     assert!(matches!(result, WorkspaceStep::Quit));
     assert_eq!(calls.lock().unwrap().inputs, vec![b"x".to_vec()]);
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // Keep the queued-hit lifetime and each navigation fence in one fixture.
+fn output_search_reveals_only_the_exact_terminal_snapshot_and_consumes_the_hit() {
+    use crate::presentation::workspace_deck::output_search::Hit;
+    use usagi_core::usecase::terminal_search::{
+        SearchBudget, SearchTerminalKind, TerminalSearchResult, WorkspaceOutputSearch,
+    };
+    let snapshot = snapshot("output-search");
+    let workspace = snapshot.workspace_id;
+    let session = snapshot.session_ids[0];
+    let terminal = live_terminal_ref(workspace, session);
+    let geometry = Geometry { cols: 20, rows: 3 };
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RecordingStreamPort(Arc::default())),
+    );
+    let mut screen = usagi_core::usecase::vt_screen::VtScreen::new(3, 20);
+    screen.advance(b"one\r\ntwo\r\nthree");
+    let mut source =
+        TerminalSearchResult::unavailable(terminal.clone(), SearchTerminalKind::Terminal);
+    source.output_offset = b"one\r\ntwo\r\nthree".len() as u64;
+    source.search(&screen.checkpoint(), "two", &mut SearchBudget::default());
+    deck.open_output_search();
+    deck.handle_overlay_key(&Key::Paste("two".into()));
+    let (token, _, _) = deck.take_output_search().unwrap();
+    deck.apply_output_search(
+        token,
+        vec![(
+            workspace,
+            Ok(WorkspaceOutputSearch {
+                workspace,
+                query: "two".into(),
+                terminals: vec![source],
+                omitted_terminals: 0,
+            }),
+        )],
+    );
+    let crate::presentation::OverlayIntent::OutputVisit(hit) = deck.handle_overlay_key(&Key::Enter)
+    else {
+        panic!()
+    };
+    let hit: Hit = *hit;
+    let mut controls = LiveTerminalControls::default();
+    deck.pending_output_hit = Some(hit.clone());
+    assert_eq!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        ),
+        None
+    );
+    assert!(deck.pending_output_hit.is_some());
+    deck.close_overlay();
+    assert!(
+        crate::presentation::output_search::focus_match(&mut deck, &ui, &mut controls, None, 1)
+            .unwrap()
+            .contains("no longer")
+    );
+    deck.pending_output_hit = Some(hit.clone());
+    assert!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        )
+        .unwrap()
+        .contains("unavailable")
+    );
+    ui.start_terminal_session(terminal.clone(), geometry);
+    controls.sync_focus(Some(&terminal));
+    deck.pending_output_hit = Some(hit.clone());
+    assert_eq!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        ),
+        None
+    );
+    assert_eq!(controls.scroll(), 1);
+    assert!(controls.has_selection());
+    assert!(deck.pending_output_hit.is_none());
+    let mut stale = hit;
+    stale.query = "other".into();
+    deck.pending_output_hit = Some(stale);
+    assert!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        )
+        .unwrap()
+        .contains("Output changed")
+    );
+    assert_eq!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        ),
+        None
+    );
+}
+
+#[test]
+fn output_search_frame_owns_queries_and_control_keys() {
+    let snapshot = snapshot("output-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenOutputSearch),
+        Key::Paste("error".into()),
+        Key::Passthrough(vec![3]),
+        Key::Enter,
+        Key::Tab,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Search terminal output"))
+    );
+}
+
+struct OutputSearchFactory(CountingBackendFactory);
+struct OutputSearchPort(WorkspaceId);
+impl crate::usecase::application::runtime_ports::GardenInventoryPort for OutputSearchPort {
+    fn inventory(
+        &mut self,
+        _: WorkspaceId,
+    ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
+        Err("unavailable".into())
+    }
+    fn search_terminal_output(
+        &mut self,
+        workspace: WorkspaceId,
+        query: &str,
+    ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
+        use usagi_core::usecase::terminal_search::{
+            SearchBudget, SearchTerminalKind, TerminalSearchResult, WorkspaceOutputSearch,
+        };
+        assert_eq!(workspace, self.0);
+        let mut source = TerminalSearchResult::unavailable(
+            live_terminal_ref(workspace, SessionId::new()),
+            SearchTerminalKind::Terminal,
+        );
+        let mut screen = usagi_core::usecase::vt_screen::VtScreen::new(3, 30);
+        screen.advance(b"before\r\nerror\r\nafter");
+        source.search(&screen.checkpoint(), query, &mut SearchBudget::default());
+        Ok(WorkspaceOutputSearch {
+            workspace,
+            query: query.into(),
+            terminals: vec![source],
+            omitted_terminals: 0,
+        })
+    }
+}
+impl ControllerBackendFactory for OutputSearchFactory {
+    fn create(
+        &mut self,
+        snapshot: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        let mut composition = self.0.create(snapshot, host);
+        composition.garden_inventory = Box::new(OutputSearchPort(snapshot.workspace_id));
+        composition
+    }
+}
+
+#[test]
+fn output_search_frame_applies_async_results_and_refuses_a_disappeared_target() {
+    let snapshot = snapshot("output-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = OutputSearchFactory(CountingBackendFactory::new());
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenOutputSearch),
+        Key::Paste("error".into()),
+        Key::Other,
+        Key::Enter,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        inner,
+        wait_for: "1 hits",
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    assert!(
+        term.inner
+            .frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("no longer available"))
+    );
+    assert!(deck.pending_output_hit.is_none());
+}

@@ -11676,3 +11676,154 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
         matches!(call(WorkspaceId::new(), &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::OwnershipUnknown)
     );
 }
+
+#[test]
+#[allow(clippy::too_many_lines)] // A single adopted tenant proves human scope and read-only inspection together.
+fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
+    use usagi_core::usecase::terminal_search::{
+        MATCHES_MAX, SearchTerminalKind, TERMINALS_MAX, WorkspaceOutputSearch,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let generation = DaemonGeneration::new();
+    let sessions = Arc::new(Mutex::new(
+        SessionRuntime::open(
+            root.clone(),
+            &temporary.path().join("sessions"),
+            generation,
+            AlwaysSuccessfulGit,
+            PermissiveSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    let before = sessions.lock().unwrap().snapshot().unwrap();
+    let workspace = serde_json::from_value(before["workspace_id"].clone()).unwrap();
+    let bound = bound_to(
+        &temporary.path().join("tenants"),
+        &root,
+        Arc::clone(&sessions),
+        workspace,
+    );
+    let agent = empty_agent_runtime(DispatchStore::new(temporary.path().join("dispatch")));
+    let (pty, _observations) = DaemonPty::new(
+        Arc::new(TerminalPipelineMetrics::default()),
+        Arc::new(SpawnedChildren::default()),
+        Arc::new(ShutdownRequest::new()),
+    );
+    let mut record = reserved_terminal_record(generation);
+    record.terminal.workspace_id = workspace;
+    record.operation.workspace_id = workspace;
+    record.launch.request.scope.workspace_id = workspace;
+    let reference = record.terminal.clone();
+    let terminal = Arc::new(Mutex::new(
+        GenericTerminalRuntime::from_snapshot(
+            generation,
+            TrustedLoginShell {
+                profile: LoginShellProfile::new(BTreeMap::new(), root.clone()),
+                environment: None,
+                workspaces: None,
+                workspace_root: root,
+            },
+            ShardedTerminalStore::new(sharded_state(temporary.path(), generation)),
+            pty,
+            SharedTerminalScopeResolver(Arc::clone(&bound.workspaces)),
+            TerminalStoreSnapshot {
+                records: vec![record],
+                ..TerminalStoreSnapshot::default()
+            }
+            .reconcile_after_daemon_restart()
+            .unwrap()
+            .0,
+        )
+        .unwrap(),
+    ));
+    let call = |workspace, query, raw: &serde_json::Value| {
+        super::terminal_search::dispatch(
+            &agent,
+            &terminal,
+            &bound,
+            workspace,
+            query,
+            usagi_core::infrastructure::ipc::RequestId("search".into()),
+            raw,
+            &session_test_hello(),
+        )
+    };
+    let reply = call(workspace, "error", &serde_json::json!({}));
+    let EnvelopeKind::Response { outcome, body, .. } = reply.kind else {
+        panic!()
+    };
+    assert_eq!(outcome, ResponseOutcome::Ok);
+    let result: WorkspaceOutputSearch = serde_json::from_value(body).unwrap();
+    assert_eq!(result.workspace, workspace);
+    assert!(result.terminals[0].unavailable);
+    assert_eq!(sessions.lock().unwrap().snapshot().unwrap(), before);
+    for (id, query, raw, code) in [
+        (
+            workspace,
+            "error",
+            serde_json::json!({"caller_context":{}}),
+            ErrorCode::PermissionDenied,
+        ),
+        (
+            workspace,
+            "error",
+            serde_json::json!({"_caller_credential":"secret"}),
+            ErrorCode::PermissionDenied,
+        ),
+        (
+            workspace,
+            "",
+            serde_json::json!({}),
+            ErrorCode::InvalidArgument,
+        ),
+        (
+            WorkspaceId::new(),
+            "error",
+            serde_json::json!({}),
+            ErrorCode::OwnershipUnknown,
+        ),
+    ] {
+        assert!(
+            matches!(call(id, query, &raw).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == code)
+        );
+    }
+    assert!(
+        super::terminal_search::inspect(&agent, &terminal, &reference, SearchTerminalKind::Agent)
+            .is_err()
+    );
+    let mut screen = usagi_core::usecase::vt_screen::VtScreen::new(2, 200);
+    screen.advance("x".repeat(200).as_bytes());
+    let mut reads = 0;
+    let result = super::terminal_search::collect(
+        workspace,
+        "x",
+        vec![(reference.clone(), SearchTerminalKind::Agent); TERMINALS_MAX + 2],
+        |reference, _| {
+            reads += 1;
+            Ok(usagi_daemon::usecase::terminal::Snapshot {
+                terminal: reference.clone(),
+                revision: 1,
+                base_offset: 0,
+                output_offset: 200,
+                geometry: Geometry { rows: 2, cols: 200 },
+                replay: vec![],
+                screen: Box::new(screen.checkpoint()),
+                exited: Some(0),
+            })
+        },
+    );
+    assert_eq!(reads, 1);
+    assert_eq!(result.omitted_terminals, 2);
+    assert_eq!(result.terminals[0].matches.len(), MATCHES_MAX);
+    assert!(result.terminals[0].exited);
+    assert!(result.terminals[1].limited);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lock = terminal.lock().unwrap();
+        panic!("poison fixture");
+    }));
+    assert!(
+        matches!(call(workspace, "x", &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::Unavailable)
+    );
+}
