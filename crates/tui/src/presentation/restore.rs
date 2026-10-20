@@ -594,11 +594,14 @@ pub(super) fn restore_open_panes(
     }
 }
 
-pub(super) fn restore_workspace_session_focus(
-    deck: &WorkspaceDeck,
+pub(super) fn restore_workspace_controller_state(
+    deck: &mut WorkspaceDeck,
     path: &Path,
     runtime: &mut WorkspaceRuntime,
 ) {
+    if let Some(decisions) = deck.take_decisions() {
+        let _ = runtime.apply_event(AppEvent::RestoreDecisions(decisions));
+    }
     if let Some(order) = deck.session_order_for_path(path) {
         let _ = runtime.apply_event(AppEvent::RestoreSessionOrder(order.to_vec()));
     }

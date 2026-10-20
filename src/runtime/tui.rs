@@ -171,17 +171,9 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
         let result =
             (|| -> Result<Vec<usagi_core::domain::user_decision::UserDecision>, String> {
                 let mut client = Self::client()?;
-                let reply = client
-                    .request(DaemonRequest::UserDecision {
-                        action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::List,
-                        payload: serde_json::json!({}),
-                    })
-                    .map_err(daemon_error_reason)?;
-                let DaemonReply::Ok(value) = reply else {
-                    return Err("daemon did not return a decision snapshot".to_owned());
-                };
-                serde_json::from_value(value.get("decisions").cloned().unwrap_or(value))
-                    .map_err(|_| "daemon returned an invalid decision snapshot".to_owned())
+                decisions::pending_snapshot(&mut |request| {
+                    client.request(request).map_err(daemon_error_reason)
+                })
             })();
         match result {
             Ok(decisions) => BackendEvent::Decisions {
@@ -203,7 +195,7 @@ impl DecisionCommandPort for DaemonDecisionCommandPort {
             match client
                 .request(DaemonRequest::UserDecision {
                     action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::Resolve,
-                    payload: serde_json::json!({"decision_id": decision_id, "answer": answer}),
+                    payload: serde_json::json!({"workspace": workspace, "decision_id": decision_id, "answer": answer}),
                 })
                 .map_err(daemon_error_reason)?
             {
@@ -653,6 +645,7 @@ struct ProductionOverlayPort {
 
 #[cfg(test)]
 mod artifact_tests;
+mod decisions;
 mod preview_access;
 
 impl ProductionOverlayPort {
@@ -2804,15 +2797,7 @@ impl LaneConnection {
 fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>> {
     let mut lane = LaneConnection::observing();
     RefreshPump::spawn(decision_cadence(), move || {
-        let reply = lane.request(DaemonRequest::UserDecision {
-            action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::List,
-            payload: serde_json::json!({}),
-        })?;
-        let DaemonReply::Ok(value) = reply else {
-            return Err("daemon did not return a decision snapshot".to_owned());
-        };
-        serde_json::from_value(value.get("decisions").cloned().unwrap_or(value))
-            .map_err(|_| "daemon returned an invalid decision snapshot".to_owned())
+        decisions::pending_snapshot(&mut |request| lane.request(request))
     })
 }
 

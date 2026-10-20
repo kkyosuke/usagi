@@ -97,7 +97,7 @@ pub enum Overlay {
     Roles,
     /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
     CreateSession,
-    /// Workspace-scoped pending user decisions and their answer editor.
+    /// Daemon-wide pending user decisions and their answer editor.
     Decisions,
     /// Merge-confirmed sessions awaiting explicit, sequential cleanup.
     CleanupQueue,
@@ -475,6 +475,15 @@ pub struct EnvironmentEditor {
     /// `true` while a save is in flight. Local edits and re-saves are ignored
     /// until the owning port refluxes, so a save can never be double-submitted.
     saving: bool,
+}
+
+/// Last observed pending inventory and its TUI-local unread markers. The
+/// process deck carries this bounded snapshot across workspace compositions;
+/// the next daemon observation remains authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionSnapshot {
+    decisions: Vec<UserDecision>,
+    unread: BTreeSet<UserDecisionId>,
 }
 
 /// Local navigation and draft state for a durable user decision.  The durable
@@ -1533,7 +1542,7 @@ impl AppState {
     pub const fn daemon_control(&self) -> &DaemonControlState {
         &self.daemon_control
     }
-    /// Pending decisions from the current workspace only.
+    /// Pending decisions across the daemon's workspaces.
     #[must_use]
     pub fn decisions(&self) -> &[UserDecision] {
         &self.decisions
@@ -1542,6 +1551,14 @@ impl AppState {
     #[must_use]
     pub fn unread_decision_ids(&self) -> &std::collections::BTreeSet<UserDecisionId> {
         &self.unread_decisions
+    }
+    /// Capture only when leaving a workspace, never on the frame tick.
+    #[must_use]
+    pub fn decision_snapshot(&self) -> DecisionSnapshot {
+        DecisionSnapshot {
+            decisions: self.decisions.clone(),
+            unread: self.unread_decisions.clone(),
+        }
     }
     /// Open decision list/editor state, if its overlay is visible.
     #[must_use]
@@ -2030,7 +2047,7 @@ pub enum AppKey {
     OpenPreview,
     /// Open the selected session's artifacts, or the workspace-wide inventory.
     OpenArtifacts,
-    /// Open the current workspace's durable pending decision list.
+    /// Open the daemon's durable pending decision list.
     OpenDecisions,
     /// Refresh and open the exact pending question selected in the inbox.
     OpenDecision(UserDecisionId),
@@ -2265,6 +2282,9 @@ pub enum AppEvent {
     FocusSession(SessionId),
     /// Restore the process deck's manual display order on project re-entry.
     RestoreSessionOrder(Vec<SessionId>),
+    /// Carry the daemon-wide decision observation through a project switch
+    /// without treating its existing questions as newly arrived.
+    RestoreDecisions(DecisionSnapshot),
     /// Open one stable session without relying on list position. The process
     /// deck uses this after a Garden visit switched to another workspace.
     VisitSession(SessionId),
@@ -2402,7 +2422,7 @@ pub enum BackendEvent {
         scope: RoleEditorScope,
         error: SafeError,
     },
-    /// Atomic daemon snapshot; records outside `workspace` are rejected by the reducer.
+    /// Atomic daemon-wide snapshot, fenced to the observing workspace composition.
     Decisions {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
@@ -2751,10 +2771,9 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::LivePaneAvailability(has_live_pane) => {
             update_live_pane_availability(state, has_live_pane)
         }
-        AppEvent::PaneTabAvailability {
-            available: has_pane_tab,
-            error,
-        } => update_pane_tab_availability(state, has_pane_tab, error),
+        AppEvent::PaneTabAvailability { available, error } => {
+            update_pane_tab_availability(state, available, error)
+        }
         AppEvent::TerminalLaunchFailed(error) => {
             state.notice = Some(error.clone());
             if state.overlay.is_none() {
@@ -2790,6 +2809,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         }
         AppEvent::FocusSession(session) => focus_session(state, session),
         AppEvent::RestoreSessionOrder(order) => restore_session_order(state, &order),
+        AppEvent::RestoreDecisions(snapshot) => decision::restore(state, snapshot),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
             if state.overlay == Some(Overlay::Garden) {
@@ -4364,7 +4384,6 @@ fn reconcile_decision_overlay(state: &mut AppState) {
 }
 
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
-    let workspace = state.workspace;
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
@@ -4388,7 +4407,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
-        return update_decision_editor(workspace, editor, key);
+        return update_decision_editor(editor.decision.owner.workspace_id, editor, key);
     }
     match key {
         AppKey::Escape => {

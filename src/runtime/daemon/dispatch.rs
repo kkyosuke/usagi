@@ -6,6 +6,7 @@
 
 mod scratchpad;
 pub(super) mod session;
+mod user_decision_page;
 
 use session::{AgentDispatchRequest, authorize_delegation, dispatch_session_action};
 use usagi_core::domain::agent::{AgentLaunchClient, AgentLaunchEntry, AgentLaunchSource};
@@ -988,20 +989,23 @@ pub(super) fn dispatch_user_decision(
                 payload,
                 caller_context,
                 ..
-            } => Some((action, payload, caller_context, false)),
+            } => Some((action, payload, caller_context, false, false)),
             DaemonRequest::UserDecision { action, payload } => {
                 use usagi_core::infrastructure::ipc::TuiUserDecisionAction;
+                let list_all = action == TuiUserDecisionAction::ListAll;
                 let action = match action {
                     TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
-                    TuiUserDecisionAction::List => DispatchToolAction::UserDecisionList,
+                    TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll => {
+                        DispatchToolAction::UserDecisionList
+                    }
                     TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
                     TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
                 };
-                Some((action, payload, None, true))
+                Some((action, payload, None, true, list_all))
             }
             _ => None,
         });
-    let Some((action, payload, caller_context, tui_access)) = parsed else {
+    let Some((action, payload, caller_context, tui_access, list_all)) = parsed else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
             body.clone(),
@@ -1047,6 +1051,13 @@ pub(super) fn dispatch_user_decision(
     })();
     let owners = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
         if tui_access {
+            // Only the human surface may address a decision in another
+            // workspace. MCP selectors never override credential provenance.
+            let workspace = payload.get("workspace").map_or(Ok(workspace), |value| {
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "invalid decision workspace")
+                })
+            })?;
             return Ok((workspace, None));
         }
         let runtime = agent.lock().map_err(|_| {
@@ -1068,6 +1079,9 @@ pub(super) fn dispatch_user_decision(
         Ok((workspace, Some(owners)))
     });
     let response = owners.and_then(|(workspace, owners)| {
+        if list_all {
+            return user_decision_page::response(store, hello, &request_id, workspace, payload);
+        }
         let request_owners = owners.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
@@ -1118,7 +1132,7 @@ pub(super) fn dispatch_user_decision(
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
                     let decision = decision_for(input.decision_id)?;
-                    if decision.status != UserDecisionStatus::Pending {
+                    if owners.is_some() && decision.status != UserDecisionStatus::Pending {
                         // Resolution creates a durable outbox entry atomically.
                         // Polling the terminal decision is the acknowledgement;
                         // no synchronous connection is kept open while a human

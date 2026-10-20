@@ -592,10 +592,14 @@ active を変えないのは [Home と target](#home-と-target) のとおりで
 Director と root shell が同時に開いていれば、入力を持たない root surface も read-only で attach する。したがって
 最大 3 本の terminal が同時に更新され、drawer を開いたことでは選択 session の Agent content を閉じたり静止させたりしない。
 
-Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
-一覧を owner（session 名。root は `workspace root`、session 一覧に無い場合は `session <ID 先頭 8 桁>`）と title で表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
+Pending user decision は daemon 全体の pending snapshot から投影し、表示中以外の workspace の質問も受け取る。
+snapshot の受け取り先は現在の workspace composition ID で fence し、古い composition の応答は捨てる。overlay は pending
+一覧と editor に owner（`workspace 名 / session 名`。root は `workspace root`、未表示の workspace / session は
+`workspace <ID 先頭 8 桁>` / `session <ID 先頭 8 桁>`）と title を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
 editor を表示する。Esc は editor から一覧へ戻り、一覧では overlay を閉じるだけで durable decision を変更しない。
-submit は stable option ID または空でない許可済み freeform を送る。row は daemon の resolve confirmation まで
+project の切替では最後に観測した pending 一覧と未読状態を引き継ぎ、閉じた質問を新着として再表示しない。
+次の daemon snapshot で新しく届いた質問だけを自動表示し、回答済み・期限切れの質問とその未読状態を取り除く。
+submit は質問元の workspace ID と stable decision ID を指定して stable option ID または空でない許可済み freeform を送る。row は daemon の resolve confirmation まで
 残り、resolve error・disconnect・resync 後も snapshot で再試行可能な pending state に収束する。modal が開いて
 いる間は Home、Closeup、terminal の背景入力を dispatch しない。
 
@@ -980,7 +984,7 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
 
 | lane | 観測対象 | primitive | cadence | 起動する契機 | cold-start |
 |---|---|---|---|---|---|
-| decision | 保留中の user decision | `UserDecision::List` | 500ms。失敗中は 500ms から 8s 上限の指数 backoff | 最初の `RefreshDecisions` | しない |
+| decision | 全 workspace の保留中の user decision | `UserDecision::ListAll` | 500ms。失敗中は 500ms から 8s 上限の指数 backoff | 最初の `RefreshDecisions` | しない |
 | session | 他 client（MCP server / CLI）が変えた session lifecycle | `Session::List` | 1s。失敗中は 1s から 8s 上限の指数 backoff | frame loop 開始時の wake | する（高々 3 回） |
 | PR | daemon が所有する session ごとの PR inventory | `PrBatch` | 1s。失敗中は 1s から 8s 上限の指数 backoff | 観測対象 session 集合の反映と PR modal の明示要求 | しない |
 | metrics | mascot の daemon metrics | `Metrics::Snapshot` | 1s。失敗中は 1s から 8s 上限の指数 backoff | 最初の描画 | しない |
@@ -1016,6 +1020,8 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   ときに 1 回だけ notice を出し、次に成功したらその抑止を解く。session lane の失敗は refresh を要求した完了経路の
   notice として 1 回だけ出る。metrics lane の失敗は直前の sample を保持して mascot をちらつかせない。PR lane の失敗表示は
   [PR modal と browser effect](#pr-modal-と-browser-effect) が正本である。
+- **decision 一覧は全ページを揃えてから反映する**。[一覧取得の契約](07-mcp.md#user-decision)に従い、途中で一覧が
+  変わった場合や通信に失敗した場合は直前の一覧と未読状態を保持し、次の観測で先頭から再取得する。
 
 ## frame 予算
 
@@ -1366,15 +1372,15 @@ Garden は独立した通知画面を開かず、区画そのものを Action Ce
 
 | 対応が必要な状態 | Garden での投影 |
 |---|---|
-| active project の pending user decision | owner session の status 行へ `action · N decisions` を最優先で表示する |
+| 開いている project の pending user decision | owner session の status 行へ `action · N decisions` を最優先で表示する |
 | session lifecycle または dispatch の failure | failure pose / `failed` status を保ち、header の attention 件数へ加える |
 | `waiting` / `interrupted` Agent | 既存のうさぎの pose と status を保ち、header の attention 件数へ加える |
 
 区画またはうさぎの click は該当 project / session の Closeup へ移動する。
 うさぎからは対応する Agent tab まで選択する。Action Center は
 別の route、modal、永続 unread store を持たず、daemon / controller の現在の projection から毎 frame 導出する。
-inactive project の pending decision は resident controller がなく観測していないため 0 件と断定せず、attention
-件数にも加えない。inactive project で観測できる Agent membership と cached lifecycle だけを従来どおり使う。
+inactive project の pending decision も共通の decision snapshot を workspace / session ID で結合して attention
+件数へ加える。Agent membership と lifecycle は従来の観測・cache から投影する。
 
 ### responsive layout
 

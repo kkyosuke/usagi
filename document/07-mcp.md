@@ -176,7 +176,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child 自身の session ID に属する machine-local scratchpad を core usecase 経由で読み書きする（[保存先](#session-scratchpad)） |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get/list で観測する。agent 経路は作成した owner/run の decision と、exact resume で引き継いだ同じ会話の decision だけを操作できる |
+| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get で観測する。agent 経路は作成した owner/run の decision と、exact resume で引き継いだ同じ会話の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
@@ -227,7 +227,13 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 ### User decision
 
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
-caller は同じ credential で get / list を polling し、terminal decision を get した時点で durable outbox を ACK する。
+caller は同じ credential と `decision_id` で `get` を polling し、terminal decision を取得した時点で durable outbox を ACK する。
+`list` は pending だけを返すため、回答の受信には `get` を使う。TUI の参照は agent の受信 ACK を変更しない。
+TUI 専用の `ListAll` は全 workspace の pending を IPC frame 上限内のページに分けて返す。`next_cursor` がある間は
+それを `cursor` として次ページを取得する。cursor は一覧の revision と offset を持ち、途中で一覧が変わると
+`RevisionConflict` を返す。全ページの取得が成功して初めて完全な一覧として扱い、失敗時は先頭から取り直す。
+`Get` / `Resolve` / `Cancel` は optional な `workspace` ID で
+質問元を指定できる。省略時は接続先 workspace を使う。この指定と全体一覧は agent の MCP scope を拡張しない。
 同じ idempotency key の request は同じ decision に収束する。明示した期限を過ぎてからの同一内容の再送も、
 保持中の元の decision とその回答・終了状態を返す。新規 request の期限は作成時に検証する。これにより人間の応答時間が MCP connection や caller
 credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。
@@ -491,7 +497,7 @@ sibling も衝突判定には含め、重複番号を参照する依存は `unme
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract) を参照する。
 
 TUI の人間回答面は MCP caller credential を持たない。daemon は agent 用 `DispatchTool` と別の型付き IPC
-request として workspace-scoped な `get` / `list` / `resolve` / `cancel` だけを受け付け、`request` と
+request として `get` / `list` / `list_all` / `resolve` / `cancel` だけを受け付け、`request` と
 `expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存してから
 `tools/call` の成功応答を返す。agent caller は同じ credential と `decision_id` で `get` を polling し、daemon は
 durable decision の owner と caller scope を照合して terminal decision を返した時点で event を ack する。回答を

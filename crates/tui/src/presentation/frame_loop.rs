@@ -36,16 +36,16 @@ use super::{
     open_failure_notice, open_from_registry, opens_workspace_help, prepare_activation_settings,
     prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck, project_bar,
     project_controller_sessions, registry_contains_path, relative_time_clock,
-    remember_workspace_session_focus, remove_registry_paths, render_home, render_home_at,
+    remember_workspace_controller_state, remove_registry_paths, render_home, render_home_at,
     render_missing_workspace_prompt, render_open, restore_workspace_closeup,
-    restore_workspace_session_focus, retarget_drawer_chords, right_pane_tab_at, route_garden_input,
-    route_pr_modal_click, route_workspace_input_before_reducer, run_workspace_config,
-    save_config_responsive, save_config_source_responsive, scroll_key_help, select_right_pane_tab,
-    session_name_for, sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
-    step_config, step_new, step_open, step_welcome, surface_agent_tab_intent_error,
-    sync_overlay_session_roots, sync_runtime_sessions, sync_terminal_selection_motions,
-    visit_garden_agent, workspace_has_unsaved_surface, workspace_help_context,
-    workspace_navigation_target, workspace_terminal_attachments,
+    restore_workspace_controller_state, retarget_drawer_chords, right_pane_tab_at,
+    route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+    run_workspace_config, save_config_responsive, save_config_source_responsive, scroll_key_help,
+    select_right_pane_tab, session_name_for, sidebar_pointer_event, spawn_garden_observation_job,
+    spawn_restore_job, step_config, step_new, step_open, step_welcome,
+    surface_agent_tab_intent_error, sync_overlay_session_roots, sync_runtime_sessions,
+    sync_terminal_selection_motions, visit_garden_agent, workspace_has_unsaved_surface,
+    workspace_help_context, workspace_navigation_target, workspace_terminal_attachments,
 };
 
 /// Render a single static Home frame from a workspace snapshot, using the same
@@ -778,7 +778,7 @@ pub(super) fn drive_workspace_controller(
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
     adopt_session_command_lane(lane, &root_cwd, &mut ui);
-    restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
+    restore_workspace_controller_state(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
     let mut pending_palette_visit = deck.take_palette_visit(&root_cwd);
@@ -1390,7 +1390,7 @@ pub(super) fn drive_workspace_controller(
                 icon_mode,
             )
             .with_agent_inventory(ui.agent_inventory(), runtime.panes())
-            .with_workspace_deck_garden(deck)
+            .with_workspace_deck(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
             if garden_open {
@@ -1617,7 +1617,7 @@ pub(super) fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
-                remember_workspace_session_focus(deck, runtime.state());
+                remember_workspace_controller_state(deck, runtime.state());
                 if preserve_closeup {
                     deck.schedule_closeup(prepared.workspace.path.clone());
                 }
@@ -1685,7 +1685,7 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_palette_visit(path, workspace, action);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     } else {
                         super::restore_prepared_workspace(&mut loader, &root_cwd);
@@ -1719,7 +1719,7 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_attention_visit(path, session, destination);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     } else {
                         super::restore_prepared_workspace(&mut loader, &root_cwd);
@@ -1744,7 +1744,7 @@ pub(super) fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -1771,7 +1771,7 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_garden_visit(prepared.workspace.path.clone(), session, None);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -1851,7 +1851,7 @@ pub(super) fn drive_workspace_controller(
                                 if let Some(loader) = loader.as_mut() {
                                     let _ = (**loader).record_unite(&deck.paths());
                                 }
-                                remember_workspace_session_focus(deck, runtime.state());
+                                remember_workspace_controller_state(deck, runtime.state());
                                 return Ok(WorkspaceStep::Activate(Box::new(first)));
                             }
                         }
@@ -1882,7 +1882,7 @@ pub(super) fn drive_workspace_controller(
                             &prepared.workspace.path,
                         ) {
                             deck.close_path(&path);
-                            remember_workspace_session_focus(deck, runtime.state());
+                            remember_workspace_controller_state(deck, runtime.state());
                             return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                         }
                     } else {
@@ -1995,7 +1995,7 @@ pub(super) fn drive_workspace_controller(
                     visit.session,
                     visit.agent,
                 );
-                remember_workspace_session_focus(deck, runtime.state());
+                remember_workspace_controller_state(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             let notice = deck.notice().map(str::to_owned);

@@ -7,11 +7,17 @@
 mod composition;
 
 use super::{
-    AppKey, AppState, DecisionEditor, DecisionOverlayState, Effect, Overlay, SafeError,
-    SafeMessage, UserDecision, UserDecisionAnswer, UserDecisionId, UserDecisionSelectionMode,
-    UserDecisionStatus, WorkspaceId, reconcile_decision_overlay,
+    AppKey, AppState, DecisionEditor, DecisionOverlayState, DecisionSnapshot, Effect, Overlay,
+    SafeError, SafeMessage, UserDecision, UserDecisionAnswer, UserDecisionId,
+    UserDecisionSelectionMode, UserDecisionStatus, WorkspaceId, reconcile_decision_overlay,
 };
 use std::collections::BTreeSet;
+
+pub(super) fn restore(state: &mut AppState, snapshot: DecisionSnapshot) -> Vec<Effect> {
+    state.decisions = snapshot.decisions;
+    state.unread_decisions = snapshot.unread;
+    Vec::new()
+}
 
 pub(super) fn unavailable(state: &mut AppState, workspace: WorkspaceId) -> Vec<Effect> {
     if workspace != state.workspace {
@@ -98,10 +104,7 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                 .collect::<BTreeSet<_>>();
             state.decisions = decisions
                 .into_iter()
-                .filter(|decision| {
-                    decision.owner.workspace_id == workspace
-                        && decision.status == UserDecisionStatus::Pending
-                })
+                .filter(|decision| decision.status == UserDecisionStatus::Pending)
                 .collect();
             state.unread_decisions.retain(|id| {
                 state
@@ -146,7 +149,9 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
             workspace,
             decision_id,
         } => {
-            if workspace != state.workspace {
+            if !state.decisions.iter().any(|decision| {
+                decision.decision_id == decision_id && decision.owner.workspace_id == workspace
+            }) {
                 return Vec::new();
             }
             let closes_active_modal = state
@@ -170,12 +175,14 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
             decision_id,
             error,
         } => {
-            if workspace == state.workspace
-                && let Some(editor) = state
-                    .decision_overlay
-                    .as_mut()
-                    .and_then(|overlay| overlay.editor.as_mut())
-                    .filter(|editor| editor.decision.decision_id == decision_id)
+            if let Some(editor) = state
+                .decision_overlay
+                .as_mut()
+                .and_then(|overlay| overlay.editor.as_mut())
+                .filter(|editor| {
+                    editor.decision.decision_id == decision_id
+                        && editor.decision.owner.workspace_id == workspace
+                })
             {
                 editor.error = Some(error);
                 editor.scroll_offset = None;

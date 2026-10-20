@@ -33,7 +33,7 @@ pub trait ExternalTerminalPort: Send {
 
 /// Daemon-authoritative durable decision boundary.
 pub trait DecisionCommandPort: Send {
-    /// Fetches the authoritative pending snapshot for one workspace.
+    /// Fetches the daemon-wide pending snapshot for the observing workspace composition.
     fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent;
 
     /// Submits one already validated answer.
