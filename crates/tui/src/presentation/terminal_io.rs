@@ -433,6 +433,7 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
         | LiveTerminalAction::OpenKnowledgeSearch
+        | LiveTerminalAction::OpenOutputSearch
         | LiveTerminalAction::OpenCommandPalette
         | LiveTerminalAction::OpenAttention
         | LiveTerminalAction::ActivateWorkspace(_)

@@ -7,11 +7,13 @@
 
 mod attention;
 mod knowledge_search;
+pub(crate) mod output_search;
 pub(crate) mod palette;
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
 use usagi_core::domain::id::{AgentRuntimeId, SessionId, UserDecisionId, WorkspaceId};
@@ -27,6 +29,7 @@ use crate::presentation::widgets::garden::{GardenAgent, GardenSession};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
+use crate::usecase::application::controller::DecisionSnapshot;
 use crate::usecase::fuzzy::fuzzy_score;
 
 const TAB_NAME_WIDTH: usize = 18;
@@ -184,6 +187,7 @@ enum DeckOverlay {
     Attention(attention::AttentionList),
     Palette(palette::Palette),
     Knowledge(knowledge_search::Search),
+    OutputSearch(output_search::Search),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +199,7 @@ enum AddWorkspaceMode {
 /// Result of reducing one key while a deck overlay is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayIntent {
+    OutputVisit(Box<output_search::Hit>),
     Stay,
     Cancel,
     PaletteVisit {
@@ -242,6 +247,11 @@ pub struct WorkspaceDeck {
     attention_cursor: usize,
     pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
     pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
+    pub(crate) pending_output_hit: Option<output_search::Hit>,
+    search_epoch: u64,
+    /// Parked only during controller replacement. Shared ownership keeps
+    /// loading-frame deck clones from copying question bodies every frame.
+    decisions: Option<Arc<DecisionSnapshot>>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -269,6 +279,9 @@ impl WorkspaceDeck {
             attention_cursor: 0,
             pending_attention: None,
             pending_palette: None,
+            pending_output_hit: None,
+            search_epoch: 0,
+            decisions: None,
         }
     }
 
@@ -295,6 +308,32 @@ impl WorkspaceDeck {
     #[must_use]
     pub fn slots(&self) -> &[WorkspaceSlot] {
         &self.slots
+    }
+
+    pub(super) fn remember_decisions(&mut self, snapshot: DecisionSnapshot) {
+        self.decisions = Some(Arc::new(snapshot));
+    }
+
+    pub(super) fn take_decisions(&mut self) -> Option<DecisionSnapshot> {
+        self.decisions.take().map(Arc::unwrap_or_clone)
+    }
+
+    /// Source labels for questions displayed while another project is active.
+    #[must_use]
+    pub fn decision_owner_names(&self) -> crate::presentation::views::decision_modal::OwnerNames {
+        crate::presentation::views::decision_modal::OwnerNames {
+            workspaces: self
+                .slots
+                .iter()
+                .map(|slot| (slot.workspace_id, slot.label.clone()))
+                .collect(),
+            sessions: self
+                .slots
+                .iter()
+                .flat_map(|slot| slot.sessions.iter())
+                .map(|session| (session.projected.id, session.projected.label.clone()))
+                .collect(),
+        }
     }
 
     #[must_use]
@@ -466,6 +505,7 @@ impl WorkspaceDeck {
             DeckOverlay::Attention(list) => list.handle(key, &self.slots),
             DeckOverlay::Knowledge(search) => search.handle(key),
             DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
+            DeckOverlay::OutputSearch(search) => search.handle(key),
         }
     }
 
@@ -1251,6 +1291,9 @@ pub fn render_overlay(
             knowledge_search::render(deck, search, height, width, base)
         }
         Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
+        Some(DeckOverlay::OutputSearch(search)) => {
+            output_search::render(deck, search, height, width, base)
+        }
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {
             render_switcher(deck, switcher, height, width, base)

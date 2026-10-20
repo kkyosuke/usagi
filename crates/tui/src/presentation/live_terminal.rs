@@ -77,6 +77,25 @@ pub struct LiveTerminalControls {
 }
 
 impl LiveTerminalControls {
+    /// Reveal a validated search hit and retain its highlight through redraws.
+    pub(crate) fn show_search_selection(
+        &mut self,
+        selection: TerminalSelection,
+        buffer: TerminalBuffer,
+        origin: u64,
+        total: usize,
+        viewport: usize,
+    ) {
+        let row = selection.anchor().row;
+        self.observe_rows(buffer, origin, total, viewport);
+        self.active.scroll = total
+            .saturating_sub(viewport)
+            .saturating_sub(row.saturating_sub(viewport / 2));
+        self.begin_selection(selection);
+        self.active.dragging = false;
+        self.active.feedback = Some("Search match".into());
+    }
+
     /// Track `terminal` as the focused pane, restoring its terminal-local view
     /// state when focus returns. A pending pointer gesture cannot span panes, so
     /// blur cancels the gesture while retaining an established selection.

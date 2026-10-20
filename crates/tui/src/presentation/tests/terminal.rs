@@ -77,7 +77,7 @@ fn decision_selection_frame(
         &vec!["BACKGROUND TERMINAL".into(); height],
         runtime.state().decision_overlay().unwrap(),
         runtime.state().decisions(),
-        &BTreeMap::new(),
+        &crate::presentation::views::decision_modal::OwnerNames::default(),
     )
 }
 

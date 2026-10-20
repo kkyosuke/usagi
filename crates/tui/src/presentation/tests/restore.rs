@@ -1760,6 +1760,100 @@ fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
 }
 
 #[test]
+fn workspace_switch_preserves_decision_dismissal_unread_and_new_arrivals() {
+    fn observe(
+        runtime: &mut WorkspaceRuntime,
+        decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    ) {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+            workspace: runtime.state().workspace(),
+            decisions,
+        }));
+    }
+    fn switch(
+        runtime: &WorkspaceRuntime,
+        target: &WorkspaceSnapshot,
+        deck: &mut WorkspaceDeck,
+    ) -> WorkspaceRuntime {
+        remember_workspace_controller_state(deck, runtime.state());
+        deck.activate_snapshot(target);
+        let mut restored = WorkspaceRuntime::new(target.workspace_id, target.session_ids.clone());
+        restore_workspace_controller_state(deck, &target.workspace.path, &mut restored);
+        restored
+    }
+
+    let alpha = snapshot("alpha");
+    let beta = snapshot("beta");
+    let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+    let template = super::terminal::decision_selection_runtime_with_title("Existing question");
+    let mut first = template.state().decisions()[0].clone();
+    first.owner.workspace_id = alpha.workspace_id;
+    let mut current = WorkspaceRuntime::new(alpha.workspace_id, alpha.session_ids.clone());
+    observe(&mut current, vec![first.clone()]);
+    assert_eq!(current.state().overlay(), Some(Overlay::Decisions));
+    let _ = current.apply_event(AppEvent::Key(AppKey::Escape));
+    let _ = current.apply_event(AppEvent::Key(AppKey::Escape));
+    assert_eq!(current.state().overlay(), None);
+
+    let mut current = switch(&current, &beta, &mut deck);
+    assert_eq!(current.state().overlay(), None);
+    observe(&mut current, vec![first.clone()]);
+    assert_eq!(
+        current.state().overlay(),
+        None,
+        "a dismissed question is not new after switching"
+    );
+    assert_eq!(current.state().decisions(), std::slice::from_ref(&first));
+    assert_eq!(
+        current.state().unread_decision_ids(),
+        &BTreeSet::from([first.decision_id])
+    );
+
+    let _ = current.apply_event(AppEvent::Key(AppKey::OpenDecisions));
+    let _ = current.apply_event(AppEvent::Key(AppKey::Escape));
+    assert!(current.state().unread_decision_ids().is_empty());
+    let mut current = switch(&current, &alpha, &mut deck);
+    let _ = current.apply_event(AppEvent::Backend(BackendEvent::DecisionsUnavailable {
+        workspace: alpha.workspace_id,
+    }));
+    // Switching again before a successful read must retain the last observation
+    // and the user's read markers, rather than replacing them with an empty set.
+    let mut current = switch(&current, &beta, &mut deck);
+    assert_eq!(current.state().decisions(), std::slice::from_ref(&first));
+    assert!(current.state().unread_decision_ids().is_empty());
+    observe(&mut current, vec![first.clone()]);
+    assert_eq!(current.state().overlay(), None);
+
+    let mut second = first.clone();
+    second.decision_id = UserDecisionId::new();
+    second.title = "New question".into();
+    observe(&mut current, vec![first, second.clone()]);
+    assert_eq!(
+        current
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        second.decision_id
+    );
+    assert_eq!(
+        current.state().unread_decision_ids(),
+        &BTreeSet::from([second.decision_id])
+    );
+    observe(&mut current, vec![second.clone()]);
+    let mut current = switch(&current, &alpha, &mut deck);
+    assert_eq!(current.state().decisions(), std::slice::from_ref(&second));
+    observe(&mut current, Vec::new());
+    let current = switch(&current, &beta, &mut deck);
+    assert!(current.state().decisions().is_empty());
+    assert!(current.state().unread_decision_ids().is_empty());
+    assert_eq!(current.state().overlay(), None);
+}
+
+#[test]
 fn workspace_switch_restores_each_projects_last_session_cursor() {
     let alpha = snapshot("alpha");
     let beta = snapshot_with_sessions("beta", &["first", "remembered"]);
@@ -1769,9 +1863,9 @@ fn workspace_switch_restores_each_projects_last_session_cursor() {
     let mut previous = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
     let _ = previous.handle_key(Key::Down);
 
-    remember_workspace_session_focus(&mut deck, previous.state());
+    remember_workspace_controller_state(&mut deck, previous.state());
     let _ = previous.handle_key(Key::Down);
-    remember_workspace_session_focus(&mut deck, previous.state());
+    remember_workspace_controller_state(&mut deck, previous.state());
     assert_eq!(
         deck.focused_session_for_path(&beta.workspace.path),
         Some(remembered),
@@ -1779,7 +1873,7 @@ fn workspace_switch_restores_each_projects_last_session_cursor() {
     );
 
     let mut restored = WorkspaceRuntime::new(beta.workspace_id, beta.session_ids.clone());
-    restore_workspace_session_focus(&deck, &beta.workspace.path, &mut restored);
+    restore_workspace_controller_state(&mut deck, &beta.workspace.path, &mut restored);
     assert_eq!(
         restored.state().selected(),
         crate::usecase::application::controller::Selection::Target(Target::Session(remembered))
@@ -2008,7 +2102,7 @@ fn workspace_switch_restores_manual_session_order_with_fresh_membership() {
     deck.remember_session_order(WorkspaceId::new(), &[a]);
     let mut previous = WorkspaceRuntime::new(snapshot.workspace_id, vec![a, b, c]);
     let _ = previous.handle_key(Key::Char('N'));
-    remember_workspace_session_focus(&mut deck, previous.state());
+    remember_workspace_controller_state(&mut deck, previous.state());
     deck.activate_snapshot(&snapshot);
     assert_eq!(
         deck.session_order_for_path(&snapshot.workspace.path),
@@ -2016,7 +2110,7 @@ fn workspace_switch_restores_manual_session_order_with_fresh_membership() {
     );
     let new = SessionId::new();
     let mut restored = WorkspaceRuntime::new(snapshot.workspace_id, vec![new, c, b]);
-    restore_workspace_session_focus(&deck, &snapshot.workspace.path, &mut restored);
+    restore_workspace_controller_state(&mut deck, &snapshot.workspace.path, &mut restored);
     assert_eq!(restored.state().sessions(), &[b, c, new]);
     let _ = restored.apply_event(AppEvent::Backend(BackendEvent::Sessions(vec![new, c, b])));
     assert_eq!(restored.state().sessions(), &[b, c, new]);

@@ -36,16 +36,16 @@ use super::{
     open_failure_notice, open_from_registry, opens_workspace_help, prepare_activation_settings,
     prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck, project_bar,
     project_controller_sessions, registry_contains_path, relative_time_clock,
-    remember_workspace_session_focus, remove_registry_paths, render_home, render_home_at,
+    remember_workspace_controller_state, remove_registry_paths, render_home, render_home_at,
     render_missing_workspace_prompt, render_open, restore_workspace_closeup,
-    restore_workspace_session_focus, retarget_drawer_chords, right_pane_tab_at, route_garden_input,
-    route_pr_modal_click, route_workspace_input_before_reducer, run_workspace_config,
-    save_config_responsive, save_config_source_responsive, scroll_key_help, select_right_pane_tab,
-    session_name_for, sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
-    step_config, step_new, step_open, step_welcome, surface_agent_tab_intent_error,
-    sync_overlay_session_roots, sync_runtime_sessions, sync_terminal_selection_motions,
-    visit_garden_agent, workspace_has_unsaved_surface, workspace_help_context,
-    workspace_navigation_target, workspace_terminal_attachments,
+    restore_workspace_controller_state, retarget_drawer_chords, right_pane_tab_at,
+    route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+    run_workspace_config, save_config_responsive, save_config_source_responsive, scroll_key_help,
+    select_right_pane_tab, session_name_for, sidebar_pointer_event, spawn_garden_observation_job,
+    spawn_restore_job, step_config, step_new, step_open, step_welcome,
+    surface_agent_tab_intent_error, sync_overlay_session_roots, sync_runtime_sessions,
+    sync_terminal_selection_motions, visit_garden_agent, workspace_has_unsaved_surface,
+    workspace_help_context, workspace_navigation_target, workspace_terminal_attachments,
 };
 
 /// Render a single static Home frame from a workspace snapshot, using the same
@@ -760,6 +760,8 @@ pub(super) fn drive_workspace_controller(
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
     let mut _garden_job = None;
+    let (output_sender, output_completions) = mpsc::channel::<super::output_search::Completion>();
+    let mut output_job: Option<super::output_search::Job> = None;
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -780,7 +782,7 @@ pub(super) fn drive_workspace_controller(
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
     adopt_session_command_lane(lane, &root_cwd, &mut ui);
-    restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
+    restore_workspace_controller_state(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
     let mut pending_palette_visit = deck.take_palette_visit(&root_cwd);
@@ -1089,6 +1091,18 @@ pub(super) fn drive_workspace_controller(
             knowledge_port = Some(completion.port);
             knowledge_job = None;
         }
+        for completion in output_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            if deck.apply_output_search(completion.token, completion.responses) {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            garden_inventory = Some(completion.port);
+            output_job = None;
+        }
+        if let Some(job) = &output_job
+            && deck.output_search_token() != Some(job.token)
+        {
+            job.cancel();
+        }
         if deck.expire_attention(std::time::Instant::now()) {
             garden_observations = garden_observations.wrapping_add(1);
         }
@@ -1150,6 +1164,19 @@ pub(super) fn drive_workspace_controller(
         }
         controls.retain_terminals(&live_terminals);
         controls.sync_focus(focused_terminal.as_ref());
+        if pending_palette_visit.is_none()
+            && let Some(message) = super::output_search::focus_match(
+                deck,
+                &ui,
+                &mut controls,
+                focused_terminal.as_ref(),
+                usize::from(geometry.rows),
+            )
+        {
+            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                message,
+            ))));
+        }
         let screen_revision = focused_terminal
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
@@ -1377,7 +1404,7 @@ pub(super) fn drive_workspace_controller(
                 icon_mode,
             )
             .with_agent_inventory(ui.agent_inventory(), runtime.panes())
-            .with_workspace_deck_garden(deck)
+            .with_workspace_deck(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
             if garden_open {
@@ -1437,6 +1464,20 @@ pub(super) fn drive_workspace_controller(
         // Attention is always observed; detailed Agent inventory is only read
         // while Garden is visible. Both use the same bounded background lane.
         if garden_inventory.is_some()
+            && let Some((token, query, workspaces)) = deck.take_output_search()
+        {
+            let port = garden_inventory
+                .take()
+                .expect("search admission checked the port");
+            output_job = Some(super::output_search::spawn(
+                port,
+                token,
+                query,
+                workspaces,
+                output_sender.clone(),
+            ));
+        }
+        if garden_inventory.is_some()
             && garden_observation.begin_if_due(true, restore_clock.elapsed())
         {
             let targets = deck.attention_workspaces();
@@ -1475,8 +1516,8 @@ pub(super) fn drive_workspace_controller(
         // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
         // A delayed restore must not steal focus after the user starts another action.
-        if !matches!(raw_key, Key::Other) {
-            let _ = pending_palette_visit.take();
+        if !matches!(raw_key, Key::Other) && pending_palette_visit.take().is_some() {
+            deck.pending_output_hit = None;
         }
         if handle_interrupted_removal_confirmation(&raw_key, &mut ui, &mut runtime) {
             // This prompt is the exclusive frontmost owner. In particular,
@@ -1558,6 +1599,13 @@ pub(super) fn drive_workspace_controller(
             frame_material_key = None;
             continue;
         }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenOutputSearch)) {
+            deck.open_output_search();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
         if matches!(key, Key::Live(LiveTerminalAction::OpenCommandPalette)) {
             deck.open_command_palette();
             drawn_material = None;
@@ -1603,7 +1651,7 @@ pub(super) fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
-                remember_workspace_session_focus(deck, runtime.state());
+                remember_workspace_controller_state(deck, runtime.state());
                 if preserve_closeup {
                     deck.schedule_closeup(prepared.workspace.path.clone());
                 }
@@ -1615,7 +1663,22 @@ pub(super) fn drive_workspace_controller(
             continue;
         }
         if deck.overlay_open() {
-            match deck.handle_overlay_key_at(&key, height, width) {
+            let intent = deck.handle_overlay_key_at(&key, height, width);
+            let intent = if let OverlayIntent::OutputVisit(hit) = intent {
+                let action = hit.action();
+                let path = hit.path.clone();
+                let workspace = hit.source.terminal.workspace_id;
+                deck.pending_output_hit = Some(*hit);
+                OverlayIntent::PaletteVisit {
+                    path,
+                    workspace,
+                    action,
+                }
+            } else {
+                intent
+            };
+            match intent {
+                OverlayIntent::OutputVisit(_) => unreachable!("search visits are normalized above"),
                 OverlayIntent::PaletteVisit {
                     path,
                     workspace,
@@ -1624,6 +1687,7 @@ pub(super) fn drive_workspace_controller(
                     if runtime.palette_navigation_blocked()
                         || workspace_has_unsaved_surface(&runtime)
                     {
+                        deck.pending_output_hit = None;
                         deck.set_notice(
                             "Close the palette and finish the current dialog or draft first.",
                         );
@@ -1635,7 +1699,10 @@ pub(super) fn drive_workspace_controller(
                             &action,
                         ) {
                             Ok(()) => deck.close_overlay(),
-                            Err(message) => deck.set_notice(message),
+                            Err(message) => {
+                                deck.pending_output_hit = None;
+                                deck.set_notice(message);
+                            }
                         }
                     } else if let Some(prepared) =
                         prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
@@ -1652,10 +1719,11 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_palette_visit(path, workspace, action);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     } else {
                         super::restore_prepared_workspace(&mut loader, &root_cwd);
+                        deck.pending_output_hit = None;
                         deck.set_notice("Target is unavailable; refresh and select again.");
                     }
                 }
@@ -1685,10 +1753,11 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_attention_visit(path, session, destination);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     } else {
                         super::restore_prepared_workspace(&mut loader, &root_cwd);
+                        deck.pending_output_hit = None;
                         deck.set_notice("Target is unavailable; refresh and select again.");
                     }
                 }
@@ -1709,7 +1778,7 @@ pub(super) fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -1736,7 +1805,7 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_garden_visit(prepared.workspace.path.clone(), session, None);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -1816,7 +1885,7 @@ pub(super) fn drive_workspace_controller(
                                 if let Some(loader) = loader.as_mut() {
                                     let _ = (**loader).record_unite(&deck.paths());
                                 }
-                                remember_workspace_session_focus(deck, runtime.state());
+                                remember_workspace_controller_state(deck, runtime.state());
                                 return Ok(WorkspaceStep::Activate(Box::new(first)));
                             }
                         }
@@ -1847,7 +1916,7 @@ pub(super) fn drive_workspace_controller(
                             &prepared.workspace.path,
                         ) {
                             deck.close_path(&path);
-                            remember_workspace_session_focus(deck, runtime.state());
+                            remember_workspace_controller_state(deck, runtime.state());
                             return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                         }
                     } else {
@@ -1960,7 +2029,7 @@ pub(super) fn drive_workspace_controller(
                     visit.session,
                     visit.agent,
                 );
-                remember_workspace_session_focus(deck, runtime.state());
+                remember_workspace_controller_state(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             let notice = deck.notice().map(str::to_owned);

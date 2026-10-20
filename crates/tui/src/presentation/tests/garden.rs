@@ -283,6 +283,99 @@ fn garden_routes_click_and_pointer_down_through_the_drawn_frame_hit_test() {
 }
 
 #[test]
+fn cross_workspace_question_shows_its_source_and_marks_the_inactive_garden_session() {
+    use usagi_core::domain::agent::CallerRef;
+    use usagi_core::domain::id::{AgentId, UserDecisionId};
+    use usagi_core::domain::user_decision::{
+        UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionSelectionMode,
+        UserDecisionStatus,
+    };
+
+    let alpha = snapshot("alpha");
+    let beta = snapshot("beta");
+    let deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+    let sessions = vec![ProjectedSession::from_record(
+        alpha.session_ids[0],
+        &alpha.state.sessions[0],
+    )];
+    let mut runtime = WorkspaceRuntime::new(alpha.workspace_id, alpha.session_ids.clone());
+    let decision = UserDecision {
+        decision_id: UserDecisionId::new(),
+        owner: UserDecisionOwner {
+            workspace_id: beta.workspace_id,
+            session_id: Some(beta.session_ids[0]),
+            caller: CallerRef {
+                session_id: Some(beta.session_ids[0]),
+                agent_id: AgentId::new(),
+            },
+            run_id: OperationId::new(),
+        },
+        title: "Question from beta".into(),
+        prompt: "Choose".into(),
+        options: vec![UserDecisionOption {
+            id: "yes".into(),
+            label: "Yes".into(),
+            description: None,
+            pros: vec![],
+            cons: vec![],
+        }],
+        allow_freeform: false,
+        allow_comment: false,
+        require_confirmation: false,
+        recommendation: None,
+        selection_limits: None,
+        selection_mode: UserDecisionSelectionMode::Single,
+        context: vec![],
+        expires_at: None,
+        idempotency_key: None,
+        status: UserDecisionStatus::Pending,
+        answer: None,
+        created_at: now(),
+        resolved_at: None,
+    };
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+        workspace: alpha.workspace_id,
+        decisions: vec![decision],
+    }));
+    let build = |runtime: &WorkspaceRuntime| {
+        home_frame_material(
+            30,
+            140,
+            runtime,
+            "alpha",
+            &sessions,
+            None,
+            health(),
+            &BTreeMap::new(),
+            None,
+            None,
+            now(),
+        )
+        .with_workspace_deck(&deck)
+    };
+    let modal = render_home_material(&build(&runtime)).join("\n");
+    assert!(modal.contains("beta / beta-session"), "{modal}");
+    assert!(modal.contains("Question from beta"));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    let banner = render_home_material(&build(&runtime)).join("\n");
+    assert!(banner.contains("beta / beta-session"));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenGarden));
+    let material = build(&runtime);
+    let plots = material.projection.garden_sessions().unwrap();
+    assert_eq!(plots[0].pending_decisions, 0);
+    assert_eq!(plots[1].pending_decisions, 1);
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+        workspace: alpha.workspace_id,
+        decisions: vec![],
+    }));
+    assert_eq!(
+        build(&runtime).projection.garden_sessions().unwrap()[1].pending_decisions,
+        0
+    );
+}
+
+#[test]
 fn garden_frame_material_uses_every_open_projects_projection() {
     let alpha = snapshot("alpha");
     let beta = snapshot("beta");
@@ -311,7 +404,7 @@ fn garden_frame_material_uses_every_open_projects_projection() {
             None,
             now(),
         )
-        .with_workspace_deck_garden(deck)
+        .with_workspace_deck(deck)
     };
     let material = build(&deck);
     let plots = material

@@ -18,6 +18,7 @@ mod service_context;
 mod session_cache;
 mod standby;
 mod tenant_control;
+mod terminal_search;
 mod workers;
 
 pub(crate) use managed_update::{ManagedUpdateSync, sync_after_update};

@@ -191,6 +191,8 @@ pub enum LiveTerminalAction {
     OpenCommandPalette,
     /// Search the active workspace Issue and Memory stores.
     OpenKnowledgeSearch,
+    /// Search retained terminal output across open projects.
+    OpenOutputSearch,
     /// Open attention across all open projects (`Ctrl-O i`).
     OpenAttention,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
@@ -217,7 +219,7 @@ pub enum LiveTerminalAction {
     OpenPreview,
     /// Open generated files (`Ctrl-O f`).
     OpenArtifacts,
-    /// Open the workspace's pending decisions (`Ctrl-O d`).
+    /// Open the daemon's pending decisions (`Ctrl-O d`).
     OpenDecisions,
     /// Open the active target's scratchpad (`Ctrl-O s`).
     OpenNotes,
@@ -607,6 +609,12 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
         PrefixHelpScope::Workspace,
         "Ctrl-O m",
         "search Issue and Memory",
+    ),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('/') => LiveTerminalAction::OpenOutputSearch),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O /",
+        "search retained terminal output",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('k'), legacy = 11 => LiveTerminalAction::OpenCommandPalette),

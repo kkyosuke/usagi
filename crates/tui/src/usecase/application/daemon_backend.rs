@@ -482,7 +482,7 @@ impl DaemonBackend {
         }
     }
 
-    /// Connect a workspace-scoped durable-decision port.
+    /// Connect a daemon-wide durable-decision port.
     #[must_use]
     pub fn with_decisions(mut self, decisions: Box<dyn DecisionPort>) -> Self {
         self.decisions = decisions;
