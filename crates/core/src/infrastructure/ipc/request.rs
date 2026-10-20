@@ -379,7 +379,7 @@ pub struct UserDecisionCursor {
     pub offset: usize,
 }
 
-/// A byte-bounded part of the human-facing pending inventory. Consumers publish
+/// A byte-bounded part of the authorized pending inventory. Consumers publish
 /// only after following every cursor from the same revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionPage {

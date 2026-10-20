@@ -1,4 +1,4 @@
-//! TUI inventory pages sized against their actual negotiated response envelope.
+//! Scoped decision pages sized against their actual negotiated response envelope.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -9,7 +9,7 @@ use usagi_core::{
             DEFAULT_MAX_FRAME_BYTES, ErrorCode, ProtocolError, RequestId, ResponseOutcome,
             ServerHello, UserDecisionCursor, UserDecisionPage,
         },
-        store::user_decision::{UserDecisionPageError, UserDecisionStore},
+        store::user_decision::{UserDecisionPageError, UserDecisionScope, UserDecisionStore},
     },
 };
 
@@ -24,6 +24,7 @@ pub(super) fn response(
     hello: &ServerHello,
     request_id: &RequestId,
     workspace: WorkspaceId,
+    scope: UserDecisionScope<'_>,
     payload: Value,
 ) -> Result<Value, ProtocolError> {
     let payload: Payload = serde_json::from_value(payload).map_err(|_| {
@@ -51,7 +52,7 @@ pub(super) fn response(
         .min(DEFAULT_MAX_FRAME_BYTES)
         .saturating_sub(overhead);
     let page = store
-        .pending_page(payload.cursor.as_ref(), budget)
+        .pending_page(scope, payload.cursor.as_ref(), budget)
         .map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "decision inventory is unavailable")
         })?
@@ -177,7 +178,10 @@ mod tests {
         }
         let mut hello = hello();
         let request = RequestId("request\"\\\n".repeat(5));
-        let page = store.pending_page(None, 2048).unwrap().unwrap();
+        let page = store
+            .pending_page(UserDecisionScope::All, None, 2048)
+            .unwrap()
+            .unwrap();
         assert_eq!(page.decisions, vec![first.clone()]);
         let body = page_body(first.owner.workspace_id, &page);
         let exact = response_size(&hello, &request, body.clone());
@@ -187,6 +191,7 @@ mod tests {
             &hello,
             &request,
             first.owner.workspace_id,
+            UserDecisionScope::All,
             json!({}),
         )
         .unwrap();
@@ -199,6 +204,7 @@ mod tests {
                 &hello,
                 &request,
                 first.owner.workspace_id,
+                UserDecisionScope::All,
                 json!({})
             )
             .unwrap_err()
@@ -211,6 +217,7 @@ mod tests {
             &hello,
             &request,
             first.owner.workspace_id,
+            UserDecisionScope::All,
             json!({"cursor":page.next_cursor}),
         )
         .unwrap();
@@ -227,7 +234,15 @@ mod tests {
         let mut hello = hello();
         let request = RequestId("empty".into());
         let workspace = WorkspaceId::new();
-        let empty = response(&store, &hello, &request, workspace, json!({})).unwrap();
+        let empty = response(
+            &store,
+            &hello,
+            &request,
+            workspace,
+            UserDecisionScope::All,
+            json!({}),
+        )
+        .unwrap();
         assert_eq!(
             empty,
             json!({"workspace":workspace,"decisions":[],"next_cursor":null})
@@ -235,15 +250,30 @@ mod tests {
         let exact = response_size(&hello, &request, empty.clone());
         hello.limits.max_frame_bytes = u32::try_from(exact).unwrap();
         assert_eq!(
-            response(&store, &hello, &request, workspace, json!({})).unwrap(),
+            response(
+                &store,
+                &hello,
+                &request,
+                workspace,
+                UserDecisionScope::All,
+                json!({})
+            )
+            .unwrap(),
             empty
         );
         for limit in [0, u32::try_from(exact - 1).unwrap()] {
             hello.limits.max_frame_bytes = limit;
             assert_eq!(
-                response(&store, &hello, &request, workspace, json!({}))
-                    .unwrap_err()
-                    .code,
+                response(
+                    &store,
+                    &hello,
+                    &request,
+                    workspace,
+                    UserDecisionScope::All,
+                    json!({})
+                )
+                .unwrap_err()
+                .code,
                 ErrorCode::ResourceExhausted
             );
         }
@@ -263,7 +293,7 @@ mod tests {
         let request = RequestId("invalid".into());
         let workspace = first.owner.workspace_id;
         let cursor = store
-            .pending_page(None, 2048)
+            .pending_page(UserDecisionScope::All, None, 2048)
             .unwrap()
             .unwrap()
             .next_cursor
@@ -275,9 +305,16 @@ mod tests {
             json!({"cursor":{"revision":cursor.revision,"offset":2}}),
         ] {
             assert_eq!(
-                response(&store, &hello, &request, workspace, payload)
-                    .unwrap_err()
-                    .code,
+                response(
+                    &store,
+                    &hello,
+                    &request,
+                    workspace,
+                    UserDecisionScope::All,
+                    payload
+                )
+                .unwrap_err()
+                .code,
                 ErrorCode::InvalidArgument
             );
         }
@@ -288,6 +325,7 @@ mod tests {
                 &hello,
                 &request,
                 workspace,
+                UserDecisionScope::All,
                 json!({"cursor":cursor})
             )
             .unwrap_err()
@@ -296,9 +334,16 @@ mod tests {
         );
         std::fs::write(store.path(), "{").unwrap();
         assert_eq!(
-            response(&store, &hello, &request, workspace, json!({}))
-                .unwrap_err()
-                .code,
+            response(
+                &store,
+                &hello,
+                &request,
+                workspace,
+                UserDecisionScope::All,
+                json!({})
+            )
+            .unwrap_err()
+            .code,
             ErrorCode::Unavailable
         );
     }

@@ -1079,8 +1079,16 @@ pub(super) fn dispatch_user_decision(
         Ok((workspace, Some(owners)))
     });
     let response = owners.and_then(|(workspace, owners)| {
-        if list_all {
-            return user_decision_page::response(store, hello, &request_id, workspace, payload);
+        if action == DispatchToolAction::UserDecisionList {
+            use usagi_core::infrastructure::store::user_decision::UserDecisionScope;
+            let scope = if let Some(owners) = owners.as_deref() {
+                UserDecisionScope::Owners(owners)
+            } else if list_all {
+                UserDecisionScope::All
+            } else {
+                UserDecisionScope::Workspace(workspace)
+            };
+            return user_decision_page::response(store, hello, &request_id, workspace, scope, payload);
         }
         let request_owners = owners.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
@@ -1142,20 +1150,6 @@ pub(super) fn dispatch_user_decision(
                             .map_err(|_| UserDecisionError::Terminal)?;
                     }
                     Ok(serde_json::json!(decision))
-                }
-                DispatchToolAction::UserDecisionList => {
-                    let decisions = store
-                        .pending(workspace)
-                        .map_err(|_| UserDecisionError::Terminal)?;
-                    let decisions = decisions
-                        .into_iter()
-                        .filter(|decision| {
-                            owners
-                                .as_ref()
-                                .is_none_or(|expected| expected.contains(&decision.owner))
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(serde_json::json!({"workspace": workspace, "decisions": decisions}))
                 }
                 DispatchToolAction::UserDecisionResolve => {
                     let input = serde_json::from_value::<ResolvePayload>(payload)
