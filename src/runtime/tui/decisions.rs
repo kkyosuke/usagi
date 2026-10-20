@@ -112,11 +112,13 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(requests.len(), 3);
         for (request, expected) in requests.into_iter().zip([None, Some(first), Some(second)]) {
-            let DaemonRequest::UserDecision { action, payload } = request else {
-                panic!("expected decision request")
-            };
-            assert_eq!(action, TuiUserDecisionAction::ListAll);
-            assert_eq!(payload, json!({ "cursor": expected }));
+            assert_eq!(
+                request,
+                DaemonRequest::UserDecision {
+                    action: TuiUserDecisionAction::ListAll,
+                    payload: json!({ "cursor": expected }),
+                }
+            );
         }
     }
 

@@ -929,9 +929,9 @@ mod tests {
             );
         }
         assert!(serde_json::to_vec(&expected).unwrap().len() > DEFAULT_MAX_FRAME_BYTES);
-        // Reserve enough for the outer IPC envelope; the daemon tests measure
-        // its exact size rather than relying on this fixture's conservative cap.
-        let budget = DEFAULT_MAX_FRAME_BYTES - 1024;
+        // A smaller negotiated frame exercises multiple continuations and
+        // their stable revision. The daemon tests measure exact envelope sizes.
+        let budget = DEFAULT_MAX_FRAME_BYTES / 2;
         let mut collected = Vec::new();
         let mut cursor = None;
         let mut pages = 0;
@@ -958,7 +958,7 @@ mod tests {
             }
             cursor = Some(next);
         }
-        assert!(pages > 1);
+        assert!(pages >= 3);
         assert_eq!(collected, expected);
     }
 
