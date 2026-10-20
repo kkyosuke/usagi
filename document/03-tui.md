@@ -11,7 +11,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [この文書の読み方](#この文書の読み方)
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
-- [Issue・Memory 検索](#issue-と-memory-の検索)
+- [Issue と Memory の検索](#issue-と-memory-の検索)
 - [横断コマンドパレット](#横断コマンドパレット)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
 - [settings scope と workspace entry](#settings-scope-と-workspace-entry)
