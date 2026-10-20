@@ -34,12 +34,14 @@ fn response(deck: &WorkspaceDeck, query: &str) -> WorkspaceOutputSearch {
 fn output_search_fences_requeries_closure_and_workspace_identity() {
     let mut deck = deck();
     assert!(deck.take_output_search().is_none());
+    assert_eq!(deck.output_search_token(), None);
     assert!(!deck.apply_output_search((0, 0), vec![]));
     deck.open_output_search();
     assert!(deck.take_output_search().is_none());
     deck.handle_overlay_key(&Key::Paste("error".into()));
     let (token, query, workspaces) = deck.take_output_search().unwrap();
     assert_eq!(query, "error");
+    assert_eq!(deck.output_search_token(), Some(token));
     assert!(deck.take_output_search().is_none());
     let response = response(&deck, &query);
     assert!(deck.apply_output_search(token, vec![(workspaces[0], Ok(response.clone()))]));
@@ -65,6 +67,7 @@ fn output_search_fences_requeries_closure_and_workspace_identity() {
     };
     assert_eq!(hit.found.column, 6);
     deck.handle_overlay_key(&Key::Char('x'));
+    assert_ne!(deck.output_search_token(), Some(token));
     assert!(!deck.apply_output_search(token, vec![(workspaces[0], Ok(response.clone()))]));
     assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
     deck.close_overlay();
