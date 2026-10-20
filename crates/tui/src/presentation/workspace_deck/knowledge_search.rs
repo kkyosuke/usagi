@@ -150,13 +150,24 @@ impl Search {
 
 impl WorkspaceDeck {
     pub(crate) fn open_knowledge_search(&mut self) {
+        self.notice = None;
+        if let Some(DeckOverlay::Knowledge(search)) = &mut self.overlay {
+            search.refresh();
+            return;
+        }
         self.knowledge_epoch = self.knowledge_epoch.wrapping_add(1);
         self.overlay = Some(DeckOverlay::Knowledge(Search {
             epoch: self.knowledge_epoch,
             status: "Searching…".into(),
             ..Search::default()
         }));
-        self.notice = None;
+    }
+
+    pub(crate) fn knowledge_search_token(&self) -> Option<(u64, u64)> {
+        match &self.overlay {
+            Some(DeckOverlay::Knowledge(search)) => Some((search.epoch, search.revision)),
+            _ => None,
+        }
     }
 
     pub(crate) fn take_knowledge_request(&mut self) -> Option<((u64, u64), Request)> {

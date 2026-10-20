@@ -34,12 +34,15 @@ fn search(deck: &WorkspaceDeck) -> &Search {
 #[test]
 fn knowledge_search_preserves_exact_sources_and_fences_query_close_and_document_responses() {
     let mut deck = deck();
+    assert_eq!(deck.knowledge_search_token(), None);
     assert!(deck.take_knowledge_request().is_none());
     assert!(!deck.apply_knowledge_response((0, 0), Response::Search(results())));
     deck.open_knowledge_search();
     let (old, _) = deck.take_knowledge_request().unwrap();
+    assert_eq!(deck.knowledge_search_token(), Some(old));
     deck.handle_overlay_key(&Key::Paste("needle".into()));
     let (token, request) = deck.take_knowledge_request().unwrap();
+    assert_eq!(deck.knowledge_search_token(), Some(token));
     assert_eq!(request, Request::Search("needle".into()));
     assert!(deck.take_knowledge_request().is_none());
     assert!(!deck.apply_knowledge_response(old, Response::Search(results())));
@@ -143,8 +146,10 @@ fn knowledge_search_input_caps_refresh_navigation_empty_results_and_small_frames
     deck.handle_overlay_key(&Key::Char('x'));
     assert_eq!(search(&deck).input.value().chars().count(), QUERY_LIMIT);
     let (token, _) = deck.take_knowledge_request().unwrap();
-    deck.handle_overlay_key(&Key::Live(LiveTerminalAction::OpenKnowledgeSearch));
+    deck.open_knowledge_search();
     let (next, _) = deck.take_knowledge_request().unwrap();
+    assert_eq!(next.0, token.0);
+    assert_eq!(search(&deck).input.value().chars().count(), QUERY_LIMIT);
     assert_ne!(token, next);
     assert!(deck.apply_knowledge_response(next, Response::Search(Results::default())));
     assert!(

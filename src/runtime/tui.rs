@@ -4990,7 +4990,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let factory = ProductionBackendFactory::default();
         let mut port = factory.knowledge_search(tmp.path());
-        assert!(port.search("").documents.is_empty());
+        assert!(
+            port.search("", std::sync::Arc::default())
+                .documents
+                .is_empty()
+        );
     }
 
     /// The contract of Home's three background observation lanes.

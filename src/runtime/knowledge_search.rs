@@ -1,5 +1,9 @@
 //! Workspace-scoped adapters over the existing Issue and Memory searches.
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use usagi_core::infrastructure::store::{issue::IssueStore, memory::MemoryStore};
 use usagi_core::usecase::{issue, memory};
 use usagi_tui::usecase::application::knowledge_search::{
@@ -17,10 +21,13 @@ impl KnowledgeSearch {
 }
 
 impl KnowledgeSearchPort for KnowledgeSearch {
-    fn search(&mut self, query: &str) -> Results {
+    fn search(&mut self, query: &str, cancelled: Arc<AtomicBool>) -> Results {
         let mut result = Results::default();
+        if cancelled.load(Ordering::Acquire) {
+            return result;
+        }
         match issue::search(
-            &IssueStore::new(&self.root),
+            &IssueStore::new(&self.root).with_lock_cancellation(Arc::clone(&cancelled)),
             query,
             &issue::IssueFilter::default(),
         ) {
@@ -58,8 +65,11 @@ impl KnowledgeSearchPort for KnowledgeSearch {
                 .errors
                 .push("Issue store is unavailable; refresh to retry".into()),
         }
+        if cancelled.load(Ordering::Acquire) {
+            return Results::default();
+        }
         match memory::search(
-            &MemoryStore::new(&self.root),
+            &MemoryStore::new(&self.root).with_lock_cancellation(Arc::clone(&cancelled)),
             query,
             &memory::MemoryFilter::default(),
         ) {
@@ -82,6 +92,9 @@ impl KnowledgeSearchPort for KnowledgeSearch {
             Err(_) => result
                 .errors
                 .push("Memory store is unavailable; refresh to retry".into()),
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Results::default();
         }
         result
     }

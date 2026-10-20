@@ -737,7 +737,7 @@ pub(super) fn drive_workspace_controller(
     let mut knowledge_port = Some(backend_factory.knowledge_search(&root_cwd));
     let (knowledge_sender, knowledge_completions) =
         mpsc::channel::<super::knowledge_search::Completion>();
-    let mut knowledge_job = None;
+    let mut knowledge_job: Option<super::knowledge_search::Job> = None;
     let composition = backend_factory.create(&snapshot, host);
     let session_catalogs = composition.session_catalogs;
     let mut backend = composition.backend;
@@ -1078,6 +1078,9 @@ pub(super) fn drive_workspace_controller(
             if selected || ui.agent_inventory().is_some() {
                 pending_garden_agent = None;
             }
+        }
+        if let Some(job) = &knowledge_job {
+            job.cancel_unless_current(deck.knowledge_search_token());
         }
         for completion in knowledge_completions.try_iter().take(FRAME_EVENT_BUDGET) {
             if deck.apply_knowledge_response(completion.token, completion.response) {

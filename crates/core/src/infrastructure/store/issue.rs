@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -165,6 +169,7 @@ impl MarkdownEntry for IssueEntry {
 pub struct IssueStore {
     inner: MarkdownStore<IssueEntry>,
     repo_root: PathBuf,
+    lock_cancellation: Option<Arc<AtomicBool>>,
 }
 
 /// A parseable issue paired with the exact Markdown file that supplied it.
@@ -213,7 +218,15 @@ impl IssueStore {
         Self {
             inner: MarkdownStore::new(repo_root.join(STATE_DIR).join(ISSUES_DIR_NAME)),
             repo_root,
+            lock_cancellation: None,
         }
+    }
+
+    /// Allow a background reader to cancel waits for the store lock.
+    #[must_use]
+    pub fn with_lock_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.lock_cancellation = Some(cancelled);
+        self
     }
 
     #[must_use]
@@ -234,7 +247,11 @@ impl IssueStore {
     ///
     /// Returns an error when the lock cannot be acquired.
     pub fn lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire(self.dir())
+        StoreLock::acquire_cancellable(self.dir(), || {
+            self.lock_cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        })
     }
 
     /// Read and parse every issue markdown file, sorted by number.

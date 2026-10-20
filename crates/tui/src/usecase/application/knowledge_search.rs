@@ -1,4 +1,5 @@
 //! Read-only Issue/Memory discovery boundary for the human TUI.
+use std::sync::{Arc, atomic::AtomicBool};
 
 /// Maximum displayed results per store. A full store scan can return more.
 pub const RESULT_LIMIT: usize = 100;
@@ -29,7 +30,9 @@ pub struct Results {
 
 /// Moved into a worker; neither method runs on the frame thread.
 pub trait KnowledgeSearchPort: Send {
-    fn search(&mut self, query: &str) -> Results;
+    /// Observe cancellation during lock waits and between stores. A cancelled
+    /// response retains its request token and is discarded by the frame loop.
+    fn search(&mut self, query: &str, cancelled: Arc<AtomicBool>) -> Results;
     /// Read the current exact source using the bounded preview policy.
     /// # Errors
     /// Returns safe feedback when the source is missing or cannot be previewed.
@@ -39,7 +42,7 @@ pub trait KnowledgeSearchPort: Send {
 pub struct UnavailableKnowledgeSearch;
 
 impl KnowledgeSearchPort for UnavailableKnowledgeSearch {
-    fn search(&mut self, _: &str) -> Results {
+    fn search(&mut self, _: &str, _: Arc<AtomicBool>) -> Results {
         Results {
             errors: vec!["Issue / Memory search is unavailable".into()],
             ..Results::default()
