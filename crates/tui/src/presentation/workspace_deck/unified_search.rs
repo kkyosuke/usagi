@@ -3,7 +3,7 @@ use super::{
     DeckOverlay, Key, OverlayIntent, WorkspaceDeck, WorkspaceSlot, modal, output_search, palette,
 };
 use crate::presentation::unified_search::{Request, Response};
-use crate::presentation::widgets::TextInput;
+use crate::presentation::widgets::{TextInput, display_width};
 use crate::usecase::application::{
     controller::Target,
     knowledge_search::{Document, QUERY_LIMIT},
@@ -160,7 +160,7 @@ impl Search {
             return OverlayIntent::Stay;
         }
         if self.document.is_some() {
-            return self.handle_document(key);
+            return self.handle_document(key, slots);
         }
         let before = self.input.value().to_owned();
         match key {
@@ -245,14 +245,16 @@ impl Search {
         OverlayIntent::Stay
     }
 
-    fn handle_document(&mut self, key: &Key) -> OverlayIntent {
+    fn handle_document(&mut self, key: &Key, slots: &[WorkspaceSlot]) -> OverlayIntent {
         match key {
             Key::Escape => {
                 self.document = None;
                 self.lines.clear();
                 self.revision = self.revision.wrapping_add(1);
                 self.requested = Some(self.revision);
-                self.status = format!("{} results", self.entries.len());
+                self.refresh_navigation(slots);
+                self.update_status();
+                self.completed = Some(self.revision);
             }
             Key::Quit => return OverlayIntent::Cancel,
             Key::Up | Key::PageUp => {
@@ -456,11 +458,16 @@ pub(super) fn render(
         }
     })
     .join(" · ");
-    let mut body = vec![scopes, sanitize_presentation_line(&search.status)];
+    let scopes = if display_width(&scopes) > inner {
+        format!("[{}]", search.scope.label())
+    } else {
+        scopes
+    };
+    let mut body = vec![(0, scopes), (3, sanitize_presentation_line(&search.status))];
     let visible = height.saturating_sub(15).clamp(1, 16);
     if let Some(doc) = &search.document {
-        body.push(sanitize_presentation_line(&doc.title));
-        body.push(sanitize_presentation_line(&doc.path));
+        body.push((1, sanitize_presentation_line(&doc.title)));
+        body.push((5, sanitize_presentation_line(&doc.path)));
         body.extend(
             search
                 .lines
@@ -469,27 +476,51 @@ pub(super) fn render(
                 .skip(search.scroll)
                 .take(visible)
                 .map(|(i, line)| {
-                    format!(
-                        "{}: {}",
-                        i + 1,
-                        sanitize_presentation_line(line)
-                            .chars()
-                            .skip(search.horizontal)
-                            .collect::<String>()
+                    (
+                        if i == search.scroll {
+                            2
+                        } else {
+                            10 + i - search.scroll
+                        },
+                        format!(
+                            "{}: {}",
+                            i + 1,
+                            sanitize_presentation_line(line)
+                                .chars()
+                                .skip(search.horizontal)
+                                .collect::<String>()
+                        ),
                     )
                 }),
         );
-        body.push(modal::footer(
-            "Esc results · ↑↓ / PgUp PgDn scroll · ←→ pan · Tab scope",
+        body.push((
+            4,
+            modal::footer("Esc results · ↑↓ / PgUp PgDn scroll · ←→ pan · Tab scope"),
         ));
     } else {
-        body.push(modal::filter_line(
+        body.extend(result_lines(search, visible, inner));
+    }
+    if let Some(notice) = deck.notice() {
+        body.push((2, modal::error_line(notice, inner)));
+    }
+    let capacity = modal::reserved_body_height(height, width, body.len());
+    let body = fit_body(body, capacity);
+    modal::render_body_over(height, width, base, "Search", inner, body.len(), body)
+}
+
+fn result_lines(search: &Search, visible: usize, inner: usize) -> Vec<(usize, String)> {
+    let mut body = vec![(
+        1,
+        modal::filter_line(
             search.input.value(),
             search.input.cursor(),
             search.input.selection(),
-        ));
-        if search.scope == Scope::CurrentSession {
-            body.push(search.current.as_ref().map_or_else(
+        ),
+    )];
+    if search.scope == Scope::CurrentSession {
+        body.push((
+            6,
+            search.current.as_ref().map_or_else(
                 || "No current session selected".into(),
                 |current| {
                     sanitize_presentation_line(&format!(
@@ -497,44 +528,62 @@ pub(super) fn render(
                         current.root.display()
                     ))
                 },
-            ));
-        }
-        if search.input.value().is_empty() && search.scope != Scope::Artifact {
-            body.push("Type a query to search retained terminal output".into());
-        }
-        if !search.output_status.is_empty() {
-            body.push(search.output_status.clone());
-        }
-        body.extend(
-            search
-                .errors
-                .iter()
-                .take(2)
-                .map(|error| modal::error_line(&sanitize_presentation_line(error), inner)),
-        );
-        let index = search.index();
-        let (start, end) = modal::list_window(search.entries.len(), index.unwrap_or(0), visible);
-        if search.entries.is_empty() {
-            body.push("No matching results".into());
-        }
-        for (i, entry) in search.entries.iter().enumerate().take(end).skip(start) {
-            body.push(format!(
+            ),
+        ));
+    }
+    if search.input.value().is_empty() && search.scope != Scope::Artifact {
+        body.push((8, "Type a query to search retained terminal output".into()));
+    }
+    if !search.output_status.is_empty() {
+        body.push((7, search.output_status.clone()));
+    }
+    body.extend(search.errors.iter().take(2).map(|error| {
+        (
+            5,
+            modal::error_line(&sanitize_presentation_line(error), inner),
+        )
+    }));
+    let index = search.index();
+    let (start, end) = modal::list_window(search.entries.len(), index.unwrap_or(0), visible);
+    if search.entries.is_empty() {
+        body.push((2, "No matching results".into()));
+    }
+    for (i, entry) in search.entries.iter().enumerate().take(end).skip(start) {
+        body.push((
+            if index == Some(i) {
+                2
+            } else {
+                10 + i.abs_diff(index.unwrap_or(0))
+            },
+            format!(
                 "{} {}",
                 modal::selection_marker(index == Some(i)),
                 sanitize_presentation_line(&entry.label())
-            ));
-        }
-        if let Some(entry) = index.and_then(|i| search.entries.get(i)) {
-            body.push(sanitize_presentation_line(&entry.detail()));
-        }
-        body.push(modal::footer(
-            "Tab / Shift-Tab scope · Enter open · Esc close · Ctrl-O f refresh · ↑↓ select",
+            ),
         ));
     }
-    if let Some(notice) = deck.notice() {
-        body.push(modal::error_line(notice, inner));
+    if let Some(entry) = index.and_then(|i| search.entries.get(i)) {
+        body.push((6, sanitize_presentation_line(&entry.detail())));
     }
-    modal::render_body_over(height, width, base, "Search", inner, body.len(), body)
+    body.push((
+        4,
+        modal::footer(
+            "Tab / Shift-Tab scope · Enter open · Esc close · Ctrl-O f refresh · ↑↓ select",
+        ),
+    ));
+    body
+}
+
+// Keep the scope, query/title and selected result/body line before optional
+// metadata on short terminals. Restore display order after choosing the rows.
+fn fit_body(lines: Vec<(usize, String)>, capacity: usize) -> Vec<String> {
+    let mut lines = lines.into_iter().enumerate().collect::<Vec<_>>();
+    if lines.len() > capacity {
+        lines.sort_by_key(|(index, (priority, _))| (*priority, *index));
+        lines.truncate(capacity);
+        lines.sort_by_key(|(index, _)| *index);
+    }
+    lines.into_iter().map(|(_, (_, line))| line).collect()
 }
 
 #[cfg(test)]

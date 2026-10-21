@@ -187,6 +187,37 @@ fn unified_search_sanitizes_current_path_only_for_display() {
 }
 
 #[test]
+fn unified_search_short_frames_keep_scope_query_and_selected_result_visible() {
+    let mut deck = deck();
+    let session = deck.slots[0].sessions[0].projected.id;
+    deck.open_unified_search(Some(session));
+    deck.handle_overlay_key(&Key::Paste("zzzxmatch".into()));
+    let mut result = results(&deck);
+    result.errors.push("another unavailable source".into());
+    for scope in [
+        Scope::All,
+        Scope::Terminal,
+        Scope::Artifact,
+        Scope::CurrentSession,
+    ] {
+        assert_eq!(search(&deck).scope, scope);
+        complete(&mut deck, result.clone());
+        deck.handle_overlay_key(&Key::PageDown);
+        for (height, width) in [(12, 80), (10, 40), (9, 30)] {
+            let frame = render_overlay(&deck, height, width, &[]).join("\n");
+            assert!(frame.contains(&format!("[{}]", scope.label())), "{frame}");
+            assert!(frame.contains("zzzxmatch"), "{frame}");
+            assert!(frame.contains(&modal::selection_marker(true)), "{frame}");
+        }
+        deck.set_notice("Target unavailable");
+        let frame = render_overlay(&deck, 10, 40, &[]).join("\n");
+        assert!(frame.contains("Target unavailable"), "{frame}");
+        assert!(frame.contains(&modal::selection_marker(true)), "{frame}");
+        deck.handle_overlay_key(&Key::Tab);
+    }
+}
+
+#[test]
 fn unified_search_document_reader_fences_loading_back_scope_switch_and_reopen() {
     let mut deck = deck();
     deck.open_unified_search(None);
@@ -213,6 +244,16 @@ fn unified_search_document_reader_fences_loading_back_scope_switch_and_reopen() 
             .join("\n")
             .contains("2: ZZZXMATCH body")
     );
+    assert!(
+        render_overlay(&deck, 9, 40, &[])
+            .join("\n")
+            .contains("2: ZZZXMATCH body")
+    );
+    deck.handle_overlay_key(&Key::Home);
+    let frame = render_overlay(&deck, 30, 140, &[]).join("\n");
+    for line in ["1: before", "2: ZZZXMATCH body", "3: after"] {
+        assert!(frame.contains(line), "{frame}");
+    }
     for key in [
         Key::Down,
         Key::PageDown,
@@ -228,6 +269,10 @@ fn unified_search_document_reader_fences_loading_back_scope_switch_and_reopen() 
     }
     assert_eq!(search(&deck).input.value(), "zzzxmatch");
     deck.handle_overlay_key(&Key::Escape);
+    assert_eq!(
+        search(&deck).status,
+        "3 results · 5 omitted · 1 unavailable"
+    );
     assert!(deck.take_unified_request().is_none());
     assert!(!deck.apply_unified_response(token, Response::Read(Ok(vec![]))));
     deck.handle_overlay_key(&Key::Enter);
@@ -249,6 +294,49 @@ fn unified_search_document_reader_fences_loading_back_scope_switch_and_reopen() 
     deck.close_overlay();
     deck.open_unified_search(None);
     assert!(!deck.apply_unified_response(token, Response::Read(Err("stale".into()))));
+}
+
+#[test]
+fn unified_search_return_from_document_refreshes_navigation_and_count_updates() {
+    let mut deck = deck();
+    deck.slots[0].sessions[0].projected.label = "zzzxmatch".into();
+    let session = deck.slots[0].sessions[0].clone();
+    deck.open_unified_search(None);
+    deck.handle_overlay_key(&Key::Paste("zzzxmatch".into()));
+    let result = results(&deck);
+    complete(&mut deck, result);
+    let document_index = search(&deck)
+        .entries
+        .iter()
+        .position(|entry| matches!(entry, Entry::Document(_)))
+        .unwrap();
+    for _ in 0..document_index {
+        deck.handle_overlay_key(&Key::Down);
+    }
+    deck.handle_overlay_key(&Key::Enter);
+    let (read_token, _) = deck.take_unified_request().unwrap();
+    deck.slots[0].sessions.clear();
+    assert!(!deck.refresh_unified_navigation());
+    deck.handle_overlay_key(&Key::Escape);
+    assert_eq!(search(&deck).entries.len(), 3);
+    assert_eq!(
+        search(&deck).status,
+        "3 results · 5 omitted · 1 unavailable"
+    );
+    assert!(matches!(search(&deck).selected, Some(Entry::Document(_))));
+    assert!(deck.take_unified_request().is_none());
+    assert!(!deck.apply_unified_response(read_token, Response::Read(Ok(vec![]))));
+
+    deck.slots[0].sessions.push(session);
+    assert!(deck.refresh_unified_navigation());
+    assert!(search(&deck).entries.len() > 3);
+    assert_eq!(
+        search(&deck).status,
+        format!(
+            "{} results · 5 omitted · 1 unavailable",
+            search(&deck).entries.len()
+        )
+    );
 }
 
 #[test]
