@@ -1,13 +1,24 @@
-//! Revision-fenced, byte-bounded pages of the complete pending observation.
+//! Revision-fenced, byte-bounded pages of a scoped pending observation.
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
 use crate::{
-    domain::user_decision::UserDecision,
+    domain::{
+        id::WorkspaceId,
+        user_decision::{UserDecision, UserDecisionOwner},
+    },
     infrastructure::ipc::{UserDecisionCursor, UserDecisionPage},
 };
+
+/// Selected by the authenticated dispatcher, never by an agent's payload.
+#[derive(Clone, Copy)]
+pub enum UserDecisionScope<'a> {
+    All,
+    Workspace(WorkspaceId),
+    Owners(&'a [UserDecisionOwner]),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserDecisionPageError {

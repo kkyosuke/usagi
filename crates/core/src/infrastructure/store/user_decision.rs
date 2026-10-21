@@ -8,7 +8,7 @@
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
 mod page;
-pub use page::UserDecisionPageError;
+pub use page::{UserDecisionPageError, UserDecisionScope};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -220,14 +220,25 @@ impl UserDecisionStore {
             .filter(|item| item.status == UserDecisionStatus::Pending)
             .collect())
     }
-    /// Observe one page from a stable pending snapshot. The caller subtracts
-    /// transport envelope overhead before supplying the serialized page budget.
+    /// Observe one page after applying the caller's authenticated scope. Both
+    /// revision and offsets describe only that scope's pending snapshot. The
+    /// caller subtracts transport envelope overhead from the page budget.
     pub fn pending_page(
         &self,
+        scope: UserDecisionScope<'_>,
         cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
         max_page_bytes: usize,
     ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
-        page::pending_page(self.pending_all()?, cursor, max_page_bytes)
+        let decisions = self
+            .pending_all()?
+            .into_iter()
+            .filter(|decision| match scope {
+                UserDecisionScope::All => true,
+                UserDecisionScope::Workspace(workspace) => decision.owner.workspace_id == workspace,
+                UserDecisionScope::Owners(owners) => owners.contains(&decision.owner),
+            })
+            .collect();
+        page::pending_page(decisions, cursor, max_page_bytes)
     }
     /// Marks every due pending decision terminal. Expiry deliberately produces
     /// no delivery event: an answer must never be invented for a timed-out
@@ -906,6 +917,109 @@ mod tests {
     }
 
     #[test]
+    fn scoped_inventory_pages_filter_before_revision_and_offset_calculation() {
+        use crate::infrastructure::ipc::UserDecisionPage;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut first = item();
+        first.idempotency_key = None;
+        let workspace = first.owner.workspace_id;
+        let mut inherited = first.clone();
+        inherited.decision_id = UserDecisionId::new();
+        inherited.owner = later_owner(&first.owner);
+        inherited.prompt = "p".repeat(4096);
+        let mut sibling = first.clone();
+        sibling.decision_id = UserDecisionId::new();
+        sibling.owner.caller.agent_id = AgentId::new();
+        let mut fresh_run = first.clone();
+        fresh_run.decision_id = UserDecisionId::new();
+        fresh_run.owner.run_id = OperationId::new();
+        let foreign = item();
+        // Interleave unauthorized records so global offsets cannot work.
+        for decision in [&foreign, &first, &sibling, &inherited, &fresh_run] {
+            store.create(decision.clone()).unwrap().unwrap();
+        }
+        let owners = [first.owner.clone(), inherited.owner.clone()];
+        let scope = UserDecisionScope::Owners(&owners);
+        let first_page = store.pending_page(scope, None, 2048).unwrap().unwrap();
+        assert_eq!(first_page.decisions, vec![first.clone()]);
+        let cursor = first_page.next_cursor.unwrap();
+        assert_eq!(cursor.offset, 1);
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::Owners(&[]), None, 2048)
+                .unwrap()
+                .unwrap(),
+            UserDecisionPage {
+                decisions: vec![],
+                next_cursor: None
+            }
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::Workspace(workspace), None, 16_384)
+                .unwrap()
+                .unwrap()
+                .decisions,
+            vec![first.clone(), sibling.clone(), inherited.clone(), fresh_run]
+        );
+        for other_scope in [
+            UserDecisionScope::All,
+            UserDecisionScope::Workspace(workspace),
+            UserDecisionScope::Owners(&owners[..1]),
+        ] {
+            assert_eq!(
+                store
+                    .pending_page(other_scope, Some(&cursor), 16_384)
+                    .unwrap(),
+                Err(UserDecisionPageError::RevisionConflict)
+            );
+        }
+        // Mutations outside the authenticated scope do not invalidate it.
+        for decision in [&foreign, &sibling] {
+            store
+                .resolve(
+                    decision.owner.workspace_id,
+                    decision.decision_id,
+                    UserDecisionAnswer::Option {
+                        option_id: "a".into(),
+                        comment: None,
+                    },
+                    Utc::now(),
+                )
+                .unwrap()
+                .unwrap();
+        }
+        let before = std::fs::read(store.path()).unwrap();
+        assert_eq!(
+            store
+                .pending_page(scope, Some(&cursor), 16_384)
+                .unwrap()
+                .unwrap(),
+            UserDecisionPage {
+                decisions: vec![inherited],
+                next_cursor: None
+            }
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert_eq!(store.events().unwrap().len(), 2);
+        store
+            .terminal(
+                workspace,
+                first.decision_id,
+                UserDecisionStatus::Cancelled,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.pending_page(scope, Some(&cursor), 16_384).unwrap(),
+            Err(UserDecisionPageError::RevisionConflict)
+        );
+    }
+
+    #[test]
     fn human_inventory_pages_preserve_large_cross_workspace_backlogs() {
         use crate::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, UserDecisionPage};
 
@@ -937,7 +1051,7 @@ mod tests {
         let mut pages = 0;
         loop {
             let page = store
-                .pending_page(cursor.as_ref(), budget)
+                .pending_page(UserDecisionScope::All, cursor.as_ref(), budget)
                 .unwrap()
                 .unwrap();
             let encoded = serde_json::to_vec(&page).unwrap();
@@ -973,9 +1087,16 @@ mod tests {
             next_cursor: None,
         };
         let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
-        assert_eq!(store.pending_page(None, empty_bytes).unwrap(), Ok(empty));
         assert_eq!(
-            store.pending_page(None, empty_bytes - 1).unwrap(),
+            store
+                .pending_page(UserDecisionScope::All, None, empty_bytes)
+                .unwrap(),
+            Ok(empty)
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, empty_bytes - 1)
+                .unwrap(),
             Err(UserDecisionPageError::PageTooSmall)
         );
     }
@@ -993,7 +1114,7 @@ mod tests {
         store.create(first.clone()).unwrap().unwrap();
         store.create(second.clone()).unwrap().unwrap();
         let cursor = store
-            .pending_page(None, 2048)
+            .pending_page(UserDecisionScope::All, None, 2048)
             .unwrap()
             .unwrap()
             .next_cursor
@@ -1004,11 +1125,15 @@ mod tests {
         };
         let first_bytes = serde_json::to_vec(&first_page).unwrap().len();
         assert_eq!(
-            store.pending_page(None, first_bytes).unwrap(),
+            store
+                .pending_page(UserDecisionScope::All, None, first_bytes)
+                .unwrap(),
             Ok(first_page)
         );
         assert_eq!(
-            store.pending_page(None, first_bytes - 1).unwrap(),
+            store
+                .pending_page(UserDecisionScope::All, None, first_bytes - 1)
+                .unwrap(),
             Err(UserDecisionPageError::PageTooSmall)
         );
         let last_page = UserDecisionPage {
@@ -1017,17 +1142,22 @@ mod tests {
         };
         let last_bytes = serde_json::to_vec(&last_page).unwrap().len();
         assert_eq!(
-            store.pending_page(Some(&cursor), last_bytes).unwrap(),
+            store
+                .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes)
+                .unwrap(),
             Ok(last_page)
         );
         assert_eq!(
-            store.pending_page(Some(&cursor), last_bytes - 1).unwrap(),
+            store
+                .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes - 1)
+                .unwrap(),
             Err(UserDecisionPageError::PageTooSmall)
         );
         for offset in [0, 2, usize::MAX] {
             assert_eq!(
                 store
                     .pending_page(
+                        UserDecisionScope::All,
                         Some(&UserDecisionCursor {
                             offset,
                             ..cursor.clone()
@@ -1041,6 +1171,7 @@ mod tests {
         assert_eq!(
             store
                 .pending_page(
+                    UserDecisionScope::All,
                     Some(&UserDecisionCursor {
                         revision: "old".into(),
                         ..cursor.clone()
@@ -1060,11 +1191,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            store.pending_page(Some(&cursor), last_bytes).unwrap(),
+            store
+                .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes)
+                .unwrap(),
             Err(UserDecisionPageError::RevisionConflict)
         );
         std::fs::write(store.path(), "{").unwrap();
-        assert!(store.pending_page(None, last_bytes).is_err());
+        assert!(
+            store
+                .pending_page(UserDecisionScope::All, None, last_bytes)
+                .is_err()
+        );
     }
 
     #[test]

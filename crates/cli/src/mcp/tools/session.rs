@@ -231,10 +231,10 @@ impl Tool for UserDecisionList {
         "user_decision_list"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run が所有する pending decision を返す。TUI は全 workspace の pending decision を表示する"
+        "現在の agent が所有・exact resume で継承した pending decision をページで返す。next_cursor が null になるまで cursor に渡して取得し、RevisionConflict 時は先頭から取り直す。回答の受信は user_decision_get を使う"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"cursor":{"type":"object","properties":{"revision":{"type":"string","minLength":1,"maxLength":64},"offset":{"type":"integer","minimum":1}},"required":["revision","offset"],"additionalProperties":false}},"additionalProperties":false}"#
     }
 }
 pub struct UserDecisionResolve;

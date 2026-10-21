@@ -203,6 +203,10 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 `cancelled`、`expired` のいずれかになったら処理を続ける。同じ idempotency key の request は同じ decision に
 収束するため、接続をまたぐ retry に使える。
 
+保留中の質問を一覧で回収するときは `user_decision_list {}` を呼び、`next_cursor` が `null` になるまで
+その値を `cursor` に渡して取得する。`RevisionConflict` が返ったら途中の一覧を破棄して先頭から取り直す。
+一覧は現在の agent が所有・exact resume で継承した pending だけを含む。回答の受信は `user_decision_get` を使う。
+
 比較が必要なら `context` に `kind: "table"`（`title` / `columns` / `rows`）を添える。関係や手順は
 `kind: "diagram"`（`title` / `text`）の ASCII / Unicode テキスト図で示す。複数案を同時に選べる質問は
 `selection_mode: "multiple"` にし、回答の `kind: "options"` / `option_ids` を読む。

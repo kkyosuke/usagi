@@ -1592,6 +1592,142 @@ fn production_user_decision_retry_without_deadline_is_idempotent() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // Exercise every page, scope fence and answer outbox through the same authenticated MCP connection.
+fn production_user_decision_list_pages_large_owned_backlogs() {
+    use usagi_core::domain::user_decision::UserDecisionAnswer;
+    use usagi_core::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, UserDecisionPage};
+    use usagi_core::infrastructure::store::user_decision::UserDecisionScope;
+
+    let mut mcp = McpHarness::start();
+    mcp.launch_caller();
+    let first: UserDecision = serde_json::from_value(tool_text(&mcp.tool(
+        "user_decision_request",
+        &json!({"title":"Large backlog", "prompt":"p".repeat(16 * 1024),
+            "options":[{"id":"yes","label":"Yes"}]}),
+    )))
+    .unwrap();
+    let store = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+    let mut expected = vec![first.clone()];
+    for _ in 1..80 {
+        let mut question = first.clone();
+        question.decision_id = UserDecisionId::new();
+        expected.push(store.create(question).unwrap().unwrap());
+    }
+    assert!(serde_json::to_vec(&expected).unwrap().len() > DEFAULT_MAX_FRAME_BYTES);
+    let mut foreign = first.clone();
+    foreign.decision_id = UserDecisionId::new();
+    foreign.owner.caller.agent_id = AgentId::new();
+    store.create(foreign.clone()).unwrap().unwrap();
+    let mut other_run = first.clone();
+    other_run.decision_id = UserDecisionId::new();
+    other_run.owner.run_id = OperationId::new();
+    store.create(other_run).unwrap().unwrap();
+    let mut other_workspace = first.clone();
+    other_workspace.decision_id = UserDecisionId::new();
+    other_workspace.owner.workspace_id = WorkspaceId::new();
+    store.create(other_workspace).unwrap().unwrap();
+    let mut answered = first.clone();
+    answered.decision_id = UserDecisionId::new();
+    store.create(answered.clone()).unwrap().unwrap();
+    store
+        .resolve(
+            answered.owner.workspace_id,
+            answered.decision_id,
+            UserDecisionAnswer::Option {
+                option_id: "yes".into(),
+                comment: None,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+
+    let mut arguments = json!({});
+    let mut actual = Vec::new();
+    let mut first_cursor = None;
+    let mut pages = 0;
+    loop {
+        let body = tool_text(&mcp.tool("user_decision_list", &arguments));
+        assert_eq!(body["workspace"], json!(first.owner.workspace_id));
+        let page: UserDecisionPage = serde_json::from_value(body).unwrap();
+        assert!(!page.decisions.is_empty());
+        actual.extend(page.decisions);
+        pages += 1;
+        assert!(pages <= expected.len());
+        if pages == 1 {
+            first_cursor.clone_from(&page.next_cursor);
+            // Another agent answering a question must not invalidate our cursor.
+            store
+                .resolve(
+                    foreign.owner.workspace_id,
+                    foreign.decision_id,
+                    UserDecisionAnswer::Option {
+                        option_id: "yes".into(),
+                        comment: None,
+                    },
+                    chrono::Utc::now(),
+                )
+                .unwrap()
+                .unwrap();
+        }
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        assert_eq!(cursor.offset, actual.len());
+        arguments = json!({"cursor":cursor});
+    }
+    assert!(pages >= 2, "the owned backlog exceeds one IPC frame");
+    assert_eq!(actual, expected);
+    assert_eq!(
+        store.events().unwrap().len(),
+        2,
+        "listing must not ACK answers"
+    );
+    let cursor = first_cursor.unwrap();
+    let replay: UserDecisionPage = serde_json::from_value(tool_text(
+        &mcp.tool("user_decision_list", &json!({"cursor":cursor})),
+    ))
+    .unwrap();
+    assert_eq!(replay.decisions, expected[cursor.offset..]);
+    assert!(replay.next_cursor.is_none());
+    // A cursor from the human inventory cannot broaden the authenticated scope.
+    let global_cursor = store
+        .pending_page(UserDecisionScope::All, None, DEFAULT_MAX_FRAME_BYTES)
+        .unwrap()
+        .unwrap()
+        .next_cursor
+        .unwrap();
+    let denied = mcp.tool("user_decision_list", &json!({"cursor":global_cursor}));
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("RevisionConflict")
+    );
+    store
+        .terminal(
+            first.owner.workspace_id,
+            first.decision_id,
+            usagi_core::domain::user_decision::UserDecisionStatus::Cancelled,
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+    let stale = mcp.tool("user_decision_list", &json!({"cursor":cursor}));
+    assert!(
+        stale["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("RevisionConflict")
+    );
+    let restarted = tool_text(&mcp.tool("user_decision_list", &json!({})));
+    assert_eq!(
+        restarted["decisions"][0]["decision_id"],
+        json!(expected[1].decision_id)
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // Follow the same durable question through two TUI scopes and its real MCP owner.
 fn production_cross_workspace_user_decision_reaches_its_agent_and_acks_only_owner_reads() {
     use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};

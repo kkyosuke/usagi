@@ -254,6 +254,38 @@ mod tests {
     }
 
     #[test]
+    fn user_decision_list_accepts_only_bounded_cursors_without_owner_selectors() {
+        let registry = registry();
+        let list = registry
+            .iter()
+            .find(|tool| tool.name() == "user_decision_list")
+            .unwrap();
+        let schema: serde_json::Value = serde_json::from_str(list.input_schema()).unwrap();
+        let cursor = serde_json::json!({"revision":"a".repeat(64),"offset":1});
+        for arguments in [serde_json::json!({}), serde_json::json!({"cursor":cursor})] {
+            assert!(list.validate(&arguments, &schema).is_ok(), "{arguments}");
+        }
+        for arguments in [
+            serde_json::json!({"cursor":null}),
+            serde_json::json!({"cursor":"invalid"}),
+            serde_json::json!({"cursor":{"revision":"a".repeat(65),"offset":1}}),
+            serde_json::json!({"cursor":{"revision":"","offset":1}}),
+            serde_json::json!({"cursor":{"revision":"a","offset":0}}),
+            serde_json::json!({"cursor":{"revision":"a","offset":-1}}),
+            serde_json::json!({"cursor":{"revision":"a","offset":1.5}}),
+            serde_json::json!({"cursor":{"offset":1}}),
+            serde_json::json!({"cursor":{"revision":"a"}}),
+            serde_json::json!({"cursor":{"revision":"a","offset":1,"workspace":"other"}}),
+            serde_json::json!({"cursor":cursor,"workspace":"other"}),
+            serde_json::json!({"cursor":cursor,"owner":{}}),
+            serde_json::json!({"cursor":cursor,"caller":{}}),
+            serde_json::json!({"cursor":cursor,"run_id":"other"}),
+        ] {
+            assert!(list.validate(&arguments, &schema).is_err(), "{arguments}");
+        }
+    }
+
+    #[test]
     fn user_decision_comment_schema_accepts_opt_in_and_bounded_choice_notes() {
         let registry = registry();
         let request = registry
