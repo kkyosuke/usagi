@@ -127,6 +127,9 @@ pub enum DaemonRequest {
     SearchTerminalOutput {
         workspace: WorkspaceId,
         query: String,
+        /// Filter before applying scan budgets. Omission retains workspace scope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<SessionId>,
     },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.

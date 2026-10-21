@@ -69,6 +69,7 @@ pub trait GardenInventoryPort: Send {
         &mut self,
         _workspace: WorkspaceId,
         _query: &str,
+        _session: Option<SessionId>,
     ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
         Err("Terminal output search is unavailable".into())
     }

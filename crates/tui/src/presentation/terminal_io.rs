@@ -432,6 +432,7 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::KeyboardHelp
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
+        | LiveTerminalAction::OpenUnifiedSearch
         | LiveTerminalAction::OpenKnowledgeSearch
         | LiveTerminalAction::OpenOutputSearch
         | LiveTerminalAction::OpenCommandPalette
@@ -924,7 +925,7 @@ pub(super) fn visit_palette_target(
     runtime: &mut WorkspaceRuntime,
     workspace: WorkspaceId,
     action: &super::workspace_deck::palette::Action,
-) -> Result<(), &'static str> {
+) -> Result<Vec<crate::usecase::application::controller::Effect>, &'static str> {
     runtime.validate_palette_action(workspace, action)?;
     if let super::workspace_deck::palette::Action::Tab {
         target,

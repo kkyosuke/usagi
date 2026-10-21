@@ -44,12 +44,15 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 |---|---|
 | 複数の作業が同じ checkout で衝突する | session ごとに独立した worktree を作る |
 | Agent と terminal が散らばり、状態を追いにくい | workspace をまたいで TUI から一覧・操作する |
+| 増えた機能や検索対象をまとめて探したい | [統合検索](document/03-tui.md#統合検索)。`Tab` で All / Terminal / Artifact / Current session を切り替える |
 | 複数の Agent / Terminal の出力からエラーを探したい | [ターミナル出力の横断検索](document/03-tui.md#ターミナル出力の横断検索) で保持中の出力を検索 |
 | session・タブ・操作の場所を探すのに時間がかかる | [横断コマンドパレット](document/03-tui.md#横断コマンドパレット) で検索して開く |
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 | 過去の Issue や Memory の本文を探したい | [Issue・Memory 検索](document/03-tui.md#issue-と-memory-の検索) で検索・閲覧できる |
 | session ごとの生成物を探しづらい | session 行の [Artifacts](document/03-tui.md#artifacts) から閲覧でき、外部表示の失敗・未確認も一覧内で確認できる。削除後の保管済み成果物も検索できる |
+
+`Ctrl-O` → `Ctrl-F` で統合検索を開き、`Tab` で検索対象を切り替えられます。
 
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
 session 削除の `--force` は、保管に失敗した成果物も破棄します。

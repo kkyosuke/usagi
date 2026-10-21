@@ -9,6 +9,7 @@ mod attention;
 mod knowledge_search;
 pub(crate) mod output_search;
 pub(crate) mod palette;
+mod unified_search;
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
@@ -187,6 +188,7 @@ enum DeckOverlay {
     Attention(attention::AttentionList),
     Palette(palette::Palette),
     Knowledge(knowledge_search::Search),
+    Unified(Box<unified_search::Search>),
     OutputSearch(output_search::Search),
 }
 
@@ -239,6 +241,7 @@ pub struct WorkspaceDeck {
     active: WorkspaceId,
     overlay: Option<DeckOverlay>,
     knowledge_epoch: u64,
+    unified_epoch: u64,
     notice: Option<String>,
     pending_garden_visit: Option<(PathBuf, GardenVisit)>,
     pending_closeup_path: Option<PathBuf>,
@@ -272,6 +275,7 @@ impl WorkspaceDeck {
             slots: vec![slot],
             overlay: None,
             knowledge_epoch: 0,
+            unified_epoch: 0,
             notice: None,
             pending_garden_visit: None,
             pending_closeup_path: None,
@@ -504,6 +508,7 @@ impl WorkspaceDeck {
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
             DeckOverlay::Attention(list) => list.handle(key, &self.slots),
             DeckOverlay::Knowledge(search) => search.handle(key),
+            DeckOverlay::Unified(search) => search.handle(key, &self.slots),
             DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
             DeckOverlay::OutputSearch(search) => search.handle(key),
         }
@@ -1289,6 +1294,9 @@ pub fn render_overlay(
         Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
         Some(DeckOverlay::Knowledge(search)) => {
             knowledge_search::render(deck, search, height, width, base)
+        }
+        Some(DeckOverlay::Unified(search)) => {
+            unified_search::render(deck, search, height, width, base)
         }
         Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
         Some(DeckOverlay::OutputSearch(search)) => {

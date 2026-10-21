@@ -18,6 +18,10 @@ const MAX_QUERY_CHARS: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Workspace,
+    Artifact {
+        target: Target,
+        path: String,
+    },
     Session(SessionId),
     Tab {
         target: Target,
@@ -34,7 +38,7 @@ impl Action {
     pub(crate) fn session(&self) -> Option<SessionId> {
         match self {
             Self::Session(session) => Some(*session),
-            Self::Tab { target, .. } => target.session_id(),
+            Self::Tab { target, .. } | Self::Artifact { target, .. } => target.session_id(),
             Self::Command { session, .. } => *session,
             Self::Workspace => None,
         }
@@ -49,17 +53,18 @@ pub(crate) struct CachedTab {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Identity {
-    workspace: WorkspaceId,
-    action: Action,
+pub(super) struct Identity {
+    pub(super) workspace: WorkspaceId,
+    pub(super) action: Action,
 }
 
-struct Row {
-    identity: Identity,
-    path: PathBuf,
-    label: String,
-    context: String,
-    detail: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Row {
+    pub(super) identity: Identity,
+    pub(super) path: PathBuf,
+    pub(super) label: String,
+    pub(super) context: String,
+    pub(super) detail: String,
 }
 
 fn row(slot: &WorkspaceSlot, action: Action, label: &str, context: &str, detail: &str) -> Row {
@@ -81,7 +86,7 @@ fn row(slot: &WorkspaceSlot, action: Action, label: &str, context: &str, detail:
     }
 }
 
-fn rows(slots: &[WorkspaceSlot], query: &str) -> Vec<Row> {
+pub(super) fn rows(slots: &[WorkspaceSlot], query: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     for slot in slots {
         rows.push(row(

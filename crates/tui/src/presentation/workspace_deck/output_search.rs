@@ -17,7 +17,7 @@ pub struct Hit {
     pub source: Arc<TerminalSearchResult>,
     pub found: OutputMatch,
     pub query: String,
-    label: String,
+    pub(super) label: String,
 }
 
 impl Hit {
@@ -156,78 +156,84 @@ impl WorkspaceDeck {
         if (search.epoch, search.revision) != token {
             return false;
         }
-        let mut unavailable = 0;
-        let mut limited = 0;
-        let mut scanned = 0;
-        let mut projects = 0;
-        for (workspace, response) in responses {
-            let Some(slot) = self
-                .slots
-                .iter()
-                .find(|slot| slot.workspace_id == workspace)
-            else {
-                continue;
-            };
-            let Ok(response) = response else {
-                unavailable += 1;
-                continue;
-            };
-            if response.workspace != workspace || response.query != search.input.value() {
-                unavailable += 1;
-                continue;
-            }
-            projects += 1;
-            limited += response.omitted_terminals;
-            for result in response.terminals {
-                if result.terminal.workspace_id != workspace {
-                    unavailable += 1;
-                    continue;
-                }
-                unavailable += usize::from(result.unavailable);
-                limited += usize::from(result.limited);
-                scanned += result.scanned_rows;
-                let session = result
-                    .terminal
-                    .session_id
-                    .and_then(|id| {
-                        slot.sessions
-                            .iter()
-                            .find(|session| session.projected.id == id)
-                    })
-                    .map_or("workspace", |session| session.projected.label.as_str());
-                let label = sanitize_presentation_line(&format!(
-                    "{} / {} / {:?} {}{}",
-                    slot.label,
-                    session,
-                    result.kind,
-                    result
-                        .terminal
-                        .terminal_id
-                        .as_str()
-                        .chars()
-                        .take(8)
-                        .collect::<String>(),
-                    if result.exited { " (exited)" } else { "" }
-                ));
-                let source = Arc::new(result);
-                for found in &source.matches {
-                    search.hits.push(Hit {
-                        path: slot.path.clone(),
-                        source: Arc::clone(&source),
-                        found: found.clone(),
-                        query: search.input.value().to_owned(),
-                        label: label.clone(),
-                    });
-                }
-            }
-        }
-        search.status = format!(
-            "Snapshot · {projects}/{} projects · {} hits · {scanned} rows · {unavailable} unavailable · {limited} limited/omitted",
-            self.slots.len(),
-            search.hits.len()
-        );
+        (search.hits, search.status) = collect_hits(&self.slots, search.input.value(), responses);
         true
     }
+}
+
+pub(super) fn collect_hits(
+    slots: &[super::WorkspaceSlot],
+    query: &str,
+    responses: SearchResponses,
+) -> (Vec<Hit>, String) {
+    let mut hits = Vec::new();
+    let mut unavailable = 0;
+    let mut limited = 0;
+    let mut scanned = 0;
+    let mut projects = 0;
+    for (workspace, response) in responses {
+        let Some(slot) = slots.iter().find(|slot| slot.workspace_id == workspace) else {
+            continue;
+        };
+        let Ok(response) = response else {
+            unavailable += 1;
+            continue;
+        };
+        if response.workspace != workspace || response.query != query {
+            unavailable += 1;
+            continue;
+        }
+        projects += 1;
+        limited += response.omitted_terminals;
+        for result in response.terminals {
+            if result.terminal.workspace_id != workspace {
+                unavailable += 1;
+                continue;
+            }
+            unavailable += usize::from(result.unavailable);
+            limited += usize::from(result.limited);
+            scanned += result.scanned_rows;
+            let session = result
+                .terminal
+                .session_id
+                .and_then(|id| {
+                    slot.sessions
+                        .iter()
+                        .find(|session| session.projected.id == id)
+                })
+                .map_or("workspace", |session| session.projected.label.as_str());
+            let label = sanitize_presentation_line(&format!(
+                "{} / {} / {:?} {}{}",
+                slot.label,
+                session,
+                result.kind,
+                result
+                    .terminal
+                    .terminal_id
+                    .as_str()
+                    .chars()
+                    .take(8)
+                    .collect::<String>(),
+                if result.exited { " (exited)" } else { "" }
+            ));
+            let source = Arc::new(result);
+            for found in &source.matches {
+                hits.push(Hit {
+                    path: slot.path.clone(),
+                    source: Arc::clone(&source),
+                    found: found.clone(),
+                    query: query.to_owned(),
+                    label: label.clone(),
+                });
+            }
+        }
+    }
+    let status = format!(
+        "Snapshot · {projects}/{} projects · {} hits · {scanned} rows · {unavailable} unavailable · {limited} limited/omitted",
+        slots.len(),
+        hits.len()
+    );
+    (hits, status)
 }
 
 pub(super) fn render(

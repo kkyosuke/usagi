@@ -51,7 +51,7 @@ pub(super) fn spawn(
                 break;
             }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                port.search_terminal_output(workspace, &query)
+                port.search_terminal_output(workspace, &query, None)
             }))
             .unwrap_or_else(|_| Err("Terminal output search is unavailable".into()));
             responses.push((workspace, result));

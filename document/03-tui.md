@@ -11,6 +11,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [この文書の読み方](#この文書の読み方)
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
+- [統合検索](#統合検索)
 - [Issue と Memory の検索](#issue-と-memory-の検索)
 - [横断コマンドパレット](#横断コマンドパレット)
 - [ターミナル出力の横断検索](#ターミナル出力の横断検索)
@@ -276,6 +277,29 @@ project tab の黄色い `!N` は確認できた対応待ちの件数、`!N+` �
 状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。
 観測は専用 worker が稼働済み daemon の保存済み状態だけを読み、workspace の adopt、daemon/Agent 起動、terminal attach、状態の変更は行わない。
 各接続・request は250ms・再試行なしで読み、workspace 切り替え時は次の request を中止して worker を回収する。
+
+## 統合検索
+
+`Ctrl-O` の後に `Ctrl-F`（または `f`）を押すと統合検索が開く。`Tab` で次、`Shift-Tab` で前の対象に切り替え、検索語は保持する。
+
+| 対象 | 検索する内容 |
+|---|---|
+| All | 開いている project の session・観測済みタブ・コマンド、保持中の terminal 出力、Artifact、および現在の workspace の Issue / Memory |
+| Terminal | 開いている project の Agent / Terminal の保持出力 |
+| Artifact | 開いている project の session と保管済み Artifact のファイル名・パス |
+| Current session | 検索を開いた時に選択されていた session の操作・タブ・保持出力・Artifact |
+
+Current session は Switch の cursor / Closeup の active session に固定する。session が選択されていない場合はその旨を表示する。
+Terminal は大文字小文字を区別する文字列検索、Artifact はパスの fuzzy 検索、Issue / Memory は既存の本文検索を使う。
+Artifact のファイル本文は検索しない。空の検索語では操作・Artifact・Issue / Memory の一覧を表示し、terminal 出力の検索は入力後に始める。
+
+`↑↓` / `PgUp` / `PgDn` で選び、`Enter` で該当タブ・操作・Artifact の外部表示・Issue / Memory 本文を開く。
+本文では `Esc` で結果に戻り、結果では `Esc` で閉じる。`Ctrl-O f` で検索語と対象を保って再取得する。
+検索中の文字入力や貼り付けは背面の terminal に送らない。古い query・対象・閉じ直し前の応答は破棄する。
+
+外部の検索は背景 worker で行い、最大 16 project、操作候補と Artifact は各 100 件、Issue / Memory は各 100 件に制限する。
+Current session は対象 project / session を絞ってから上限を適用する。terminal の上限は[ターミナル出力の横断検索](#ターミナル出力の横断検索)と同じ。
+省略・取得不能を表示し、移動時には既存の ID・利用可否・Artifact の安全な読み取りを再確認する。
 
 ## Issue と Memory の検索
 
@@ -1819,8 +1843,8 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
 
 `Artifacts` は利用可能な session の Agent 状態行の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
-`Ctrl-O f` は Switch の cursor / Closeup の active session を開き、session 未選択時は保管済みを含む workspace 全体を開く。
-sidebar が16桁未満の場合は label を省略し、`Ctrl-O f` から開く。
+`Ctrl-O f` は[統合検索](#統合検索)を開く。`Tab` で Artifact を選ぶと成果物を横断検索できる。
+sidebar が16桁未満の場合は label を省略し、`artifact` コマンドまたは統合検索から開く。
 TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。
 削除後に同名の session を作り直した場合は、新しい session の成果物を表示する。
 削除・削除中を検知した session の一覧や本文は閉じる。読み込みと外部表示は worker 上で最新の daemon の

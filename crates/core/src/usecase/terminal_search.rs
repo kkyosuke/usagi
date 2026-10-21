@@ -1,7 +1,7 @@
 //! Bounded search of semantic terminal cells, shared by the daemon and TUI.
 
 use super::vt_screen::{ActiveBuffer, Geometry, ScreenCheckpoint, VtScreen};
-use crate::domain::id::{TerminalRef, WorkspaceId};
+use crate::domain::id::{SessionId, TerminalRef, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
 pub const QUERY_MAX: usize = 256;
@@ -47,6 +47,9 @@ pub struct TerminalSearchResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceOutputSearch {
     pub workspace: WorkspaceId,
+    /// Echoed scope lets a scoped client detect older daemons that ignore it.
+    #[serde(default)]
+    pub session: Option<SessionId>,
     pub query: String,
     pub terminals: Vec<TerminalSearchResult>,
     pub omitted_terminals: usize,

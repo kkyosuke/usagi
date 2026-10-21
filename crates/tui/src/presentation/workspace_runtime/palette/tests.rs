@@ -221,3 +221,65 @@ fn interrupted_tab_navigation_never_resumes_and_diff_is_not_searchable() {
         }
     ));
 }
+
+#[test]
+fn unified_search_artifact_activation_emits_exact_open_effect_and_rejects_stale_targets() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLifecycles(
+        [(
+            session,
+            SessionLifecycleProjection {
+                lifecycle: SessionLifecycle::Available,
+                failure_stage: None,
+                failure_summary: None,
+            },
+        )]
+        .into(),
+    )));
+    for target in [Target::Session(session), Target::Root(workspace)] {
+        let path = if target.session_id().is_some() {
+            "artifacts/report.txt"
+        } else {
+            ".usagi/sessions/s/artifacts/report.txt"
+        };
+        let action = Action::Artifact {
+            target,
+            path: path.into(),
+        };
+        assert!(runtime.palette_action_available(workspace, &action));
+        let effects = runtime.activate_palette_action(workspace, &action).unwrap();
+        assert!(
+            matches!(effects.as_slice(), [Effect::OpenArtifact { target: actual, path: actual_path, .. }] if *actual == target && actual_path == path)
+        );
+        let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    }
+    for (target, path) in [
+        (Target::Session(SessionId::new()), "artifacts/x"),
+        (Target::Root(WorkspaceId::new()), "artifacts/x"),
+        (Target::Root(workspace), "../secret"),
+        (Target::Root(workspace), "/absolute"),
+        (Target::Root(workspace), ""),
+    ] {
+        assert!(
+            runtime
+                .activate_palette_action(
+                    workspace,
+                    &Action::Artifact {
+                        target,
+                        path: path.into()
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            runtime
+                .apply_event(AppEvent::OpenArtifact {
+                    target: Target::Session(SessionId::new()),
+                    path: path.into()
+                })
+                .is_empty()
+        );
+    }
+}
