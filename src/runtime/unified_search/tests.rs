@@ -153,4 +153,43 @@ fn unified_search_bounds_artifacts_reports_errors_and_cancels_between_sources() 
         ..Terminals::default()
     });
     assert_eq!(port.search(&query, cancelled), Results::default());
+    // The workspace-local knowledge reader must also stay idle when the project
+    // inventory is empty and the request has already been cancelled.
+    query.projects.clear();
+    assert_eq!(
+        port.search(&query, Arc::new(AtomicBool::new(true))),
+        Results::default()
+    );
+    assert!(!tmp.path().join(".usagi/issues/index.json").exists());
+    assert!(!tmp.path().join(".usagi/memory/index.json").exists());
+}
+
+#[test]
+fn unified_search_cancels_knowledge_lock_wait_and_joins_without_partial_results() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join(".usagi/issues");
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("001-report.md"), "---\nnumber: 1\ntitle: Report\nstatus: todo\npriority: high\ndependson: []\ncreated_at: 2026-10-20T00:00:00Z\nupdated_at: 2026-10-20T00:00:00Z\n---\nreport\n").unwrap();
+    let held =
+        usagi_core::infrastructure::persistence::store_lock::StoreLock::acquire(&store).unwrap();
+    let mut port = UnifiedSearch::new(tmp.path(), Box::<Terminals>::default());
+    let mut query = query(tmp.path());
+    query.text.clear();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&cancelled);
+    let (sender, receiver) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = sender.send(port.search(&query, cancel));
+    });
+    let waiting = receiver.recv_timeout(Duration::from_millis(50));
+    cancelled.store(true, Ordering::Release);
+    let result = receiver.recv_timeout(Duration::from_secs(5));
+    // Release and join even if a regression produced a premature result or timeout.
+    drop(held);
+    worker.join().unwrap();
+    assert!(waiting.is_err());
+    assert_eq!(result.unwrap(), Results::default());
+    assert!(!tmp.path().join(".usagi/memory/index.json").exists());
 }

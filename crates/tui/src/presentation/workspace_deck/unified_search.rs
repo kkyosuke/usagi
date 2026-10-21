@@ -20,6 +20,13 @@ enum Entry {
 }
 
 impl Entry {
+    fn same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Navigation(left), Self::Navigation(right)) => left.identity == right.identity,
+            _ => self == other,
+        }
+    }
+
     fn label(&self) -> String {
         match self {
             Self::Navigation(row) => format!("{} · {}", row.label, row.context),
@@ -128,9 +135,11 @@ impl Search {
     }
 
     fn index(&self) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|entry| Some(entry) == self.selected.as_ref())
+        self.entries.iter().position(|entry| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| entry.same_target(selected))
+        })
     }
 
     fn change_scope(&mut self, slots: &[WorkspaceSlot], reverse: bool) {
@@ -482,7 +491,12 @@ pub(super) fn render(
         if search.scope == Scope::CurrentSession {
             body.push(search.current.as_ref().map_or_else(
                 || "No current session selected".into(),
-                |current| format!("Current session: {}", current.root.display()),
+                |current| {
+                    sanitize_presentation_line(&format!(
+                        "Current session: {}",
+                        current.root.display()
+                    ))
+                },
             ));
         }
         if search.input.value().is_empty() && search.scope != Scope::Artifact {
@@ -504,11 +518,11 @@ pub(super) fn render(
             body.push("No matching results".into());
         }
         for (i, entry) in search.entries.iter().enumerate().take(end).skip(start) {
-            body.push(sanitize_presentation_line(&format!(
+            body.push(format!(
                 "{} {}",
                 modal::selection_marker(index == Some(i)),
-                entry.label()
-            )));
+                sanitize_presentation_line(&entry.label())
+            ));
         }
         if let Some(entry) = index.and_then(|i| search.entries.get(i)) {
             body.push(sanitize_presentation_line(&entry.detail()));

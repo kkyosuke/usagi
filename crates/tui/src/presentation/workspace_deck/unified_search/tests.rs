@@ -102,6 +102,8 @@ fn unified_search_scopes_preserve_query_current_identity_and_exact_activation() 
     assert!(deck.take_unified_request().is_none());
     assert_eq!(search(&deck).entries.len(), 3);
     let frame = render_overlay(&deck, 35, 140, &[]).join("\n");
+    assert!(frame.contains(&modal::selection_marker(true)));
+    assert!(!frame.contains(&sanitize_presentation_line(&modal::selection_marker(true))));
     for text in [
         "[All]",
         "zzzxmatch",
@@ -162,6 +164,26 @@ fn unified_search_scopes_preserve_query_current_identity_and_exact_activation() 
     complete(&mut deck, result);
     assert!(search(&deck).entries.is_empty());
     assert!(!deck.apply_unified_response(token, Response::Search(Results::default())));
+}
+
+#[test]
+fn unified_search_sanitizes_current_path_only_for_display() {
+    let mut deck = deck();
+    let root = std::path::PathBuf::from("/project/\x1b]52;c;payload\x07\n\u{202e}session");
+    let session = deck.slots[0].sessions[0].projected.id;
+    deck.slots[0].sessions[0].projected.cwd = root.clone();
+    deck.open_unified_search(Some(session));
+    for _ in 0..3 {
+        deck.handle_overlay_key(&Key::Tab);
+    }
+    let (_, Request::Search(query)) = deck.take_unified_request().unwrap() else {
+        panic!("expected a search request");
+    };
+    assert_eq!(query.current.unwrap().root, root);
+    let frame = render_overlay(&deck, 28, 140, &[]).join("\n");
+    assert!(frame.contains("Current session: /project/�]52;c;payload���session"));
+    assert!(!frame.contains("\x1b]52;"));
+    assert!(!frame.contains('\u{202e}'));
 }
 
 #[test]
@@ -320,6 +342,57 @@ fn unified_search_current_navigation_updates_keep_selected_identity_and_source_r
     );
     deck.handle_overlay_key(&Key::Enter);
     assert!(!deck.refresh_unified_navigation());
+}
+
+#[test]
+fn unified_search_keeps_tab_selection_when_labels_and_positions_change() {
+    use crate::usecase::application::pane::{PaneKind, TabSelection};
+    let mut deck = deck();
+    let result = results(&deck);
+    let terminal = result.outputs[0].1.as_ref().unwrap().terminals[0]
+        .terminal
+        .clone();
+    let target = Target::Session(terminal.session_id.unwrap());
+    let selected_action = palette::Action::Tab {
+        target,
+        selection: TabSelection::Live(terminal.clone()),
+        kind: PaneKind::Terminal,
+    };
+    deck.slots[0].palette_tabs.push(palette::CachedTab {
+        action: selected_action.clone(),
+        label: "Tab · Terminal 2".into(),
+    });
+    deck.open_unified_search(None);
+    deck.handle_overlay_key(&Key::Paste("Tab Terminal".into()));
+    assert!(
+        matches!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::PaletteVisit { action, .. } if action == selected_action)
+    );
+
+    // Reordering tabs changes their ordinal labels, not the terminal identity.
+    deck.slots[0].palette_tabs[0].label = "Tab · Terminal 3".into();
+    let mut other = terminal;
+    other.terminal_id = TerminalId::new();
+    deck.slots[0].palette_tabs.insert(
+        0,
+        palette::CachedTab {
+            action: palette::Action::Tab {
+                target,
+                selection: TabSelection::Live(other),
+                kind: PaneKind::Terminal,
+            },
+            label: "Tab · Terminal 1".into(),
+        },
+    );
+    deck.slots[0].sessions[0].projected.label = "renamed session".into();
+    assert!(deck.refresh_unified_navigation());
+    assert!(
+        matches!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::PaletteVisit { action, .. } if action == selected_action)
+    );
+
+    deck.slots[0].palette_tabs.pop();
+    assert!(deck.refresh_unified_navigation());
+    assert!(!search(&deck).entries.is_empty());
+    assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
 }
 
 #[test]

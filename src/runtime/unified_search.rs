@@ -69,6 +69,9 @@ impl UnifiedSearchPort for UnifiedSearch {
                     });
                 results.outputs.push((project.workspace, response));
             }
+            if cancelled.load(Ordering::Acquire) {
+                return Results::default();
+            }
             if query.scope != Scope::Terminal {
                 let (root, target, all) = current.map_or(
                     (
