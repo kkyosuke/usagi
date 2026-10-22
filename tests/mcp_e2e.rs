@@ -1770,7 +1770,7 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
     let mut answered = first.clone();
     answered.decision_id = UserDecisionId::new();
     store.create(answered.clone()).unwrap().unwrap();
-    store
+    let answered = store
         .resolve(
             answered.owner.workspace_id,
             answered.decision_id,
@@ -1782,6 +1782,7 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
         )
         .unwrap()
         .unwrap();
+    expected.push(answered);
 
     let mut arguments = json!({});
     let mut actual = Vec::new();
@@ -1818,7 +1819,7 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
         arguments = json!({"cursor":cursor});
     }
     assert!(pages >= 2, "the owned backlog exceeds one IPC frame");
-    assert_eq!(actual, expected);
+    assert_decision_inventory_eq(&actual, &expected);
     assert_eq!(
         store.events().unwrap().len(),
         2,
@@ -1829,11 +1830,11 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
         &mcp.tool("user_decision_list", &json!({"cursor":cursor})),
     ))
     .unwrap();
-    assert_eq!(replay.decisions, expected[cursor.offset..]);
+    assert_decision_inventory_eq(&replay.decisions, &expected[cursor.offset..]);
     assert!(replay.next_cursor.is_none());
     // A cursor from the human inventory cannot broaden the authenticated scope.
     let global_cursor = store
-        .pending_page(UserDecisionScope::All, None, DEFAULT_MAX_FRAME_BYTES)
+        .inbox_page(UserDecisionScope::All, None, DEFAULT_MAX_FRAME_BYTES)
         .unwrap()
         .unwrap()
         .next_cursor
@@ -1866,6 +1867,18 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
         restarted["decisions"][0]["decision_id"],
         json!(expected[1].decision_id)
     );
+}
+
+fn assert_decision_inventory_eq(actual: &[UserDecision], expected: &[UserDecision]) {
+    assert_eq!(actual.len(), expected.len(), "inbox record count");
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert!(
+            actual == expected,
+            "inbox records differ: actual {} / expected {}",
+            actual.decision_id,
+            expected.decision_id
+        );
+    }
 }
 
 #[test]
