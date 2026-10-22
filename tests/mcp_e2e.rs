@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 50);
+    assert_eq!(tools.len(), 51);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -120,6 +120,7 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
     }
     assert!(names.contains("terminal_list"));
     assert!(names.contains("terminal_read"));
+    assert!(names.contains("user_decision_ack"));
     for name in [
         "workflow_start",
         "workflow_status",
@@ -147,7 +148,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 39);
+    assert_eq!(names.len(), 40);
     assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(!names.contains(&"session_delegate_issue"));
@@ -1594,6 +1595,9 @@ fn production_user_decision_retry_without_deadline_is_idempotent() {
 #[test]
 #[allow(clippy::too_many_lines)] // One authenticated round trip includes legacy recovery and receipt fencing.
 fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have_no_effect() {
+    use usagi_core::infrastructure::ipc::{
+        DEFAULT_MAX_FRAME_BYTES, read_json_frame, write_json_frame,
+    };
     use usagi_core::infrastructure::store::user_decision::wire::DecisionChunk;
     let mut mcp = McpHarness::start();
     mcp.launch_caller();
@@ -1632,6 +1636,49 @@ fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have
         &state,
     )
     .unwrap();
+    // An older TUI does not understand deferred entries. It must receive an
+    // explicit failure, never a successful partial pending inventory.
+    let mut old_tui =
+        usagi_daemon::infrastructure::unix_transport::connect_current(&mcp.data_dir()).unwrap();
+    old_tui
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    old_tui
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write_json_frame(&mut old_tui, &json!({
+        "kind":"client_hello", "client_id":"old-decision-tui", "connection_nonce":"old-decision-tui",
+        "expected_daemon_generation":null,
+        "supported_protocols":[{"generation":1,"min_revision":0,"max_revision":2}],
+        "capabilities":[], "required_capabilities":[],
+        "build":{"version":"old","commit":"old","target":"test","artifact":"old"},
+        "workspace":{"scope":"bound","root":mcp.workspace().canonicalize().unwrap()}
+    }), DEFAULT_MAX_FRAME_BYTES).unwrap();
+    let hello: serde_json::Value = read_json_frame(&mut old_tui, DEFAULT_MAX_FRAME_BYTES)
+        .unwrap()
+        .unwrap();
+    assert_eq!(hello["kind"], "server_hello");
+    assert_eq!(hello["protocol"]["revision"], 2);
+    let before_legacy_read = fs::read(store.path()).unwrap();
+    write_json_frame(
+        &mut old_tui,
+        &json!({
+            "protocol":hello["protocol"], "daemon_generation":hello["daemon_generation"],
+            "kind":"request", "request_id":"old-decision-list", "timeout_ms":10000,
+            "body":{"kind":"user_decision","action":"list_all","payload":{}}
+        }),
+        DEFAULT_MAX_FRAME_BYTES,
+    )
+    .unwrap();
+    let rejected: serde_json::Value = read_json_frame(&mut old_tui, DEFAULT_MAX_FRAME_BYTES)
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected["outcome"]["outcome"], "error");
+    assert_eq!(rejected["outcome"]["value"]["code"], "capability_missing");
+    assert_eq!(rejected["outcome"]["value"]["side_effect"], "none");
+    assert!(rejected["body"].is_null());
+    assert_eq!(fs::read(store.path()).unwrap(), before_legacy_read);
+    drop(old_tui);
     let listed = tool_text(&mcp.tool("user_decision_list", &json!({})));
     assert_eq!(listed["decisions"], json!([initial]));
     assert_eq!(

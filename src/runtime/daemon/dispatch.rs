@@ -1013,20 +1013,22 @@ pub(super) fn dispatch_user_decision(
             hello,
         );
     };
-    if !matches!(
-        action,
-        DispatchToolAction::UserDecisionRequest
-            | DispatchToolAction::UserDecisionGet
-            | DispatchToolAction::UserDecisionAck
-            | DispatchToolAction::UserDecisionList
-            | DispatchToolAction::UserDecisionResolve
-            | DispatchToolAction::UserDecisionCancel
-            | DispatchToolAction::UserDecisionExpire
-    ) {
+    if !action.is_user_decision() {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
             body.clone(),
             hello,
+        );
+    }
+    if let Err(error) = usagi_core::infrastructure::ipc::require_user_decision_delivery(
+        hello.protocol,
+        &hello.capabilities,
+    ) {
+        return envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
         );
     }
 

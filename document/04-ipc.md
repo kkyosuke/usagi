@@ -123,6 +123,13 @@ capability を持たない旧 daemon は build tuple へ fallback せず handsha
 hello の optional な `surface` は Agent 起動の診断記録に使う。意味と記録の追い方は
 [Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
 
+generation 1 revision 3 は user decision の明示ACKと分割取得に対応する。decision要求だけは交渉結果が
+revision 3以上で、daemonが `user-decision.delivery.v1` を広告していることをclient・daemon双方で必須にする。
+新clientは旧daemonへ暗黙ACKを行う `get` を送信せず、新daemonは旧clientへ `deferred` を含む不完全な一覧を
+成功として返さない。不一致はeffect zeroの `CapabilityMissing` とし、daemonとclientの更新・再接続を案内する。
+他の要求は引き続き旧revisionで利用でき、terminal checkpointはrevision 2の契約を保つ。
+具体的な質問・回答・ACKの形は [7. MCPのuser decision](07-mcp.md#user-decision) を正本とする。
+
 `BuildIdentity` は version、commit diagnostics、full target triple、canonical `artifact` を持つ。artifact は
 `usagi-artifact-v1:<profile>:<target>:<source-id>` である。`build.rs` は Git checkout では
 commit と tracked / untracked source set、Git metadata の無い package build では package source set から
@@ -834,10 +841,10 @@ negotiated revision で決まる。
 | negotiated revision | payload | offset | 意味 |
 |---|---|---|---|
 | 1 | `replay`（raw byte tail） | `base_offset + replay.length == output_offset` | 移行互換の legacy 経路。tail は最大 64 KiB |
-| 2 | `screen`（semantic checkpoint） | `base_offset == output_offset`（tail 長 0） | `output_offset` 時点の完全な screen state |
+| 2以上 | `screen`（semantic checkpoint） | `base_offset == output_offset`（tail 長 0） | `output_offset` 時点の完全な screen state |
 
-daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHello.capabilities` に
-`terminal.screen-checkpoint.v1` を含める。client も `max_revision` 2 を広告し、共通 revision が 1 に落ちる旧 client には
+daemon は generation 1 の `max_revision` を 3 として広告し、`ServerHello.capabilities` に
+`terminal.screen-checkpoint.v1` を含める。client も `max_revision` 3 を広告し、共通 revision が 1 に落ちる旧 client には
 従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
 oldest-row origin /
@@ -849,7 +856,7 @@ checkpoint 経路の判定は capability を真実源とし、client 側の収�
 
 | client | daemon | capability | 共通 revision | 収束先 |
 |---|---|---|---|---|
-| new | new | 有 | 2 | checkpoint から復元し suffix を feed |
+| new | new | 有 | 2以上 | checkpoint から復元し suffix を feed |
 | new | old | 無 | 1 | client が限定表示へ fail closed（raw tail を parse しない） |
 | new | new | 無（広告漏れ） | 2 | 同じく限定表示（capability を真実源とする） |
 | old | new | 有 | 1 | daemon が revision 1 の raw tail を返し、旧 client の既存挙動を保つ |

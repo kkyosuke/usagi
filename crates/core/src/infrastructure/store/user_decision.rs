@@ -55,10 +55,10 @@ const MAX_SERIALIZED_BYTES: usize = 4 * 1024 * 1024;
 /// than silently creating a second human question.
 const TERMINAL_RETENTION: usize = 256;
 
-/// Newest terminal decisions protected even during byte-pressure compaction.
+/// Recent terminal decisions retained during ordinary completion mutations.
 ///
-/// This is the minimum duplicate-recovery window. Older terminal records may
-/// be replaced by idempotency tombstones to meet the aggregate byte budget.
+/// New admission and legacy recovery may reclaim this history when needed to
+/// fit the byte budget. Tombstones still prevent a duplicate human question.
 const MIN_TERMINAL_RETENTION: usize = 32;
 
 /// How many unanswered decisions one workspace may hold at once.
@@ -438,7 +438,16 @@ impl UserDecisionStore {
             // Recovery headroom may finish old questions, never admit new ones.
             let recovery = state.recovery_bytes;
             state.recovery_bytes = 0;
-            if !compact_bounded(state, self.limits).expect("decision state is JSON serializable") {
+            // Completed history must not permanently block fresh questions.
+            // Pending records and unacknowledged answers remain protected;
+            // reclaimed keys become tombstones before this admission commits.
+            let admission_limits = StoreLimits {
+                minimum_terminal_retention: 0,
+                ..self.limits
+            };
+            if !compact_bounded(state, admission_limits)
+                .expect("decision state is JSON serializable")
+            {
                 return Err(UserDecisionError::CapacityReached);
             }
             state.recovery_bytes = recovery;
@@ -590,15 +599,17 @@ impl UserDecisionStore {
 
 /// Drop the terminal decisions past [`TERMINAL_RETENTION`], oldest first.
 ///
-/// Three classes are never dropped, because dropping them would lose state a
+/// Two classes are never dropped, because dropping them would lose state a
 /// caller is still owed:
 ///
 /// - **pending** — someone is blocked waiting for the answer;
 /// - **referenced by an un-acknowledged event** — the answer has not reached its
 ///   caller, and [`UserDecisionStore::get_for_event`] validates the delivery
-///   against this record;
-/// - **the newest terminal records** — a retry carrying the same idempotency key
-///   is answered from these instead of asking the person twice.
+///   against this record.
+///
+/// Recent completed records answer retries until new admission or legacy
+/// recovery needs their space. Tombstones continue preventing duplicate human
+/// questions after those records have been reclaimed.
 ///
 /// Running on every mutation keeps the bound a property of the document rather
 /// than of a maintenance tick that may never run.
@@ -614,6 +625,19 @@ fn compact_bounded(state: &mut State, limits: StoreLimits) -> Result<bool> {
     if over > 0 {
         drop_oldest_evictable(state, &referenced, over);
         evictable_count -= over;
+    }
+
+    // Legacy pending records may finish above the ordinary budget. Keeping a
+    // minimum history larger than that budget would reject every future request
+    // even after all answers were acknowledged. During recovery only, reclaim
+    // completed history until ordinary admission can resume. Pending decisions
+    // and answers whose receipt has not been acknowledged remain protected.
+    while state.recovery_bytes > 0
+        && evictable_count > 0
+        && capacity::reserved_len(state)? > limits.max_serialized_bytes
+    {
+        drop_oldest_evictable(state, &referenced, 1);
+        evictable_count -= 1;
     }
 
     while capacity::reserved_len(state)? > limits.max_serialized_bytes + state.recovery_bytes {
@@ -1140,6 +1164,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One snapshot fixes full-record, deferred-reference and cursor boundaries together.
     fn human_inventory_pages_enforce_exact_byte_and_cursor_boundaries() {
         use crate::infrastructure::ipc::{UserDecisionCursor, UserDecisionPage};
 
@@ -1169,12 +1194,29 @@ mod tests {
                 .unwrap(),
             Ok(first_page)
         );
+        let deferred_first = UserDecisionPage {
+            deferred: vec![wire::reference(&first)],
+            decisions: Vec::new(),
+            next_cursor: Some(cursor.clone()),
+        };
+        let deferred_first_bytes = serde_json::to_vec(&deferred_first).unwrap().len();
         assert_eq!(
             store
                 .pending_page(UserDecisionScope::All, None, first_bytes - 1)
                 .unwrap(),
+            Ok(deferred_first)
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, deferred_first_bytes - 1)
+                .unwrap(),
             Err(UserDecisionPageError::PageTooSmall)
         );
+        let deferred_last = UserDecisionPage {
+            deferred: vec![wire::reference(&second)],
+            decisions: Vec::new(),
+            next_cursor: None,
+        };
         let last_page = UserDecisionPage {
             deferred: Vec::new(),
             decisions: vec![second],
@@ -1191,7 +1233,7 @@ mod tests {
             store
                 .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes - 1)
                 .unwrap(),
-            Err(UserDecisionPageError::PageTooSmall)
+            Ok(deferred_last)
         );
         for offset in [0, 2, usize::MAX] {
             assert_eq!(
@@ -1911,13 +1953,15 @@ mod tests {
                 .unwrap(),
             vec![decision.decision_id]
         );
-        assert_eq!(
+        assert!(
             store
                 .get(decision.owner.workspace_id, decision.decision_id)
                 .unwrap()
-                .unwrap()
-                .status,
-            UserDecisionStatus::Expired
+                .is_none()
+        );
+        assert_eq!(
+            store.create(decision).unwrap(),
+            Err(UserDecisionError::IdempotencyExpired)
         );
     }
 

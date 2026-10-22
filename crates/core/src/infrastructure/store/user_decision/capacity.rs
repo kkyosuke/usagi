@@ -9,6 +9,10 @@ use anyhow::Result;
 const TERMINAL_OVERHEAD: usize = 1024;
 const TOMBSTONE_BOUND: usize = TOMBSTONE_WORDS * 32 + 128;
 const MAX_ANSWER_BOUND: usize = Policy::FREEFORM_ANSWER_MAX_BYTES * 6 + 256;
+// Adding the field to legacy JSON and encoding any supported usize takes less
+// than 64 bytes. When replacing an existing zero only its decimal digits grow.
+const RECOVERY_METADATA_BOUND: usize = 64;
+const RECOVERY_VALUE_GROWTH: usize = 20;
 
 pub(super) fn answer_bound(decision: &UserDecision) -> usize {
     let options: usize = decision
@@ -33,7 +37,12 @@ pub(super) fn reserved_len(state: &State) -> Result<usize> {
         .iter()
         .any(|decision| decision.idempotency_key.is_some())
     {
-        TOMBSTONE_BOUND.saturating_sub(serde_json::to_vec_pretty(&state.expired_idempotency)?.len())
+        let encoded = serde_json::to_string_pretty(&state.expired_idempotency)?;
+        // The field is embedded one level deeper in State. Subtract its actual
+        // contribution, including indentation, so allocating the reserved
+        // tombstone array cannot increase the charged size.
+        let embedded = encoded.len() + 2 * encoded.matches('\n').count();
+        TOMBSTONE_BOUND.saturating_sub(embedded)
     } else {
         0
     };
@@ -44,7 +53,7 @@ pub(super) fn recovery_limit(limits: StoreLimits) -> usize {
     limits.max_serialized_bytes
         + limits.pending_global * (2 * MAX_ANSWER_BOUND + TERMINAL_OVERHEAD)
         + TOMBSTONE_BOUND
-        + 64
+        + RECOVERY_METADATA_BOUND
 }
 
 pub(super) fn recover(state: &mut State, limits: StoreLimits, file_bytes: usize) -> Result<()> {
@@ -62,7 +71,7 @@ pub(super) fn recover(state: &mut State, limits: StoreLimits, file_bytes: usize)
     if state.recovery_bytes == 0 {
         let reserved = reserved_len(state)?;
         if reserved > limits.max_serialized_bytes {
-            state.recovery_bytes = reserved - limits.max_serialized_bytes + 64;
+            state.recovery_bytes = reserved - limits.max_serialized_bytes + RECOVERY_VALUE_GROWTH;
         }
     }
     if reserved_len(state)? > limits.max_serialized_bytes + state.recovery_bytes {

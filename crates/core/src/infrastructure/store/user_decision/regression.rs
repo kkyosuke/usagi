@@ -151,6 +151,49 @@ fn legacy_full_store_recovers_answers_cancellation_and_expiry_across_restart() {
             .answer,
         Some(max_answer())
     );
+    assert!(reopened.ack_event(first.decision_id).unwrap());
+    let recovered = UserDecisionStore::new(dir.path());
+    assert_eq!(recovered.load().unwrap().recovery_bytes, 0);
+    recovered.create(item()).unwrap().unwrap();
+    assert!(std::fs::metadata(store.path()).unwrap().len() <= MAX_SERIALIZED_BYTES as u64);
+}
+
+#[test]
+fn recovery_headroom_includes_new_metadata_at_the_legacy_global_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = UserDecisionStore::new(dir.path());
+    let mut state = State::default();
+    for _ in 0..GLOBAL_PENDING_LIMIT {
+        let mut decision = item();
+        decision.allow_freeform = true;
+        decision.prompt = "p".into();
+        state.decisions.push(decision);
+    }
+    let mut legacy = serde_json::json!(state);
+    legacy.as_object_mut().unwrap().remove("recovery_bytes");
+    let mut remaining =
+        MAX_SERIALIZED_BYTES - serde_json::to_vec_pretty(&legacy).unwrap().len() - 1;
+    for decision in legacy["decisions"].as_array_mut().unwrap() {
+        let growth = remaining.min(Policy::PROMPT_MAX_BYTES - 1);
+        decision["prompt"] = serde_json::json!("p".repeat(growth + 1));
+        remaining -= growth;
+    }
+    assert_eq!(remaining, 0);
+    json_file::write_atomic(dir.path(), &store.path(), &legacy).unwrap();
+    assert_eq!(
+        std::fs::metadata(store.path()).unwrap().len(),
+        MAX_SERIALIZED_BYTES as u64
+    );
+    let recovered = store.load().unwrap();
+    let hard_limit = capacity::recovery_limit(store.limits);
+    assert!(recovered.recovery_bytes <= hard_limit - MAX_SERIALIZED_BYTES);
+    assert!(capacity::reserved_len(&recovered).unwrap() <= hard_limit);
+    assert_eq!(serde_json::json!(recovered.decisions), legacy["decisions"]);
+    let first = &recovered.decisions[0];
+    assert!(!store.ack_event(first.decision_id).unwrap());
+    let reopened = UserDecisionStore::new(dir.path()).load().unwrap();
+    assert_eq!(reopened.decisions, recovered.decisions);
+    assert!(reopened.recovery_bytes <= hard_limit - MAX_SERIALIZED_BYTES);
 }
 
 #[test]
@@ -414,5 +457,51 @@ fn chunks_respect_utf8_boundaries_and_reject_offsets_inside_characters() {
             4096
         ),
         Err(UserDecisionPageError::InvalidCursor)
+    );
+}
+
+#[test]
+fn completed_history_cannot_permanently_block_new_questions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut decision = rich(Policy::PROMPT_MAX_BYTES + 32 * Policy::OPTION_DESCRIPTION_MAX_BYTES);
+    decision.idempotency_key = Some("first".into());
+    let budget = capacity::reserved_len(&State {
+        decisions: vec![decision.clone()],
+        ..State::default()
+    })
+    .unwrap();
+    let limits = StoreLimits {
+        max_serialized_bytes: budget,
+        ..StoreLimits::default()
+    };
+    let store = UserDecisionStore::with_limits(dir.path(), limits);
+    store.create(decision.clone()).unwrap().unwrap();
+    store
+        .resolve(
+            decision.owner.workspace_id,
+            decision.decision_id,
+            max_answer(),
+            fixed_now(),
+        )
+        .unwrap()
+        .unwrap();
+    let mut next = decision.clone();
+    next.decision_id = UserDecisionId::new();
+    next.idempotency_key = Some("later".into());
+    let before = std::fs::read(store.path()).unwrap();
+    assert_eq!(
+        store.create(next.clone()).unwrap(),
+        Err(UserDecisionError::CapacityReached)
+    );
+    assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    assert_eq!(store.events().unwrap().len(), 1);
+    store.ack_event(decision.decision_id).unwrap();
+    assert!(store.events().unwrap().is_empty());
+    assert!(store.pending_all().unwrap().is_empty());
+    let admitted = store.create(next.clone()).unwrap();
+    assert_eq!(admitted.unwrap().decision_id, next.decision_id);
+    assert_eq!(
+        store.create(decision).unwrap(),
+        Err(UserDecisionError::IdempotencyExpired)
     );
 }

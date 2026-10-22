@@ -226,6 +226,9 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 
 ### User decision
 
+clientとdaemonの両方が [IPC revision 3のdecision契約](04-ipc.md#frame-と-handshake) に対応している必要がある。
+旧版が接続している場合はdecision操作をeffect zeroで拒否するため、daemonとMCP/TUI clientを更新・再接続する。
+
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
 caller は同じ credential と `decision_id` で `get` を polling する。`get` は read-only で、応答を失っても回答と
 outbox は残る。`resolved` の回答を受信・保存した後、`user_decision_ack {"decision_id":"..."}` で明示的に受信確認する。
@@ -314,7 +317,8 @@ MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開
 
 新規質問は owner・時刻・既定値を含む JSON と最大回答の見積もりを合計して512 KiB以下に制限する。
 JSON escape 後の byte 数で検査し、超過時は保存前に `InvalidArgument` を返す。
-旧版で受け付けた大きな質問は削除・省略せず、一覧の `deferred` に decision ID / workspace / revision を返す。
+旧版で受け付けた大きな質問や、実際の通信上限内に1件も収まらない質問は削除・省略せず、一覧の
+`deferred` に decision ID / workspace / revision を返す。
 `get` に `decision_id` と `cursor: {"revision":"...","offset":0}` を渡すと、`data`（JSON本文の断片）と
 `next_cursor` を返す。`next_cursor` が `null` になるまで連結し、全文をJSONとして解析してから使う。
 途中の変更は `RevisionConflict` として先頭から取り直す。`get` の cursor なし応答も frame に収まらない場合は
@@ -323,10 +327,13 @@ JSON escape 後の byte 数で検査し、超過時は保存前に `InvalidArgum
 件数上限とは別に、`user-decisions.json` の pretty JSON と、pending の最大回答・outbox コピー・終端時刻・
 tombstone 増加分の予約を合わせて4 MiB以下で新規受付する。UTF-8 byte が JSON escape で最大6倍になることも
 予約に含む。受付済みの質問は、その予約を使って回答・取消・期限切れ処理を完了できる。
-byte pressure では終端時刻が古い record を落とし、最新32件とpending・未ACK回答を保護する。
+byte pressure では終端時刻が古い record を落とす。通常の回答・取消処理では最新32件の終端履歴を残すが、
+新規受付に必要な場合はそれより少なくても整理する。pending・未ACK回答は常に保護する。
 通常の終端履歴は256件まで保持する。新規受付で空きを確保できなければ `ResourceExhausted`・effect zero で拒否する。
 旧版の4 MiB以内の文書に予約不足がある場合だけ、既存pendingの最大回答分を復旧用に確保して保存する。
-復旧枠は新規受付に使わず、質問の完了・ACK・履歴整理に応じて縮小する。読み込み上限は旧4 MiBと
+復旧枠は新規受付に使わず、質問の完了・ACK・履歴整理に応じて縮小する。復旧中も通常4 MiBの受付へ
+戻るため、ACK済み・取消・期限切れの履歴を最新32件より少なくても整理する。pending・未ACK回答は保護し、
+整理した質問のidempotency keyはtombstoneに残す。読み込み上限は旧4 MiBと
 最大256件の回答予約・固定metadata分に制限し、不正な復旧枠や予約不足は拒否する。
 復旧中の文書は4 MiBを超えることがあるため、旧版へのdowngrade前には回答の受信確認と履歴整理を完了する。
 削除した terminal record の idempotency key は owner と組にした固定長 tombstone に残すため、古い retry は

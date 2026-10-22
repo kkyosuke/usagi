@@ -18,12 +18,13 @@ use crate::infrastructure::ipc::request::{
     TuiUserDecisionAction,
 };
 use crate::infrastructure::ipc::{
-    Bootstrap, BuildIdentity, Capability, ClientHello, ClientId, ClientWorkspace, DaemonGeneration,
-    Envelope, EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange,
-    ProtocolVersion, ResponseOutcome, ServerHello, TERMINAL_CHECKPOINT_REVISION,
+    Bootstrap, BuildIdentity, CURRENT_PROTOCOL_REVISION, Capability, ClientHello, ClientId,
+    ClientWorkspace, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, GenerationRole,
+    ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, ServerHello,
     TERMINAL_WIRE_GENERATION, TerminalInputReplayMode, TerminalSnapshotMode,
     client_advertised_capabilities, client_required_capabilities, is_workspace_mismatch,
-    read_json_frame, terminal_input_replay_mode, terminal_snapshot_mode, write_json_frame,
+    read_json_frame, require_user_decision_delivery, terminal_input_replay_mode,
+    terminal_snapshot_mode, write_json_frame,
 };
 
 #[cfg(test)]
@@ -41,7 +42,9 @@ use crate::infrastructure::ipc::request::{
     TerminalLaunchIntent, agent_launch_semantic_key, agent_resume_semantic_key, decode_pr_snapshot,
 };
 #[cfg(test)]
-use crate::infrastructure::ipc::{OWNER_GENERATION_ROUTING_CAPABILITY, WORKSPACE_FENCE_CAPABILITY};
+use crate::infrastructure::ipc::{
+    OWNER_GENERATION_ROUTING_CAPABILITY, TERMINAL_CHECKPOINT_REVISION, WORKSPACE_FENCE_CAPABILITY,
+};
 #[cfg(test)]
 use crate::infrastructure::ipc::{RetryMode, SideEffect};
 #[cfg(test)]
@@ -174,10 +177,9 @@ impl<S: Read + Write> IpcClient<S> {
             supported_protocols: vec![ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                // Revision 2 carries the semantic screen checkpoint. An older
-                // daemon still negotiates revision 1, which this client treats
-                // as legacy (it never parses the raw tail).
-                max_revision: TERMINAL_CHECKPOINT_REVISION,
+                // Older revisions remain usable for supported families; each
+                // changed contract is checked before submitting its requests.
+                max_revision: CURRENT_PROTOCOL_REVISION,
             }],
             // Advertised, not required: this is what *this* client can do, and
             // it is the daemon that needs it — a rollover may only leave a
@@ -328,6 +330,12 @@ fn verify_owner_binding(
 
 impl<S: Read + Write> DaemonClient for IpcClient<S> {
     fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
+        if matches!(&request, DaemonRequest::UserDecision { .. })
+            || matches!(&request, DaemonRequest::DispatchTool { action, .. } if action.is_user_decision())
+        {
+            require_user_decision_delivery(self.protocol, &self.server_capabilities)
+                .map_err(ClientError::Protocol)?;
+        }
         self.next_request += 1;
         // Terminal owners use this correlation ID as part of their input
         // dedupe fence, so it must satisfy the canonical resource-ID contract
@@ -1594,7 +1602,7 @@ mod tests {
             TerminalSnapshotMode::Checkpoint
         );
 
-        // The client offers revision 2 so a checkpoint daemon can select it.
+        // The current range still includes revision 2 for checkpoint daemons.
         let sent = read_json_frame::<serde_json::Value>(
             &mut Cursor::new(checkpoint.transport().output.clone()),
             1_048_576,
@@ -1607,7 +1615,7 @@ mod tests {
             serde_json::json!([ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                max_revision: TERMINAL_CHECKPOINT_REVISION,
+                max_revision: CURRENT_PROTOCOL_REVISION,
             }])
         );
 
@@ -1694,6 +1702,64 @@ mod tests {
         assert_eq!(error.retry_mode(), RetryMode::Reconnect);
         assert_eq!(error.side_effect(), SideEffect::PartialOrUnknown);
         assert_eq!(error.to_string(), "Unavailable: daemon is absent");
+    }
+
+    #[test]
+    fn decision_requests_never_reach_a_peer_with_implicit_read_acknowledgements() {
+        let mut requests: Vec<_> = [
+            DispatchToolAction::UserDecisionRequest,
+            DispatchToolAction::UserDecisionGet,
+            DispatchToolAction::UserDecisionAck,
+            DispatchToolAction::UserDecisionList,
+            DispatchToolAction::UserDecisionResolve,
+            DispatchToolAction::UserDecisionCancel,
+            DispatchToolAction::UserDecisionExpire,
+        ]
+        .into_iter()
+        .map(|action| DaemonRequest::DispatchTool {
+            action,
+            payload: serde_json::json!({}),
+            caller_context: None,
+            operation_id: "decision-test".into(),
+        })
+        .collect();
+        for action in [
+            TuiUserDecisionAction::Get,
+            TuiUserDecisionAction::ListAll,
+            TuiUserDecisionAction::Resolve,
+        ] {
+            requests.push(DaemonRequest::UserDecision {
+                action,
+                payload: serde_json::json!({}),
+            });
+        }
+        for request in requests {
+            let mut client = IpcClient::connect(
+                scripted(ResponseOutcome::Ok, "1"),
+                "client".into(),
+                "nonce".into(),
+                ClientPolicy::mcp(),
+                client_build(),
+                test_workspace(),
+            )
+            .unwrap();
+            let before = client.transport().output.clone();
+            let error = client.request(request.clone()).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::CapabilityMissing);
+            assert_eq!(error.side_effect(), SideEffect::None);
+            assert_eq!(client.transport().output, before);
+            assert_eq!(client.next_request, 0);
+            client.protocol.revision = CURRENT_PROTOCOL_REVISION;
+            client
+                .server_capabilities
+                .push(Capability::UserDecisionDelivery.wire_name().into());
+            assert_eq!(
+                client.request(request).unwrap(),
+                DaemonReply::Ok(serde_json::json!({"ok":true}))
+            );
+            assert!(client.transport().output.len() > before.len());
+        }
+        assert!(!DispatchToolAction::AgentGet.is_user_decision());
     }
 
     #[test]

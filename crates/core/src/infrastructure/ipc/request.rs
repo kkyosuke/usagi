@@ -332,6 +332,21 @@ pub enum DispatchToolAction {
 }
 
 impl DispatchToolAction {
+    /// Whether the action requires the explicit-receipt decision protocol.
+    #[must_use]
+    pub const fn is_user_decision(self) -> bool {
+        matches!(
+            self,
+            Self::UserDecisionRequest
+                | Self::UserDecisionGet
+                | Self::UserDecisionAck
+                | Self::UserDecisionList
+                | Self::UserDecisionResolve
+                | Self::UserDecisionCancel
+                | Self::UserDecisionExpire
+        )
+    }
+
     /// Whether this action only reads daemon state, so a fresh-connection retry
     /// re-reads safely.
     #[must_use]
