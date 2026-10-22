@@ -390,6 +390,7 @@ pub struct HomeProjection {
     foreground_overlay: Option<Overlay>,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    decision_answers: Vec<usagi_core::domain::user_decision::UserDecision>,
     decision_owners: decision_modal::OwnerNames,
     unread_decision_ids: std::collections::BTreeSet<usagi_core::domain::id::UserDecisionId>,
     /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
@@ -778,6 +779,7 @@ impl HomeProjection {
                 .filter(|_| state.overlay() == Some(Overlay::Decisions))
                 .cloned(),
             decisions: state.decisions().to_vec(),
+            decision_answers: state.decision_answers().to_vec(),
             decision_owners,
             unread_decision_ids: state.unread_decision_ids().clone(),
             // The foreground overlay is the single source of truth for what a
@@ -1741,18 +1743,26 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
     // The badge stays while any decision is pending, so a decision that was
     // seen in the list but not answered is still discoverable. Unread
     // decisions are emphasized in bold.
-    let notice = (!home.decisions.is_empty()).then(|| {
-        let style = if home.unread_decision_ids.is_empty() {
-            Role::Warning.style()
-        } else {
-            Role::Warning.style().bold()
-        };
-        style.paint(&format!(
-            "{} Reply needed ({})",
-            icons.decision,
-            home.decisions.len()
-        ))
-    });
+    let notice = if home.decisions.is_empty() {
+        (!home.decision_answers.is_empty()).then(|| {
+            Style::new()
+                .dim()
+                .paint(&format!("Saved answers ({})", home.decision_answers.len()))
+        })
+    } else {
+        Some({
+            let style = if home.unread_decision_ids.is_empty() {
+                Role::Warning.style()
+            } else {
+                Role::Warning.style().bold()
+            };
+            style.paint(&format!(
+                "{} Reply needed ({})",
+                icons.decision,
+                home.decisions.len()
+            ))
+        })
+    };
     let root_terminal = if home.root_terminal_drawer.is_some() {
         Role::Accent
             .style()
@@ -2636,7 +2646,11 @@ fn render_home_modals(
             width,
             &frame,
             overlay,
-            &home.decisions,
+            if overlay.show_answers() {
+                &home.decision_answers
+            } else {
+                &home.decisions
+            },
             &home.decision_owners,
         )
     } else if home.closeup_action_visible {
@@ -5403,6 +5417,35 @@ mod tests {
         assert!(strip(&read_line).contains("Reply needed (1)"));
         assert!(read_line.contains("\u{1b}[33m"));
         assert!(!read_line.contains("\u{1b}[1;33m"));
+    }
+
+    #[test]
+    fn saved_decision_answers_remain_accessible_without_pending_questions() {
+        let workspace = WorkspaceId::new();
+        let mut saved = pending_confirm_decision(workspace);
+        saved.status = usagi_core::domain::user_decision::UserDecisionStatus::Resolved;
+        saved.answer = Some(
+            usagi_core::domain::user_decision::UserDecisionAnswer::Option {
+                option_id: saved.options[0].id.clone(),
+                comment: None,
+            },
+        );
+        let mut state = AppState::home(workspace, vec![]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![saved],
+            }),
+        );
+        let home = HomeProjection::from_state(&state, "work", &[]);
+        let layout = home_header_layout(120, &home);
+        assert!(strip(&layout.line).contains("Saved answers (1)"));
+        assert!(!strip(&layout.line).contains("Reply needed"));
+        assert!((0..120).any(|col| layout.action_at(col) == Some(HomeHeaderAction::Decisions)));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        let home = HomeProjection::from_state(&state, "work", &[]);
+        assert!(joined_home(&home).contains("Answers awaiting receipt"));
     }
 
     #[test]

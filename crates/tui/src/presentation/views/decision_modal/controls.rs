@@ -5,13 +5,31 @@ use crate::usecase::application::controller::DecisionEditor;
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionSelectionMode};
 
 pub(super) fn kind(decision: &UserDecision) -> &'static str {
-    if decision.options.is_empty() {
+    if decision.status == usagi_core::domain::user_decision::UserDecisionStatus::Resolved {
+        "Awaiting agent receipt"
+    } else if decision.options.is_empty() {
         "Freeform only"
     } else if decision.selection_mode == UserDecisionSelectionMode::Multiple {
         "Multiple choice"
     } else {
         "Single choice"
     }
+}
+
+pub(super) fn saved_footer(editor: &DecisionEditor, width: usize) -> Vec<String> {
+    vec![
+        modal::footer("Awaiting agent receipt"),
+        modal::footer(if editor.discard_confirmation() {
+            "Enter: discard  Esc: keep"
+        } else if width < 50 {
+            "d: discard  Esc: back"
+        } else {
+            "d: discard  Esc: back  PgUp/PgDn: scroll"
+        }),
+    ]
+    .into_iter()
+    .map(|line| widgets::clip_to_width(&line, width))
+    .collect()
 }
 
 pub(super) fn editor_footer(editor: &DecisionEditor, width: usize) -> Vec<String> {

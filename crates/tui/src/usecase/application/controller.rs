@@ -483,11 +483,18 @@ pub struct EnvironmentEditor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionSnapshot {
     decisions: Vec<UserDecision>,
+    answers: Vec<UserDecision>,
     unread: BTreeSet<UserDecisionId>,
 }
 
 /// Local navigation and draft state for a durable user decision.  The durable
 /// record itself remains daemon-owned; dismissing this state never mutates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedAnswerMode {
+    View,
+    ConfirmDiscard,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionEditor {
     decision: UserDecision,
@@ -498,6 +505,7 @@ pub struct DecisionEditor {
     input_comment: bool,
     comment: String,
     confirmation: Option<UserDecisionAnswer>,
+    saved_answer_mode: SavedAnswerMode,
     /// First visible content row. `None` follows the active automatic anchor.
     /// Presentation resolves paging against the actual rendered viewport.
     scroll_offset: Option<usize>,
@@ -521,6 +529,7 @@ impl DecisionEditor {
             input_comment: false,
             comment: String::new(),
             confirmation: None,
+            saved_answer_mode: SavedAnswerMode::View,
             scroll_offset,
             follow_freeform: input_freeform,
             freeform: String::new(),
@@ -552,6 +561,10 @@ impl DecisionEditor {
         self.confirmation.as_ref()
     }
     #[must_use]
+    pub const fn discard_confirmation(&self) -> bool {
+        matches!(self.saved_answer_mode, SavedAnswerMode::ConfirmDiscard)
+    }
+    #[must_use]
     pub fn decision(&self) -> &UserDecision {
         &self.decision
     }
@@ -581,6 +594,7 @@ impl DecisionEditor {
 /// editor.  Returning from the editor keeps the list available for re-display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionOverlayState {
+    show_answers: bool,
     selected: usize,
     editor: Option<DecisionEditor>,
     requested: Option<UserDecisionId>,
@@ -590,6 +604,10 @@ pub struct DecisionOverlayState {
 }
 
 impl DecisionOverlayState {
+    #[must_use]
+    pub const fn show_answers(&self) -> bool {
+        self.show_answers
+    }
     #[must_use]
     pub const fn is_loading(&self) -> bool {
         self.requested.is_some()
@@ -1154,6 +1172,7 @@ pub struct AppState {
     role_editor: Option<RoleEditor>,
     daemon_control: DaemonControlState,
     decisions: Vec<UserDecision>,
+    decision_answers: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
     decision_overlay: Option<DecisionOverlayState>,
     /// The visible Pull Request modal. It exists exactly while
@@ -1362,6 +1381,7 @@ impl AppState {
             role_editor: None,
             daemon_control: DaemonControlState::default(),
             decisions: Vec::new(),
+            decision_answers: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
             decision_overlay: None,
             pr_overlay: None,
@@ -1547,6 +1567,11 @@ impl AppState {
     pub fn decisions(&self) -> &[UserDecision] {
         &self.decisions
     }
+    /// Saved answers still awaiting the requesting agent's receipt.
+    #[must_use]
+    pub fn decision_answers(&self) -> &[UserDecision] {
+        &self.decision_answers
+    }
     /// Pending decisions the user has not opened from the notice centre yet.
     #[must_use]
     pub fn unread_decision_ids(&self) -> &std::collections::BTreeSet<UserDecisionId> {
@@ -1557,6 +1582,7 @@ impl AppState {
     pub fn decision_snapshot(&self) -> DecisionSnapshot {
         DecisionSnapshot {
             decisions: self.decisions.clone(),
+            answers: self.decision_answers.clone(),
             unread: self.unread_decisions.clone(),
         }
     }
@@ -2437,6 +2463,10 @@ pub enum BackendEvent {
         workspace: WorkspaceId,
         decision_id: UserDecisionId,
     },
+    DecisionDiscarded {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+    },
     /// A safe resolve failure; the draft and pending item stay retryable.
     DecisionError {
         workspace: WorkspaceId,
@@ -2585,6 +2615,11 @@ pub enum Effect {
         workspace: WorkspaceId,
         decision_id: UserDecisionId,
         answer: UserDecisionAnswer,
+    },
+    /// Discard a saved answer only after explicit human confirmation.
+    DiscardDecision {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
     },
     /// target の terminal を開くか再利用する。
     OpenTerminal {
@@ -3074,6 +3109,10 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             },
         ),
         BackendEvent::DecisionResolved {
+            workspace,
+            decision_id,
+        }
+        | BackendEvent::DecisionDiscarded {
             workspace,
             decision_id,
         } => decision::update(
@@ -4367,14 +4406,17 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         return;
     };
     if let Some(editor) = &overlay.editor {
-        let mut present = false;
-        for item in &state.decisions {
-            if item.decision_id == editor.decision.decision_id {
-                present = true;
-                break;
+        let current = state
+            .decisions
+            .iter()
+            .chain(&state.decision_answers)
+            .find(|item| item.decision_id == editor.decision.decision_id);
+        if let Some(current) = current {
+            if current.status != editor.decision.status {
+                overlay.show_answers = current.status == UserDecisionStatus::Resolved;
+                overlay.editor = Some(DecisionEditor::new(current.clone()));
             }
-        }
-        if !present {
+        } else {
             overlay.editor = None;
             if overlay.exact.is_some() {
                 overlay.error =
@@ -4382,9 +4424,12 @@ fn reconcile_decision_overlay(state: &mut AppState) {
             }
         }
     }
-    overlay.selected = overlay
-        .selected
-        .min(state.decisions.len().saturating_sub(1));
+    let rows = if overlay.show_answers {
+        &state.decision_answers
+    } else {
+        &state.decisions
+    };
+    overlay.selected = overlay.selected.min(rows.len().saturating_sub(1));
 }
 
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
@@ -4403,7 +4448,7 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if overlay
         .editor
         .as_ref()
-        .is_some_and(|editor| editor.confirmation.is_none())
+        .is_some_and(|editor| editor.confirmation.is_none() && !editor.discard_confirmation())
         && matches!(&key, AppKey::Escape)
     {
         overlay.editor = None;
@@ -4413,7 +4458,19 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(editor) = overlay.editor.as_mut() {
         return update_decision_editor(editor.decision.owner.workspace_id, editor, key);
     }
+    let rows = if overlay.show_answers {
+        &state.decision_answers
+    } else {
+        &state.decisions
+    };
     match key {
+        AppKey::Tab => {
+            overlay.show_answers = !overlay.show_answers;
+            overlay.selected = 0;
+            return vec![Effect::RefreshDecisions {
+                workspace: state.workspace,
+            }];
+        }
         AppKey::Escape => {
             state.overlay = None;
             state.decision_overlay = None;
@@ -4422,10 +4479,10 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             overlay.selected = overlay.selected.saturating_sub(1);
         }
         AppKey::DecisionNext | AppKey::Down => {
-            overlay.selected = (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
+            overlay.selected = (overlay.selected + 1).min(rows.len().saturating_sub(1));
         }
         AppKey::Enter => {
-            if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
+            if let Some(decision) = rows.get(overlay.selected).cloned() {
                 overlay.editor = Some(DecisionEditor::new(decision));
             }
         }
@@ -4518,6 +4575,7 @@ fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Ve
     }
     state.overlay = Some(Overlay::Decisions);
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: state.decisions.is_empty() && !state.decision_answers.is_empty(),
         selected: 0,
         editor: None,
         requested,

@@ -713,6 +713,13 @@ Enter で送信し、Esc で下書きを保持して編集に戻る。PgUp/PgDn 
 自由入力欄へ移動し、現在の欄の回答だけを送信する。両方の入力内容は切り替えや同じ質問の snapshot 更新で保持する。
 送信エラー時も入力を保持し、daemon の resolve confirmation を受け取ってから質問を閉じる。
 
+質問一覧の `Tab` で、回答待ちの質問と `Answers awaiting receipt`（Agent の受信確認待ちの回答）を切り替える。
+回答待ちの質問がなく保存済み回答だけがある場合は、Home header の `Saved answers (N)` から一覧を開ける。
+保存済み回答は質問本文・選択・補足コメント・自由回答を読み取り専用で表示し、開くだけでは受信確認も破棄もしない。
+依頼元 session の削除後もこの一覧から確認できる。`d` で破棄確認を開き、`Enter` で保存回答を破棄する。
+確認中の `Esc` は回答を保持したまま戻る。破棄すると Agent はその回答を受け取れなくなる。
+保存済み回答は新しい質問の自動表示、未読件数、回答待ちの通知には含めない。
+
 pending decision がある間、Home header の右上に Icons 設定に応じた bell または `!` indicator と
 `Reply needed (N)`（N は回答待ちの質問数）を warning 色（黄）で表示し、未読がある間は太字にする。新しい pending decision を resync で
 観測すると、その直下の banner に owner（一覧と同じ表記）と decision の title（summary）を warning 色で表示する。

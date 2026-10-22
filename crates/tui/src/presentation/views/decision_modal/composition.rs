@@ -87,11 +87,30 @@ pub(super) fn confirmation_viewport(
     width: usize,
     capacity: usize,
 ) -> super::EditorViewport {
-    let mut rows = wrapped_content_lines("Review answer", "", width)
+    let saved =
+        editor.decision().status == usagi_core::domain::user_decision::UserDecisionStatus::Resolved;
+    let heading = if editor.discard_confirmation() {
+        "Discard saved answer?"
+    } else if saved {
+        "Saved answer"
+    } else {
+        "Review answer"
+    };
+    let mut rows = wrapped_content_lines(heading, "", width)
         .into_iter()
         .map(|line| Role::Accent.style().bold().paint(&line))
         .collect::<Vec<_>>();
+    if editor.discard_confirmation() {
+        rows.extend(wrapped_content_lines(
+            "Discarding removes this saved answer. The agent will no longer be able to receive it.",
+            "",
+            width,
+        ));
+    }
     rows.extend(wrapped_content_lines(&editor.decision().title, "", width));
+    if saved {
+        rows.extend(wrapped_content_lines(&editor.decision().prompt, "", width));
+    }
     rows.push(String::new());
     match answer {
         UserDecisionAnswer::Option { option_id, .. } => {

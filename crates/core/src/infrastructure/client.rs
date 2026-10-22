@@ -1727,6 +1727,7 @@ mod tests {
             TuiUserDecisionAction::Get,
             TuiUserDecisionAction::ListAll,
             TuiUserDecisionAction::Resolve,
+            TuiUserDecisionAction::Discard,
         ] {
             requests.push(DaemonRequest::UserDecision {
                 action,
@@ -1749,10 +1750,20 @@ mod tests {
             assert_eq!(error.side_effect(), SideEffect::None);
             assert_eq!(client.transport().output, before);
             assert_eq!(client.next_request, 0);
-            client.protocol.revision = CURRENT_PROTOCOL_REVISION;
             client
                 .server_capabilities
                 .push(Capability::UserDecisionDelivery.wire_name().into());
+            client.protocol.revision = 3;
+            assert_eq!(
+                client.request(request.clone()).unwrap_err().code(),
+                ErrorCode::CapabilityMissing
+            );
+            assert_eq!(
+                client.transport().output,
+                before,
+                "revision 3 cannot recover answered IDs"
+            );
+            client.protocol.revision = CURRENT_PROTOCOL_REVISION;
             assert_eq!(
                 client.request(request).unwrap(),
                 DaemonReply::Ok(serde_json::json!({"ok":true}))

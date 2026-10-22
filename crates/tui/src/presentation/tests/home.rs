@@ -959,6 +959,14 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
         BackendEvent::DecisionError { .. }
     ));
     assert!(matches!(
+        UnavailableDecisionCommandPort.discard(workspace_id, decision_id),
+        BackendEvent::DecisionError {
+            workspace,
+            decision_id: rejected,
+            ..
+        } if workspace == workspace_id && rejected == decision_id
+    ));
+    assert!(matches!(
         UnavailableEnvironmentStore.load(EnvScope::Workspace),
         BackendEvent::EnvironmentError { .. }
     ));

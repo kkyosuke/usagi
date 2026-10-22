@@ -388,9 +388,11 @@ pub enum TuiUserDecisionAction {
     ListAll,
     Resolve,
     Cancel,
+    /// Human-confirmed disposal of an undelivered resolved answer.
+    Discard,
 }
 
-/// Continuation within one immutable observation of the pending inventory.
+/// Continuation within one immutable observation of the decision inbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserDecisionCursor {
@@ -398,7 +400,7 @@ pub struct UserDecisionCursor {
     pub offset: usize,
 }
 
-/// A byte-bounded part of the authorized pending inventory. Consumers publish
+/// A byte-bounded part of the authorized decision inbox. Consumers publish
 /// only after following every cursor from the same revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionPage {

@@ -626,6 +626,7 @@ fn every_existing_modal_blocks_director_drawer_entry() {
             }
             Overlay::Decisions => {
                 state.decision_overlay = Some(DecisionOverlayState {
+                    show_answers: false,
                     selected: 0,
                     editor: None,
                     requested: None,

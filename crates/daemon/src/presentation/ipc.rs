@@ -746,7 +746,7 @@ pub fn server_protocol(
             generation: usagi_core::infrastructure::ipc::TERMINAL_WIRE_GENERATION,
             min_revision: 0,
             // Preserve older revisions for request families with compatible
-            // contracts. Decision delivery requires revision 3 at dispatch.
+            // contracts. Decision dispatch separately enforces its delivery revision.
             max_revision: usagi_core::infrastructure::ipc::CURRENT_PROTOCOL_REVISION,
         }],
         capabilities: usagi_core::infrastructure::ipc::server_advertised_capabilities(

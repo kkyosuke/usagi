@@ -7,6 +7,8 @@
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
 
 mod capacity;
+#[cfg(test)]
+mod inbox;
 mod page;
 #[cfg(test)]
 mod regression;
@@ -236,9 +238,39 @@ impl UserDecisionStore {
         cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
         max_page_bytes: usize,
     ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
-        let decisions = self
-            .pending_all()?
+        self.scoped_page(scope, cursor, max_page_bytes, false)
+    }
+
+    /// Recover outstanding questions and answers whose receipt has not been
+    /// acknowledged, including when the creation response (and ID) was lost.
+    pub fn inbox_page(
+        &self,
+        scope: UserDecisionScope<'_>,
+        cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
+        max_page_bytes: usize,
+    ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
+        self.scoped_page(scope, cursor, max_page_bytes, true)
+    }
+
+    fn scoped_page(
+        &self,
+        scope: UserDecisionScope<'_>,
+        cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
+        max_page_bytes: usize,
+        include_answers: bool,
+    ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
+        let state = self.load()?;
+        let waiting: std::collections::BTreeSet<_> =
+            state.events.iter().map(|event| event.decision_id).collect();
+        let decisions = state
+            .decisions
             .into_iter()
+            .filter(|decision| {
+                decision.status == UserDecisionStatus::Pending
+                    || (include_answers
+                        && decision.status == UserDecisionStatus::Resolved
+                        && waiting.contains(&decision.decision_id))
+            })
             .filter(|decision| match scope {
                 UserDecisionScope::All => true,
                 UserDecisionScope::Workspace(workspace) => decision.owner.workspace_id == workspace,
@@ -246,6 +278,36 @@ impl UserDecisionStore {
             })
             .collect();
         page::pending_page(decisions, cursor, max_page_bytes)
+    }
+
+    /// Explicit human disposal of a reviewed, undelivered answer. Removing its
+    /// record and outbox together releases capacity without claiming delivery
+    /// to the agent. Keys remain tombstoned so a retry cannot ask again.
+    pub fn discard_answer(
+        &self,
+        workspace: WorkspaceId,
+        id: UserDecisionId,
+    ) -> Result<Result<(), UserDecisionError>> {
+        self.mutate_decision(|state| {
+            let index = state
+                .decisions
+                .iter()
+                .position(|decision| {
+                    decision.decision_id == id
+                        && decision.owner.workspace_id == workspace
+                        && decision.status == UserDecisionStatus::Resolved
+                })
+                .ok_or(UserDecisionError::Terminal)?;
+            if !state.events.iter().any(|event| event.decision_id == id) {
+                return Err(UserDecisionError::Terminal);
+            }
+            let decision = state.decisions.remove(index);
+            state.events.retain(|event| event.decision_id != id);
+            if let Some(key) = decision.idempotency_key {
+                state.expired_idempotency.insert(&decision.owner, &key);
+            }
+            Ok(())
+        })
     }
     /// Marks every due pending decision terminal. Expiry deliberately produces
     /// no delivery event: an answer must never be invented for a timed-out

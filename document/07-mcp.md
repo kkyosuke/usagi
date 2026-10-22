@@ -226,22 +226,26 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 
 ### User decision
 
-clientとdaemonの両方が [IPC revision 3のdecision契約](04-ipc.md#frame-と-handshake) に対応している必要がある。
+clientとdaemonの両方が [IPC revision 4のdecision契約](04-ipc.md#frame-と-handshake) に対応している必要がある。
 旧版が接続している場合はdecision操作をeffect zeroで拒否するため、daemonとMCP/TUI clientを更新・再接続する。
 
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
 caller は同じ credential と `decision_id` で `get` を polling する。`get` は read-only で、応答を失っても回答と
 outbox は残る。`resolved` の回答を受信・保存した後、`user_decision_ack {"decision_id":"..."}` で明示的に受信確認する。
 ACK は owner / exact resume の継承 owner だけに許可し、保持中の同じ回答への重複 ACK は成功する。
-`list` は pending だけを返すため、回答の受信には `get` を使う。TUI の参照は agent の受信 ACK を変更しない。
-`user_decision_list` は認証済み owner 集合（exact resume の継承分を含む）の pending を IPC frame 上限内の
+作成応答を失って `decision_id` が分からない場合も、再 request の前に `list` から質問と未 ACK の回答を回収できる。
+`user_decision_list` は認証済み owner 集合（exact resume の継承分を含む）の pending と未 ACK の resolved を IPC frame 上限内の
 ページに分けて返す。最初は `{}`、応答の `next_cursor` が `null` になるまではその値を `cursor` に渡して次ページを取得する。
-cursor は対象一覧の revision と offset を持ち、対象の pending が変わると `RevisionConflict` を返す。
+cursor は対象一覧の revision と offset を持ち、対象の質問・回答・ACK が変わると `RevisionConflict` を返す。
 対象外の owner の変更では cursor を無効にしない。全ページの取得が成功して初めて完全な一覧として扱い、
 失敗時は途中の結果を破棄して先頭から取り直す。cursor は権限を与えず、workspace / owner / run を引数で選べない。
 TUI 専用の `List`（指定 workspace）/ `ListAll`（全 workspace）も同じページ形式を返す。
-TUI の `Get` / `Resolve` / `Cancel` は optional な `workspace` ID で
+一覧取得は read-only で、完全な resolved の回答を受信・保存してから ACK する。ACK 済み、cancelled、expired は一覧に含めない。
+TUI の `Get` / `Resolve` / `Cancel` / `Discard` は optional な `workspace` ID で
 質問元を指定できる。省略時は接続先 workspace を使う。この指定と全体一覧は agent の MCP scope を拡張しない。
+TUI の参照は agent の受信 ACK を変更しない。依頼元 session が削除されても未 ACK の回答を保持し、
+人間が [保存済み回答の画面](03-tui.md#home-と-target) で明示確認したときだけ `Discard` で回答と outbox を同時に破棄できる。
+これは agent の受信確認ではない。pending や ACK 済みの record は破棄できず、idempotency key は tombstone に残す。
 同じ idempotency key の request は同じ decision に収束する。明示した期限を過ぎてからの同一内容の再送も、
 保持中の元の decision とその回答・終了状態を返す。新規 request の期限は作成時に検証する。これにより人間の応答時間が MCP connection や caller
 credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。

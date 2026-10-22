@@ -167,11 +167,37 @@ impl DaemonDecisionCommandPort {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=decision_port_completion_contract
 impl DecisionCommandPort for DaemonDecisionCommandPort {
+    fn discard(&mut self, workspace: WorkspaceId, decision_id: UserDecisionId) -> BackendEvent {
+        let result = (|| -> Result<(), String> {
+            let mut client = Self::client()?;
+            match client.request(DaemonRequest::UserDecision {
+                action: usagi_core::infrastructure::ipc::TuiUserDecisionAction::Discard,
+                payload: serde_json::json!({"workspace": workspace, "decision_id": decision_id}),
+            }).map_err(daemon_error_reason)? {
+                DaemonReply::Ok(value)
+                    if value.get("discarded") == Some(&serde_json::json!(true))
+                        && value.get("decision_id") == Some(&serde_json::json!(decision_id)) => Ok(()),
+                _ => Err("daemon did not confirm saved answer disposal".to_owned()),
+            }
+        })();
+        match result {
+            Ok(()) => BackendEvent::DecisionDiscarded {
+                workspace,
+                decision_id,
+            },
+            Err(error) => BackendEvent::DecisionError {
+                workspace,
+                decision_id,
+                error: Self::safe_error(error),
+            },
+        }
+    }
+
     fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent {
         let result =
             (|| -> Result<Vec<usagi_core::domain::user_decision::UserDecision>, String> {
                 let mut client = Self::client()?;
-                decisions::pending_snapshot(&mut |request| {
+                decisions::inbox_snapshot(&mut |request| {
                     client.request(request).map_err(daemon_error_reason)
                 })
             })();
@@ -596,6 +622,19 @@ impl ProductionDecisionPort {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BackendDecisionPort for ProductionDecisionPort {
+    fn discard(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        completions: Completions,
+    ) {
+        completions.emit(
+            usagi_tui::usecase::application::controller::AppEvent::Backend(
+                self.daemon.discard(workspace, decision_id),
+            ),
+        );
+    }
+
     fn poll(&mut self, completions: &Completions) {
         if let Some(result) = self.pump.take() {
             self.publish(result, completions);
@@ -2815,7 +2854,7 @@ impl LaneConnection {
 fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>> {
     let mut lane = LaneConnection::observing();
     RefreshPump::spawn(decision_cadence(), move || {
-        decisions::pending_snapshot(&mut |request| lane.request(request))
+        decisions::inbox_snapshot(&mut |request| lane.request(request))
     })
 }
 

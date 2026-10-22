@@ -1001,6 +1001,9 @@ pub(super) fn dispatch_user_decision(
                     }
                     TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
                     TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
+                    // The human receipt lane explicitly discards an answer;
+                    // it never acknowledges delivery on the agent's behalf.
+                    TuiUserDecisionAction::Discard => DispatchToolAction::UserDecisionAck,
                 };
                 Some((action, payload, None, true, list_all))
             }
@@ -1166,8 +1169,13 @@ pub(super) fn dispatch_user_decision(
                 DispatchToolAction::UserDecisionAck => {
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
                         .map_err(|_| UserDecisionError::InvalidRequest)?;
+                    if tui_access {
+                        store.discard_answer(workspace, input.decision_id)
+                            .map_err(|_| UserDecisionError::Terminal)??;
+                        return Ok(serde_json::json!({"decision_id":input.decision_id,"discarded":true}));
+                    }
                     let decision = decision_for(input.decision_id)?;
-                    if owners.is_none() || decision.status != UserDecisionStatus::Resolved {
+                    if decision.status != UserDecisionStatus::Resolved {
                         return Err(UserDecisionError::Terminal.into());
                     }
                     store.ack_event(input.decision_id).map_err(|_| UserDecisionError::Terminal)?;

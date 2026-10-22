@@ -204,9 +204,11 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 収束するため、接続をまたぐ retry に使える。`get` は既読にしない。`resolved` の回答を受信・保存した後、
 `user_decision_ack` に同じ `decision_id` を渡して受信確認する。TUI の回答操作だけでは ACK されない。
 
-保留中の質問を一覧で回収するときは `user_decision_list {}` を呼び、`next_cursor` が `null` になるまで
+保留中の質問と未受信の回答を一覧で回収するときは `user_decision_list {}` を呼び、`next_cursor` が `null` になるまで
 その値を `cursor` に渡して取得する。`RevisionConflict` が返ったら途中の一覧を破棄して先頭から取り直す。
-一覧は現在の agent が所有・exact resume で継承した pending だけを含む。回答の受信は `user_decision_get` を使う。
+一覧は現在の agent が所有・exact resume で継承した pending と未 ACK の resolved を含む。
+作成応答を失って質問IDが不明な場合も、再 request の前にこの一覧を確認する。一覧を読むだけでは ACK しない。
+完全な resolved の回答を受信・保存したら `user_decision_ack` で受信確認する。
 旧版の大きな質問は一覧の `deferred` に入る。その `decision_id` と `cursor: {"revision":"返されたrevision","offset":0}` を
 `get` に渡す。`data` と `next_cursor` を受け取ったら、cursorを順に渡して全dataを連結し、JSONとして解析する。
 途中の内容を回答・ACKに使わない。`get` の通常呼び出しも巨大な旧質問では同じ断片形式を返す。
