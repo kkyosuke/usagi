@@ -24,6 +24,7 @@ fn response(deck: &WorkspaceDeck, query: &str) -> WorkspaceOutputSearch {
     result.search(&screen.checkpoint(), query, &mut SearchBudget::default());
     WorkspaceOutputSearch {
         workspace,
+        session: None,
         query: query.into(),
         terminals: vec![result],
         omitted_terminals: 0,

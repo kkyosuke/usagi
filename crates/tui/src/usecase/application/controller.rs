@@ -1824,7 +1824,7 @@ impl AppState {
         }
     }
 
-    fn file_preview_target(&self) -> Option<Target> {
+    pub(crate) fn file_preview_target(&self) -> Option<Target> {
         let session = match self.route {
             Route::Home(HomeMode::Switch) => match self.selected {
                 Selection::Target(Target::Session(session)) => session,
@@ -2163,6 +2163,8 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// Open an exact artifact selected by the process search picker.
+    OpenArtifact { target: Target, path: String },
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
     /// The runtime's current live-pane availability, sampled on every event.
@@ -2759,9 +2761,11 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // Keep the exhaustive event dispatch in one decision table.
 fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     pull_requests::cancel_inbox_wait(state, &event);
     match event {
+        AppEvent::OpenArtifact { target, path } => open_artifact_path(state, target, path),
         AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
             state.pending_session_click = None;
@@ -5032,6 +5036,29 @@ fn open_artifacts(state: &mut AppState, target: Target, arguments: &str) -> Vec<
         path: None,
         filter,
     }]
+}
+
+fn open_artifact_path(state: &mut AppState, target: Target, path: String) -> Vec<Effect> {
+    let available = match target {
+        Target::Root(workspace) => workspace == state.workspace,
+        Target::Session(session) => {
+            state.sessions.contains(&session)
+                && state
+                    .session_lifecycles
+                    .get(&session)
+                    .is_none_or(|projection| projection.lifecycle.capabilities().can_use)
+        }
+    };
+    if !available {
+        return Vec::new();
+    }
+    let _ = open_artifacts(state, target, "");
+    state
+        .preview_overlay
+        .as_mut()
+        .unwrap()
+        .set_files(vec![path], Vec::new());
+    preview::update_preview_overlay(state, &AppKey::Enter)
 }
 
 fn open_preview(state: &mut AppState) -> Vec<Effect> {

@@ -191,6 +191,8 @@ pub enum LiveTerminalAction {
     OpenCommandPalette,
     /// Search the active workspace Issue and Memory stores.
     OpenKnowledgeSearch,
+    /// Search all sources with switchable scope.
+    OpenUnifiedSearch,
     /// Search retained terminal output across open projects.
     OpenOutputSearch,
     /// Open attention across all open projects (`Ctrl-O i`).
@@ -675,10 +677,10 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     ),
     prefix_shortcut!(KeyCode::Char('v'), legacy = 22 => LiveTerminalAction::OpenPreview),
     with_help(
-        prefix_shortcut!(KeyCode::Char('f'), legacy = 6 => LiveTerminalAction::OpenArtifacts),
-        PrefixHelpScope::WorkspaceBase,
-        "Ctrl-O f",
-        "Artifacts",
+        prefix_shortcut!(KeyCode::Char('f'), legacy = 6 => LiveTerminalAction::OpenUnifiedSearch),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O f / Ctrl-F",
+        "search all sources (Tab changes scope)",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
@@ -1236,15 +1238,15 @@ mod tests {
             },
             Case {
                 follow_up: key(KeyCode::Char('f')),
-                action: LiveTerminalAction::OpenArtifacts,
+                action: LiveTerminalAction::OpenUnifiedSearch,
             },
             Case {
                 follow_up: ctrl('f'),
-                action: LiveTerminalAction::OpenArtifacts,
+                action: LiveTerminalAction::OpenUnifiedSearch,
             },
             Case {
                 follow_up: LiveInput::Raw(vec![6]),
-                action: LiveTerminalAction::OpenArtifacts,
+                action: LiveTerminalAction::OpenUnifiedSearch,
             },
             Case {
                 follow_up: ctrl('d'),
@@ -1490,7 +1492,7 @@ mod tests {
         for (character, expected) in [
             (
                 'f',
-                LiveInputOutput::Action(LiveTerminalAction::OpenArtifacts),
+                LiveInputOutput::Action(LiveTerminalAction::OpenUnifiedSearch),
             ),
             ('u', LiveInputOutput::Swallowed),
         ] {

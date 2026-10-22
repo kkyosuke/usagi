@@ -11745,6 +11745,7 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
             &bound,
             workspace,
             query,
+            None,
             usagi_core::infrastructure::ipc::RequestId("search".into()),
             raw,
             &session_test_hello(),
@@ -11799,6 +11800,7 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
     let result = super::terminal_search::collect(
         workspace,
         "x",
+        None,
         vec![(reference.clone(), SearchTerminalKind::Agent); TERMINALS_MAX + 2],
         |reference, _| {
             reads += 1;
@@ -11825,5 +11827,74 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
     }));
     assert!(
         matches!(call(workspace, "x", &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::Unavailable)
+    );
+}
+
+#[test]
+fn terminal_search_filters_session_before_shared_budgets_and_echoes_scope() {
+    use usagi_core::domain::id::{DaemonGeneration, TerminalId, TerminalRef, WorktreeId};
+    use usagi_core::usecase::terminal_search::{SearchTerminalKind, TERMINALS_MAX};
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let reference = TerminalRef {
+        workspace_id: workspace,
+        session_id: None,
+        daemon_generation: DaemonGeneration::new(),
+        terminal_id: TerminalId::new(),
+        worktree_id: WorktreeId::new(),
+    };
+    let mut targets = vec![(reference.clone(), SearchTerminalKind::Terminal); TERMINALS_MAX + 2];
+    let wanted = TerminalRef {
+        session_id: Some(session),
+        ..reference
+    };
+    targets.push((wanted.clone(), SearchTerminalKind::Agent));
+    let mut inspected = vec![];
+    let result = super::terminal_search::collect(
+        workspace,
+        "needle",
+        Some(session),
+        targets,
+        |reference, _| {
+            inspected.push(reference.clone());
+            Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+                usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                "fixture",
+            ))
+        },
+    );
+    assert_eq!(inspected, vec![wanted.clone()]);
+    assert_eq!(result.session, Some(session));
+    assert_eq!(result.omitted_terminals, 0);
+    assert_eq!(result.terminals[0].terminal, wanted);
+}
+
+#[test]
+fn terminal_search_scope_wire_field_is_optional_and_roundtrips() {
+    use usagi_core::infrastructure::ipc::DaemonRequest;
+    use usagi_core::usecase::terminal_search::WorkspaceOutputSearch;
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    for selected in [None, Some(session)] {
+        let request = DaemonRequest::SearchTerminalOutput {
+            workspace,
+            query: "needle".into(),
+            session: selected,
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(json.clone()).unwrap(),
+            request
+        );
+        if selected.is_none() {
+            assert!(json.get("session").is_none());
+        }
+    }
+    let legacy = serde_json::json!({"workspace": workspace, "query": "needle", "terminals": [], "omitted_terminals": 0});
+    assert_eq!(
+        serde_json::from_value::<WorkspaceOutputSearch>(legacy)
+            .unwrap()
+            .session,
+        None
     );
 }

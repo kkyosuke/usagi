@@ -25,6 +25,7 @@ mod session_commands;
 mod startup;
 mod terminal_io;
 pub mod theme;
+mod unified_search;
 pub mod views;
 pub mod widgets;
 pub mod workspace_deck;
@@ -504,6 +505,13 @@ impl SessionCatalogPort for UnavailableSessionCatalogPort {
 
 /// Single factory used by direct launch and every screen-graph workspace entry.
 pub trait ControllerBackendFactory {
+    /// A dedicated read-only search lane; implementations must not start a daemon.
+    fn unified_search(
+        &self,
+        _root: &Path,
+    ) -> Box<dyn crate::usecase::application::unified_search::UnifiedSearchPort> {
+        Box::new(crate::usecase::application::unified_search::UnavailableUnifiedSearch)
+    }
     /// Dedicated workspace-local reader, moved off the frame thread.
     fn knowledge_search(
         &self,

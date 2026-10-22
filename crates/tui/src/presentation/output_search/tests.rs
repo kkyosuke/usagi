@@ -15,6 +15,7 @@ impl GardenInventoryPort for Port {
         &mut self,
         workspace: WorkspaceId,
         query: &str,
+        _session: Option<usagi_core::domain::id::SessionId>,
     ) -> Result<WorkspaceOutputSearch, String> {
         self.entered.send(workspace).unwrap();
         assert!(
@@ -23,6 +24,7 @@ impl GardenInventoryPort for Port {
         );
         Ok(WorkspaceOutputSearch {
             workspace,
+            session: None,
             query: query.into(),
             terminals: vec![],
             omitted_terminals: 0,

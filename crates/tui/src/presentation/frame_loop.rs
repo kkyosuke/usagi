@@ -734,6 +734,10 @@ pub(super) fn drive_workspace_controller(
     let session_lifecycles = snapshot.session_lifecycles.clone();
     let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
+    let mut unified_port = Some(backend_factory.unified_search(&root_cwd));
+    let (unified_sender, unified_completions) =
+        mpsc::channel::<super::unified_search::Completion>();
+    let mut unified_job: Option<super::unified_search::Job> = None;
     let mut knowledge_port = Some(backend_factory.knowledge_search(&root_cwd));
     let (knowledge_sender, knowledge_completions) =
         mpsc::channel::<super::knowledge_search::Completion>();
@@ -1051,15 +1055,22 @@ pub(super) fn drive_workspace_controller(
                     && (restore_retry.in_flight
                         || (restore_commands.is_some() && restore_retry.next_retry_at.is_some()));
             if !waiting_for_tabs {
-                if let Err(message) = super::terminal_io::visit_palette_target(
+                match super::terminal_io::visit_palette_target(
                     &mut ui,
                     &mut runtime,
                     *workspace,
                     action,
                 ) {
-                    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
-                        Notice::new(message),
-                    )));
+                    Ok(effects) => {
+                        if let Some(step) = dispatch_reducer_effects(&mut backend, effects) {
+                            return Ok(step);
+                        }
+                    }
+                    Err(message) => {
+                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
+                            Notice::new(message),
+                        )));
+                    }
                 }
                 pending_palette_visit = None;
             }
@@ -1080,6 +1091,16 @@ pub(super) fn drive_workspace_controller(
             if selected || ui.agent_inventory().is_some() {
                 pending_garden_agent = None;
             }
+        }
+        if let Some(job) = &unified_job {
+            job.cancel_unless_current(deck.unified_search_token());
+        }
+        for completion in unified_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            if deck.apply_unified_response(completion.token, completion.response) {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            unified_port = Some(completion.port);
+            unified_job = None;
         }
         if let Some(job) = &knowledge_job {
             job.cancel_unless_current(deck.knowledge_search_token());
@@ -1326,11 +1347,14 @@ pub(super) fn drive_workspace_controller(
         // Retain only tab metadata for inactive projects; output stays with the
         // resident runtime. Refresh membership before painting or accepting input.
         let tab_revision = runtime.panes().revision();
-        if sessions_changed || palette_tab_revision != Some(tab_revision) {
+        let unified_changed = if sessions_changed || palette_tab_revision != Some(tab_revision) {
             deck.update_palette_tabs(&runtime);
             palette_tab_revision = Some(tab_revision);
-        }
-        if deck.refresh_command_palette_selection() {
+            deck.refresh_unified_navigation()
+        } else {
+            false
+        };
+        if unified_changed || deck.refresh_command_palette_selection() {
             drawn_material = None;
             frame_source_key = None;
             frame_material_key = None;
@@ -1447,6 +1471,19 @@ pub(super) fn drive_workspace_controller(
             }
             frame_source_key = Some(next_source_key);
             frame_material_key = Some(next_frame_key);
+        }
+        if unified_job.is_none()
+            && unified_port.is_some()
+            && let Some((token, request)) = deck.take_unified_request()
+        {
+            unified_job = Some(super::unified_search::spawn(
+                unified_port
+                    .take()
+                    .expect("search admission checked the port"),
+                token,
+                request,
+                unified_sender.clone(),
+            ));
         }
         if knowledge_job.is_none()
             && knowledge_port.is_some()
@@ -1592,6 +1629,18 @@ pub(super) fn drive_workspace_controller(
             frame_material_key = None;
             continue;
         }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenUnifiedSearch)) {
+            deck.open_unified_search(
+                runtime
+                    .state()
+                    .file_preview_target()
+                    .and_then(Target::session_id),
+            );
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
         if matches!(key, Key::Live(LiveTerminalAction::OpenKnowledgeSearch)) {
             deck.open_knowledge_search();
             drawn_material = None;
@@ -1698,7 +1747,13 @@ pub(super) fn drive_workspace_controller(
                             workspace,
                             &action,
                         ) {
-                            Ok(()) => deck.close_overlay(),
+                            Ok(effects) => {
+                                deck.close_overlay();
+                                if let Some(step) = dispatch_reducer_effects(&mut backend, effects)
+                                {
+                                    return Ok(step);
+                                }
+                            }
                             Err(message) => {
                                 deck.pending_output_hit = None;
                                 deck.set_notice(message);

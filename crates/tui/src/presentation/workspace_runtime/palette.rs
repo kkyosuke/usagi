@@ -80,6 +80,13 @@ impl WorkspaceRuntime {
         }
         match action {
             Action::Workspace | Action::Session(_) => true,
+            Action::Artifact { target, path } => {
+                (matches!(target, Target::Session(_)) || *target == Target::Root(workspace))
+                    && !path.is_empty()
+                    && std::path::Path::new(path)
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+            }
             Action::Command {
                 session: Some(_),
                 name,
@@ -96,10 +103,9 @@ impl WorkspaceRuntime {
         &mut self,
         workspace: WorkspaceId,
         action: &Action,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Vec<crate::usecase::application::controller::Effect>, &'static str> {
         self.validate_palette_action(workspace, action)?;
-        self.focus_palette_action(action);
-        Ok(())
+        Ok(self.focus_palette_action(action))
     }
 
     pub(crate) fn validate_palette_action(
@@ -116,7 +122,10 @@ impl WorkspaceRuntime {
         Ok(())
     }
 
-    fn focus_palette_action(&mut self, action: &Action) {
+    fn focus_palette_action(
+        &mut self,
+        action: &Action,
+    ) -> Vec<crate::usecase::application::controller::Effect> {
         if self.state.overlay().is_some() {
             let _ = self.apply_event(AppEvent::Key(AppKey::Escape));
         }
@@ -134,6 +143,12 @@ impl WorkspaceRuntime {
                 let _ = self.apply_event(AppEvent::Key(AppKey::CtrlO));
             }
             Action::Session(_) => {}
+            Action::Artifact { target, path } => {
+                return self.apply_event(AppEvent::OpenArtifact {
+                    target: *target,
+                    path: path.clone(),
+                });
+            }
             Action::Tab {
                 target,
                 selection,
@@ -173,6 +188,7 @@ impl WorkspaceRuntime {
                 }
             }
         }
+        Vec::new()
     }
 }
 

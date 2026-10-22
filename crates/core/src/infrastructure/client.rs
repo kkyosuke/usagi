@@ -2534,6 +2534,7 @@ mod deadline_and_retry_tests {
             DaemonRequest::SearchTerminalOutput {
                 workspace: WorkspaceId::new(),
                 query: "error".into(),
+                session: None,
             },
             DaemonRequest::Session {
                 action: SessionAction::List,

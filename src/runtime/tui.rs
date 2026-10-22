@@ -1169,6 +1169,15 @@ fn project_backend_session_roots(snapshot: &WorkspaceSnapshot) -> Vec<(SessionId
 }
 
 impl ControllerBackendFactory for ProductionBackendFactory {
+    fn unified_search(
+        &self,
+        root: &Path,
+    ) -> Box<dyn usagi_tui::usecase::application::unified_search::UnifiedSearchPort> {
+        Box::new(super::unified_search::UnifiedSearch::new(
+            root,
+            Box::new(DaemonGardenInventoryPort),
+        ))
+    }
     fn knowledge_search(
         &self,
         root: &Path,
@@ -2092,6 +2101,7 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
         &mut self,
         workspace: WorkspaceId,
         query: &str,
+        session: Option<SessionId>,
     ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
         let mut client = crate::runtime::daemon::existing_policy_client(
             usagi_core::infrastructure::client::ClientPolicy {
@@ -2107,6 +2117,7 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
                 usagi_core::infrastructure::ipc::DaemonRequest::SearchTerminalOutput {
                     workspace,
                     query: query.to_owned(),
+                    session,
                 },
             )
             .map_err(|_| "Terminal output search is unavailable".to_owned())?;
@@ -5005,6 +5016,27 @@ mod tests {
             port.search("", std::sync::Arc::default())
                 .documents
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn unified_search_factory_uses_the_current_workspace_without_connecting_for_empty_query() {
+        use usagi_tui::usecase::application::unified_search::{Project, Query, Scope};
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = ProductionBackendFactory::default();
+        let mut port = factory.unified_search(tmp.path());
+        let query = Query {
+            text: String::new(),
+            scope: Scope::Artifact,
+            projects: vec![Project {
+                workspace: WorkspaceId::new(),
+                root: tmp.path().into(),
+            }],
+            current: None,
+        };
+        let result = port.search(&query, Arc::default());
+        assert!(
+            result.artifacts.is_empty() && result.outputs.is_empty() && result.errors.is_empty()
         );
     }
 

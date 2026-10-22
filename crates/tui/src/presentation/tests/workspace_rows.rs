@@ -2825,6 +2825,7 @@ fn output_search_reveals_only_the_exact_terminal_snapshot_and_consumes_the_hit()
             workspace,
             Ok(WorkspaceOutputSearch {
                 workspace,
+                session: None,
                 query: "two".into(),
                 terminals: vec![source],
                 omitted_terminals: 0,
@@ -2960,6 +2961,7 @@ impl crate::usecase::application::runtime_ports::GardenInventoryPort for OutputS
         &mut self,
         workspace: WorkspaceId,
         query: &str,
+        _session: Option<usagi_core::domain::id::SessionId>,
     ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
         use usagi_core::usecase::terminal_search::{
             SearchBudget, SearchTerminalKind, TerminalSearchResult, WorkspaceOutputSearch,
@@ -2974,6 +2976,7 @@ impl crate::usecase::application::runtime_ports::GardenInventoryPort for OutputS
         source.search(&screen.checkpoint(), query, &mut SearchBudget::default());
         Ok(WorkspaceOutputSearch {
             workspace,
+            session: None,
             query: query.into(),
             terminals: vec![source],
             omitted_terminals: 0,
@@ -3034,4 +3037,244 @@ fn output_search_frame_applies_async_results_and_refuses_a_disappeared_target() 
             .any(|frame| frame.join("\n").contains("no longer available"))
     );
     assert!(deck.pending_output_hit.is_none());
+}
+
+mod unified_cancellation {
+    use super::*;
+    use crate::usecase::application::unified_search::{Query, Results, UnifiedSearchPort};
+    use std::sync::{atomic::AtomicBool, mpsc};
+    use std::time::{Duration, Instant};
+    struct Port(mpsc::Sender<String>);
+    impl UnifiedSearchPort for Port {
+        fn search(&mut self, query: &Query, cancelled: Arc<AtomicBool>) -> Results {
+            self.0.send(format!("started:{}", query.text)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                cancelled.load(Ordering::Acquire),
+                "frame did not cancel stale search"
+            );
+            self.0.send(format!("cancelled:{}", query.text)).unwrap();
+            Results {
+                errors: vec!["stale search result".into()],
+                ..Results::default()
+            }
+        }
+        fn read(&mut self, _: &str) -> Result<Vec<String>, String> {
+            unreachable!("no document is selected")
+        }
+    }
+    struct Factory(CountingBackendFactory, mpsc::Sender<String>);
+    impl ControllerBackendFactory for Factory {
+        fn create(
+            &mut self,
+            snapshot: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> ControllerBackendComposition {
+            self.0.create(snapshot, host)
+        }
+        fn unified_search(&self, _: &std::path::Path) -> Box<dyn UnifiedSearchPort> {
+            Box::new(Port(self.1.clone()))
+        }
+    }
+    struct SearchTerminal {
+        inner: FakeTerminal,
+        events: mpsc::Receiver<String>,
+        expected: std::collections::VecDeque<&'static str>,
+        deadline: Instant,
+    }
+    impl Terminal for SearchTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            self.inner.size()
+        }
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.inner.draw(frame)
+        }
+        fn wait(&mut self, duration: Duration) -> io::Result<()> {
+            self.inner.wait(duration)
+        }
+        fn read_key(&mut self) -> io::Result<Key> {
+            if self.inner.keys.front() == Some(&Key::Other) {
+                if let Ok(event) = self.events.try_recv() {
+                    assert_eq!(event, self.expected.pop_front().unwrap());
+                    self.inner.keys.pop_front();
+                } else {
+                    assert!(
+                        Instant::now() < self.deadline,
+                        "search lifecycle event did not arrive"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                    return Ok(Key::Other);
+                }
+                return Ok(Key::Other);
+            }
+            self.inner.read_key()
+        }
+    }
+    #[test]
+    fn unified_search_frame_cancels_query_changes_overlay_switches_and_close() {
+        let snapshot = snapshot("knowledge-search-cancel");
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        let (sender, receiver) = mpsc::channel();
+        let mut factory = Factory(CountingBackendFactory::new(), sender);
+        let mut inner = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+            Key::Other,
+            Key::Paste("new".into()),
+            Key::Other,
+            Key::Other,
+            Key::Live(LiveTerminalAction::OpenOutputSearch),
+            Key::Other,
+            Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+            Key::Other,
+            Key::Escape,
+            Key::Other,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        inner.size = Some((28, 120));
+        let mut term = SearchTerminal {
+            inner,
+            events: receiver,
+            expected: [
+                "started:",
+                "cancelled:",
+                "started:new",
+                "cancelled:new",
+                "started:",
+                "cancelled:",
+            ]
+            .into(),
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        let step = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(step, WorkspaceStep::Quit));
+        assert!(term.expected.is_empty());
+        assert!(
+            term.inner
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Search terminal output"))
+        );
+        assert!(
+            !term
+                .inner
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("stale search result"))
+        );
+    }
+}
+
+#[test]
+fn unified_search_frame_owns_queries_and_refresh_preserves_query_and_filter() {
+    let snapshot = snapshot("knowledge-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        Key::Paste("search body".into()),
+        Key::Passthrough(vec![3]),
+        Key::Enter,
+        Key::Tab,
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    let refreshed = term
+        .frames
+        .iter()
+        .rev()
+        .map(|frame| frame.join("\n"))
+        .find(|frame| frame.contains("Search"))
+        .expect("search was drawn after refresh");
+    assert!(refreshed.contains("search body"), "{refreshed}");
+    assert!(refreshed.contains("[Terminal]"), "{refreshed}");
+}
+
+#[test]
+fn unified_search_owns_text_paste_and_control_input_over_a_live_terminal() {
+    let snapshot = snapshot("palette-terminal");
+    let calls = Arc::new(Mutex::new(StreamCalls::default()));
+    let terminal = live_terminal_ref(snapshot.workspace_id, snapshot.session_ids[0]);
+    let mut factory = PaletteStreamFactory {
+        inner: CountingBackendFactory::new(),
+        terminal,
+        calls: Arc::clone(&calls),
+    };
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        // The ordinal excludes fuzzy command matches before the tab is observed.
+        Key::Paste("Tab Terminal 1".into()),
+        Key::Other,
+        Key::Enter,
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        Key::Char('s'),
+        Key::Paste("private query".into()),
+        Key::Passthrough(vec![4]),
+        Key::Enter,
+        Key::Escape,
+        Key::Char('x'),
+        Key::Live(LiveTerminalAction::Switch),
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        wait_for: "Tab · Terminal",
+        inner,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    let calls = calls.lock().unwrap();
+    assert!(calls.attaches > 0);
+    assert_eq!(calls.inputs, vec![b"x".to_vec()]);
+    assert_eq!(calls.launches, 0);
 }

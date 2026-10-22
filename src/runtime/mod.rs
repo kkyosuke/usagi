@@ -22,4 +22,5 @@ pub(crate) mod refresh_pump;
 pub(crate) mod systemd;
 pub(crate) mod terminal_pump;
 pub(crate) mod tui;
+mod unified_search;
 pub(crate) mod user_env;

@@ -1,6 +1,6 @@
 //! Human search borrows existing terminal owners, without attach/resize/input.
 use super::{ConnectionWorkspace, SharedAgentRuntime, SharedTerminalRuntime, envelope};
-use usagi_core::domain::id::WorkspaceId;
+use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::infrastructure::ipc::{
     Envelope, ErrorCode, ProtocolError, RequestId, ResponseOutcome, ServerHello,
 };
@@ -16,6 +16,7 @@ pub(super) fn dispatch(
     bound: &ConnectionWorkspace,
     workspace: WorkspaceId,
     query: &str,
+    session: Option<SessionId>,
     request_id: RequestId,
     raw: &serde_json::Value,
     hello: &ServerHello,
@@ -36,7 +37,7 @@ pub(super) fn dispatch(
             "Workspace is not adopted",
         ))
     } else {
-        search(agent, terminal, workspace, query)
+        search(agent, terminal, workspace, query, session)
             .and_then(|result| serde_json::to_value(result).map_err(unavailable))
     };
     match result {
@@ -62,6 +63,7 @@ fn search(
     terminal: &SharedTerminalRuntime,
     workspace: WorkspaceId,
     query: &str,
+    session: Option<SessionId>,
 ) -> Result<WorkspaceOutputSearch, ProtocolError> {
     let mut targets = tagged(
         agent.lock().map_err(unavailable)?.search_targets(workspace),
@@ -74,9 +76,13 @@ fn search(
             .search_targets(workspace),
         SearchTerminalKind::Terminal,
     ));
-    Ok(collect(workspace, query, targets, |reference, kind| {
-        inspect(agent, terminal, reference, kind)
-    }))
+    Ok(collect(
+        workspace,
+        query,
+        session,
+        targets,
+        |reference, kind| inspect(agent, terminal, reference, kind),
+    ))
 }
 
 fn tagged(
@@ -108,12 +114,14 @@ pub(super) fn inspect(
 pub(super) fn collect(
     workspace: WorkspaceId,
     query: &str,
-    targets: Vec<(usagi_core::domain::id::TerminalRef, SearchTerminalKind)>,
+    session: Option<SessionId>,
+    mut targets: Vec<(usagi_core::domain::id::TerminalRef, SearchTerminalKind)>,
     mut snapshot: impl FnMut(
         &usagi_core::domain::id::TerminalRef,
         SearchTerminalKind,
     ) -> Result<usagi_daemon::usecase::terminal::Snapshot, ProtocolError>,
 ) -> WorkspaceOutputSearch {
+    targets.retain(|(reference, _)| session.is_none_or(|id| reference.session_id == Some(id)));
     let omitted_terminals = targets.len().saturating_sub(TERMINALS_MAX);
     let mut budget = SearchBudget::default();
     let mut terminals = Vec::new();
@@ -134,6 +142,7 @@ pub(super) fn collect(
     }
     WorkspaceOutputSearch {
         workspace,
+        session,
         query: query.to_owned(),
         terminals,
         omitted_terminals,
