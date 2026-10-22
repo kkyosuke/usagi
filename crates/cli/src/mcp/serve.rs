@@ -1207,7 +1207,8 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 50);
+        assert!(tools.iter().any(|tool| tool["name"] == "user_decision_ack"));
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -1253,7 +1254,8 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 38);
+        assert_eq!(names.len(), 39);
+        assert!(names.contains(&"user_decision_ack"));
         assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
         assert!(!names.contains(&"session_delegate_issue"));
