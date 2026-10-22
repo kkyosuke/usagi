@@ -244,7 +244,7 @@ impl Tool for UserDecisionList {
         "user_decision_list"
     }
     fn description(&self) -> &'static str {
-        "現在の agent が所有・exact resume で継承した pending decision をページで返す。next_cursor が null になるまで cursor に渡して取得し、RevisionConflict 時は先頭から取り直す。deferred の旧質問は decision_id と revision / offset:0 を user_decision_get に渡し全断片を取得する。回答の受信は user_decision_get を使う"
+        "現在の agent が所有・exact resume で継承した pending と未 ACK の resolved をページで返す。作成応答を失い ID が不明でも再 request の前にここから回収する。next_cursor が null になるまで cursor に渡し、RevisionConflict 時は先頭から取り直す。deferred は decision_id と revision / offset:0 を user_decision_get に渡して全断片を取得する。完全な resolved の回答を受信・保存してから user_decision_ack を呼ぶ"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"cursor":{"type":"object","properties":{"revision":{"type":"string","minLength":1,"maxLength":64},"offset":{"type":"integer","minimum":1}},"required":["revision","offset"],"additionalProperties":false}},"additionalProperties":false}"#

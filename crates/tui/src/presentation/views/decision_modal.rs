@@ -100,7 +100,9 @@ fn editor_rows(
 ) -> Vec<String> {
     let viewport = editor_viewport(editor, inner_width, capacity);
     let mut body = modal::scroll_window(&viewport.rows, viewport.start, viewport.end);
-    if let Some(answer) = editor.confirmation() {
+    if editor.decision().status == usagi_core::domain::user_decision::UserDecisionStatus::Resolved {
+        body.extend(controls::saved_footer(editor, inner_width));
+    } else if let Some(answer) = editor.confirmation() {
         body.extend(controls::review_footer(answer, inner_width));
     } else {
         body.extend(controls::editor_footer(editor, inner_width));
@@ -113,6 +115,9 @@ fn editor_viewport(
     inner_width: usize,
     capacity: usize,
 ) -> EditorViewport {
+    if let Some(answer) = &editor.decision().answer {
+        return composition::confirmation_viewport(editor, answer, inner_width, capacity);
+    }
     if let Some(answer) = editor.confirmation() {
         return composition::confirmation_viewport(editor, answer, inner_width, capacity);
     }
@@ -238,7 +243,11 @@ fn list_body(
             modal::footer("Esc: close"),
         ];
     }
-    let mut rows = vec![modal::caption("Pending decisions across workspaces")];
+    let mut rows = vec![modal::caption(if overlay.show_answers() {
+        "Saved answers awaiting agent receipt"
+    } else {
+        "Pending decisions across workspaces"
+    })];
     if decisions.is_empty() {
         rows.push(modal::empty_notice("(none)"));
     }
@@ -266,7 +275,20 @@ fn list_body(
     let (start, end) = layout::focus_window(rows.len(), focus, anchor, capacity);
     let mut body = modal::scroll_window(&rows, start, end);
     body.push(modal::content_line(
-        &format!("{} pending", decisions.len()),
+        &format!(
+            "{} {} · Tab: {}",
+            decisions.len(),
+            if overlay.show_answers() {
+                "saved answers"
+            } else {
+                "pending"
+            },
+            if overlay.show_answers() {
+                "pending questions"
+            } else {
+                "saved answers"
+            }
+        ),
         inner_width,
     ));
     body.push(modal::content_line(
@@ -348,7 +370,12 @@ pub fn render_over(
         )
     } else {
         (
-            "Questions awaiting reply".to_owned(),
+            if overlay.show_answers() {
+                "Answers awaiting receipt"
+            } else {
+                "Questions awaiting reply"
+            }
+            .to_owned(),
             list_body(overlay, decisions, owners, inner_width, capacity),
         )
     };
@@ -372,6 +399,83 @@ mod tests {
         inner_width: usize,
     ) -> Vec<String> {
         editor_rows(editor, inner_width, CONTENT_CAPACITY)
+    }
+
+    #[test]
+    fn decision_saved_answer_and_discard_confirmation_remain_readable() {
+        use usagi_core::domain::user_decision::UserDecisionAnswer;
+        for answer in [
+            UserDecisionAnswer::Option {
+                option_id: "safe".into(),
+                comment: Some("Only staging".into()),
+            },
+            UserDecisionAnswer::Options {
+                option_ids: vec!["safe".into()],
+                comment: None,
+            },
+            UserDecisionAnswer::Freeform {
+                text: format!("{}ANSWER_END", "details\n".repeat(40)),
+            },
+        ] {
+            let workspace = WorkspaceId::new();
+            let mut saved = decision(workspace, None);
+            saved.status = UserDecisionStatus::Resolved;
+            saved.answer = Some(answer);
+            let mut state = AppState::home(workspace, vec![]);
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions: vec![saved.clone()],
+                }),
+            );
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+            for (height, width) in [(24, 80), (14, 36)] {
+                let frame = render_over(
+                    height,
+                    width,
+                    &vec![String::new(); height],
+                    state.decision_overlay().unwrap(),
+                    state.decision_answers(),
+                    &OwnerNames::default(),
+                )
+                .join("\n");
+                assert!(frame.contains("Choose"), "{frame}");
+            }
+            let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+            for width in [32, 70] {
+                let editor = state.decision_overlay().unwrap().editor().unwrap();
+                let body = editor_body(editor, width).join("\n");
+                assert!(body.contains("Saved answer"));
+                assert!(body.contains("d: discard"));
+                assert!(!body.contains("Enter: send"));
+            }
+            let mut seen = String::new();
+            for _ in 0..10 {
+                let editor = state.decision_overlay().unwrap().editor().unwrap();
+                seen.push_str(&editor_body(editor, 70).join("\n"));
+                let _ = update(&mut state, AppEvent::Key(AppKey::PageDown));
+            }
+            match saved.answer.unwrap() {
+                UserDecisionAnswer::Freeform { .. } => assert!(seen.contains("ANSWER_END")),
+                UserDecisionAnswer::Option { .. } => assert!(seen.contains("Only staging")),
+                UserDecisionAnswer::Options { .. } => assert!(seen.contains("Safe [safe]")),
+            }
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char('d')));
+            let body =
+                editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
+            assert!(body.contains("Discard saved answer?"));
+            assert!(body.contains("Discarding removes this saved answer"));
+            assert!(body.contains("receive it."));
+            assert!(body.contains("Enter: discard"));
+            assert!(body.contains("Esc: keep"));
+            let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+            assert!(
+                !editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70)
+                    .join("\n")
+                    .contains("Discard saved answer?")
+            );
+        }
     }
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, update as reduce,

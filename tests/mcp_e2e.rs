@@ -1992,12 +1992,17 @@ fn production_cross_workspace_user_decision_requires_explicit_owner_ack() {
         payload:json!({"workspace":decision.owner.workspace_id,"decision_id":decision.decision_id}),
     }).unwrap();
     assert!(matches!(inspected, DaemonReply::Ok(ref body) if body["answer"] == answer));
-    let pending = tool_text(&mcp.tool("user_decision_list", &json!({})));
-    assert_eq!(pending["decisions"], json!([]));
+    let recovered = tool_text(&mcp.tool("user_decision_list", &json!({})));
+    assert_eq!(recovered["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        recovered["decisions"][0]["decision_id"],
+        json!(decision.decision_id)
+    );
+    assert_eq!(recovered["decisions"][0]["answer"], answer);
     assert_eq!(
         store.events().unwrap().len(),
         1,
-        "TUI reads and pending lists cannot ACK the agent's answer"
+        "TUI reads and inbox lists cannot ACK the agent's answer"
     );
     let received = tool_text(&mcp.tool(
         "user_decision_get",
@@ -2024,7 +2029,116 @@ fn production_cross_workspace_user_decision_requires_explicit_owner_ack() {
         &json!({"decision_id":decision.decision_id}),
     ));
     assert_eq!(received, replayed);
+    assert_eq!(
+        tool_text(&mcp.tool("user_decision_list", &json!({})))["decisions"],
+        json!([])
+    );
+    assert_human_decision_discard(&mut mcp, &mut tui, &store, &decision);
     assert_large_decision_inventory_pages(&mut tui, &store, &decision, &foreign);
+}
+
+fn assert_human_decision_discard(
+    mcp: &mut McpHarness,
+    tui: &mut dyn DaemonClient,
+    store: &UserDecisionStore,
+    original: &UserDecision,
+) {
+    let mut saved = original.clone();
+    saved.decision_id = UserDecisionId::new();
+    saved.idempotency_key = Some("discard-answer".into());
+    store.create(saved.clone()).unwrap().unwrap();
+    let payload = json!({"workspace": saved.owner.workspace_id, "decision_id": saved.decision_id});
+    let before = fs::read(store.path()).unwrap();
+    assert!(
+        tui.request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Discard,
+            payload: payload.clone(),
+        })
+        .is_err()
+    );
+    assert_eq!(
+        fs::read(store.path()).unwrap(),
+        before,
+        "pending is never discarded"
+    );
+    store
+        .resolve(
+            saved.owner.workspace_id,
+            saved.decision_id,
+            usagi_core::domain::user_decision::UserDecisionAnswer::Option {
+                option_id: "yes".into(),
+                comment: Some("Saved for review".into()),
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+    let DaemonReply::Ok(inbox) = tui
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::ListAll,
+            payload: json!({}),
+        })
+        .unwrap()
+    else {
+        panic!("inbox");
+    };
+    assert!(
+        inbox["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["decision_id"] == json!(saved.decision_id) && d["status"] == "resolved")
+    );
+    assert_eq!(store.events().unwrap().len(), 1);
+    let before = fs::read(store.path()).unwrap();
+    for invalid in [
+        json!({}),
+        json!({"decision_id":"bad"}),
+        json!({"workspace":"bad","decision_id":saved.decision_id}),
+        json!({"workspace":WorkspaceId::new(),"decision_id":saved.decision_id}),
+    ] {
+        assert!(
+            tui.request(DaemonRequest::UserDecision {
+                action: TuiUserDecisionAction::Discard,
+                payload: invalid
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), before);
+    }
+    let denied = mcp.tool("user_decision_discard", &payload);
+    assert!(denied.get("error").is_some(), "disposal is human-only");
+    let DaemonReply::Ok(discarded) = tui
+        .request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Discard,
+            payload: payload.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("discard");
+    };
+    assert_eq!(
+        discarded,
+        json!({"decision_id":saved.decision_id,"discarded":true})
+    );
+    assert!(store.events().unwrap().is_empty());
+    assert!(
+        store
+            .get(saved.owner.workspace_id, saved.decision_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tui.request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Discard,
+            payload
+        })
+        .is_err()
+    );
+    assert_eq!(
+        store.create(saved).unwrap(),
+        Err(usagi_core::domain::user_decision::UserDecisionError::IdempotencyExpired)
+    );
 }
 
 fn assert_large_decision_inventory_pages(
@@ -2217,7 +2331,21 @@ fn decision_restart_round_trip(legacy: bool) {
         json!(pending)
     );
     let listed = tool_text(decision_restart_reply(&resumed, 3));
-    assert_eq!(listed["decisions"], json!([pending]));
+    assert_eq!(listed["decisions"].as_array().unwrap().len(), 2);
+    assert!(
+        listed["decisions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(pending))
+    );
+    assert!(
+        listed["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["decision_id"] == json!(answered.decision_id)
+                && item["answer"] == answer)
+    );
     assert_eq!(
         tool_text(decision_restart_reply(&resumed, 4)),
         json!(pending)

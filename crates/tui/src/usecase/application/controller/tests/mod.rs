@@ -5,6 +5,7 @@ fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
 }
 
 mod closeup;
+mod decision_inbox;
 mod director;
 mod garden;
 mod new;
@@ -2273,6 +2274,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     let decision = pending_decision(workspace);
     state.decisions = vec![decision.clone()];
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: false,
         selected: 0,
         editor: Some(DecisionEditor::new(decision)),
         requested: None,
@@ -2301,6 +2303,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     state.decisions = vec![decision];
     state.overlay = Some(Overlay::Decisions);
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: false,
         selected: 0,
         editor: None,
         requested: None,
@@ -2366,6 +2369,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     decision.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
     state.decisions = vec![decision.clone()];
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: false,
         selected: 0,
         editor: Some(DecisionEditor::new(decision)),
         requested: None,
@@ -2381,6 +2385,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     let second = pending_decision(workspace);
     state.decisions = vec![first.clone(), second.clone()];
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: false,
         selected: 1,
         editor: Some(DecisionEditor::new(second.clone())),
         requested: None,
@@ -2490,6 +2495,7 @@ fn coverage_contract_executes_guarded_reducer_success_paths() {
     let decision = pending_decision(workspace);
     state.decisions = vec![decision.clone()];
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: false,
         selected: 0,
         editor: Some(DecisionEditor::new(decision.clone())),
         requested: None,

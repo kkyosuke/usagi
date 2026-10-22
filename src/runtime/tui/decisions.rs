@@ -7,8 +7,8 @@ use usagi_core::infrastructure::ipc::{
     DaemonReply, DaemonRequest, TuiUserDecisionAction, UserDecisionCursor, UserDecisionPage,
 };
 
-// The durable store permits at most 256 pending decisions. Every continuation
-// must advance by at least one, so this also bounds a faulty peer's work.
+// Bound work for faulty peers. The byte-bounded durable inbox (including its
+// legacy recovery reserve) fits comfortably within 256 normal wire pages.
 const MAX_PAGES: usize = 256;
 use usagi_core::infrastructure::store::user_decision::wire::{
     DecisionChunk, DecisionReference, MAX_RECOVERY_RECORD_BYTES, revision,
@@ -57,7 +57,7 @@ fn read_deferred(
     Err("daemon exceeded the decision fragment limit".to_owned())
 }
 
-pub(super) fn pending_snapshot(
+pub(super) fn inbox_snapshot(
     request: &mut dyn FnMut(DaemonRequest) -> Result<DaemonReply, String>,
 ) -> Result<Vec<UserDecision>, String> {
     let mut cursor: Option<UserDecisionCursor> = None;
@@ -154,7 +154,7 @@ mod tests {
         ]
         .into_iter();
         let mut requests = Vec::new();
-        let actual = pending_snapshot(&mut |request| {
+        let actual = inbox_snapshot(&mut |request| {
             requests.push(request);
             Ok(replies.next().unwrap())
         })
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn empty_inventory_is_a_complete_snapshot() {
         assert!(
-            pending_snapshot(&mut |_| Ok(page(Vec::new(), None)))
+            inbox_snapshot(&mut |_| Ok(page(Vec::new(), None)))
                 .unwrap()
                 .is_empty()
         );
@@ -203,14 +203,14 @@ mod tests {
         for failure in failures {
             let mut replies =
                 [Ok(page(vec![first.clone()], Some(cursor("a", 1)))), failure].into_iter();
-            assert!(pending_snapshot(&mut |_| replies.next().unwrap()).is_err());
+            assert!(inbox_snapshot(&mut |_| replies.next().unwrap()).is_err());
         }
     }
 
     #[test]
     fn bounds_a_peer_that_never_finishes_the_inventory() {
         let mut calls = 0;
-        let result = pending_snapshot(&mut |_| {
+        let result = inbox_snapshot(&mut |_| {
             calls += 1;
             Ok(page(vec![decision()], Some(cursor("a", calls))))
         });
@@ -219,36 +219,46 @@ mod tests {
     }
     #[test]
     fn deferred_inventory_restores_full_records_before_publishing() {
-        let expected = decision();
-        let reference =
-            usagi_core::infrastructure::store::user_decision::wire::reference(&expected);
-        let mut reads = 0;
-        let actual = pending_snapshot(&mut |request| {
-            let request = json!(request);
-            assert_eq!(request["kind"], "user_decision");
-            if request["action"] == "list_all" {
-                return Ok(DaemonReply::Ok(
-                    json!({"decisions": [], "deferred": [reference], "next_cursor":null}),
-                ));
+        for resolved in [false, true] {
+            let mut expected = decision();
+            if resolved {
+                expected.status = usagi_core::domain::user_decision::UserDecisionStatus::Resolved;
+                expected.answer = Some(
+                    usagi_core::domain::user_decision::UserDecisionAnswer::Freeform {
+                        text: "Received answer".into(),
+                    },
+                );
             }
-            reads += 1;
-            assert_eq!(request["action"], "get");
-            let payload = &request["payload"];
-            assert_eq!(payload["workspace"], json!(expected.owner.workspace_id));
-            let cursor: UserDecisionCursor =
-                serde_json::from_value(payload["cursor"].clone()).unwrap();
-            Ok(DaemonReply::Ok(
-                usagi_core::infrastructure::store::user_decision::wire::response(
-                    &expected,
-                    Some(&cursor),
-                    2400,
-                )
-                .unwrap(),
-            ))
-        })
-        .unwrap();
-        assert_eq!(actual, vec![expected]);
-        assert!(reads > 1);
+            let reference =
+                usagi_core::infrastructure::store::user_decision::wire::reference(&expected);
+            let mut reads = 0;
+            let actual = inbox_snapshot(&mut |request| {
+                let request = json!(request);
+                assert_eq!(request["kind"], "user_decision");
+                if request["action"] == "list_all" {
+                    return Ok(DaemonReply::Ok(
+                        json!({"decisions": [], "deferred": [reference], "next_cursor":null}),
+                    ));
+                }
+                reads += 1;
+                assert_eq!(request["action"], "get");
+                let payload = &request["payload"];
+                assert_eq!(payload["workspace"], json!(expected.owner.workspace_id));
+                let cursor: UserDecisionCursor =
+                    serde_json::from_value(payload["cursor"].clone()).unwrap();
+                Ok(DaemonReply::Ok(
+                    usagi_core::infrastructure::store::user_decision::wire::response(
+                        &expected,
+                        Some(&cursor),
+                        2400,
+                    )
+                    .unwrap(),
+                ))
+            })
+            .unwrap();
+            assert_eq!(actual, vec![expected]);
+            assert!(reads > 1);
+        }
     }
 
     #[test]

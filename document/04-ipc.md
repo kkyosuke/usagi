@@ -123,10 +123,11 @@ capability を持たない旧 daemon は build tuple へ fallback せず handsha
 hello の optional な `surface` は Agent 起動の診断記録に使う。意味と記録の追い方は
 [Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
 
-generation 1 revision 3 は user decision の明示ACKと分割取得に対応する。decision要求だけは交渉結果が
-revision 3以上で、daemonが `user-decision.delivery.v1` を広告していることをclient・daemon双方で必須にする。
+generation 1 revision 4 は user decision の明示ACK・分割取得に加え、未受信回答の一覧回収と人間の明示破棄に対応する。
+decision要求だけは交渉結果がrevision 4以上で、daemonが `user-decision.delivery.v1` を広告していることをclient・daemon双方で必須にする。
 新clientは旧daemonへ暗黙ACKを行う `get` を送信せず、新daemonは旧clientへ `deferred` を含む不完全な一覧を
 成功として返さない。不一致はeffect zeroの `CapabilityMissing` とし、daemonとclientの更新・再接続を案内する。
+revision 3のpendingのみの一覧も、新しい回答回収契約としては受け付けない。
 他の要求は引き続き旧revisionで利用でき、terminal checkpointはrevision 2の契約を保つ。
 具体的な質問・回答・ACKの形は [7. MCPのuser decision](07-mcp.md#user-decision) を正本とする。
 

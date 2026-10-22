@@ -710,6 +710,7 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
     assert_eq!(editor.freeform(), "");
     assert!(editor.error().is_none());
     let overlay = DecisionOverlayState {
+        show_answers: false,
         selected: 0,
         editor: Some(editor),
         requested: None,

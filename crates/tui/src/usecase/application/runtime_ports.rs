@@ -33,7 +33,7 @@ pub trait ExternalTerminalPort: Send {
 
 /// Daemon-authoritative durable decision boundary.
 pub trait DecisionCommandPort: Send {
-    /// Fetches the daemon-wide pending snapshot for the observing workspace composition.
+    /// Fetches pending questions and answers awaiting agent receipt.
     fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent;
 
     /// Submits one already validated answer.
@@ -43,6 +43,9 @@ pub trait DecisionCommandPort: Send {
         decision_id: UserDecisionId,
         answer: UserDecisionAnswer,
     ) -> BackendEvent;
+
+    /// Discards a saved answer after explicit human confirmation.
+    fn discard(&mut self, workspace: WorkspaceId, decision_id: UserDecisionId) -> BackendEvent;
 }
 
 /// Durable per-target environment boundary.

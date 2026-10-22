@@ -8,13 +8,14 @@ mod composition;
 
 use super::{
     AppKey, AppState, DecisionEditor, DecisionOverlayState, DecisionSnapshot, Effect, Overlay,
-    SafeError, SafeMessage, UserDecision, UserDecisionAnswer, UserDecisionId,
+    SafeError, SafeMessage, SavedAnswerMode, UserDecision, UserDecisionAnswer, UserDecisionId,
     UserDecisionSelectionMode, UserDecisionStatus, WorkspaceId, reconcile_decision_overlay,
 };
 use std::collections::BTreeSet;
 
 pub(super) fn restore(state: &mut AppState, snapshot: DecisionSnapshot) -> Vec<Effect> {
     state.decisions = snapshot.decisions;
+    state.decision_answers = snapshot.answers;
     state.unread_decisions = snapshot.unread;
     Vec::new()
 }
@@ -53,13 +54,23 @@ fn open_requested(state: &mut AppState) -> bool {
             .decision_overlay
             .as_mut()
             .expect("requested decision overlay");
-        if let Some(index) = state
+        if let Some(decision) = state
             .decisions
             .iter()
-            .position(|decision| decision.decision_id == decision_id)
+            .chain(&state.decision_answers)
+            .find(|decision| decision.decision_id == decision_id)
         {
-            overlay.selected = index;
-            overlay.editor = Some(DecisionEditor::new(state.decisions[index].clone()));
+            overlay.show_answers = decision.status == UserDecisionStatus::Resolved;
+            let rows = if overlay.show_answers {
+                &state.decision_answers
+            } else {
+                &state.decisions
+            };
+            overlay.selected = rows
+                .iter()
+                .position(|row| row.decision_id == decision_id)
+                .unwrap_or(0);
+            overlay.editor = Some(DecisionEditor::new(decision.clone()));
             overlay.error = None;
             state.unread_decisions.remove(&decision_id);
         } else {
@@ -88,70 +99,88 @@ pub(super) enum Event {
     },
 }
 
+fn observe(
+    state: &mut AppState,
+    workspace: WorkspaceId,
+    decisions: Vec<UserDecision>,
+) -> Vec<Effect> {
+    if workspace != state.workspace {
+        return Vec::new();
+    }
+    let previously_known = state
+        .decisions
+        .iter()
+        .map(|decision| decision.decision_id)
+        .collect::<BTreeSet<_>>();
+    (state.decisions, state.decision_answers) = decisions
+        .into_iter()
+        .filter(|decision| {
+            matches!(
+                decision.status,
+                UserDecisionStatus::Pending | UserDecisionStatus::Resolved
+            )
+        })
+        .partition(|decision| decision.status == UserDecisionStatus::Pending);
+    state.unread_decisions.retain(|id| {
+        state
+            .decisions
+            .iter()
+            .any(|decision| decision.decision_id == *id)
+    });
+    state.unread_decisions.extend(
+        state
+            .decisions
+            .iter()
+            .filter(|decision| !previously_known.contains(&decision.decision_id))
+            .map(|decision| decision.decision_id),
+    );
+    reconcile_decision_overlay(state);
+    if open_requested(state) {
+        return Vec::new();
+    }
+    // A newly created decision is actionable immediately. Open its
+    // answer editor rather than making the user traverse the list.
+    // Reconnect snapshots contain only known rows, so they preserve a
+    // deliberate dismiss and never steal focus.
+    if state.overlay.is_none()
+        && !state.workspace_drawer_open()
+        && let Some(decision) = state
+            .decisions
+            .iter()
+            .find(|decision| !previously_known.contains(&decision.decision_id))
+            .cloned()
+    {
+        state.overlay = Some(Overlay::Decisions);
+        state.decision_overlay = Some(DecisionOverlayState {
+            show_answers: false,
+            selected: 0,
+            editor: Some(DecisionEditor::new(decision)),
+            requested: None,
+            error: None,
+            exact: None,
+        });
+    }
+    Vec::new()
+}
+
 pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
         Event::Snapshot {
             workspace,
             decisions,
-        } => {
-            if workspace != state.workspace {
-                return Vec::new();
-            }
-            let previously_known = state
-                .decisions
-                .iter()
-                .map(|decision| decision.decision_id)
-                .collect::<BTreeSet<_>>();
-            state.decisions = decisions
-                .into_iter()
-                .filter(|decision| decision.status == UserDecisionStatus::Pending)
-                .collect();
-            state.unread_decisions.retain(|id| {
-                state
-                    .decisions
-                    .iter()
-                    .any(|decision| decision.decision_id == *id)
-            });
-            state.unread_decisions.extend(
-                state
-                    .decisions
-                    .iter()
-                    .filter(|decision| !previously_known.contains(&decision.decision_id))
-                    .map(|decision| decision.decision_id),
-            );
-            reconcile_decision_overlay(state);
-            if open_requested(state) {
-                return Vec::new();
-            }
-            // A newly created decision is actionable immediately. Open its
-            // answer editor rather than making the user traverse the list.
-            // Reconnect snapshots contain only known rows, so they preserve a
-            // deliberate dismiss and never steal focus.
-            if state.overlay.is_none()
-                && !state.workspace_drawer_open()
-                && let Some(decision) = state
-                    .decisions
-                    .iter()
-                    .find(|decision| !previously_known.contains(&decision.decision_id))
-                    .cloned()
-            {
-                state.overlay = Some(Overlay::Decisions);
-                state.decision_overlay = Some(DecisionOverlayState {
-                    selected: 0,
-                    editor: Some(DecisionEditor::new(decision)),
-                    requested: None,
-                    error: None,
-                    exact: None,
-                });
-            }
-        }
+        } => return observe(state, workspace, decisions),
         Event::Resolved {
             workspace,
             decision_id,
         } => {
-            if !state.decisions.iter().any(|decision| {
-                decision.decision_id == decision_id && decision.owner.workspace_id == workspace
-            }) {
+            if !state
+                .decisions
+                .iter()
+                .chain(&state.decision_answers)
+                .any(|decision| {
+                    decision.decision_id == decision_id && decision.owner.workspace_id == workspace
+                })
+            {
                 return Vec::new();
             }
             let closes_active_modal = state
@@ -161,6 +190,9 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
                 .is_some_and(|editor| editor.decision.decision_id == decision_id);
             state
                 .decisions
+                .retain(|decision| decision.decision_id != decision_id);
+            state
+                .decision_answers
                 .retain(|decision| decision.decision_id != decision_id);
             state.unread_decisions.remove(&decision_id);
             if closes_active_modal {
@@ -217,6 +249,9 @@ pub(super) fn update_decision_editor(
     editor: &mut DecisionEditor,
     key: AppKey,
 ) -> Vec<Effect> {
+    if editor.decision.status == UserDecisionStatus::Resolved {
+        return update_saved_answer(workspace, editor, &key);
+    }
     if editor.confirmation.is_some() {
         return composition::update_confirmation(workspace, editor, &key);
     }
@@ -268,6 +303,32 @@ pub(super) fn update_decision_editor(
         }
         AppKey::SubmitDecision | AppKey::Enter => {
             return submit_decision(workspace, editor, multiple);
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn update_saved_answer(
+    workspace: WorkspaceId,
+    editor: &mut DecisionEditor,
+    key: &AppKey,
+) -> Vec<Effect> {
+    match key {
+        AppKey::Escape => {
+            editor.saved_answer_mode = SavedAnswerMode::View;
+            editor.error = None;
+        }
+        AppKey::Char('d') if !editor.discard_confirmation() => {
+            editor.saved_answer_mode = SavedAnswerMode::ConfirmDiscard;
+            editor.scroll_offset = Some(0);
+            editor.error = None;
+        }
+        AppKey::Enter if editor.discard_confirmation() => {
+            return vec![Effect::DiscardDecision {
+                workspace,
+                decision_id: editor.decision.decision_id,
+            }];
         }
         _ => {}
     }

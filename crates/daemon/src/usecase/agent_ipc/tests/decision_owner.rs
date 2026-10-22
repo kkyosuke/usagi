@@ -12,6 +12,103 @@ struct Conversation {
     _worktree: tempfile::TempDir,
 }
 
+#[test]
+fn removed_session_answers_remain_reviewable_until_explicit_human_disposal() {
+    use usagi_core::domain::id::UserDecisionId;
+    use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer};
+    use usagi_core::infrastructure::store::user_decision::UserDecisionStore;
+    let mut conversation = Conversation::delegated();
+    let owner = conversation.owner();
+    let credential = conversation.credential();
+    let dir = tempfile::tempdir().unwrap();
+    let store = UserDecisionStore::new(dir.path());
+    let question: UserDecision = serde_json::from_value(json!({
+        "decision_id":UserDecisionId::new(), "owner":owner,
+        "title":"Question", "prompt":"May we proceed?", "options":[],
+        "allow_freeform":true, "expires_at":null, "idempotency_key":"audit-removed-session",
+        "status":"pending", "answer":null, "created_at":Utc::now(), "resolved_at":null
+    }))
+    .unwrap();
+    let question = store.create_with_default_expiry(question).unwrap().unwrap();
+    store
+        .resolve(
+            owner.workspace_id,
+            question.decision_id,
+            UserDecisionAnswer::Freeform {
+                text: "Human answer".into(),
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+    conversation.finish();
+    assert_eq!(
+        conversation
+            .agent
+            .close_session(owner.session_id.unwrap())
+            .unwrap(),
+        1
+    );
+    assert!(
+        conversation
+            .agent
+            .inventory(owner.workspace_id)
+            .runtimes
+            .is_empty()
+    );
+    assert!(
+        conversation
+            .agent
+            .inventory(owner.workspace_id)
+            .resumable
+            .is_empty()
+    );
+    assert!(
+        conversation
+            .agent
+            .mcp_user_decision_owners(&credential)
+            .is_err()
+    );
+    assert!(store.pending_all().unwrap().is_empty());
+    assert_eq!(store.events().unwrap().len(), 1);
+    assert!(
+        store
+            .expire_due(Utc::now() + chrono::Duration::days(30))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        UserDecisionStore::new(dir.path()).events().unwrap().len(),
+        1
+    );
+    let inbox = store
+        .inbox_page(
+            usagi_core::infrastructure::store::user_decision::UserDecisionScope::All,
+            None,
+            usagi_core::infrastructure::ipc::DEFAULT_MAX_FRAME_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(inbox.decisions.len(), 1);
+    assert_eq!(inbox.decisions[0].decision_id, question.decision_id);
+    store
+        .discard_answer(owner.workspace_id, question.decision_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        UserDecisionStore::new(dir.path())
+            .events()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .get(owner.workspace_id, question.decision_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
 impl Conversation {
     fn delegated() -> Self {
         let fixture = tempfile::tempdir().unwrap();

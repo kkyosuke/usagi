@@ -863,6 +863,16 @@ impl AgentTabIntentPort for UnavailableAgentTabIntentPort {
 struct UnavailableDecisionCommandPort;
 #[cfg(test)]
 impl DecisionCommandPort for UnavailableDecisionCommandPort {
+    fn discard(&mut self, workspace: WorkspaceId, decision_id: UserDecisionId) -> BackendEvent {
+        self.resolve(
+            workspace,
+            decision_id,
+            UserDecisionAnswer::Freeform {
+                text: String::new(),
+            },
+        )
+    }
+
     fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent {
         BackendEvent::DecisionsUnavailable { workspace }
     }

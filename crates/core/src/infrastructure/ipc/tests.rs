@@ -170,6 +170,8 @@ fn server_and_readiness_policies_share_the_closed_capability_vocabulary() {
 #[test]
 fn decision_delivery_requires_both_current_peers_and_an_advertised_contract() {
     for (client_revision, server_revision, advertised, accepted) in [
+        (3, CURRENT_PROTOCOL_REVISION, true, false),
+        (CURRENT_PROTOCOL_REVISION, 3, true, false),
         (2, CURRENT_PROTOCOL_REVISION, true, false),
         (CURRENT_PROTOCOL_REVISION, 2, false, false),
         (

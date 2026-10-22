@@ -33,9 +33,9 @@ pub const TERMINAL_WIRE_GENERATION: u16 = 1;
 /// A peer that negotiates a lower revision keeps the legacy `replay` tail, so
 /// the daemon serves both during the migration window.
 pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
-/// Explicit answer receipts and bounded decision fragments require both peers
-/// to understand revision 3. Older revisions remain usable for other families.
-pub const USER_DECISION_DELIVERY_REVISION: u16 = 3;
+/// Revision 4 adds recovery of unacknowledged answers and explicit human
+/// disposal. Older revisions remain usable for non-decision families.
+pub const USER_DECISION_DELIVERY_REVISION: u16 = 4;
 pub const CURRENT_PROTOCOL_REVISION: u16 = USER_DECISION_DELIVERY_REVISION;
 
 /// Closed vocabulary for capabilities exchanged during IPC negotiation.

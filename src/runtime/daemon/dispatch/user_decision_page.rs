@@ -53,7 +53,7 @@ pub(super) fn response(
         .min(DEFAULT_MAX_FRAME_BYTES)
         .saturating_sub(overhead);
     let page = store
-        .pending_page(scope, payload.cursor.as_ref(), budget)
+        .inbox_page(scope, payload.cursor.as_ref(), budget)
         .map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "decision inventory is unavailable")
         })?
@@ -169,16 +169,27 @@ mod tests {
     fn decision_pages_fit_the_exact_envelope_limit() {
         let temp = tempfile::tempdir().unwrap();
         let store = UserDecisionStore::new(temp.path());
-        let first = decision();
+        let mut first = decision();
         let mut second = decision();
         second.prompt = "\"\\\n".repeat(2048);
         for item in [&first, &second] {
             store.create(item.clone()).unwrap().unwrap();
         }
+        first = store
+            .resolve(
+                first.owner.workspace_id,
+                first.decision_id,
+                usagi_core::domain::user_decision::UserDecisionAnswer::Freeform {
+                    text: "Recovered answer".into(),
+                },
+                chrono::Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
         let mut hello = hello();
         let request = RequestId("request\"\\\n".repeat(5));
         let page = store
-            .pending_page(UserDecisionScope::All, None, 2048)
+            .inbox_page(UserDecisionScope::All, None, 2048)
             .unwrap()
             .unwrap();
         assert_eq!(page.decisions, vec![first.clone()]);

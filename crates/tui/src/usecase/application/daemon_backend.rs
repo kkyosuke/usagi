@@ -304,6 +304,27 @@ pub trait DecisionPort {
         answer: UserDecisionAnswer,
         completions: Completions,
     );
+
+    /// Explicit human disposal; embedded ports fail closed unless implemented.
+    fn discard(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        completions: Completions,
+    ) {
+        completions.emit(AppEvent::Backend(
+            super::controller::BackendEvent::DecisionError {
+                workspace,
+                decision_id,
+                error: super::controller::SafeError {
+                    message: super::controller::SafeMessage::new(
+                        "Saved answer disposal is unavailable.",
+                    ),
+                    error_id: "decision-discard-unavailable".to_owned(),
+                },
+            },
+        ));
+    }
 }
 
 struct NoDecisions;
@@ -645,6 +666,12 @@ impl DaemonBackend {
             } => self
                 .decisions
                 .resolve(workspace, decision_id, answer, self.completions()),
+            Effect::DiscardDecision {
+                workspace,
+                decision_id,
+            } => self
+                .decisions
+                .discard(workspace, decision_id, self.completions()),
             Effect::LoadPullRequests { target } => {
                 self.overlay.load_pull_requests(target, self.completions());
             }
@@ -1509,6 +1536,10 @@ mod tests {
         let workspace = WorkspaceId::new();
         for effect in [
             Effect::RefreshDecisions { workspace },
+            Effect::DiscardDecision {
+                workspace,
+                decision_id: UserDecisionId::new(),
+            },
             Effect::ResolveDecision {
                 workspace,
                 decision_id: UserDecisionId::new(),
@@ -1520,7 +1551,7 @@ mod tests {
         ] {
             assert_eq!(backend.dispatch(effect), Flow::Continue);
         }
-        assert_eq!(backend.drain_events().len(), 2);
+        assert_eq!(backend.drain_events().len(), 3);
     }
 
     #[test]
