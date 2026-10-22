@@ -1592,6 +1592,100 @@ fn production_user_decision_retry_without_deadline_is_idempotent() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One authenticated round trip includes legacy recovery and receipt fencing.
+fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have_no_effect() {
+    use usagi_core::infrastructure::store::user_decision::wire::DecisionChunk;
+    let mut mcp = McpHarness::start();
+    mcp.launch_caller();
+    let initial: UserDecision = serde_json::from_value(tool_text(&mcp.tool(
+        "user_decision_request",
+        &json!({"title":"Legacy", "prompt":"Choose", "options":[{"id":"yes","label":"Yes"}]}),
+    )))
+    .unwrap();
+    let store = UserDecisionStore::new(mcp.data_dir().join("daemon"));
+    let options: Vec<_> = (0..32).map(|index| json!({"id":format!("option-{index}"), "label":"Option",
+        "description":"\u{1}".repeat(2048), "pros":vec!["\\".repeat(512);4], "cons":vec!["\\".repeat(512);4]})).collect();
+    let table = json!({"kind":"table", "title":"Data", "columns":vec!["\\".repeat(512);6],
+        "rows":vec![vec!["\\".repeat(512);6];16]});
+    let before = fs::read(store.path()).unwrap();
+    let rejected = mcp.tool(
+        "user_decision_request",
+        &json!({"title":"Too large", "prompt":"Choose",
+        "options":options, "context":[table]}),
+    );
+    assert!(rejected.get("error").is_some(), "{rejected}");
+    assert_eq!(fs::read(store.path()).unwrap(), before);
+    let mut legacy = initial.clone();
+    legacy.decision_id = UserDecisionId::new();
+    legacy.options = serde_json::from_value(json!(options)).unwrap();
+    legacy.context = serde_json::from_value(json!(vec![table; 4])).unwrap();
+    legacy.validate_request().unwrap();
+    assert!(
+        serde_json::to_vec(&legacy).unwrap().len()
+            > usagi_core::infrastructure::ipc::DEFAULT_MAX_FRAME_BYTES
+    );
+    // Seed the exact prior-version format; the current admission rejects it.
+    let state = json!({"decisions":[initial, legacy],"events":[],"expired_idempotency":{}});
+    usagi_core::infrastructure::persistence::json_file::write_atomic(
+        &mcp.data_dir().join("daemon"),
+        &store.path(),
+        &state,
+    )
+    .unwrap();
+    let listed = tool_text(&mcp.tool("user_decision_list", &json!({})));
+    assert_eq!(listed["decisions"], json!([initial]));
+    assert_eq!(
+        listed["deferred"][0]["decision_id"],
+        json!(legacy.decision_id)
+    );
+    let pending_ack = mcp.tool(
+        "user_decision_ack",
+        &json!({"decision_id":legacy.decision_id}),
+    );
+    assert!(pending_ack.get("error").is_some());
+    let mut cursor = serde_json::Value::Null;
+    let mut text = String::new();
+    loop {
+        let mut arguments = json!({"decision_id":legacy.decision_id});
+        if !cursor.is_null() {
+            arguments["cursor"] = cursor;
+        }
+        let chunk: DecisionChunk =
+            serde_json::from_value(tool_text(&mcp.tool("user_decision_get", &arguments))).unwrap();
+        assert_eq!(chunk.offset, text.len());
+        text.push_str(&chunk.data);
+        cursor = json!(chunk.next_cursor);
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(serde_json::from_str::<UserDecision>(&text).unwrap(), legacy);
+    let changed = mcp.tool(
+        "user_decision_get",
+        &json!({"decision_id":legacy.decision_id,"cursor":{"revision":"stale","offset":0}}),
+    );
+    assert!(changed.get("error").is_some());
+    let result = tool_text(&mcp.tool(
+        "user_decision_resolve",
+        &json!({"decision_id":legacy.decision_id,
+        "answer":{"kind":"option","option_id":"option-0"}}),
+    ));
+    assert_eq!(result["decision_id"], json!(legacy.decision_id));
+    assert_eq!(store.events().unwrap().len(), 1);
+    let _ = mcp.tool(
+        "user_decision_get",
+        &json!({"decision_id":legacy.decision_id}),
+    );
+    assert_eq!(store.events().unwrap().len(), 1);
+    let ack = tool_text(&mcp.tool(
+        "user_decision_ack",
+        &json!({"decision_id":legacy.decision_id}),
+    ));
+    assert_eq!(ack["acknowledged"], true);
+    assert!(store.events().unwrap().is_empty());
+}
+
+#[test]
 #[allow(clippy::too_many_lines)] // Exercise every page, scope fence and answer outbox through the same authenticated MCP connection.
 fn production_user_decision_list_pages_large_owned_backlogs() {
     use usagi_core::domain::user_decision::UserDecisionAnswer;
@@ -1729,7 +1823,7 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
 
 #[test]
 #[allow(clippy::too_many_lines)] // Follow the same durable question through two TUI scopes and its real MCP owner.
-fn production_cross_workspace_user_decision_reaches_its_agent_and_acks_only_owner_reads() {
+fn production_cross_workspace_user_decision_requires_explicit_owner_ack() {
     use usagi_core::infrastructure::client::{ClientPolicy, IpcClient};
     use usagi_core::infrastructure::ipc::{ClientWorkspace, SessionAction};
     use usagi_daemon::infrastructure::unix_transport::connect_current;
@@ -1864,6 +1958,19 @@ fn production_cross_workspace_user_decision_reaches_its_agent_and_acks_only_owne
     ));
     assert_eq!(received["status"], "resolved");
     assert_eq!(received["answer"], answer);
+    assert_eq!(store.events().unwrap().len(), 1, "owner reads must not ACK");
+    let denied_ack = mcp.tool(
+        "user_decision_ack",
+        &json!({"decision_id": foreign.decision_id}),
+    );
+    assert!(denied_ack.get("error").is_some());
+    for _ in 0..2 {
+        let ack = tool_text(&mcp.tool(
+            "user_decision_ack",
+            &json!({"decision_id":decision.decision_id}),
+        ));
+        assert_eq!(ack["acknowledged"], true);
+    }
     assert!(store.events().unwrap().is_empty());
     let replayed = tool_text(&mcp.tool(
         "user_decision_get",
@@ -2073,6 +2180,10 @@ fn decision_restart_round_trip(legacy: bool) {
     assert_eq!(fetched_answer["owner"], json!(answered.owner));
     assert_eq!(fetched_answer["answer"], answer);
     assert_eq!(fetched_answer["status"], "resolved");
+    assert_eq!(
+        tool_text(decision_restart_reply(&resumed, 8))["acknowledged"],
+        true
+    );
     assert!(decisions.events().unwrap().is_empty());
     assert_eq!(decisions.pending(workspace).unwrap(), vec![pending.clone()]);
     assert_eq!(
@@ -2427,6 +2538,7 @@ fi
     printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"user_decision_list","arguments":{}}}'
     printf '%s\n' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"user_decision_request","arguments":{"title":"Pending approval","prompt":"Choose","options":[{"id":"yes","label":"Yes"}],"idempotency_key":"pending-approval"}}}'
     printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"user_decision_get","arguments":{"decision_id":"%s"}}}\n' "$answered"
+    printf '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"user_decision_ack","arguments":{"decision_id":"%s"}}}\n' "$answered"
     if [ "$stage" = legacy ]; then
       printf '%s\n' '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"user_decision_request","arguments":{"title":"Legacy-only approval","prompt":"Choose","options":[{"id":"yes","label":"Yes"}],"idempotency_key":"legacy-only"}}}'
     fi

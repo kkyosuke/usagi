@@ -2138,6 +2138,10 @@ mod tests {
                 usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionGet,
             ),
             (
+                "user_decision_ack",
+                usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionAck,
+            ),
+            (
                 "user_decision_list",
                 usagi_core::infrastructure::ipc::DispatchToolAction::UserDecisionList,
             ),

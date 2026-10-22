@@ -324,6 +324,7 @@ pub enum DispatchToolAction {
     AgentInboxAck,
     UserDecisionRequest,
     UserDecisionGet,
+    UserDecisionAck,
     UserDecisionList,
     UserDecisionResolve,
     UserDecisionCancel,
@@ -383,6 +384,9 @@ pub struct UserDecisionCursor {
 /// only after following every cursor from the same revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionPage {
+    /// Legacy records fetched separately in bounded, revision-fenced chunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<crate::infrastructure::store::user_decision::wire::DecisionReference>,
     pub decisions: Vec<crate::domain::user_decision::UserDecision>,
     pub next_cursor: Option<UserDecisionCursor>,
 }

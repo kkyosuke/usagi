@@ -201,11 +201,16 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 `user_decision_request` は durable な pending decision を作成して直ちに返す。人間の回答まで同じ MCP call を
 開いたままにはしない。caller は返された `decision_id` を `user_decision_get` で polling し、`resolved`、
 `cancelled`、`expired` のいずれかになったら処理を続ける。同じ idempotency key の request は同じ decision に
-収束するため、接続をまたぐ retry に使える。
+収束するため、接続をまたぐ retry に使える。`get` は既読にしない。`resolved` の回答を受信・保存した後、
+`user_decision_ack` に同じ `decision_id` を渡して受信確認する。TUI の回答操作だけでは ACK されない。
 
 保留中の質問を一覧で回収するときは `user_decision_list {}` を呼び、`next_cursor` が `null` になるまで
 その値を `cursor` に渡して取得する。`RevisionConflict` が返ったら途中の一覧を破棄して先頭から取り直す。
 一覧は現在の agent が所有・exact resume で継承した pending だけを含む。回答の受信は `user_decision_get` を使う。
+旧版の大きな質問は一覧の `deferred` に入る。その `decision_id` と `cursor: {"revision":"返されたrevision","offset":0}` を
+`get` に渡す。`data` と `next_cursor` を受け取ったら、cursorを順に渡して全dataを連結し、JSONとして解析する。
+途中の内容を回答・ACKに使わない。`get` の通常呼び出しも巨大な旧質問では同じ断片形式を返す。
+新しい質問は最大回答を含むJSONが512 KiB以下、保存は回答用の予約を含めて4 MiB以内で受け付ける。
 
 比較が必要なら `context` に `kind: "table"`（`title` / `columns` / `rows`）を添える。関係や手順は
 `kind: "diagram"`（`title` / `text`）の ASCII / Unicode テキスト図で示す。複数案を同時に選べる質問は

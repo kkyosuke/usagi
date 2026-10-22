@@ -31,6 +31,7 @@ pub(super) fn response(
         ProtocolError::new(ErrorCode::InvalidArgument, "invalid decision page cursor")
     })?;
     let empty = UserDecisionPage {
+        deferred: Vec::new(),
         decisions: Vec::new(),
         next_cursor: None,
     };
@@ -61,14 +62,12 @@ pub(super) fn response(
 }
 
 fn page_body(workspace: WorkspaceId, page: &UserDecisionPage) -> Value {
-    json!({
-        "workspace": workspace,
-        "decisions": page.decisions,
-        "next_cursor": page.next_cursor,
-    })
+    let mut value = json!(page);
+    value["workspace"] = json!(workspace);
+    value
 }
 
-fn page_error(error: UserDecisionPageError) -> ProtocolError {
+pub(super) fn page_error(error: UserDecisionPageError) -> ProtocolError {
     let (code, message) = match error {
         UserDecisionPageError::RevisionConflict => (
             ErrorCode::RevisionConflict,

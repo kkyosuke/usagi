@@ -198,7 +198,7 @@ adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral 
 引数の詳細は列挙せず、`tools/list` のスキーマを正本とし、手順は resource
 `usagi://guides/orchestration` を参照させる（正本は [7. MCP サーバ#tool 面](07-mcp.md#tool-面)）。
 人への質問・確認・選択には `user_decision_request` を使って TUI で回答できるよう促し、返された
-`decision_id` を `user_decision_get` で確認させる。pending 中は回答に依存しない作業だけを進め、
+`decision_id` を `user_decision_get` で確認させ、resolved の回答を受信後に `user_decision_ack` で受信確認させる。pending 中は回答に依存しない作業だけを進め、
 cancelled / expired を承認とみなさず、人の回答を代理送信しないよう指示する。
 
 各行は launch scope に依存せず真である文にする。行が述べるのは「どこで何が受理されるか」で、

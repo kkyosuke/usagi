@@ -49,6 +49,7 @@ pub(super) fn pending_page(
     }
     let start = cursor.map_or(0, |cursor| cursor.offset);
     let mut page = UserDecisionPage {
+        deferred: Vec::new(),
         decisions: Vec::new(),
         next_cursor: None,
     };
@@ -60,18 +61,39 @@ pub(super) fn pending_page(
         });
     }
 
+    let references: Vec<_> = decisions
+        .iter()
+        .map(|decision| {
+            (super::wire::record_bytes(decision) > super::wire::MAX_RECORD_BYTES)
+                .then(|| super::wire::reference(decision))
+        })
+        .collect();
     let mut record_bytes = 0;
+    let mut deferred_count = 0;
+    let mut full_count = 0;
     let mut best_end = None;
-    // Serialize each record once. Re-serializing each growing candidate page
+    // Measure entries independently. Re-serializing each growing candidate page
     // would make every read quadratic in caller-controlled question bytes.
     for (index, decision) in decisions.iter().enumerate().skip(start) {
-        record_bytes += serde_json::to_vec(decision)?.len() + usize::from(index > start);
+        if let Some(reference) = &references[index] {
+            record_bytes += serde_json::to_vec(reference)?.len() + usize::from(deferred_count > 0);
+            deferred_count += 1;
+        } else {
+            record_bytes += serde_json::to_vec(decision)?.len() + usize::from(full_count > 0);
+            full_count += 1;
+        }
         let end = index + 1;
         page.next_cursor = (end < decisions.len()).then(|| UserDecisionCursor {
             revision: revision.clone(),
             offset: end,
         });
-        let page_bytes = serde_json::to_vec(&page)?.len() + record_bytes;
+        let page_bytes = serde_json::to_vec(&page)?.len()
+            + record_bytes
+            + if deferred_count > 0 {
+                ",\"deferred\":[]".len()
+            } else {
+                0
+            };
         if page_bytes <= max_page_bytes {
             best_end = Some(end);
         }
@@ -83,10 +105,17 @@ pub(super) fn pending_page(
         revision,
         offset: end,
     });
-    page.decisions = decisions
+    for (decision, reference) in decisions
         .into_iter()
+        .zip(references)
         .skip(start)
         .take(end - start)
-        .collect();
+    {
+        if let Some(reference) = reference {
+            page.deferred.push(reference);
+        } else {
+            page.decisions.push(decision);
+        }
+    }
     Ok(Ok(page))
 }
