@@ -745,9 +745,9 @@ pub fn server_protocol(
         supported_protocols: vec![usagi_core::infrastructure::ipc::ProtocolRange {
             generation: usagi_core::infrastructure::ipc::TERMINAL_WIRE_GENERATION,
             min_revision: 0,
-            // Revision 2 adds the semantic screen checkpoint; a client that
-            // negotiates a lower revision keeps the legacy raw tail.
-            max_revision: usagi_core::infrastructure::ipc::TERMINAL_CHECKPOINT_REVISION,
+            // Preserve older revisions for request families with compatible
+            // contracts. Decision delivery requires revision 3 at dispatch.
+            max_revision: usagi_core::infrastructure::ipc::CURRENT_PROTOCOL_REVISION,
         }],
         capabilities: usagi_core::infrastructure::ipc::server_advertised_capabilities(
             usagi_core::infrastructure::ipc::GenerationRole::Active,
@@ -1677,11 +1677,11 @@ mod tests {
     fn the_negotiated_revision_advertises_and_selects_the_checkpoint_wire() {
         use crate::usecase::terminal::SnapshotWire;
         use usagi_core::infrastructure::ipc::{
-            TERMINAL_CHECKPOINT_REVISION, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
-            TERMINAL_WIRE_GENERATION,
+            CURRENT_PROTOCOL_REVISION, TERMINAL_CHECKPOINT_REVISION,
+            TERMINAL_SCREEN_CHECKPOINT_CAPABILITY, TERMINAL_WIRE_GENERATION,
         };
 
-        // The daemon advertises the checkpoint capability and revision 2.
+        // The current daemon still advertises the revision 2 checkpoint contract.
         let server = server();
         assert!(
             server
@@ -1694,7 +1694,7 @@ mod tests {
             vec![ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                max_revision: TERMINAL_CHECKPOINT_REVISION,
+                max_revision: CURRENT_PROTOCOL_REVISION,
             }]
         );
 
@@ -1705,6 +1705,11 @@ mod tests {
             (
                 TERMINAL_CHECKPOINT_REVISION,
                 TERMINAL_CHECKPOINT_REVISION,
+                SnapshotWire::ScreenCheckpoint,
+            ),
+            (
+                CURRENT_PROTOCOL_REVISION,
+                CURRENT_PROTOCOL_REVISION,
                 SnapshotWire::ScreenCheckpoint,
             ),
         ] {

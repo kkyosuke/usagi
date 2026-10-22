@@ -10,6 +10,52 @@ use usagi_core::infrastructure::ipc::{
 // The durable store permits at most 256 pending decisions. Every continuation
 // must advance by at least one, so this also bounds a faulty peer's work.
 const MAX_PAGES: usize = 256;
+use usagi_core::infrastructure::store::user_decision::wire::{
+    DecisionChunk, DecisionReference, MAX_RECOVERY_RECORD_BYTES, revision,
+};
+
+fn read_deferred(
+    request: &mut dyn FnMut(DaemonRequest) -> Result<DaemonReply, String>,
+    reference: &DecisionReference,
+) -> Result<UserDecision, String> {
+    let invalid = || "daemon returned an invalid decision fragment".to_owned();
+    let mut text = String::new();
+    for _ in 0..128 {
+        let DaemonReply::Ok(value) = request(DaemonRequest::UserDecision {
+            action: TuiUserDecisionAction::Get,
+            payload: serde_json::json!({"workspace": reference.workspace, "decision_id": reference.decision_id,
+                "cursor": {"revision": reference.revision, "offset": text.len()}}),
+        })?
+        else {
+            return Err(invalid());
+        };
+        let chunk: DecisionChunk = serde_json::from_value(value).map_err(|_| invalid())?;
+        if chunk.decision_id != reference.decision_id
+            || chunk.revision != reference.revision
+            || chunk.offset != text.len()
+            || chunk.data.is_empty()
+            || text.len() + chunk.data.len() > MAX_RECOVERY_RECORD_BYTES
+        {
+            return Err(invalid());
+        }
+        text.push_str(&chunk.data);
+        if let Some(next) = chunk.next_cursor {
+            if next.revision != reference.revision || next.offset != text.len() {
+                return Err(invalid());
+            }
+        } else {
+            let decision: UserDecision = serde_json::from_str(&text).map_err(|_| invalid())?;
+            if revision(&text) != reference.revision
+                || decision.decision_id != reference.decision_id
+                || decision.owner.workspace_id != reference.workspace
+            {
+                return Err(invalid());
+            }
+            return Ok(decision);
+        }
+    }
+    Err("daemon exceeded the decision fragment limit".to_owned())
+}
 
 pub(super) fn pending_snapshot(
     request: &mut dyn FnMut(DaemonRequest) -> Result<DaemonReply, String>,
@@ -25,8 +71,11 @@ pub(super) fn pending_snapshot(
         let DaemonReply::Ok(value) = reply else {
             return Err("daemon did not return a decision page".to_owned());
         };
-        let page: UserDecisionPage = serde_json::from_value(value)
+        let mut page: UserDecisionPage = serde_json::from_value(value)
             .map_err(|_| "daemon returned an invalid decision page".to_owned())?;
+        for reference in &page.deferred {
+            page.decisions.push(read_deferred(request, reference)?);
+        }
         if page
             .decisions
             .iter()
@@ -85,6 +134,7 @@ mod tests {
     fn page(decisions: Vec<UserDecision>, next_cursor: Option<UserDecisionCursor>) -> DaemonReply {
         DaemonReply::Ok(
             serde_json::to_value(UserDecisionPage {
+                deferred: Vec::new(),
                 decisions,
                 next_cursor,
             })
@@ -166,5 +216,105 @@ mod tests {
         });
         assert!(result.unwrap_err().contains("page limit"));
         assert_eq!(calls, MAX_PAGES);
+    }
+    #[test]
+    fn deferred_inventory_restores_full_records_before_publishing() {
+        let expected = decision();
+        let reference =
+            usagi_core::infrastructure::store::user_decision::wire::reference(&expected);
+        let mut reads = 0;
+        let actual = pending_snapshot(&mut |request| {
+            let request = json!(request);
+            assert_eq!(request["kind"], "user_decision");
+            if request["action"] == "list_all" {
+                return Ok(DaemonReply::Ok(
+                    json!({"decisions": [], "deferred": [reference], "next_cursor":null}),
+                ));
+            }
+            reads += 1;
+            assert_eq!(request["action"], "get");
+            let payload = &request["payload"];
+            assert_eq!(payload["workspace"], json!(expected.owner.workspace_id));
+            let cursor: UserDecisionCursor =
+                serde_json::from_value(payload["cursor"].clone()).unwrap();
+            Ok(DaemonReply::Ok(
+                usagi_core::infrastructure::store::user_decision::wire::response(
+                    &expected,
+                    Some(&cursor),
+                    2400,
+                )
+                .unwrap(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(actual, vec![expected]);
+        assert!(reads > 1);
+    }
+
+    #[test]
+    fn rejects_incomplete_changed_malformed_and_unbounded_fragments() {
+        let expected = decision();
+        let reference =
+            usagi_core::infrastructure::store::user_decision::wire::reference(&expected);
+        let text = serde_json::to_string(&expected).unwrap();
+        let valid = DecisionChunk {
+            decision_id: expected.decision_id,
+            revision: reference.revision.clone(),
+            offset: 0,
+            data: text.clone(),
+            next_cursor: None,
+        };
+        let failures = [
+            Err("disconnected".into()),
+            Ok(DaemonReply::Accepted {
+                operation_id: "x".into(),
+                revision: 1,
+                body: json!({}),
+            }),
+            Ok(DaemonReply::Ok(json!({}))),
+            Ok(DaemonReply::Ok(json!(DecisionChunk {
+                offset: 1,
+                ..valid.clone()
+            }))),
+            Ok(DaemonReply::Ok(json!(DecisionChunk {
+                data: "x".repeat(MAX_RECOVERY_RECORD_BYTES + 1),
+                ..valid.clone()
+            }))),
+            Ok(DaemonReply::Ok(json!(DecisionChunk {
+                data: "{".into(),
+                ..valid.clone()
+            }))),
+            Ok(DaemonReply::Ok(json!(DecisionChunk {
+                data: format!("{text} "),
+                ..valid.clone()
+            }))),
+            Ok(DaemonReply::Ok(json!(DecisionChunk {
+                next_cursor: Some(cursor("wrong", text.len())),
+                ..valid
+            }))),
+        ];
+        for failure in failures {
+            assert!(read_deferred(&mut |_| failure.clone(), &reference).is_err());
+        }
+        let mut calls = 0;
+        assert!(
+            read_deferred(
+                &mut |_| {
+                    let chunk = DecisionChunk {
+                        decision_id: expected.decision_id,
+                        revision: reference.revision.clone(),
+                        offset: calls,
+                        data: "x".into(),
+                        next_cursor: Some(cursor(&reference.revision, calls + 1)),
+                    };
+                    calls += 1;
+                    Ok(DaemonReply::Ok(json!(chunk)))
+                },
+                &reference
+            )
+            .unwrap_err()
+            .contains("fragment limit")
+        );
+        assert_eq!(calls, 128);
     }
 }

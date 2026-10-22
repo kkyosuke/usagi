@@ -46,6 +46,7 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::dispatch(AgentInboxAck, DispatchToolAction::AgentInboxAck),
         ToolDescriptor::dispatch(UserDecisionRequest, DispatchToolAction::UserDecisionRequest),
         ToolDescriptor::dispatch(UserDecisionGet, DispatchToolAction::UserDecisionGet),
+        ToolDescriptor::dispatch(UserDecisionAck, DispatchToolAction::UserDecisionAck),
         ToolDescriptor::dispatch(UserDecisionList, DispatchToolAction::UserDecisionList),
         ToolDescriptor::dispatch(UserDecisionResolve, DispatchToolAction::UserDecisionResolve),
         ToolDescriptor::dispatch(UserDecisionCancel, DispatchToolAction::UserDecisionCancel),
@@ -122,7 +123,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。options の pros / cons で案ごとのメリット・注意点を表示できる。allow_comment で選択に補足コメント、require_confirmation で TUI の送信前確認を有効化できる。回答は user_decision_get で取得する"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。options の pros / cons で案ごとのメリット・注意点を表示できる。allow_comment で選択に補足コメント、require_confirmation で TUI の送信前確認を有効化できる。回答は user_decision_get で取得し受信後 user_decision_ack で確認する。質問と最大回答の JSON 合計は512KiBまで"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -219,7 +220,19 @@ impl Tool for UserDecisionGet {
         "user_decision_get"
     }
     fn description(&self) -> &'static str {
-        "現在の agent が所有する decision を取得する。pending の間は同じ decision_id を polling し、terminal 応答を受け取る"
+        "現在の agent が所有する decision を取得する。pending の間は同じ decision_id を polling し、terminal 応答を受け取る。取得は既読にしない。resolved の回答を受信した後 user_decision_ack を呼ぶ。巨大な旧質問は data と next_cursor を返すので cursor を渡して全断片を連結・JSON 解析する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"decision_id":{"type":"string"},"cursor":{"type":"object","properties":{"revision":{"type":"string","minLength":1,"maxLength":64},"offset":{"type":"integer","minimum":0}},"required":["revision","offset"],"additionalProperties":false}},"required":["decision_id"],"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionAck;
+impl Tool for UserDecisionAck {
+    fn name(&self) -> &'static str {
+        "user_decision_ack"
+    }
+    fn description(&self) -> &'static str {
+        "user_decision_get で resolved の回答を受信・保存した後、所有者として受信確認する。再送は安全。回答を取得する前には呼ばない"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#
@@ -231,7 +244,7 @@ impl Tool for UserDecisionList {
         "user_decision_list"
     }
     fn description(&self) -> &'static str {
-        "現在の agent が所有・exact resume で継承した pending decision をページで返す。next_cursor が null になるまで cursor に渡して取得し、RevisionConflict 時は先頭から取り直す。回答の受信は user_decision_get を使う"
+        "現在の agent が所有・exact resume で継承した pending decision をページで返す。next_cursor が null になるまで cursor に渡して取得し、RevisionConflict 時は先頭から取り直す。deferred の旧質問は decision_id と revision / offset:0 を user_decision_get に渡し全断片を取得する。回答の受信は user_decision_get を使う"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"cursor":{"type":"object","properties":{"revision":{"type":"string","minLength":1,"maxLength":64},"offset":{"type":"integer","minimum":1}},"required":["revision","offset"],"additionalProperties":false}},"additionalProperties":false}"#

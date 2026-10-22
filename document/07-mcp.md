@@ -176,7 +176,7 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child 自身の session ID に属する machine-local scratchpad を core usecase 経由で読み書きする（[保存先](#session-scratchpad)） |
-| `user_decision_request` / `user_decision_get` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get で観測する。agent 経路は作成した owner/run の decision と、exact resume で引き継いだ同じ会話の decision だけを操作できる |
+| `user_decision_request` / `user_decision_get` / `user_decision_ack` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get で観測する。agent 経路は作成した owner/run の decision と、exact resume で引き継いだ同じ会話の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
 | `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
@@ -226,8 +226,13 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 
 ### User decision
 
+clientとdaemonの両方が [IPC revision 3のdecision契約](04-ipc.md#frame-と-handshake) に対応している必要がある。
+旧版が接続している場合はdecision操作をeffect zeroで拒否するため、daemonとMCP/TUI clientを更新・再接続する。
+
 `user_decision_request` は connection deadline 内に人間の回答を待たず、作成済み `Pending` record を直ちに返す。
-caller は同じ credential と `decision_id` で `get` を polling し、terminal decision を取得した時点で durable outbox を ACK する。
+caller は同じ credential と `decision_id` で `get` を polling する。`get` は read-only で、応答を失っても回答と
+outbox は残る。`resolved` の回答を受信・保存した後、`user_decision_ack {"decision_id":"..."}` で明示的に受信確認する。
+ACK は owner / exact resume の継承 owner だけに許可し、保持中の同じ回答への重複 ACK は成功する。
 `list` は pending だけを返すため、回答の受信には `get` を使う。TUI の参照は agent の受信 ACK を変更しない。
 `user_decision_list` は認証済み owner 集合（exact resume の継承分を含む）の pending を IPC frame 上限内の
 ページに分けて返す。最初は `{}`、応答の `next_cursor` が `null` になるまではその値を `cursor` に渡して次ページを取得する。
@@ -243,7 +248,7 @@ credential の寿命を壊さず、daemon rollover / restart 後も store から
 
 exact resume では、元の decision owner（workspace / session / caller / run）を新 runtime の owner shard に保存して引き継ぐ。
 旧版が同じ会話の途中で別 owner を作った場合も、保持中の exact resume lineage と binding で確認できた owner を追加で保存する。
-新しい credential と現在の live run / binding を認証した上で、この保存済み集合を使って get / list と再 request を行う。
+新しい credential と現在の live run / binding を認証した上で、この保存済み集合を使って get / list / ack と再 request を行う。
 同じ key が複数の旧 owner に存在するときは直近の旧 run を優先し、その内容が違えば conflict とする。古い別の回答へ切り替えない。
 優先する key が tombstone に残っていれば `IdempotencyExpired` とし、質問を複製しない。
 元の runtime / dispatch run が保持上限で回収されても保存済み owner と idempotency key の対応は失われない。
@@ -310,13 +315,30 @@ MCP schema は同じ値を文字数上限と UTF-8 byte 上限の両方で公開
 上限超過は decision と outbox を作らず `InvalidArgument` になり、既存の durable document に違反があれば
 再起動後も巨大な値を再公開せず fail closed にする。
 
-件数上限とは別に、caller-controlled な prompt / option / answer を含む `user-decisions.json` の pretty JSON は
-4 MiB 以下に保つ。byte pressure では最新 32 件より古い terminal record だけを先に落とし、pending、未 ACK outbox、
-または最新 32 件の retry window が上限を占有していれば mutation を `ResourceExhausted`・effect zero で拒否する。
+新規質問は owner・時刻・既定値を含む JSON と最大回答の見積もりを合計して512 KiB以下に制限する。
+JSON escape 後の byte 数で検査し、超過時は保存前に `InvalidArgument` を返す。
+旧版で受け付けた大きな質問や、実際の通信上限内に1件も収まらない質問は削除・省略せず、一覧の
+`deferred` に decision ID / workspace / revision を返す。
+`get` に `decision_id` と `cursor: {"revision":"...","offset":0}` を渡すと、`data`（JSON本文の断片）と
+`next_cursor` を返す。`next_cursor` が `null` になるまで連結し、全文をJSONとして解析してから使う。
+途中の変更は `RevisionConflict` として先頭から取り直す。`get` の cursor なし応答も frame に収まらない場合は
+同じ断片形式になる。TUI は各質問の全文を復元してから一覧を公開する。断片・一覧の取得は ACK しない。
+
+件数上限とは別に、`user-decisions.json` の pretty JSON と、pending の最大回答・outbox コピー・終端時刻・
+tombstone 増加分の予約を合わせて4 MiB以下で新規受付する。UTF-8 byte が JSON escape で最大6倍になることも
+予約に含む。受付済みの質問は、その予約を使って回答・取消・期限切れ処理を完了できる。
+byte pressure では終端時刻が古い record を落とす。通常の回答・取消処理では最新32件の終端履歴を残すが、
+新規受付に必要な場合はそれより少なくても整理する。pending・未ACK回答は常に保護する。
+通常の終端履歴は256件まで保持する。新規受付で空きを確保できなければ `ResourceExhausted`・effect zero で拒否する。
+旧版の4 MiB以内の文書に予約不足がある場合だけ、既存pendingの最大回答分を復旧用に確保して保存する。
+復旧枠は新規受付に使わず、質問の完了・ACK・履歴整理に応じて縮小する。復旧中も通常4 MiBの受付へ
+戻るため、ACK済み・取消・期限切れの履歴を最新32件より少なくても整理する。pending・未ACK回答は保護し、
+整理した質問のidempotency keyはtombstoneに残す。読み込み上限は旧4 MiBと
+最大256件の回答予約・固定metadata分に制限し、不正な復旧枠や予約不足は拒否する。
+復旧中の文書は4 MiBを超えることがあるため、旧版へのdowngrade前には回答の受信確認と履歴整理を完了する。
 削除した terminal record の idempotency key は owner と組にした固定長 tombstone に残すため、古い retry は
 `IdempotencyExpired` となり、別の新規 decision として再作成されない。固定長集合の衝突は安全側（expired）へ倒れ、
-daemon の寿命に比例して metadata を増やさない。既存ファイルが byte 上限を超えている場合も、全体を parse せず
-fail closed にする。
+daemon の寿命に比例して metadata を増やさない。
 
 agent は durable effect を保証する行だけを実行手順に使う。daemon は handler の無い action の入力
 payload を成功応答としてエコーしない。

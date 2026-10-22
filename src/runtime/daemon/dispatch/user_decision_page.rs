@@ -31,6 +31,7 @@ pub(super) fn response(
         ProtocolError::new(ErrorCode::InvalidArgument, "invalid decision page cursor")
     })?;
     let empty = UserDecisionPage {
+        deferred: Vec::new(),
         decisions: Vec::new(),
         next_cursor: None,
     };
@@ -61,14 +62,12 @@ pub(super) fn response(
 }
 
 fn page_body(workspace: WorkspaceId, page: &UserDecisionPage) -> Value {
-    json!({
-        "workspace": workspace,
-        "decisions": page.decisions,
-        "next_cursor": page.next_cursor,
-    })
+    let mut value = json!(page);
+    value["workspace"] = json!(workspace);
+    value
 }
 
-fn page_error(error: UserDecisionPageError) -> ProtocolError {
+pub(super) fn page_error(error: UserDecisionPageError) -> ProtocolError {
     let (code, message) = match error {
         UserDecisionPageError::RevisionConflict => (
             ErrorCode::RevisionConflict,
@@ -198,18 +197,19 @@ mod tests {
         assert_eq!(actual, body);
         assert_eq!(response_size(&hello, &request, actual), exact);
         hello.limits.max_frame_bytes -= 1;
+        let deferred = response(
+            &store,
+            &hello,
+            &request,
+            first.owner.workspace_id,
+            UserDecisionScope::All,
+            json!({}),
+        )
+        .unwrap();
+        assert!(response_size(&hello, &request, deferred.clone()) < exact);
         assert_eq!(
-            response(
-                &store,
-                &hello,
-                &request,
-                first.owner.workspace_id,
-                UserDecisionScope::All,
-                json!({})
-            )
-            .unwrap_err()
-            .code,
-            ErrorCode::ResourceExhausted
+            deferred["deferred"],
+            json!([usagi_core::infrastructure::store::user_decision::wire::reference(&first)])
         );
         hello.limits.max_frame_bytes = u32::try_from(DEFAULT_MAX_FRAME_BYTES).unwrap();
         let last = response(
