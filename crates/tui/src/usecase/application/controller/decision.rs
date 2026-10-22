@@ -7,9 +7,10 @@
 mod composition;
 
 use super::{
-    AppKey, AppState, DecisionEditor, DecisionOverlayState, DecisionSnapshot, Effect, Overlay,
-    SafeError, SafeMessage, SavedAnswerMode, UserDecision, UserDecisionAnswer, UserDecisionId,
-    UserDecisionSelectionMode, UserDecisionStatus, WorkspaceId, reconcile_decision_overlay,
+    AppKey, AppState, DecisionCompletion, DecisionEditor, DecisionOverlayState, DecisionSnapshot,
+    Effect, Overlay, SafeError, SafeMessage, SavedAnswerMode, UserDecision, UserDecisionAnswer,
+    UserDecisionId, UserDecisionSelectionMode, UserDecisionStatus, WorkspaceId,
+    reconcile_decision_overlay,
 };
 use std::collections::BTreeSet;
 
@@ -17,6 +18,7 @@ pub(super) fn restore(state: &mut AppState, snapshot: DecisionSnapshot) -> Vec<E
     state.decisions = snapshot.decisions;
     state.decision_answers = snapshot.answers;
     state.unread_decisions = snapshot.unread;
+    state.decision_completions = snapshot.completions;
     Vec::new()
 }
 
@@ -88,10 +90,6 @@ pub(super) enum Event {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
     },
-    Resolved {
-        workspace: WorkspaceId,
-        decision_id: UserDecisionId,
-    },
     Error {
         workspace: WorkspaceId,
         decision_id: UserDecisionId,
@@ -102,11 +100,12 @@ pub(super) enum Event {
 fn observe(
     state: &mut AppState,
     workspace: WorkspaceId,
-    decisions: Vec<UserDecision>,
+    mut decisions: Vec<UserDecision>,
 ) -> Vec<Effect> {
     if workspace != state.workspace {
         return Vec::new();
     }
+    suppress_stale_completions(state, &mut decisions);
     let previously_known = state
         .decisions
         .iter()
@@ -163,45 +162,74 @@ fn observe(
     Vec::new()
 }
 
+/// The resident lane publishes complete inbox reads in order, but a read may
+/// have started before a command completed. Keep that completion until a later
+/// observation confirms it: an answer leaves pending, a discard leaves the
+/// inbox. Markers are then released rather than growing for the TUI's lifetime.
+/// Between observations they can only cover IDs from the last bounded inbox.
+fn suppress_stale_completions(state: &mut AppState, decisions: &mut Vec<UserDecision>) {
+    let mut awaiting_observation = BTreeSet::new();
+    decisions.retain(|decision| {
+        let Some(completion) = state.decision_completions.get(&decision.decision_id) else {
+            return true;
+        };
+        if *completion == DecisionCompletion::Discarded
+            || decision.status == UserDecisionStatus::Pending
+        {
+            awaiting_observation.insert(decision.decision_id);
+            return false;
+        }
+        true
+    });
+    state
+        .decision_completions
+        .retain(|id, _| awaiting_observation.contains(id));
+}
+
+pub(super) fn complete(
+    state: &mut AppState,
+    workspace: WorkspaceId,
+    decision_id: UserDecisionId,
+    completion: DecisionCompletion,
+) -> Vec<Effect> {
+    if !state
+        .decisions
+        .iter()
+        .chain(&state.decision_answers)
+        .any(|decision| {
+            decision.decision_id == decision_id && decision.owner.workspace_id == workspace
+        })
+    {
+        return Vec::new();
+    }
+    state.decision_completions.insert(decision_id, completion);
+    let closes_active_modal = state
+        .decision_overlay
+        .as_ref()
+        .and_then(|overlay| overlay.editor.as_ref())
+        .is_some_and(|editor| editor.decision.decision_id == decision_id);
+    state
+        .decisions
+        .retain(|decision| decision.decision_id != decision_id);
+    state
+        .decision_answers
+        .retain(|decision| decision.decision_id != decision_id);
+    state.unread_decisions.remove(&decision_id);
+    if closes_active_modal {
+        state.overlay = None;
+        state.decision_overlay = None;
+    } else {
+        reconcile_decision_overlay(state);
+    }
+    Vec::new()
+}
+
 pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
         Event::Snapshot {
             workspace,
             decisions,
         } => return observe(state, workspace, decisions),
-        Event::Resolved {
-            workspace,
-            decision_id,
-        } => {
-            if !state
-                .decisions
-                .iter()
-                .chain(&state.decision_answers)
-                .any(|decision| {
-                    decision.decision_id == decision_id && decision.owner.workspace_id == workspace
-                })
-            {
-                return Vec::new();
-            }
-            let closes_active_modal = state
-                .decision_overlay
-                .as_ref()
-                .and_then(|overlay| overlay.editor.as_ref())
-                .is_some_and(|editor| editor.decision.decision_id == decision_id);
-            state
-                .decisions
-                .retain(|decision| decision.decision_id != decision_id);
-            state
-                .decision_answers
-                .retain(|decision| decision.decision_id != decision_id);
-            state.unread_decisions.remove(&decision_id);
-            if closes_active_modal {
-                state.overlay = None;
-                state.decision_overlay = None;
-            } else {
-                reconcile_decision_overlay(state);
-            }
-        }
         Event::Error {
             workspace,
             decision_id,

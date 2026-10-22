@@ -477,14 +477,21 @@ pub struct EnvironmentEditor {
     saving: bool,
 }
 
-/// Last observed pending inventory and its TUI-local unread markers. The
-/// process deck carries this bounded snapshot across workspace compositions;
-/// the next daemon observation remains authoritative.
+/// Last observed inbox, unread markers, and completions still awaiting an
+/// observation. The process deck carries this bounded state across workspaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionSnapshot {
     decisions: Vec<UserDecision>,
     answers: Vec<UserDecision>,
     unread: BTreeSet<UserDecisionId>,
+    completions: BTreeMap<UserDecisionId, DecisionCompletion>,
+}
+
+/// A daemon-confirmed transition that an in-flight inbox read may predate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecisionCompletion {
+    Resolved,
+    Discarded,
 }
 
 /// Local navigation and draft state for a durable user decision.  The durable
@@ -1174,6 +1181,7 @@ pub struct AppState {
     decisions: Vec<UserDecision>,
     decision_answers: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
+    decision_completions: BTreeMap<UserDecisionId, DecisionCompletion>,
     decision_overlay: Option<DecisionOverlayState>,
     /// The visible Pull Request modal. It exists exactly while
     /// [`Overlay::Prs`] is the foreground overlay; an inventory request that has
@@ -1383,6 +1391,7 @@ impl AppState {
             decisions: Vec::new(),
             decision_answers: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
+            decision_completions: BTreeMap::new(),
             decision_overlay: None,
             pr_overlay: None,
             pr_request: None,
@@ -1584,6 +1593,7 @@ impl AppState {
             decisions: self.decisions.clone(),
             answers: self.decision_answers.clone(),
             unread: self.unread_decisions.clone(),
+            completions: self.decision_completions.clone(),
         }
     }
     /// Open decision list/editor state, if its overlay is visible.
@@ -3111,17 +3121,11 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
         BackendEvent::DecisionResolved {
             workspace,
             decision_id,
-        }
-        | BackendEvent::DecisionDiscarded {
+        } => decision::complete(state, workspace, decision_id, DecisionCompletion::Resolved),
+        BackendEvent::DecisionDiscarded {
             workspace,
             decision_id,
-        } => decision::update(
-            state,
-            decision::Event::Resolved {
-                workspace,
-                decision_id,
-            },
-        ),
+        } => decision::complete(state, workspace, decision_id, DecisionCompletion::Discarded),
         BackendEvent::DecisionError {
             workspace,
             decision_id,

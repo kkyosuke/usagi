@@ -2765,6 +2765,168 @@ mod decision_inbox {
     }
 
     #[test]
+    fn decision_completion_rejects_old_pending_reads_across_workspace_switches() {
+        for switch_workspace in [false, true] {
+            let workspace = WorkspaceId::new();
+            let question = pending_decision(WorkspaceId::new());
+            let owner = question.owner.workspace_id;
+            let id = question.decision_id;
+            let mut state = AppState::home(workspace, vec![]);
+            snapshot(&mut state, vec![question.clone()]);
+            let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+            assert!(
+                matches!(effects.as_slice(), [Effect::ResolveDecision { workspace, decision_id, .. }]
+                if *workspace == owner && *decision_id == id)
+            );
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::DecisionResolved {
+                    workspace: owner,
+                    decision_id: id,
+                }),
+            );
+            assert!(state.overlay().is_none());
+            if switch_workspace {
+                let retained = state.decision_snapshot();
+                state = AppState::home(WorkspaceId::new(), vec![]);
+                let _ = update(&mut state, AppEvent::RestoreDecisions(retained));
+            }
+            // Failure is not evidence that the in-flight pending read is gone.
+            let active = state.workspace;
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace: active }),
+            );
+            for _ in 0..3 {
+                snapshot(&mut state, vec![question.clone()]);
+                assert!(state.decisions().is_empty());
+                assert!(state.unread_decision_ids().is_empty());
+                assert!(state.overlay().is_none());
+                assert_eq!(state.decision_completions.len(), 1);
+            }
+            let mut answered = question;
+            answered.status = UserDecisionStatus::Resolved;
+            answered.answer = Some(UserDecisionAnswer::Option {
+                option_id: answered.options[0].id.clone(),
+                comment: None,
+            });
+            snapshot(&mut state, vec![answered.clone()]);
+            assert_eq!(state.decision_answers(), std::slice::from_ref(&answered));
+            assert!(state.decision_completions.is_empty());
+            assert!(state.overlay().is_none());
+            snapshot(&mut state, vec![]);
+            assert!(state.decision_answers().is_empty());
+            assert!(state.overlay().is_none());
+        }
+    }
+
+    #[test]
+    fn decision_discard_rejects_old_answers_until_the_inbox_confirms_removal() {
+        let workspace = WorkspaceId::new();
+        let answer = saved(WorkspaceId::new());
+        let owner = answer.owner.workspace_id;
+        let id = answer.decision_id;
+        let mut state = AppState::home(workspace, vec![]);
+        snapshot(&mut state, vec![answer.clone()]);
+        for key in [AppKey::OpenDecisions, AppKey::Enter, AppKey::Char('d')] {
+            let _ = update(&mut state, AppEvent::Key(key));
+        }
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::DiscardDecision {
+                workspace: owner,
+                decision_id: id
+            }]
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionDiscarded {
+                workspace: owner,
+                decision_id: id,
+            }),
+        );
+        let retained = state.decision_snapshot();
+        state = AppState::home(WorkspaceId::new(), vec![]);
+        let _ = update(&mut state, AppEvent::RestoreDecisions(retained));
+        for _ in 0..3 {
+            snapshot(&mut state, vec![answer.clone()]);
+            assert!(state.decision_answers().is_empty());
+            assert!(state.overlay().is_none());
+            assert_eq!(state.decision_completions.len(), 1);
+        }
+        snapshot(&mut state, vec![]);
+        assert!(state.decision_completions.is_empty());
+        let fresh_answer = saved(owner);
+        snapshot(&mut state, vec![fresh_answer.clone()]);
+        assert_eq!(
+            state.decision_answers(),
+            std::slice::from_ref(&fresh_answer)
+        );
+        assert!(state.overlay().is_none());
+    }
+
+    #[test]
+    fn decision_completions_require_success_and_leave_new_questions_actionable() {
+        let workspace = WorkspaceId::new();
+        let question = pending_decision(workspace);
+        let id = question.decision_id;
+        let fresh = pending_decision(workspace);
+        let mut state = AppState::home(workspace, vec![]);
+        snapshot(&mut state, vec![question.clone()]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionResolved {
+                workspace: WorkspaceId::new(),
+                decision_id: id,
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionError {
+                workspace,
+                decision_id: id,
+                error: SafeError {
+                    message: SafeMessage::new("Try again"),
+                    error_id: "retry".into(),
+                },
+            }),
+        );
+        assert!(state.decision_completions.is_empty());
+        snapshot(&mut state, vec![question.clone()]);
+        assert_eq!(state.decisions(), std::slice::from_ref(&question));
+        assert!(
+            matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
+            [Effect::ResolveDecision { decision_id, .. }] if *decision_id == id)
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionResolved {
+                workspace,
+                decision_id: id,
+            }),
+        );
+        snapshot(&mut state, vec![question, fresh.clone()]);
+        assert_eq!(state.decisions(), std::slice::from_ref(&fresh));
+        assert_eq!(
+            state.unread_decision_ids(),
+            &BTreeSet::from([fresh.decision_id])
+        );
+        assert_eq!(
+            state
+                .decision_overlay()
+                .unwrap()
+                .editor()
+                .unwrap()
+                .decision(),
+            &fresh
+        );
+        assert_eq!(state.decision_completions.len(), 1);
+        // A full observation without the settled ID also releases its marker.
+        snapshot(&mut state, vec![fresh]);
+        assert!(state.decision_completions.is_empty());
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // One human interaction covers inspection, cancellation, failure, retry, and confirmed disposal.
     fn decision_inbox_saved_answers_are_quiet_read_only_and_require_explicit_disposal() {
         let workspace = WorkspaceId::new();

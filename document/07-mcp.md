@@ -226,6 +226,8 @@ UTF-8 plain text、`output_offset`、`live`、`exit_code`、`returned_lines`、`
 
 ### User decision
 
+この節が質問の所有権、人間の回答、明示的な受信確認の契約の正本である。
+
 clientとdaemonの両方が [IPC revision 4のdecision契約](04-ipc.md#frame-と-handshake) に対応している必要がある。
 旧版が接続している場合はdecision操作をeffect zeroで拒否するため、daemonとMCP/TUI clientを更新・再接続する。
 
@@ -233,6 +235,8 @@ clientとdaemonの両方が [IPC revision 4のdecision契約](04-ipc.md#frame-�
 caller は同じ credential と `decision_id` で `get` を polling する。`get` は read-only で、応答を失っても回答と
 outbox は残る。`resolved` の回答を受信・保存した後、`user_decision_ack {"decision_id":"..."}` で明示的に受信確認する。
 ACK は owner / exact resume の継承 owner だけに許可し、保持中の同じ回答への重複 ACK は成功する。
+`resolve` は回答と delivery outbox を atomic に保存する。Agent PTY への自動配送は行わず、接続が切れても
+未 ACK の回答を保持し、認証済み owner の `get` / `list` と明示 ACK で回収する。
 作成応答を失って `decision_id` が分からない場合も、再 request の前に `list` から質問と未 ACK の回答を回収できる。
 `user_decision_list` は認証済み owner 集合（exact resume の継承分を含む）の pending と未 ACK の resolved を IPC frame 上限内の
 ページに分けて返す。最初は `{}`、応答の `next_cursor` が `null` になるまではその値を `cursor` に渡して次ページを取得する。
@@ -246,9 +250,13 @@ TUI の `Get` / `Resolve` / `Cancel` / `Discard` は optional な `workspace` ID
 TUI の参照は agent の受信 ACK を変更しない。依頼元 session が削除されても未 ACK の回答を保持し、
 人間が [保存済み回答の画面](03-tui.md#home-と-target) で明示確認したときだけ `Discard` で回答と outbox を同時に破棄できる。
 これは agent の受信確認ではない。pending や ACK 済みの record は破棄できず、idempotency key は tombstone に残す。
+人間の TUI 面は MCP caller credential を持たず、agent の `DispatchTool` と別の型付き IPC を使う。
+質問の `request` と明示的な `expire` は credential 付き agent 面に限定する。
 同じ idempotency key の request は同じ decision に収束する。明示した期限を過ぎてからの同一内容の再送も、
 保持中の元の decision とその回答・終了状態を返す。新規 request の期限は作成時に検証する。これにより人間の応答時間が MCP connection や caller
 credential の寿命を壊さず、daemon rollover / restart 後も store から継続できる。
+期限切れ、cancel、expire は terminal record のみを残し、回答 event を作らない。期限切れ処理は
+接続や次の MCP call を待たず、daemon の maintenance が行う。
 
 exact resume では、元の decision owner（workspace / session / caller / run）を新 runtime の owner shard に保存して引き継ぐ。
 旧版が同じ会話の途中で別 owner を作った場合も、保持中の exact resume lineage と binding で確認できた owner を追加で保存する。
@@ -525,14 +533,7 @@ sibling を exact filename と `ambiguous: true` の別 row として返し、`r
 sibling も衝突判定には含め、重複番号を参照する依存は `unmet_deps` に残す。番号 identity と明示 repair の正本は
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract) を参照する。
 
-TUI の人間回答面は MCP caller credential を持たない。daemon は agent 用 `DispatchTool` と別の型付き IPC
-request として `get` / `list` / `list_all` / `resolve` / `cancel` だけを受け付け、`request` と
-`expire` は credential 付き agent 面に限定する。`resolve` は回答と delivery outbox を atomic に保存してから
-`tools/call` の成功応答を返す。agent caller は同じ credential と `decision_id` で `get` を polling し、daemon は
-durable decision の owner と caller scope を照合して terminal decision を返した時点で event を ack する。回答を
-Agent PTY へ自動配送する経路は持たないため、MCP client disconnect では event を残し、同じ caller の次の `get` で
-収束する。期限切れ、cancel、expire は terminal record のみを残し、回答 event を作らない。deadline maintenance は
-接続や次の MCP call を待たずに期限を terminal 化する。
+TUI の人間回答面、Agent の所有権、回答の受信確認は [User decision](#user-decision) を参照する。
 
 ### 同じ session の Agent 間通信
 
