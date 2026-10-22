@@ -400,25 +400,42 @@ fn malformed_recovery_capacity_and_transaction_overflow_fail_without_writes() {
     json_file::write_atomic(dir.path(), &store.path(), &state).unwrap();
     assert!(store.load().unwrap_err().to_string().contains("hard limit"));
     std::fs::remove_file(store.path()).unwrap();
+    let append = |state: &mut State| {
+        state.decisions.push(item());
+    };
     assert!(
         store
-            .mutate(|state| {
-                state.decisions.push(item());
-            })
+            .mutate(append)
             .unwrap_err()
             .to_string()
             .contains("capacity")
     );
+    assert!(!store.path().exists());
+    let recovered = UserDecisionStore::new(dir.path());
+    recovered.mutate(append).unwrap();
+    assert_eq!(recovered.pending_all().unwrap().len(), 1);
+    std::fs::remove_file(store.path()).unwrap();
+    let append_decision = |state: &mut State| {
+        state.decisions.push(item());
+        if state.decisions.len() == 1 {
+            Ok(())
+        } else {
+            Err(UserDecisionError::IdempotencyConflict)
+        }
+    };
     assert_eq!(
-        store
-            .mutate_decision(|state| {
-                state.decisions.push(item());
-                Ok(())
-            })
-            .unwrap(),
+        store.mutate_decision(append_decision).unwrap(),
         Err(UserDecisionError::CapacityReached)
     );
     assert!(!store.path().exists());
+    recovered.mutate_decision(append_decision).unwrap().unwrap();
+    assert_eq!(recovered.pending_all().unwrap().len(), 1);
+    let committed = std::fs::read(recovered.path()).unwrap();
+    assert_eq!(
+        recovered.mutate_decision(append_decision).unwrap(),
+        Err(UserDecisionError::IdempotencyConflict)
+    );
+    assert_eq!(std::fs::read(recovered.path()).unwrap(), committed);
 }
 
 #[test]
