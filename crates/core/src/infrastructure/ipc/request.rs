@@ -324,6 +324,7 @@ pub enum DispatchToolAction {
     AgentInboxAck,
     UserDecisionRequest,
     UserDecisionGet,
+    UserDecisionAck,
     UserDecisionList,
     UserDecisionResolve,
     UserDecisionCancel,
@@ -331,6 +332,21 @@ pub enum DispatchToolAction {
 }
 
 impl DispatchToolAction {
+    /// Whether the action requires the explicit-receipt decision protocol.
+    #[must_use]
+    pub const fn is_user_decision(self) -> bool {
+        matches!(
+            self,
+            Self::UserDecisionRequest
+                | Self::UserDecisionGet
+                | Self::UserDecisionAck
+                | Self::UserDecisionList
+                | Self::UserDecisionResolve
+                | Self::UserDecisionCancel
+                | Self::UserDecisionExpire
+        )
+    }
+
     /// Whether this action only reads daemon state, so a fresh-connection retry
     /// re-reads safely.
     #[must_use]
@@ -383,6 +399,9 @@ pub struct UserDecisionCursor {
 /// only after following every cursor from the same revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserDecisionPage {
+    /// Legacy records fetched separately in bounded, revision-fenced chunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<crate::infrastructure::store::user_decision::wire::DecisionReference>,
     pub decisions: Vec<crate::domain::user_decision::UserDecision>,
     pub next_cursor: Option<UserDecisionCursor>,
 }

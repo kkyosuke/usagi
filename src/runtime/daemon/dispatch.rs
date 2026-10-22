@@ -921,6 +921,7 @@ pub(super) fn dispatch_pr_snapshot(
 #[derive(Debug)]
 pub(super) enum UserDecisionDispatchError {
     Decision(usagi_core::domain::user_decision::UserDecisionError),
+    Transport(usagi_core::infrastructure::store::user_decision::UserDecisionPageError),
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
@@ -1012,19 +1013,22 @@ pub(super) fn dispatch_user_decision(
             hello,
         );
     };
-    if !matches!(
-        action,
-        DispatchToolAction::UserDecisionRequest
-            | DispatchToolAction::UserDecisionGet
-            | DispatchToolAction::UserDecisionList
-            | DispatchToolAction::UserDecisionResolve
-            | DispatchToolAction::UserDecisionCancel
-            | DispatchToolAction::UserDecisionExpire
-    ) {
+    if !action.is_user_decision() {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
             body.clone(),
             hello,
+        );
+    }
+    if let Err(error) = usagi_core::infrastructure::ipc::require_user_decision_delivery(
+        hello.protocol,
+        &hello.capabilities,
+    ) {
+        return envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::Value::Null,
         );
     }
 
@@ -1090,6 +1094,23 @@ pub(super) fn dispatch_user_decision(
             };
             return user_decision_page::response(store, hello, &request_id, workspace, scope, payload);
         }
+        let overhead = serde_json::to_vec(&envelope(hello, request_id.clone(), ResponseOutcome::Ok, serde_json::Value::Null))
+            .expect("JSON envelope").len() - 4;
+        let budget = (hello.limits.max_frame_bytes as usize)
+            .min(usagi_core::infrastructure::ipc::DEFAULT_MAX_FRAME_BYTES).saturating_sub(overhead);
+        if budget < 2048 {
+            return Err(ProtocolError::new(ErrorCode::ResourceExhausted, "decision response envelope leaves insufficient frame space"));
+        }
+        let cursor: Option<usagi_core::infrastructure::ipc::UserDecisionCursor> =
+            serde_json::from_value(payload.get("cursor").cloned().unwrap_or(serde_json::Value::Null))
+                .map_err(|_| ProtocolError::new(ErrorCode::InvalidArgument, "invalid decision cursor"))?;
+        if cursor.is_some() && action != DispatchToolAction::UserDecisionGet {
+            return Err(ProtocolError::new(ErrorCode::InvalidArgument, "only get accepts a decision cursor"));
+        }
+        let render = |decision: &UserDecision| {
+            usagi_core::infrastructure::store::user_decision::wire::response(decision, cursor.as_ref(), budget)
+                .map_err(UserDecisionDispatchError::Transport)
+        };
         let request_owners = owners.clone();
         let decision_for = |id| -> Result<UserDecision, UserDecisionError> {
             let decision = store
@@ -1134,22 +1155,23 @@ pub(super) fn dispatch_user_decision(
                             resolved_at: None,
                         }, &owners)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    Ok(serde_json::json!(decision))
+                    render(&decision)
                 }
                 DispatchToolAction::UserDecisionGet => {
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
                         .map_err(|_| UserDecisionError::Terminal)?;
                     let decision = decision_for(input.decision_id)?;
-                    if owners.is_some() && decision.status != UserDecisionStatus::Pending {
-                        // Resolution creates a durable outbox entry atomically.
-                        // Polling the terminal decision is the acknowledgement;
-                        // no synchronous connection is kept open while a human
-                        // considers the answer.
-                        store
-                            .ack_event(input.decision_id)
-                            .map_err(|_| UserDecisionError::Terminal)?;
+                    render(&decision)
+                }
+                DispatchToolAction::UserDecisionAck => {
+                    let input = serde_json::from_value::<DecisionIdPayload>(payload)
+                        .map_err(|_| UserDecisionError::InvalidRequest)?;
+                    let decision = decision_for(input.decision_id)?;
+                    if owners.is_none() || decision.status != UserDecisionStatus::Resolved {
+                        return Err(UserDecisionError::Terminal.into());
                     }
-                    Ok(serde_json::json!(decision))
+                    store.ack_event(input.decision_id).map_err(|_| UserDecisionError::Terminal)?;
+                    Ok(serde_json::json!({"decision_id": input.decision_id, "acknowledged": true}))
                 }
                 DispatchToolAction::UserDecisionResolve => {
                     let input = serde_json::from_value::<ResolvePayload>(payload)
@@ -1158,7 +1180,7 @@ pub(super) fn dispatch_user_decision(
                     let decision = store
                         .resolve(workspace, input.decision_id, input.answer, now)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    Ok(serde_json::json!(decision))
+                    render(&decision)
                 }
                 DispatchToolAction::UserDecisionCancel | DispatchToolAction::UserDecisionExpire => {
                     let input = serde_json::from_value::<DecisionIdPayload>(payload)
@@ -1172,13 +1194,14 @@ pub(super) fn dispatch_user_decision(
                     let decision = store
                         .terminal(workspace, input.decision_id, status, now)
                         .map_err(|_| UserDecisionError::Terminal)??;
-                    Ok(serde_json::json!(decision))
+                    render(&decision)
                 }
                 _ => unreachable!(),
             }
         })();
         let value = result.map_err(|error| {
             let (code, message) = match error {
+                UserDecisionDispatchError::Transport(error) => return user_decision_page::page_error(error),
                 UserDecisionDispatchError::Decision(UserDecisionError::IdempotencyConflict) => (
                     ErrorCode::IdempotencyConflict,
                     "decision idempotency key conflicts",

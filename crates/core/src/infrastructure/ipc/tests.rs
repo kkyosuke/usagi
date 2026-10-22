@@ -168,6 +168,50 @@ fn server_and_readiness_policies_share_the_closed_capability_vocabulary() {
 }
 
 #[test]
+fn decision_delivery_requires_both_current_peers_and_an_advertised_contract() {
+    for (client_revision, server_revision, advertised, accepted) in [
+        (2, CURRENT_PROTOCOL_REVISION, true, false),
+        (CURRENT_PROTOCOL_REVISION, 2, false, false),
+        (
+            CURRENT_PROTOCOL_REVISION,
+            CURRENT_PROTOCOL_REVISION,
+            false,
+            false,
+        ),
+        (
+            CURRENT_PROTOCOL_REVISION,
+            CURRENT_PROTOCOL_REVISION,
+            true,
+            true,
+        ),
+    ] {
+        let mut client = hello();
+        client.supported_protocols[0].max_revision = client_revision;
+        let mut daemon = server();
+        daemon.supported_protocols[0].max_revision = server_revision;
+        if advertised {
+            daemon
+                .capabilities
+                .push(Capability::UserDecisionDelivery.wire_name().into());
+        }
+        // Older peers may still use every compatible non-decision family.
+        let negotiated = negotiate(&client, &daemon).unwrap();
+        let result = require_user_decision_delivery(negotiated.protocol, &negotiated.capabilities);
+        assert_eq!(result.is_ok(), accepted);
+        if !accepted {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, ErrorCode::CapabilityMissing);
+            assert_eq!(error.side_effect, SideEffect::None);
+            assert!(
+                error
+                    .message
+                    .contains("update the daemon and reconnect clients")
+            );
+        }
+    }
+}
+
+#[test]
 fn production_capability_wire_names_are_defined_only_in_the_ipc_vocabulary() {
     fn rust_sources(path: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(path).unwrap() {

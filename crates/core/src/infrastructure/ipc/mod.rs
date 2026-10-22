@@ -33,6 +33,10 @@ pub const TERMINAL_WIRE_GENERATION: u16 = 1;
 /// A peer that negotiates a lower revision keeps the legacy `replay` tail, so
 /// the daemon serves both during the migration window.
 pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
+/// Explicit answer receipts and bounded decision fragments require both peers
+/// to understand revision 3. Older revisions remain usable for other families.
+pub const USER_DECISION_DELIVERY_REVISION: u16 = 3;
+pub const CURRENT_PROTOCOL_REVISION: u16 = USER_DECISION_DELIVERY_REVISION;
 
 /// Closed vocabulary for capabilities exchanged during IPC negotiation.
 ///
@@ -52,6 +56,7 @@ pub enum Capability {
     WorkspaceFence,
     OwnerGenerationRouting,
     GenerationHandoff,
+    UserDecisionDelivery,
 }
 
 /// Stable metadata for one member of the capability vocabulary.
@@ -63,7 +68,7 @@ pub struct CapabilityDescriptor {
 
 impl Capability {
     /// Every capability understood by this build.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::RequestCorrelation,
         Self::PrSnapshot,
         Self::PrSubscription,
@@ -74,6 +79,7 @@ impl Capability {
         Self::WorkspaceFence,
         Self::OwnerGenerationRouting,
         Self::GenerationHandoff,
+        Self::UserDecisionDelivery,
     ];
 
     /// Stable wire spelling and protocol purpose.
@@ -119,6 +125,10 @@ impl Capability {
             Self::GenerationHandoff => CapabilityDescriptor {
                 wire_name: "daemon.generation-handoff.v1",
                 purpose: "re-decide authority during generation handoff",
+            },
+            Self::UserDecisionDelivery => CapabilityDescriptor {
+                wire_name: "user-decision.delivery.v1",
+                purpose: "observe decisions without acknowledging them and transfer bounded fragments",
             },
         }
     }
@@ -560,7 +570,7 @@ const BASE_CLIENT_REQUIRED_CAPABILITIES: [Capability; 3] = [
     Capability::BuildArtifact,
 ];
 
-const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 9] = [
+const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 10] = [
     Capability::RequestCorrelation,
     Capability::PrSnapshot,
     Capability::PrSubscription,
@@ -570,6 +580,7 @@ const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 9] = [
     Capability::TerminalInputOperation,
     Capability::WorkspaceFence,
     Capability::OwnerGenerationRouting,
+    Capability::UserDecisionDelivery,
 ];
 
 const STANDBY_READINESS_REQUIRED_CAPABILITIES: [Capability; 2] =
@@ -613,6 +624,27 @@ pub fn server_advertised_capabilities(role: GenerationRole) -> Vec<String> {
         capabilities.push(Capability::GenerationHandoff.wire_name().to_owned());
     }
     capabilities
+}
+
+/// A decision request must never fall back to implicit read acknowledgements or
+/// publish a partial inventory to a client that does not understand fragments.
+pub fn require_user_decision_delivery(
+    protocol: ProtocolVersion,
+    capabilities: &[String],
+) -> Result<(), ProtocolError> {
+    if protocol.generation == TERMINAL_WIRE_GENERATION
+        && protocol.revision >= USER_DECISION_DELIVERY_REVISION
+        && Capability::UserDecisionDelivery.is_advertised_by(capabilities)
+    {
+        return Ok(());
+    }
+    Err(ProtocolError::new(
+        ErrorCode::CapabilityMissing,
+        format!(
+            "user decisions require IPC revision {USER_DECISION_DELIVERY_REVISION} and {}; update the daemon and reconnect clients",
+            Capability::UserDecisionDelivery.wire_name()
+        ),
+    ))
 }
 
 /// Descriptors a standby hello must advertise before it can receive authority.

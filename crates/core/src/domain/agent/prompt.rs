@@ -44,7 +44,7 @@ const TOOLS_CLOSE: &str = "</tools>";
 /// MCP server is wired. It carries the pointer to the guide resource instead of
 /// the procedure itself, so the prompt does not restate what the guide owns.
 const SESSION_TOOLS: &str = "- session: session の作成・観測・委譲・完了報告は daemon が権威です。手順は resource usagi://guides/orchestration を読んでください。";
-const USER_DECISION_TOOLS: &str = "- user decision: 人への質問・確認・選択が必要な場合は usagi MCP の user_decision_request を使い、TUI で回答できるようにしてください。返された decision_id を user_decision_get で確認し、pending の間は回答に依存しない作業だけを進めてください。cancelled / expired を承認とみなさず、人の回答を代わりに送信しないでください。";
+const USER_DECISION_TOOLS: &str = "- user decision: 人への質問・確認・選択が必要な場合は usagi MCP の user_decision_request を使い、TUI で回答できるようにしてください。返された decision_id を user_decision_get で確認し、pending の間は回答に依存しない作業だけを進めてください。resolved の回答を受信したら user_decision_ack で受信確認してください。cancelled / expired を承認とみなさず、人の回答を代わりに送信しないでください。";
 const ISSUE_TOOLS: &str = "- issue: 作業の起点となる backlog を検索・参照できます。git 追跡下のため、書き込みは session worktree からだけ受理されます。";
 const MEMORY_TOOLS: &str = "- memory: session をまたいで残す判断や制約を検索・保存できます。";
 
