@@ -2771,7 +2771,11 @@ mod decision_inbox {
         let foreign = WorkspaceId::new();
         let answer = saved(foreign);
         let mut state = AppState::home(workspace, vec![]);
-        snapshot(&mut state, vec![answer.clone()]);
+        let mut cancelled = pending_decision(workspace);
+        cancelled.status = UserDecisionStatus::Cancelled;
+        let mut expired = pending_decision(workspace);
+        expired.status = UserDecisionStatus::Expired;
+        snapshot(&mut state, vec![answer.clone(), cancelled, expired]);
         assert!(state.decisions().is_empty());
         assert_eq!(state.decision_answers(), std::slice::from_ref(&answer));
         assert!(state.unread_decisions.is_empty());

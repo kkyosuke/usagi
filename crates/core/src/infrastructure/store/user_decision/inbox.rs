@@ -191,8 +191,10 @@ fn abandoned_answers_can_be_reviewed_and_discarded_to_recover_capacity() {
                     admitted.push(decision);
                     assert!(admitted.len() < 128);
                 }
-                Err(UserDecisionError::CapacityReached) => break,
-                other => panic!("{other:?}"),
+                Err(error) => {
+                    assert_eq!(error, UserDecisionError::CapacityReached);
+                    break;
+                }
             }
         }
     }
