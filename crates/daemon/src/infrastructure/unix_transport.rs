@@ -86,6 +86,7 @@ struct LocatorLockBarrier {
 struct LocatorLockSetupBarrier {
     ready: std::sync::Arc<std::sync::Barrier>,
     resume: std::sync::Arc<std::sync::Barrier>,
+    inherit_directory: bool,
 }
 
 #[cfg(test)]
@@ -188,10 +189,26 @@ fn pause_locator_lock_before_verify() {
 fn pause_next_locator_lock_after_setup(
     ready: std::sync::Arc<std::sync::Barrier>,
     resume: std::sync::Arc<std::sync::Barrier>,
+    inherit_directory: bool,
 ) {
     LOCATOR_LOCK_SETUP_BARRIER.with(|barrier| {
-        *barrier.borrow_mut() = Some(LocatorLockSetupBarrier { ready, resume });
+        *barrier.borrow_mut() = Some(LocatorLockSetupBarrier {
+            ready,
+            resume,
+            inherit_directory,
+        });
     });
+}
+
+#[cfg(test)]
+fn inherit_locator_setup_directory(directory: &fs::File) -> Option<fs::File> {
+    LOCATOR_LOCK_SETUP_BARRIER.with(|barrier| {
+        barrier
+            .borrow()
+            .as_ref()
+            .filter(|barrier| barrier.inherit_directory)
+            .map(|_| directory.try_clone().unwrap())
+    })
 }
 
 #[cfg(test)]
@@ -1474,6 +1491,11 @@ fn lock_private_node_within(daemon: &Path, name: &str, wait: Duration) -> io::Re
     // Never wait for the inode lock while holding the setup-directory lock.
     // Stale retirement holds the inode lock before repairing generation
     // directories, so retaining both in the opposite order would deadlock.
+    #[cfg(test)]
+    let _inherited_directory = inherit_locator_setup_directory(&directory);
+    // close alone leaves flock held if a concurrent fork inherited this open
+    // file description. CLOEXEC closes that copy only when the child execs.
+    FileExt::unlock(&directory)?;
     drop(directory);
     #[cfg(test)]
     pause_locator_lock_after_setup();
@@ -3969,7 +3991,19 @@ mod tests {
 
     #[test]
     fn locator_lock_releases_setup_directory_before_waiting_on_current() {
-        let temp = TempDir::new_in("/tmp").unwrap();
+        assert_locator_setup_released(false);
+    }
+
+    #[test]
+    fn locator_lock_releases_setup_directory_with_an_inherited_descriptor() {
+        // dup and fork share the same open file description and flock. Retain
+        // the duplicate through the wait to model a child paused before exec,
+        // without relying on process scheduling or forking the test harness.
+        assert_locator_setup_released(true);
+    }
+
+    fn assert_locator_setup_released(inherit_directory: bool) {
+        let temp = TempDir::new().unwrap();
         let daemon = temp.path().join("daemon");
         ensure_private_dir(&daemon).unwrap();
         let held = lock_locator(&daemon).unwrap();
@@ -3983,6 +4017,7 @@ mod tests {
                 pause_next_locator_lock_after_setup(
                     setup_ready_for_writer,
                     setup_resume_for_writer,
+                    inherit_directory,
                 );
                 lock_locator(&daemon)
             })
