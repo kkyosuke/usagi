@@ -3,9 +3,10 @@
 //! Archives are independent of session worktrees and never removed by session
 //! teardown. Failed snapshots leave the original artifacts intact.
 
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -16,6 +17,9 @@ use crate::domain::workspace_layout::{SESSIONS_DIR, STATE_DIR};
 
 /// Reserved session artifact directory, also used below `.usagi` for archives.
 pub const ARTIFACTS_DIR: &str = "artifacts";
+/// Optional list of user-facing paths relative to the artifact directory.
+pub const ARTIFACT_INDEX: &str = ".index.json";
+const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_DEPTH: usize = 64;
 
@@ -111,6 +115,91 @@ pub fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut result = Vec::new();
     walk(root, Path::new(""), &mut result, &mut 0)?;
     Ok(result)
+}
+
+/// Discover the deliverables offered in the sidebar, finder, and search.
+/// An explicit index curates entry points without listing their supporting
+/// assets. Older directories keep their readable documents and images visible.
+/// Archiving and external-view copies continue to use [`files`] to retain assets.
+///
+/// # Errors
+/// Refuses unsafe files, invalid indexes, and the same traversal limits as files.
+pub fn presented_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut available = files(root)?;
+    available.retain(|path| displayable_path(path));
+    match open_relative(root, Path::new(ARTIFACT_INDEX)) {
+        Ok(mut file) => {
+            if !file.metadata()?.is_file() {
+                return Err(invalid());
+            }
+            let selected = read_index(&mut file)?;
+            available.retain(|path| selected.contains(path));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            available.retain(|path| legacy_deliverable(path));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(available)
+}
+
+fn read_index(input: &mut dyn Read) -> io::Result<BTreeSet<PathBuf>> {
+    let mut bytes = Vec::new();
+    input.take(MAX_INDEX_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INDEX_BYTES {
+        return Err(invalid());
+    }
+    let paths: Vec<PathBuf> = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if paths.len() > MAX_ENTRIES
+        || paths.iter().any(|path| {
+            path.as_os_str().is_empty()
+                || path == Path::new(ARTIFACT_INDEX)
+                || path == Path::new(".gitignore")
+                || path
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+                || !displayable_path(path)
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(paths.into_iter().collect())
+}
+
+fn displayable_path(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|path| path.chars().all(presentation_character_is_safe))
+}
+
+fn legacy_deliverable(path: &Path) -> bool {
+    if path.components().any(|part| {
+        let name = part.as_os_str().to_string_lossy();
+        name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                "assets" | "logs" | "tmp" | "cache" | "node_modules" | "target"
+            )
+    }) {
+        return false;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "md" | "txt"
+                    | "html"
+                    | "htm"
+                    | "pdf"
+                    | "csv"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "webp"
+                    | "svg"
+            )
+        })
 }
 
 // Open through directory descriptors so swapped intermediate symlinks cannot
@@ -299,7 +388,7 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
 }
 
 fn append(root: &Path, directory: &Path, paths: &mut Vec<String>) -> io::Result<()> {
-    for relative in files(directory)? {
+    for relative in presented_files(directory)? {
         let path = directory.join(relative);
         let relative = path.strip_prefix(root).map_err(|_| invalid())?;
         if let Some(text) = relative.to_str()
@@ -343,7 +432,16 @@ pub fn contains(relative: &str, all: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
+
+    struct BrokenRead;
+
+    impl Read for BrokenRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("read failed"))
+        }
+    }
 
     fn session(root: &Path, name: &str) -> PathBuf {
         let session = root.join(STATE_DIR).join(SESSIONS_DIR).join(name);
@@ -358,6 +456,162 @@ mod tests {
             warnings.borrow_mut().push(message.to_owned());
         });
         (result, warnings.into_inner())
+    }
+
+    #[test]
+    fn legacy_lists_keep_documents_and_images_without_work_files_or_support_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = session(temp.path(), "legacy");
+        for directory in [
+            "nested",
+            "assets",
+            "logs",
+            "tmp",
+            "cache",
+            ".private",
+            "node_modules",
+            "target",
+        ] {
+            fs::create_dir(session.join("artifacts").join(directory)).unwrap();
+        }
+        for path in [
+            "nested/findings.md",
+            "preview.HTML",
+            "diagram.PNG",
+            "summary.txt",
+            "table.csv",
+            "build.log",
+            "build-report.ts",
+            "metrics.json",
+            "settings.toml",
+            "changes.patch",
+            "font.ttf",
+            "unknown",
+            "assets/chart.svg",
+            "logs/report.md",
+            "tmp/report.html",
+            "cache/image.png",
+            ".private/notes.txt",
+            "node_modules/readme.md",
+            "target/report.txt",
+        ] {
+            fs::write(session.join("artifacts").join(path), "content").unwrap();
+        }
+        fs::write(session.join("artifacts/hidden\u{1b}.md"), "unsafe name").unwrap();
+        assert_eq!(
+            list(&session, false).unwrap(),
+            [
+                "artifacts/diagram.PNG",
+                "artifacts/nested/findings.md",
+                "artifacts/preview.HTML",
+                "artifacts/summary.txt",
+                "artifacts/table.csv",
+            ]
+        );
+        assert_eq!(
+            presented_files(&session.join(ARTIFACTS_DIR)).unwrap().len(),
+            5
+        );
+    }
+
+    #[test]
+    fn an_index_curates_entry_points_and_archives_keep_their_supporting_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = session(temp.path(), "curated");
+        let output = session.join(ARTIFACTS_DIR);
+        fs::create_dir(output.join("assets")).unwrap();
+        for path in [
+            "report.html",
+            "summary.md",
+            "assets/chart.svg",
+            "assets/data.json",
+            "build.log",
+        ] {
+            fs::write(output.join(path), "content").unwrap();
+        }
+        fs::write(
+            output.join(ARTIFACT_INDEX),
+            r#"["report.html", "summary.md", "missing.pdf", "report.html"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            list(&session, false).unwrap(),
+            ["artifacts/report.html", "artifacts/summary.md"]
+        );
+        assert_eq!(presented_files(&output).unwrap().len(), 2);
+        let snapshot = archive(&session).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(snapshot.join("assets/data.json")).unwrap(),
+            "content"
+        );
+        assert!(snapshot.join(ARTIFACT_INDEX).is_file());
+        assert_eq!(presented_files(&snapshot).unwrap().len(), 2);
+        assert_eq!(list(temp.path(), true).unwrap().len(), 4);
+
+        // Explicitly requested data can be a deliverable even though legacy
+        // discovery hides uncurated JSON such as test metrics and config.
+        fs::write(output.join(ARTIFACT_INDEX), r#"["assets/data.json"]"#).unwrap();
+        assert_eq!(
+            list(&session, false).unwrap(),
+            ["artifacts/assets/data.json"]
+        );
+        fs::write(output.join(ARTIFACT_INDEX), "[]").unwrap();
+        assert!(list(&session, false).unwrap().is_empty());
+        assert_eq!(files(&output).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn indexes_reject_invalid_shapes_paths_limits_and_io_failures() {
+        for input in [
+            "",
+            "{}",
+            "[1]",
+            "[",
+            r#"[""]"#,
+            r#"["/etc/passwd"]"#,
+            r#"["../report.md"]"#,
+            r#"["a/../report.md"]"#,
+            r#"["./report.md"]"#,
+            r#"[".index.json"]"#,
+            r#"[".gitignore"]"#,
+            r#"["report\u001b.md"]"#,
+        ] {
+            assert!(read_index(&mut input.as_bytes()).is_err(), "{input}");
+        }
+        assert!(read_index(&mut "[]".as_bytes()).unwrap().is_empty());
+        let too_many = serde_json::to_vec(&vec!["report.md"; MAX_ENTRIES + 1]).unwrap();
+        assert!(read_index(&mut too_many.as_slice()).is_err());
+        let too_large = vec![b' '; usize::try_from(MAX_INDEX_BYTES + 1).unwrap()];
+        assert!(read_index(&mut too_large.as_slice()).is_err());
+
+        assert!(read_index(&mut BrokenRead).is_err());
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(ARTIFACT_INDEX)).unwrap();
+        assert!(presented_files(temp.path()).is_err());
+        fs::remove_dir(temp.path().join(ARTIFACT_INDEX)).unwrap();
+        fs::write(temp.path().join(ARTIFACT_INDEX), "not an index").unwrap();
+        assert!(presented_files(temp.path()).is_err());
+    }
+
+    #[test]
+    fn unreadable_indexes_fail_instead_of_publishing_unselected_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let index = temp.path().join(ARTIFACT_INDEX);
+        fs::write(&index, "[]").unwrap();
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = presented_files(temp.path());
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn presentation_paths_require_safe_utf8_without_lossy_substitution() {
+        assert!(displayable_path(Path::new("report.md")));
+        assert!(!displayable_path(Path::new("bad\u{1b}.md")));
+        let non_utf8 = std::ffi::OsString::from_vec(b"bad-\xff.txt".to_vec());
+        assert!(!displayable_path(Path::new(&non_utf8)));
     }
 
     #[test]
@@ -572,7 +826,7 @@ mod tests {
     #[test]
     fn traversal_limits_fail_without_publishing_a_partial_inventory() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("a"), "a").unwrap();
+        fs::write(temp.path().join("a.txt"), "a").unwrap();
         assert!(
             walk(temp.path(), Path::new(""), &mut Vec::new(), &mut {
                 MAX_ENTRIES
@@ -593,7 +847,7 @@ mod tests {
         assert!(files(&blocked.join("child")).is_err());
         assert!(list(&blocked.join("child"), true).is_err());
         assert!(copy_regular(File::open(temp.path()).unwrap(), &temp.path().join("copy")).is_err());
-        fs::write(temp.path().join("other"), "other").unwrap();
+        fs::write(temp.path().join("other.txt"), "other").unwrap();
         assert!(append(&blocked, temp.path(), &mut Vec::new()).is_err());
         let session = session(temp.path(), "many");
         let many = session.join(ARTIFACTS_DIR);

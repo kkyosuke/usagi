@@ -1204,10 +1204,10 @@ mod tests {
         fs::write(session.join("artifacts/execute.sh"), "exit 1").unwrap();
         let (files, changed, _) =
             load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
-        assert_eq!(files.len(), 3);
+        assert_eq!(files.len(), 2);
         assert!(changed.is_empty());
         let (all, _, _) = load_preview(temp.path(), None, PreviewFileFilter::AllArtifacts).unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 2);
         let (_, _, lines) = load_preview(
             &session,
             Some("artifacts/report.md"),
@@ -1268,6 +1268,13 @@ mod tests {
         )
         .unwrap();
         fs::write(session.join("artifacts/images/chart.svg"), "original chart").unwrap();
+        fs::write(
+            session.join("artifacts/.index.json"),
+            r#"["pages/report.html"]"#,
+        )
+        .unwrap();
+        let (listed, _, _) = load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
+        assert_eq!(listed, ["artifacts/pages/report.html"]);
         let view = artifact_open_view(
             &session,
             "artifacts/pages/report.html",

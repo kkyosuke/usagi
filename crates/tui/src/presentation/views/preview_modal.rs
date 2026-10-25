@@ -1456,7 +1456,7 @@ mod tests {
             vec![],
             vec![],
         );
-        assert!(joined(&state).contains("No artifacts yet"));
+        assert!(joined(&state).contains("No deliverables yet"));
         let path = ".usagi/sessions/one/artifacts/report.md".to_owned();
         complete_preview(
             &mut state,
