@@ -1270,6 +1270,10 @@ replacement generation の locator または socket を削除することはな�
 `current.lock` を含む lifecycle lock node の secure create / reopen と pathname identity の契約は
 [5. daemon data directory](05-daemon.md#daemon-data-directory) を正本とする。
 
+`current.lock` / `generations.lock` の作成・修復に使う directory setup lock は、inode lock の取得待ちに入る前に
+明示的に解除する。並行する子プロセスが directory fd を継承していても、子の exec や終了を待たずに setup lock を
+解放し、locator を保持する retire と directory 修復との lock 順序の逆転を防ぐ。
+
 lock を保持した locator writer は writer ごとに一意な private temporary file を `create_new` と
 `O_NOFOLLOW | O_CLOEXEC` で開き、file descriptor を `fchmod(0600)` した後に regular file・所有 UID・
 exact mode・`nlink == 1` を検証する。JSON 全体の write と file fsync 後にも同じ fd を再検証し、その場合だけ
