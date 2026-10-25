@@ -11620,16 +11620,11 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
     );
     let agent = empty_agent_runtime(DispatchStore::new(temporary.path().join("dispatch")));
     let decisions = UserDecisionStore::new(temporary.path().join("decisions"));
-    let prs = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
-        PrInventoryStore::new(temporary.path().join("prs")),
-        GenerationRole::Active,
-    ))));
     let call = |workspace, raw: &serde_json::Value| {
         super::attention::dispatch(
             &agent,
             &bound,
             &decisions,
-            &prs,
             workspace,
             usagi_core::infrastructure::ipc::RequestId("attention".into()),
             raw,
