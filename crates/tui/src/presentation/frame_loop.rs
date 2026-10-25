@@ -168,6 +168,7 @@ pub(super) fn home_frame_material(
         metrics,
         health,
         Arc::new(git_diffs.clone()),
+        Arc::new(BTreeMap::new()),
         managed_terminal_view,
         root_terminal_view.as_deref(),
         create_pending,
@@ -190,6 +191,7 @@ pub(super) fn home_frame_material_shared(
     metrics: Option<usagi_core::infrastructure::ipc::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    artifact_counts: Arc<BTreeMap<SessionId, usize>>,
     managed_terminal_view: Option<Arc<TerminalViewProjection>>,
     root_terminal_view: Option<&TerminalViewProjection>,
     create_pending: Option<&str>,
@@ -216,6 +218,7 @@ pub(super) fn home_frame_material_shared(
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
         .with_shared_git_diffs(git_diffs)
+        .with_artifact_counts(artifact_counts)
         .with_shared_terminal_view(managed_terminal_view)
         .with_director_drawer(runtime.director_projection().clone())
         .with_root_terminal_drawer(root_terminal_projection)
@@ -1415,6 +1418,7 @@ pub(super) fn drive_workspace_controller(
                 metrics_projection.metrics(),
                 metrics_projection.health(),
                 metrics_projection.shared_git_diffs(),
+                metrics_projection.shared_artifact_counts(),
                 if runtime.state().workspace_drawer_open() {
                     background_terminal_view.as_ref().map(Arc::clone)
                 } else {

@@ -126,13 +126,12 @@ fn artifacts_click_matches_the_visible_width_and_lifecycle() {
         SessionLifecycle::Failed,
     ] {
         for sidebar_width in [15_u16, 16, 36] {
-            let start = sidebar_width - u16::try_from(SIDEBAR_ARTIFACTS_LABEL.len()).unwrap();
+            let start = sidebar_width - 3; // package glyph, space, and one-digit count
             for column in [start - 1, start, sidebar_width - 1, sidebar_width] {
                 let mut state = sized_home(workspace, vec![session], sidebar_width + 2, 30);
                 state.session_lifecycles.insert(session, lifecycle(phase));
                 let effects = pointer_effects(&mut state, column, 4, std::time::Duration::ZERO);
-                let visible = phase.capabilities().can_use
-                    && usize::from(sidebar_width) >= SIDEBAR_ARTIFACTS_MIN_WIDTH;
+                let visible = phase.capabilities().can_use && sidebar_width >= 16;
                 let opens_artifacts = visible && (start..sidebar_width).contains(&column);
                 assert_eq!(
                     matches!(effects.as_slice(), [Effect::LoadPreview {

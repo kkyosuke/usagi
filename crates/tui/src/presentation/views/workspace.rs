@@ -51,8 +51,7 @@ use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, Overlay, PrOverlay,
-    PreviewOverlay, SIDEBAR_ARTIFACTS_LABEL, SIDEBAR_ARTIFACTS_MIN_WIDTH, Selection,
-    SessionRoleProjection, Target, TargetPhase,
+    PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
 use crate::usecase::application::metrics::GitDiff;
 use crate::usecase::application::pane::{
@@ -88,6 +87,9 @@ const MEMORY_ICON: &str = "\u{f233}";
 const AGENT_ICON: &str = "\u{f085}";
 const DECISION_NOTICE_ICON: &str = "\u{f0f3}";
 const PR_ICON: &str = "\u{ea64}";
+/// nf-md-package_variant: a box for generated artifacts.
+const ARTIFACT_ICON: &str = "\u{f03d6}";
+const SIDEBAR_ARTIFACTS_MIN_WIDTH: usize = 16;
 const SESSION_CURSOR_ICON: &str = "\u{f0907}";
 const SWITCH_ICON: &str = "\u{f0ec}";
 const CLOSEUP_ICON: &str = "\u{f00e}";
@@ -100,6 +102,7 @@ struct IconSet {
     agents: &'static str,
     decision: &'static str,
     pull_request: &'static str,
+    artifacts: &'static str,
     session_cursor: &'static str,
     note: &'static str,
 }
@@ -112,6 +115,7 @@ const fn icon_set(mode: IconMode) -> IconSet {
             agents: AGENT_ICON,
             decision: DECISION_NOTICE_ICON,
             pull_request: PR_ICON,
+            artifacts: ARTIFACT_ICON,
             session_cursor: SESSION_CURSOR_ICON,
             note: NOTE_ICON,
         },
@@ -121,6 +125,7 @@ const fn icon_set(mode: IconMode) -> IconSet {
             agents: "Agents",
             decision: "!",
             pull_request: "PR",
+            artifacts: "Artifacts",
             session_cursor: ">",
             note: "▤",
         },
@@ -316,6 +321,10 @@ fn pr_summary(visible: usize, mode: IconMode) -> Option<String> {
     })
 }
 
+fn artifacts_summary(count: usize, mode: IconMode) -> Option<String> {
+    (count > 0).then(|| format!("{} {count}", icon_set(mode).artifacts))
+}
+
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
@@ -373,6 +382,8 @@ pub struct HomeProjection {
     /// sidebar の git 差分列。stable `SessionId` で session 行に結合する非永続の描画素材で、
     /// controller state には持たせない。空なら差分列を描かず metrics 導入前の frame を保つ。
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    /// File counts refreshed off the frame thread, joined by stable session ID.
+    artifact_counts: Arc<BTreeMap<SessionId, usize>>,
     /// 選択中 live terminal の viewport 素材。`None` は live terminal 非表示で、右ペインは
     /// 既存の pane strip をそのまま描く。
     terminal_view: Option<Arc<TerminalViewProjection>>,
@@ -760,6 +771,7 @@ impl HomeProjection {
             client_build: None,
             health: DaemonHealthTracker::default(),
             git_diffs: Arc::new(BTreeMap::new()),
+            artifact_counts: Arc::new(BTreeMap::new()),
             terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
@@ -1224,6 +1236,24 @@ impl HomeProjection {
     ) -> Self {
         self.git_diffs = diffs;
         self
+    }
+
+    /// Attach background artifact counts without reading the filesystem in a frame.
+    #[must_use]
+    pub fn with_artifact_counts(mut self, counts: Arc<BTreeMap<SessionId, usize>>) -> Self {
+        self.artifact_counts = counts;
+        self
+    }
+
+    fn artifacts_action(&self, session: &ProjectedSession, width: usize) -> Option<String> {
+        if !session.lifecycle.capabilities().can_use || width < SIDEBAR_ARTIFACTS_MIN_WIDTH {
+            return None;
+        }
+        artifacts_summary(
+            self.artifact_counts.get(&session.id).copied().unwrap_or(0),
+            self.icon_mode,
+        )
+        .filter(|label| widgets::display_width(label) < width)
     }
 
     /// Attach the focused live terminal's viewport rows, scroll offset and
@@ -3149,13 +3179,10 @@ fn home_row_lines_at(
             .session_agents
             .get(&session.id)
             .map_or(&[][..], Vec::as_slice);
-        let show_artifacts =
-            session.lifecycle.capabilities().can_use && width >= SIDEBAR_ARTIFACTS_MIN_WIDTH;
-        let agent_width = if show_artifacts {
-            width - SIDEBAR_ARTIFACTS_LABEL.len() - 1
-        } else {
-            width
-        };
+        let artifacts = home.artifacts_action(session, width);
+        let agent_width = artifacts
+            .as_ref()
+            .map_or(width, |label| width - widgets::display_width(label) - 1);
         let agent_line = sidebar_agent_line_with_icon_mode(
             agents,
             agent_width,
@@ -3167,8 +3194,8 @@ fn home_row_lines_at(
         vec![
             first,
             widgets::pad_to_width(&metadata, width),
-            if show_artifacts {
-                with_artifacts_action(&agent_line, width)
+            if let Some(label) = artifacts {
+                with_artifacts_action(&agent_line, width, &label)
             } else {
                 agent_line
             },
@@ -3178,21 +3205,15 @@ fn home_row_lines_at(
     }
 }
 
-fn with_artifacts_action(agents: &str, width: usize) -> String {
-    if width < SIDEBAR_ARTIFACTS_MIN_WIDTH {
-        return agents.to_owned();
-    }
-    let remaining = width - SIDEBAR_ARTIFACTS_LABEL.len();
+fn with_artifacts_action(agents: &str, width: usize, label: &str) -> String {
+    let remaining = width - widgets::display_width(label);
     format!(
         "{}{}",
         widgets::pad_to_width(
             &widgets::clip_to_width(agents.trim_end(), remaining - 1),
             remaining
         ),
-        Role::Info
-            .style()
-            .underline()
-            .paint(SIDEBAR_ARTIFACTS_LABEL),
+        Role::Info.style().underline().paint(label),
     )
 }
 
@@ -4072,14 +4093,25 @@ mod tests {
 
     #[test]
     fn artifacts_action_is_flush_right_and_keeps_narrow_rows_unchanged() {
-        for width in [16, 36] {
-            let line = with_artifacts_action("  Agents: running", width);
-            assert_eq!(widgets::display_width(&line), width);
-            assert!(widgets::strip_ansi(&line).ends_with("Artifacts"));
+        for mode in [IconMode::NerdFont, IconMode::Text] {
+            let label = super::artifacts_summary(2, mode).unwrap();
+            for width in [16, 36] {
+                let line = with_artifacts_action("  Agents: running", width, &label);
+                assert_eq!(widgets::display_width(&line), width);
+                assert!(widgets::strip_ansi(&line).ends_with(&label));
+            }
+            let padded = widgets::pad_to_width("  —", 36);
+            assert!(!with_artifacts_action(&padded, 36, &label).contains('…'));
         }
-        assert_eq!(with_artifacts_action("  —", 10), "  —");
-        let padded = widgets::pad_to_width("  —", 36);
-        assert!(!with_artifacts_action(&padded, 36).contains('…'));
+        assert_eq!(
+            super::artifacts_summary(2, IconMode::NerdFont),
+            Some(format!("{} 2", super::ARTIFACT_ICON))
+        );
+        assert_eq!(
+            super::artifacts_summary(2, IconMode::Text).as_deref(),
+            Some("Artifacts 2")
+        );
+        assert_eq!(super::artifacts_summary(0, IconMode::NerdFont), None);
     }
 
     #[test]
@@ -4094,23 +4126,37 @@ mod tests {
             for icon_mode in [IconMode::NerdFont, IconMode::Text] {
                 let home = home_with_session_states(&[(lifecycle, None)]).with_icon_mode(icon_mode);
                 let selection = Selection::Target(Target::Session(home.sessions[0].id));
-                for width in [15, 16, LEFT_WIDTH] {
-                    let lines = home_row_lines_at(
-                        width,
-                        &home,
-                        selection,
-                        SidebarDiffColumns::default(),
-                        0,
-                        now(),
-                    );
-                    let visible = lifecycle.capabilities().can_use
-                        && width >= super::SIDEBAR_ARTIFACTS_MIN_WIDTH;
-                    assert_eq!(
-                        strip(&lines[2]).ends_with("Artifacts"),
-                        visible,
-                        "{lifecycle:?}, {icon_mode:?}, width {width}"
-                    );
-                    assert_eq!(widgets::display_width(&lines[2]), width);
+                for count in [None, Some(0), Some(1), Some(12), Some(usize::MAX)] {
+                    let counts = count.map(|count| (home.sessions[0].id, count));
+                    let home = home
+                        .clone()
+                        .with_artifact_counts(Arc::new(counts.into_iter().collect()));
+                    for width in [15, 16, LEFT_WIDTH] {
+                        let lines = home_row_lines_at(
+                            width,
+                            &home,
+                            selection,
+                            SidebarDiffColumns::default(),
+                            0,
+                            now(),
+                        );
+                        let label = super::artifacts_summary(count.unwrap_or(0), icon_mode);
+                        let visible = lifecycle.capabilities().can_use
+                            && width >= super::SIDEBAR_ARTIFACTS_MIN_WIDTH
+                            && label
+                                .as_ref()
+                                .is_some_and(|label| widgets::display_width(label) < width);
+                        let rendered = strip(&lines[2]);
+                        assert_eq!(
+                            rendered.contains(super::icon_set(icon_mode).artifacts),
+                            visible,
+                            "{lifecycle:?}, {icon_mode:?}, count {count:?}, width {width}"
+                        );
+                        if visible {
+                            assert!(rendered.ends_with(label.as_ref().unwrap()));
+                        }
+                        assert_eq!(widgets::display_width(&lines[2]), width);
+                    }
                 }
             }
         }

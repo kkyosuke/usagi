@@ -1369,7 +1369,13 @@ impl SessionRefreshPort for DaemonSessionRefreshPort {
     }
 }
 
-/// The mascot's metrics and the sidebar's git columns.
+struct SessionSidebarObservation {
+    session: SessionId,
+    git_diff: Option<GitDiff>,
+    artifact_count: usize,
+}
+
+/// The mascot's metrics and the sidebar's Git and artifact observations.
 ///
 /// `latest` used to sample the daemon inline behind a one-second cache, but that
 /// one sample per second still opened a fresh bootstrapped connection **on the
@@ -1380,8 +1386,9 @@ struct DaemonMetricsPort {
     metrics: RefreshPump<Option<DaemonMetrics>>,
     latest: Option<DaemonMetrics>,
     git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
+    artifact_counts: BTreeMap<SessionId, usize>,
     git_sessions: Vec<(usagi_core::domain::id::SessionId, PathBuf)>,
-    git_receiver: Option<mpsc::Receiver<(usagi_core::domain::id::SessionId, GitDiff)>>,
+    git_receiver: Option<mpsc::Receiver<SessionSidebarObservation>>,
     last_git_refresh: Option<Instant>,
 }
 
@@ -1394,6 +1401,7 @@ impl DaemonMetricsPort {
             metrics: spawn_metrics_pump(),
             latest: None,
             git_diffs: BTreeMap::new(),
+            artifact_counts: BTreeMap::new(),
             git_sessions: Vec::new(),
             git_receiver: None,
             last_git_refresh: None,
@@ -1420,20 +1428,33 @@ impl MetricsPort for DaemonMetricsPort {
             updates.push(MetricsUpdate::Metrics(sample));
         }
         let mut git_changed = false;
+        let mut artifacts_changed = false;
         if let Some(sessions) = sessions {
             self.git_sessions = sessions.to_vec();
             let active_ids = sessions.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
             let before = self.git_diffs.len();
             self.git_diffs.retain(|id, _| active_ids.contains(id));
             git_changed |= self.git_diffs.len() != before;
+            let before = self.artifact_counts.len();
+            self.artifact_counts.retain(|id, _| active_ids.contains(id));
+            artifacts_changed |= self.artifact_counts.len() != before;
         }
         let mut finished = false;
         if let Some(receiver) = &self.git_receiver {
             loop {
                 match receiver.try_recv() {
-                    Ok((id, status)) => {
-                        git_changed |= self.git_diffs.get(&id) != Some(&status);
-                        self.git_diffs.insert(id, status);
+                    Ok(observation) => {
+                        let id = observation.session;
+                        if !self.git_sessions.iter().any(|(active, _)| *active == id) {
+                            continue;
+                        }
+                        if let Some(status) = observation.git_diff {
+                            git_changed |= self.git_diffs.get(&id) != Some(&status);
+                            self.git_diffs.insert(id, status);
+                        }
+                        artifacts_changed |=
+                            self.artifact_counts.get(&id) != Some(&observation.artifact_count);
+                        self.artifact_counts.insert(id, observation.artifact_count);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -1457,19 +1478,26 @@ impl MetricsPort for DaemonMetricsPort {
             thread::spawn(move || {
                 let runner = SystemGit;
                 for (id, path) in sessions {
-                    let Ok(Some(status)) = diff_status(&runner, &path) else {
-                        continue;
-                    };
-                    let _ = sender.send((
-                        id,
-                        GitDiff {
-                            base: status.base,
-                            ahead: status.ahead,
-                            behind: status.behind,
-                            added: status.added,
-                            removed: status.removed,
-                        },
-                    ));
+                    let artifact_count = usagi_core::infrastructure::artifacts::files(
+                        &path.join(usagi_core::infrastructure::artifacts::ARTIFACTS_DIR),
+                    )
+                    .map_or(0, |files| files.len());
+                    let git_diff =
+                        diff_status(&runner, &path)
+                            .ok()
+                            .flatten()
+                            .map(|status| GitDiff {
+                                base: status.base,
+                                ahead: status.ahead,
+                                behind: status.behind,
+                                added: status.added,
+                                removed: status.removed,
+                            });
+                    let _ = sender.send(SessionSidebarObservation {
+                        session: id,
+                        git_diff,
+                        artifact_count,
+                    });
                 }
             });
             self.git_receiver = Some(receiver);
@@ -1477,6 +1505,9 @@ impl MetricsPort for DaemonMetricsPort {
         }
         if git_changed {
             updates.push(MetricsUpdate::GitDiffs(self.git_diffs.clone()));
+        }
+        if artifacts_changed {
+            updates.push(MetricsUpdate::ArtifactCounts(self.artifact_counts.clone()));
         }
         updates
     }

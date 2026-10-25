@@ -1991,9 +1991,6 @@ pub(crate) const SIDEBAR_CHROME_ROWS: usize = 2;
 /// Desired Home sidebar left-pane width. The split clamps it to leave the right
 /// pane at least one column. Mirrors `views::workspace`'s `LEFT_WIDTH`.
 pub(crate) const SIDEBAR_LEFT_WIDTH: usize = 36;
-/// Shared geometry of the generated-file action on a session's Agent row.
-pub(crate) const SIDEBAR_ARTIFACTS_LABEL: &str = "Artifacts";
-pub(crate) const SIDEBAR_ARTIFACTS_MIN_WIDTH: usize = 16;
 /// Established session-row footprint: summary, change history, and Agent states.
 /// Presentation resolves pointer targets using its actual rendered layout.
 pub(crate) const SIDEBAR_SESSION_ROW_LINES: usize = 3;
