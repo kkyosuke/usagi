@@ -54,6 +54,41 @@ fn file(root: &Path, path: &str) {
 }
 
 #[test]
+fn artifact_search_respects_curated_reports_and_legacy_work_file_exclusions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for path in [
+        ".usagi/sessions/one/artifacts/report.html",
+        ".usagi/sessions/one/artifacts/report-draft.md",
+        ".usagi/sessions/one/artifacts/assets/report.png",
+        ".usagi/sessions/two/artifacts/report.md",
+        ".usagi/sessions/two/artifacts/report.log",
+        ".usagi/sessions/two/artifacts/report.ts",
+        ".usagi/sessions/two/artifacts/report-metrics.json",
+    ] {
+        file(root, path);
+    }
+    fs::write(
+        root.join(".usagi/sessions/one/artifacts/.index.json"),
+        r#"["report.html"]"#,
+    )
+    .unwrap();
+    let mut port = UnifiedSearch::new(root, Box::<Terminals>::default());
+    let mut query = query(root);
+    query.scope = Scope::Artifact;
+    let result = port.search(&query, Arc::default());
+    assert!(result.errors.is_empty());
+    let paths = result
+        .artifacts
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 2);
+    assert!(paths.contains(&".usagi/sessions/one/artifacts/report.html"));
+    assert!(paths.contains(&".usagi/sessions/two/artifacts/report.md"));
+}
+
+#[test]
 fn unified_search_combines_sources_and_isolates_current_session_before_project_limit() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

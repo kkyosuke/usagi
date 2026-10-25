@@ -109,7 +109,27 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `artifacts/` を用意する。
 新規の `artifacts/.gitignore` には `*` を書き、生成物を Git の未追跡差分から除外する。既存の ignore file は上書きしない。
 この準備に失敗した場合は、作成した Git worktree・branch と session tree を補償処理で取り消す。mirror 内の repository も対象とする。
-Agent の起動指示は調査結果・設計書・画像・HTML・検証レポートをこの場所へ保存するよう案内する。
+`artifacts/` はユーザーに提示する成果物の保存先であり、この節が保存対象と一覧への掲載規則の正本である。
+Agent の起動指示は次の区分を案内する。
+
+| 保存先 | 対象 |
+|---|---|
+| `artifacts/` | ユーザーに見せる調査結果、表示用 HTML・画像、検証結果の要約 |
+| `artifacts/assets/` | HTML などの表示に必要な画像・font・補助データ。単独で提示しない素材は一覧へ登録しない |
+| worktree 内の `.work/` など Git 対象外の作業領域 | 生ログ、途中経過、補助スクリプト、一時設定、キャッシュ。Agent が `.work/.gitignore` に `*` を書く |
+
+Agent は提示するファイルを保存した後、`artifacts/.index.json` を相対パスの JSON 配列として更新し、既存の提示対象を保持する。
+たとえば `["findings.md", "preview.html", "verification.txt"]` とすると、この3件だけを sidebar の件数・一覧・統合検索へ出す。
+`.index.json` 自体、未登録の素材・作業ファイル、存在しないパスは表示しない。重複は1件にまとめ、空の配列は表示対象なしとする。
+明示登録したファイルは拡張子を制限せず、ユーザーが指定したデータ形式も提示できる。
+index は1 MiB・20,000件までとし、絶対パス・パス逸脱・制御文字・管理ファイルの登録と不正な JSON は拒否する。
+不正な index を読み込めない場合に、未登録のファイルを代わりに表示することはない。
+
+index のない既存 directory は `md` / `txt` / `html` / `htm` / `pdf` / `csv` と画像
+`png` / `jpg` / `jpeg` / `gif` / `webp` / `svg` を表示する（拡張子の大文字小文字は区別しない）。
+ドットで始まるパス要素と `assets` / `logs` / `tmp` / `cache` / `node_modules` / `target` の下は表示しない。
+既存ファイルの削除・自動移動は行わず、過去の保存先にも index を追加して提示対象を絞れる。
+
 旧 session でディレクトリが無い場合は Agent が作成する。コードとして管理するファイルは従来どおり Git / PR に載せる。
 生成中の保存先は session 内の `artifacts/` であり、保管先の `.usagi/artifacts/` は workspace root を基準にする。
 Agent が生成するときに root 側へ直接書き込む必要はない。全 session の一覧は両方の保存先を表示する。
@@ -118,6 +138,7 @@ session の削除と orphan worktree の cleanup は、Git / filesystem の削�
 `.usagi/artifacts/<name>/<snapshot-id>/` へコピーする。snapshot ID は毎回新しい UUID で、同名 session の再作成や
 削除の再試行でも既存の成果物を上書きしない。空の出力は保管しない。コピー元は変更しないため、削除が失敗した場合も
 作業中の成果物が残る。再試行時には別の snapshot が作られることがある。
+保管は index と未登録の補助素材も含めた directory 全体を対象とし、保管後の一覧でも同じ掲載規則を使う。
 
 コピーは `.partial-<id>` へ行い、ファイルとディレクトリを同期してから公開名へ rename する。
 snapshot の root・各 directory は本人だけが到達できる `0700`、file は `0600` で作成し、保管によって他の OS user へ公開しない。

@@ -50,7 +50,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 | 過去の Issue や Memory の本文を探したい | [Issue・Memory 検索](document/03-tui.md#issue-と-memory-の検索) で検索・閲覧できる |
-| session ごとの生成物を探しづらい | 生成物がある session 行の [Artifacts アイコンと件数](document/03-tui.md#artifacts)から閲覧でき、外部表示の失敗・未確認も一覧内で確認できる。削除後の保管済み成果物も検索できる |
+| 調査結果や確認用の HTML・画像を探しづらい | ユーザー向け成果物がある session 行の [Artifacts アイコンと件数](document/03-tui.md#artifacts)から閲覧できる。ログや補助ファイルを一覧から外し、削除後の保管済み成果物も検索できる |
 
 `Ctrl-O` → `Ctrl-F` で統合検索を開き、`Tab` で検索対象を切り替えられます。
 小さい画面でも選択中の結果を優先して表示します。

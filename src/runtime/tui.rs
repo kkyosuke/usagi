@@ -1478,7 +1478,7 @@ impl MetricsPort for DaemonMetricsPort {
             thread::spawn(move || {
                 let runner = SystemGit;
                 for (id, path) in sessions {
-                    let artifact_count = usagi_core::infrastructure::artifacts::files(
+                    let artifact_count = usagi_core::infrastructure::artifacts::presented_files(
                         &path.join(usagi_core::infrastructure::artifacts::ARTIFACTS_DIR),
                     )
                     .map_or(0, |files| files.len());

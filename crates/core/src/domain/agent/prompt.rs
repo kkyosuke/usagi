@@ -30,7 +30,7 @@ pub enum PromptScope {
 
 const ROOT_SCOPE: &str = "<context>\nあなたは usagi が管理するワークスペースの root ディレクトリ（統括環境）で起動されています。\n</context>\n<instructions>\n受け取った指示をもとに、どのようなタスクを各セッションに実行させるべきかを判別してください。\n</instructions>";
 
-const SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n調査結果・設計書・画像・HTML・検証レポートなどの生成物は、この worktree の artifacts/ に保存してください。ディレクトリがなければ作成し、artifacts/.gitignore に * を記載して Git 追跡から除外してください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
+const SESSION_SCOPE: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\nartifacts/ はユーザーに見せる成果物の保存先です。提示する調査結果、表示用 HTML・画像、検証結果の要約だけを保存してください。生ログ、途中経過、補助スクリプト、一時設定、キャッシュは artifacts/ に入れず、この worktree 内の .work/ など Git 対象外の作業領域へ保存してください。ディレクトリがなければ作成し、artifacts/.gitignore と .work/.gitignore に * を記載して Git 追跡から除外してください。保存後は artifacts/.index.json を成果物の相対パスの JSON 配列（例: [\"report.md\", \"preview.html\"]）として更新し、既存の提示対象を保持してください。HTML の素材や補助データは artifacts/assets/ に置き、単独で提示しないファイルは一覧へ登録しないでください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
 
 const TOOLS_OPEN: &str = "<tools>\ntool 名と引数は tools/list のスキーマが正本です。";
 const TOOLS_CLOSE: &str = "</tools>";
@@ -105,7 +105,7 @@ mod tests {
 
     /// Stable session boundary. Tool availability lives in the separate tools
     /// fragment so this text names no concrete tool.
-    const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\n調査結果・設計書・画像・HTML・検証レポートなどの生成物は、この worktree の artifacts/ に保存してください。ディレクトリがなければ作成し、artifacts/.gitignore に * を記載して Git 追跡から除外してください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
+    const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\nartifacts/ はユーザーに見せる成果物の保存先です。提示する調査結果、表示用 HTML・画像、検証結果の要約だけを保存してください。生ログ、途中経過、補助スクリプト、一時設定、キャッシュは artifacts/ に入れず、この worktree 内の .work/ など Git 対象外の作業領域へ保存してください。ディレクトリがなければ作成し、artifacts/.gitignore と .work/.gitignore に * を記載して Git 追跡から除外してください。保存後は artifacts/.index.json を成果物の相対パスの JSON 配列（例: [\"report.md\", \"preview.html\"]）として更新し、既存の提示対象を保持してください。HTML の素材や補助データは artifacts/assets/ に置き、単独で提示しないファイルは一覧へ登録しないでください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
 
     const ALL: McpToolFamilies = McpToolFamilies {
         issue: true,
@@ -142,6 +142,20 @@ mod tests {
         for scope in [PromptScope::Root, PromptScope::Session] {
             assert_eq!(launch_system_prompt(scope, None, None), scope_prompt(scope));
         }
+    }
+
+    #[test]
+    fn session_artifacts_are_curated_deliverables_and_work_files_have_a_separate_home() {
+        let prompt = launch_system_prompt(PromptScope::Session, None, None);
+        assert!(prompt.contains("ユーザーに見せる成果物"));
+        assert!(prompt.contains("調査結果、表示用 HTML・画像、検証結果の要約だけ"));
+        assert!(prompt.contains("生ログ、途中経過、補助スクリプト、一時設定、キャッシュ"));
+        assert!(prompt.contains(".work/"));
+        assert!(prompt.contains("artifacts/.index.json"));
+        assert!(prompt.contains(r#"["report.md", "preview.html"]"#));
+        assert!(prompt.contains("既存の提示対象を保持"));
+        assert!(prompt.contains("artifacts/assets/"));
+        assert!(!scope_prompt(PromptScope::Root).contains("artifacts/"));
     }
 
     #[test]

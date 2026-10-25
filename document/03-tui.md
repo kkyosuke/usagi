@@ -1854,8 +1854,9 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 | Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
 
-Artifacts は生成物の実ファイルがある利用可能な session だけ、Agent 状態行の右端にアイコンと件数を下線付きで表示する。
-空の directory とルートの `.gitignore` は数えない。未取得・取得失敗時も表示しない。件数は背景で約1秒ごとに更新する。
+Artifacts はユーザー向けの成果物がある利用可能な session だけ、Agent 状態行の右端にアイコンと件数を下線付きで表示する。
+件数・一覧・統合検索は[成果物の掲載規則](05-daemon.md#session-artifacts-と削除前の保管)に従う。
+未取得・取得失敗時は表示しない。件数は背景で約1秒ごとに更新する。
 表示は [Icons 設定](#settings-scope-と-workspace-entry)に従い、`text` では `Artifacts N` とする。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は[統合検索](#統合検索)を開く。`Tab` で Artifact を選ぶと成果物を横断検索できる。
 sidebar が16桁未満の場合は label を省略し、`artifact` コマンドまたは統合検索から開く。
@@ -1888,9 +1889,9 @@ HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
 アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。
 未確認の helper やアプリは終了させず、自然終了を回収する。失敗が確認できたコピーは取り除く。
-本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には `artifacts/` への保存案内を表示する。
+本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には調査結果・HTML・画像を `artifacts/` へ保存する案内を表示する。
 
-Git の tracked / changed / ignore 判定を使わず、`artifacts/` のファイルを列挙する。横断一覧は
+Git の tracked / changed / ignore 判定を使わず、`artifacts/` の掲載対象ファイルを列挙する。横断一覧は
 `.usagi/sessions/<name>/artifacts/` と `.usagi/artifacts/<name>/<snapshot-id>/` を対象とし、作成途中の保管先は表示しない。
 ファイル一覧は開き直すと更新される。パス逸脱・symlink・特殊ファイルは拒否し、読み込み失敗は一覧内に表示する。
 テキストのサイズ上限・UTF-8 判定・制御文字の無害化は File Preview と共通である。
