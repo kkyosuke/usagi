@@ -337,18 +337,21 @@ fn sidebar_pointer_adapter_uses_the_frame_on_screen_and_keeps_its_identity() {
             prs: Vec::new(),
         },
     )];
-    let material = home_frame_material(
+    let material = crate::presentation::frame_loop::home_frame_material_shared(
         30,
         100,
         &runtime,
         "test",
-        &sessions,
+        std::sync::Arc::from(sessions.to_vec()),
         None,
         health(),
-        &BTreeMap::new(),
+        std::sync::Arc::new(BTreeMap::new()),
+        std::sync::Arc::new(BTreeMap::from([(first, 2)])),
+        None,
         None,
         None,
         now(),
+        usagi_core::domain::settings::IconMode::NerdFont,
     );
     let at = std::time::Duration::from_millis(1_234);
     let event = sidebar_pointer_event(Some(&material), 35, 4, at);

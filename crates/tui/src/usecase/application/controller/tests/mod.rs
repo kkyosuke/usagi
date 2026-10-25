@@ -215,7 +215,9 @@ fn pointer_event(state: &AppState, column: u16, row: u16, at: std::time::Duratio
                 )
             })
             .collect::<Vec<_>>();
-        let home = HomeProjection::from_state(state, "test", &sessions);
+        let home = HomeProjection::from_state(state, "test", &sessions).with_artifact_counts(
+            std::sync::Arc::new(state.sessions().iter().map(|id| (*id, 1)).collect()),
+        );
         sidebar_pointer_target(
             usize::from(height),
             usize::from(width),

@@ -445,6 +445,7 @@ Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の c
 | 表示面 | `nerd_font` | `text` fallback |
 |---|---|---|
 | PR 件数 | `U+EA64` | `PR` |
+| Artifacts 件数 | package variant `U+F03D6` | `Artifacts` |
 | session cursor | rabbit `U+F0907` | `>` |
 | Agents / Agent concurrency | `U+F085` | `Agents`（狭幅は `A`） |
 | CPU / resident memory | `U+F2DB` / `U+F233` | `CPU` / `MEM` |
@@ -1848,12 +1849,14 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 
 | 入口 | 表示対象 |
 |---|---|
-| session 行の `Artifacts` をクリック | クリックした session の生成物 |
+| session 行の Artifacts アイコンと件数をクリック | クリックした session の生成物 |
 | Closeup の `artifact` | 選択中 session の生成物 |
 | Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
 
-`Artifacts` は利用可能な session の Agent 状態行の右端に下線付きで表示する。クリックしても現在の pane と session 選択は保持する。
+Artifacts は生成物の実ファイルがある利用可能な session だけ、Agent 状態行の右端にアイコンと件数を下線付きで表示する。
+空の directory とルートの `.gitignore` は数えない。未取得・取得失敗時も表示しない。件数は背景で約1秒ごとに更新する。
+表示は [Icons 設定](#settings-scope-と-workspace-entry)に従い、`text` では `Artifacts N` とする。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は[統合検索](#統合検索)を開く。`Tab` で Artifact を選ぶと成果物を横断検索できる。
 sidebar が16桁未満の場合は label を省略し、`artifact` コマンドまたは統合検索から開く。
 TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。

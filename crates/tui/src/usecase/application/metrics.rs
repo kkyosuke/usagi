@@ -39,7 +39,7 @@ pub struct GitDiff {
 
 /// One changed metrics / git-diff observation returned by [`MetricsBackend`].
 ///
-/// A poll may yield neither, either, or both variants. The shell applies them to
+/// A poll may yield any changed observations. The shell applies them to
 /// a [`MetricsProjection`]; no variant touches the reducer or `AppState`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetricsUpdate {
@@ -47,6 +47,8 @@ pub enum MetricsUpdate {
     Metrics(Option<DaemonMetrics>),
     /// The latest completed per-session git diffs.
     GitDiffs(BTreeMap<SessionId, GitDiff>),
+    /// Regular generated files observed in each session's artifact directory.
+    ArtifactCounts(BTreeMap<SessionId, usize>),
 }
 
 /// Pulls the latest safe daemon observation at an application polling boundary.
@@ -92,6 +94,7 @@ pub trait MetricsPortFactory {
 pub struct MetricsProjection {
     metrics: Option<DaemonMetrics>,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    artifact_counts: Arc<BTreeMap<SessionId, usize>>,
     /// Diagnostic-only daemon health, folded from the same drained samples.
     ///
     /// It lives beside the metrics cache because health is a projection *of*
@@ -128,6 +131,13 @@ impl MetricsProjection {
                 self.git_diffs = Arc::new(git_diffs);
                 true
             }
+            MetricsUpdate::ArtifactCounts(counts) => {
+                if self.artifact_counts.as_ref() == &counts {
+                    return;
+                }
+                self.artifact_counts = Arc::new(counts);
+                true
+            }
         };
         if changed {
             self.generation = self.generation.saturating_add(1);
@@ -155,6 +165,12 @@ impl MetricsProjection {
     #[must_use]
     pub fn shared_git_diffs(&self) -> Arc<BTreeMap<SessionId, GitDiff>> {
         Arc::clone(&self.git_diffs)
+    }
+
+    /// Shared artifact observations; absent and zero counts draw no badge.
+    #[must_use]
+    pub fn shared_artifact_counts(&self) -> Arc<BTreeMap<SessionId, usize>> {
+        Arc::clone(&self.artifact_counts)
     }
 
     /// Monotonic generation of material that actually changed.
@@ -362,6 +378,27 @@ mod tests {
         }
         assert_eq!(projection.metrics(), Some(metrics()));
         assert_eq!(projection.git_diffs().get(&session), Some(&git_diff()));
+    }
+
+    #[test]
+    fn artifact_updates_invalidate_the_frame_only_when_counts_change() {
+        let session = SessionId::new();
+        let mut projection = MetricsProjection::default();
+        let counts = BTreeMap::from([(session, 2)]);
+        assert!(projection.shared_artifact_counts().is_empty());
+        projection.apply(MetricsUpdate::ArtifactCounts(counts.clone()));
+        assert_eq!(projection.shared_artifact_counts().as_ref(), &counts);
+        assert_eq!(projection.generation(), 1);
+        let shared = projection.shared_artifact_counts();
+        projection.apply(MetricsUpdate::ArtifactCounts(counts));
+        assert_eq!(projection.generation(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            &shared,
+            &projection.shared_artifact_counts()
+        ));
+        projection.apply(MetricsUpdate::ArtifactCounts(BTreeMap::new()));
+        assert!(projection.shared_artifact_counts().is_empty());
+        assert_eq!(projection.generation(), 2);
     }
 
     #[test]

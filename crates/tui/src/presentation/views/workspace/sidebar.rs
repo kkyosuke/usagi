@@ -1,10 +1,9 @@
 //! One sidebar layout shared by drawing and pointer resolution.
 
 use super::{
-    CHROME_ROWS, CREATE_SKELETON_ROWS, DateTime, HomeProjection, LEFT_WIDTH,
-    SIDEBAR_ARTIFACTS_LABEL, SIDEBAR_ARTIFACTS_MIN_WIDTH, Selection, SessionLifecycle, Target, Utc,
-    abnormal_daemon_speech, home_row_height_at, home_viewport_start, panes, pr_summary,
-    sidecar_labels_with_icon_mode, widgets,
+    CHROME_ROWS, CREATE_SKELETON_ROWS, DateTime, HomeProjection, LEFT_WIDTH, Selection,
+    SessionLifecycle, Target, Utc, abnormal_daemon_speech, home_row_height_at, home_viewport_start,
+    panes, pr_summary, sidecar_labels_with_icon_mode, widgets,
 };
 use crate::usecase::application::controller::SidebarPointerTarget;
 
@@ -133,9 +132,8 @@ pub fn sidebar_pointer_target(
             return Some(SidebarPointerTarget::PullRequests(id));
         }
         if line == 2
-            && session.lifecycle.capabilities().can_use
-            && left >= SIDEBAR_ARTIFACTS_MIN_WIDTH
-            && column >= left - SIDEBAR_ARTIFACTS_LABEL.len()
+            && let Some(label) = home.artifacts_action(session, left)
+            && column >= left - widgets::display_width(&label)
         {
             return Some(SidebarPointerTarget::Artifacts(id));
         }
@@ -256,6 +254,43 @@ mod tests {
     }
 
     #[test]
+    fn artifact_hitbox_matches_the_visible_badge_and_disappears_with_empty_counts() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for mode in [IconMode::NerdFont, IconMode::Text] {
+            let (id, home) = action_home(SessionLifecycle::Available, false, mode);
+            for count in [0, 1, 12] {
+                let home = home.clone().with_artifact_counts(std::sync::Arc::new(
+                    std::collections::BTreeMap::from([(id, count)]),
+                ));
+                let label = super::super::artifacts_summary(count, mode);
+                let start = label
+                    .as_ref()
+                    .map(|label| LEFT_WIDTH - widgets::display_width(label));
+                for column in 0..LEFT_WIDTH {
+                    let target = sidebar_pointer_target(
+                        30,
+                        100,
+                        &home,
+                        now,
+                        u16::try_from(column).unwrap(),
+                        4,
+                    );
+                    let expected = if start.is_some_and(|start| column >= start) {
+                        SidebarPointerTarget::Artifacts(id)
+                    } else {
+                        SidebarPointerTarget::Row(Selection::Target(Target::Session(id)))
+                    };
+                    assert_eq!(
+                        target,
+                        Some(expected),
+                        "{mode:?}, count {count}, column {column}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn rendered_artifact_cells_resolve_to_the_same_session_in_every_viewport() {
         let workspace = WorkspaceId::new();
         let ids = (0..6).map(|_| SessionId::new()).collect::<Vec<_>>();
@@ -309,15 +344,18 @@ mod tests {
                                 );
                             }
                             let mut home = HomeProjection::from_state(&state, "test", &sessions)
-                                .with_icon_mode(mode);
+                                .with_icon_mode(mode)
+                                .with_artifact_counts(std::sync::Arc::new(
+                                    ids.iter().map(|id| (*id, 1)).collect(),
+                                ));
                             if scenario == 5 {
                                 home = home.with_create_pending(Some("pending".into()));
                             }
                             let frame = render_home_at(height, width, &home, now);
                             let sidebar = panes::split(width, LEFT_WIDTH).left;
                             for row in 0..height {
-                                let visible =
-                                    left(&frame[row], sidebar).ends_with(SIDEBAR_ARTIFACTS_LABEL);
+                                let label = super::super::artifacts_summary(1, mode).unwrap();
+                                let visible = left(&frame[row], sidebar).ends_with(&label);
                                 let target = sidebar_pointer_target(
                                     height,
                                     width,

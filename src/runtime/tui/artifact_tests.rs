@@ -7,6 +7,110 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_tui::presentation::views::workspace::{HomeProjection, ProjectedSession, render_home};
 use usagi_tui::usecase::application::controller::{AppState, Effect, update};
 
+fn refresh_artifact_counts(port: &mut DaemonMetricsPort) -> Vec<MetricsUpdate> {
+    port.last_git_refresh = None;
+    let mut updates = port.poll_updates(None);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while port.git_receiver.is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "sidebar observation worker timed out"
+        );
+        thread::sleep(Duration::from_millis(5));
+        updates.extend(port.poll_updates(None));
+    }
+    updates
+}
+
+#[test]
+fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionId::new();
+    let mut port = DaemonMetricsPort {
+        metrics: RefreshPump::spawn(metrics_cadence(), || Ok(None)),
+        latest: None,
+        git_diffs: BTreeMap::new(),
+        artifact_counts: BTreeMap::new(),
+        git_sessions: vec![(session, tmp.path().to_path_buf())],
+        git_receiver: None,
+        last_git_refresh: None,
+    };
+    let updates = refresh_artifact_counts(&mut port);
+    assert!(
+        updates.contains(&MetricsUpdate::ArtifactCounts(BTreeMap::from([(
+            session, 0
+        )])))
+    );
+
+    usagi_core::infrastructure::artifacts::prepare(tmp.path()).unwrap();
+    fs::create_dir(tmp.path().join("artifacts/empty")).unwrap();
+    assert!(refresh_artifact_counts(&mut port).is_empty());
+
+    // The same worker also retains Git summaries when they are available.
+    for args in [
+        vec!["init", "--quiet", "--initial-branch=main", "."],
+        vec![
+            "-c",
+            "user.name=Artifact test",
+            "-c",
+            "user.email=artifact@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+        vec!["checkout", "--quiet", "-b", "artifact-test"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(tmp.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(refresh_artifact_counts(&mut port).iter().any(|update| {
+        matches!(update, MetricsUpdate::GitDiffs(diffs) if diffs.contains_key(&session))
+    }));
+
+    fs::write(tmp.path().join("artifacts/empty/report.txt"), "report").unwrap();
+    assert!(
+        refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
+            BTreeMap::from([(session, 1)])
+        ))
+    );
+
+    fs::remove_file(tmp.path().join("artifacts/empty/report.txt")).unwrap();
+    assert!(
+        refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
+            BTreeMap::from([(session, 0)])
+        ))
+    );
+
+    // A late result for a removed session cannot restore its badge.
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(SessionSidebarObservation {
+            session,
+            git_diff: None,
+            artifact_count: 99,
+        })
+        .unwrap();
+    drop(sender);
+    port.git_receiver = Some(receiver);
+    assert!(
+        port.poll_updates(Some(&[]))
+            .contains(&MetricsUpdate::ArtifactCounts(BTreeMap::new()))
+    );
+    assert!(port.artifact_counts.is_empty());
+}
+
 struct Browser {
     opened: Arc<Mutex<Vec<Vec<u8>>>>,
 }
