@@ -109,14 +109,20 @@ fn load_runtime_configuration(
     workspace_root: &Path,
 ) -> io::Result<(RuntimeModelSnapshot, McpToolFamilies)> {
     let global = Storage::open_default()
-        .and_then(|storage| storage.load_settings())
-        .map_err(|error| io::Error::other(error.to_string()))?;
+        .map_err(configuration_io_error)?
+        .load_settings()
+        .map_err(configuration_io_error)?;
     let local = WorkspaceSettingsStore::new(workspace_root)
         .load()
-        .map_err(|error| io::Error::other(error.to_string()))?;
+        .map_err(configuration_io_error)?;
     let families = McpToolFamilies::from_settings(&global.with_local(&local));
     let snapshot = runtime_model_snapshot(workspace_root, &PathExecutableLocator);
     Ok((snapshot, families))
+}
+
+#[allow(clippy::needless_pass_by_value)] // Result::map_err transfers ownership to this function pointer.
+fn configuration_io_error(error: anyhow::Error) -> io::Error {
+    io::Error::other(error.to_string())
 }
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
@@ -924,9 +930,9 @@ mod tests {
     use super::{
         MAX_STDIO_MESSAGE_BYTES, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
         ServerCapabilities, ServerState, ServerTools, agent_selector_schema, apply_caller_policy,
-        daemon_error_data, execute_tool, handle_line, handle_line_with_client,
-        normalize_caller_credential, read_bounded_line, resolve_workspace_root,
-        runtime_model_snapshot, serve, serve_with_client_and_caller,
+        configuration_io_error, daemon_error_data, execute_tool, handle_line,
+        handle_line_with_client, normalize_caller_credential, read_bounded_line,
+        resolve_workspace_root, runtime_model_snapshot, serve, serve_with_client_and_caller,
         serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
         tools_call, tools_list_result,
     };
@@ -978,6 +984,13 @@ mod tests {
             self.requests.push(request);
             self.reply.clone()
         }
+    }
+
+    #[test]
+    fn configuration_failure_keeps_its_message_at_the_stdio_boundary() {
+        let error = configuration_io_error(anyhow::anyhow!("workspace settings are malformed"));
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "workspace settings are malformed");
     }
 
     /// 1 行を処理して応答 `Value` を得る（通知は `None`）。
