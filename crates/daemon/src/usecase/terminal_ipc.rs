@@ -242,10 +242,6 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         })
     }
 
-    /// Runs one bounded retention collection pass and applies its decisions to
-    /// this owner's records and journals. The composition root drives it
-    /// periodically so a daemon whose terminals are idle still ages its finals
-    /// out of the budget.
     /// Whether this workspace still has a generic terminal that is running.
     #[must_use]
     pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
@@ -311,6 +307,10 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             .map_err(map_error)
     }
 
+    /// Runs one bounded retention collection pass and applies its decisions to
+    /// this owner's records and journals. The composition root drives it
+    /// periodically so a daemon whose terminals are idle still ages its finals
+    /// out of the budget.
     pub fn collect_retention_garbage(&mut self) -> usize
     where
         S: TerminalStore,
@@ -337,9 +337,7 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     #[must_use]
     pub fn retained_resources(&self) -> std::collections::BTreeSet<String> {
         self.coordinator
-            .snapshot()
-            .records
-            .iter()
+            .records()
             .map(|record| record.terminal.terminal_id.as_str())
             .collect()
     }

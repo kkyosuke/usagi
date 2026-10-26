@@ -35,9 +35,15 @@ use usagi_core::usecase::vt_screen::{
     ActiveBuffer, CheckpointError, RetainedRowMotion, ScreenCheckpoint,
 };
 
-use super::pane_runtime::Geometry;
 use super::terminal_screen::{TerminalBuffer, TerminalInputModes, TerminalScreen};
 use super::terminal_selection::{TerminalPoint, TerminalSelection};
+
+/// The terminal dimensions requested by this client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Geometry {
+    pub cols: u16,
+    pub rows: u16,
+}
 
 /// How an attach snapshot carries the terminal screen.
 ///

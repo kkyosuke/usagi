@@ -1,38 +1,14 @@
 //! One bounded read-only worker, shared with the Garden observation port.
+pub(super) use super::background_job::SearchJob as Job;
 use super::workspace_deck::output_search::{SearchResponses, SearchToken};
 use crate::usecase::application::runtime_ports::GardenInventoryPort;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::Sender,
-};
+use std::sync::{atomic::Ordering, mpsc::Sender};
 use usagi_core::domain::id::WorkspaceId;
 
 pub(super) struct Completion {
     pub port: Box<dyn GardenInventoryPort>,
     pub token: SearchToken,
     pub responses: SearchResponses,
-}
-
-pub(super) struct Job {
-    pub token: SearchToken,
-    cancelled: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Job {
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        self.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
 }
 
 pub(super) fn spawn(
@@ -42,9 +18,7 @@ pub(super) fn spawn(
     workspaces: Vec<WorkspaceId>,
     sender: Sender<Completion>,
 ) -> Job {
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::clone(&cancelled);
-    let worker = std::thread::spawn(move || {
+    Job::spawn(token, move |cancel| {
         let mut responses = Vec::new();
         for workspace in workspaces.into_iter().take(super::MAX_OBSERVED_PROJECTS) {
             if cancel.load(Ordering::Acquire) {
@@ -61,12 +35,7 @@ pub(super) fn spawn(
             token,
             responses,
         });
-    });
-    Job {
-        token,
-        cancelled,
-        worker: Some(worker),
-    }
+    })
 }
 
 /// Consume the queued hit once the target tab has been focused and attached.

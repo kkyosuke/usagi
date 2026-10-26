@@ -2415,7 +2415,8 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 完全な `TerminalRef` にだけ attach する。daemon 不通、拒否、未知・古い completion では local spawn や
 名前からの terminal 推測をしない。
 
-daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
+daemon inventory の tab 復元は presentation の `restore`、attach/resume、stream、resync は
+`terminal_session::TerminalSession` が担当する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry の
 変化時に送り、失敗した場合は同じ pending geometry を capped exponential backoff で再試行する。ACK 後にだけ
 右ペインの VT screen を resize して PTY と同じ viewport に確定する。detach はこの client の
@@ -2426,7 +2427,7 @@ live tab と client subscription を直ちに外し、残る tab または Close
 [config の `default_model`](#settings-scope-と-workspace-entry) を解決して明示 profile として送る。controller が発行した
 `OperationId` は pending tab と IPC request で同一のまま保持され、adapter は同じ ID の effect を一度しか
 送らない。accepted の間は Agent pending tab を残し、replay を含む final は workspace と session が一致する
-完全な `TerminalRef` のときだけ既存の `PaneRuntime` へ渡す。
+完全な `TerminalRef` のときだけ pane reducer へ渡し、選択された tab に `TerminalSession` が attach する。
 
 ```text
 Closeup agent ─► LaunchAgent(operation, profile?) ─► daemon Agent request

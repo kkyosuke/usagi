@@ -9,6 +9,7 @@ mod attention;
 mod knowledge_search;
 pub(crate) mod output_search;
 pub(crate) mod palette;
+mod search_input;
 mod unified_search;
 
 use std::collections::{BTreeMap, HashSet};

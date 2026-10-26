@@ -241,11 +241,7 @@ impl AgentRuntime {
             Some(credential.clone()),
             semantic_key.to_owned(),
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -345,7 +341,9 @@ impl AgentRuntime {
             return durable_operation_outcome(replacement);
         }
         let (available, reason) = match repair_revision {
-            Some(revision) => self.repair_resume_source_availability(source, &records, revision),
+            Some(revision) => {
+                self.resume_source_availability_at_revision(source, &records, revision)
+            }
             None => self.resume_source_availability(source, &records),
         };
         if !available {
@@ -498,11 +496,7 @@ impl AgentRuntime {
             semantic_key.to_owned(),
             &superseded,
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -718,11 +712,7 @@ impl AgentRuntime {
             Some(credential.clone()),
             launch_semantic.to_owned(),
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -740,6 +730,21 @@ impl AgentRuntime {
             completed: false,
             semantic_digest: Some(semantic_digest),
         })
+    }
+
+    /// Release the ephemeral caller and fail both reservations after an
+    /// unsuccessful launch. Preserve the original launch failure if cleanup fails.
+    fn rollback_uncommitted_admission(
+        &mut self,
+        operation: OperationId,
+        credential: &str,
+        runtime: &AgentRuntimeRef,
+    ) {
+        self.mcp_callers.remove(credential);
+        let _ = self
+            .coordinator
+            .fail_reserved_launch(runtime, &mut *self.store);
+        let _ = self.dispatch.fail_admission(operation);
     }
 
     pub(super) fn commit_admission(

@@ -14,7 +14,7 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::terminal_launch::TerminalInventoryEntry;
 
-use super::pane_runtime::Geometry;
+use super::terminal_session::Geometry;
 use super::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
     TerminalSubscription,

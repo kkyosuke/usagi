@@ -423,8 +423,6 @@ pub struct SecureUnixListener {
 pub struct EndpointCleanup {
     locator: EndpointLocator,
     daemon: PathBuf,
-    #[cfg_attr(not(test), allow(dead_code))]
-    socket: PathBuf,
     socket_identity: SocketIdentity,
     generation_dir: PathBuf,
     generation_directory: Arc<fs::File>,
@@ -553,7 +551,6 @@ impl SecureUnixListener {
             let cleanup = EndpointCleanup {
                 locator,
                 daemon: daemon.clone(),
-                socket: socket.clone(),
                 socket_identity: identity,
                 generation_dir: generation_dir.clone(),
                 generation_directory: Arc::clone(&generation_directory),
@@ -652,6 +649,11 @@ impl SecureUnixListener {
 }
 
 impl EndpointCleanup {
+    #[cfg(test)]
+    fn socket_path(&self) -> PathBuf {
+        self.generation_dir.join("sock")
+    }
+
     /// The exact generation and endpoint this token owns.
     ///
     /// The composition root reads it to name the generation it registers in the
@@ -2911,12 +2913,12 @@ mod tests {
     fn retirement_is_generation_fenced_and_removes_only_the_owned_endpoint() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let mut old = SecureUnixListener::bind(temp.path(), generation()).unwrap();
-        let old_socket = old.cleanup.socket.clone();
+        let old_socket = old.cleanup.socket_path();
         let old_locator = old.locator().clone();
 
         let mut replacement = SecureUnixListener::bind(temp.path(), generation()).unwrap();
         let replacement_cleanup = replacement.cleanup_handle();
-        let replacement_socket = replacement.cleanup.socket.clone();
+        let replacement_socket = replacement.cleanup.socket_path();
         let replacement_locator = replacement.locator().clone();
         assert!(!owns_endpoint(&replacement_locator, &old_locator));
 
@@ -2950,7 +2952,7 @@ mod tests {
         let mut listener =
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let cleanup = listener.cleanup_handle();
-        let generation_dir = cleanup.socket.parent().unwrap().to_path_buf();
+        let generation_dir = cleanup.generation_dir.clone();
         let displaced = cleanup.daemon.join("displaced-owned-generation");
         let displaced_socket = displaced.join("sock");
         let current = cleanup.daemon.join("current.json");
@@ -3011,7 +3013,7 @@ mod tests {
     fn endpoint_disappearance_after_validation_is_classified_as_unavailable() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
-        let socket = listener.cleanup.socket.clone();
+        let socket = listener.cleanup.socket_path();
         let current = listener.cleanup.daemon.join("current.json");
         let ready = Arc::new(Barrier::new(2));
         let resume = Arc::new(Barrier::new(2));
@@ -4185,7 +4187,7 @@ mod tests {
         assert_eq!(fs::metadata(&current).unwrap().mode() & 0o7777, 0o1600);
         fs::set_permissions(&current, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
 
-        let socket = cleanup.socket.clone();
+        let socket = cleanup.socket_path();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o1600)).unwrap();
         assert_eq!(
             remove_owned_socket_if_present(&socket).unwrap_err().kind(),
@@ -4293,7 +4295,7 @@ mod tests {
         let daemon = temp.path().join("daemon");
         let current = daemon.join("current.json");
         let alias = daemon.join("current.alias");
-        let socket = listener.cleanup.socket.clone();
+        let socket = listener.cleanup.socket_path();
         fs::hard_link(&current, &alias).unwrap();
         assert_eq!(fs::metadata(&current).unwrap().nlink(), 2);
 
@@ -4328,7 +4330,7 @@ mod tests {
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let cleanup = listener.cleanup_handle();
         let daemon = temp.path().join("daemon");
-        let socket = cleanup.socket.clone();
+        let socket = cleanup.socket_path();
         fs::remove_file(&socket).unwrap();
         fs::write(&socket, b"not a socket").unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(SOCKET_MODE)).unwrap();
@@ -4366,20 +4368,20 @@ mod tests {
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let cleanup = listener.cleanup_handle();
         let current = cleanup.daemon.join("current.json");
-        let replacement = replace_with_private_socket(&cleanup.socket);
+        let replacement = replace_with_private_socket(&cleanup.socket_path());
 
         assert_eq!(
             cleanup.retire().unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
-        assert!(cleanup.socket.exists());
+        assert!(cleanup.socket_path().exists());
         assert!(
             current.exists(),
             "locator remains as a cleanup failure fence"
         );
 
         drop(replacement);
-        fs::remove_file(&cleanup.socket).unwrap();
+        fs::remove_file(cleanup.socket_path()).unwrap();
         cleanup.retire().unwrap();
         assert!(!current.exists());
         // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
@@ -4441,7 +4443,7 @@ mod tests {
         let mut listener =
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let daemon = temp.path().join("daemon");
-        let socket = listener.cleanup.socket.clone();
+        let socket = listener.cleanup.socket_path();
         let orphan_generation = daemon.join("generations").join(generation().0);
         ensure_private_dir(&orphan_generation).unwrap();
         let orphan = orphan_generation.join(".sock.bind");
@@ -4476,8 +4478,8 @@ mod tests {
         let temp = TempDir::new_in("/tmp").unwrap();
         let live = SecureUnixListener::bind_private(temp.path(), generation()).unwrap();
         let dead = SecureUnixListener::bind_private(temp.path(), generation()).unwrap();
-        let live_socket = live.cleanup.socket.clone();
-        let dead_socket = dead.cleanup.socket.clone();
+        let live_socket = live.cleanup.socket_path();
+        let dead_socket = dead.cleanup.socket_path();
         let live_generation = live.cleanup.locator.generation.0.clone();
 
         retire_stale_current_preserving(temp.path(), &|generation| generation == live_generation)
@@ -4500,7 +4502,7 @@ mod tests {
         let listener = SecureUnixListener::bind(temp.path(), generation()).unwrap();
         let daemon = temp.path().join("daemon");
         let current = daemon.join("current.json");
-        let socket = listener.cleanup.socket.clone();
+        let socket = listener.cleanup.socket_path();
         let generation_dir = socket.parent().unwrap().to_path_buf();
         let ready = Arc::new(Barrier::new(2));
         let resume = Arc::new(Barrier::new(2));
@@ -4535,7 +4537,7 @@ mod tests {
         let mut listener =
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let cleanup = listener.cleanup_handle();
-        let socket = cleanup.socket.clone();
+        let socket = cleanup.socket_path();
         let current = cleanup.daemon.join("current.json");
         let ready = Arc::new(Barrier::new(2));
         let resume = Arc::new(Barrier::new(2));
@@ -4575,7 +4577,7 @@ mod tests {
         let mut listener =
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let cleanup = listener.cleanup_handle();
-        let socket = cleanup.socket.clone();
+        let socket = cleanup.socket_path();
         let generation_dir = socket.parent().unwrap().to_path_buf();
         let current = cleanup.daemon.join("current.json");
         let outside_generation = temp.path().join("outside-generation");
@@ -4626,7 +4628,7 @@ mod tests {
         let mut listener =
             ManuallyDrop::new(SecureUnixListener::bind(temp.path(), generation()).unwrap());
         let cleanup = listener.cleanup_handle();
-        let generation_dir = cleanup.socket.parent().unwrap().to_path_buf();
+        let generation_dir = cleanup.generation_dir.clone();
         let generation_name = generation_dir.file_name().unwrap();
         let generations = generation_dir.parent().unwrap().to_path_buf();
         let displaced_generations = cleanup.daemon.join("displaced-generations-root");

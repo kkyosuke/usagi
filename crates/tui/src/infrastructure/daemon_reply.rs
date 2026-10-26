@@ -17,7 +17,7 @@ use crate::usecase::application::agent_runtime_ports::{AgentPaneAdmission, Exact
 use crate::usecase::application::controller::{
     AppEvent, BackendEvent, SafeError, SafeMessage, Target,
 };
-use crate::usecase::application::pane_runtime::Geometry;
+use crate::usecase::application::terminal_session::Geometry;
 use crate::usecase::application::terminal_session::{
     TerminalAttachScreen, TerminalChunk, TerminalError, TerminalInputOutcome,
 };

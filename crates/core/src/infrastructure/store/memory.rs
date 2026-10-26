@@ -14,15 +14,11 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::memory::{Memory, MemorySummary};
 use crate::infrastructure::paths::STATE_DIR;
 use crate::infrastructure::persistence::markdown_store::{
@@ -61,14 +57,6 @@ impl MarkdownEntry for MemoryEntry {
 
     fn is_entry_file(path: &Path) -> bool {
         is_memory_file(path)
-    }
-
-    fn parse_markdown(text: &str) -> Result<Memory> {
-        Ok(Memory::from_markdown(text)?)
-    }
-
-    fn to_markdown(entry: &Memory) -> String {
-        entry.to_markdown()
     }
 
     fn file_name(entry: &Memory) -> Result<String> {
@@ -129,7 +117,6 @@ fn memory_file_name(name: &str) -> Result<String> {
 /// File-based persistence rooted at a repository's `.usagi/memory/` directory.
 pub struct MemoryStore {
     inner: MarkdownStore<MemoryEntry>,
-    lock_cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl MemoryStore {
@@ -138,14 +125,13 @@ impl MemoryStore {
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
             inner: MarkdownStore::new(repo_root.as_ref().join(STATE_DIR).join(MEMORY_DIR_NAME)),
-            lock_cancellation: None,
         }
     }
 
     /// Allow a background reader to cancel waits for the store lock.
     #[must_use]
     pub fn with_lock_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
-        self.lock_cancellation = Some(cancelled);
+        self.inner = self.inner.with_lock_cancellation(cancelled);
         self
     }
 
@@ -171,11 +157,7 @@ impl MemoryStore {
     ///
     /// Returns an error when the lock cannot be acquired.
     pub fn lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire_cancellable(self.dir(), || {
-            self.lock_cancellation
-                .as_ref()
-                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
-        })
+        self.inner.lock()
     }
 
     /// Read and parse every memory markdown file, sorted by name.
@@ -217,7 +199,7 @@ impl MemoryStore {
     /// Returns an error when `name` is not a single safe path component, or the
     /// backing file exists but cannot be read or parsed.
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
-        self.repair_derived_best_effort();
+        self.inner.repair_derived_best_effort();
         self.read_locked(name)
     }
 
@@ -255,14 +237,9 @@ impl MemoryStore {
     /// Returns an error when the name is unsafe, source cannot be committed, or
     /// the dirty marker cannot be scheduled.
     pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<MutationOutcome<()>> {
-        let rebuild_required = self.inner.derived_is_dirty();
         self.inner.mark_derived_dirty()?;
         self.inner.write_markdown(memory)?;
-        let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
-        } else {
-            self.inner.reindex_after_write(memory)
-        };
+        let refresh = self.inner.rebuild_derived().map(|_| ());
         Ok(self.inner.finish_committed((), refresh))
     }
 
@@ -296,17 +273,9 @@ impl MemoryStore {
                 return Err(error).context(format!("failed to inspect {}", path.display()));
             }
         }
-        let rebuild_required = self.inner.derived_is_dirty();
         self.inner.mark_derived_dirty()?;
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) => return Err(e).context(format!("failed to remove {}", path.display())),
-        }
-        let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
-        } else {
-            self.inner.reindex_after_remove()
-        };
+        fs::remove_file(&path).context(format!("failed to remove {}", path.display()))?;
+        let refresh = self.inner.rebuild_derived().map(|_| ());
         Ok(self.inner.finish_committed(true, refresh))
     }
 
@@ -317,25 +286,11 @@ impl MemoryStore {
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
     pub fn summaries(&self) -> Result<Vec<MemorySummary>> {
-        self.repair_derived_best_effort();
+        self.inner.repair_derived_best_effort();
         if self.inner.derived_is_dirty() {
             return self.inner.source_summaries();
         }
         self.inner.summaries()
-    }
-
-    fn repair_derived_best_effort(&self) {
-        if !self.inner.derived_is_dirty() {
-            return;
-        }
-        let repair = self
-            .lock()
-            .and_then(|_lock| self.inner.repair_derived_locked());
-        if let Err(error) = repair {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "memory derived rebuild remains scheduled after read: {error:#}"
-            ));
-        }
     }
 }
 
@@ -425,6 +380,7 @@ fn is_memory_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::frontmatter::FrontmatterDoc;
     use crate::domain::memory::MemoryType;
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
     use crate::infrastructure::store::DerivedState;

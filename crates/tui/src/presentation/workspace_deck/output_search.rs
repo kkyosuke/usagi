@@ -49,7 +49,7 @@ pub(super) struct Search {
 
 impl Search {
     pub(super) fn handle(&mut self, key: &Key) -> OverlayIntent {
-        let before = self.input.value().to_owned();
+        let mut query_changed = false;
         match key {
             Key::Escape | Key::Quit => return OverlayIntent::Cancel,
             Key::Enter => {
@@ -68,32 +68,9 @@ impl Search {
                     .saturating_add(if matches!(key, Key::PageDown) { 5 } else { 1 })
                     .min(self.hits.len().saturating_sub(1));
             }
-            Key::Char(ch) if !ch.is_control() && self.input.value().chars().count() < QUERY_MAX => {
-                self.input.insert(*ch);
-            }
-            Key::Paste(text) => {
-                let remaining = QUERY_MAX.saturating_sub(self.input.value().chars().count());
-                self.input.insert_str(
-                    &text
-                        .chars()
-                        .filter(|ch| !ch.is_control())
-                        .take(remaining)
-                        .collect::<String>(),
-                );
-            }
-            Key::Backspace => {
-                self.input.backspace();
-            }
-            Key::Delete => {
-                self.input.delete_forward();
-            }
-            Key::Left => self.input.move_left(),
-            Key::Right => self.input.move_right(),
-            Key::Home | Key::LineStart => self.input.move_home(),
-            Key::End | Key::LineEnd => self.input.move_end(),
-            _ => {}
+            _ => query_changed = super::search_input::edit(&mut self.input, key, QUERY_MAX),
         }
-        if before != self.input.value() || matches!(key, Key::Tab) {
+        if query_changed || matches!(key, Key::Tab) {
             self.revision = self.revision.wrapping_add(1);
             self.hits.clear();
             self.cursor = 0;

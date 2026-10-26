@@ -397,7 +397,7 @@ impl AgentRuntime {
                             "a live Agent profile has no current integration revision",
                         )
                     })?;
-                let (available, reason) = Self::repair_source_availability(record, &records);
+                let (available, reason) = Self::resume_source_metadata_availability(record, &records);
                 let target = resume_target(record).filter(|_| available).ok_or_else(|| {
                     ProtocolError::new(
                         ErrorCode::Busy,
@@ -757,8 +757,9 @@ impl AgentRuntime {
         (false, reason)
     }
 
-    pub(super) fn resume_source_availability(
-        &self,
+    /// Validates durable lineage and provider metadata independently from the
+    /// installed adapter revision, which integration repair may intentionally migrate.
+    pub(super) fn resume_source_metadata_availability(
         record: &crate::usecase::runtime::DurableRuntimeRecord,
         records: &[crate::usecase::runtime::DurableRuntimeRecord],
     ) -> (bool, ProviderResumeReason) {
@@ -795,43 +796,46 @@ impl AgentRuntime {
             && record.launch.request.scope == reference.scope
             && record.runtime.terminal.workspace_id == reference.scope.workspace_id
             && record.runtime.terminal.session_id == reference.scope.session_id
-            && record.runtime.terminal.worktree_id == reference.scope.worktree_id;
-        let adapter_compatible = self
-            .registry
-            .profile(&record.launch.plan.profile_id)
-            .is_ok_and(|profile| {
-                profile.revision == reference.adapter_revision
-                    && profile.capabilities.contains(&AgentCapability::Resume)
-                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
-            });
-        if internally_compatible && adapter_compatible {
+            && record.runtime.terminal.worktree_id == reference.scope.worktree_id
+            && provider_matches_profile(reference.provider, &record.launch.plan.profile_id);
+        if internally_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
         } else {
             (false, ProviderResumeReason::IncompatibleProviderMetadata)
         }
     }
 
-    pub(super) fn repair_resume_source_availability(
+    pub(super) fn resume_source_availability(
+        &self,
+        record: &crate::usecase::runtime::DurableRuntimeRecord,
+        records: &[crate::usecase::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        self.resume_source_availability_at_revision(
+            record,
+            records,
+            record.launch.plan.profile_revision,
+        )
+    }
+
+    /// Normal resume uses the captured revision; integration repair supplies
+    /// the current revision while preserving the same durable source checks.
+    pub(super) fn resume_source_availability_at_revision(
         &self,
         record: &crate::usecase::runtime::DurableRuntimeRecord,
         records: &[crate::usecase::runtime::DurableRuntimeRecord],
         expected_revision: u32,
     ) -> (bool, ProviderResumeReason) {
-        let (source_compatible, reason) = Self::repair_source_availability(record, records);
+        let (source_compatible, reason) =
+            Self::resume_source_metadata_availability(record, records);
         if !source_compatible {
             return (false, reason);
         }
-        let reference = record
-            .provider_resume
-            .as_ref()
-            .expect("repair-compatible source has provider metadata");
         let current_compatible = self
             .registry
             .profile(&record.launch.plan.profile_id)
             .is_ok_and(|profile| {
                 profile.revision == expected_revision
                     && profile.capabilities.contains(&AgentCapability::Resume)
-                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
             });
         if current_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
@@ -871,7 +875,7 @@ impl AgentRuntime {
             .filter(|run| run.agent_id == agent_id && Some(run.run_id) != source)
             .map(|run| run.run_id)
             .collect();
-        Ok(!self.coordinator.snapshot().records.iter().any(|record| {
+        Ok(!self.coordinator.records().any(|record| {
             runs.contains(&record.operation.operation_id)
                 && !matches!(
                     record.state,

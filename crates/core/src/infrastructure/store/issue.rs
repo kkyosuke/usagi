@@ -12,15 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
@@ -124,14 +120,6 @@ impl MarkdownEntry for IssueEntry {
         is_issue_file(path)
     }
 
-    fn parse_markdown(text: &str) -> Result<Issue> {
-        Ok(Issue::from_markdown(text)?)
-    }
-
-    fn to_markdown(entry: &Issue) -> String {
-        entry.to_markdown()
-    }
-
     fn file_name(entry: &Issue) -> Result<String> {
         Ok(entry.file_name())
     }
@@ -169,7 +157,6 @@ impl MarkdownEntry for IssueEntry {
 pub struct IssueStore {
     inner: MarkdownStore<IssueEntry>,
     repo_root: PathBuf,
-    lock_cancellation: Option<Arc<AtomicBool>>,
 }
 
 /// A parseable issue paired with the exact Markdown file that supplied it.
@@ -218,14 +205,13 @@ impl IssueStore {
         Self {
             inner: MarkdownStore::new(repo_root.join(STATE_DIR).join(ISSUES_DIR_NAME)),
             repo_root,
-            lock_cancellation: None,
         }
     }
 
     /// Allow a background reader to cancel waits for the store lock.
     #[must_use]
     pub fn with_lock_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
-        self.lock_cancellation = Some(cancelled);
+        self.inner = self.inner.with_lock_cancellation(cancelled);
         self
     }
 
@@ -247,11 +233,7 @@ impl IssueStore {
     ///
     /// Returns an error when the lock cannot be acquired.
     pub fn lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire_cancellable(self.dir(), || {
-            self.lock_cancellation
-                .as_ref()
-                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
-        })
+        self.inner.lock()
     }
 
     /// Read and parse every issue markdown file, sorted by number.
@@ -349,7 +331,7 @@ impl IssueStore {
         }
         let lock = self.lock()?;
         observe(SourceSnapshotLockPhase::LockAcquired);
-        self.repair_derived_best_effort_locked(&lock);
+        self.inner.repair_derived_best_effort_locked(&lock);
         observe(SourceSnapshotLockPhase::DerivedRepaired);
         let snapshot = self.source_snapshot_locked(&lock)?;
         observe(SourceSnapshotLockPhase::SnapshotCaptured);
@@ -484,7 +466,7 @@ impl IssueStore {
         let lock = self.lock()?;
         let path = self.point_path_for(number)?;
         observe(ReadLockPhase::UniqueChecked);
-        self.repair_derived_best_effort_locked(&lock);
+        self.inner.repair_derived_best_effort_locked(&lock);
         observe(ReadLockPhase::DerivedRepaired);
         let issue = path
             .map(|path| self.read_numbered_path(number, &path))
@@ -528,20 +510,13 @@ impl IssueStore {
     /// written, the stale name cannot be removed, or the dirty marker cannot be
     /// scheduled. Ambiguity is detected before any source or derived mutation.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
-        let existing: Vec<_> = self.point_path_for(issue.number)?.into_iter().collect();
-        let rebuild_required = self.inner.derived_is_dirty();
+        let existing = self.point_path_for(issue.number)?;
         self.inner.mark_derived_dirty()?;
         let target = self.inner.write_markdown(issue)?;
-        for stale in existing {
-            if stale != target {
-                fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
-            }
+        if let Some(stale) = existing.filter(|path| *path != target) {
+            fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
         }
-        let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
-        } else {
-            self.inner.reindex_after_write(issue)
-        };
+        let refresh = self.inner.rebuild_derived().map(|_| ());
         Ok(self.inner.finish_committed((), refresh))
     }
 
@@ -566,21 +541,13 @@ impl IssueStore {
     /// more than one source file claims `number`.
     pub fn remove_with_outcome(&self, number: u32) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
-        let files: Vec<_> = self.point_path_for(number)?.into_iter().collect();
-        if files.is_empty() {
+        let Some(file) = self.point_path_for(number)? else {
             let repair = self.inner.repair_derived_locked();
             return Ok(self.inner.finish_committed(false, repair));
-        }
-        let rebuild_required = self.inner.derived_is_dirty();
-        self.inner.mark_derived_dirty()?;
-        for file in files {
-            fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
-        }
-        let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
-        } else {
-            self.inner.reindex_after_remove()
         };
+        self.inner.mark_derived_dirty()?;
+        fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
+        let refresh = self.inner.rebuild_derived().map(|_| ());
         Ok(self.inner.finish_committed(true, refresh))
     }
 
@@ -591,7 +558,7 @@ impl IssueStore {
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
-        self.repair_derived_best_effort();
+        self.inner.repair_derived_best_effort();
         if self.inner.derived_is_dirty() {
             return self.source_summaries();
         }
@@ -604,31 +571,6 @@ impl IssueStore {
             .into_iter()
             .map(IssueSource::summary)
             .collect())
-    }
-
-    fn repair_derived_best_effort(&self) {
-        if !self.inner.derived_is_dirty() {
-            return;
-        }
-        let repair = self.lock().map(|lock| {
-            self.repair_derived_best_effort_locked(&lock);
-        });
-        if let Err(error) = repair {
-            ErrorLog::record(&format!(
-                "issue derived rebuild remains scheduled after read: {error:#}"
-            ));
-        }
-    }
-
-    fn repair_derived_best_effort_locked(&self, _lock: &StoreLock) {
-        if !self.inner.derived_is_dirty() {
-            return;
-        }
-        if let Err(error) = self.inner.repair_derived_locked() {
-            ErrorLog::record(&format!(
-                "issue derived rebuild remains scheduled after read: {error:#}"
-            ));
-        }
     }
 
     /// Write the number-sorted `summaries` to `index.json` as the derived cache.
@@ -916,6 +858,7 @@ pub(crate) fn number_from_filename(path: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::frontmatter::FrontmatterDoc;
     use crate::domain::issue::{IssuePriority, IssueStatus};
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
     use crate::infrastructure::store::DerivedState;
