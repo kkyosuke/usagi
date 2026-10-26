@@ -260,7 +260,7 @@ fn layout(
     let mut header = vec![tab_line];
     if !compact {
         header.push(modal::caption(if list.view == InboxView::Actions {
-            "Only items that need your action appear here."
+            "Questions and stopped tasks that need your action in usagi."
         } else if summary.has_unknown() {
             "Progress and status updates."
         } else {
@@ -303,13 +303,11 @@ fn layout(
     if summary.has_unknown() {
         let message = if compact {
             "Checking status…".to_owned()
-        } else if summary.unknown_items == 0 {
+        } else {
             format!(
                 "Status unknown for {} project(s). Retrying automatically.",
                 summary.unknown
             )
-        } else {
-            "Some statuses are still being checked. Retrying automatically.".to_owned()
         };
         layout.body.push(modal::caption(&message));
     }
@@ -611,7 +609,7 @@ mod tests {
         update(
             &mut deck,
             0,
-            vec![item("pr:failed", AttentionKind::Blocked)],
+            vec![item("session:failed", AttentionKind::Blocked)],
         );
         let mut list = AttentionList::default();
         let drawn = layout(&deck.slots, &list, Some("Target unavailable"), 24, 80);
@@ -631,13 +629,13 @@ mod tests {
             drawn
                 .body
                 .iter()
-                .any(|line| line.contains("Check PR problem"))
+                .any(|line| line.contains("Check stopped task"))
         );
         assert!(
             drawn
                 .body
                 .iter()
-                .any(|line| line.contains("Enter: Open PR"))
+                .any(|line| line.contains("Enter: Open session"))
         );
         list.filter = "no match".into();
         assert!(
