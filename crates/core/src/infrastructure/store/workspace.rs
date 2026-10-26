@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::IssueSummary;
@@ -204,27 +203,6 @@ impl Storage {
         crate::domain::settings::validate_env_limits(&settings.env)?;
         json_file::write_atomic(&self.dir, &self.dir.join(SETTINGS_FILE), settings)
     }
-
-    /// Stamp `updated_at` onto the workspace named `name` and persist the change,
-    /// returning the touched workspace, or `None` when no workspace has that name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the registry cannot be read or written.
-    pub fn touch_workspace(
-        &self,
-        name: &str,
-        updated_at: DateTime<Utc>,
-    ) -> Result<Option<Workspace>> {
-        let mut workspaces = self.load_workspaces()?;
-        let Some(workspace) = workspaces.iter_mut().find(|w| w.name == name) else {
-            return Ok(None);
-        };
-        workspace.updated_at = updated_at;
-        let touched = workspace.clone();
-        self.save_workspaces(&workspaces)?;
-        Ok(Some(touched))
-    }
 }
 
 struct LockedWorkspaceRegistry<'a> {
@@ -282,6 +260,7 @@ impl WorkspaceRepository for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::fs;
 
     fn temp_storage() -> (tempfile::TempDir, Storage) {
@@ -456,20 +435,20 @@ mod tests {
     }
 
     #[test]
-    fn touch_workspace_stamps_the_named_entry_and_ignores_others() {
-        let (_dir, storage) = temp_storage();
-        let base = Workspace::new("alpha", "/tmp/alpha");
+    fn opening_a_registered_workspace_updates_only_its_timestamp() {
+        let (dir, storage) = temp_storage();
+        let base = Workspace::new("alpha", dir.path().join("alpha"));
+        let sibling = Workspace::new("beta", dir.path().join("beta"));
         storage
-            .save_workspaces(std::slice::from_ref(&base))
+            .save_workspaces(&[base.clone(), sibling.clone()])
             .unwrap();
 
         let later = base.updated_at + chrono::Duration::seconds(60);
-        let touched = storage.touch_workspace("alpha", later).unwrap();
-        assert_eq!(touched.unwrap().updated_at, later);
-        assert_eq!(storage.load_workspaces().unwrap()[0].updated_at, later);
-
-        // An unknown name touches nothing and reports it.
-        assert!(storage.touch_workspace("missing", later).unwrap().is_none());
+        let opened = crate::usecase::workspace::open(&storage, &base.path, later).unwrap();
+        let mut expected = base;
+        expected.updated_at = later;
+        assert_eq!(opened, expected);
+        assert_eq!(storage.load_workspaces().unwrap(), vec![expected, sibling]);
     }
 
     #[test]

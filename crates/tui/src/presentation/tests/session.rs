@@ -476,7 +476,6 @@ fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         Box::new(UnavailableEnvironmentStore),
         Box::new(NoDesktopNotifications),
         Box::new(NoMetrics),
-        Box::new(UnavailablePrSnapshotPort),
         Box::new(UnavailableBrowserOpener),
     );
 
@@ -568,7 +567,6 @@ fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_por
             Box::new(UnavailableEnvironmentStore),
             Box::new(NoDesktopNotifications),
             Box::new(NoMetrics),
-            Box::new(UnavailablePrSnapshotPort),
             Box::new(UnavailableBrowserOpener),
         );
 

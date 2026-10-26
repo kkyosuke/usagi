@@ -242,12 +242,6 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         })
     }
 
-    /// Whether this workspace still has a generic terminal that is running.
-    #[must_use]
-    pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
-        self.coordinator.has_running_in_workspace(workspace)
-    }
-
     /// Runtime scopes and states used to fence automatic cache detachment.
     #[must_use]
     pub fn cache_cleanup_activity(
@@ -258,15 +252,6 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         super::terminal::TerminalRuntimeState,
     )> {
         self.coordinator.cache_cleanup_activity(workspace)
-    }
-
-    /// Number of live generic terminal PTYs owned by one workspace.
-    #[must_use]
-    pub fn running_count_in_workspace(
-        &self,
-        workspace: usagi_core::domain::id::WorkspaceId,
-    ) -> usize {
-        self.coordinator.running_count_in_workspace(workspace)
     }
 
     /// Number of generic terminal records which may still own a process.
@@ -2459,8 +2444,11 @@ mod tests {
 
         // The workspace-wide question a retirement asks: this workspace has a
         // running child, another workspace does not.
-        assert!(runtime.has_running_in_workspace(workspace));
-        assert!(!runtime.has_running_in_workspace(WorkspaceId::new()));
+        assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 1);
+        assert_eq!(
+            runtime.retirement_blocker_count_in_workspace(WorkspaceId::new()),
+            0
+        );
         assert_eq!(
             runtime.cache_cleanup_activity(workspace),
             vec![(
@@ -2473,9 +2461,6 @@ mod tests {
                 .cache_cleanup_activity(WorkspaceId::new())
                 .is_empty()
         );
-        assert_eq!(runtime.running_count_in_workspace(workspace), 1);
-        assert_eq!(runtime.running_count_in_workspace(WorkspaceId::new()), 0);
-        assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 1);
 
         // A different scope (foreign session) sees nothing.
         let foreign = TerminalLaunchScope {
@@ -2494,8 +2479,6 @@ mod tests {
         assert_eq!(exited.len(), 1);
         assert!(!exited[0].live);
         // An exited child no longer keeps its workspace.
-        assert!(!runtime.has_running_in_workspace(workspace));
-        assert_eq!(runtime.running_count_in_workspace(workspace), 0);
         assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 0);
         // Retain the stopped identity in the snapshot so a scan can detect
         // that a runtime started and exited while the tree was measured.

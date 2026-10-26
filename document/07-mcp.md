@@ -140,8 +140,10 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
 validator、execution route、caller policy の正本である。Issue / Memory がともに有効な場合も、tool 件数は descriptor
 registry から導出し、本書へ転記しない。
-`tools/list` と `tools/call` は同じ descriptor registry を参照するため、掲載された tool は必ず
-1 つの実行経路と caller policy を持つ。`tools/call` の実挙動は次のとおりである。
+接続開始時に descriptor registry を一度だけ検証し、runtime/model snapshot を反映した実効 schema とともに
+保持する。`tools/list` と `tools/call` はこの同じ集合・schema を参照するため、掲載された tool は必ず
+1 つの実行経路と caller policy を持つ。request ごとの引数検証・caller policy 適用は毎回行い、
+設定・runtime availability の変更は再接続時に反映する。`tools/call` の実挙動は次のとおりである。
 
 MCP server は起動時に Global と Workspace の `issue_enabled` / `memory_enabled` を解決し、server lifetime 中は
 同じ availability snapshot を使う。`issue_enabled = false` では `issue_*` と `session_delegate_issue`、

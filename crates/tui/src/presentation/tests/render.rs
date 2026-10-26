@@ -399,7 +399,6 @@ fn controller_loop_renders_home_and_detaches_on_quit_confirmation() {
         Box::new(UnavailableEnvironmentStore),
         Box::new(NoDesktopNotifications),
         Box::new(NoMetrics),
-        Box::new(UnavailablePrSnapshotPort),
         Box::new(UnavailableBrowserOpener),
     );
 
