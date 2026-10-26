@@ -1,6 +1,10 @@
 use super::*;
 use crate::usecase::application::unified_search::UnavailableUnifiedSearch;
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
 struct Port {
     entered: Sender<()>,
@@ -98,10 +102,8 @@ fn unified_search_worker_cancels_stale_queries_close_and_drop_then_joins() {
             sender,
         );
         job.cancel_unless_current(Some((1, 0)));
-        assert!(!job.cancelled.load(Ordering::Acquire));
         if let Some(target) = target {
             job.cancel_unless_current(target);
-            assert!(job.cancelled.load(Ordering::Acquire));
         }
         drop(job);
         assert!(

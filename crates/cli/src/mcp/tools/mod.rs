@@ -12,11 +12,12 @@ mod issue_wire;
 pub mod memory;
 pub mod session;
 pub mod terminal;
+mod wire;
 
 use std::collections::HashSet;
 use std::fmt;
 
-use super::tool::{CallerPolicy, ToolDescriptor, ToolRoute, validate_schema_definition};
+use super::tool::{ToolDescriptor, ToolRoute, validate_schema_definition};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::infrastructure::ipc::SessionAction;
 
@@ -73,37 +74,15 @@ impl fmt::Display for RegistryError {
 ///
 /// # Errors
 ///
-/// Returns a registry error for duplicate routes, caller-policy drift,
+/// Returns a registry error for duplicate names or routes,
 /// or schema vocabulary the runtime validator cannot enforce.
 pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryError> {
     let mut names = HashSet::new();
     let mut routes = HashSet::new();
     for descriptor in descriptors {
-        if !descriptor.is_advertised() {
-            return Err(RegistryError(format!(
-                "route for {} is not advertised",
-                descriptor.name()
-            )));
-        }
         if !names.insert(descriptor.name()) {
             return Err(RegistryError(format!(
                 "duplicate tool name: {}",
-                descriptor.name()
-            )));
-        }
-        if !matches!(
-            (descriptor.route(), descriptor.caller_policy()),
-            (
-                ToolRoute::Store(_) | ToolRoute::Session(_),
-                CallerPolicy::Public
-            ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
-                | (
-                    ToolRoute::AgentInventory | ToolRoute::AgentResume | ToolRoute::Dispatch(_),
-                    CallerPolicy::AgentCredential
-                )
-        ) {
-            return Err(RegistryError(format!(
-                "route and caller policy mismatch for {}",
                 descriptor.name()
             )));
         }
@@ -526,10 +505,8 @@ mod tests {
             );
             assert!(matches!(
                 (descriptor.route(), descriptor.caller_policy()),
-                (
-                    ToolRoute::Store(_) | ToolRoute::Session(_),
-                    CallerPolicy::Public
-                ) | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
+                (ToolRoute::Store(_), CallerPolicy::Public)
+                    | (ToolRoute::Session(_), CallerPolicy::SessionCredential)
                     | (
                         ToolRoute::AgentInventory | ToolRoute::AgentResume | ToolRoute::Dispatch(_),
                         CallerPolicy::AgentCredential
@@ -773,23 +750,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_rejects_duplicate_name_duplicate_route_and_unadvertised_route() {
+    fn registry_rejects_duplicate_names_and_routes() {
         assert_eq!(FixtureTool("description").description(), "fixture");
         assert!(matches!(
             FixtureTool("call").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
         let duplicate_name = [
-            ToolDescriptor::new(
-                Box::new(FixtureTool("same")),
-                ToolRoute::Store(StoreRoot::Workspace),
-                CallerPolicy::Public,
-            ),
-            ToolDescriptor::new(
-                Box::new(FixtureTool("same")),
-                ToolRoute::Session(SessionAction::List),
-                CallerPolicy::Public,
-            ),
+            ToolDescriptor::workspace_store(FixtureTool("same")),
+            ToolDescriptor::session(FixtureTool("same"), SessionAction::List),
         ];
         assert!(
             validate_registry(&duplicate_name)
@@ -799,16 +768,8 @@ mod tests {
         );
 
         let duplicate_route = [
-            ToolDescriptor::new(
-                Box::new(FixtureTool("one")),
-                ToolRoute::Session(SessionAction::List),
-                CallerPolicy::Public,
-            ),
-            ToolDescriptor::new(
-                Box::new(FixtureTool("two")),
-                ToolRoute::Session(SessionAction::List),
-                CallerPolicy::Public,
-            ),
+            ToolDescriptor::session(FixtureTool("one"), SessionAction::List),
+            ToolDescriptor::session(FixtureTool("two"), SessionAction::List),
         ];
         assert!(
             validate_registry(&duplicate_route)
@@ -816,23 +777,10 @@ mod tests {
                 .to_string()
                 .contains("duplicate executable route")
         );
-
-        let unadvertised = [ToolDescriptor::fixture(
-            Box::new(FixtureTool("hidden")),
-            ToolRoute::Store(StoreRoot::Workspace),
-            CallerPolicy::Public,
-            false,
-        )];
-        assert!(
-            validate_registry(&unadvertised)
-                .unwrap_err()
-                .to_string()
-                .contains("not advertised")
-        );
     }
 
     #[test]
-    fn registry_rejects_schema_and_policy_drift() {
+    fn registry_rejects_unsupported_or_invalid_schemas() {
         assert_eq!(UnsupportedSchema.description(), "fixture");
         assert_eq!(SchemaFixture("fixture", "{}").description(), "fixture");
         assert!(matches!(
@@ -843,11 +791,7 @@ mod tests {
             SchemaFixture("call", "{}").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
-        let unsupported_schema = [ToolDescriptor::new(
-            Box::new(UnsupportedSchema),
-            ToolRoute::Store(StoreRoot::Workspace),
-            CallerPolicy::Public,
-        )];
+        let unsupported_schema = [ToolDescriptor::workspace_store(UnsupportedSchema)];
         assert!(
             validate_registry(&unsupported_schema)
                 .unwrap_err()
@@ -855,31 +799,12 @@ mod tests {
                 .contains("unsupported keyword")
         );
 
-        let mismatch = [ToolDescriptor::new(
-            Box::new(FixtureTool("mismatch")),
-            ToolRoute::Store(StoreRoot::Workspace),
-            CallerPolicy::AgentCredential,
-        )];
-        assert!(
-            validate_registry(&mismatch)
-                .unwrap_err()
-                .to_string()
-                .contains("policy mismatch")
-        );
-
         for fixture in [
             SchemaFixture("invalid_json", "{"),
             SchemaFixture("not_object", r#"{"type":"array","properties":{}}"#),
             SchemaFixture("no_properties", r#"{"type":"object"}"#),
         ] {
-            assert!(
-                validate_registry(&[ToolDescriptor::new(
-                    Box::new(fixture),
-                    ToolRoute::Store(StoreRoot::Workspace),
-                    CallerPolicy::Public,
-                )])
-                .is_err()
-            );
+            assert!(validate_registry(&[ToolDescriptor::workspace_store(fixture)]).is_err());
         }
 
         assert!(matches!(

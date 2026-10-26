@@ -94,7 +94,6 @@ use usagi_tui::usecase::application::daemon_backend::{
     TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
 use usagi_tui::usecase::application::metrics::{GitDiff, MetricsPort, MetricsUpdate};
-use usagi_tui::usecase::application::pane_runtime::Geometry;
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
     DecisionCommandPort, EnvironmentStorePort, ExternalTerminalPort, RestoreConnectionPort,
@@ -104,6 +103,7 @@ use usagi_tui::usecase::application::runtime_ports::{
 use usagi_tui::usecase::application::session_catalog::{
     project_branch_catalog, project_branch_default, project_session_role_catalog,
 };
+use usagi_tui::usecase::application::terminal_session::Geometry;
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
     TerminalSubscription,
@@ -2374,7 +2374,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         workspace: WorkspaceId,
         session: Option<usagi_core::domain::id::SessionId>,
-        geometry: usagi_tui::usecase::application::pane_runtime::Geometry,
+        geometry: usagi_tui::usecase::application::terminal_session::Geometry,
         arguments: &str,
         operation: usagi_core::domain::id::OperationId,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {

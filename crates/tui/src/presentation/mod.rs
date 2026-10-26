@@ -7,6 +7,7 @@
 //! 領域配置（[`layouts`]）。view が layout で領域を割り、そこへ widget を配置する。
 //! 色は [`theme`] が意味的な役割で一元管理する（役割→具体色の単一情報源）。
 
+mod background_job;
 mod banner;
 mod config_setup;
 mod controller_host;
@@ -203,12 +204,12 @@ use crate::usecase::application::metrics::{
 };
 use crate::usecase::application::observation_lane::ObservationLane;
 use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
-use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::BrowserOpener;
 #[cfg(test)]
 use crate::usecase::application::pr::PrSnapshotPort;
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
+use crate::usecase::application::terminal_session::Geometry;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,

@@ -400,14 +400,7 @@ impl GenericTerminalCoordinator {
     pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
         self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
-        for record in self.records.values() {
-            if record.state == TerminalRuntimeState::Exited {
-                self.retention.set_pinned(
-                    &record.terminal,
-                    self.terminals.is_attached(&record.terminal),
-                );
-            }
-        }
+        self.refresh_exited_retention_pins();
     }
 
     /// Coalesces cleanup for every connection absent from the daemon's current
@@ -418,15 +411,21 @@ impl GenericTerminalCoordinator {
         writer: &mut dyn PtyWriter,
     ) {
         self.terminals.retain_live_connections(live, writer);
-        for record in self.records.values() {
-            if record.state == TerminalRuntimeState::Exited {
-                self.retention.set_pinned(
-                    &record.terminal,
-                    self.terminals.is_attached(&record.terminal),
-                );
-            }
+        self.refresh_exited_retention_pins();
+    }
+    fn refresh_exited_retention_pins(&self) {
+        for record in self
+            .records
+            .values()
+            .filter(|record| record.state == TerminalRuntimeState::Exited)
+        {
+            self.retention.set_pinned(
+                &record.terminal,
+                self.terminals.is_attached(&record.terminal),
+            );
         }
     }
+
     pub fn terminal_snapshot(
         &self,
         terminal: &TerminalRef,
@@ -665,6 +664,11 @@ impl GenericTerminalCoordinator {
         };
         self.persist(store)
     }
+    /// Borrow authoritative records for projections that do not need a durable snapshot.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &DurableTerminalRecord> {
+        self.records.values()
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> TerminalStoreSnapshot {
         TerminalStoreSnapshot {

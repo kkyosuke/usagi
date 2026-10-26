@@ -596,10 +596,12 @@ reviewer: agent_messages → 差分確認 → agent_message(changes_requested �
 
 tool descriptor の実装は `crates/cli/src/mcp/tools/` と `crates/cli/src/mcp/tool.rs` に置く。
 新しい tool は対象系統の `Tool` 実装へ metadata と schema を定義し、同じ registry entry へ
-execution route と caller policy を割り当てる。serve 側へ name match を追加しない。
+typed execution route を割り当てる。caller policy はその route から導出し、別の可変状態として保持しない。
+serve 側へ name match を追加しない。
 
 実効設定で filter された registry は MCP serve loop が入力を受け付ける前に検証される。重複 name、重複 execution route、
-route を持つ非公開 entry、不正な object schema は起動を拒否する。runtime validator は `tools/list` が返した同じ schema（runtime/model の動的列挙を
+不正な object schema は起動を拒否する。registry への登録が公開の正本であり、entry に公開フラグを重複保持しない。
+runtime validator は `tools/list` が返した同じ schema（runtime/model の動的列挙を
 含む）で arguments を検証してから route を実行する。
 
 tool を追加・変更するときは registry の全件回帰テストへ valid/invalid arguments が自動的に列挙される。

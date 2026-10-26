@@ -562,7 +562,7 @@ fn doctor_refuses_invalid_revision_catalog_and_running_agent_without_force() {
 }
 
 #[test]
-fn repair_source_diagnosis_covers_every_fail_closed_relation() {
+fn resume_source_diagnosis_is_shared_by_normal_and_repair_resume() {
     let workspace = WorkspaceId::new();
     let mut agent = runtime();
     agent
@@ -577,41 +577,69 @@ fn repair_source_diagnosis_covers_every_fail_closed_relation() {
         )
         .unwrap();
     let records = agent.coordinator.snapshot().records;
-    assert!(AgentRuntime::repair_source_availability(&records[0], &records).0);
-    let mut missing = records[0].clone();
-    missing.provider_resume = None;
-    assert_eq!(
+    let source = &records[0];
+    let revision = source.launch.plan.profile_revision;
+    assert!(AgentRuntime::resume_source_metadata_availability(source, &records).0);
+    assert!(agent.resume_source_availability(source, &records).0);
+    assert!(
         agent
-            .repair_resume_source_availability(&missing, &records, 2)
-            .1,
-        ProviderResumeReason::ProviderMetadataUnavailable
+            .resume_source_availability_at_revision(source, &records, revision)
+            .0
+    );
+    assert_eq!(
+        agent.resume_source_availability_at_revision(source, &records, revision + 1),
+        (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
 
-    let mut superseded = records[0].clone();
+    let mut missing = source.clone();
+    missing.provider_resume = None;
+    let mut superseded = source.clone();
     superseded.superseded_by = Some(AgentRuntimeId::new());
-    assert_eq!(
-        AgentRuntime::repair_source_availability(&superseded, &records).1,
-        ProviderResumeReason::SourceAlreadySuperseded
-    );
-
-    let mut duplicate = records[0].clone();
+    let mut duplicate = source.clone();
     duplicate.runtime.agent_runtime_id = AgentRuntimeId::new();
-    assert_eq!(
-        AgentRuntime::repair_source_availability(&records[0], &[records[0].clone(), duplicate],).1,
-        ProviderResumeReason::LiveOrOwnershipUnknown
-    );
-
-    let mut incompatible = records[0].clone();
+    let mut incompatible = source.clone();
     incompatible
         .provider_resume
         .as_mut()
         .unwrap()
         .scope
         .worktree_id = WorktreeId::new();
-    assert_eq!(
-        AgentRuntime::repair_source_availability(&incompatible, &records).1,
-        ProviderResumeReason::IncompatibleProviderMetadata
-    );
+    for (candidate, peers, reason) in [
+        (
+            missing,
+            records.clone(),
+            ProviderResumeReason::ProviderMetadataUnavailable,
+        ),
+        (
+            superseded,
+            records.clone(),
+            ProviderResumeReason::SourceAlreadySuperseded,
+        ),
+        (
+            source.clone(),
+            vec![source.clone(), duplicate],
+            ProviderResumeReason::LiveOrOwnershipUnknown,
+        ),
+        (
+            incompatible,
+            records.clone(),
+            ProviderResumeReason::IncompatibleProviderMetadata,
+        ),
+    ] {
+        let expected = (false, reason);
+        assert_eq!(
+            AgentRuntime::resume_source_metadata_availability(&candidate, &peers),
+            expected
+        );
+        assert_eq!(
+            agent.resume_source_availability(&candidate, &peers),
+            expected
+        );
+        assert_eq!(
+            agent.resume_source_availability_at_revision(&candidate, &peers, revision + 1),
+            expected
+        );
+    }
 }
 
 fn hydrate_restart_runtime(snapshot: RuntimeStoreSnapshot) -> AgentRuntime {

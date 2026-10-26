@@ -23,12 +23,13 @@ use usagi_tui::usecase::application::controller::{
 };
 use usagi_tui::usecase::application::metrics::GitDiff;
 use usagi_tui::usecase::application::pane::{
-    LivePane, PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
-};
-use usagi_tui::usecase::application::pane_runtime::{
-    Geometry, PaneRuntime, TerminalError, TerminalInventory, TerminalPort, TerminalSnapshot,
+    PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
 };
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
+use usagi_tui::usecase::application::terminal_session::{
+    Geometry, SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputError,
+    TerminalInputOutcome, TerminalSession, TerminalStreamPort, TerminalSubscription,
+};
 
 #[test]
 fn selected_terminal_window_rejects_empty_reversed_and_out_of_bounds_ranges() {
@@ -376,83 +377,72 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     assert_eq!(state.overlay(), None);
 }
 
-#[derive(Default)]
 struct ResumeFixturePort {
-    inventory: Vec<TerminalInventory>,
+    error: TerminalError,
     attachments: Vec<TerminalRef>,
 }
 
-impl TerminalPort for ResumeFixturePort {
-    fn inventory(&mut self) -> Result<Vec<TerminalInventory>, TerminalError> {
-        Ok(self.inventory.clone())
-    }
-
+impl TerminalStreamPort for ResumeFixturePort {
     fn attach(
         &mut self,
         terminal: &TerminalRef,
-        _: Option<u64>,
-    ) -> Result<TerminalSnapshot, TerminalError> {
+        _: Geometry,
+    ) -> Result<TerminalAttach, TerminalError> {
         self.attachments.push(terminal.clone());
-        Ok(TerminalSnapshot {
-            terminal: terminal.clone(),
-            output_offset: 0,
-            geometry: Geometry { cols: 80, rows: 24 },
-            replay: Vec::new(),
-            exited: false,
-        })
+        Err(self.error)
     }
 
-    fn resync(&mut self, _: &TerminalRef) -> Result<TerminalSnapshot, TerminalError> {
-        Err(TerminalError::Unavailable)
+    fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
+        panic!("a refused attachment cannot poll")
     }
 
-    fn input(&mut self, _: &TerminalRef, _: &[u8]) -> Result<(), TerminalError> {
-        Ok(())
+    fn input(
+        &mut self,
+        _: &TerminalRef,
+        _: TerminalSubscription,
+        _: u64,
+        _: OperationId,
+        _: &[u8],
+    ) -> Result<TerminalInputOutcome, TerminalError> {
+        panic!("a refused attachment cannot send input")
     }
 
-    fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), TerminalError> {
-        Ok(())
+    fn detach(&mut self, _: &TerminalRef, _: TerminalSubscription) {
+        panic!("a refused attachment has no subscription to detach")
     }
-
-    fn detach(&mut self, _: &TerminalRef) {}
 }
 
 #[test]
-fn terminal_resume_falls_back_for_missing_and_stale_inventory() {
-    let workspace = WorkspaceId::new();
-    let surviving_session = SessionId::new();
-
-    let saved = terminal(workspace, surviving_session);
-    let pane = PaneState::with_live(
-        PaneSelection::Tab(TabSelection::Live(saved.clone())),
-        vec![LivePane {
-            terminal: saved.clone(),
-            kind: PaneKind::Terminal,
-        }],
-    );
-
-    // Missing inventory data is a safe no-attach fallback.
-    let mut missing = PaneRuntime::new(pane.clone());
-    let mut port = ResumeFixturePort::default();
-    missing.reconnect(&mut port);
-    assert!(missing.pane().tabs().is_empty());
-    assert!(port.attachments.is_empty());
-
-    // An old TerminalRef (same terminal ID but another daemon incarnation) is
-    // stale rather than a candidate for heuristic migration.
-    let mut old = saved;
-    old.daemon_generation = DaemonGeneration::new();
-    let mut stale = PaneRuntime::new(pane);
-    let mut port = ResumeFixturePort {
-        inventory: vec![TerminalInventory {
-            terminal: old,
-            live: true,
-        }],
-        ..ResumeFixturePort::default()
-    };
-    stale.reconnect(&mut port);
-    assert!(stale.pane().tabs().is_empty());
-    assert!(port.attachments.is_empty());
+fn terminal_resume_preserves_identity_and_refuses_input_for_unavailable_or_stale_targets() {
+    let saved = terminal(WorkspaceId::new(), SessionId::new());
+    for (error, expected_state, message) in [
+        (
+            TerminalError::Unavailable,
+            SessionState::Reconnecting,
+            "daemon unavailable",
+        ),
+        (
+            TerminalError::Stale,
+            SessionState::Disconnected,
+            "terminal is no longer available",
+        ),
+    ] {
+        let mut port = ResumeFixturePort {
+            error,
+            attachments: Vec::new(),
+        };
+        let mut session = TerminalSession::new(saved.clone(), Geometry { cols: 80, rows: 24 });
+        session.connect(&mut port);
+        assert_eq!(session.state(), expected_state);
+        assert!(session.error().unwrap().contains(message));
+        assert_eq!(session.terminal(), &saved);
+        assert_eq!(port.attachments, vec![saved.clone()]);
+        assert_eq!(
+            session.send_input(&mut port, b"command\n"),
+            Err(TerminalInputError::NotLive(expected_state)),
+        );
+        assert_eq!(port.attachments.len(), 1);
+    }
 }
 
 /// Freezes the sidebar Git diff columns projected through `with_git_diffs`.

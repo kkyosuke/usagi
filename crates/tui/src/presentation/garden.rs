@@ -3,6 +3,7 @@
 //! Home frame loop は「どこへ入力を渡すか」だけを見て、Garden 固有の判断は
 //! ここが持つ。
 
+use super::background_job::Job as GardenObservationJob;
 use super::{
     AgentRuntimeId, AgentWorkspaceObservation, AppEvent, Effect, GardenClick, GardenInventoryPort,
     HomeFrameMaterial, Key, LiveTerminalAction, MAX_OBSERVED_PROJECTS, Overlay, PointerEvent,
@@ -217,30 +218,13 @@ pub(super) struct GardenObservationCompletion {
 /// A workspace whose daemon does not answer, or answers with another
 /// workspace's inventory, is skipped: the Garden keeps that project's read-only
 /// plot rather than drawing a foreign project's rabbits in it.
-pub(super) struct GardenObservationJob {
-    worker: Option<std::thread::JoinHandle<()>>,
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl Drop for GardenObservationJob {
-    fn drop(&mut self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
 pub(super) fn spawn_garden_observation_job(
     mut port: Box<dyn GardenInventoryPort>,
     workspaces: Vec<WorkspaceId>,
     observe_agents: bool,
     sender: Sender<GardenObservationCompletion>,
 ) -> GardenObservationJob {
-    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let cancel = std::sync::Arc::clone(&cancelled);
-    let worker = std::thread::spawn(move || {
+    GardenObservationJob::spawn(move |cancel| {
         let mut inventories = Vec::new();
         let mut attention = Vec::new();
         for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
@@ -268,11 +252,7 @@ pub(super) fn spawn_garden_observation_job(
             inventories,
             attention,
         });
-    });
-    GardenObservationJob {
-        worker: Some(worker),
-        cancelled,
-    }
+    })
 }
 
 /// Select one visible managed-session tab after the frame's hit test resolved
@@ -360,21 +340,9 @@ mod observation_worker_tests {
         entered_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
-        let cancelled = Arc::clone(&job.cancelled);
-        let dropper = std::thread::spawn(move || drop(job));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        // Observe the timeout even if the dropper has already cancelled the job.
-        let mut waiting_for_cancellation = true;
-        while waiting_for_cancellation {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "job drop must request cancellation"
-            );
-            std::thread::yield_now();
-            waiting_for_cancellation = !cancelled.load(Ordering::Acquire);
-        }
+        job.cancel();
         release_tx.send(()).unwrap();
-        dropper.join().unwrap();
+        drop(job);
         let mut result = receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();

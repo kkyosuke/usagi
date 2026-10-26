@@ -1,10 +1,7 @@
 //! A single cancellable reader for the unified picker.
+pub(super) use super::background_job::SearchJob as Job;
 use crate::usecase::application::unified_search::{Query, Results, UnifiedSearchPort};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::Sender,
-};
+use std::sync::mpsc::Sender;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Request {
@@ -23,38 +20,13 @@ pub(super) struct Completion {
     pub port: Box<dyn UnifiedSearchPort>,
 }
 
-pub(super) struct Job {
-    token: (u64, u64),
-    cancelled: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Job {
-    pub(super) fn cancel_unless_current(&self, token: Option<(u64, u64)>) {
-        if token != Some(self.token) {
-            self.cancelled.store(true, Ordering::Release);
-        }
-    }
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
 pub(super) fn spawn(
     mut port: Box<dyn UnifiedSearchPort>,
     token: (u64, u64),
     request: Request,
     sender: Sender<Completion>,
 ) -> Job {
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::clone(&cancelled);
-    let worker = std::thread::spawn(move || {
+    Job::spawn(token, move |cancel| {
         let response = match request {
             Request::Search(query) => Response::Search(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -75,12 +47,7 @@ pub(super) fn spawn(
             response,
             port,
         });
-    });
-    Job {
-        token,
-        cancelled,
-        worker: Some(worker),
-    }
+    })
 }
 
 #[cfg(test)]

@@ -1624,16 +1624,7 @@ impl RuntimeCoordinator {
     pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
         self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
-        let exited: Vec<TerminalRef> = self
-            .records
-            .values()
-            .filter(|record| record.state == RuntimeState::Exited)
-            .map(|record| record.runtime.terminal.clone())
-            .collect();
-        for terminal in exited {
-            let attached = self.terminals.is_attached(&terminal);
-            self.retention.set_pinned(&terminal, attached);
-        }
+        self.refresh_exited_retention_pins();
     }
 
     /// Coalesces cleanup for every connection absent from the daemon's current
@@ -1645,15 +1636,18 @@ impl RuntimeCoordinator {
         writer: &mut dyn PtyWriter,
     ) {
         self.terminals.retain_live_connections(live, writer);
-        let exited: Vec<TerminalRef> = self
+        self.refresh_exited_retention_pins();
+    }
+
+    fn refresh_exited_retention_pins(&self) {
+        for record in self
             .records
             .values()
             .filter(|record| record.state == RuntimeState::Exited)
-            .map(|record| record.runtime.terminal.clone())
-            .collect();
-        for terminal in exited {
-            let attached = self.terminals.is_attached(&terminal);
-            self.retention.set_pinned(&terminal, attached);
+        {
+            let terminal = &record.runtime.terminal;
+            self.retention
+                .set_pinned(terminal, self.terminals.is_attached(terminal));
         }
     }
 
@@ -1797,6 +1791,11 @@ impl RuntimeCoordinator {
         reference.last_known_phase = Some(phase);
         self.persist(store)
     }
+    /// Borrow authoritative records for projections that do not need a durable snapshot.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &DurableRuntimeRecord> {
+        self.records.values()
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {
         RuntimeStoreSnapshot {

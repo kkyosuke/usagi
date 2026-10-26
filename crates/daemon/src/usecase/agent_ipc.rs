@@ -786,12 +786,10 @@ impl AgentRuntime {
             .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
         let recorded_at = Utc::now();
         let operations = coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .map(|record| {
                 let operation_id = record.operation.operation_id.to_string();
-                let outcome = durable_operation_outcome(&record);
+                let outcome = durable_operation_outcome(record);
                 (
                     operation_id,
                     AgentOperation::new(record.semantic_key.as_deref(), outcome, recorded_at),
@@ -835,9 +833,7 @@ impl AgentRuntime {
     fn prune_operations(&mut self, now: DateTime<Utc>) {
         let protected = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .map(|record| record.operation.operation_id.to_string())
             .collect::<BTreeSet<_>>();
         let max_age_seconds = self.operation_bounds.age_seconds;
@@ -888,9 +884,7 @@ impl AgentRuntime {
         let failed = self.failed_dispatch_ids()?;
         Ok(self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| Self::is_failed_reservation(record, &failed))
             .map(|record| record.runtime.agent_runtime_id)
             .collect())
@@ -1239,11 +1233,9 @@ impl AgentRuntime {
     pub fn session_phase(&self, session: SessionId) -> AgentPhase {
         let failed = self.failed_dispatch_ids().unwrap_or_default();
         self.coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.session_id == Some(session))
-            .map(|record| self.record_phase(&record, &failed))
+            .map(|record| self.record_phase(record, &failed))
             .max_by_key(|(priority, _)| *priority)
             .map_or(AgentPhase::Absent, |(_, phase)| phase)
     }
@@ -1283,11 +1275,9 @@ impl AgentRuntime {
         workspace: WorkspaceId,
     ) -> Vec<(TerminalRef, super::runtime::RuntimeState)> {
         self.coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
-            .map(|record| (record.runtime.terminal, record.state))
+            .map(|record| (record.runtime.terminal.clone(), record.state))
             .collect()
     }
 
@@ -1295,9 +1285,7 @@ impl AgentRuntime {
     #[must_use]
     pub fn retirement_blocker_count(&self, workspace: WorkspaceId) -> usize {
         self.coordinator
-            .snapshot()
-            .records
-            .iter()
+            .records()
             .filter(|record| {
                 record.runtime.terminal.workspace_id == workspace
                     && matches!(
@@ -1332,7 +1320,8 @@ impl AgentRuntime {
             .filter_map(|record| {
                 let expected_revision = expected.get(record.launch.plan.profile_id.as_str())?;
                 (record.launch.plan.profile_revision < *expected_revision).then(|| {
-                    let resume_available = Self::repair_source_availability(record, &records).0;
+                    let resume_available =
+                        Self::resume_source_metadata_availability(record, &records).0;
                     OutdatedAgentRuntime {
                         runtime: record.runtime.clone(),
                         continuation: record.continuation,
@@ -1566,11 +1555,14 @@ impl AgentRuntime {
     > {
         let origins = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
-            .map(|record| (record.operation.operation_id, record.launch_provenance))
+            .map(|record| {
+                (
+                    record.operation.operation_id,
+                    record.launch_provenance.clone(),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         let mut latest = BTreeMap::<AgentId, (chrono::DateTime<Utc>, OperationId)>::new();
         for run in self.dispatch.runs().map_err(map_dispatch_storage_error)? {
@@ -1612,7 +1604,7 @@ impl AgentRuntime {
                 })
                 .or_insert(agent.status);
         }
-        for record in self.coordinator.snapshot().records {
+        for record in self.coordinator.records() {
             if record.runtime.terminal.workspace_id != workspace
                 || record.state != super::runtime::RuntimeState::Running
                 || !matches!(
@@ -1766,52 +1758,6 @@ impl AgentRuntime {
         Ok(true)
     }
 
-    fn repair_source_availability(
-        record: &super::runtime::DurableRuntimeRecord,
-        records: &[super::runtime::DurableRuntimeRecord],
-    ) -> (bool, ProviderResumeReason) {
-        let (Some(continuation), Some(_source), Some(reference)) = (
-            record.continuation,
-            record.resume_source,
-            record.provider_resume.as_ref(),
-        ) else {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
-        };
-        if record.superseded_by.is_some() {
-            return (false, ProviderResumeReason::SourceAlreadySuperseded);
-        }
-        if records.iter().any(|candidate| {
-            candidate.runtime.agent_runtime_id != record.runtime.agent_runtime_id
-                && candidate.continuation == Some(continuation)
-                && holds_live_or_unknown_agent(candidate.state)
-        }) {
-            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
-        }
-        let capture_compatible = matches!(
-            (reference.provider, reference.provenance),
-            (
-                ProviderKind::Claude,
-                ProviderCaptureProvenance::DaemonIssued
-                    | ProviderCaptureProvenance::ProviderStructured
-            ) | (
-                ProviderKind::Codex | ProviderKind::Agy,
-                ProviderCaptureProvenance::ProviderStructured
-            )
-        );
-        let internally_compatible = capture_compatible
-            && record.launch.plan.profile_revision == reference.adapter_revision
-            && record.launch.request.scope == reference.scope
-            && record.runtime.terminal.workspace_id == reference.scope.workspace_id
-            && record.runtime.terminal.session_id == reference.scope.session_id
-            && record.runtime.terminal.worktree_id == reference.scope.worktree_id
-            && provider_matches_profile(reference.provider, &record.launch.plan.profile_id);
-        if internally_compatible {
-            (true, ProviderResumeReason::ExplicitResumeAvailable)
-        } else {
-            (false, ProviderResumeReason::IncompatibleProviderMetadata)
-        }
-    }
-
     /// Journals daemon-owned PTY output before it becomes replayable.  A stale
     /// terminal is a safe no-op error, never a replacement.
     pub fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) -> Result<(), ProtocolError> {
@@ -1911,9 +1857,7 @@ impl AgentRuntime {
     pub fn close_session(&mut self, session: SessionId) -> Result<usize, ProtocolError> {
         let owned_operations = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.session_id == Some(session))
             .map(|record| {
                 (
@@ -1934,9 +1878,7 @@ impl AgentRuntime {
     pub fn close_workspace(&mut self, workspace: WorkspaceId) -> Result<usize, ProtocolError> {
         let owned_operations = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
             .map(|record| {
                 (
@@ -1957,9 +1899,7 @@ impl AgentRuntime {
     #[must_use]
     pub fn managed_session_ids(&self) -> std::collections::BTreeSet<SessionId> {
         self.coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter_map(|record| record.runtime.session_id)
             .collect()
     }
@@ -1972,9 +1912,7 @@ impl AgentRuntime {
     #[must_use]
     pub fn retained_resources(&self) -> std::collections::BTreeSet<String> {
         self.coordinator
-            .snapshot()
-            .records
-            .iter()
+            .records()
             .map(|record| record.runtime.terminal.terminal_id.as_str())
             .collect()
     }

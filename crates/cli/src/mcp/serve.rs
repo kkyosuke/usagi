@@ -890,11 +890,6 @@ fn store_tool_call(
             id,
             json!({"content":[{"type":"text","text":result}], "isError": false}),
         ),
-        Err(ToolError::UnknownTool(tool)) => protocol::error(
-            id,
-            error_code::METHOD_NOT_FOUND,
-            &format!("unknown tool: {tool}"),
-        ),
         Err(ToolError::InvalidParams(message)) => {
             protocol::error(id, error_code::INVALID_PARAMS, &message)
         }
@@ -960,7 +955,7 @@ mod tests {
     use crate::mcp::runtime_model::{
         ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
     };
-    use crate::mcp::tool::{CallerPolicy, StoreRoot, Tool, ToolDescriptor, ToolError, ToolRoute};
+    use crate::mcp::tool::{CallerPolicy, Tool, ToolDescriptor, ToolError, ToolRoute};
     use crate::mcp::tools::registry;
     use serde_json::Value;
     use std::io::{BufReader, Cursor, ErrorKind, Write};
@@ -1461,10 +1456,6 @@ mod tests {
         };
         for (tool, expected) in [
             (
-                ErrorTool(|| ToolError::UnknownTool("gone".into())),
-                crate::mcp::protocol::error_code::METHOD_NOT_FOUND,
-            ),
-            (
                 ErrorTool(|| ToolError::Unimplemented("later")),
                 crate::mcp::protocol::error_code::INTERNAL_ERROR,
             ),
@@ -1473,11 +1464,7 @@ mod tests {
                 crate::mcp::protocol::error_code::INVALID_PARAMS,
             ),
         ] {
-            let descriptor = ToolDescriptor::new(
-                Box::new(tool),
-                ToolRoute::Store(StoreRoot::Workspace),
-                CallerPolicy::Public,
-            );
+            let descriptor = ToolDescriptor::workspace_store(tool);
             assert_eq!(descriptor.name(), "error_fixture");
             assert_eq!(descriptor.description(), "error mapping fixture");
             assert!(descriptor.input_schema().contains("object"));
