@@ -25,7 +25,7 @@ use super::{
     TerminalViewProjection, UnavailableAgentCommandPort, UnavailableBackendPort,
     UnavailableBrowserOpener, UnavailableDecisionCommandPort, UnavailableEnvironmentStore,
     UnavailableExternalTerminalPort, UnavailableGardenInventoryPort, UnavailablePaneLaunchPort,
-    UnavailablePrSnapshotPort, UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
+    UnavailableSessionCommandPort, UnavailableSessionCommandPortFactory,
     WORKSPACE_SWITCH_LOADING_GRACE, WelcomeStep, WorkspaceConfigContext, WorkspaceConfigStep,
     WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
     WorkspaceInputRoute, WorkspaceIoRuntime, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot,
@@ -84,7 +84,6 @@ use crate::usecase::application::daemon_backend::{
     ReopenAgentRequest,
 };
 use crate::usecase::application::pane::{LivePane, PaneKind, PaneSelection, PaneTab, TabSelection};
-use crate::usecase::application::pr::PrSnapshotPort;
 use crate::usecase::application::run as dispatch;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::{EntryScreen, Key, Terminal};

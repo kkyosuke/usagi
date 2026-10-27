@@ -223,7 +223,7 @@ impl ProjectedSession {
             last_modified: record.last_active_or_created(),
             has_notes: !record.notes.is_empty(),
             memo: record.notes.note.clone(),
-            pr_count: visible_pr_links(&record.prs),
+            pr_count: PrLink::visible_count(&record.prs),
             removing: false,
             agent_resume: None,
             // Lifecycle is daemon-authoritative and joined by stable ID before
@@ -303,10 +303,6 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
             |parent| format!("{parent} › {}", session.label),
         );
     format!("{role}{lineage}")
-}
-
-pub(crate) fn visible_pr_links(prs: &[PrLink]) -> usize {
-    prs.iter().filter(|pr| pr.is_visible()).count()
 }
 
 pub(crate) fn visible_pr_entries(prs: &[PrEntry]) -> usize {
@@ -9409,6 +9405,11 @@ mod tests {
         assert_eq!(
             ProjectedSession::from_record(SessionId::new(), &one).pr_count,
             2
+        );
+        one.prs[0].state = PrState::Dismissed;
+        assert_eq!(
+            ProjectedSession::from_record(SessionId::new(), &one).pr_count,
+            1
         );
 
         let target = Target::Root(WorkspaceId::new());

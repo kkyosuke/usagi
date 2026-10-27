@@ -19,7 +19,7 @@ use usagi_core::usecase::vt_screen::{
     ScreenCheckpoint, VtScreen,
 };
 
-use super::terminal_link::scan_links;
+use super::terminal_link::link_cells;
 use super::terminal_selection::{TerminalPoint, TerminalSelection};
 
 // Kept in sync with `presentation::frame::TERMINAL_CURSOR_MARKER`.  This
@@ -246,8 +246,7 @@ impl TerminalScreen {
         let plain = (scan_start..scan_end)
             .map(|row| unstyled_row(self.retained_row(row)))
             .collect::<Vec<_>>();
-        let links = scan_links(&plain)
-            .cells
+        let links = link_cells(&plain)
             .into_iter()
             .map(|point| TerminalPoint {
                 row: point.row + scan_start,
@@ -338,8 +337,7 @@ impl TerminalScreen {
         let plain = (scan_start..scan_end)
             .map(|row| unstyled_row(self.retained_row(row)))
             .collect::<Vec<_>>();
-        let links = scan_links(&plain)
-            .cells
+        let links = link_cells(&plain)
             .into_iter()
             .map(|point| TerminalPoint {
                 row: point.row + scan_start,

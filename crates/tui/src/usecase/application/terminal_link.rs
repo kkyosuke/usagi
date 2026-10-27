@@ -12,19 +12,16 @@
 //!   an `http(s)` URL, lifts the link out as text (a URL wrapped across rows is
 //!   stitched back into one string), so a click anywhere along it opens the
 //!   whole link.
-//! - [`scan_links`] runs the same detection over the whole grid once, returning
-//!   both every cell that sits on a URL (to underline links) and each URL's
-//!   text in reading order; [`link_cells`] is the cell-only half.
-//! - [`link_cells_at`] is the hover counterpart to [`link_cells`]: it returns
-//!   just the cells of the one URL under the pointer.
+//! - [`link_cells`] runs the same detection over the whole grid once, returning
+//!   every cell that sits on a URL so the renderer can underline links.
 //! - [`validate_url`] is the defense-in-depth gate a browser launcher
 //!   runs on a detected string before spawning: it re-checks the scheme
 //!   allowlist and rejects any control character, escape, newline, or space, so
 //!   an ANSI/terminal-control sequence can never reach a browser argument.
 //!
-//! This is the pure core of the click-to-open feature. The mouse hit-test, selection-drag
-//! coexistence, and the browser spawn itself live in later wiring;
-//! everything here is pure and unit-tested against plain row strings.
+//! This is the pure core of the click-to-open feature. The mouse hit-test and
+//! selection-drag coexistence live in presentation; everything here is pure and
+//! unit-tested against plain row strings.
 //!
 //! Because [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) drops the
 //! per-row wrap flag, a logical line is reconstructed from the grid width: a row
@@ -151,69 +148,25 @@ pub fn url_at(viewport: &[String], point: TerminalPoint) -> Option<String> {
     url_in_chars(&chars, idx)
 }
 
-/// Both products of one whole-grid URL scan: the cells every link covers (to
-/// underline them) and each link's text in reading order.
-pub struct ScreenLinks {
-    /// Every grid cell that sits on an `http(s)` URL.
-    pub cells: HashSet<TerminalPoint>,
-    /// Each `http(s)` URL on the grid, as text, in reading order.
-    pub urls: Vec<String>,
-}
-
-/// Scan the whole viewport for `http(s)` URLs once, returning both the cells they
-/// cover and their text. Computing both in one pass flattens each logical line
-/// and runs [`url_spans`] a single time instead of twice.
+/// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
+/// links to mark them clickable. Each logical line is scanned once.
 #[must_use]
-pub fn scan_links(viewport: &[String]) -> ScreenLinks {
+pub fn link_cells(viewport: &[String]) -> HashSet<TerminalPoint> {
     let grid = expand(viewport);
     let mut cells = HashSet::new();
-    let mut urls = Vec::new();
     if grid.width == 0 {
-        return ScreenLinks { cells, urls };
+        return cells;
     }
     let mut start = 0;
     while start < grid.rows.len() {
         let end = grid.logical_end(start);
         let chars = grid.flatten(start, end);
         for span in url_spans(&chars) {
-            urls.push(chars[span.clone()].iter().collect());
             for index in span {
                 cells.insert(grid.cell(start, index));
             }
         }
         start = end + 1;
-    }
-    ScreenLinks { cells, urls }
-}
-
-/// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
-/// links to mark them clickable. The cell half of [`scan_links`].
-#[must_use]
-pub fn link_cells(viewport: &[String]) -> HashSet<TerminalPoint> {
-    scan_links(viewport).cells
-}
-
-/// Every grid cell of the `http(s)` URL that the cell at `point` sits on, or an
-/// empty set when `point` is blank or not on a URL. The hover counterpart to
-/// [`link_cells`]: it picks out just the one link under the pointer so the
-/// renderer can recolour it.
-#[must_use]
-pub fn link_cells_at(viewport: &[String], point: TerminalPoint) -> HashSet<TerminalPoint> {
-    let mut cells = HashSet::new();
-    let grid = expand(viewport);
-    if grid.width == 0 || point.row >= grid.rows.len() || point.column >= grid.width {
-        return cells;
-    }
-    let start = logical_start(&grid, point.row);
-    let chars = grid.flatten(start, grid.logical_end(point.row));
-    let idx = (point.row - start) * grid.width + point.column;
-    if chars[idx].is_whitespace() {
-        return cells;
-    }
-    if let Some(span) = url_spans(&chars).into_iter().find(|s| s.contains(&idx)) {
-        for index in span {
-            cells.insert(grid.cell(start, index));
-        }
     }
     cells
 }
@@ -337,8 +290,8 @@ pub enum UrlRejection {
 /// returning the candidate unchanged when it passes.
 ///
 /// Detection already restricts schemes to `http(s)` and characters to printable
-/// ASCII, so a candidate from [`url_at`] or [`scan_links`] always passes; this is
-/// the defense-in-depth gate a launcher runs immediately before spawning, so an
+/// ASCII, so a candidate from [`url_at`] always passes. This is the
+/// defense-in-depth gate a launcher runs immediately before spawning, so an
 /// ANSI escape, terminal-control byte, or non-`http(s)` scheme can never reach a
 /// browser argument regardless of how the candidate was obtained.
 ///
@@ -569,14 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn scan_links_marks_exactly_the_url_run_and_lists_the_url() {
+    fn link_cells_marks_exactly_the_url_run() {
         let view = grid(40, &["see https://example.com/x now"]);
-        let links = scan_links(&view);
         // "https://example.com/x" is 21 chars starting at col 4 (after "see "),
         // so cols 4..=24 are link cells; the surrounding words carry none.
         let expected: HashSet<(usize, usize)> = (4..=24).map(|c| (0, c)).collect();
-        assert_eq!(pairs(links.cells), expected);
-        assert_eq!(links.urls, vec!["https://example.com/x"]);
+        assert_eq!(pairs(link_cells(&view)), expected);
     }
 
     #[test]
@@ -586,9 +537,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_links_lists_every_url_in_reading_order() {
+    fn link_cells_marks_every_url_across_rows() {
         let view = grid(30, &["https://a.io first", "then https://b.io"]);
-        assert_eq!(scan_links(&view).urls, vec!["https://a.io", "https://b.io"],);
+        let expected = (0..12)
+            .map(|column| (0, column))
+            .chain((5..17).map(|column| (1, column)))
+            .collect();
+        assert_eq!(pairs(link_cells(&view)), expected);
     }
 
     #[test]
@@ -605,56 +560,9 @@ mod tests {
     }
 
     #[test]
-    fn scan_links_handles_an_empty_viewport() {
+    fn link_cells_handles_an_empty_viewport() {
         assert!(link_cells(&[]).is_empty());
-        assert!(scan_links(&[String::new()]).urls.is_empty());
-    }
-
-    #[test]
-    fn link_cells_at_returns_the_hovered_urls_cells() {
-        let view = grid(40, &["see https://example.com/x now"]);
-        let expected: HashSet<(usize, usize)> = (4..=24).map(|c| (0, c)).collect();
-        for col in 4..=24 {
-            assert_eq!(
-                pairs(link_cells_at(&view, at(0, col))),
-                expected,
-                "col {col}"
-            );
-        }
-    }
-
-    #[test]
-    fn link_cells_at_picks_only_the_hovered_link_among_several() {
-        let view = grid(60, &["https://a.io and https://b.io"]);
-        let cells = pairs(link_cells_at(&view, at(0, 0)));
-        // "https://a.io" is 12 chars at cols 0..=11; the second URL is untouched.
-        let expected: HashSet<(usize, usize)> = (0..=11).map(|c| (0, c)).collect();
-        assert_eq!(cells, expected);
-    }
-
-    #[test]
-    fn link_cells_at_spans_a_wrapped_url() {
-        let view = grid(16, &["https://example.", "com/page"]);
-        let cells = pairs(link_cells_at(&view, at(1, 2)));
-        for col in 0..16 {
-            assert!(cells.contains(&(0, col)), "row 0 col {col}");
-        }
-        for col in 0..8 {
-            assert!(cells.contains(&(1, col)), "row 1 col {col}");
-        }
-    }
-
-    #[test]
-    fn link_cells_at_returns_empty_off_a_link() {
-        let view = grid(40, &["see https://example.com now"]);
-        // A blank cell, the surrounding text, a trailing blank, and a cell
-        // outside the grid all yield no link.
-        assert!(link_cells_at(&view, at(0, 0)).is_empty());
-        assert!(link_cells_at(&view, at(0, 3)).is_empty());
-        assert!(link_cells_at(&view, at(0, 39)).is_empty());
-        assert!(link_cells_at(&view, at(9, 0)).is_empty());
-        // An empty viewport yields no link and does not panic.
-        assert!(link_cells_at(&[], at(0, 0)).is_empty());
+        assert!(link_cells(&[String::new()]).is_empty());
     }
 
     #[test]

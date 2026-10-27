@@ -1356,7 +1356,8 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
 - **レジストリと dispatch**: 各系統の `tools()` が tool struct と typed `ToolRoute` を同じ式で
   `ToolDescriptor` にし、`tools::registry()` は descriptor を連結する。tool 名を再解釈する文字列 `match` は持たず、
   route を付けていない `Box<dyn Tool>` は registry の要素型になれない。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
-  listing と call に使い、name lookup と schema validation の後、descriptor の route に従って Store または daemon IPC へ送る。
+  接続単位の `ServerTools` に実効 schema とともに保持して listing と call に使う。name lookup と引数の schema validation の後、
+  descriptor の route に従って Store または daemon IPC へ送る。設定読込・runtime snapshot の取得は共通の接続初期化経路に集約する。
   全 tool に一様な入口を与えるが、全 tool が `Tool::call` を通るわけではない。
 - **serve ループ**（`mcp/serve.rs`）: stdio 上の JSON-RPC 2.0 を 1 行ずつ処理する。純粋な
   ルーティング（`handle_line`: str → 応答 or 通知の無応答）と実 IO の反復（`serve`）を分け、

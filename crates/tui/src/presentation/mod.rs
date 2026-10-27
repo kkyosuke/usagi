@@ -205,8 +205,6 @@ use crate::usecase::application::metrics::{
 use crate::usecase::application::observation_lane::ObservationLane;
 use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
 use crate::usecase::application::pr::BrowserOpener;
-#[cfg(test)]
-use crate::usecase::application::pr::PrSnapshotPort;
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::Geometry;
@@ -915,20 +913,6 @@ impl EnvironmentStorePort for UnavailableEnvironmentStore {
             scope,
             error: unavailable_environment_error(),
         }
-    }
-}
-
-/// PR snapshot fallback for entry points that do not inject the daemon PR port
-/// (the Welcome/Open/Recent screen graph). The PR overlay shows a safe notice.
-#[cfg(test)]
-struct UnavailablePrSnapshotPort;
-#[cfg(test)]
-impl PrSnapshotPort for UnavailablePrSnapshotPort {
-    fn snapshot(
-        &mut self,
-        _session: SessionId,
-    ) -> Result<usagi_core::infrastructure::ipc::PrSnapshot, String> {
-        Err("Pull Request data is unavailable.".to_owned())
     }
 }
 
@@ -2668,7 +2652,6 @@ pub(crate) fn run_workspace_controller(
     _environment: Box<dyn EnvironmentStorePort>,
     _desktop_notifications: Box<dyn DesktopNotificationPort>,
     metrics: Box<dyn MetricsPort>,
-    _pr_port: Box<dyn PrSnapshotPort>,
     browser: Box<dyn BrowserOpener>,
 ) -> io::Result<Exit> {
     let mut factory = FixedBackendFactory {

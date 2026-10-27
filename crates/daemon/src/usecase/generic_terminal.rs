@@ -689,34 +689,6 @@ impl GenericTerminalCoordinator {
             .map(|record| (record.terminal.clone(), record.state))
             .collect()
     }
-    /// Whether this workspace still has a generic terminal that is running.
-    ///
-    /// Unlike [`Self::inventory`], the question is about the whole workspace
-    /// rather than one scope inside it: a retirement gives back the workspace,
-    /// so any live child anywhere in it must keep it.
-    #[must_use]
-    pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
-        self.records.values().any(|record| {
-            record.terminal.workspace_id == workspace
-                && matches!(record.state, TerminalRuntimeState::Running)
-        })
-    }
-
-    /// Number of live generic terminal PTYs owned by one workspace.
-    #[must_use]
-    pub fn running_count_in_workspace(
-        &self,
-        workspace: usagi_core::domain::id::WorkspaceId,
-    ) -> usize {
-        self.records
-            .values()
-            .filter(|record| {
-                record.terminal.workspace_id == workspace
-                    && matches!(record.state, TerminalRuntimeState::Running)
-            })
-            .count()
-    }
-
     /// Number of PTY records that may still name a live process and therefore
     /// must block an unforced workspace retirement.
     #[must_use]
@@ -1153,7 +1125,7 @@ mod tests {
         coordinator.exit(&exited, 0, &mut store).unwrap();
 
         assert_eq!(
-            coordinator.running_count_in_workspace(first.workspace_id),
+            coordinator.retirement_blocker_count_in_workspace(first.workspace_id),
             1
         );
         assert_eq!(

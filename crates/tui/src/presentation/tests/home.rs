@@ -977,7 +977,6 @@ fn compatibility_ports_fail_explicitly_and_never_silently_succeed() {
         UnavailableEnvironmentStore.save(EnvScope::Global, Vec::new()),
         BackendEvent::EnvironmentError { .. }
     ));
-    assert!(UnavailablePrSnapshotPort.snapshot(session_id).is_err());
     assert!(
         UnavailableBrowserOpener
             .open("https://example.com")

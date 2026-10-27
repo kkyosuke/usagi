@@ -5,7 +5,7 @@
 //! 1 接続の lifecycle state と行単位の validation/routing を `handle_line_with_client` に閉じ込め、
 //! `serve` は実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、routing は
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
-//! issue / memory は接続時に固定した root の core store usecase、session / agent / terminal /
+//! issue / memory は接続時に固定した root の core store usecase、
 //! session / agent / terminal 系は daemon client へ接続し、tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Read, Write};
@@ -64,11 +64,65 @@ enum ServerState {
 
 #[derive(Clone, Copy)]
 struct ServerCapabilities<'a> {
-    runtime_models: &'a RuntimeModelSnapshot,
-    tools: McpToolFamilies,
+    tools: &'a ServerTools<'a>,
     caller_credential: Option<&'a str>,
     store_root: &'a Path,
     memory_root: &'a Path,
+}
+
+/// One connection owns the validated registry and the schemas used by both
+/// tools/list and tools/call. Runtime availability is fixed for that lifetime.
+struct ServerTools<'a> {
+    runtime_models: &'a RuntimeModelSnapshot,
+    entries: Vec<PreparedTool>,
+}
+
+struct PreparedTool {
+    descriptor: ToolDescriptor,
+    schema: Value,
+}
+
+impl<'a> ServerTools<'a> {
+    fn new(runtime_models: &'a RuntimeModelSnapshot, families: McpToolFamilies) -> Self {
+        let entries = tools::registry_with_families(families)
+            .into_iter()
+            .map(|descriptor| {
+                let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
+                if let Some(agent) = agent_selector_schema(runtime_models, descriptor.route()) {
+                    schema["properties"]["agent"] = agent;
+                }
+                if uses_runtime_schema(descriptor.route()) {
+                    schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
+                }
+                PreparedTool { descriptor, schema }
+            })
+            .collect();
+        Self {
+            runtime_models,
+            entries,
+        }
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
+fn load_runtime_configuration(
+    workspace_root: &Path,
+) -> io::Result<(RuntimeModelSnapshot, McpToolFamilies)> {
+    let global = Storage::open_default()
+        .map_err(configuration_io_error)?
+        .load_settings()
+        .map_err(configuration_io_error)?;
+    let local = WorkspaceSettingsStore::new(workspace_root)
+        .load()
+        .map_err(configuration_io_error)?;
+    let families = McpToolFamilies::from_settings(&global.with_local(&local));
+    let snapshot = runtime_model_snapshot(workspace_root, &PathExecutableLocator);
+    Ok((snapshot, families))
+}
+
+#[allow(clippy::needless_pass_by_value)] // Result::map_err transfers ownership to this function pointer.
+fn configuration_io_error(error: anyhow::Error) -> io::Error {
+    io::Error::other(error.to_string())
 }
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
@@ -110,23 +164,14 @@ pub fn serve_with_client(
         store_root.clone(),
         std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
     );
-    let global = Storage::open_default()
-        .and_then(|storage| storage.load_settings())
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let local = WorkspaceSettingsStore::new(&workspace_root)
-        .load()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let families = McpToolFamilies::from_settings(&global.with_local(&local));
-    let locator = PathExecutableLocator;
-    let snapshot = runtime_model_snapshot(&workspace_root, &locator);
+    let (snapshot, families) = load_runtime_configuration(&workspace_root)?;
     serve_with_client_and_capabilities(
         input,
         out,
         version,
         client,
         ServerCapabilities {
-            runtime_models: &snapshot,
-            tools: families,
+            tools: &ServerTools::new(&snapshot, families),
             caller_credential: None,
             store_root: &store_root,
             memory_root: &store_root,
@@ -154,46 +199,17 @@ pub fn serve_with_client_and_caller(
         store_root.clone(),
         std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
     );
-    serve_with_client_and_caller_scoped(
-        input,
-        out,
-        version,
-        client,
-        caller_credential,
-        &workspace_root,
-        &store_root,
-    )
-}
-
-#[coverage(off)] // coverage: reason=composition owner=root-cli expires=2027-01-31 tests=mcp_e2e
-fn serve_with_client_and_caller_scoped(
-    input: impl BufRead,
-    out: &mut dyn Write,
-    version: &str,
-    client: &mut dyn DaemonClient,
-    caller_credential: &str,
-    workspace_root: &Path,
-    store_root: &Path,
-) -> io::Result<()> {
-    let global = Storage::open_default()
-        .and_then(|storage| storage.load_settings())
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let local = WorkspaceSettingsStore::new(workspace_root)
-        .load()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let families = McpToolFamilies::from_settings(&global.with_local(&local));
-    let snapshot = runtime_model_snapshot(workspace_root, &PathExecutableLocator);
+    let (snapshot, families) = load_runtime_configuration(&workspace_root)?;
     serve_with_client_and_capabilities(
         input,
         out,
         version,
         client,
         ServerCapabilities {
-            runtime_models: &snapshot,
-            tools: families,
+            tools: &ServerTools::new(&snapshot, families),
             caller_credential: Some(caller_credential),
-            store_root,
-            memory_root: store_root,
+            store_root: &store_root,
+            memory_root: &store_root,
         },
     )
 }
@@ -247,22 +263,14 @@ pub fn serve_with_client_and_caller_at_roots(
         store_root.to_path_buf(),
         std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
     );
-    let global = Storage::open_default()
-        .and_then(|storage| storage.load_settings())
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let local = WorkspaceSettingsStore::new(&workspace_root)
-        .load()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-    let families = McpToolFamilies::from_settings(&global.with_local(&local));
-    let snapshot = runtime_model_snapshot(&workspace_root, &PathExecutableLocator);
+    let (snapshot, families) = load_runtime_configuration(&workspace_root)?;
     serve_with_client_and_capabilities(
         input,
         out,
         version,
         client,
         ServerCapabilities {
-            runtime_models: &snapshot,
-            tools: families,
+            tools: &ServerTools::new(&snapshot, families),
             caller_credential: Some(caller_credential),
             store_root,
             memory_root,
@@ -317,8 +325,7 @@ pub fn serve_with_client_and_features(
         version,
         client,
         ServerCapabilities {
-            runtime_models: snapshot,
-            tools: families,
+            tools: &ServerTools::new(snapshot, families),
             caller_credential: None,
             store_root: &store_root,
             memory_root: &store_root,
@@ -333,8 +340,6 @@ fn serve_with_client_and_capabilities(
     client: &mut dyn DaemonClient,
     capabilities: ServerCapabilities<'_>,
 ) -> io::Result<()> {
-    // Fail before accepting input if metadata, route, schema, or capability drifted.
-    drop(tools::registry_with_families(capabilities.tools));
     let mut buf = Vec::with_capacity(MAX_STDIO_MESSAGE_BYTES + 1);
     let mut state = ServerState::AwaitingInitialize;
     loop {
@@ -397,8 +402,7 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
         version,
         &mut unavailable,
         ServerCapabilities {
-            runtime_models: &RuntimeModelSnapshot::default(),
-            tools: McpToolFamilies::all(),
+            tools: &ServerTools::new(&RuntimeModelSnapshot::default(), McpToolFamilies::all()),
             caller_credential: None,
             store_root: Path::new("."),
             memory_root: Path::new("."),
@@ -520,20 +524,8 @@ fn respond(
     }
     match method {
         "ping" => protocol::success(id, json!({})),
-        "tools/list" => protocol::success(
-            id,
-            tools_list_result(capabilities.runtime_models, capabilities.tools),
-        ),
-        "tools/call" => tools_call(
-            id,
-            params,
-            client,
-            capabilities.runtime_models,
-            capabilities.tools,
-            capabilities.caller_credential,
-            capabilities.store_root,
-            capabilities.memory_root,
-        ),
+        "tools/list" => protocol::success(id, tools_list_result(capabilities.tools)),
+        "tools/call" => tools_call(id, params, client, capabilities),
         "resources/list" => protocol::success(id, resources::list_result()),
         "resources/read" => resources_read(id, params),
         other => protocol::error(
@@ -568,41 +560,29 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Result<Value, &'s
 }
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
-fn tools_list_result(snapshot: &RuntimeModelSnapshot, families: McpToolFamilies) -> Value {
-    let tools: Vec<Value> = tools::registry_with_families(families)
+fn tools_list_result(tools: &ServerTools<'_>) -> Value {
+    let listed: Vec<Value> = tools
+        .entries
         .iter()
-        .filter(|tool| tool_is_available(snapshot, tool.route()))
+        .filter(|tool| tool_is_available(tools.runtime_models, tool.descriptor.route()))
         .map(|tool| {
-            // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
-            let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
-            if let Some(agent) = agent_selector_schema(snapshot, tool.route()) {
-                schema["properties"]["agent"] = agent;
-            }
-            if uses_runtime_schema(tool.route()) {
-                schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
-            }
             json!({
-                "name": tool.name(),
-                "description": tool.description(),
-                "inputSchema": schema,
+                "name": tool.descriptor.name(),
+                "description": tool.descriptor.description(),
+                "inputSchema": tool.schema,
             })
         })
         .collect();
-    json!({ "tools": tools })
+    json!({ "tools": listed })
 }
 
 /// `tools/call` を処理する。実装済み tool を store / daemon 経路へ送り、未実装 tool と
 /// daemon の protocol error は JSON-RPC エラーとして返す。
-#[allow(clippy::too_many_arguments)] // The boundary keeps the two store authorities explicit.
 fn tools_call(
     id: Value,
     params: Option<&Value>,
     client: &mut dyn DaemonClient,
-    snapshot: &RuntimeModelSnapshot,
-    families: McpToolFamilies,
-    caller_credential: Option<&str>,
-    store_root: &Path,
-    memory_root: &Path,
+    capabilities: ServerCapabilities<'_>,
 ) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
@@ -621,14 +601,20 @@ fn tools_call(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let registry = tools::registry_with_families(families);
-    let Some(descriptor) = registry.iter().find(|descriptor| descriptor.name() == name) else {
+    let tools = capabilities.tools;
+    let snapshot = tools.runtime_models;
+    let Some(prepared) = tools
+        .entries
+        .iter()
+        .find(|tool| tool.descriptor.name() == name)
+    else {
         return protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
             &format!("unknown tool: {name}"),
         );
     };
+    let descriptor = &prepared.descriptor;
     if !tool_is_available(snapshot, descriptor.route()) {
         return protocol::error(
             id,
@@ -639,25 +625,20 @@ fn tools_call(
             ),
         );
     }
-    let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-    if let Some(agent_schema) = agent_selector_schema(snapshot, descriptor.route()) {
-        schema["properties"]["agent"] = agent_schema;
-        if let Some(agent) = arguments.get("agent")
-            && let Err(message) = validate_agent_selector(snapshot, descriptor.route(), agent)
-        {
-            return protocol::error(id, error_code::INVALID_PARAMS, &message);
-        }
+    if let Some(agent) = arguments.get("agent")
+        && let Err(message) = validate_agent_selector(snapshot, descriptor.route(), agent)
+    {
+        return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    if uses_runtime_schema(descriptor.route()) {
-        schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
-    }
-    if let Err(ToolError::InvalidParams(message)) = descriptor.validate(&arguments, &schema) {
+    if let Err(ToolError::InvalidParams(message)) =
+        descriptor.validate(&arguments, &prepared.schema)
+    {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
     apply_caller_policy(
         descriptor.caller_policy(),
         &mut arguments,
-        caller_credential,
+        capabilities.caller_credential,
     );
     if uses_runtime_schema(descriptor.route())
         && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
@@ -665,15 +646,15 @@ fn tools_call(
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
     let routed_store_root = match descriptor.route() {
-        ToolRoute::Store(StoreRoot::Memory) => memory_root,
-        _ => store_root,
+        ToolRoute::Store(StoreRoot::Memory) => capabilities.memory_root,
+        _ => capabilities.store_root,
     };
     execute_tool(
         id,
         descriptor,
         arguments,
         client,
-        caller_credential,
+        capabilities.caller_credential,
         routed_store_root,
     )
 }
@@ -803,7 +784,10 @@ fn validate_agent_selector(
 ) -> Result<(), String> {
     match route {
         ToolRoute::Session(SessionAction::DelegateBrief) => snapshot.validate_new_agent(agent),
-        _ => snapshot.validate_agent(agent),
+        ToolRoute::Dispatch(DispatchToolAction::Dispatch | DispatchToolAction::AgentHandoff) => {
+            snapshot.validate_agent(agent)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -945,10 +929,10 @@ fn resources_read(id: Value, params: Option<&Value>) -> Value {
 mod tests {
     use super::{
         MAX_STDIO_MESSAGE_BYTES, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
-        ServerCapabilities, ServerState, agent_selector_schema, apply_caller_policy,
-        daemon_error_data, execute_tool, handle_line, handle_line_with_client,
-        normalize_caller_credential, read_bounded_line, resolve_workspace_root,
-        runtime_model_snapshot, serve, serve_with_client_and_caller,
+        ServerCapabilities, ServerState, ServerTools, agent_selector_schema, apply_caller_policy,
+        configuration_io_error, daemon_error_data, execute_tool, handle_line,
+        handle_line_with_client, normalize_caller_credential, read_bounded_line,
+        resolve_workspace_root, runtime_model_snapshot, serve, serve_with_client_and_caller,
         serve_with_client_and_features, serve_with_client_and_snapshot, session_tool_response,
         tools_call, tools_list_result,
     };
@@ -1000,6 +984,13 @@ mod tests {
             self.requests.push(request);
             self.reply.clone()
         }
+    }
+
+    #[test]
+    fn configuration_failure_keeps_its_message_at_the_stdio_boundary() {
+        let error = configuration_io_error(anyhow::anyhow!("workspace settings are malformed"));
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "workspace settings are malformed");
     }
 
     /// 1 行を処理して応答 `Value` を得る（通知は `None`）。
@@ -1083,8 +1074,10 @@ mod tests {
                 "9.9.9",
                 &mut client,
                 ServerCapabilities {
-                    runtime_models: &RuntimeModelSnapshot::default(),
-                    tools: McpToolFamilies::all(),
+                    tools: &ServerTools::new(
+                        &RuntimeModelSnapshot::default(),
+                        McpToolFamilies::all(),
+                    ),
                     caller_credential: None,
                     store_root: Path::new("."),
                     memory_root: Path::new("."),
@@ -1264,7 +1257,8 @@ mod tests {
     fn delegation_is_hidden_when_no_new_worker_selector_is_executable() {
         let snapshot =
             RuntimeModelSnapshot::capture(&WorkspaceAgentConfig::empty(), &FakeServeLocator(&[]));
-        let listed = tools_list_result(&snapshot, McpToolFamilies::all());
+        let tools = ServerTools::new(&snapshot, McpToolFamilies::all());
+        let listed = tools_list_result(&tools);
         assert!(
             listed["tools"]
                 .as_array()
@@ -1285,14 +1279,66 @@ mod tests {
             serde_json::json!(1),
             Some(&params),
             &mut client,
-            &snapshot,
-            McpToolFamilies::all(),
-            Some("credential"),
-            Path::new("."),
-            Path::new("."),
+            ServerCapabilities {
+                tools: &tools,
+                caller_credential: Some("credential"),
+                store_root: Path::new("."),
+                memory_root: Path::new("."),
+            },
         );
         assert_eq!(response["error"]["code"], -32601);
         assert!(client.requests.is_empty());
+    }
+
+    #[test]
+    fn connection_schema_is_stable_across_rejected_and_successful_calls() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
+            &FakeServeLocator(&["claude"]),
+        );
+        let input = initialized_input(concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"session\":{\"name\":\"worker\"},\"agent\":{\"runtime\":\"claude\",\"model\":\"unknown\"},\"prompt\":\"work\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"terminal_list\",\"arguments\":{\"agent\":null}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"session\":{\"name\":\"worker\"},\"agent\":{\"runtime\":\"claude\",\"model\":\"sonnet\"},\"prompt\":\"work\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/list\"}\n",
+        ));
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({"accepted":true}))),
+            requests: Vec::new(),
+        };
+        let mut output = Vec::new();
+        serve_with_client_and_snapshot(
+            input.as_bytes(),
+            &mut output,
+            "9.9.9",
+            &mut client,
+            &snapshot,
+        )
+        .unwrap();
+        let responses = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(responses.len(), 6);
+        assert_eq!(responses[2]["error"]["code"], -32602);
+        assert!(
+            responses[2]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not allowed")
+        );
+        assert_eq!(responses[3]["error"]["code"], -32602);
+        assert!(
+            responses[3]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown property")
+        );
+        assert!(responses[4].get("result").is_some());
+        assert_eq!(client.requests.len(), 1);
+        assert_eq!(responses[1]["result"], responses[5]["result"]);
     }
 
     #[test]
@@ -1312,11 +1358,12 @@ mod tests {
             serde_json::json!(1),
             Some(&params),
             &mut client,
-            &RuntimeModelSnapshot::default(),
-            McpToolFamilies::all(),
-            Some("credential"),
-            issue_root.path(),
-            memory_root.path(),
+            ServerCapabilities {
+                tools: &ServerTools::new(&RuntimeModelSnapshot::default(), McpToolFamilies::all()),
+                caller_credential: Some("credential"),
+                store_root: issue_root.path(),
+                memory_root: memory_root.path(),
+            },
         );
 
         assert!(response.get("result").is_some(), "{response}");

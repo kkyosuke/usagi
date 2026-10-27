@@ -1677,17 +1677,6 @@ impl DispatchStore {
         Ok(records.into_iter().map(|record| record.message).collect())
     }
 
-    /// # Errors
-    ///
-    /// Returns an error when the inbox cannot be read.
-    pub fn unread_inbox(&self, caller: &CallerRef) -> Result<Vec<InboxMessage>> {
-        Ok(self
-            .inbox(caller)?
-            .into_iter()
-            .filter(|message| !message.read)
-            .collect())
-    }
-
     /// Marks all messages for `run_id` read and returns whether anything changed.
     ///
     /// # Errors
@@ -3414,7 +3403,7 @@ mod tests {
     }
 
     #[test]
-    fn inbox_is_jsonl_durable_and_filters_then_marks_unread_messages() {
+    fn inbox_is_jsonl_durable_and_pages_then_marks_unread_messages() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
         let (session, agent_id, caller) = ids();
@@ -3428,10 +3417,17 @@ mod tests {
             .unwrap();
         let other = OperationId::new();
         store.append_inbox(&caller, message(other, worker)).unwrap();
-        assert_eq!(store.unread_inbox(&caller).unwrap().len(), 2);
+        let unread = store
+            .inbox_page(&caller, None, INBOX_PAGE_MAX, true, None)
+            .unwrap();
+        assert_eq!(unread.messages.len(), 2);
         assert!(store.mark_inbox_read(&caller, run_id).unwrap());
         assert!(!store.mark_inbox_read(&caller, run_id).unwrap());
-        assert_eq!(store.unread_inbox(&caller).unwrap().len(), 1);
+        let unread = DispatchStore::new(tmp.path())
+            .inbox_page(&caller, None, INBOX_PAGE_MAX, true, None)
+            .unwrap();
+        assert_eq!(unread.messages.len(), 1);
+        assert_eq!(unread.messages[0].run_id, other);
         assert!(store.inbox_path(&caller).is_file());
         let text = fs::read_to_string(store.inbox_path(&caller)).unwrap();
         assert_eq!(text.lines().count(), 2);
