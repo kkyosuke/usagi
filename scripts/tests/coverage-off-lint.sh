@@ -136,6 +136,31 @@ increased_budget() {
   printf '%s\n' '{"version":1,"total":0,"owners":{},"paths":{}}' > "$dir/budget.json"
 }
 
+ignored_artifacts() {
+  local dir=$1
+  allowed_io "$dir"
+  mkdir -p "$dir/artifacts/dependencies/src" "$dir/target/debug"
+  printf '%s\n' '#[coverage(off)]' 'fn generated() {}' > "$dir/artifacts/dependencies/src/lib.rs"
+  cp "$dir/artifacts/dependencies/src/lib.rs" "$dir/target/debug/generated.rs"
+}
+
+untracked_workspace_source() {
+  local dir=$1
+  allowed_io "$dir"
+  mkdir -p "$dir/crates/new/src"
+  printf '%s\n' '#[coverage(off)]' 'fn uncovered() {}' > "$dir/crates/new/src/new.rs"
+}
+
+untracked_root_example() {
+  local dir=$1
+  allowed_io "$dir"
+  mkdir -p "$dir/examples"
+  printf '%s\n' '#[coverage(off)]' 'fn uncovered() {}' > "$dir/examples/new.rs"
+}
+
+run_case ignored-artifacts 0 'ok (1 exclusions)' ignored_artifacts
+run_case untracked-workspace-source 1 'unregistered coverage(off) for fn:uncovered' untracked_workspace_source
+run_case untracked-root-example 1 'unregistered coverage(off) for fn:uncovered' untracked_root_example
 run_case allowed-io 0 'ok (1 exclusions)' allowed_io
 run_case allowed-test-instance 0 'ok (1 exclusions)' allowed_test_instance
 run_case forbidden-reducer 1 'forbidden reason "reducer"' forbidden_reducer

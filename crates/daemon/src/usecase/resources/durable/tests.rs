@@ -326,6 +326,65 @@ fn a_reservation_claims_capacity_before_the_shard_records_it() {
 }
 
 #[test]
+fn a_replayed_claim_cannot_authorize_another_terminal() {
+    for first_state in [
+        TerminalRuntimeState::Reserved,
+        TerminalRuntimeState::Running,
+    ] {
+        let world = World::new();
+        let old = DaemonGeneration::new();
+        let next = DaemonGeneration::new();
+        let original = terminal(old);
+        let operation = OperationId::new();
+        let identity = ObservedChildren::new().with(9, "start-9");
+        let initial = project_terminal(
+            &terminal_record(
+                &original,
+                operation,
+                first_state,
+                (first_state == TerminalRuntimeState::Running).then(|| process(9, "start-9")),
+            ),
+            &identity,
+        );
+        let old_state = world.state(old, identity);
+        // Stop the shipping transaction after the allocator CAS: a crash or
+        // shard write failure can leave this claim without its owning payload.
+        old_state.claim(&[&initial]).unwrap();
+        let before = world.allocator.get();
+        assert!(world.archive.bytes(old).get().is_none());
+
+        let proposed = TerminalRef {
+            daemon_generation: next,
+            terminal_id: TerminalId::new(),
+            ..original.clone()
+        };
+        let replacement = RuntimeProjection {
+            resource: proposed.clone(),
+            state: ProjectedState::Reserved,
+            ..initial.clone()
+        };
+        assert_eq!(
+            world
+                .state(next, ObservedChildren::new())
+                .commit(ResourceKind::Terminal, &[replacement])
+                .unwrap_err()
+                .refusal(),
+            Some(ResourceError::OwnershipUnknown)
+        );
+        assert_eq!(world.allocator.get(), before);
+        assert!(world.allocator().claim(&proposed).is_none());
+        assert!(world.archive.bytes(next).get().is_none());
+
+        // Saving the original identity still converges, including a sealed final.
+        old_state
+            .commit(ResourceKind::Terminal, &[initial])
+            .unwrap();
+        assert_eq!(world.allocator.get(), before);
+        assert!(world.shard(old).resource(&original).is_some());
+    }
+}
+
+#[test]
 fn a_spawned_child_becomes_a_live_claim_and_a_durable_final() {
     let world = World::new();
     let owner = DaemonGeneration::new();
@@ -1400,9 +1459,13 @@ fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
         )]))
         .unwrap();
     let mut old_shard = world.shard(old);
+    // An older build may have persisted an unfinished command before dying.
     old_shard
-        .accept_command(&resource, &OperationId::new())
-        .unwrap();
+        .in_flight
+        .push(crate::usecase::resources::shard::InFlightCommand {
+            resource: resource.clone(),
+            command: OperationId::new(),
+        });
     world
         .archive
         .bytes(old)

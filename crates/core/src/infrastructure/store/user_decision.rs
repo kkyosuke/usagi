@@ -89,10 +89,6 @@ pub struct UserDecisionResolvedEvent {
     pub answer: UserDecisionAnswer,
     pub created_at: DateTime<Utc>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UserDecisionDeliveryError {
-    Inconsistent,
-}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct State {
     decisions: Vec<UserDecision>,
@@ -341,17 +337,6 @@ impl UserDecisionStore {
     pub fn events(&self) -> Result<Vec<UserDecisionResolvedEvent>> {
         Ok(self.load()?.events)
     }
-    /// Returns the resolved durable record only when it still agrees with an
-    /// outbox event.  This prevents a consumer from routing an answer based on
-    /// forged or stale event data.
-    pub fn get_for_event(&self, event: &UserDecisionResolvedEvent) -> Result<Option<UserDecision>> {
-        Ok(self.load()?.decisions.into_iter().find(|decision| {
-            decision.decision_id == event.decision_id
-                && decision.owner.caller == event.recipient
-                && decision.status == UserDecisionStatus::Resolved
-                && decision.answer.as_ref() == Some(&event.answer)
-        }))
-    }
     /// Acknowledges one validated terminal observation. Repeated
     /// acknowledgements are a safe no-op, which makes reconnect recovery
     /// idempotent.
@@ -366,24 +351,6 @@ impl UserDecisionStore {
             };
             state.events.remove(index);
             true
-        })
-    }
-    pub fn consume_events(&self) -> Result<Result<usize, UserDecisionDeliveryError>> {
-        self.mutate(|state| {
-            let consistent = state.events.iter().all(|event| {
-                state.decisions.iter().any(|decision| {
-                    decision.decision_id == event.decision_id
-                        && decision.owner.caller == event.recipient
-                        && decision.status == UserDecisionStatus::Resolved
-                        && decision.answer.as_ref() == Some(&event.answer)
-                })
-            });
-            if !consistent {
-                return Err(UserDecisionDeliveryError::Inconsistent);
-            }
-            let consumed = state.events.len();
-            state.events.clear();
-            Ok(consumed)
         })
     }
     pub fn create(
@@ -666,8 +633,7 @@ impl UserDecisionStore {
 ///
 /// - **pending** — someone is blocked waiting for the answer;
 /// - **referenced by an un-acknowledged event** — the answer has not reached its
-///   caller, and [`UserDecisionStore::get_for_event`] validates the delivery
-///   against this record.
+///   caller; reconnect discovery returns the answer from this retained record.
 ///
 /// Recent completed records answer retries until new admission or legacy
 /// recovery needs their space. Tombstones continue preventing duplicate human
@@ -1378,7 +1344,11 @@ mod tests {
         let event = store.events().unwrap().pop().unwrap();
         assert_eq!(event.decision_id, decision.decision_id);
         assert_eq!(event.recipient, decision.owner.caller);
-        assert_eq!(store.get_for_event(&event).unwrap(), Some(resolved.clone()));
+        assert_eq!(
+            store.get(workspace, event.decision_id).unwrap(),
+            Some(resolved.clone())
+        );
+        assert_eq!(Some(event.answer.clone()), resolved.answer);
         assert!(store.ack_event(event.decision_id).unwrap());
         assert!(!store.ack_event(event.decision_id).unwrap());
         assert!(store.events().unwrap().is_empty());
@@ -1407,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_resolved_event_is_consumed_once() {
+    fn resolved_event_is_acknowledged_once_across_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let store = UserDecisionStore::new(temp.path());
         let decision = item();
@@ -1425,8 +1395,15 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(store.consume_events().unwrap(), Ok(1));
-        assert_eq!(store.consume_events().unwrap(), Ok(0));
+        let reopened = UserDecisionStore::new(temp.path());
+        assert!(reopened.ack_event(decision.decision_id).unwrap());
+        assert!(!reopened.ack_event(decision.decision_id).unwrap());
+        assert!(
+            UserDecisionStore::new(temp.path())
+                .events()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1475,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn consumer_rejects_an_event_without_its_resolved_record() {
+    fn inbox_ignores_an_event_without_its_resolved_record() {
         let temp = tempfile::tempdir().unwrap();
         let store = UserDecisionStore::new(temp.path());
         let decision = item();
@@ -1489,10 +1466,18 @@ mod tests {
             }],
         });
         std::fs::write(store.path(), serde_json::to_vec(&state).unwrap()).unwrap();
-        assert_eq!(
-            store.consume_events().unwrap(),
-            Err(UserDecisionDeliveryError::Inconsistent)
-        );
+        let before = std::fs::read(store.path()).unwrap();
+        let page = store
+            .inbox_page(
+                UserDecisionScope::Workspace(decision.owner.workspace_id),
+                None,
+                crate::infrastructure::ipc::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(page.decisions.is_empty());
+        assert!(page.deferred.is_empty());
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
         assert_eq!(store.events().unwrap().len(), 1);
     }
     #[test]
@@ -1843,7 +1828,7 @@ mod tests {
     }
 
     /// An answer that has not reached its caller yet is not history: dropping it
-    /// would make `get_for_event` refuse the delivery it is meant to validate.
+    /// would leave reconnect discovery without the answer it must return.
     #[test]
     fn a_decision_with_an_unacknowledged_delivery_survives_retention() {
         let temp = tempfile::tempdir().unwrap();
@@ -1883,10 +1868,13 @@ mod tests {
             .into_iter()
             .find(|event| event.decision_id == awaited_id)
             .expect("the delivery is still outstanding");
-        assert!(
-            store.get_for_event(&event).unwrap().is_some(),
-            "retention dropped a record an outstanding delivery validates against"
-        );
+        let retained = store
+            .get(workspace, event.decision_id)
+            .unwrap()
+            .expect("retention must preserve an unacknowledged answer");
+        assert_eq!(retained.status, UserDecisionStatus::Resolved);
+        assert_eq!(retained.owner.caller, event.recipient);
+        assert_eq!(retained.answer, Some(event.answer));
     }
 
     /// Pending records cannot be evicted, so saturation has to refuse the new

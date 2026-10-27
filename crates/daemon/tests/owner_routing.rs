@@ -34,6 +34,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use usagi_core as core_crate;
 use usagi_core::domain::id::{DaemonGeneration, TerminalId, WorkspaceId, WorktreeId};
 use usagi_core::domain::terminal_launch::{
     TerminalInventoryEntry, TerminalKind, TerminalLaunchScope,
@@ -48,9 +49,17 @@ use usagi_core::infrastructure::ipc::{
     read_json_frame, write_json_frame,
 };
 use usagi_core::infrastructure::owner_routing::{
-    GenerationDirectory, GenerationTransport, OwnerPresence, OwnerRouter, TrustedEndpoint,
-    presence_of, terminal_request,
+    GenerationDirectory, TrustedEndpoint, terminal_request,
 };
+
+#[path = "../../core/tests/support/owner_router.rs"]
+#[expect(
+    dead_code,
+    reason = "The shared harness includes methods exercised only by Core unit tests."
+)]
+mod owner_router;
+use owner_router::{GenerationTransport, OwnerPresence, OwnerRouter, presence_of};
+
 use usagi_daemon::infrastructure::generation_registry::{
     GenerationRegistryFile, TrustedGenerationDirectory,
 };

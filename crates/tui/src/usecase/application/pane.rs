@@ -117,8 +117,9 @@ impl PaneState {
         }
     }
 
-    /// local storage から復元した live tabs で state を作る。
+    /// Build a live-tab fixture for reducer and view tests.
     #[must_use]
+    #[cfg(test)]
     pub fn with_live(selected: PaneSelection, tabs: Vec<LivePane>) -> Self {
         Self {
             tabs: tabs.into_iter().map(PaneTab::Live).collect(),

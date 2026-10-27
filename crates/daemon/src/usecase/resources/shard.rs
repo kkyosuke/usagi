@@ -19,9 +19,9 @@
 //! outbox after observing the consumed revision. The active generation never
 //! writes the old shard — [`super::drain::ActiveConsumer`] structurally cannot.
 //!
-//! A standby only ever [`hydrate`]s, which is read only, and seals what it read.
-//! It becomes a writer through [`WriterLease`] after the handoff commits, and only
-//! if neither the shard nor the allocator moved under the seal.
+//! Standby hydration and active/draining writes are coordinated by
+//! [`super::durable::ShardedRuntimeState`]; generation admission is owned by
+//! [`crate::usecase::authority`].
 
 use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
@@ -321,89 +321,6 @@ impl ShardDocument {
         Ok(())
     }
 
-    /// Accept a terminal command for one owned resource. In-flight commands gate
-    /// this generation's collection.
-    ///
-    /// # Errors
-    /// Returns [`ResourceError::UnknownResource`] or
-    /// [`ResourceError::WrongState`] when the resource holds no live child.
-    pub fn accept_command(
-        &mut self,
-        resource: &TerminalRef,
-        command: &OperationId,
-    ) -> Result<(), ResourceError> {
-        let entry = self.resource_mut(resource)?;
-        if entry.state != ResourceState::Running {
-            return Err(ResourceError::WrongState);
-        }
-        if self
-            .in_flight
-            .iter()
-            .any(|pending| &pending.command == command)
-        {
-            return Ok(());
-        }
-        self.in_flight.push(InFlightCommand {
-            resource: resource.clone(),
-            command: *command,
-        });
-        Ok(())
-    }
-
-    /// Commit a completed command to this shard and publish it once.
-    ///
-    /// # Errors
-    /// Returns [`ResourceError::UnknownResource`] or
-    /// [`ResourceError::UnknownOperation`] for a command this owner never
-    /// accepted.
-    pub fn commit_command_completion(
-        &mut self,
-        resource: &TerminalRef,
-        command: &OperationId,
-    ) -> Result<(), ResourceError> {
-        if self.resource(resource).is_none() {
-            return Err(ResourceError::UnknownResource);
-        }
-        let Some(index) = self
-            .in_flight
-            .iter()
-            .position(|pending| &pending.command == command)
-        else {
-            // Already completed and published: the outbox (or the consumer)
-            // holds the single copy, so this converges without a second event.
-            return if self.published_completion(resource, command) {
-                Ok(())
-            } else {
-                Err(ResourceError::UnknownOperation)
-            };
-        };
-        self.in_flight.remove(index);
-        self.publish(resource, OwnerEvent::CommandCompleted { command: *command });
-        Ok(())
-    }
-
-    /// Commit journalled output progress and publish it once per offset.
-    ///
-    /// # Errors
-    /// Returns [`ResourceError::UnknownResource`].
-    pub fn commit_output(
-        &mut self,
-        resource: &TerminalRef,
-        offset: u64,
-    ) -> Result<(), ResourceError> {
-        if self.resource(resource).is_none() {
-            return Err(ResourceError::UnknownResource);
-        }
-        if self.outbox.iter().any(|event| {
-            event.resource.terminal_id == resource.terminal_id
-                && event.event == OwnerEvent::Output { offset }
-        }) {
-            return Ok(());
-        }
-        self.publish(resource, OwnerEvent::Output { offset });
-        Ok(())
-    }
-
     /// Commit a child's exit to this shard and publish it exactly once.
     ///
     /// The write is one transition: the resource becomes `Exited` and the outbox
@@ -506,13 +423,6 @@ impl ShardDocument {
         });
     }
 
-    fn published_completion(&self, resource: &TerminalRef, command: &OperationId) -> bool {
-        self.outbox.iter().any(|event| {
-            event.resource.terminal_id == resource.terminal_id
-                && event.event == OwnerEvent::CommandCompleted { command: *command }
-        })
-    }
-
     fn resource_mut(
         &mut self,
         resource: &TerminalRef,
@@ -597,123 +507,6 @@ fn drained(
         return Err(CollectionBlocker::CapacityClaim);
     }
     Ok(())
-}
-
-/// What a standby read, and the exact revisions it read it at.
-///
-/// Holding one of these proves only that a read happened. It carries no write
-/// capability, which is the point: a standby's readiness must not reconcile,
-/// save, tick, or spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SealedHydrate {
-    owner: DaemonGeneration,
-    shard_revision: u64,
-    allocator_revision: u64,
-    resources: usize,
-}
-
-impl SealedHydrate {
-    /// The generation this seal describes.
-    #[must_use]
-    pub fn owner(&self) -> DaemonGeneration {
-        self.owner
-    }
-
-    /// The shard revision the standby read.
-    #[must_use]
-    pub fn shard_revision(&self) -> u64 {
-        self.shard_revision
-    }
-
-    /// The allocator revision the standby read.
-    #[must_use]
-    pub fn allocator_revision(&self) -> u64 {
-        self.allocator_revision
-    }
-
-    /// How many records were hydrated.
-    #[must_use]
-    pub fn resources(&self) -> usize {
-        self.resources
-    }
-}
-
-/// The right to write one shard, granted only after activation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriterLease {
-    owner: DaemonGeneration,
-    shard_revision: u64,
-    allocator_revision: u64,
-}
-
-impl WriterLease {
-    /// The generation allowed to write.
-    #[must_use]
-    pub fn owner(&self) -> DaemonGeneration {
-        self.owner
-    }
-
-    /// The shard revision admission starts from.
-    #[must_use]
-    pub fn shard_revision(&self) -> u64 {
-        self.shard_revision
-    }
-
-    /// The allocator revision admission starts from.
-    #[must_use]
-    pub fn allocator_revision(&self) -> u64 {
-        self.allocator_revision
-    }
-}
-
-/// Read one generation's shard without writing anything.
-///
-/// # Errors
-/// Returns [`ResourceError::ForeignOwner`] when the stored document names a
-/// different generation, or any load failure.
-pub fn hydrate(
-    shard: &OwnerShard,
-    allocator: &AllocatorDocument,
-) -> Result<SealedHydrate, ResourceFailure> {
-    let snapshot = shard.load()?;
-    let document = snapshot.document();
-    if document.owner != shard.owner() {
-        return Err(ResourceError::ForeignOwner.into());
-    }
-    Ok(SealedHydrate {
-        owner: document.owner,
-        shard_revision: document.revision,
-        allocator_revision: allocator.revision,
-        resources: document.resources.len(),
-    })
-}
-
-/// Turn a seal into a writer lease after the handoff has committed.
-///
-/// Both revisions are re-verified: if either object moved between hydrate and
-/// activation, the standby's picture is stale and admission does not start.
-///
-/// # Errors
-/// Returns [`ResourceError::SealedElsewhere`] when a revision moved, or any load
-/// failure.
-pub fn open_writer(
-    shard: &OwnerShard,
-    allocator: &AllocatorDocument,
-    sealed: &SealedHydrate,
-) -> Result<WriterLease, ResourceFailure> {
-    let snapshot = shard.load()?;
-    let document = snapshot.document();
-    if document.owner != sealed.owner
-        || document.revision != sealed.shard_revision
-        || allocator.revision != sealed.allocator_revision
-    {
-        return Err(ResourceError::SealedElsewhere.into());
-    }
-    Ok(WriterLease {
-        owner: sealed.owner,
-        shard_revision: sealed.shard_revision,
-        allocator_revision: sealed.allocator_revision,
-    })
 }
 
 /// One generation's shard over a [`CasFile`].

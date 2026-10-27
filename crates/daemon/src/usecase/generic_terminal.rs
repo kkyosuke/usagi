@@ -699,8 +699,7 @@ impl GenericTerminalCoordinator {
         self.records
             .values()
             .filter(|record| {
-                record.terminal.workspace_id == workspace
-                    && terminal_state_blocks_retirement(record.state)
+                record.terminal.workspace_id == workspace && record.state.requires_termination()
             })
             .count()
     }
@@ -754,7 +753,7 @@ impl GenericTerminalCoordinator {
             .collect::<Vec<_>>();
         let mut terminate_failed = false;
         for record in &targets {
-            if !terminal_state_requires_termination(record.state) {
+            if !record.state.requires_termination() {
                 continue;
             }
             if spawner.terminate_reap(&record.terminal).is_err() {
@@ -936,22 +935,6 @@ impl GenericTerminalCoordinator {
             TerminalReconcileState::IdentityUnknown,
         ))
     }
-}
-
-fn terminal_state_requires_termination(state: TerminalRuntimeState) -> bool {
-    matches!(
-        state,
-        TerminalRuntimeState::Running
-            | TerminalRuntimeState::ReconcileRequired(
-                TerminalReconcileState::SpawnAmbiguous
-                    | TerminalReconcileState::PersistAfterSpawn
-                    | TerminalReconcileState::OrphanRunning
-            )
-    )
-}
-
-fn terminal_state_blocks_retirement(state: TerminalRuntimeState) -> bool {
-    terminal_state_requires_termination(state)
 }
 
 #[cfg(test)]
@@ -1326,15 +1309,19 @@ mod tests {
             TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn),
             TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
         ] {
-            assert!(terminal_state_requires_termination(state));
+            assert!(state.requires_termination());
         }
         for state in [
             TerminalRuntimeState::Reserved,
+            TerminalRuntimeState::Interrupted,
+            TerminalRuntimeState::Sleeping,
             TerminalRuntimeState::Exited,
             TerminalRuntimeState::Reclaimed,
+            TerminalRuntimeState::SpawnFailed,
             TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterExit),
         ] {
-            assert!(!terminal_state_requires_termination(state));
+            assert!(!state.requires_termination());
         }
     }
     #[test]

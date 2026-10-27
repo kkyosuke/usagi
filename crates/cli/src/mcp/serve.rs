@@ -139,13 +139,15 @@ fn configuration_io_error(error: anyhow::Error) -> io::Error {
 /// # Errors
 ///
 /// stdin の読み取り、`out` への書き込み、または入力行の上限超過時にエラーを返す。
-pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
+#[cfg(test)]
+fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
     let mut unavailable = UnavailableClient;
     serve_with_client(input, out, version, &mut unavailable)
 }
 
-/// As [`serve`], but routes managed-session tools through the supplied daemon
-/// client. The stdio server owns no session state and never falls back to a
+/// Serves line-oriented JSON-RPC through the supplied daemon client until EOF.
+/// Invalid bounded input receives a protocol error; oversized input stops the
+/// server. The stdio server owns no session state and never falls back to a
 /// local PTY when the client reports an error.
 ///
 /// # Errors
@@ -285,7 +287,8 @@ pub fn serve_with_client_and_caller_at_roots(
 ///
 /// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
 /// responses so serving continues.
-pub fn serve_with_client_and_snapshot(
+#[cfg(test)]
+fn serve_with_client_and_snapshot(
     input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
@@ -310,7 +313,8 @@ pub fn serve_with_client_and_snapshot(
 ///
 /// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
 /// responses so serving continues.
-pub fn serve_with_client_and_features(
+#[cfg(test)]
+fn serve_with_client_and_features(
     input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
@@ -383,7 +387,9 @@ fn read_bounded_line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> io::Result<
     Ok(read)
 }
 
+#[cfg(test)]
 struct UnavailableClient;
+#[cfg(test)]
 impl DaemonClient for UnavailableClient {
     fn request(&mut self, _request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         Err(ClientError::Unavailable(

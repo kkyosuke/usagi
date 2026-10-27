@@ -3292,7 +3292,7 @@ impl LifecycleSnapshot {
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=lifecycle_parser_projection_and_safe_error_mapping_cover_every_branch
 fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, String> {
     let result = (|| {
-        let snapshot = serde_json::from_value::<SessionListSnapshot>(value.clone())
+        let snapshot = <SessionListSnapshot as serde::Deserialize>::deserialize(value)
             .map_err(|error| format!("invalid daemon session snapshot: {error}"))?;
         let agent_resumes = snapshot
             .sessions

@@ -25,7 +25,6 @@ pub struct TextOverlay {
     title: String,
     document: OverlayDocument,
     scroll: usize,
-    dismiss_on_any_key: bool,
     footer: String,
     status: Option<String>,
 }
@@ -38,18 +37,9 @@ impl TextOverlay {
             title: title.into(),
             document,
             scroll: 0,
-            dismiss_on_any_key: false,
             footer: "↑↓ scroll   Esc: close".to_owned(),
             status: None,
         }
-    }
-
-    /// Mark this overlay as an acknowledgement dialog. Its owner closes it on
-    /// the next user input instead of exposing scroll controls.
-    #[must_use]
-    pub fn acknowledgement(mut self) -> Self {
-        self.dismiss_on_any_key = true;
-        self
     }
 
     /// Replace the default viewer controls with context-specific hints.
@@ -115,11 +105,7 @@ impl TextOverlay {
         let (start, end) = modal::viewport_window(lines.len(), self.scroll, viewport);
         let mut body = modal::scroll_window(&lines, start, end);
         body.push(String::new());
-        body.push(modal::footer(if self.dismiss_on_any_key {
-            "Press any key to close"
-        } else {
-            &self.footer
-        }));
+        body.push(modal::footer(&self.footer));
         modal::fixed_body(body, body_height)
     }
 
@@ -146,11 +132,7 @@ impl TextOverlay {
         let lines = self.lines();
         let (start, end) = modal::viewport_window(lines.len(), self.scroll, 1);
         let line = lines[start].clone();
-        let footer = modal::footer(if self.dismiss_on_any_key {
-            "Press any key to close"
-        } else {
-            &self.footer
-        });
+        let footer = modal::footer(&self.footer);
         match body_height {
             0 => Vec::new(),
             1 => vec![line],
@@ -349,13 +331,6 @@ mod tests {
             .body_with_reserved_footer(4);
         assert!(only_line.join("\n").contains("only"));
         assert_eq!(modal.body_with_reserved_footer(5).len(), 5);
-        assert!(
-            modal
-                .acknowledgement()
-                .body_with_reserved_footer(2)
-                .join("\n")
-                .contains("Press any key to close")
-        );
     }
 
     #[test]
@@ -368,17 +343,5 @@ mod tests {
         assert!(frame[0].starts_with("workspace-0-"));
         assert!(frame.join("\n").contains("Notes"));
         assert!(frame.iter().all(|line| display_width(line) == 80));
-    }
-
-    #[test]
-    fn acknowledgement_uses_an_any_key_dismiss_hint() {
-        let modal = TextOverlay::new("Error", OverlayDocument::Ready(vec!["failed".into()]))
-            .acknowledgement();
-
-        assert!(
-            render(24, 80, &modal)
-                .join("\n")
-                .contains("Press any key to close")
-        );
     }
 }

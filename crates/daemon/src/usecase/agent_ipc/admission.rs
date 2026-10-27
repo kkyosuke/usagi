@@ -38,12 +38,10 @@ impl AgentRuntime {
             None => None,
             Some(run) => self
                 .coordinator
-                .snapshot()
-                .records
-                .into_iter()
+                .records()
                 .find(|record| record.operation.operation_id == run.run_id)
-                .and_then(|record| record.launch_provenance)
-                .and_then(|provenance| provenance.created),
+                .and_then(|record| record.launch_provenance.as_ref())
+                .and_then(|provenance| provenance.created.clone()),
         };
         Ok(AgentLaunchProvenance {
             agent_id: Some(agent),
@@ -59,7 +57,7 @@ impl AgentRuntime {
         if !self.coordinator.concurrency().is_saturated() {
             return Ok(false);
         }
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let mut candidate = None;
         for record in &records {
             let eligible = record.state == crate::usecase::runtime::RuntimeState::Running
@@ -230,7 +228,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::launch_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -289,7 +287,7 @@ impl AgentRuntime {
                 "agent resume admission is incomplete and cannot be spawned again",
             ));
         }
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let source = records
             .iter()
             .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
@@ -484,7 +482,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.resume_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::resume_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -701,7 +699,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::launch_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,

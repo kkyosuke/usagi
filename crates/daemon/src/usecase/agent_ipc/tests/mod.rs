@@ -577,17 +577,18 @@ fn resume_source_diagnosis_is_shared_by_normal_and_repair_resume() {
         )
         .unwrap();
     let records = agent.coordinator.snapshot().records;
+    let record_refs = records.iter().collect::<Vec<_>>();
     let source = &records[0];
     let revision = source.launch.plan.profile_revision;
-    assert!(AgentRuntime::resume_source_metadata_availability(source, &records).0);
-    assert!(agent.resume_source_availability(source, &records).0);
+    assert!(AgentRuntime::resume_source_metadata_availability(source, &record_refs).0);
+    assert!(agent.resume_source_availability(source, &record_refs).0);
     assert!(
         agent
-            .resume_source_availability_at_revision(source, &records, revision)
+            .resume_source_availability_at_revision(source, &record_refs, revision)
             .0
     );
     assert_eq!(
-        agent.resume_source_availability_at_revision(source, &records, revision + 1),
+        agent.resume_source_availability_at_revision(source, &record_refs, revision + 1),
         (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
 
@@ -627,16 +628,17 @@ fn resume_source_diagnosis_is_shared_by_normal_and_repair_resume() {
         ),
     ] {
         let expected = (false, reason);
+        let peer_records = peers.iter().collect::<Vec<_>>();
         assert_eq!(
-            AgentRuntime::resume_source_metadata_availability(&candidate, &peers),
+            AgentRuntime::resume_source_metadata_availability(&candidate, &peer_records),
             expected
         );
         assert_eq!(
-            agent.resume_source_availability(&candidate, &peers),
+            agent.resume_source_availability(&candidate, &peer_records),
             expected
         );
         assert_eq!(
-            agent.resume_source_availability_at_revision(&candidate, &peers, revision + 1),
+            agent.resume_source_availability_at_revision(&candidate, &peer_records, revision + 1),
             expected
         );
     }
@@ -3299,7 +3301,6 @@ fn helper_error_routes_and_durable_replay_outcomes_are_total() {
             OrchestrationError::UnknownProfile,
             ErrorCode::InvalidArgument,
         ),
-        (OrchestrationError::UnknownRuntime, ErrorCode::StaleTarget),
     ] {
         assert_eq!(map_orchestration_error(error).code, code);
     }
@@ -3484,4 +3485,134 @@ fn handled_result(outcome: TerminalOutcome<Value>) -> Result<Value, ProtocolErro
         TerminalOutcome::Handled(result) => result,
         TerminalOutcome::NotOwned => Err(stale_terminal()),
     }
+}
+
+fn session_resume_status(
+    runtime: &AgentRuntime,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> (bool, ProviderResumeReason) {
+    let observation = runtime
+        .session_observations(workspace)
+        .unwrap()
+        .get(&session)
+        .copied()
+        .unwrap_or_default();
+    (observation.resumable, observation.resume_reason)
+}
+
+#[test]
+fn session_observations_capture_each_session_and_exclude_other_workspaces() {
+    let mut runtime = codex_runtime();
+    let first = intent(Some("codex"));
+    let second = AgentLaunchIntent {
+        session: Some(SessionId::new()),
+        ..first.clone()
+    };
+    let foreign = intent(Some("codex"));
+    let mut admissions = Vec::new();
+    for launch in [&first, &second, &foreign] {
+        admissions.push(
+            runtime
+                .launch(
+                    &OperationId::new().to_string(),
+                    launch,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap(),
+        );
+    }
+    for (admission, phase) in
+        admissions
+            .iter()
+            .zip([AgentPhase::Waiting, AgentPhase::Running, AgentPhase::Ready])
+    {
+        let credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, caller)| caller.runtime == admission.runtime)
+            .unwrap()
+            .0
+            .clone();
+        runtime.report_agent_phase(&credential, phase).unwrap();
+    }
+    let observations = runtime.session_observations(first.workspace).unwrap();
+    assert_eq!(observations.len(), 2);
+    for (launch, phase) in [
+        (&first, AgentPhase::Waiting),
+        (&second, AgentPhase::Running),
+    ] {
+        let session = launch.session.unwrap();
+        let observation = observations[&session];
+        assert_eq!(observation.phase, phase);
+        assert_eq!(observation.status, Some(AgentStatus::Running));
+        assert!(!observation.resumable);
+        assert_eq!(
+            observation.resume_reason,
+            ProviderResumeReason::LiveOrOwnershipUnknown
+        );
+    }
+    assert!(
+        runtime
+            .session_observations(WorkspaceId::new())
+            .unwrap()
+            .is_empty()
+    );
+    runtime.exit(&admissions[0].terminal, 0).unwrap();
+    assert_eq!(
+        observations[&first.session.unwrap()].phase,
+        AgentPhase::Waiting
+    );
+    assert_eq!(
+        runtime.session_observations(first.workspace).unwrap()[&first.session.unwrap()].phase,
+        AgentPhase::Ended
+    );
+    assert_eq!(
+        session_resume_status(&runtime, first.workspace, SessionId::new()),
+        (false, ProviderResumeReason::ProviderMetadataUnavailable)
+    );
+}
+
+impl AgentRuntime {
+    /// Existing lifecycle assertions use the same workspace projection as IPC.
+    fn session_phase(&self, session: SessionId) -> AgentPhase {
+        self.coordinator
+            .records()
+            .find(|record| record.runtime.session_id == Some(session))
+            .and_then(|record| {
+                self.session_observations(record.runtime.terminal.workspace_id)
+                    .unwrap()
+                    .get(&session)
+                    .copied()
+            })
+            .unwrap_or_default()
+            .phase
+    }
+}
+
+#[test]
+fn session_observations_include_dispatch_only_sessions_and_propagate_storage_errors() {
+    let mut runtime = codex_runtime();
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let worker = runtime
+        .dispatch
+        .upsert_agent_by_runtime_model(
+            workspace,
+            Some(session),
+            AgentProfileId::new("codex").unwrap(),
+            ModelSelector::new("fixture").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.session_observations(workspace).unwrap()[&session],
+        AgentSessionObservation {
+            status: Some(worker.status),
+            ..AgentSessionObservation::default()
+        }
+    );
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("dispatch.json"), "invalid").unwrap();
+    runtime.dispatch = DispatchStore::new(directory.path());
+    assert!(runtime.session_observations(workspace).is_err());
 }

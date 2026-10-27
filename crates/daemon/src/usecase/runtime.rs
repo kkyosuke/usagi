@@ -1199,7 +1199,7 @@ impl RuntimeCoordinator {
         let mut terminate_failed = false;
 
         for (_, record) in &targets {
-            if runtime_state_requires_termination(record.state) {
+            if record.state.requires_termination() {
                 if spawner.terminate_reap(&record.runtime.terminal).is_err() {
                     terminate_failed = true;
                     continue;
@@ -1290,9 +1290,7 @@ impl RuntimeCoordinator {
 
         let mut interrupted = 0;
         for (key, record) in targets {
-            if record.state != RuntimeState::Reserved
-                && !runtime_state_requires_termination(record.state)
-            {
+            if record.state != RuntimeState::Reserved && !record.state.requires_termination() {
                 continue;
             }
             if record.process.is_some() && spawner.terminate_reap(&record.runtime.terminal).is_err()
@@ -1920,18 +1918,6 @@ impl RuntimeCoordinator {
             )),
         }
     }
-}
-
-const fn runtime_state_requires_termination(state: RuntimeState) -> bool {
-    matches!(
-        state,
-        RuntimeState::Running
-            | RuntimeState::ReconcileRequired(
-                ReconcileState::SpawnAmbiguous
-                    | ReconcileState::PersistAfterSpawn
-                    | ReconcileState::OrphanRunning
-            )
-    )
 }
 
 fn terminal_ownership_state(state: RuntimeState) -> TerminalState {

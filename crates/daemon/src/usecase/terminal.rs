@@ -105,6 +105,23 @@ pub enum TerminalRuntimeState {
     SpawnFailed,
 }
 
+impl TerminalRuntimeState {
+    /// Whether a PTY may still belong to this runtime and requires termination
+    /// before its workspace can be retired or its record removed.
+    #[must_use]
+    pub const fn requires_termination(self) -> bool {
+        matches!(
+            self,
+            Self::Running
+                | Self::ReconcileRequired(
+                    TerminalReconcileState::SpawnAmbiguous
+                        | TerminalReconcileState::PersistAfterSpawn
+                        | TerminalReconcileState::OrphanRunning
+                )
+        )
+    }
+}
+
 /// A fail-closed condition that must be reconciled, never replaced by spawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

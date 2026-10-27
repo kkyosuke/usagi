@@ -236,16 +236,6 @@ impl IssueStore {
         self.inner.lock()
     }
 
-    /// Read and parse every issue markdown file, sorted by number.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be read or any file fails to
-    /// parse.
-    pub fn scan(&self) -> Result<Vec<Issue>> {
-        self.inner.scan()
-    }
-
     /// Validate every Markdown source as one unambiguous issue identity.
     ///
     /// This is stricter than lenient listing: every source must parse, its
@@ -279,20 +269,6 @@ impl IssueStore {
             return Err(AmbiguousIssueNumber { number, files }.into());
         }
         Ok(())
-    }
-
-    /// Like [`scan`](Self::scan), but logs unreadable/unparseable issue files and
-    /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory itself cannot be read.
-    pub fn scan_lenient(&self) -> Result<Vec<Issue>> {
-        Ok(self
-            .scan_sources_lenient()?
-            .into_iter()
-            .map(|source| source.issue)
-            .collect())
     }
 
     /// Paths of every issue markdown file. Empty when the directory is missing.
@@ -870,6 +846,18 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
+    fn source_issues(store: &IssueStore) -> Vec<Issue> {
+        let sources = store
+            .scan_sources_lenient()
+            .expect("source entries remain readable");
+        assert_eq!(
+            sources.len(),
+            store.issue_files().unwrap().len(),
+            "a durability assertion must not hide an unreadable source"
+        );
+        sources.into_iter().map(|source| source.issue).collect()
+    }
+
     fn issue(number: u32, title: &str) -> Issue {
         let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
         Issue {
@@ -949,10 +937,10 @@ mod tests {
     }
 
     #[test]
-    fn scan_is_empty_when_directory_is_missing() {
+    fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(store.scan().unwrap().is_empty());
+        assert!(source_issues(&store).is_empty());
         assert_eq!(store.max_number().unwrap(), 0);
     }
 
@@ -1550,13 +1538,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_propagates_parse_errors() {
+    fn point_read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(store.dir().join("003-broken.md"), "not an issue").unwrap();
 
-        let err = store.scan().unwrap_err();
+        let err = store.read(3).unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
     }
 
@@ -1590,7 +1578,7 @@ mod tests {
             .map(|s| s.number)
             .collect();
         assert_eq!(rebuilt, vec![1, 3]);
-        assert!(store.scan().is_err());
+        assert!(store.read(2).is_err());
 
         let entry = fs::read_dir(
             crate::infrastructure::paths::data_dir()
@@ -1613,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_errors_when_the_issues_path_is_not_a_directory() {
+    fn sources_error_when_the_issues_path_is_not_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
         fs::write(tmp.path().join(".usagi/issues"), "not a dir").unwrap();
@@ -1621,8 +1609,9 @@ mod tests {
 
         assert!(
             store
-                .scan()
-                .unwrap_err()
+                .scan_sources_lenient()
+                .err()
+                .expect("a file cannot serve as the source directory")
                 .to_string()
                 .contains("failed to read")
         );
@@ -1709,7 +1698,7 @@ mod tests {
 
         assert_eq!(next, 3);
         assert!(store.dir().join("002-two.md").exists());
-        assert_eq!(store.scan().unwrap().len(), 3);
+        assert_eq!(source_issues(&store).len(), 3);
     }
 
     #[test]
@@ -1746,7 +1735,7 @@ mod tests {
         store.write(&issue(1, "One")).unwrap();
         let _guard = store.lock().unwrap();
         assert!(store.dir().join(".lock").is_file());
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_issues(&store).len(), 1);
     }
 
     #[test]
@@ -1914,21 +1903,24 @@ mod tests {
     }
 
     #[test]
-    fn non_markdown_files_are_ignored_by_scan() {
+    fn sources_ignore_non_markdown_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
         fs::write(store.dir().join("README.txt"), "ignore me").unwrap();
 
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_issues(&store).len(), 1);
     }
 
     #[test]
-    fn scan_lenient_returns_the_parseable_issues() {
+    fn sources_retain_the_parseable_issue_and_its_filename() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
-        assert_eq!(store.scan_lenient().unwrap().len(), 1);
+        let sources = store.scan_sources_lenient().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].issue, issue(1, "One"));
+        assert_eq!(sources[0].file, "001-one.md");
     }
 
     #[test]
@@ -2601,14 +2593,14 @@ mod tests {
 
             let outcome = store.write(&created).unwrap();
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert_eq!(store.scan().unwrap(), vec![created.clone()]);
+            assert_eq!(source_issues(&store), vec![created.clone()]);
 
             let reopened = IssueStore::new(tmp.path());
             assert_eq!(reopened.read(1).unwrap(), Some(created.clone()));
             assert!(reopened.index_path().is_file());
             let retry = reopened.write(&created).unwrap();
             assert_eq!(retry.derived, DerivedState::Fresh);
-            assert_eq!(reopened.scan().unwrap(), vec![created]);
+            assert_eq!(source_issues(&reopened), vec![created]);
         }
 
         unsafe {
@@ -2633,7 +2625,7 @@ mod tests {
 
             let outcome = store.write(&updated).unwrap();
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert_eq!(store.scan().unwrap(), vec![updated.clone()]);
+            assert_eq!(source_issues(&store), vec![updated.clone()]);
 
             let reopened = IssueStore::new(tmp.path());
             assert_eq!(reopened.read(1).unwrap(), Some(updated.clone()));
@@ -2641,7 +2633,7 @@ mod tests {
                 reopened.write(&updated).unwrap().derived,
                 DerivedState::Fresh
             );
-            assert_eq!(reopened.scan().unwrap(), vec![updated]);
+            assert_eq!(source_issues(&reopened), vec![updated]);
         }
 
         unsafe {
@@ -2666,7 +2658,7 @@ mod tests {
             let outcome = store.remove_with_outcome(1).unwrap();
             assert!(outcome.value);
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert!(store.scan().unwrap().is_empty());
+            assert!(source_issues(&store).is_empty());
 
             let reopened = IssueStore::new(tmp.path());
             assert!(reopened.summaries().unwrap().is_empty());
@@ -2688,7 +2680,7 @@ mod tests {
             let source = store.dir().join("001-created.md");
             fail_next_atomic_write(&source, stage);
             assert!(store.write(&issue(1, "Created")).is_err());
-            assert!(store.scan().unwrap().is_empty());
+            assert!(source_issues(&store).is_empty());
 
             store.write(&issue(1, "Old")).unwrap();
             let updated_source = store.dir().join("001-updated.md");

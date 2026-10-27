@@ -958,6 +958,7 @@ pub(super) fn start_pr_projection_worker(
                         let _ = projector.observe_committed(terminal, session, &bytes);
                     }
                     PrProjection::Gap { terminal } => projector.mark_gap(terminal),
+                    PrProjection::Reset => projector.reset_carries(),
                     PrProjection::Closed { terminal, session } => {
                         let _ = projector.release_terminal(terminal, session);
                     }

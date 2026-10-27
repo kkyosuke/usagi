@@ -599,7 +599,7 @@ mod tests {
 
         assert_eq!(retry.number, first.number);
         assert_eq!(retry.created_at, first.created_at);
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(store.source_snapshot().unwrap().sources.len(), 1);
         assert_eq!(
             fs::read(authority.join("sequence.json")).unwrap(),
             sequence_before
@@ -656,7 +656,7 @@ mod tests {
             assert!(create(&store, spec("must not be written"), ts(20)).is_err());
 
             assert_eq!(fs::read(&corrupt_path).unwrap(), corrupt_before);
-            assert!(store.scan().unwrap().is_empty());
+            assert!(store.source_snapshot().unwrap().sources.is_empty());
             assert!(!store.dir().join("001-must-not-be-written.md").exists());
             assert!(!authority.join("legacy-v2-migrated").exists());
             if corrupt_marker {

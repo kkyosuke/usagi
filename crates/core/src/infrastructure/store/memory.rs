@@ -160,29 +160,8 @@ impl MemoryStore {
         self.inner.lock()
     }
 
-    /// Read and parse every memory markdown file, sorted by name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be read or any file fails to
-    /// parse.
-    pub fn scan(&self) -> Result<Vec<Memory>> {
-        self.inner.scan()
-    }
-
-    /// Like [`scan`](Self::scan), but logs unreadable/unparseable memory files and
-    /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory itself cannot be read.
-    pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
-        self.inner.scan_lenient()
-    }
-
-    /// Like [`scan_lenient`](Self::scan_lenient), but pairs each memory with the
-    /// exact file it was read from so callers building their own summaries name
-    /// a source that exists.
+    /// Read parseable memories paired with their exact source filenames so
+    /// callers building summaries name a source that exists.
     ///
     /// # Errors
     ///
@@ -386,6 +365,18 @@ mod tests {
     use crate::infrastructure::store::DerivedState;
     use chrono::{TimeZone, Utc};
 
+    fn source_memories(store: &MemoryStore) -> Vec<Memory> {
+        let sources = store
+            .scan_sources_lenient()
+            .expect("source entries remain readable");
+        assert_eq!(
+            sources.len(),
+            store.inner.entry_files().unwrap().len(),
+            "a durability assertion must not hide an unreadable source"
+        );
+        sources.into_iter().map(|source| source.entry).collect()
+    }
+
     fn memory(name: &str, title: &str) -> Memory {
         let ts = Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap();
         Memory {
@@ -412,10 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn scan_is_empty_when_directory_is_missing() {
+    fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
-        assert!(store.scan().unwrap().is_empty());
+        assert!(source_memories(&store).is_empty());
     }
 
     #[test]
@@ -500,7 +491,7 @@ mod tests {
         updated.body = "changed".to_string();
         store.write(&updated).unwrap();
 
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_memories(&store).len(), 1);
         assert_eq!(store.read("fact").unwrap().unwrap().title, "New");
     }
 
@@ -635,13 +626,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_propagates_parse_errors() {
+    fn point_read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(store.dir().join("broken.md"), "not a memory").unwrap();
 
-        let err = store.scan().unwrap_err();
+        let err = store.read("broken").unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
     }
 
@@ -675,7 +666,7 @@ mod tests {
             .map(|s| s.name.clone())
             .collect();
         assert_eq!(rebuilt, vec!["one".to_string(), "two".to_string()]);
-        assert!(store.scan().is_err());
+        assert!(store.read("broken").is_err());
 
         let entry = fs::read_dir(
             crate::infrastructure::paths::data_dir()
@@ -698,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_errors_when_the_memory_path_is_not_a_directory() {
+    fn sources_error_when_the_memory_path_is_not_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
         fs::write(tmp.path().join(".usagi/memory"), "not a dir").unwrap();
@@ -706,8 +697,9 @@ mod tests {
 
         assert!(
             store
-                .scan()
-                .unwrap_err()
+                .scan_sources_lenient()
+                .err()
+                .expect("a file cannot serve as the source directory")
                 .to_string()
                 .contains("failed to read")
         );
@@ -780,25 +772,28 @@ mod tests {
         store.write(&memory("one", "One")).unwrap();
         let _guard = store.lock().unwrap();
         assert!(store.dir().join(".lock").is_file());
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_memories(&store).len(), 1);
     }
 
     #[test]
-    fn toc_and_index_are_ignored_by_scan() {
+    fn sources_ignore_toc_index_and_non_markdown_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("one", "One")).unwrap();
         fs::write(store.dir().join("README.txt"), "ignore me").unwrap();
 
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_memories(&store).len(), 1);
     }
 
     #[test]
-    fn scan_lenient_returns_the_parseable_memories() {
+    fn sources_retain_the_parseable_memory_and_its_filename() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("one", "One")).unwrap();
-        assert_eq!(store.scan_lenient().unwrap().len(), 1);
+        let sources = store.scan_sources_lenient().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].entry, memory("one", "One"));
+        assert_eq!(sources[0].file, "one.md");
     }
 
     #[test]
@@ -972,7 +967,7 @@ mod tests {
 
             let outcome = store.write(&created).unwrap();
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert_eq!(store.scan().unwrap(), vec![created.clone()]);
+            assert_eq!(source_memories(&store), vec![created.clone()]);
 
             let reopened = MemoryStore::new(tmp.path());
             assert_eq!(reopened.read("created").unwrap(), Some(created.clone()));
@@ -981,7 +976,7 @@ mod tests {
                 reopened.write(&created).unwrap().derived,
                 DerivedState::Fresh
             );
-            assert_eq!(reopened.scan().unwrap(), vec![created]);
+            assert_eq!(source_memories(&reopened), vec![created]);
         }
 
         unsafe {
@@ -1006,7 +1001,7 @@ mod tests {
 
             let outcome = store.write(&updated).unwrap();
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert_eq!(store.scan().unwrap(), vec![updated.clone()]);
+            assert_eq!(source_memories(&store), vec![updated.clone()]);
 
             let reopened = MemoryStore::new(tmp.path());
             assert_eq!(reopened.read("fact").unwrap(), Some(updated.clone()));
@@ -1014,7 +1009,7 @@ mod tests {
                 reopened.write(&updated).unwrap().derived,
                 DerivedState::Fresh
             );
-            assert_eq!(reopened.scan().unwrap(), vec![updated]);
+            assert_eq!(source_memories(&reopened), vec![updated]);
         }
 
         unsafe {
@@ -1039,7 +1034,7 @@ mod tests {
             let outcome = store.remove_with_outcome("doomed").unwrap();
             assert!(outcome.value);
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert!(store.scan().unwrap().is_empty());
+            assert!(source_memories(&store).is_empty());
 
             let reopened = MemoryStore::new(tmp.path());
             assert!(reopened.summaries().unwrap().is_empty());
@@ -1061,7 +1056,7 @@ mod tests {
             let source = store.dir().join("fact.md");
             fail_next_atomic_write(&source, stage);
             assert!(store.write(&memory("fact", "Created")).is_err());
-            assert!(store.scan().unwrap().is_empty());
+            assert!(source_memories(&store).is_empty());
 
             store.write(&memory("fact", "Old")).unwrap();
             fail_next_atomic_write(&source, stage);

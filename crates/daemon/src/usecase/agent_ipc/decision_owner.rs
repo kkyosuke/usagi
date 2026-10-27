@@ -74,7 +74,10 @@ impl AgentRuntime {
         let authority = if record.user_decision_owner.is_some() {
             self.user_decision_authority_for_record(record, &[])
         } else {
-            self.user_decision_authority_for_record(record, &self.coordinator.snapshot().records)
+            self.user_decision_authority_for_record(
+                record,
+                &self.coordinator.records().collect::<Vec<_>>(),
+            )
         }?;
         Ok(authority.into_owners())
     }
@@ -86,7 +89,7 @@ impl AgentRuntime {
     pub(super) fn user_decision_authority_for_record(
         &self,
         record: &DurableRuntimeRecord,
-        records: &[DurableRuntimeRecord],
+        records: &[&DurableRuntimeRecord],
     ) -> Result<ConversationDecisionAuthority, ProtocolError> {
         let mut cursor = record;
         let mut seen = BTreeSet::new();

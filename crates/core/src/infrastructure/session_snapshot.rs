@@ -196,7 +196,7 @@ fn decode_session_list_item(value: serde_json::Value) -> Result<SessionListItem,
         .count();
     let runtime = if observed_fields == RUNTIME_FIELDS.len() {
         Some(
-            serde_json::from_value::<SessionRuntimeObservation>(value.clone())
+            SessionRuntimeObservation::deserialize(&value)
                 .map_err(|_| "session runtime observation is malformed")?,
         )
     } else if observed_fields == 0 {
@@ -206,8 +206,7 @@ fn decode_session_list_item(value: serde_json::Value) -> Result<SessionListItem,
     };
     let role_summary = object
         .get("role_summary")
-        .cloned()
-        .map(serde_json::from_value)
+        .map(Deserialize::deserialize)
         .transpose()
         .map_err(|_| "session role summary is malformed")?
         .flatten();

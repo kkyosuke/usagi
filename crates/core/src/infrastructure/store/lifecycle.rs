@@ -24,13 +24,13 @@ const STATE_FILE: &str = "sessions.json";
 /// It is a real, never-reused identity (not derived from a name or path) so a
 /// workspace-root terminal/agent can be fenced exactly like a session one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct PersistedLifecycle {
+struct PersistedLifecycle<S = WorkspaceLifecycleState> {
     repository_root: PathBuf,
     /// Absent only in stores written before workspace-root scope existed; the
     /// daemon backfills it once on open via [`DaemonLifecycleStore::ensure_root_worktree_id`].
     #[serde(default)]
     root_worktree_id: Option<WorktreeId>,
-    state: WorkspaceLifecycleState,
+    state: S,
 }
 
 /// A state store intended solely for the daemon command handler.
@@ -98,7 +98,7 @@ impl DaemonLifecycleStore {
             &PersistedLifecycle {
                 repository_root: repository_root.into(),
                 root_worktree_id: Some(WorktreeId::new()),
-                state: state.clone(),
+                state,
             },
         )
     }
@@ -151,7 +151,7 @@ impl DaemonLifecycleStore {
             &PersistedLifecycle {
                 repository_root: persisted.repository_root,
                 root_worktree_id: persisted.root_worktree_id,
-                state: state.clone(),
+                state,
             },
         )
     }
@@ -283,18 +283,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());
         let root = Path::new("/tmp/repository");
-        store
-            .initialize(
-                &WorkspaceLifecycleState::new(WorkspaceId::new(), now()),
-                root,
-            )
-            .unwrap();
+        let state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        store.initialize(&state, root).unwrap();
 
         assert_eq!(
             store.load_with_workspace().unwrap().map(|(root, _)| root),
             Some(root.into())
         );
         assert_eq!(store.state_path(), tmp.path().join(STATE_FILE));
+        let owned = PersistedLifecycle {
+            repository_root: root.into(),
+            root_worktree_id: Some(store.ensure_root_worktree_id().unwrap()),
+            state,
+        };
+        assert_eq!(
+            std::fs::read_to_string(store.state_path()).unwrap(),
+            format!("{}\n", serde_json::to_string_pretty(&owned).unwrap()),
+            "borrowed writes preserve the owned persistence envelope"
+        );
     }
 
     #[test]

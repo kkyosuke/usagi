@@ -9,7 +9,7 @@
 //! 解釈は入力層が整うときに載せ、ここではカーソル移動の純粋操作だけを公開する。
 
 use usagi_core::domain::pr_inventory::{
-    PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
+    PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState,
 };
 
 use crate::presentation::theme::{Role, Style};
@@ -34,8 +34,11 @@ pub struct PrModal {
 }
 
 /// ダミーの [`PrEntry`] を 1 件組む。
+#[cfg(test)]
 fn dummy_pr(url: &str, title: &str, state: PrState) -> PrEntry {
-    let mut pr = PrEntry::new(canonicalize(url).expect("dummy PR URL is canonical"));
+    let mut pr = PrEntry::new(
+        usagi_core::domain::pr_inventory::canonicalize(url).expect("dummy PR URL is canonical"),
+    );
     pr.title = Some(title.to_string());
     pr.state = state;
     pr
@@ -44,6 +47,7 @@ fn dummy_pr(url: &str, title: &str, state: PrState) -> PrEntry {
 impl PrModal {
     /// デモ用のダミー PR 一覧（open 2 件・merged 1 件）。
     #[must_use]
+    #[cfg(test)]
     pub fn dummy() -> Self {
         Self::new(vec![
             dummy_pr(

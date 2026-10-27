@@ -109,9 +109,8 @@ pub struct SessionRecord {
     pub notes: Scratchpad,
     /// Pull requests discovered for this session — harvested from its panes'
     /// output and persisted so the sidebar keeps showing the `#<number>` badges
-    /// across restarts. Empty (the default) is omitted from `state.json`. Rolled
-    /// up to the session level via [`PrLink::aggregate`] (per-worktree attribution
-    /// arrives with the git layer).
+    /// across restarts. Empty (the default) is omitted from `state.json`. Current
+    /// PR state is projected from the daemon-owned inventory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prs: Vec<PrLink>,
 }

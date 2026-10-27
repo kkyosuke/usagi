@@ -75,19 +75,21 @@ fn snapshot(
         serde_json::from_value(value["sessions"].clone()).map_err(unavailable)?;
     let decisions = decisions.pending(workspace).map_err(unavailable)?;
     let agent = agent.lock().map_err(unavailable)?;
-    let observation = agent.workspace_observation(workspace)?;
+    let observations = agent.session_observations(workspace)?;
+    let statuses = observations
+        .iter()
+        .filter_map(|(session, observation)| observation.status.map(|status| (*session, status)))
+        .collect();
     let phases = sessions
         .iter()
-        .map(|session| agent.session_phase(session.session_id))
+        .map(|session| {
+            observations
+                .get(&session.session_id)
+                .map_or(AgentPhase::Absent, |observation| observation.phase)
+        })
         .collect::<Vec<_>>();
     drop(agent);
-    project(
-        workspace,
-        &sessions,
-        &decisions,
-        &observation.session_statuses,
-        &phases,
-    )
+    project(workspace, &sessions, &decisions, &statuses, &phases)
 }
 
 fn project(

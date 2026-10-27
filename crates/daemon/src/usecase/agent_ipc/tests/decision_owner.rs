@@ -639,7 +639,7 @@ fn legacy_decision_authority_refuses_another_worker_in_the_same_scope() {
             .agent
             .user_decision_authority_for_record(
                 &current,
-                &conversation.agent.coordinator.snapshot().records,
+                &conversation.agent.coordinator.records().collect::<Vec<_>>(),
             )
             .is_err()
     );
@@ -706,7 +706,7 @@ fn decision_owner_refuses_inconsistent_scope_caller_and_lineage() {
         assert!(
             conversation
                 .agent
-                .user_decision_authority_for_record(&current, &[invalid])
+                .user_decision_authority_for_record(&current, &[&invalid])
                 .is_err()
         );
     }
@@ -716,7 +716,7 @@ fn decision_owner_refuses_inconsistent_scope_caller_and_lineage() {
     assert!(
         conversation
             .agent
-            .user_decision_authority_for_record(&cycle, std::slice::from_ref(&cycle))
+            .user_decision_authority_for_record(&cycle, &[&cycle])
             .is_err()
     );
 }

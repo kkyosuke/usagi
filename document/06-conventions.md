@@ -255,6 +255,8 @@ fn read_real_pty() { /* OS call only */ }
 を実行する。source だけの追加、registry だけ残る stale symbol、重複、理由・owner・期限・テスト証跡の欠落、期限切れ、
 許可外理由に加え、[`coverage-off-budget.json`](../coverage-off-budget.json) の owner / path 別 inventory と一致しない
 件数変更は CI を失敗させる。budget 更新は増減を review 上で明示するだけで、許可理由の適合確認を代替しない。
+source scan はルートと各 crate の `build.rs`・`src/`・`tests/`・`examples/`・`benches/` を対象にする。
+これらの未追跡ファイルも検査し、`artifacts/` の生成物や依存キャッシュ、build 出力は検査に混ぜない。
 現行 debt の領域別 inventory と返済順序は
 [8. coverage exclusion inventory](08-coverage.md) を参照する。
 

@@ -301,8 +301,9 @@ impl WorkspaceDeck {
         self.icon_mode
     }
 
-    /// Start a deck from an ordered, non-empty group of prepared snapshots.
+    /// Build a multi-project fixture from ordered, non-empty snapshots.
     #[must_use]
+    #[cfg(test)]
     pub fn from_snapshots(snapshots: &[WorkspaceSnapshot]) -> Option<Self> {
         let first = snapshots.first()?;
         let mut deck = Self::new(first);
@@ -698,20 +699,6 @@ impl WorkspaceDeck {
             // describes no observation until the lane makes one.
             slot.agents_observed = false;
         }
-    }
-
-    /// Every open project the Garden observes from the outside: the tabs whose
-    /// workspace controller is not resident in this process.
-    ///
-    /// The active project is excluded because its own controller already
-    /// projects richer, runtime-local Agent phases into the Garden.
-    #[must_use]
-    pub fn observable_workspaces(&self) -> Vec<WorkspaceId> {
-        self.slots
-            .iter()
-            .map(WorkspaceSlot::workspace_id)
-            .filter(|workspace| *workspace != self.active)
-            .collect()
     }
 
     /// Attach one inactive project's daemon Agent inventory to its cached plots.
@@ -2124,7 +2111,6 @@ mod tests {
         let alpha = snapshot_with_session("alpha", "/alpha", "build");
         let beta = snapshot_with_session("beta", "/beta", "review");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
-        assert_eq!(deck.observable_workspaces(), vec![beta.workspace_id]);
 
         // Before any observation the plot stays the read-only one: an empty
         // cached list is not evidence that the project owns no Agents.
@@ -2220,7 +2206,6 @@ mod tests {
         )));
 
         deck.activate_snapshot(&beta);
-        assert_eq!(deck.observable_workspaces(), vec![alpha.workspace_id]);
         assert!(!deck.slots[1].agents_observed);
 
         // The now-active project's cache is a fallback for when its tab goes
