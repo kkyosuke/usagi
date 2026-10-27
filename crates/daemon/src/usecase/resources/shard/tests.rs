@@ -3,8 +3,8 @@
 use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 
 use super::{
-    CollectionBlocker, OwnerEvent, ResourceState, SHARD_SCHEMA, ShardDocument, collectable,
-    hydrate, open_writer, retired_collectable,
+    CollectionBlocker, InFlightCommand, OwnerEvent, ResourceState, SHARD_SCHEMA, ShardDocument,
+    collectable, retired_collectable,
 };
 use crate::usecase::resources::allocator::{AllocatorDocument, ClaimState, ResourceKind};
 use crate::usecase::resources::fixture::{
@@ -119,86 +119,17 @@ fn an_unprovable_record_stays_visible_and_holds_no_child() {
 }
 
 #[test]
-fn commands_are_tracked_until_they_complete_and_publish_once() {
-    let owner = DaemonGeneration::new();
-    let (mut document, _, resource, _) = running(owner);
-    let command = OperationId::new();
-
-    assert_eq!(
-        document.accept_command(&terminal(owner), &command),
-        Err(ResourceError::UnknownResource)
-    );
-    document.accept_command(&resource, &command).unwrap();
-    document.accept_command(&resource, &command).unwrap();
-    assert_eq!(document.in_flight.len(), 1);
-    document
-        .validate()
-        .expect("an accepted command for an owned resource is well formed");
-
-    document
-        .commit_command_completion(&resource, &command)
-        .unwrap();
-    assert!(document.in_flight.is_empty());
-    assert_eq!(document.unacked_outbox(), 1);
-    // The completion is already published, so repeating it converges instead of
-    // publishing a second event.
-    document
-        .commit_command_completion(&resource, &command)
-        .unwrap();
-    assert_eq!(document.unacked_outbox(), 1);
-
-    assert_eq!(
-        document.commit_command_completion(&resource, &OperationId::new()),
-        Err(ResourceError::UnknownOperation)
-    );
-    assert_eq!(
-        document.commit_command_completion(&terminal(owner), &command),
-        Err(ResourceError::UnknownResource)
-    );
-
-    let (mut reserved_only, _, pending) = reserved(owner);
-    assert_eq!(
-        reserved_only.accept_command(&pending, &command),
-        Err(ResourceError::WrongState),
-        "a command needs a running child"
-    );
-    document.validate().unwrap();
-}
-
-#[test]
-fn output_progress_publishes_one_event_per_offset() {
-    let owner = DaemonGeneration::new();
-    let (mut document, _, resource, _) = running(owner);
-    document.commit_output(&resource, 10).unwrap();
-    document.commit_output(&resource, 10).unwrap();
-    assert_eq!(document.unacked_outbox(), 1);
-    document.commit_output(&resource, 20).unwrap();
-    assert_eq!(document.unacked_outbox(), 2);
-    assert_eq!(
-        document.commit_output(&terminal(owner), 1),
-        Err(ResourceError::UnknownResource)
-    );
-    assert!(!OwnerEvent::Output { offset: 10 }.is_terminal());
-    assert!(
-        OwnerEvent::Exit { status: Some(0) }.is_terminal(),
-        "only an exit releases capacity"
-    );
-    assert!(
-        !OwnerEvent::CommandCompleted {
-            command: OperationId::new()
-        }
-        .is_terminal()
-    );
-    document.validate().unwrap();
-}
-
-#[test]
 fn an_exit_records_and_publishes_in_one_transition() {
     let owner = DaemonGeneration::new();
     let (mut document, _, resource, _) = running(owner);
-    document
-        .accept_command(&resource, &OperationId::new())
-        .unwrap();
+    // Retained shards may still contain commands accepted by older builds.
+    document.in_flight.push(InFlightCommand {
+        resource: resource.clone(),
+        command: OperationId::new(),
+    });
+    let legacy = serde_json::to_string(&document).unwrap();
+    document = serde_json::from_str(&legacy).unwrap();
+    document.validate().unwrap();
 
     document.commit_exit(&resource, Some(3)).unwrap();
     assert_eq!(
@@ -228,7 +159,7 @@ fn an_exit_records_and_publishes_in_one_transition() {
 fn the_owner_reclaims_only_what_the_consumer_has_applied() {
     let owner = DaemonGeneration::new();
     let (mut document, operation, resource, _) = running(owner);
-    document.commit_output(&resource, 5).unwrap();
+    document.publish(&resource, OwnerEvent::Output { offset: 5 });
     document.commit_exit(&resource, Some(0)).unwrap();
     assert_eq!(document.unacked_outbox(), 2);
 
@@ -343,16 +274,19 @@ fn a_generation_is_collectable_only_when_every_count_is_zero() {
     // A command accepted while the child was running, whose record then became
     // unprovable, is still this owner's responsibility.
     let command = OperationId::new();
-    document.accept_command(&resource, &command).unwrap();
+    document.in_flight.push(InFlightCommand {
+        resource: resource.clone(),
+        command,
+    });
     document.mark_ownership_unknown(&resource).unwrap();
     assert_eq!(
         collectable(&document, &allocator),
         Err(CollectionBlocker::InFlightCommand)
     );
 
-    document
-        .commit_command_completion(&resource, &command)
-        .unwrap();
+    // A legacy completion remains a collection barrier until consumed.
+    document.in_flight.clear();
+    document.publish(&resource, OwnerEvent::CommandCompleted { command });
     assert_eq!(
         collectable(&document, &allocator),
         Err(CollectionBlocker::UnackedOutbox)
@@ -453,61 +387,6 @@ fn a_self_contradicting_shard_is_refused_rather_than_repaired() {
 }
 
 #[test]
-fn a_standby_hydrates_read_only_and_only_activation_opens_a_writer() {
-    let owner = DaemonGeneration::new();
-    let shard_bytes = SharedBytes::default();
-    let allocator_bytes = SharedBytes::default();
-    let shard = bind_shard(&shard_bytes, owner);
-    let allocator = crate::usecase::resources::fixture::allocator(&allocator_bytes, policy(2, 2));
-
-    let operation = OperationId::new();
-    let resource = terminal(owner);
-    shard
-        .update(|document| {
-            document.reserve(&operation, "digest", ResourceKind::Terminal, &resource)
-        })
-        .unwrap();
-    let stored = shard_bytes.get().unwrap();
-    let ledger = allocator.load().unwrap().to_document();
-
-    let sealed = hydrate(&shard, &ledger).unwrap();
-    assert_eq!(sealed.owner(), owner);
-    assert_eq!(sealed.shard_revision(), 1);
-    assert_eq!(sealed.allocator_revision(), 0);
-    assert_eq!(sealed.resources(), 1);
-    assert_eq!(
-        shard_bytes.get().unwrap(),
-        stored,
-        "hydrate and readiness write nothing at all"
-    );
-
-    let lease = open_writer(&shard, &ledger, &sealed).unwrap();
-    assert_eq!(lease.owner(), owner);
-    assert_eq!(lease.shard_revision(), 1);
-    assert_eq!(lease.allocator_revision(), 0);
-
-    // Either object moving under the seal invalidates it.
-    shard
-        .update(|document| document.record_spawn(&resource, &verified(71, "os:71")))
-        .unwrap();
-    assert_eq!(
-        open_writer(&shard, &ledger, &sealed).unwrap_err().refusal(),
-        Some(ResourceError::SealedElsewhere)
-    );
-    let moved_ledger = AllocatorDocument {
-        revision: 5,
-        ..ledger.clone()
-    };
-    let fresh = hydrate(&shard, &ledger).unwrap();
-    assert_eq!(
-        open_writer(&shard, &moved_ledger, &fresh)
-            .unwrap_err()
-            .refusal(),
-        Some(ResourceError::SealedElsewhere)
-    );
-}
-
-#[test]
 fn a_shard_document_belonging_to_another_generation_is_never_written() {
     let owner = DaemonGeneration::new();
     let bytes = SharedBytes::default();
@@ -523,12 +402,6 @@ fn a_shard_document_belonging_to_another_generation_is_never_written() {
                 ResourceKind::Terminal,
                 &terminal(owner),
             ))
-            .unwrap_err()
-            .refusal(),
-        Some(ResourceError::ForeignOwner)
-    );
-    assert_eq!(
-        hydrate(&shard, &AllocatorDocument::default())
             .unwrap_err()
             .refusal(),
         Some(ResourceError::ForeignOwner)

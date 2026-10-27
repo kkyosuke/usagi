@@ -10,6 +10,10 @@
 //! dropped and a [`PrProjection::Gap`] takes its place *in order*, because
 //! concatenating bytes across dropped bytes could synthesize a PR URL that never
 //! appeared in the output.
+//! Entries have a separate bound, including gaps and terminal exits. Exhausting
+//! it discards pending work and queues an ordered reset of all parser carries.
+//! This may lose PR discoveries during overload, but never joins discontinuous
+//! output or retains an unbounded backlog of zero-byte metadata.
 
 use std::{
     collections::VecDeque,
@@ -26,6 +30,9 @@ use usagi_core::domain::id::{SessionId, TerminalId};
 /// slack — far more than the projector needs to absorb a burst, while still a
 /// hard ceiling on memory.
 pub const QUEUE_BYTES_MAX: usize = 4 * 1024 * 1024;
+
+/// Maximum queued output, gap, reset and terminal-exit entries combined.
+pub const QUEUE_ITEMS_MAX: usize = 4096;
 
 /// How large a queued chunk may grow by merging its successors.
 ///
@@ -72,6 +79,9 @@ pub enum PrProjection {
     },
     /// Bytes were dropped before whatever follows for this terminal.
     Gap { terminal: TerminalId },
+    /// Pending work was discarded under metadata pressure. Forget every partial
+    /// URL before processing subsequent output; persisted discoveries remain.
+    Reset,
     /// The terminal exited: flush its carry and reclaim it.
     Closed {
         terminal: TerminalId,
@@ -87,27 +97,35 @@ struct State {
 }
 
 /// A bounded queue whose producer never blocks.
-#[derive(Default)]
 pub struct PrProjectionQueue {
     state: Mutex<State>,
     ready: Condvar,
     byte_cap: usize,
     merge_cap: usize,
+    item_cap: usize,
+}
+
+impl Default for PrProjectionQueue {
+    fn default() -> Self {
+        Self::with_limits(QUEUE_BYTES_MAX, MERGE_BYTES_MAX, QUEUE_ITEMS_MAX)
+    }
 }
 
 impl PrProjectionQueue {
     #[must_use]
     pub fn new() -> Self {
-        Self::with_limits(QUEUE_BYTES_MAX, MERGE_BYTES_MAX)
+        Self::default()
     }
 
     #[must_use]
-    pub fn with_limits(byte_cap: usize, merge_cap: usize) -> Self {
+    fn with_limits(byte_cap: usize, merge_cap: usize, item_cap: usize) -> Self {
+        assert!(item_cap >= 2, "a reset and its successor need two entries");
         Self {
             state: Mutex::new(State::default()),
             ready: Condvar::new(),
             byte_cap,
             merge_cap,
+            item_cap,
         }
     }
 
@@ -137,10 +155,9 @@ impl PrProjectionQueue {
                     u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                     Ordering::Relaxed,
                 );
-                Self::push_gap(state, terminal);
+                self.push_gap(state, terminal);
                 return false;
             }
-            state.bytes += bytes.len();
             // Merging into the pending chunk keeps the entry count proportional
             // to bytes. The merged bytes are contiguous, so this changes nothing
             // a scan can observe.
@@ -153,6 +170,7 @@ impl PrProjectionQueue {
                 && *pending_session == session
                 && pending_bytes.len() < self.merge_cap
             {
+                state.bytes += bytes.len();
                 COALESCED_BYTES.fetch_add(
                     u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                     Ordering::Relaxed,
@@ -160,6 +178,8 @@ impl PrProjectionQueue {
                 pending_bytes.extend_from_slice(&bytes);
                 return true;
             }
+            self.reserve_entry(state);
+            state.bytes += bytes.len();
             state.items.push_back(PrProjection::Output {
                 terminal,
                 session,
@@ -177,7 +197,7 @@ impl PrProjectionQueue {
         if let Ok(mut state) = self.state.lock()
             && !state.closed
         {
-            Self::push_gap(&mut state, terminal);
+            self.push_gap(&mut state, terminal);
             self.ready.notify_one();
         }
     }
@@ -187,6 +207,7 @@ impl PrProjectionQueue {
         if let Ok(mut state) = self.state.lock()
             && !state.closed
         {
+            self.reserve_entry(&mut state);
             state
                 .items
                 .push_back(PrProjection::Closed { terminal, session });
@@ -195,15 +216,33 @@ impl PrProjectionQueue {
     }
 
     /// Appends a gap unless the newest entry is already this terminal's gap.
-    fn push_gap(state: &mut State, terminal: TerminalId) {
+    fn push_gap(&self, state: &mut State, terminal: TerminalId) {
         if matches!(
             state.items.back(),
             Some(PrProjection::Gap { terminal: pending }) if *pending == terminal
         ) {
             return;
         }
+        self.reserve_entry(state);
         GAPS.fetch_add(1, Ordering::Relaxed);
         state.items.push_back(PrProjection::Gap { terminal });
+    }
+
+    /// Keeps the reset before new work, including an exit that could otherwise
+    /// flush a now-truncated URL. A single consumer also processes any item it
+    /// already received before observing this reset.
+    fn reserve_entry(&self, state: &mut State) {
+        if state.items.len() < self.item_cap {
+            return;
+        }
+        DROPPED_BYTES.fetch_add(
+            u64::try_from(state.bytes).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        GAPS.fetch_add(1, Ordering::Relaxed);
+        state.items.clear();
+        state.bytes = 0;
+        state.items.push_back(PrProjection::Reset);
     }
 
     /// Blocks until work is available. Returns `None` once the queue is closed
@@ -240,7 +279,7 @@ impl PrProjectionQueue {
         self.state.lock().map_or(0, |state| state.bytes)
     }
 
-    /// Pending entry count. Tests assert merging keeps this proportional to bytes.
+    /// Pending entry count, including zero-byte metadata.
     #[must_use]
     pub fn queued_items(&self) -> usize {
         self.state.lock().map_or(0, |state| state.items.len())
@@ -253,7 +292,7 @@ mod tests {
     use std::sync::Arc;
 
     fn queue() -> PrProjectionQueue {
-        PrProjectionQueue::with_limits(64, 16)
+        PrProjectionQueue::with_limits(64, 16, QUEUE_ITEMS_MAX)
     }
 
     #[test]
@@ -310,7 +349,7 @@ mod tests {
 
     #[test]
     fn a_full_queue_drops_bytes_and_records_a_gap_in_order() {
-        let queue = PrProjectionQueue::with_limits(8, 0);
+        let queue = PrProjectionQueue::with_limits(8, 0, QUEUE_ITEMS_MAX);
         let terminal = TerminalId::new();
         let session = SessionId::new();
         assert!(queue.submit_output(terminal, Some(session), b"12345678".to_vec()));
@@ -371,7 +410,7 @@ mod tests {
     #[test]
     fn counters_are_byte_and_event_counts_only() {
         let before = pr_projection_counters();
-        let queue = PrProjectionQueue::with_limits(4, 4);
+        let queue = PrProjectionQueue::with_limits(4, 4, QUEUE_ITEMS_MAX);
         let terminal = TerminalId::new();
         assert!(queue.submit_output(terminal, None, b"ab".to_vec()));
         assert!(queue.submit_output(terminal, None, b"cd".to_vec()));
@@ -380,5 +419,80 @@ mod tests {
         assert!(after.dropped_bytes >= before.dropped_bytes + 4);
         assert!(after.coalesced_bytes >= before.coalesced_bytes + 2);
         assert!(after.gaps > before.gaps);
+    }
+
+    #[test]
+    fn alternating_overflow_and_terminal_churn_bound_all_metadata() {
+        let queue = PrProjectionQueue::new();
+        let terminals = [TerminalId::new(), TerminalId::new()];
+        for _ in 0..(QUEUE_BYTES_MAX / 4096) {
+            assert!(queue.submit_output(terminals[0], None, vec![b'x'; 4096]));
+        }
+        let mut dropped = 0;
+        for index in 0..10_000 {
+            dropped +=
+                usize::from(!queue.submit_output(terminals[index % 2], None, vec![b'x'; 4096]));
+            assert!(queue.queued_bytes() <= QUEUE_BYTES_MAX);
+            assert!(queue.queued_items() <= QUEUE_ITEMS_MAX);
+        }
+        assert!(dropped > 0);
+        for _ in 0..10_000 {
+            queue.submit_closed(TerminalId::new(), None);
+            assert!(queue.queued_items() <= QUEUE_ITEMS_MAX);
+        }
+        assert_eq!(queue.queued_bytes(), 0);
+        assert_eq!(queue.recv(), Some(PrProjection::Reset));
+    }
+
+    #[test]
+    fn metadata_reset_precedes_new_output_and_exit() {
+        let queue = PrProjectionQueue::with_limits(64, 0, 2);
+        let terminal = TerminalId::new();
+        assert!(queue.submit_output(terminal, None, b"discarded".to_vec()));
+        queue.submit_gap(terminal);
+        assert!(queue.submit_output(terminal, None, b"new".to_vec()));
+        assert_eq!(queue.queued_bytes(), 3);
+        assert_eq!(queue.recv(), Some(PrProjection::Reset));
+        assert!(
+            matches!(queue.recv(), Some(PrProjection::Output { bytes, .. }) if bytes == b"new")
+        );
+
+        queue.submit_gap(terminal);
+        queue.submit_gap(TerminalId::new());
+        queue.submit_closed(terminal, None);
+        queue.close();
+        assert_eq!(queue.recv(), Some(PrProjection::Reset));
+        assert_eq!(
+            queue.recv(),
+            Some(PrProjection::Closed {
+                terminal,
+                session: None
+            })
+        );
+        assert_eq!(queue.recv(), None);
+    }
+
+    #[test]
+    fn gaps_separated_by_output_remain_distinct_and_reset_is_ordered() {
+        let queue = PrProjectionQueue::with_limits(1, 0, 4);
+        let terminal = TerminalId::new();
+        queue.submit_gap(terminal);
+        assert!(queue.submit_output(terminal, None, b"a".to_vec()));
+        assert!(!queue.submit_output(terminal, None, b"b".to_vec()));
+        assert_eq!(queue.recv(), Some(PrProjection::Gap { terminal }));
+        assert!(matches!(queue.recv(), Some(PrProjection::Output { .. })));
+        assert_eq!(queue.recv(), Some(PrProjection::Gap { terminal }));
+        for _ in 0..5 {
+            queue.submit_gap(TerminalId::new());
+        }
+        assert_eq!(queue.queued_items(), 2);
+        assert_eq!(queue.recv(), Some(PrProjection::Reset));
+        assert!(matches!(queue.recv(), Some(PrProjection::Gap { .. })));
+    }
+
+    #[test]
+    #[should_panic(expected = "a reset and its successor need two entries")]
+    fn metadata_limit_reserves_room_for_the_reset() {
+        let _ = PrProjectionQueue::with_limits(1, 0, 1);
     }
 }

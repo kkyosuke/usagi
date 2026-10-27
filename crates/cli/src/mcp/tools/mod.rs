@@ -27,7 +27,8 @@ use usagi_core::infrastructure::ipc::SessionAction;
 ///
 /// Panics before the MCP serve loop starts when descriptor validation fails.
 #[must_use]
-pub fn registry() -> Vec<ToolDescriptor> {
+#[cfg(test)]
+pub(super) fn registry() -> Vec<ToolDescriptor> {
     registry_with_families(McpToolFamilies::all())
 }
 

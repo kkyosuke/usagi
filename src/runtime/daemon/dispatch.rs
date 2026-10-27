@@ -60,42 +60,20 @@ pub(super) struct DispatchToolContext<'a> {
 pub(super) fn dispatch_dispatch_tool(
     context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
+    request: DaemonRequest,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    let action = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::DispatchTool { action, .. } => Some(action),
-            _ => None,
-        });
-    if action.is_some_and(|action| {
-        matches!(
-            action,
-            DispatchToolAction::Dispatch
-                | DispatchToolAction::AgentHandoff
-                | DispatchToolAction::AgentPeers
-                | DispatchToolAction::AgentMessage
-                | DispatchToolAction::AgentMessages
-                | DispatchToolAction::AgentMessageAck
-                | DispatchToolAction::SessionGet
-                | DispatchToolAction::AgentList
-                | DispatchToolAction::AgentGet
-                | DispatchToolAction::TerminalList
-                | DispatchToolAction::TerminalRead
-                | DispatchToolAction::AgentComplete
-                | DispatchToolAction::AgentFail
-                | DispatchToolAction::AgentInbox
-                | DispatchToolAction::AgentInboxAck
-        )
-    }) {
-        dispatch_agent_tool(context, request_id, body, hello)
+    if matches!(&request, DaemonRequest::DispatchTool { action, .. } if !action.is_user_decision())
+    {
+        dispatch_agent_tool(context, request_id, request, body, hello)
     } else {
         dispatch_user_decision(
             context.agent,
             context.bound,
             context.decisions,
             request_id,
+            request,
             body,
             hello,
         )
@@ -107,6 +85,7 @@ pub(super) fn dispatch_dispatch_tool(
 pub(super) fn dispatch_agent_tool(
     context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
+    request: DaemonRequest,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
@@ -176,17 +155,15 @@ pub(super) fn dispatch_agent_tool(
     let bound = context.bound;
     let pr_inventory = context.pr_inventory;
 
-    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::DispatchTool {
-                action,
-                operation_id,
-                payload,
-                caller_context,
-            } => Some((action, operation_id, payload, caller_context)),
-            _ => None,
-        });
+    let parsed = match request {
+        DaemonRequest::DispatchTool {
+            action,
+            operation_id,
+            payload,
+            caller_context,
+        } => Some((action, operation_id, payload, caller_context)),
+        _ => None,
+    };
     let Some((action, operation_id, payload, caller_context)) = parsed else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
@@ -204,25 +181,18 @@ pub(super) fn dispatch_agent_tool(
                     "agent caller provenance is unknown",
                 )
             })?;
-        let snapshot = bound
+        let workspace = bound
             .sessions()
             .lock()
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
             })?
-            .snapshot()
+            .workspace_id()
             .map_err(|_| {
                 ProtocolError::new(
                     ErrorCode::Unavailable,
                     "daemon could not read managed sessions",
                 )
-            })?;
-        let workspace = snapshot
-            .get("workspace_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or_else(|| {
-                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })?;
         let runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
@@ -407,12 +377,28 @@ pub(super) fn dispatch_agent_tool(
                 .last()
                 .map_or(serde_json::Value::Null, |run| serde_json::json!(run)))
         };
+        let session_snapshot = || {
+            bound
+                .sessions()
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+                })?
+                .snapshot()
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "daemon could not read managed sessions",
+                    )
+                })
+        };
         match action {
             DispatchToolAction::Dispatch | DispatchToolAction::AgentHandoff => {
                 let handoff = action == DispatchToolAction::AgentHandoff;
-                let payload = if handoff {
+                let handoff_snapshot = handoff.then(session_snapshot).transpose()?;
+                let payload = if let Some(snapshot) = &handoff_snapshot {
                     usagi_daemon::usecase::peer_messages::handoff_payload(
-                        &caller, &snapshot, payload,
+                        &caller, snapshot, payload,
                     )?
                 } else {
                     payload
@@ -494,7 +480,7 @@ pub(super) fn dispatch_agent_tool(
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
-                let created_body = if handoff {
+                let created_body = if let Some(snapshot) = handoff_snapshot {
                     snapshot
                 } else {
                     perform_create(
@@ -616,6 +602,7 @@ pub(super) fn dispatch_agent_tool(
                 let input = serde_json::from_value::<SessionPayload>(payload).map_err(|_| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid session_get payload")
                 })?;
+                let snapshot = session_snapshot()?;
                 let session_id = session_id_by_name(&snapshot, &input.name).ok_or_else(|| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                 })?;
@@ -652,6 +639,7 @@ pub(super) fn dispatch_agent_tool(
                     .get("session")
                     .and_then(serde_json::Value::as_str)
                     .map(|name| {
+                        let snapshot = session_snapshot()?;
                         session_id_by_name(&snapshot, name).ok_or_else(|| {
                             ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                         })
@@ -938,6 +926,7 @@ pub(super) fn dispatch_user_decision(
     bound: &ConnectionWorkspace,
     store: &UserDecisionStore,
     request_id: usagi_core::infrastructure::ipc::RequestId,
+    request: DaemonRequest,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
@@ -982,33 +971,31 @@ pub(super) fn dispatch_user_decision(
         answer: UserDecisionAnswer,
     }
 
-    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::DispatchTool {
-                action,
-                payload,
-                caller_context,
-                ..
-            } => Some((action, payload, caller_context, false, false)),
-            DaemonRequest::UserDecision { action, payload } => {
-                use usagi_core::infrastructure::ipc::TuiUserDecisionAction;
-                let list_all = action == TuiUserDecisionAction::ListAll;
-                let action = match action {
-                    TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
-                    TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll => {
-                        DispatchToolAction::UserDecisionList
-                    }
-                    TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
-                    TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
-                    // The human receipt lane explicitly discards an answer;
-                    // it never acknowledges delivery on the agent's behalf.
-                    TuiUserDecisionAction::Discard => DispatchToolAction::UserDecisionAck,
-                };
-                Some((action, payload, None, true, list_all))
-            }
-            _ => None,
-        });
+    let parsed = match request {
+        DaemonRequest::DispatchTool {
+            action,
+            payload,
+            caller_context,
+            ..
+        } => Some((action, payload, caller_context, false, false)),
+        DaemonRequest::UserDecision { action, payload } => {
+            use usagi_core::infrastructure::ipc::TuiUserDecisionAction;
+            let list_all = action == TuiUserDecisionAction::ListAll;
+            let action = match action {
+                TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
+                TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll => {
+                    DispatchToolAction::UserDecisionList
+                }
+                TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
+                TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
+                // The human receipt lane explicitly discards an answer;
+                // it never acknowledges delivery on the agent's behalf.
+                TuiUserDecisionAction::Discard => DispatchToolAction::UserDecisionAck,
+            };
+            Some((action, payload, None, true, list_all))
+        }
+        _ => None,
+    };
     let Some((action, payload, caller_context, tui_access, list_all)) = parsed else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
@@ -1042,18 +1029,12 @@ pub(super) fn dispatch_user_decision(
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
             })?
-            .snapshot()
+            .workspace_id()
             .map_err(|_| {
                 ProtocolError::new(
                     ErrorCode::Unavailable,
                     "daemon could not read managed sessions",
                 )
-            })?
-            .get("workspace_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or_else(|| {
-                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })
     })();
     let owners = workspace.and_then(|workspace| -> Result<_, ProtocolError> {

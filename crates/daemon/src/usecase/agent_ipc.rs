@@ -1,7 +1,7 @@
 //! Daemon-owned Agent launch IPC owner.
 //!
 //! This module turns a product-neutral [`AgentLaunchIntent`] into a durable
-//! launch through the [`Orchestrator`] and [`RuntimeCoordinator`], resolving the
+//! launch through [`super::orchestration`] and [`RuntimeCoordinator`], resolving the
 //! target checkout only through the injected #268 [`SessionScopeResolver`].  It
 //! reuses the shared terminal registry/stream contract owned by the coordinator
 //! rather than duplicating the generic terminal (#264) owner loop: agent
@@ -65,7 +65,7 @@ use crate::usecase::{
 use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 
 use super::{
-    orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
+    orchestration::{AdapterRegistry, OrchestrationError, RuntimeAuthorization},
     runtime::{OutputJournal, ProviderResumeWrite, PtySpawner, RuntimeCoordinator, RuntimeError},
     terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
     terminal_owner::{
@@ -139,6 +139,26 @@ pub struct AgentAdmission {
     /// the semantic key was persisted; such a record replays without a digest and
     /// the client refuses the final rather than guessing.
     pub semantic_digest: Option<String>,
+}
+
+/// Safe per-session runtime projection captured once for a workspace request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentSessionObservation {
+    pub phase: AgentPhase,
+    pub resumable: bool,
+    pub resume_reason: ProviderResumeReason,
+    pub status: Option<AgentStatus>,
+}
+
+impl Default for AgentSessionObservation {
+    fn default() -> Self {
+        Self {
+            phase: AgentPhase::Absent,
+            resumable: false,
+            resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,
+            status: None,
+        }
+    }
 }
 
 /// Outcome of an authenticated worker report.
@@ -366,7 +386,7 @@ pub trait AgentTerminalActor {
 }
 
 /// The daemon's single Agent owner.  It holds the durable runtime coordinator,
-/// orchestrator, adapter registry, runtime store, output journal, and PTY
+/// adapter registry, runtime store, output journal, and PTY
 /// spawner/writer, plus the producer-issued operation ledger for idempotency.
 trait RuntimeStorePort: super::runtime::RuntimeStore + Send {
     #[cfg(test)]
@@ -404,7 +424,6 @@ impl<T: PtySpawner + PtyWriter + Send + 'static> AgentPtyPort for T {
 
 pub struct AgentRuntime {
     coordinator: RuntimeCoordinator,
-    orchestrator: Orchestrator,
     registry: AdapterRegistry,
     store: Box<dyn RuntimeStorePort>,
     journal: Box<dyn OutputJournalPort>,
@@ -710,7 +729,6 @@ impl AgentRuntime {
             .expect("a fresh Agent coordinator accepts its production generation");
         Self {
             coordinator,
-            orchestrator: Orchestrator::new(),
             registry,
             store: Box::new(store),
             journal: Box::new(journal),
@@ -798,7 +816,6 @@ impl AgentRuntime {
             .collect();
         Ok(Self {
             coordinator,
-            orchestrator: Orchestrator::new(),
             registry,
             store: Box::new(store),
             journal: Box::new(journal),
@@ -919,13 +936,14 @@ impl AgentRuntime {
     /// [`Self::failed_reservation_ids`].
     pub fn clean_failed_reservations(&mut self) -> Result<usize, ProtocolError> {
         let ids = self.failed_reservation_ids()?;
-        let records = self.coordinator.snapshot().records;
-        let mut cleaned = 0;
-        for runtime in records
-            .into_iter()
+        let runtimes = self
+            .coordinator
+            .records()
             .filter(|record| ids.contains(&record.runtime.agent_runtime_id))
-            .map(|record| record.runtime)
-        {
+            .map(|record| record.runtime.clone())
+            .collect::<Vec<_>>();
+        let mut cleaned = 0;
+        for runtime in runtimes {
             cleaned += usize::from(
                 self.coordinator
                     .clean_failed_launch(&runtime, &mut *self.store)
@@ -1155,7 +1173,7 @@ impl AgentRuntime {
     /// session is running work or lacks resume metadata, the whole request is
     /// refused before signalling a process.
     pub fn sleep_session(&mut self, session: SessionId) -> Result<usize, ProtocolError> {
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let live = records
             .iter()
             .filter(|record| {
@@ -1222,22 +1240,48 @@ impl AgentRuntime {
         self.mcp_callers.len()
     }
 
-    /// Returns the runtime phase projected for one session.
-    ///
-    /// The daemon-observed [`RuntimeState`](super::runtime::RuntimeState) is the
-    /// authority: a phase an agent reported through its own lifecycle hook
-    /// refines the projection only while that exact runtime is still `Running`.
-    /// A report therefore never makes a reserved, interrupted, or exited runtime
-    /// look alive, and never hides an interruption.
-    #[must_use]
-    pub fn session_phase(&self, session: SessionId) -> AgentPhase {
+    /// Captures list/status projections without copying durable runtime payloads
+    /// or reading dispatch history separately for every session row.
+    pub fn session_observations(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<BTreeMap<SessionId, AgentSessionObservation>, ProtocolError> {
+        let mut observations = self
+            .workspace_agent_statuses(workspace)?
+            .into_iter()
+            .map(|(session, status)| {
+                (
+                    session,
+                    AgentSessionObservation {
+                        status: Some(status),
+                        ..AgentSessionObservation::default()
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Runtime state remains authoritative if failed-run history becomes
+        // unavailable after the workspace status read.
         let failed = self.failed_dispatch_ids().unwrap_or_default();
-        self.coordinator
-            .records()
-            .filter(|record| record.runtime.session_id == Some(session))
-            .map(|record| self.record_phase(record, &failed))
-            .max_by_key(|(priority, _)| *priority)
-            .map_or(AgentPhase::Absent, |(_, phase)| phase)
+        let records = self.coordinator.records().collect::<Vec<_>>();
+        let mut sessions: BTreeMap<SessionId, Vec<_>> = BTreeMap::new();
+        for record in &records {
+            if record.runtime.terminal.workspace_id == workspace
+                && let Some(session) = record.runtime.session_id
+            {
+                sessions.entry(session).or_default().push(*record);
+            }
+        }
+        for (session, session_records) in sessions {
+            let observation = observations.entry(session).or_default();
+            observation.phase = session_records
+                .iter()
+                .map(|record| self.record_phase(record, &failed))
+                .max_by_key(|(priority, _)| *priority)
+                .map_or(AgentPhase::Absent, |(_, phase)| phase);
+            (observation.resumable, observation.resume_reason) =
+                self.session_resume_status_from(&session_records, &records);
+        }
+        Ok(observations)
     }
 
     fn record_phase(
@@ -1288,15 +1332,7 @@ impl AgentRuntime {
             .records()
             .filter(|record| {
                 record.runtime.terminal.workspace_id == workspace
-                    && matches!(
-                        record.state,
-                        super::runtime::RuntimeState::Running
-                            | super::runtime::RuntimeState::ReconcileRequired(
-                                super::runtime::ReconcileState::OrphanRunning
-                                    | super::runtime::ReconcileState::SpawnAmbiguous
-                                    | super::runtime::ReconcileState::PersistAfterSpawn
-                            )
-                    )
+                    && record.state.requires_termination()
             })
             .count()
     }
@@ -1309,7 +1345,7 @@ impl AgentRuntime {
         expected: &[AgentIntegrationRevision],
     ) -> Result<AgentIntegrationDiagnosis, ProtocolError> {
         let expected = expected_integration_revisions(expected)?;
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let failed = self.failed_dispatch_ids().unwrap_or_default();
         let mut outdated = records
             .iter()
@@ -1467,9 +1503,7 @@ impl AgentRuntime {
         let failed = self.failed_dispatch_ids().unwrap_or_default();
         let mut records = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
             .collect::<Vec<_>>();
         records.sort_by_key(|record| {
@@ -2505,7 +2539,6 @@ fn map_orchestration_error(error: OrchestrationError) -> ProtocolError {
         OrchestrationError::UnknownProfile => {
             ProtocolError::new(ErrorCode::InvalidArgument, "unknown agent profile")
         }
-        OrchestrationError::UnknownRuntime => stale_terminal(),
         OrchestrationError::Runtime(runtime) => map_runtime_error(runtime),
     }
 }

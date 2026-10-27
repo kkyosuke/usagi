@@ -19,7 +19,6 @@ pub mod authority;
 pub mod build_report;
 pub mod claude;
 pub mod codex;
-pub mod control;
 pub mod custody;
 pub mod desktop_notifications;
 pub mod endpoint;

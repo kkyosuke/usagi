@@ -119,18 +119,8 @@ pub fn tab_at(width: usize, prefix: &str, tabs: &[Tab<'_>], column: usize) -> Op
     None
 }
 
-/// tab が無い右ペイン本文を、静的うさぎと案内文で中央に置く。
-///
-/// この関数は tick や runtime を受け取らないため、同じ geometry と message なら常に同じ
-/// フレームを返す。狭すぎる場合は通常の clipping により安全に縮退する。
-#[must_use]
-pub fn empty_pane(width: usize, rows: usize, message: &str) -> Vec<String> {
-    empty_pane_with_detail(width, rows, message, None)
-}
-
-/// [`empty_pane`] に、画面が提供する安全な補足を加える。
-///
-/// 補足は feedback のように renderer がすでに表示安全と保証した文字列だけを渡す。
+/// Place the static rabbit, message, and optional safe detail in an empty pane.
+/// The same geometry and messages always produce the same clipped frame.
 #[must_use]
 pub fn empty_pane_with_detail(
     width: usize,
@@ -178,8 +168,7 @@ pub fn empty_pane_with_detail(
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::{
-        Tab, WAVE_TICKS_PER_POSITION, empty_pane, empty_pane_with_detail, pending_label, render,
-        tab_at,
+        Tab, WAVE_TICKS_PER_POSITION, empty_pane_with_detail, pending_label, render, tab_at,
     };
     use crate::presentation::widgets::display_width;
 
@@ -295,7 +284,7 @@ mod tests {
 
     #[test]
     fn empty_pane_centers_static_rabbit_and_message() {
-        let rows = empty_pane(30, 11, "No tabs stirring yet. Enter starts one.");
+        let rows = empty_pane_with_detail(30, 11, "No tabs stirring yet. Enter starts one.", None);
         let plain = rows.iter().map(|row| strip(row)).collect::<Vec<_>>();
         assert_eq!(rows.len(), 11);
         assert!(plain.iter().any(|row| row.contains("(='-')")));
@@ -308,7 +297,7 @@ mod tests {
         );
         assert_eq!(
             rows,
-            empty_pane(30, 11, "No tabs stirring yet. Enter starts one.")
+            empty_pane_with_detail(30, 11, "No tabs stirring yet. Enter starts one.", None)
         );
     }
 
@@ -339,7 +328,7 @@ mod tests {
                 .all(|row| row.starts_with("\u{1b}[2;37m") && row.ends_with("\u{1b}[0m"))
         );
 
-        let narrow = empty_pane(1, 7, "wide message");
+        let narrow = empty_pane_with_detail(1, 7, "wide message", None);
         assert!(narrow.iter().all(|row| display_width(row) <= 1));
         assert!(
             narrow

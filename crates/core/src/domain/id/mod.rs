@@ -360,39 +360,5 @@ impl CompletionFence {
     }
 }
 
-/// The fail-closed result of decoding a legacy record which lacks a v2 identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LegacyIdentityError {
-    /// No typed incarnation was stored.
-    Missing,
-    /// Multiple possible resources match legacy name/path/PID evidence.
-    Ambiguous,
-}
-
-impl fmt::Display for LegacyIdentityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing => f.write_str("legacy record has no typed identity"),
-            Self::Ambiguous => f.write_str("legacy record identity is ambiguous"),
-        }
-    }
-}
-
-impl std::error::Error for LegacyIdentityError {}
-
-/// Accepts a migrated identity only when it is present and unambiguous.
-/// Legacy name/path/PID evidence is deliberately not returned as a usable key.
-///
-/// # Errors
-///
-/// Returns [`LegacyIdentityError`] so callers retain the record for diagnostics
-/// but never treat it as a normal resource.
-pub fn migrate_identity<T>(identity: Option<T>, ambiguous: bool) -> Result<T, LegacyIdentityError> {
-    if ambiguous {
-        return Err(LegacyIdentityError::Ambiguous);
-    }
-    identity.ok_or(LegacyIdentityError::Missing)
-}
-
 #[cfg(test)]
 mod tests;

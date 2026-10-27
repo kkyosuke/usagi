@@ -1,8 +1,8 @@
 use super::{
     AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, AgentRuntimeRef, ClientId,
-    CompletionFence, ConnectionId, DaemonGeneration, IdParseError, LegacyIdentityError,
-    OperationId, ProtocolVersion, ProtocolVersionError, RequestId, ScopeError, SessionId,
-    TerminalId, TerminalRef, WorkspaceId, WorktreeId, migrate_identity,
+    CompletionFence, ConnectionId, DaemonGeneration, IdParseError, OperationId, ProtocolVersion,
+    ProtocolVersionError, RequestId, ScopeError, SessionId, TerminalId, TerminalRef, WorkspaceId,
+    WorktreeId,
 };
 
 fn terminal(session_id: Option<SessionId>) -> TerminalRef {
@@ -208,27 +208,4 @@ fn completion_fence_rejects_every_late_worker_mismatch() {
     ];
     assert!(current.fences(&current));
     assert!(cases.iter().all(|candidate| !current.fences(candidate)));
-}
-
-#[test]
-fn legacy_identity_migration_fails_closed() {
-    assert!(migrate_identity(Some(WorkspaceId::new()), false).is_ok());
-    assert_eq!(
-        migrate_identity::<WorkspaceId>(None, false),
-        Err(LegacyIdentityError::Missing)
-    );
-    assert_eq!(
-        migrate_identity(Some(WorkspaceId::new()), true),
-        Err(LegacyIdentityError::Ambiguous)
-    );
-    assert!(
-        LegacyIdentityError::Missing
-            .to_string()
-            .contains("no typed")
-    );
-    assert!(
-        LegacyIdentityError::Ambiguous
-            .to_string()
-            .contains("ambiguous")
-    );
 }

@@ -862,12 +862,12 @@ MCP wiring は profile の `McpWiring` capability と、別個の workspace/sess
 だけで adapter の scoped provisioner に要求する。provision failure は spawn 前に typed error として止まり、secret・
 raw config・rendered argv は durable record、IPC、terminal annotation、log に渡さない。
 
-phase hook は daemon が生成した一 runtime 限定 token、完全な `AgentRuntimeRef`、`CompletionFence`、単調 source
-sequence を照合してから in-memory projection に反映する。token と hook payload は永続化しないため、restart 後や
-foreign / duplicate / exited runtime の report は fail-closed で無視または拒否される。resume は immutable snapshot の
-schema、request/plan provenance、profile revision と capability を再検証するだけで再 renderer / spawn しない。reclaim は
-verified process identity の disappearance または orphan だけを記録し、unknown identity、ambiguous spawn、secret loss は
-明示 action を必要とし replacement spawn をしない。
+phase hook の認証と反映は `AgentRuntime` が所有し、daemon が観測した runtime state に対する表示の詳細化として扱う。
+認証・投影規則の正本は [Agent phase の投影](05-daemon.md#agent-phase-の投影) である。
+明示 resume は exact target と保存済み provenance を検証し、新しい daemon-owned runtime を起動する。
+通常の新規起動と resume は共通の semantic launch 経路を通り、provider 固有の再開情報だけを adapter に渡す。
+再開条件の正本は [provider-native conversation resume](05-daemon.md#provider-native-conversation-resume) である。
+不明な process ownership を通常の再起動に読み替えず、runtime の照合と admission を通して replacement を判断する。
 
 ## TUI Overview のコマンド dispatch
 

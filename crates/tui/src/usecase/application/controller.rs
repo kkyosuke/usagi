@@ -3642,8 +3642,8 @@ pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
 /// rows: the Home header above the drawer, the panel's top and bottom borders,
 /// two vertical padding rows, the route breadcrumb, its separator, and the
 /// footer hint.
-/// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
-/// keeps the launch gate and the render agreeing on the geometry.
+/// The Director drawer tests compare its rendered candidate rows against
+/// `director_picker_capacity` so rendering and the launch gate stay in agreement.
 pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 8;
 
 /// Candidate rows the launch picker can draw at `height` terminal rows.

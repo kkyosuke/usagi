@@ -372,19 +372,6 @@ impl ResumeRejection {
             }
         }
     }
-
-    /// Whether the same explicit action is worth repeating after this refusal.
-    #[must_use]
-    pub const fn retryable(self) -> bool {
-        match self {
-            Self::NotResumable | Self::AlreadyResuming => false,
-            Self::OperationMismatch
-            | Self::RelationMissing
-            | Self::ContinuationMismatch
-            | Self::SourceMismatch
-            | Self::ReplacementNotFenced => true,
-        }
-    }
 }
 
 /// Builds the request for one explicitly selected interrupted tab.
@@ -1098,7 +1085,6 @@ mod tests {
             resume_command(&tab, Some(operation), OperationId::new()),
             Err(ResumeRejection::AlreadyResuming)
         );
-        assert!(!ResumeRejection::AlreadyResuming.retryable());
 
         let unresumable = InterruptedTab {
             target: None,
@@ -1108,7 +1094,6 @@ mod tests {
             resume_command(&unresumable, None, OperationId::new()),
             Err(ResumeRejection::NotResumable)
         );
-        assert!(!ResumeRejection::NotResumable.retryable());
     }
 
     #[test]
@@ -1228,7 +1213,6 @@ mod tests {
             ),
             Err(ResumeRejection::ReplacementNotFenced)
         );
-        assert!(ResumeRejection::ReplacementNotFenced.retryable());
     }
 
     #[test]
@@ -1301,13 +1285,6 @@ mod tests {
             rejections
                 .iter()
                 .all(|rejection| !rejection.safe_message().is_empty())
-        );
-        assert_eq!(
-            rejections
-                .iter()
-                .filter(|rejection| rejection.retryable())
-                .count(),
-            5
         );
         // The derives used by the pane owner stay exercised without leaking any
         // provider-native value into a rendered string.

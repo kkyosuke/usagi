@@ -398,15 +398,16 @@ impl ShardedRuntimeState {
 
     /// Commit the owner's truth about one resource kind.
     ///
-    /// The order is fixed and is the same one [`super::launch`] documents: the
-    /// shared claim first, then the owner's shard, then the exits this process is
+    /// The order is fixed: the shared claim first, then the owner's shard,
+    /// then the exits this process is
     /// the active consumer for.
     ///
     /// # Errors
     /// Returns [`ResourceError::CapacityExhausted`] when a pool is full across
     /// every retained generation — before any spawn, so the refusal has no effect
     /// — [`ResourceError::OperationConflict`] for a producer id reused with a
-    /// different intent, or a store failure.
+    /// different intent, [`ResourceError::OwnershipUnknown`] when its recorded
+    /// resource differs from the proposed terminal, or a store failure.
     pub fn commit(
         &self,
         kind: ResourceKind,
@@ -1056,6 +1057,12 @@ fn claim_one(
         // and history is not re-admitted.
         return Ok(());
     };
+    // A replay names the original resource, including its owner generation.
+    // A claim left behind before its shard was saved cannot authorize a newly
+    // minted terminal, even when the producer operation and intent match.
+    if record.resource != projection.resource {
+        return Err(ResourceError::OwnershipUnknown);
+    }
     if record.outcome.is_final() {
         return Ok(());
     }

@@ -376,12 +376,6 @@ impl Open {
         self.input_mut().select_end();
     }
 
-    /// Switch between Single and Unite selection. A new Unite set starts empty.
-    pub fn toggle_unite(&mut self) {
-        self.unite = !self.unite;
-        self.unite_paths.clear();
-    }
-
     /// Add or remove the selected workspace from the Unite set.
     pub fn toggle_unite_member(&mut self) {
         if self.view != OpenView::Projects {
@@ -1035,7 +1029,6 @@ mod tests {
         assert!(empty.unite_paths().is_empty());
 
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
-        open.toggle_unite();
         open.toggle_unite_member();
         open.select_next();
         open.toggle_unite_member();

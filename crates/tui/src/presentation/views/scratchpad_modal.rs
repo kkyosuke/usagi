@@ -287,24 +287,6 @@ pub fn render_notes_for_over(
     )
 }
 
-/// Render the scratchpad over an existing Home frame without replacing its background.
-#[must_use]
-pub fn render_notes_over(
-    height: usize,
-    width: usize,
-    base: &[String],
-    editor: &NoteEditor,
-) -> Vec<String> {
-    modal::render_over(
-        height,
-        width,
-        base,
-        "Notes",
-        INNER_WIDTH,
-        &note_body(editor),
-    )
-}
-
 /// Render the environment editor over an existing Home frame without replacing its background.
 #[must_use]
 pub fn render_environment_over(
@@ -381,7 +363,7 @@ pub fn render_roles_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{render_environment_over, render_notes_over, render_roles_over};
+    use super::{render_environment_over, render_notes_for_over, render_roles_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, EnvironmentEntry, NoteSection, RoleEditorScope,
@@ -546,7 +528,8 @@ mod tests {
                 scratchpad: Scratchpad::default(),
             }),
         );
-        let empty_notes = render_notes_over(0, 0, &base(), state.note_editor().unwrap());
+        let empty_notes =
+            render_notes_for_over(0, 0, &base(), state.note_editor().unwrap(), "session");
         let notes_height = empty_notes
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
@@ -562,7 +545,7 @@ mod tests {
                 AppEvent::Key(AppKey::SelectNoteSection(section)),
             );
             assert!(
-                render_notes_over(24, 80, &base(), state.note_editor().unwrap())
+                render_notes_for_over(24, 80, &base(), state.note_editor().unwrap(), "session")
                     .join("\n")
                     .contains(expected)
             );
@@ -604,7 +587,7 @@ mod tests {
                 },
             }),
         );
-        let notes = render_notes_over(24, 80, &base(), state.note_editor().unwrap());
+        let notes = render_notes_for_over(24, 80, &base(), state.note_editor().unwrap(), "session");
         assert!(notes[0].starts_with("home-row-0-"));
         assert!(notes.join("\n").contains("draft survives"));
         assert!(notes.join("\n").contains("Could not save notes"));
@@ -624,7 +607,8 @@ mod tests {
                 &mut state,
                 AppEvent::Key(AppKey::SelectNoteSection(section)),
             );
-            let frame = render_notes_over(24, 80, &base(), state.note_editor().unwrap());
+            let frame =
+                render_notes_for_over(24, 80, &base(), state.note_editor().unwrap(), "session");
             assert!(frame.join("\n").contains(expected));
         }
     }

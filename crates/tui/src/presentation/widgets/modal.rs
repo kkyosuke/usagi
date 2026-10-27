@@ -503,11 +503,6 @@ impl ConfirmationModal {
         self.confirm_selected = true;
     }
 
-    /// Select No.
-    pub fn select_cancel(&mut self) {
-        self.confirm_selected = false;
-    }
-
     /// Move focus between Yes and No.
     pub fn toggle(&mut self) {
         self.confirm_selected = !self.confirm_selected;
@@ -956,8 +951,6 @@ mod tests {
         assert!(!modal.is_confirm_selected());
         modal.select_confirm();
         assert!(modal.is_confirm_selected());
-        modal.select_cancel();
-        assert!(!modal.is_confirm_selected());
 
         assert!(ConfirmationModal::default().is_confirm_selected());
 

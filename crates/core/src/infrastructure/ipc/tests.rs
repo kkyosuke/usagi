@@ -302,7 +302,7 @@ fn invalid_json_is_protocol_error() {
 }
 
 #[test]
-fn json_write_and_queue_error_paths_are_explicit() {
+fn json_write_errors_are_explicit() {
     struct RefusesSerialization;
     impl serde::Serialize for RefusesSerialization {
         fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
@@ -338,30 +338,18 @@ fn json_write_and_queue_error_paths_are_explicit() {
         .kind(),
         io::ErrorKind::InvalidData
     );
-    let mut frame = PendingFrame::new(b"x".to_vec());
     assert_eq!(
-        frame.write_to(&mut ZeroWriter).unwrap_err().kind(),
+        write_json_frame(&mut ZeroWriter, &true, DEFAULT_MAX_FRAME_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::WriteZero
     );
     assert_eq!(
-        frame.write_to(&mut OtherErrorWriter).unwrap_err().kind(),
+        write_json_frame(&mut OtherErrorWriter, &true, DEFAULT_MAX_FRAME_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::Other
     );
-
-    let mut queue = OutboundQueues::new(QueueLimits {
-        control_frames: 0,
-        control_bytes: 0,
-        output_frames: 1,
-        output_bytes: 16,
-        control_reserve_bytes: 0,
-    });
-    assert_eq!(
-        queue.push_control(vec![]),
-        Err(QueueError::ResourceExhausted)
-    );
-    assert!(!queue.flush_one(&mut Vec::new()).unwrap());
-    queue.push_output(b"output".to_vec()).unwrap();
-    assert!(queue.flush_one(&mut Vec::new()).unwrap());
 }
 #[test]
 fn negotiation_uses_protocol_not_build_identity() {
@@ -886,7 +874,7 @@ fn envelope_keeps_response_and_event_routing_independent() {
     assert_eq!(stream.epoch, "e");
 }
 #[test]
-fn cache_and_durable_journal_have_distinct_idempotency_keys() {
+fn response_cache_rejects_a_request_id_reused_with_different_content() {
     let response = Envelope {
         protocol: ProtocolVersion {
             generation: 1,
@@ -922,14 +910,6 @@ fn cache_and_durable_journal_have_distinct_idempotency_keys() {
             .code,
         ErrorCode::IdempotencyConflict
     );
-    let mut journal = IdempotencyJournal::default();
-    let key = OperationKey {
-        operation_id: OperationId("o".into()),
-        target_scope: "scope".into(),
-        semantic_digest: "d".into(),
-    };
-    assert_eq!(journal.decide(key.clone()), IdempotencyDecision::New);
-    assert_eq!(journal.decide(key), IdempotencyDecision::Existing);
 }
 
 #[test]
@@ -998,83 +978,8 @@ fn covers_protocol_error_and_cache_edge_cases() {
             .unwrap()
             .is_none()
     );
-    let mut journal = IdempotencyJournal::default();
-    assert_eq!(
-        journal.decide(OperationKey {
-            operation_id: OperationId("o".into()),
-            target_scope: "a".into(),
-            semantic_digest: "a".into()
-        }),
-        IdempotencyDecision::New
-    );
-    assert_eq!(
-        journal.decide(OperationKey {
-            operation_id: OperationId("o".into()),
-            target_scope: "b".into(),
-            semantic_digest: "a".into()
-        }),
-        IdempotencyDecision::Conflict
-    );
     assert!(read_frame(&mut Bad).is_err());
     assert!(write_frame(&mut BadWriter, b"x").is_err());
-}
-
-#[test]
-fn partial_write_and_would_block_preserve_a_complete_frame() {
-    struct PartialWriter {
-        bytes: Vec<u8>,
-        calls: usize,
-    }
-    impl io::Write for PartialWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.calls += 1;
-            if self.calls == 2 {
-                return Err(io::Error::from(io::ErrorKind::WouldBlock));
-            }
-            let count = bytes.len().min(3);
-            self.bytes.extend_from_slice(&bytes[..count]);
-            Ok(count)
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut queue = OutboundQueues::new(QueueLimits::default());
-    queue.push_control(b"ack".to_vec()).unwrap();
-    let mut writer = PartialWriter {
-        bytes: Vec::new(),
-        calls: 0,
-    };
-    while !queue.is_empty() {
-        queue.flush_one(&mut writer).unwrap();
-    }
-    assert_eq!(
-        read_frame(&mut Cursor::new(writer.bytes)).unwrap(),
-        Some(b"ack".to_vec())
-    );
-}
-
-#[test]
-fn saturated_output_preserves_control_capacity() {
-    let mut queue = OutboundQueues::new(QueueLimits {
-        output_frames: 1,
-        output_bytes: 16,
-        control_frames: 1,
-        control_bytes: 4,
-        control_reserve_bytes: 8,
-    });
-    queue.push_output(b"output".to_vec()).unwrap();
-    assert_eq!(
-        queue.push_output(b"more".to_vec()),
-        Err(QueueError::Backpressure)
-    );
-    queue.push_control(b"ack".to_vec()).unwrap();
-    let mut bytes = Vec::new();
-    queue.flush_one(&mut bytes).unwrap();
-    assert_eq!(
-        read_frame(&mut Cursor::new(bytes)).unwrap(),
-        Some(b"ack".to_vec())
-    );
 }
 
 #[test]

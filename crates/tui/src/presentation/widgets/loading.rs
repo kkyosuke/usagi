@@ -1,7 +1,7 @@
 //! ローディング表示の部品。
 //!
-//! 進捗の割合が分かるときの進捗バー、割合が無いときのスピナー、そして待機中に画面が
-//! 固まって見えないよう跳ねる「ローディングうさぎ」を持つ。すべて `frame`（単調増加する
+//! 待機中に画面が固まって見えないよう、スピナーと跳ねる「ローディングうさぎ」を
+//! 表示する。すべて `frame`（単調増加する
 //! ティック）から絵柄を選ぶ純粋関数で、連続するフレームを描けばアニメーションする。
 //! 色付け（マゼンタ太字）はテーマ導入時に載せるため、ここでは無色の行を返す。
 
@@ -15,32 +15,6 @@ const LOADING_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "
 #[must_use]
 pub fn spinner_char(frame: usize) -> &'static str {
     LOADING_SPINNER[frame % LOADING_SPINNER.len()]
-}
-
-/// 括弧内が `width` 桁の固定幅進捗バー `[===>   ]`。`done / total` の割合を最も近い桁に
-/// 丸めて満たす。空（`done == 0`）は全て空白、完了（`done >= total`）は全て `=`、途中は
-/// 先頭に `>` を置く。尺度が無い（`total == 0`）か `width == 0` のときは空文字を返す。
-#[must_use]
-pub fn progress_bar(done: usize, total: usize, width: usize) -> String {
-    if total == 0 || width == 0 {
-        return String::new();
-    }
-    let done = done.min(total);
-    // 満たす割合をバーの桁に丸める。病的な数でも割る前に溢れないよう u128 で計算する。
-    // 値は `width` に収まるので usize に戻せる。
-    let filled = ((done as u128 * width as u128 + total as u128 / 2) / total as u128) as usize;
-    if filled == 0 {
-        return format!("[{}]", " ".repeat(width));
-    }
-    if filled >= width {
-        return format!("[{}]", "=".repeat(width));
-    }
-    // 途中: 先頭までの `=`、`>` の頭、残りの空白 — 三者の合計は常に `width`。
-    format!(
-        "[{}>{}]",
-        "=".repeat(filled - 1),
-        " ".repeat(width - filled)
-    )
 }
 
 /// ローディングうさぎが循環する表情。中央の `ㅅ` が常に同じ桁に来るよう、両脇のグリフは
@@ -97,9 +71,7 @@ pub fn loading_screen(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LOADING_FACES, LOADING_SPINNER, hopping_rabbit, loading_screen, progress_bar, spinner_char,
-    };
+    use super::{LOADING_FACES, LOADING_SPINNER, hopping_rabbit, loading_screen, spinner_char};
     use crate::presentation::widgets::display_width;
 
     #[test]
@@ -107,20 +79,6 @@ mod tests {
         assert_eq!(spinner_char(0), LOADING_SPINNER[0]);
         assert_eq!(spinner_char(LOADING_SPINNER.len()), LOADING_SPINNER[0]);
         assert_eq!(spinner_char(LOADING_SPINNER.len() + 3), LOADING_SPINNER[3]);
-    }
-
-    #[test]
-    fn progress_bar_edges_and_partial() {
-        assert_eq!(progress_bar(0, 0, 10), ""); // total 0
-        assert_eq!(progress_bar(1, 2, 0), ""); // width 0
-        assert_eq!(progress_bar(0, 4, 4), "[    ]"); // 空
-        assert_eq!(progress_bar(4, 4, 4), "[====]"); // 完了
-        assert_eq!(progress_bar(5, 4, 4), "[====]"); // done を total に丸める
-        // 途中: 括弧内はちょうど width 桁。
-        let mid = progress_bar(1, 4, 4);
-        assert_eq!(mid, "[>   ]");
-        assert_eq!(mid.chars().filter(|c| *c != '[' && *c != ']').count(), 4);
-        assert_eq!(progress_bar(2, 4, 4), "[=>  ]");
     }
 
     #[test]

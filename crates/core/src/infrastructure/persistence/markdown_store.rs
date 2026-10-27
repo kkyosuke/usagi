@@ -155,37 +155,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         self.dir.join(DIRTY_FILE)
     }
 
-    /// Read and parse every entry markdown file, sorted by its store-specific key.
-    pub(crate) fn scan(&self) -> Result<Vec<E::Entry>> {
-        use rayon::prelude::*;
-
-        let mut sources: Vec<MarkdownSource<E::Entry>> = self
-            .entry_files()?
-            .into_par_iter()
-            .map(|path| {
-                Ok(MarkdownSource {
-                    entry: self.read_existing_path(&path)?,
-                    file: source_file_name(&path)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        E::sort_sources(&mut sources);
-        Ok(sources.into_iter().map(|source| source.entry).collect())
-    }
-
-    /// Like [`scan`](Self::scan), but records unreadable/unparseable files to the
-    /// error log and skips them so one corrupt sibling cannot break listings or
-    /// cache rebuilds.
-    pub(crate) fn scan_lenient(&self) -> Result<Vec<E::Entry>> {
-        Ok(self
-            .scan_sources_lenient()?
-            .into_iter()
-            .map(|source| source.entry)
-            .collect())
-    }
-
-    /// Like [`scan_lenient`](Self::scan_lenient), but retains the exact file each
-    /// entry came from so summaries can name a source that exists.
+    /// Read parseable entries with their exact source filenames, logging and
+    /// skipping corrupt siblings so healthy entries remain available.
     pub(crate) fn scan_sources_lenient(&self) -> Result<Vec<MarkdownSource<E::Entry>>> {
         use rayon::prelude::*;
 

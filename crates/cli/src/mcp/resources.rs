@@ -27,8 +27,8 @@ const ORCHESTRATION_GUIDE: &str = include_str!("guides/orchestration.md");
 
 /// 公開する全 resource のレジストリ。
 #[must_use]
-pub fn registry() -> Vec<Resource> {
-    vec![Resource {
+pub fn registry() -> &'static [Resource] {
+    &[Resource {
         uri: "usagi://guides/orchestration",
         name: "usagi orchestration guide",
         description: "セッションの委譲・観測・完了報告の使い方（agent 向け）",
@@ -91,7 +91,7 @@ mod tests {
     fn every_resource_has_a_unique_uri() {
         let reg = registry();
         let mut seen = std::collections::HashSet::new();
-        for resource in &reg {
+        for resource in reg {
             assert!(seen.insert(resource.uri));
         }
     }

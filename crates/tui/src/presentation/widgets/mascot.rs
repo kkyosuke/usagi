@@ -56,22 +56,9 @@ impl MascotBlock {
     }
 }
 
-/// `width` の sidebar に収まる mascot block を作る。
-///
-/// speech がない、または bubble を組めない幅では静かな mascot を返す。mascot 自体も
-/// 入らない幅なら `None` を返し、呼び出し側は list viewport を優先できる。
-#[must_use]
-pub fn sidebar_block(
-    width: usize,
-    tick: u64,
-    speech: Option<&MascotSpeech>,
-) -> Option<MascotBlock> {
-    sidebar_block_with_sidecar(width, tick, speech, &[])
-}
-
 /// Builds a sidebar mascot with up to three ambient-status lines beside the
 /// rabbit. The sidecar is observational and never changes the
-/// mascot's navigation footprint.
+/// mascot's navigation footprint. Returns `None` when the rabbit cannot fit.
 #[must_use]
 pub fn sidebar_block_with_sidecar(
     width: usize,
@@ -202,7 +189,7 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MascotSpeech, canonical_tick, sidebar_block, sidebar_block_with_sidecar};
+    use super::{MascotSpeech, canonical_tick, sidebar_block_with_sidecar};
     use crate::presentation::widgets::display_width;
 
     fn plain(rows: &[String]) -> String {
@@ -231,7 +218,7 @@ mod tests {
 
     #[test]
     fn silent_block_has_the_three_row_mascot_and_a_bottom_reservation() {
-        let block = sidebar_block(20, 0, None).expect("mascot fits");
+        let block = sidebar_block_with_sidecar(20, 0, None, &[]).expect("mascot fits");
         assert_eq!(block.rows().len(), 3);
         assert_eq!(block.reserved_rows(), 4);
         assert!(plain(block.rows()).contains("(o.o)?"));
@@ -240,7 +227,7 @@ mod tests {
     #[test]
     fn speech_uses_a_tailed_bubble_above_the_mascot() {
         let speech = MascotSpeech::new(["ready".to_owned()]).expect("speech");
-        let block = sidebar_block(20, 0, Some(&speech)).expect("mascot fits");
+        let block = sidebar_block_with_sidecar(20, 0, Some(&speech), &[]).expect("mascot fits");
         let text = plain(block.rows());
         assert!(text.contains("╭───────╮"));
         assert!(text.contains("│ ready │"));
@@ -252,7 +239,7 @@ mod tests {
     #[test]
     fn speech_wraps_cjk_and_removes_input_ansi_before_painting() {
         let speech = MascotSpeech::new(["\u{1b}[31mあいうえお".to_owned()]).expect("speech");
-        let block = sidebar_block(11, 0, Some(&speech)).expect("mascot fits");
+        let block = sidebar_block_with_sidecar(11, 0, Some(&speech), &[]).expect("mascot fits");
         assert!(plain(block.rows()).contains("あい"));
         assert!(block.rows().iter().all(|row| display_width(row) == 11));
         assert!(block.rows().iter().all(|row| row.ends_with("\u{1b}[0m")));
@@ -261,13 +248,13 @@ mod tests {
     #[test]
     fn empty_speech_and_too_narrow_mascot_are_safely_omitted() {
         assert!(MascotSpeech::new([String::new()]).is_none());
-        assert!(sidebar_block(7, 0, None).is_none());
+        assert!(sidebar_block_with_sidecar(7, 0, None, &[]).is_none());
     }
 
     #[test]
     fn mascot_animation_keeps_its_footprint_while_twitching_and_blinking() {
-        let twitch = sidebar_block(20, 5, None).expect("mascot fits");
-        let blink = sidebar_block(20, 4, None).expect("mascot fits");
+        let twitch = sidebar_block_with_sidecar(20, 5, None, &[]).expect("mascot fits");
+        let blink = sidebar_block_with_sidecar(20, 4, None, &[]).expect("mascot fits");
         assert!(plain(twitch.rows()).contains("(\\(/"));
         assert!(plain(blink.rows()).contains("(-.-)?"));
         assert_eq!(twitch.reserved_rows(), blink.reserved_rows());

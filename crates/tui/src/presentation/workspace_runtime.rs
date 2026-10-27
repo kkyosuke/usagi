@@ -1583,45 +1583,14 @@ impl WorkspaceRuntime {
         }
     }
 
-    /// Turn one resuming interrupted tab into its new live Agent terminal.
-    ///
-    /// The answer is accepted only when the operation, the lineage, the exact
-    /// interrupted source, and a genuinely new fenced terminal all agree
-    /// ([`accept_replacement`]). Any disagreement leaves every tab as it was and
-    /// surfaces safe feedback instead.
-    ///
-    /// # Errors
-    ///
-    /// Returns the safe [`ResumeRejection`] describing which fence disagreed.
-    pub fn complete_tab_resume(
-        &mut self,
-        continuation: AgentContinuationRef,
-        answered: OperationId,
-        answered_continuation: Option<AgentContinuationRef>,
-        relation: Option<&AgentResumeRelation>,
-        terminal: &TerminalRef,
-    ) -> Result<Vec<PaneRegistryEffect>, ResumeRejection> {
-        let Some(target) = self.panes.active() else {
-            return Err(ResumeRejection::NotResumable);
-        };
-        self.complete_tab_resume_for(
-            target,
-            continuation,
-            answered,
-            answered_continuation,
-            relation,
-            terminal,
-        )
-    }
-
     /// Complete an exact resume in its owning target even if the drawer was
     /// closed while the daemon request was in flight. A background replacement
     /// updates only that target and produces no attach effect.
     ///
     /// # Errors
     ///
-    /// Returns the same exact-resume fence rejection as
-    /// [`Self::complete_tab_resume`].
+    /// Returns the safe [`ResumeRejection`] when the operation, lineage,
+    /// interrupted source, or new terminal fence disagrees ([`accept_replacement`]).
     pub fn complete_tab_resume_for(
         &mut self,
         target: Target,
@@ -1768,55 +1737,6 @@ impl WorkspaceRuntime {
             })
     }
 
-    /// Preview the live terminal selected after closing the current live tab.
-    /// `Some(None)` means the successor is generic-unaddressable here
-    /// (pending/ready) or the target becomes empty; outer `None` means no live
-    /// tab is currently selected.
-    #[must_use]
-    pub fn terminal_after_close(&self) -> Option<Option<TerminalRef>> {
-        let PaneSelection::Tab(TabSelection::Live(selected)) = self.panes.active_pane().selected()
-        else {
-            return None;
-        };
-        let tabs = self.panes.active_pane().tabs();
-        let index = tabs
-            .iter()
-            .position(|tab| matches!(tab, PaneTab::Live(live) if live.terminal.fences(selected)))?;
-        if tabs.len() == 1 {
-            return Some(None);
-        }
-        let successor = if index + 1 < tabs.len() {
-            &tabs[index + 1]
-        } else {
-            &tabs[index - 1]
-        };
-        Some(match successor {
-            PaneTab::Live(live) => Some(live.terminal.clone()),
-            PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
-        })
-    }
-
-    /// Preview the stable selection chosen after closing any selected tab.
-    #[must_use]
-    pub fn selection_after_close(&self) -> Option<Option<TabSelection>> {
-        let PaneSelection::Tab(selected) = self.panes.active_pane().selected() else {
-            return None;
-        };
-        let tabs = self.panes.active_pane().tabs();
-        let index = tabs
-            .iter()
-            .position(|tab| tab_selection(tab) == *selected)?;
-        if tabs.len() == 1 {
-            return Some(None);
-        }
-        let successor = if index + 1 < tabs.len() {
-            &tabs[index + 1]
-        } else {
-            &tabs[index - 1]
-        };
-        Some(Some(tab_selection(successor)))
-    }
-
     /// Cycle the active pane's selected tab for an `Effect::SelectTab`. Only the
     /// tab owner (not the action modal) reacts, matching the reducer contract.
     pub fn select_tab(&mut self, direction: TabDirection) -> Vec<PaneRegistryEffect> {
@@ -1826,20 +1746,6 @@ impl WorkspaceRuntime {
         let effects = route_tab_command(&mut self.panes, PaneTabCommand::Select(selection));
         self.sync_live_pane();
         effects
-    }
-
-    /// Preview the stable live-terminal selection produced by a tab cycle
-    /// without mutating the pane registry. The outer `None` means there is no
-    /// tab to select; the inner `None` is a pending/ready non-terminal tab.
-    #[must_use]
-    pub fn terminal_after_select(&self, direction: TabDirection) -> Option<Option<TerminalRef>> {
-        self.selection_after_select(direction)
-            .map(|selection| match selection {
-                TabSelection::Live(terminal) => Some(terminal),
-                TabSelection::Pending(_)
-                | TabSelection::Ready(_)
-                | TabSelection::Interrupted(_) => None,
-            })
     }
 
     /// Preview the stable selection produced by a tab cycle.
@@ -1947,23 +1853,6 @@ impl WorkspaceRuntime {
         let effects = route_tab_command(&mut self.panes, PaneTabCommand::Reorder(direction));
         self.sync_live_pane();
         effects
-    }
-
-    /// Preview the active pane's live-terminal order after a move so durable
-    /// Agent intent can commit before the visible registry changes.
-    #[must_use]
-    pub fn terminal_order_after_reorder(&self, direction: TabDirection) -> Vec<TerminalRef> {
-        let mut panes = self.panes.clone();
-        let _ = route_tab_command(&mut panes, PaneTabCommand::Reorder(direction));
-        panes
-            .active_pane()
-            .tabs()
-            .iter()
-            .filter_map(|tab| match tab {
-                PaneTab::Live(pane) => Some(pane.terminal.clone()),
-                PaneTab::Pending(_) | PaneTab::Ready(_) | PaneTab::Interrupted(_) => None,
-            })
-            .collect()
     }
 
     /// Preview the current and next stable tab identities around a move,
@@ -3398,12 +3287,12 @@ mod tests {
     }
 
     #[test]
-    fn tab_previews_cover_empty_pending_and_previous_successors() {
+    fn stable_tab_previews_preserve_pending_and_live_identities() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let target = Target::Session(session);
         let mut runtime = closeup_on(workspace, session);
-        assert_eq!(runtime.terminal_after_close(), None);
+        assert_eq!(runtime.selection_after_select(TabDirection::Next), None);
 
         let first_operation = OperationId::new();
         let first = terminal_ref(workspace, session);
@@ -3413,24 +3302,61 @@ mod tests {
         let _ = runtime.request_pane(target, pending, PaneKind::Agent);
         let _ = runtime.focus_terminal(target, first.clone());
 
-        assert_eq!(runtime.terminal_after_close(), Some(None));
         assert_eq!(
-            runtime.terminal_after_select(TabDirection::Next),
-            Some(None)
+            runtime.selection_after_select(TabDirection::Next),
+            Some(TabSelection::Pending(pending))
         );
         assert_eq!(
-            runtime.terminal_order_after_reorder(TabDirection::Next),
-            vec![first.clone()]
+            runtime.tab_order_after_reorder(TabDirection::Next),
+            (
+                vec![
+                    TabSelection::Live(first.clone()),
+                    TabSelection::Pending(pending)
+                ],
+                vec![
+                    TabSelection::Pending(pending),
+                    TabSelection::Live(first.clone())
+                ],
+            )
         );
 
         let second = terminal_ref(workspace, session);
         let _ = runtime.complete_pane(target, pending, second.clone());
         let _ = runtime.focus_terminal(target, second);
         assert_eq!(
-            runtime.terminal_after_select(TabDirection::Previous),
-            Some(Some(first.clone()))
+            runtime.selection_after_select(TabDirection::Previous),
+            Some(TabSelection::Live(first))
         );
-        assert_eq!(runtime.terminal_after_close(), Some(Some(first)));
+    }
+
+    #[test]
+    fn closing_a_live_tab_selects_the_next_or_previous_stable_slot() {
+        for close_first in [true, false] {
+            let workspace = WorkspaceId::new();
+            let session = SessionId::new();
+            let target = Target::Session(session);
+            let mut runtime = closeup_on(workspace, session);
+            let first = terminal_ref(workspace, session);
+            let second = terminal_ref(workspace, session);
+            for terminal in [first.clone(), second.clone()] {
+                let operation = OperationId::new();
+                let _ = runtime.request_pane(target, operation, PaneKind::Agent);
+                let _ = runtime.complete_pane(target, operation, terminal);
+            }
+            let (selected, successor) = if close_first {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let _ = runtime.focus_terminal(target, selected.clone());
+
+            assert_eq!(runtime.close_focused_pane().detach, Some(selected));
+            assert_eq!(
+                runtime.active_pane().selected(),
+                &PaneSelection::Tab(TabSelection::Live(successor.clone()))
+            );
+            assert_eq!(runtime.focused_terminal(), Some(successor));
+        }
     }
 
     #[test]
@@ -4652,40 +4578,6 @@ mod tests {
     }
 
     #[test]
-    fn stable_selection_previews_cover_empty_and_previous_slot_fallbacks() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let target = Target::Session(session);
-
-        let inactive = WorkspaceRuntime::new(workspace, Vec::new());
-        assert_eq!(inactive.selection_after_close(), None);
-
-        let mut single = closeup_on(workspace, session);
-        let only_operation = OperationId::new();
-        let only_terminal = terminal_ref(workspace, session);
-        let _ = single.request_pane(target, only_operation, PaneKind::Agent);
-        let _ = single.complete_pane(target, only_operation, only_terminal.clone());
-        let _ = single.focus_terminal(target, only_terminal.clone());
-        assert_eq!(single.terminal_after_close(), Some(None));
-        assert_eq!(single.selection_after_close(), Some(None));
-
-        let second_operation = OperationId::new();
-        let second_terminal = terminal_ref(workspace, session);
-        let _ = single.request_pane(target, second_operation, PaneKind::Agent);
-        let _ = single.complete_pane(target, second_operation, second_terminal.clone());
-        let _ = single.focus_terminal(target, only_terminal.clone());
-        assert_eq!(
-            single.selection_after_close(),
-            Some(Some(TabSelection::Live(second_terminal.clone())))
-        );
-        let _ = single.focus_terminal(target, second_terminal);
-        assert_eq!(
-            single.selection_after_close(),
-            Some(Some(TabSelection::Live(only_terminal)))
-        );
-    }
-
-    #[test]
     fn on_effect_mirrors_pane_effects_and_ignores_the_rest() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -5324,15 +5216,14 @@ mod tests {
             Some(history.continuation)
         );
         assert!(runtime.focused_terminal().is_none());
-        assert_eq!(runtime.terminal_after_close(), None);
+        let selection = TabSelection::Interrupted(history.continuation);
         assert_eq!(
-            runtime.terminal_after_select(TabDirection::Next),
-            Some(None)
+            runtime.selection_after_select(TabDirection::Next),
+            Some(selection.clone())
         );
-        assert!(
-            runtime
-                .terminal_order_after_reorder(TabDirection::Next)
-                .is_empty()
+        assert_eq!(
+            runtime.tab_order_after_reorder(TabDirection::Next),
+            (vec![selection.clone()], vec![selection])
         );
 
         assert_eq!(runtime.close_focused_pane(), CloseOutcome::default());
@@ -5400,7 +5291,8 @@ mod tests {
 
         let (relation, terminal) = replacement(&resumed);
         let effects = runtime
-            .complete_tab_resume(
+            .complete_tab_resume_for(
+                Target::Session(session),
                 resumed.continuation,
                 command.operation,
                 Some(resumed.continuation),
@@ -5459,7 +5351,8 @@ mod tests {
         // whose operation does not match the in-flight request.
         let (relation, terminal) = replacement(&resumable);
         assert_eq!(
-            runtime.complete_tab_resume(
+            runtime.complete_tab_resume_for(
+                Target::Session(session),
                 usagi_core::domain::id::AgentContinuationRef::new(),
                 OperationId::new(),
                 Some(resumable.continuation),
@@ -5469,7 +5362,8 @@ mod tests {
             Err(ResumeRejection::NotResumable)
         );
         assert_eq!(
-            runtime.complete_tab_resume(
+            runtime.complete_tab_resume_for(
+                Target::Session(session),
                 resumable.continuation,
                 OperationId::new(),
                 Some(resumable.continuation),
@@ -5484,7 +5378,8 @@ mod tests {
         // A daemon answer without the source-to-replacement relation leaves the
         // history tab in place and shows safe feedback.
         assert_eq!(
-            runtime.complete_tab_resume(
+            runtime.complete_tab_resume_for(
+                Target::Session(session),
                 resumable.continuation,
                 command.operation,
                 Some(resumable.continuation),
@@ -5524,7 +5419,8 @@ mod tests {
         let (relation, terminal) = replacement(&history);
         assert!(
             runtime
-                .complete_tab_resume(
+                .complete_tab_resume_for(
+                    Target::Session(session),
                     history.continuation,
                     command.operation,
                     Some(history.continuation),
@@ -5622,7 +5518,8 @@ mod tests {
             Err(ResumeRejection::NotResumable)
         );
         assert_eq!(
-            runtime.complete_tab_resume(
+            runtime.complete_tab_resume_for(
+                Target::Session(session),
                 continuation,
                 OperationId::new(),
                 Some(continuation),

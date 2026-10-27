@@ -2534,7 +2534,6 @@ mod tests {
         let checkpoint = screen.checkpoint();
         assert_eq!(checkpoint.decoder.phase, DecoderPhase::CsiOverflow);
         assert!(checkpoint.decoder.params.is_empty());
-        assert!(checkpoint.to_json_bytes().is_ok());
         let mut restored = VtScreen::from_checkpoint(&checkpoint).expect("overflow restores");
 
         // The oversized final is swallowed instead of dispatching the retained
@@ -2623,17 +2622,14 @@ mod tests {
     }
 
     /// Asserts a checkpoint reconstructs its source exactly, both directly and
-    /// across the serialized-bytes boundary (so serde and the byte budget are
-    /// exercised too).
+    /// across the serialized-bytes boundary, exercising the shared serde shape.
     fn assert_roundtrip(screen: &VtScreen) {
         let cp = screen.checkpoint();
         let restored = VtScreen::from_checkpoint(&cp).expect("valid checkpoint reconstructs");
         assert_eq!(&restored, screen);
 
-        let bytes = cp
-            .to_json_bytes()
-            .expect("checkpoint fits the frame budget");
-        let decoded = ScreenCheckpoint::from_json_bytes(&bytes).expect("bytes decode");
+        let bytes = serde_json::to_vec(&cp).expect("checkpoint serializes");
+        let decoded: ScreenCheckpoint = serde_json::from_slice(&bytes).expect("bytes decode");
         assert_eq!(decoded, cp);
         let restored =
             VtScreen::from_checkpoint(&decoded).expect("decoded checkpoint reconstructs");
@@ -2893,11 +2889,6 @@ mod tests {
             reject(&cp),
             CheckpointError::StyleTooLong(STYLE_BYTES_MAX + 1)
         );
-        assert_eq!(
-            cp.to_json_bytes()
-                .expect_err("style rejected before serialize"),
-            CheckpointError::StyleTooLong(STYLE_BYTES_MAX + 1)
-        );
 
         let mut cp = valid_checkpoint();
         cp.decoder.params = "1".repeat(PARAMS_MAX + 1);
@@ -3066,42 +3057,6 @@ mod tests {
     }
 
     #[test]
-    fn json_boundary_rejects_oversized_and_malformed_input() {
-        // Serializing a checkpoint larger than one frame is rejected.
-        let mut cp = valid_checkpoint();
-        cp.geometry.cols = 3;
-        let row = RowCheckpoint {
-            runs: vec![
-                CellRun {
-                    style_id: 0,
-                    ch: 'x',
-                    continuation: false,
-                    wrapped: false,
-                    repeat: 1,
-                };
-                3
-            ],
-        };
-        cp.primary.grid = vec![row.clone()];
-        cp.primary.scrollback = vec![row; SCROLLBACK_MAX];
-        let err = cp.to_json_bytes().expect_err("oversized checkpoint");
-        assert!(matches!(err, CheckpointError::TooLarge { .. }));
-
-        // Oversized input is rejected before it is parsed.
-        let big = vec![b' '; CHECKPOINT_BYTES_MAX + 1];
-        assert!(matches!(
-            ScreenCheckpoint::from_json_bytes(&big),
-            Err(CheckpointError::TooLarge { .. })
-        ));
-
-        // Input that is not a valid encoding fails closed.
-        assert!(matches!(
-            ScreenCheckpoint::from_json_bytes(b"not a checkpoint"),
-            Err(CheckpointError::Malformed(_))
-        ));
-    }
-
-    #[test]
     fn every_checkpoint_error_renders_a_message() {
         let errors = [
             CheckpointError::UnknownSchemaVersion {
@@ -3132,8 +3087,6 @@ mod tests {
             CheckpointError::Utf8NeededOutOfRange(9),
             CheckpointError::SynchronizedOutputTooLong(9),
             CheckpointError::ActiveBufferMismatch,
-            CheckpointError::TooLarge { size: 9, limit: 1 },
-            CheckpointError::Malformed("bad".to_owned()),
         ];
         for err in errors {
             assert!(!err.to_string().is_empty());

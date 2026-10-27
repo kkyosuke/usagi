@@ -19,13 +19,6 @@ pub const MAX_DRAWER_WIDTH: usize = 96;
 const MIN_BACKGROUND_WIDTH: usize = 24;
 /// Standard Unicode Director marker; it requires no private-use patched font.
 pub const DIRECTOR_ICON: char = '♛';
-/// Rows of drawer chrome the launch picker's candidate rows never get: the Home
-/// header row above the drawer, the panel's two borders and two vertical padding
-/// rows, the route breadcrumb, its separator, and the footer hint.
-const PICKER_CHROME_ROWS: usize = 8;
-const _: () = assert!(
-    PICKER_CHROME_ROWS == crate::usecase::application::controller::DIRECTOR_PICKER_CHROME_ROWS
-);
 /// Footer shown while the picker has room for the highlighted candidate.
 const PICKER_HINT: &str = "↑↓: select  ·  Enter: launch  ·  Esc: cancel";
 /// Footer shown when the drawer cannot draw a single candidate row. The reducer
@@ -141,17 +134,6 @@ pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> DirectorTermina
         // left/right borders and one cell of padding on both sides
         cols: drawer.width.saturating_sub(4),
     }
-}
-
-/// Candidate rows the `New` picker can draw at this terminal size.
-///
-/// The picker's viewport follows the selection, so a non-zero capacity always
-/// shows the highlighted CLI. A zero capacity draws no candidate at all, which
-/// is why the reducer refuses to launch from it.
-#[must_use]
-pub fn picker_capacity(raw_height: usize, raw_width: usize) -> usize {
-    let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    height.saturating_sub(PICKER_CHROME_ROWS)
 }
 
 /// Map a frame-cell pointer into the retained root Agent terminal viewport.
@@ -999,7 +981,11 @@ mod tests {
                 .iter()
                 .filter(|line| line.contains("cli-") || line.contains(" more"))
                 .count();
-            assert_eq!(drawn, picker_capacity(height, 80), "height {height}");
+            assert_eq!(
+                drawn,
+                crate::usecase::application::controller::director_picker_capacity(height),
+                "height {height}"
+            );
             if drawn > 0 {
                 assert!(
                     text.iter().any(|line| line.contains("› cli-10")),
