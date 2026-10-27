@@ -116,14 +116,6 @@ impl AdapterRegistry {
     }
 }
 
-impl AgentProfileCatalog for AdapterRegistry {
-    fn find(&self, profile_id: &AgentProfileId) -> Option<AgentProfile> {
-        self.adapters
-            .iter()
-            .find_map(|(profile, _)| (profile.id == *profile_id).then(|| profile.clone()))
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryError {
     ProfileMismatch,

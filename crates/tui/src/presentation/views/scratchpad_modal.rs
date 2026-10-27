@@ -25,10 +25,7 @@ fn error_line(error: Option<&str>) -> Option<String> {
     })
 }
 
-fn note_body(editor: &NoteEditor) -> Vec<String> {
-    if editor.section() == NoteSection::Note {
-        return memo_body(editor, NOTES_BODY_HEIGHT, INNER_WIDTH);
-    }
+fn note_list_body(editor: &NoteEditor) -> Vec<String> {
     let mut lines = vec![modal::caption("note · todos · decisions")];
     let section = if editor.section() == NoteSection::Todos {
         "todos"
@@ -275,7 +272,7 @@ pub fn render_notes_for_over(
             INNER_WIDTH.min(normalized_width.saturating_sub(6)),
         )
     } else {
-        note_body(editor)
+        note_list_body(editor)
     };
     modal::render_over(
         height,

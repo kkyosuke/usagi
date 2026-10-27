@@ -3,15 +3,15 @@
 use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 
 use super::{
-    CollectionBlocker, InFlightCommand, OwnerEvent, ResourceState, SHARD_SCHEMA, ShardDocument,
-    collectable, retired_collectable,
+    CollectionBlocker, InFlightCommand, OwnerEvent, OwnerShard, ResourceState, SHARD_SCHEMA,
+    ShardDocument, collectable, retired_collectable,
 };
 use crate::usecase::resources::allocator::{AllocatorDocument, ClaimState, ResourceKind};
 use crate::usecase::resources::fixture::{
-    SharedBytes, policy, shard as bind_shard, terminal, verified,
+    FileFault, MemoryFile, SharedBytes, policy, shard as bind_shard, terminal, verified,
 };
 use crate::usecase::resources::identity::ChildIdentity;
-use crate::usecase::resources::{CasDocument, ResourceError};
+use crate::usecase::resources::{CasDocument, ResourceError, ResourceFailure};
 
 fn reserved(owner: DaemonGeneration) -> (ShardDocument, OperationId, TerminalRef) {
     let mut document = ShardDocument::empty(owner);
@@ -28,6 +28,46 @@ fn running(owner: DaemonGeneration) -> (ShardDocument, OperationId, TerminalRef,
     let identity = verified(41, "os:41");
     document.record_spawn(&resource, &identity).unwrap();
     (document, operation, resource, identity)
+}
+
+#[test]
+fn loading_an_absent_shard_preserves_its_owner_without_writing() {
+    let owner = DaemonGeneration::new();
+    let bytes = SharedBytes::default();
+    let shard = bind_shard(&bytes, owner);
+
+    let snapshot = shard.load().unwrap();
+    let document = snapshot.document();
+    assert_eq!(document.owner, owner);
+    assert_eq!(document.schema, SHARD_SCHEMA);
+    assert_eq!(document.revision, 0);
+    assert!(document.resources.is_empty());
+    assert!(document.outbox.is_empty());
+    assert!(document.in_flight.is_empty());
+    assert_eq!(document.event_sequence, 0);
+    assert_eq!(snapshot.observed(), None);
+    assert_eq!(bytes.get(), None, "a read never creates a durable shard");
+}
+
+#[test]
+fn a_shard_read_failure_preserves_the_error_and_stored_resources() {
+    let owner = DaemonGeneration::new();
+    let (document, _, _, _) = running(owner);
+    let stored = serde_json::to_string(&document).unwrap();
+    let bytes = SharedBytes::default();
+    bytes.set(&stored);
+    let shard = OwnerShard::new(MemoryFile::faulty(&bytes, FileFault::ReadFails), owner);
+
+    let ResourceFailure::Io(error) = shard.load().unwrap_err() else {
+        panic!("an unreadable shard must retain the store's I/O error");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "read failed");
+    assert_eq!(bytes.get().as_deref(), Some(stored.as_str()));
+    assert_eq!(
+        bind_shard(&bytes, owner).load().unwrap().document(),
+        &document
+    );
 }
 
 #[test]
