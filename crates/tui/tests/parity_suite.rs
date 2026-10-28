@@ -26,6 +26,7 @@ use usagi_tui::usecase::application::pane::{
     PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
 };
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
+use usagi_tui::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use usagi_tui::usecase::application::terminal_session::{
     Geometry, SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputError,
     TerminalInputOutcome, TerminalSession, TerminalStreamPort, TerminalSubscription,
@@ -35,12 +36,15 @@ use usagi_tui::usecase::application::terminal_session::{
 fn selected_terminal_window_rejects_empty_reversed_and_out_of_bounds_ranges() {
     let mut screen = TerminalScreen::new(2, 8);
     screen.advance(b"one\r\ntwo");
-    let anchor = (0, 0);
-    let focus = (1, 2);
+    let mut selection = TerminalSelection::begin(
+        screen.cells_with_scrollback(),
+        TerminalPoint { row: 0, column: 0 },
+    );
+    selection.extend(TerminalPoint { row: 1, column: 2 });
     for (start, end) in [(1, 1), (2, 1), (usize::MAX, usize::MAX)] {
         assert!(
             screen
-                .rows_with_scrollback_window_selection(start, end, anchor, focus)
+                .rows_with_scrollback_window_tracked_selection(start, end, &selection)
                 .is_empty()
         );
     }

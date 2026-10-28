@@ -1,7 +1,6 @@
 //! 枠付きダイアログ（modal）の部品。
 //!
-//! 角丸の枠に本文を収める [`boxed`]、それを空の画面中央に配置する
-//! [`render_modal`]、既存フレームの中央に合成する [`render_over`] を持つ。
+//! 角丸の枠に本文を収める [`boxed`] と、既存フレームの中央に合成する [`render_over`] を持つ。
 //! 幅は表示桁数（全角 2 桁）で測り、本文が枠より広ければ [`super::clip_to_width`] で切り、
 //! 短ければ空白で詰めて右端を揃える。色付け（枠色）はテーマ導入時に載せるため無色で描く。
 
@@ -13,7 +12,7 @@ use unicode_width::UnicodeWidthChar;
 const RESET: &str = "\u{1b}[0m";
 
 /// `lines` を角丸の枠に収め、`title` を上辺に埋め込んだ行を返す。本文の上下左右に 1 桁分の
-/// 余白を付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_modal`] が中央寄せする）。
+/// 余白を付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_over`] が中央寄せする）。
 #[must_use]
 pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     boxed_with_padding(title, inner_width, lines, true)
@@ -77,7 +76,7 @@ pub fn modal_inner_width(width: usize, desired: usize) -> usize {
 /// Modal views use this after composing their state-dependent rows so a result,
 /// error, or shorter list cannot move the border while the modal is open.
 /// Extra rows are clipped at the body boundary; terminal-height clipping remains
-/// the responsibility of [`render_modal`] and [`render_over`].
+/// the responsibility of [`render_over`].
 #[must_use]
 pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body.truncate(body_height);
@@ -330,33 +329,11 @@ pub fn subcommand_row(label: &str, selected: bool) -> String {
     Style::new().dim().paint(&format!("      {marker} {label}"))
 }
 
-/// Reserve `body_height` rows for `lines` and render the modal centred on a
-/// blank frame. The twin of [`render_body_over`]; both fold the
-/// `fixed_body(…)` reserve so a view only composes its rows.
-#[must_use]
-pub fn render_body(
-    raw_height: usize,
-    raw_width: usize,
-    title: &str,
-    inner_width: usize,
-    body_height: usize,
-    lines: Vec<String>,
-) -> Vec<String> {
-    render_modal(
-        raw_height,
-        raw_width,
-        title,
-        inner_width,
-        &fixed_body(lines, body_height),
-    )
-}
-
 /// Reserve `body_height` rows for `lines` and composite the modal over `base`.
 ///
 /// On a short terminal the reserve is clamped to `height - 6`: border and
 /// internal vertical padding consume four rows, leaving one background row
-/// above and below the box. Normal terminals keep the full reserve. The twin of
-/// [`render_body`].
+/// above and below the box. Normal terminals keep the full reserve.
 #[must_use]
 pub fn render_body_over(
     raw_height: usize,
@@ -708,46 +685,6 @@ pub fn render_confirmation_over(
     )
 }
 
-/// `body` を中央寄せの [`boxed`] modal に収めたフレームを返す。枠は水平・垂直とも中央に置き、
-/// 残りは空行で埋めるので、イベントループはフルスクリーン画面と同じ手順で描き直せる。
-/// サイズ 0 は [`normalize_size`] で 80×24 にフォールバックする。
-#[must_use]
-pub fn render_modal(
-    raw_height: usize,
-    raw_width: usize,
-    title: &str,
-    inner_width: usize,
-    body: &[String],
-) -> Vec<String> {
-    let (height, width) = normalize_size(raw_height, raw_width);
-    // 左右の枠線と余白だけで 4 桁必要。枠が収まらない幅では
-    // 端末外へはみ出すより、空のフレームを返す。
-    if width < 4 {
-        return vec![String::new(); height];
-    }
-    // 枠は `inner_width + 4` 桁必要。狭い端末で溢れないよう内側幅を詰める（boxed が各行と
-    // タイトルを収まるよう切る）。
-    let inner_width = modal_inner_width(width, inner_width);
-    let box_lines = boxed(title, inner_width, body);
-    let pad = " ".repeat(centered_padding(width, inner_width + 4));
-
-    let mut lines = Vec::with_capacity(height);
-    let top_padding = height.saturating_sub(box_lines.len()) / 2;
-    for _ in 0..top_padding {
-        lines.push(String::new());
-    }
-    for line in &box_lines {
-        lines.push(format!("{pad}{line}"));
-    }
-    while lines.len() < height {
-        lines.push(String::new());
-    }
-    // 端末高に収める: 枠が非常に低い端末より高いと top_padding が 0 になり枠だけで height を
-    // 超えるので、溢れを切る（painter が最終行より下を描いて崩すのを防ぐ）。
-    lines.truncate(height);
-    lines
-}
-
 /// ANSI escape の終端かどうか。CSI 導入子 `[` は final byte ではない。
 fn is_escape_final(ch: char) -> bool {
     ('\u{40}'..='\u{7e}').contains(&ch) && ch != '['
@@ -897,10 +834,9 @@ mod tests {
     use super::{
         ConfirmationModal, ConfirmationView, body_contains, bounded_list_rows, boxed, caption,
         columns, compact_boxed, confirmation_buttons, content_line, empty_notice, filter_line,
-        fixed_body, footer, heading, list_window, modal_inner_width, prompt_line, render_body,
-        render_body_over, render_confirmation_over, render_modal, render_over,
-        reserved_body_height, scroll_above, scroll_below, scroll_window, selection_marker,
-        subcommand_row, viewport_window,
+        fixed_body, footer, heading, list_window, modal_inner_width, prompt_line, render_body_over,
+        render_confirmation_over, render_over, reserved_body_height, scroll_above, scroll_below,
+        scroll_window, selection_marker, subcommand_row, viewport_window,
     };
     use crate::presentation::theme::{Role, Style};
     use crate::presentation::widgets::{clip_to_width, strip_ansi};
@@ -1244,16 +1180,8 @@ mod tests {
     }
 
     #[test]
-    fn render_body_and_over_fold_the_fixed_body_reserve() {
-        // Centred: reserves the full body height, then render_modal clips to the
-        // terminal, matching the old render_modal(…, &fixed_body(lines, h)).
+    fn render_body_over_reserves_space_for_background_and_padding() {
         let lines = vec!["one".to_string(), "two".to_string()];
-        let centred = render_body(24, 80, "T", 20, 6, lines.clone());
-        assert_eq!(
-            centred,
-            render_modal(24, 80, "T", 20, &fixed_body(lines.clone(), 6))
-        );
-
         // Over a background: the reserve leaves room for border + internal
         // padding and one base row above and below the box.
         let base = vec!["background".to_string(); 8];
@@ -1268,8 +1196,8 @@ mod tests {
     }
 
     #[test]
-    fn render_modal_centers_the_box_over_a_blank_frame() {
-        let lines = render_modal(10, 40, "T", 10, &["hi".to_string()]);
+    fn render_over_centers_the_box_over_an_empty_background() {
+        let lines = render_over(10, 40, &[], "T", 10, &["hi".to_string()]);
         assert_eq!(lines.len(), 10);
         // 枠は本文の上下に 1 行ずつ内側余白を持ち、画面中央へ配置される。
         let non_blank = lines.iter().filter(|l| !l.trim().is_empty()).count();
@@ -1279,17 +1207,17 @@ mod tests {
     }
 
     #[test]
-    fn render_modal_falls_back_and_truncates_to_height() {
+    fn render_over_falls_back_and_truncates_to_height() {
         // 高さ 0 → 24 にフォールバック。
-        assert_eq!(render_modal(0, 0, "", 10, &[]).len(), 24);
+        assert_eq!(render_over(0, 0, &[], "", 10, &[]).len(), 24);
         // 枠より低い端末では高さに切り詰める（溢れさせない）。
         let body: Vec<String> = (0..20).map(|i| i.to_string()).collect();
-        let lines = render_modal(3, 40, "", 10, &body);
+        let lines = render_over(3, 40, &[], "", 10, &body);
         assert_eq!(lines.len(), 3);
 
         // 枠の最小 4 桁が収まらない端末でも、行を幅外へ出さない。
         for width in 1..4 {
-            let lines = render_modal(2, width, "T", 10, &["body".to_string()]);
+            let lines = render_over(2, width, &[], "T", 10, &["body".to_string()]);
             assert_eq!(lines.len(), 2);
             assert!(lines.iter().all(|line| display_width(line) <= width));
         }

@@ -154,11 +154,7 @@ pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
         .into_iter()
         .map(|workspace| overview_for(storage, workspace))
         .collect::<Vec<_>>();
-    let mut recent = overviews
-        .iter()
-        .cloned()
-        .map(Recent::Workspace)
-        .collect::<Vec<_>>();
+    let mut unites = Vec::new();
     // Unite storage is an optional enhancement to the workspace registry. A
     // hand-edited, corrupt, or future-version file must not hide healthy single
     // workspace recents.
@@ -174,12 +170,17 @@ pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
             })
             .collect::<Vec<_>>();
         if !members.is_empty() {
-            recent.push(Recent::Unite(UniteOverview::with_updated_at(
+            unites.push(Recent::Unite(UniteOverview::with_updated_at(
                 members,
                 unite.updated_at,
             )));
         }
     }
+    let mut recent = overviews
+        .into_iter()
+        .map(Recent::Workspace)
+        .chain(unites)
+        .collect::<Vec<_>>();
     recent.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
     Ok(recent)
 }
@@ -201,7 +202,7 @@ pub fn touch_unite(
     let mut seen = HashSet::new();
     let paths = paths
         .iter()
-        .filter(|path| seen.insert((*path).clone()))
+        .filter(|path| seen.insert(*path))
         .cloned()
         .collect::<Vec<_>>();
     if paths.len() < 2 {

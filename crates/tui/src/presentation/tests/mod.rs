@@ -15,7 +15,7 @@ use super::{
     CarriedOutcome, Config, ConfigStep, ControllerHost, ControllerHostAction, DecisionCommandPort,
     DefaultSettingsPort, DesktopNotificationPort, EnvironmentStorePort, Exit, ExternalTerminalPort,
     FixedBackendFactory, FsSessionWorktreeScanPort, GardenInputRoute, GardenInventoryPort,
-    Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort, MetricsPortFactory,
+    Geometry, GitDiff, IdleWatch, MAX_BACKGROUND_EXITS_PER_FRAME, MetricsPort,
     MissingWorkspacePrompt, NewStep, NoDesktopNotifications, NoMetrics, OpenStep, PROJECT_BAR_ROWS,
     PaneLaunch, PaneLaunchCommandPort, PrModalClickRoute, ProjectedSession,
     SerializedPaneLaunchPort, SessionCommandLane, SessionCommandPort, SessionCommandPortFactory,
@@ -2493,27 +2493,39 @@ impl Terminal for FakeTerminal {
     }
 }
 
+/// Test compositions create an independent scripted port for each workspace.
+pub(crate) trait MetricsPortFactory {
+    fn create(&mut self) -> Box<dyn MetricsPort>;
+}
+
 struct StaticMetrics;
 
+fn static_metrics() -> DaemonMetrics {
+    DaemonMetrics {
+        schema_version: 1,
+        sampled_at_ms: 42,
+        active_subscribers: 3,
+        dropped_updates: 0,
+        cpu_percent_hundredths: 250,
+        resident_memory_bytes: 45 * 1024 * 1024,
+        terminal_dropped_bytes: 0,
+        terminal_coalesced_bytes: 0,
+        terminal_backpressured_bytes: 0,
+        pr_projection_dropped_bytes: 0,
+        pr_projection_coalesced_bytes: 0,
+        pr_projection_gaps: 0,
+        agent_concurrency: None,
+        failed_background_workers: 0,
+        build: None,
+    }
+}
+
 impl MetricsPort for StaticMetrics {
-    fn latest(&mut self) -> Option<DaemonMetrics> {
-        Some(DaemonMetrics {
-            schema_version: 1,
-            sampled_at_ms: 42,
-            active_subscribers: 3,
-            dropped_updates: 0,
-            cpu_percent_hundredths: 250,
-            resident_memory_bytes: 45 * 1024 * 1024,
-            terminal_dropped_bytes: 0,
-            terminal_coalesced_bytes: 0,
-            terminal_backpressured_bytes: 0,
-            pr_projection_dropped_bytes: 0,
-            pr_projection_coalesced_bytes: 0,
-            pr_projection_gaps: 0,
-            agent_concurrency: None,
-            failed_background_workers: 0,
-            build: None,
-        })
+    fn poll_updates(
+        &mut self,
+        _sessions: Option<&[(SessionId, PathBuf)]>,
+    ) -> Vec<crate::usecase::application::metrics::MetricsUpdate> {
+        vec![crate::usecase::application::metrics::MetricsUpdate::Metrics(Some(static_metrics()))]
     }
 }
 
@@ -3334,8 +3346,11 @@ impl ExternalTerminalPort for CountedPort {
 }
 
 impl MetricsPort for CountedPort {
-    fn latest(&mut self) -> Option<DaemonMetrics> {
-        None
+    fn poll_updates(
+        &mut self,
+        _sessions: Option<&[(SessionId, PathBuf)]>,
+    ) -> Vec<crate::usecase::application::metrics::MetricsUpdate> {
+        Vec::new()
     }
 }
 

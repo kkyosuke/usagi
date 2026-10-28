@@ -30,6 +30,7 @@ use usagi_core::domain::{
 
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
+    resources::StoreError,
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         SpawnFailure, TerminalReconcileState, TerminalRegistry, TerminalRuntimeState,
@@ -115,8 +116,7 @@ impl TerminalStoreSnapshot {
     }
 }
 pub trait TerminalStore {
-    #[allow(clippy::result_unit_err)] // Persistence detail is intentionally erased at the usecase port.
-    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()>;
+    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), StoreError>;
 }
 /// Resolves a code-defined profile or trusted local settings once, before spawn.
 pub trait TerminalProfileResolver {
@@ -161,6 +161,8 @@ pub enum GenericTerminalError {
     ConcurrencyExhausted,
     Terminal(RegistryError),
     Store,
+    /// The durable operation ledger refused a fresh reservation without writing.
+    RetentionBackpressure,
     InvalidSnapshot,
     SpawnFailed,
     ReconcileRequired(TerminalReconcileState),
@@ -355,7 +357,12 @@ impl GenericTerminalCoordinator {
                 )),
             },
         );
-        self.persist(store)?;
+        if let Err(error) = self.persist(store) {
+            if error == GenericTerminalError::RetentionBackpressure {
+                self.records.remove(&key);
+            }
+            return Err(error);
+        }
         if let Err(error) = self.terminals.register(terminal.clone(), geometry) {
             // No PTY effect occurred, so this reservation has a definite final
             // state rather than becoming an ambiguous live owner.
@@ -863,9 +870,10 @@ impl GenericTerminalCoordinator {
         }
     }
     fn persist(&self, store: &mut dyn TerminalStore) -> Result<(), GenericTerminalError> {
-        store
-            .save(self.snapshot())
-            .map_err(|()| GenericTerminalError::Store)
+        store.save(self.snapshot()).map_err(|error| match error {
+            StoreError::Unavailable => GenericTerminalError::Store,
+            StoreError::RetentionBackpressure => GenericTerminalError::RetentionBackpressure,
+        })
     }
     fn validate_scope(
         &self,
@@ -965,22 +973,22 @@ mod tests {
     #[derive(Default)]
     struct Store(Vec<TerminalStoreSnapshot>);
     impl TerminalStore for Store {
-        fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()> {
+        fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), StoreError> {
             self.0.push(snapshot);
             Ok(())
         }
     }
     struct FailingStore;
     impl TerminalStore for FailingStore {
-        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
-            Err(())
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), StoreError> {
+            Err(StoreError::Unavailable)
         }
     }
     struct FailAfter(usize);
     impl TerminalStore for FailAfter {
-        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), StoreError> {
             self.0 = self.0.saturating_sub(1);
-            (self.0 != 0).then_some(()).ok_or(())
+            (self.0 != 0).then_some(()).ok_or(StoreError::Unavailable)
         }
     }
     struct Resolver;

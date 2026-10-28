@@ -670,6 +670,10 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
             ErrorCode::ResourceExhausted,
             "terminal PTY limit reached; close a Terminal or raise Terminal PTYs in Global Config",
         ),
+        GenericTerminalError::RetentionBackpressure => (
+            ErrorCode::ResourceExhausted,
+            "daemon operation history retention budget is exhausted",
+        ),
         GenericTerminalError::RetentionExhausted(_) => (
             ErrorCode::ResourceExhausted,
             "daemon terminal history retention budget is exhausted",
@@ -719,6 +723,7 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usecase::resources::StoreError;
     use crate::usecase::terminal::SnapshotWire;
     use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
     use crate::usecase::{
@@ -740,8 +745,12 @@ mod tests {
         fn save(
             &mut self,
             _: super::super::generic_terminal::TerminalStoreSnapshot,
-        ) -> Result<(), ()> {
-            if self.fail { Err(()) } else { Ok(()) }
+        ) -> Result<(), StoreError> {
+            if self.fail {
+                Err(StoreError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
     }
     struct Resolver;
@@ -2087,6 +2096,7 @@ mod tests {
         );
 
         let errors = [
+            GenericTerminalError::RetentionBackpressure,
             GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable),
             GenericTerminalError::Terminal(RegistryError::ScreenBudgetExceeded),
             GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
@@ -2114,6 +2124,7 @@ mod tests {
             ),
         ];
         let expected = [
+            ErrorCode::ResourceExhausted,
             ErrorCode::ResourceExhausted,
             ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,

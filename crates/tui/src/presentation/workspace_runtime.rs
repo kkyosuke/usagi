@@ -975,7 +975,7 @@ impl WorkspaceRuntime {
             .pane(Target::Root(self.state.workspace()))
             .is_some_and(|pane| {
                 pane.tabs().iter().any(|tab| {
-                    tab_selection(tab) == *selection
+                    PaneTab::selection(tab) == *selection
                         && match tab {
                             PaneTab::Pending(pending) | PaneTab::Ready(pending) => {
                                 pending.kind == kind
@@ -1075,7 +1075,7 @@ impl WorkspaceRuntime {
                 PaneTab::Live(live) => live.kind == kind,
                 PaneTab::Interrupted(_) => kind == PaneKind::Agent,
             })
-            .map(tab_selection)
+            .map(PaneTab::selection)
     }
 
     /// Keep the persisted Overview / Closeup modals aligned with the controller's
@@ -1779,7 +1779,7 @@ impl WorkspaceRuntime {
             .iter()
             .filter(|tab| root_tab_is_terminal(tab))
             .nth(index)
-            .map(tab_selection)
+            .map(PaneTab::selection)
     }
 
     /// Index of the active pane's tab owning one exact Agent runtime, for the
@@ -1837,7 +1837,7 @@ impl WorkspaceRuntime {
             .active_pane()
             .tabs()
             .get(index)
-            .map(tab_selection)
+            .map(PaneTab::selection)
     }
 
     /// Select an exact stable tab identity, used after a pointer hit test.
@@ -1867,7 +1867,7 @@ impl WorkspaceRuntime {
             .active_pane()
             .tabs()
             .iter()
-            .map(tab_selection)
+            .map(PaneTab::selection)
             .collect();
         let mut panes = self.panes.clone();
         let _ = route_tab_command(&mut panes, PaneTabCommand::Reorder(direction));
@@ -1875,7 +1875,7 @@ impl WorkspaceRuntime {
             .active_pane()
             .tabs()
             .iter()
-            .map(tab_selection)
+            .map(PaneTab::selection)
             .collect();
         (current, next)
     }
@@ -1921,9 +1921,9 @@ impl WorkspaceRuntime {
             return None;
         }
         let current = match pane.selected() {
-            PaneSelection::Tab(selection) => {
-                tabs.iter().position(|tab| tab_selection(tab) == *selection)
-            }
+            PaneSelection::Tab(selection) => tabs
+                .iter()
+                .position(|tab| PaneTab::selection(tab) == *selection),
             PaneSelection::Target(_) | PaneSelection::None => None,
         };
         let index = match (current, direction) {
@@ -1932,7 +1932,7 @@ impl WorkspaceRuntime {
             (None, TabDirection::Next) => 0,
             (None, TabDirection::Previous) => tabs.len() - 1,
         };
-        Some(tab_selection(&tabs[index]))
+        Some(PaneTab::selection(&tabs[index]))
     }
 
     fn adjacent_tab_of_kind(
@@ -1955,9 +1955,9 @@ impl WorkspaceRuntime {
             return None;
         }
         let current = match self.panes.active_pane().selected() {
-            PaneSelection::Tab(selection) => {
-                tabs.iter().position(|tab| tab_selection(tab) == *selection)
-            }
+            PaneSelection::Tab(selection) => tabs
+                .iter()
+                .position(|tab| PaneTab::selection(tab) == *selection),
             PaneSelection::Target(_) | PaneSelection::None => None,
         };
         let index = match (current, direction) {
@@ -1966,7 +1966,7 @@ impl WorkspaceRuntime {
             (None, TabDirection::Next) => 0,
             (None, TabDirection::Previous) => tabs.len() - 1,
         };
-        Some(tab_selection(tabs[index]))
+        Some(PaneTab::selection(tabs[index]))
     }
 
     fn follow_active_target(&mut self) {
@@ -2088,7 +2088,7 @@ impl WorkspaceRuntime {
                 RootTerminalTabProjection {
                     label: format!("Terminal {number}"),
                     selected: pane.is_some_and(|pane| {
-                        matches!(pane.selected(), PaneSelection::Tab(selected) if tab_selection(tab) == *selected)
+                        matches!(pane.selected(), PaneSelection::Tab(selected) if PaneTab::selection(tab) == *selected)
                     }),
                     pending: matches!(tab, PaneTab::Pending(_)),
                 }
@@ -2125,22 +2125,12 @@ fn terminal_belongs_to_target(
     terminal.workspace_id == workspace && terminal.session_id == target.session_id()
 }
 
-fn tab_selection(tab: &PaneTab) -> TabSelection {
-    match tab {
-        PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
-        PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
-        PaneTab::Ready(pending) => TabSelection::Ready(pending.operation),
-        PaneTab::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         AgentResumeRelation, CloseOutcome, InterruptedTab, PaneEvent, PaneKind, PaneRegistryEffect,
         PaneRestoreTarget, PaneTab, ResumeRejection, RootTerminalDrawerProjection,
         RootTerminalTabProjection, TabSelection, WorkspaceRuntime, root_tab_is_terminal,
-        tab_selection,
     };
     use crate::presentation::views::workspace::TerminalViewProjection;
     use crate::usecase::application::Key;
@@ -4666,16 +4656,16 @@ mod tests {
             kind: PaneKind::Diff,
         };
         assert_eq!(
-            tab_selection(&PaneTab::Pending(pending)),
+            PaneTab::selection(&PaneTab::Pending(pending)),
             TabSelection::Pending(operation)
         );
         assert_eq!(
-            tab_selection(&PaneTab::Ready(pending)),
+            PaneTab::selection(&PaneTab::Ready(pending)),
             TabSelection::Ready(operation)
         );
         let terminal = terminal_ref(workspace, session);
         assert_eq!(
-            tab_selection(&PaneTab::Live(LivePane {
+            PaneTab::selection(&PaneTab::Live(LivePane {
                 terminal: terminal.clone(),
                 kind: PaneKind::Terminal,
             })),
@@ -5188,7 +5178,7 @@ mod tests {
             "the surviving history tab keeps the strip in front of the launcher"
         );
         assert_eq!(
-            tab_selection(&runtime.active_pane().tabs()[0]),
+            PaneTab::selection(&runtime.active_pane().tabs()[0]),
             TabSelection::Interrupted(history.continuation)
         );
     }
@@ -5206,7 +5196,7 @@ mod tests {
         );
 
         assert_eq!(
-            tab_selection(&runtime.active_pane().tabs()[0]),
+            PaneTab::selection(&runtime.active_pane().tabs()[0]),
             TabSelection::Interrupted(history.continuation)
         );
         // A history tab is not a live pane: nothing to attach, poll, or resize.

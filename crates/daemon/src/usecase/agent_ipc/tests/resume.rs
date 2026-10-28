@@ -1259,6 +1259,7 @@ fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
 
     let inventory = runtime.inventory(workspace);
     assert!(inventory.runtimes.is_empty());
+    assert!(runtime.search_targets(workspace).is_empty());
     assert_eq!(inventory.resumable.len(), 1);
     assert!(inventory.resumable[0].target.is_none());
     assert!(!inventory.resumable[0].available);

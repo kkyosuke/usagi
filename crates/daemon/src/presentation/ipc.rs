@@ -5,6 +5,7 @@
 use std::io::{self, Read, Write};
 
 use crate::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext, TerminalResponse};
+use serde::Deserialize as _;
 use serde_json::json;
 use usagi_core::infrastructure::ipc::{
     Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, ProtocolError, ResponseOutcome,
@@ -499,10 +500,13 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
                         // Store the lease outside the match arm before dispatch so
                         // response observation and writing remain inside its lifetime.
                         request_lease = lease;
-                        if let Ok(usagi_core::infrastructure::ipc::DaemonRequest::Terminal {
-                            action,
-                            payload,
-                        }) = serde_json::from_value(body.clone())
+                        // Other request families are decoded by their dispatcher.
+                        if body.get("kind").and_then(serde_json::Value::as_str) == Some("terminal")
+                            && let Ok(usagi_core::infrastructure::ipc::DaemonRequest::Terminal {
+                                action,
+                                payload,
+                            }) =
+                                usagi_core::infrastructure::ipc::DaemonRequest::deserialize(&body)
                         {
                             match usagi_core::domain::id::RequestId::parse(&request_id.0) {
                                 Ok(owner_request_id) => dispatch_terminal_request(

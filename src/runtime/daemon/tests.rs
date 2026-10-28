@@ -294,7 +294,10 @@ fn terminal_capacity_uses_the_global_setting_and_falls_back_safely() {
 struct FixtureAgentStore;
 
 impl RuntimeStore for FixtureAgentStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(
+        &mut self,
+        _: RuntimeStoreSnapshot,
+    ) -> Result<(), usagi_daemon::usecase::resources::StoreError> {
         Ok(())
     }
 }
@@ -5697,7 +5700,7 @@ fn metrics_response(
         pipeline,
         observer,
         usagi_core::infrastructure::ipc::RequestId("metrics".into()),
-        &serde_json::to_value(DaemonRequest::Metrics { action }).unwrap(),
+        &DaemonRequest::Metrics { action },
         &session_test_hello(),
     );
     let EnvelopeKind::Response { outcome, body, .. } = response.kind else {
@@ -8470,7 +8473,10 @@ impl TerminalScopeResolver for TestTerminalScope {
 struct TestTerminalStore;
 
 impl TerminalStore for TestTerminalStore {
-    fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
+    fn save(
+        &mut self,
+        _: TerminalStoreSnapshot,
+    ) -> Result<(), usagi_daemon::usecase::resources::StoreError> {
         Ok(())
     }
 }

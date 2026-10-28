@@ -1380,7 +1380,7 @@ struct SessionSidebarObservation {
 /// `latest` used to sample the daemon inline behind a one-second cache, but that
 /// one sample per second still opened a fresh bootstrapped connection **on the
 /// render thread** (#551). The sampling rate is unchanged; the request now
-/// belongs to a resident lane and `latest` is a cache read that cannot block.
+/// belongs to a resident lane and `poll_updates` drains cached observations.
 /// Git diffs were already on a worker thread and keep that shape.
 struct DaemonMetricsPort {
     metrics: RefreshPump<Option<DaemonMetrics>>,
@@ -5163,9 +5163,8 @@ mod tests {
     use usagi_tui::presentation::workspace_runtime::WorkspaceRuntime;
     use usagi_tui::presentation::{ControllerBackendFactory, ControllerHost, ControllerHostAction};
     use usagi_tui::usecase::application::controller::{
-        AppState, BackendEvent, Effect, EntryEvent, EntryState, EntryWorkspace, EnvironmentEntry,
-        NewEvent, NewForm, NewMode, NewRequest, NewState, Notice, Overlay, PreviewFileFilter,
-        Target, update, update_entry, update_new,
+        AppState, BackendEvent, Effect, EnvironmentEntry, NewRequest, Overlay, PreviewFileFilter,
+        Target, update,
     };
     use usagi_tui::usecase::application::runtime_ports::RestoreConnectionPort;
     use usagi_tui::usecase::application::{
@@ -9532,53 +9531,8 @@ mod tests {
     }
 
     #[test]
-    fn production_reducer_harness_covers_entry_and_new_success_failure_routes() {
+    fn controller_home_renders_the_session_note_indicator() {
         let workspace = WorkspaceId::new();
-        let choice = EntryWorkspace::new(workspace, "demo");
-        let mut entry = EntryState::new(vec![choice.clone()], vec![workspace]);
-        assert!(update_entry(&mut entry, EntryEvent::ShowOpen).is_empty());
-        assert!(matches!(
-            update_entry(&mut entry, EntryEvent::OpenSingle(workspace)).as_slice(),
-            [Effect::AttachWorkspace { workspace: selected }] if *selected == workspace
-        ));
-
-        let mut entry = EntryState::new(vec![choice], vec![workspace]);
-        assert!(matches!(
-            update_entry(&mut entry, EntryEvent::OpenRecent(workspace)).as_slice(),
-            [Effect::AttachWorkspace { workspace: selected }] if *selected == workspace
-        ));
-        let mut entry = EntryState::new(Vec::new(), Vec::new());
-        let _ = update_entry(&mut entry, EntryEvent::ShowOpen);
-        assert!(update_entry(&mut entry, EntryEvent::Back).is_empty());
-
-        let mut new = NewState::new(
-            NewMode::Existing,
-            NewForm {
-                path: "/tmp/demo".to_owned(),
-                name: "demo".to_owned(),
-                ..Default::default()
-            },
-        );
-        let effects = update_new(&mut new, NewEvent::Submit);
-        let token = match effects.as_slice() {
-            [Effect::RegisterWorkspace { token, .. }] => *token,
-            other => panic!("unexpected new effect: {other:?}"),
-        };
-        assert!(
-            update_new(
-                &mut new,
-                NewEvent::Result {
-                    token,
-                    result: Err(Notice::new("registration failed")),
-                },
-            )
-            .is_empty()
-        );
-        assert!(matches!(
-            update_new(&mut new, NewEvent::Retry).as_slice(),
-            [Effect::RegisterWorkspace { .. }]
-        ));
-
         let session = SessionId::new();
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let projected = ProjectedSession {

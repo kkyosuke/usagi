@@ -26,6 +26,7 @@ use super::runtime_model::{
     ExecutableLocator, PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
 };
 use super::tool::{CallerPolicy, StoreRoot, ToolDescriptor, ToolError, ToolRoute};
+use super::tools::RegisteredTool;
 use super::{resources, tools};
 
 /// サーバが話せる MCP プロトコルバージョン。先頭が優先版である。
@@ -74,29 +75,20 @@ struct ServerCapabilities<'a> {
 /// tools/list and tools/call. Runtime availability is fixed for that lifetime.
 struct ServerTools<'a> {
     runtime_models: &'a RuntimeModelSnapshot,
-    entries: Vec<PreparedTool>,
-}
-
-struct PreparedTool {
-    descriptor: ToolDescriptor,
-    schema: Value,
+    entries: Vec<RegisteredTool>,
 }
 
 impl<'a> ServerTools<'a> {
     fn new(runtime_models: &'a RuntimeModelSnapshot, families: McpToolFamilies) -> Self {
-        let entries = tools::registry_with_families(families)
-            .into_iter()
-            .map(|descriptor| {
-                let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-                if let Some(agent) = agent_selector_schema(runtime_models, descriptor.route()) {
-                    schema["properties"]["agent"] = agent;
-                }
-                if uses_runtime_schema(descriptor.route()) {
-                    schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
-                }
-                PreparedTool { descriptor, schema }
-            })
-            .collect();
+        let mut entries = tools::registry_with_families(families);
+        for tool in &mut entries {
+            if let Some(agent) = agent_selector_schema(runtime_models, tool.descriptor.route()) {
+                tool.schema["properties"]["agent"] = agent;
+            }
+            if uses_runtime_schema(tool.descriptor.route()) {
+                tool.schema["properties"]["runtime"] = RuntimeModelSnapshot::runtime_schema();
+            }
+        }
         Self {
             runtime_models,
             entries,
@@ -1056,16 +1048,13 @@ mod tests {
         assert_eq!(value(&serde_json::json!({"type":"boolean"})), false);
         assert_eq!(value(&serde_json::json!({})), Value::Null);
 
-        let registry = crate::mcp::tools::registry();
-        let descriptor = registry
+        let tools = ServerTools::new(snapshot, McpToolFamilies::all());
+        let tool = tools
+            .entries
             .iter()
-            .find(|descriptor| descriptor.name() == name)
+            .find(|tool| tool.descriptor.name() == name)
             .unwrap();
-        let mut schema: Value = serde_json::from_str(descriptor.input_schema()).unwrap();
-        if let Some(agent) = agent_selector_schema(snapshot, descriptor.route()) {
-            schema["properties"]["agent"] = agent;
-        }
-        value(&schema)
+        value(&tool.schema)
     }
 
     fn initialize(line: &str) -> Value {
@@ -1479,6 +1468,7 @@ mod tests {
         let registry = registry();
         let resume = registry
             .iter()
+            .map(|tool| &tool.descriptor)
             .find(|descriptor| descriptor.name() == "session_resume")
             .unwrap();
         let invalid_target = execute_tool(
@@ -1550,6 +1540,7 @@ mod tests {
         let registry = registry();
         let dispatch = registry
             .iter()
+            .map(|tool| &tool.descriptor)
             .find(|descriptor| descriptor.name() == "session_get")
             .unwrap();
         let response = execute_tool(

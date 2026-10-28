@@ -197,8 +197,6 @@ use crate::usecase::application::daemon_backend::{
     Completions, DaemonBackend, Flow as BackendFlow,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
-#[cfg(test)]
-use crate::usecase::application::metrics::MetricsPortFactory;
 use crate::usecase::application::metrics::{
     GitDiff, MetricsBackend, MetricsPort, MetricsProjection,
 };
@@ -218,6 +216,8 @@ use crate::usecase::terminal_input::{
     LiveTerminalAction, PointerEvent, PointerKind, WHEEL_LINES, encode_mouse_wheel,
     encode_wheel_arrows,
 };
+#[cfg(test)]
+use tests::MetricsPortFactory;
 use usagi_core::usecase::settings::SettingsPort;
 
 #[cfg(test)]
@@ -424,7 +424,14 @@ fn route_workspace_input_before_reducer(
 #[cfg(test)]
 struct NoMetrics;
 #[cfg(test)]
-impl MetricsPort for NoMetrics {}
+impl MetricsPort for NoMetrics {
+    fn poll_updates(
+        &mut self,
+        _sessions: Option<&[(SessionId, PathBuf)]>,
+    ) -> Vec<crate::usecase::application::metrics::MetricsUpdate> {
+        Vec::new()
+    }
+}
 
 /// Complete production port set for one opened workspace.
 pub struct ControllerBackendComposition {

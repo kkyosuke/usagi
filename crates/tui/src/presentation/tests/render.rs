@@ -580,7 +580,7 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
         &runtime,
         "demo",
         &sessions,
-        StaticMetrics.latest(),
+        Some(static_metrics()),
         health(),
         &no_diffs,
         None,
@@ -593,7 +593,7 @@ fn the_frame_material_changes_for_every_input_the_renderer_reads() {
     // to the material: a newly observed sample must be able to change the
     // sidecar, and an unchanged observer must not force a redraw.
     let mut observed = DaemonHealthTracker::default();
-    observed.observe(&StaticMetrics.latest().expect("static metrics"));
+    observed.observe(&static_metrics());
     let health_material = home_frame_material(
         20, 80, &runtime, "demo", &sessions, None, observed, &no_diffs, None, None, clock,
     );

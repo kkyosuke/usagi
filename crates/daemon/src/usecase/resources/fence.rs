@@ -113,15 +113,6 @@ pub fn shared_write_verdict(writer: SharedWriter, role: GenerationRole) -> Write
     }
 }
 
-/// The whole-snapshot documents that would lose an update without this fence.
-#[must_use]
-pub fn fenced_writers() -> Vec<SharedWriter> {
-    SHARED_WRITERS
-        .into_iter()
-        .filter(|writer| writer.mode() == WriteMode::WholeSnapshot)
-        .collect()
-}
-
 /// Why a fenced write was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FenceRefusal {

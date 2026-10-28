@@ -60,20 +60,6 @@ impl SecretResolver for OpCli {
     }
 }
 
-/// Resolve references with bounded fan-out while preserving binding order.
-///
-/// # Errors
-/// Returns the domain limit error before any resolver call is made.
-pub fn resolve_parallel<R>(
-    bindings: &EnvBindings,
-    resolver: &R,
-) -> Result<ResolvedEnvironment, EnvLimitError>
-where
-    R: SecretResolver + Sync,
-{
-    resolve_parallel_with_service_account_token(bindings, resolver, None)
-}
-
 /// Resolve references with bounded fan-out and an optional daemon-owned
 /// 1Password service-account credential.
 ///
@@ -753,14 +739,17 @@ mod tests {
         let reader = FakeSecretResolver {
             reads: Mutex::new(Vec::new()),
         };
-        let resolved = resolve_parallel(
+        let resolved = resolve_parallel_with_service_account_token(
             &bindings(&[
                 ("RUST_LOG", "debug"),
                 ("OPEN", "op://Private/Open/token"),
                 ("LOCKED", "op://Private/Locked/token"),
                 ("1BAD", "op://Private/Bad/token"),
+                ("BLANK", "   "),
+                ("LITERAL", "op://"),
             ]),
             &reader,
+            None,
         )
         .unwrap();
 
@@ -772,17 +761,41 @@ mod tests {
                     "secret:op://Private/Open/token".to_owned()
                 ),
                 ("RUST_LOG".to_owned(), "debug".to_owned()),
+                ("LITERAL".to_owned(), "op://".to_owned()),
             ])
         );
         assert_eq!(resolved.failures.len(), 1);
         assert_eq!(resolved.failures[0].name, "LOCKED");
+        assert_eq!(resolved.failures[0].reference, "op://Private/Locked/token");
+        assert_eq!(resolved.failures[0].error, "op is locked");
+        assert!(!format!("{resolved:?}").contains("secret:op://Private/Locked"));
+        let mut reads = reader.reads.lock().unwrap().clone();
+        reads.sort();
+        assert_eq!(
+            reads,
+            ["op://Private/Locked/token", "op://Private/Open/token"]
+        );
+    }
+
+    #[test]
+    fn empty_bindings_resolve_without_reading_a_secret() {
+        let reader = FakeSecretResolver {
+            reads: Mutex::new(Vec::new()),
+        };
+        assert_eq!(
+            resolve_parallel_with_service_account_token(&EnvBindings::new(), &reader, None)
+                .unwrap(),
+            ResolvedEnvironment::default()
+        );
+        assert!(reader.reads.lock().unwrap().is_empty());
     }
 
     #[test]
     fn a_panicking_reader_fails_only_its_own_binding() {
-        let resolved = resolve_parallel(
+        let resolved = resolve_parallel_with_service_account_token(
             &bindings(&[("SECRET", "op://Private/Item/field"), ("LITERAL", "kept")]),
             &PanickingResolver,
+            None,
         )
         .unwrap();
         assert_eq!(resolved.values["LITERAL"], "kept");
@@ -798,7 +811,7 @@ mod tests {
             .map(|index| (format!("SECRET_{index}"), format!("op://vault/{index}")))
             .collect();
         assert_eq!(
-            resolve_parallel(&oversized, &reader),
+            resolve_parallel_with_service_account_token(&oversized, &reader, None),
             Err(EnvLimitError::TooManySecretReferences)
         );
         assert!(reader.reads.lock().unwrap().is_empty());
@@ -810,9 +823,13 @@ mod tests {
             reads: Mutex::new(Vec::new()),
         };
         assert_eq!(
-            resolve_parallel(&bindings(&[("RUST_LOG", "debug")]), &reader)
-                .unwrap()
-                .values,
+            resolve_parallel_with_service_account_token(
+                &bindings(&[("RUST_LOG", "debug")]),
+                &reader,
+                None
+            )
+            .unwrap()
+            .values,
             BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())])
         );
         assert!(reader.reads.lock().unwrap().is_empty());
@@ -893,7 +910,7 @@ mod tests {
         let bindings = (0..(MAX_CONCURRENT_SECRET_READS + 3))
             .map(|index| (format!("SECRET_{index}"), format!("op://vault/{index}")))
             .collect();
-        resolve_parallel(&bindings, &resolver).unwrap();
+        resolve_parallel_with_service_account_token(&bindings, &resolver, None).unwrap();
         assert_eq!(
             resolver.maximum.load(Ordering::SeqCst),
             MAX_CONCURRENT_SECRET_READS

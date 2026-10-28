@@ -534,10 +534,8 @@ impl DaemonBackend {
     ///
     /// Returns [`Flow::Exit`] for [`Effect::Detach`] and [`Flow::Leave`] for
     /// [`Effect::LeaveWorkspace`] so the loop leaves; every
-    /// other effect returns [`Flow::Continue`].  Entry-surface effects
-    /// (`AttachWorkspace` / `CloneProject` / `RegisterWorkspace`) are not used
-    /// by the Home screen and are accepted as no-ops until the screen graph
-    /// routes them.
+    /// other effect returns [`Flow::Continue`]. Workspace entry and creation
+    /// are owned by the screen graph through its `WorkspaceLoader` port.
     #[allow(clippy::too_many_lines)] // This exhaustive adapter keeps every controller effect visibly mapped to exactly one port.
     pub fn dispatch(&mut self, effect: Effect) -> Flow {
         match effect {
@@ -708,14 +706,6 @@ impl DaemonBackend {
             }
             Effect::Detach => return Flow::Exit,
             Effect::LeaveWorkspace => return Flow::Leave,
-            // Entry surfaces are outside Home. If one reaches this backend it is
-            // completed explicitly instead of being mistaken for success.
-            Effect::AttachWorkspace { .. }
-            | Effect::CloneProject { .. }
-            | Effect::RegisterWorkspace { .. } => unavailable(
-                &self.completions(),
-                "workspace entry effect is unavailable in Home",
-            ),
         }
         Flow::Continue
     }
@@ -1559,30 +1549,6 @@ mod tests {
         let mut backend = backend();
         assert_eq!(backend.dispatch(Effect::Detach), Flow::Exit);
         assert!(backend.drain_events().is_empty());
-    }
-
-    #[test]
-    fn entry_surface_effects_complete_with_explicit_home_errors() {
-        let mut backend = backend();
-        for effect in [
-            Effect::AttachWorkspace {
-                workspace: WorkspaceId::new(),
-            },
-            Effect::CloneProject {
-                repository: "git@example.com:demo.git".to_owned(),
-                destination: "/tmp/demo".into(),
-                branch: None,
-                token: PendingToken::from_raw(1),
-            },
-            Effect::RegisterWorkspace {
-                path: "/tmp/demo".into(),
-                name: "demo".to_owned(),
-                token: PendingToken::from_raw(2),
-            },
-        ] {
-            assert_eq!(backend.dispatch(effect), Flow::Continue);
-        }
-        assert_eq!(backend.drain_events().len(), 3);
     }
 
     #[test]

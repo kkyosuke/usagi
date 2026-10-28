@@ -798,7 +798,7 @@ impl AgentRuntime {
         coordinator.activate_generation(generation)?;
         store
             .save(coordinator.snapshot())
-            .map_err(|()| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
+            .map_err(|_| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
         dispatch
             .reconcile_incomplete_admissions()
             .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
@@ -1050,24 +1050,6 @@ impl AgentRuntime {
         true
     }
 
-    /// Releases only the active transport lease owned by this connection.
-    ///
-    /// The exact process claim remains so a policy client may reconnect with
-    /// the same credential. Cleanup from an older connection cannot clear a
-    /// newer connection lease, and a reused PID cannot acquire the claim.
-    pub fn release_mcp_connection(&mut self, connection: ConnectionId) {
-        for caller in self.mcp_callers.values_mut() {
-            if caller
-                .child
-                .as_ref()
-                .is_some_and(|child| child.connection == Some(connection))
-                && let Some(child) = caller.child.as_mut()
-            {
-                child.connection = None;
-            }
-        }
-    }
-
     /// Releases stale transport leases against the daemon's bounded live
     /// connection census while retaining each exact process claim.
     pub fn retain_live_mcp_connections(&mut self, live: &BTreeSet<ConnectionId>) {
@@ -1121,15 +1103,6 @@ impl AgentRuntime {
         });
         let (credential, _) = matches.next()?;
         matches.next().is_none().then_some(credential.as_str())
-    }
-
-    /// Resolves the durable dispatch identity authenticated by an MCP child.
-    /// The credential is daemon-minted after an OS-authenticated child claim; no client supplied
-    /// agent or session name participates in this lookup.
-    #[must_use]
-    pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
-        self.mcp_dispatch_context(credential)
-            .map(|context| context.caller)
     }
 
     /// Resolves all dispatch provenance from the same live credential and
@@ -1489,18 +1462,17 @@ impl AgentRuntime {
     /// Retained Agent terminal identities available to the human search lane.
     #[must_use]
     pub fn search_targets(&self, workspace: WorkspaceId) -> Vec<TerminalRef> {
-        self.inventory(workspace)
-            .runtimes
+        self.workspace_records(workspace)
             .into_iter()
-            .map(|entry| entry.runtime.terminal)
+            .filter(|record| record.continuation.is_some())
+            .map(|record| record.runtime.terminal.clone())
             .collect()
     }
 
-    /// Returns one deterministic, secret-free inventory for workspace-root and
-    /// managed-session Agent runtimes.
-    #[must_use]
-    pub fn inventory(&self, workspace: WorkspaceId) -> AgentInventory {
-        let failed = self.failed_dispatch_ids().unwrap_or_default();
+    fn workspace_records(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Vec<&super::runtime::DurableRuntimeRecord> {
         let mut records = self
             .coordinator
             .records()
@@ -1512,6 +1484,15 @@ impl AgentRuntime {
                 record.runtime.agent_runtime_id.as_str(),
             )
         });
+        records
+    }
+
+    /// Returns one deterministic, secret-free inventory for workspace-root and
+    /// managed-session Agent runtimes.
+    #[must_use]
+    pub fn inventory(&self, workspace: WorkspaceId) -> AgentInventory {
+        let dispatch = self.dispatch.runtime_projection().unwrap_or_default();
+        let records = self.workspace_records(workspace);
         let runtimes = records
             .iter()
             .filter_map(|record| {
@@ -1520,12 +1501,10 @@ impl AgentRuntime {
                     .map(|continuation| AgentRuntimeInventoryItem {
                         runtime: record.runtime.clone(),
                         operation_id: Some(record.operation.operation_id),
-                        agent_id: self
-                            .dispatch
-                            .binding(record.operation.operation_id)
-                            .ok()
-                            .flatten()
-                            .map(|binding| binding.worker.agent_id)
+                        agent_id: dispatch
+                            .agent_ids_by_run
+                            .get(&record.operation.operation_id)
+                            .copied()
                             .or_else(|| {
                                 record
                                     .launch_provenance
@@ -1533,7 +1512,7 @@ impl AgentRuntime {
                                     .and_then(|audit| audit.agent_id)
                             }),
                         continuation,
-                        state: if Self::is_failed_reservation(record, &failed) {
+                        state: if Self::is_failed_reservation(record, &dispatch.failed_runs) {
                             AgentRuntimeInventoryState::Unavailable
                         } else {
                             runtime_inventory_state(record.state)
@@ -2571,6 +2550,10 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         ),
         // A launch whose worst-case final does not fit the aggregate retention
         // budget is refused before spawn, like any other exhausted capacity.
+        RuntimeError::RetentionBackpressure => (
+            ErrorCode::ResourceExhausted,
+            "daemon operation history retention budget is exhausted",
+        ),
         RuntimeError::RetentionExhausted(_) => (
             ErrorCode::ResourceExhausted,
             "daemon retention budget cannot admit another agent runtime",

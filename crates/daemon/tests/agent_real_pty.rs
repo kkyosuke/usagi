@@ -47,6 +47,7 @@ use usagi_daemon::usecase::generation::{
     GenerationCoordinator, GenerationError, ProcessIdentity, TerminalOwnership, TerminalState,
 };
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
+use usagi_daemon::usecase::resources::StoreError;
 use usagi_daemon::usecase::runtime::{
     AdapterError, AgentAdapter, OutputJournal, ProvisionContext, PtySpawner, ResolvedLaunch,
     RuntimeStore, RuntimeStoreSnapshot, SpawnProvision, TerminateReapError,
@@ -80,7 +81,7 @@ impl TerminalOwner for EmptyGeneric {
 #[derive(Default)]
 struct MemoryStore(Vec<RuntimeStoreSnapshot>);
 impl RuntimeStore for MemoryStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0.push(snapshot);
         Ok(())
     }
@@ -89,8 +90,11 @@ impl RuntimeStore for MemoryStore {
 #[derive(Clone, Default)]
 struct SharedMemoryStore(Arc<Mutex<Vec<RuntimeStoreSnapshot>>>);
 impl RuntimeStore for SharedMemoryStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
-        self.0.lock().map_err(|_| ())?.push(snapshot);
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+        self.0
+            .lock()
+            .map_err(|_| StoreError::Unavailable)?
+            .push(snapshot);
         Ok(())
     }
 }
@@ -102,15 +106,15 @@ struct FailSecondSaveStore {
 }
 struct FailFirstSaveStore;
 impl RuntimeStore for FailFirstSaveStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
-        Err(())
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+        Err(StoreError::Unavailable)
     }
 }
 impl RuntimeStore for FailSecondSaveStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.saves += 1;
         if self.saves == 2 {
-            return Err(());
+            return Err(StoreError::Unavailable);
         }
         self.snapshots.push(snapshot);
         Ok(())

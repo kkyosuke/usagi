@@ -10,6 +10,7 @@ use usagi_core::infrastructure::persistence::json_file;
 use usagi_daemon::usecase::lock_watch::CapacityWatch;
 
 use super::tenant_control;
+use serde::Deserialize as _;
 
 use super::{
     ACCEPT_ERROR_BACKOFF, AdmissionGate, AgentConcurrencyGauge, AgentPty, AgentPtyObservation, Arc,
@@ -929,7 +930,7 @@ pub(super) fn start_ipc_accept_loop(
                                     &census_fence,
                                     &mut owner,
                                     &mut |request_id, body, hello, connection, client| {
-                                        let Ok(request) = serde_json::from_value::<DaemonRequest>(body.clone()) else {
+                                        let Ok(request) = DaemonRequest::deserialize(&body) else {
                                             return usagi_daemon::presentation::ipc::reject_unhandled_request(
                                                 request_id,
                                                 body,
@@ -972,11 +973,11 @@ pub(super) fn start_ipc_accept_loop(
                                             request_id: request_id.0.clone(),
                                             peer_pid: peer_process.pid,
                                         };
-                                        match request {
-                                            DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, &connection_tenants, &tenant_terminal, request_id, &body, hello),
-                                            DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, cache_jobs: &cache_jobs, pr_inventory: &pr_inventory, launch_client: Some(&launch_client) }, request_id, &body, hello),
+                                        match &request {
+                                            DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &request, hello),
+                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, &connection_tenants, &tenant_terminal, request_id, request, hello),
+                                            DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, request, hello),
+                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, cache_jobs: &cache_jobs, pr_inventory: &pr_inventory, launch_client: Some(&launch_client) }, request_id, request, hello),
                                             DaemonRequest::Agent { .. }
                                             | DaemonRequest::AgentInventory { .. }
                                             | DaemonRequest::AgentWorkspaceObservation { .. }
@@ -985,18 +986,18 @@ pub(super) fn start_ipc_accept_loop(
                                             | DaemonRequest::RestartAgents { .. }
                                             | DaemonRequest::ResumeAgent { .. }
                                             | DaemonRequest::ResumeAgentHeadless { .. }
-                                            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. } => dispatch_agent(&agent_launch, &bound, request_id, &body, hello, &launch_client),
-                                            DaemonRequest::CodexSessionCapture { .. } => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
-                                            DaemonRequest::AgentPhaseReport { .. } => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
-                                            DaemonRequest::Dispatch { .. } => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello, &launch_client),
-                                            DaemonRequest::Metrics { .. } => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
+                                            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. } => dispatch_agent(&agent_launch, &bound, request_id, request, hello, &launch_client),
+                                            DaemonRequest::CodexSessionCapture { .. } => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, request, hello),
+                                            DaemonRequest::AgentPhaseReport { .. } => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, request, hello),
+                                            DaemonRequest::Dispatch { .. } => dispatch_dispatch(&agent_launch, &bound, request_id, request, hello, &launch_client),
+                                            DaemonRequest::Metrics { .. } => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &request, hello),
                                             DaemonRequest::Pr { .. }
                                             | DaemonRequest::PrBatch { .. }
-                                            | DaemonRequest::PrDismiss { .. } => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                            request @ DaemonRequest::DispatchTool { .. } => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, launch_client: Some(&launch_client) }, request_id, request, &body, hello),
-                                            DaemonRequest::WorkspaceAttention { workspace } => super::attention::dispatch(&agent_launch, &bound, &decisions, workspace, request_id, &body, hello),
-                                            DaemonRequest::SearchTerminalOutput { workspace, query, session } => super::terminal_search::dispatch(&agent_launch, &terminal, &bound, workspace, &query, session, request_id, &body, hello),
-                                            request @ DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, request, &body, hello),
+                                            | DaemonRequest::PrDismiss { .. } => dispatch_pr_snapshot(&pr_inventory, request_id, request, hello),
+                                            DaemonRequest::DispatchTool { .. } => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, launch_client: Some(&launch_client) }, request_id, request, &body, hello),
+                                            DaemonRequest::WorkspaceAttention { workspace } => super::attention::dispatch(&agent_launch, &bound, &decisions, *workspace, request_id, &body, hello),
+                                            DaemonRequest::SearchTerminalOutput { workspace, query, session } => super::terminal_search::dispatch(&agent_launch, &terminal, &bound, *workspace, query, *session, request_id, &body, hello),
+                                            DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, request, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
                                     },

@@ -1,13 +1,9 @@
 //! Event-driven daemon metrics / git-diff material for the controller Home frame.
 //!
 //! Daemon metrics (the mascot sidecar) and per-session git diffs (the sidebar
-//! column) are pure draw material: the runtime migration design (§4.1) keeps
-//! them out of `AppState` because nothing in the reducer reacts to them.  Before
-//! this seam the controller frame loop polled the [`MetricsPort`] inline every
-//! frame and stashed the result on the legacy `Workspace` view; that coupled the
-//! material to a view the strangler migration is deleting.
+//! column) are draw material, independent of controller events and operations.
 //!
-//! [`MetricsBackend`] instead owns the port and accepts change-only
+//! [`MetricsBackend`] owns the port and accepts change-only
 //! [`MetricsUpdate`] values through a drain the shell consumes into a
 //! [`MetricsProjection`] cache — the same one-way discipline
 //! (`poll -> drain -> apply -> render`) as
@@ -53,40 +49,16 @@ pub enum MetricsUpdate {
 
 /// Pulls the latest safe daemon observation at an application polling boundary.
 pub trait MetricsPort {
-    /// Compatibility observation hook for simple embedders. Production ports
-    /// override [`Self::poll_updates`] to avoid materializing unchanged values.
-    fn latest(&mut self) -> Option<DaemonMetrics> {
-        None
-    }
-
-    /// Compatibility Git snapshot hook. Change-driven ports should override
-    /// [`Self::poll_updates`] and move only changed material instead.
-    fn git_diffs(&mut self, _sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
-        BTreeMap::new()
-    }
-
     /// Return only observations that changed since the previous poll. `sessions`
     /// is supplied only when the daemon session projection changed.
-    fn poll_updates(&mut self, sessions: Option<&[(SessionId, PathBuf)]>) -> Vec<MetricsUpdate> {
-        let mut updates = vec![MetricsUpdate::Metrics(self.latest())];
-        if let Some(sessions) = sessions {
-            updates.push(MetricsUpdate::GitDiffs(self.git_diffs(sessions)));
-        }
-        updates
-    }
-}
-
-/// Creates a fresh metrics port for every workspace opened from the screen graph.
-pub trait MetricsPortFactory {
-    fn create(&mut self) -> Box<dyn MetricsPort>;
+    fn poll_updates(&mut self, sessions: Option<&[(SessionId, PathBuf)]>) -> Vec<MetricsUpdate>;
 }
 
 /// Shell-owned projection cache for the controller Home frame.
 ///
 /// It is updated only by draining [`MetricsUpdate`]s, keeping the material a
 /// pure downstream of the backend poll.  `render_home` reads [`metrics`] and
-/// [`git_diffs`] through `HomeProjection::with_metrics` / `with_git_diffs`,
-/// which this issue leaves unchanged.
+/// [`git_diffs`] through `HomeProjection::with_metrics` / `with_git_diffs`.
 ///
 /// [`metrics`]: Self::metrics
 /// [`git_diffs`]: Self::git_diffs
@@ -108,7 +80,7 @@ pub struct MetricsProjection {
 impl MetricsProjection {
     /// Fold one drained observation into the cache.
     pub fn apply(&mut self, update: MetricsUpdate) {
-        let changed = match update {
+        match update {
             MetricsUpdate::Metrics(metrics) => {
                 if self.metrics == metrics {
                     return;
@@ -122,26 +94,21 @@ impl MetricsProjection {
                     self.health.observe(metrics);
                 }
                 self.metrics = metrics;
-                true
             }
             MetricsUpdate::GitDiffs(git_diffs) => {
                 if self.git_diffs.as_ref() == &git_diffs {
                     return;
                 }
                 self.git_diffs = Arc::new(git_diffs);
-                true
             }
             MetricsUpdate::ArtifactCounts(counts) => {
                 if self.artifact_counts.as_ref() == &counts {
                     return;
                 }
                 self.artifact_counts = Arc::new(counts);
-                true
             }
-        };
-        if changed {
-            self.generation = self.generation.saturating_add(1);
         }
+        self.generation = self.generation.saturating_add(1);
     }
 
     /// The diagnostic health observed so far, for the Home frame material.
@@ -185,9 +152,8 @@ impl MetricsProjection {
 ///
 /// The port owns the sampling cadence (a one-second metrics cache and a git-diff
 /// worker thread in the composition root), so a per-frame [`poll`] preserves the
-/// legacy behaviour while the loop stops calling `latest()` / `git_diffs()`
-/// directly.  The completion channel mirrors `DaemonBackend`, giving the same
-/// `drain_events` seam a fake port drives in tests.
+/// observation boundary. The buffered updates provide the same `drain_events`
+/// seam a fake port drives in tests.
 ///
 /// [`poll`]: Self::poll
 pub struct MetricsBackend {

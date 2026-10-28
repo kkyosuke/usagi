@@ -133,6 +133,7 @@ impl TerminalScreen {
     /// Renders the visible grid as one `String` per row with trailing blanks
     /// trimmed.
     #[must_use]
+    #[cfg(test)]
     pub fn rows(&self) -> Vec<String> {
         self.screen
             .grid()
@@ -143,6 +144,7 @@ impl TerminalScreen {
 
     /// Renders retained scrollback followed by the visible terminal grid.
     #[must_use]
+    #[cfg(test)]
     pub fn rows_with_scrollback(&self) -> Vec<String> {
         self.rows_with_scrollback_window(0, usize::MAX, false)
     }
@@ -150,6 +152,7 @@ impl TerminalScreen {
     /// Renders retained scrollback and the visible grid with the current PTY
     /// cursor as an inverted cell.
     #[must_use]
+    #[cfg(test)]
     pub fn rows_with_scrollback_and_cursor(&self) -> Vec<String> {
         self.rows_with_scrollback_window(0, usize::MAX, true)
     }
@@ -188,21 +191,6 @@ impl TerminalScreen {
             ActiveBuffer::Primary => TerminalBuffer::Primary,
             ActiveBuffer::Alternate => TerminalBuffer::Alternate,
         }
-    }
-
-    /// Number of retained rows needed to display both live content and a
-    /// selection. A pointer may select blank fixed-grid padding below the live
-    /// cursor, so the highlight extends the projected tail without exceeding
-    /// the retained screen.
-    #[must_use]
-    pub fn rows_with_scrollback_selection_count(
-        &self,
-        anchor: (usize, usize),
-        focus: (usize, usize),
-    ) -> usize {
-        self.rows_with_scrollback_count(true)
-            .max(anchor.0.max(focus.0).saturating_add(1))
-            .min(self.retained_row_count())
     }
 
     /// Number of rows needed for live content and the surviving visual rows of
@@ -272,7 +260,8 @@ impl TerminalScreen {
 
     /// Renders scrollback and the visible grid with a cell-precise selection.
     #[must_use]
-    pub fn rows_with_scrollback_and_cursor_selection(
+    #[cfg(test)]
+    fn rows_with_scrollback_and_cursor_selection(
         &self,
         anchor: (usize, usize),
         focus: (usize, usize),
@@ -280,30 +269,28 @@ impl TerminalScreen {
         self.rows_with_scrollback_window_selection(0, usize::MAX, anchor, focus)
     }
 
-    /// Renders only the requested retained-row window with a cell-precise
-    /// selection.
-    ///
-    /// The selection owns a complete ANSI-free snapshot for copying, but a
-    /// lingering highlight must not force every redraw or scroll action to
-    /// project the complete 10,000-row history. Link detection is expanded only
-    /// to logical lines touching this window, matching the unselected path.
+    /// Test fixture: build a tracked selection and exercise the live renderer.
     #[must_use]
-    pub fn rows_with_scrollback_window_selection(
+    #[cfg(test)]
+    fn rows_with_scrollback_window_selection(
         &self,
         start: usize,
         end: usize,
         anchor: (usize, usize),
         focus: (usize, usize),
     ) -> Vec<String> {
-        let count = self.rows_with_scrollback_selection_count(anchor, focus);
-        let (first, last) = if anchor <= focus {
-            (anchor, focus)
-        } else {
-            (focus, anchor)
-        };
-        self.rows_with_scrollback_window_selection_by(start, end, count, |row| {
-            selection_for(row, first, last)
-        })
+        let mut selection = TerminalSelection::begin(
+            self.cells_with_scrollback(),
+            TerminalPoint {
+                row: anchor.0,
+                column: anchor.1,
+            },
+        );
+        selection.extend(TerminalPoint {
+            row: focus.0,
+            column: focus.1,
+        });
+        self.rows_with_scrollback_window_tracked_selection(start, end, &selection)
     }
 
     /// Renders a retained-row window while following the selected source rows
@@ -363,6 +350,7 @@ impl TerminalScreen {
 
     /// Renders the visible grid with the current PTY cursor as an inverted cell.
     #[must_use]
+    #[cfg(test)]
     pub fn rows_with_cursor(&self) -> Vec<String> {
         let (cursor_row, cursor_col) = self.screen.cursor();
         let cursor_style = self.screen.cursor_style();
@@ -447,19 +435,9 @@ fn row_wraps(row: &[Cell]) -> bool {
     row.iter().any(Cell::wrapped)
 }
 
+#[cfg(test)]
 fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
     render_row_selected(row, cursor, cursor_style, None, None)
-}
-
-fn selection_for(
-    row: usize,
-    first: (usize, usize),
-    last: (usize, usize),
-) -> Option<(usize, usize)> {
-    (first.0..=last.0).contains(&row).then_some((
-        if row == first.0 { first.1 } else { 0 },
-        if row == last.0 { last.1 } else { usize::MAX },
-    ))
 }
 
 fn render_row_selected(

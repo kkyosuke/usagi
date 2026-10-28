@@ -1739,6 +1739,55 @@ fn a_census_counts_live_runtime_without_touching_anything() {
 }
 
 #[test]
+fn legacy_census_counts_only_states_that_still_hold_a_pty_master() {
+    let owner = DaemonGeneration::new();
+    for (state, expected) in [
+        (TerminalRuntimeState::Reserved, 1),
+        (TerminalRuntimeState::Running, 1),
+        (TerminalRuntimeState::Exited, 0),
+        (TerminalRuntimeState::Reclaimed, 0),
+        (TerminalRuntimeState::SpawnFailed, 0),
+        (
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            0,
+        ),
+        (
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
+            0,
+        ),
+    ] {
+        let world = World::with_legacy(
+            Some(&agents(vec![agent_record(
+                &terminal(owner),
+                OperationId::new(),
+                state,
+                None,
+            )])),
+            Some(&terminals(vec![terminal_record(
+                &terminal(owner),
+                OperationId::new(),
+                state,
+                None,
+            )])),
+        );
+        assert_eq!(
+            census(&world.archive).unwrap(),
+            LiveCensus {
+                agents: expected,
+                terminals: expected
+            },
+            "{state:?}"
+        );
+        assert!(world.archive.marker().is_none());
+        assert!(world.allocator.get().is_none());
+    }
+    assert_eq!(
+        census(&World::new().archive).unwrap(),
+        LiveCensus::default()
+    );
+}
+
+#[test]
 fn a_shard_resource_without_a_record_is_skipped_rather_than_guessed() {
     let world = World::new();
     let owner = DaemonGeneration::new();
@@ -2256,3 +2305,5 @@ fn a_reclaim_that_cannot_be_saved_leaves_the_leaked_claim_alone() {
         "a refused write must not publish capacity as released"
     );
 }
+
+mod retention;

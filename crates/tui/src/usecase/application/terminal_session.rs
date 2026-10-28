@@ -623,12 +623,14 @@ impl TerminalSession {
 
     /// The rendered screen rows.
     #[must_use]
+    #[cfg(test)]
     pub fn rows(&self) -> Vec<String> {
         self.screen.rows()
     }
 
     /// The rows projected into an active terminal pane, including its cursor.
     #[must_use]
+    #[cfg(test)]
     pub fn display_rows(&self) -> Vec<String> {
         match self.state {
             SessionState::Live => self.screen.rows_with_cursor(),
@@ -641,6 +643,7 @@ impl TerminalSession {
 
     /// The retained terminal history projected into an active terminal pane.
     #[must_use]
+    #[cfg(test)]
     pub fn display_rows_with_scrollback(&self) -> Vec<String> {
         match self.state {
             SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
@@ -693,6 +696,7 @@ impl TerminalSession {
 
     /// Projects the retained output with a cell-precise visual selection.
     #[must_use]
+    #[cfg(test)]
     pub fn display_rows_with_scrollback_selection(
         &self,
         selection: &TerminalSelection,
@@ -713,8 +717,8 @@ impl TerminalSession {
             .rows_with_scrollback_window_tracked_selection(start, end, selection)
     }
 
-    /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
-    /// this retains trailing spaces, while still containing no ANSI styling.
+    /// Complete visible screen cells for selection/copy, retaining trailing
+    /// spaces without ANSI styling.
     #[must_use]
     pub fn cells(&self) -> Vec<String> {
         self.screen.cells_with_scrollback()
@@ -1115,6 +1119,7 @@ impl TerminalSession {
 
     /// How many inputs are held behind an unresolved input operation.
     #[must_use]
+    #[cfg(test)]
     pub fn fenced_input_count(&self) -> usize {
         self.fenced_queue.len()
     }
@@ -1122,6 +1127,7 @@ impl TerminalSession {
     /// The length of the input whose effect is unknown, when this terminal's
     /// producer queue is fenced by one.
     #[must_use]
+    #[cfg(test)]
     pub fn unresolved_input_length(&self) -> Option<usize> {
         self.unresolved_input
             .as_ref()

@@ -259,6 +259,7 @@ pub enum OrchestrationError {
 mod tests {
     use super::*;
     use crate::usecase::generation::ProcessIdentity;
+    use crate::usecase::resources::StoreError;
     use crate::usecase::runtime::{
         AdapterError, ResolvedLaunch, RuntimeStoreSnapshot, SpawnFailure, SpawnProvision,
     };
@@ -340,7 +341,7 @@ mod tests {
     #[derive(Default)]
     struct Store;
     impl RuntimeStore for Store {
-        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
             Ok(())
         }
     }

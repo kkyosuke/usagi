@@ -39,6 +39,11 @@ managed session と terminal を所有する daemon の現在の契約である�
 後半は metrics と cross-process generation の handoff・回収契約を扱う。IPC の wire、request payload、client retry を調べる
 場合は [4. daemon IPC](04-ipc.md) を先に参照し、本書では daemon が保持する state と effect の境界を確認する。
 
+request body は dispatch 境界で一度だけ typed request に decode し、後続 handler はその値を受け取る。
+daemon 内の session 観測は typed lifecycle projection、revision だけの観測は scalar を使い、wire 応答の境界で
+serialize する。内部観測のために JSON snapshot を作成して読み戻さない。setup plan の公開 projection は共通の
+redaction を適用し、内部観測にも secret を含む argv / environment を複製しない。
+
 ## authority と lifecycle
 
 managed session の lifecycle vocabulary は daemon のために定義されている。CLI、MCP、TUI は command を
@@ -71,6 +76,10 @@ client に返す session 一覧は、使用可能な `available` に加えて、
 session 一覧・status と attention の Agent 情報は、request ごとに workspace の phase・resume 可否・status を
 まとめて取得する。runtime record は借用し、各 session 行のために durable snapshot の複製や dispatch 履歴の
 再読込を繰り返さない。phase と resume の判定はそれぞれの既存 policy を共有する。
+
+Agent inventory の failed run と agent binding は、request ごとに dispatch registry を一度読み込んだ projection
+から取得する。terminal 検索は同じ workspace・continuation 条件と順序で runtime identity を取り出し、dispatch
+registry や resume metadata を投影しない。
 
 `session_status` は lifecycle とその revision の snapshot を短い session lock で取得し、各 worktree の Git
 観測を lock の外で行う。観測中の session 作成・削除は次の snapshot に反映される。daemon の Git subprocess は
@@ -2937,8 +2946,8 @@ generation 上限と衝突する。次の rollover が上限に当たったと�
 
 ### operation ledger の retention / expiry / GC
 
-producer operation の記憶は無限には持てないため、collectable な final だけを 3 段で回収する。各段は独立した
-compare-and-swap である。
+producer operation の記憶は無限には持てないため、collectable な final だけを 3 段で回収する。定期 GC では各段が
+独立した compare-and-swap となり、中断後も次の pass で収束する。
 
 ```text
 G1  allocator CAS   full outcome ──▶ compact tombstone      exact な答えを atomic に置換する
@@ -2956,8 +2965,17 @@ G3  allocator CAS   watermark 以下の tombstone を破棄        最後の byt
 watermark は server が自分で seal した id からだけ進み、client の timestamp では進まない。live な operation を
 追い越さないため、走行中の launch が expired 判定されることはない。GC 対象は「collectable な final（ambiguous は
 永久に対象外）」かつ「capacity release が 1 度 commit 済み」かつ「consumer dependency 0」の record だけである。
-count / byte / age の hard cap に達しても安全な候補が無い場合は、既存 record を evict せず、新規 launch を typed
-backpressure で effect zero に拒否する。
+shipping store の新規 reservation は allocator の CAS 内で、追加後の record 数（full outcome と tombstone の合計）
+4096 件・serialize 後 4 MiB の上限を検査する。revision 増加の byte 数も含め、競合時は最新 document で再検査する。
+上限を超える場合は同じ candidate に安全な GC 段階を適用し、reservation と一緒に commit する。収まらなければ
+GC も reservation も保存せず、typed retention backpressure（IPC `resource_exhausted`）で拒否する。
+拒否された新規 record・resume source の変更・process-local reservation も戻すため、allocator / shard の書込や
+PTY spawn は起こらず、拒否された起動が capacity や resume source を占有し続けない。IPC の producer operation
+に対する既存の idempotency 契約は変えず、記録済みの refusal の再送は同じ結果を返す。
+
+既存 operation の exact replay、finalization、exit と partial-write retry は新規 admission ではなく、上限下でも
+進行できる。digest と完全な resource identity の fence は同じまま適用する。minimum replay window 内の final、
+live / ambiguous outcome、expiry horizon 内の tombstone を上限回復だけのために捨てない。
 
 ### legacy record の adoption
 

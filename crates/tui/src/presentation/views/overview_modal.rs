@@ -5,7 +5,7 @@
 //! usage / long help も同じ固定位置に表示する。中央に浮かぶ枠付きダイアログとして
 //! 描く（配置は共通の [`modal`] widget に委譲）。
 //!
-//! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
+//! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render_over`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。キー入力の解釈は入力層が整うときに載せ、ここでは
 //! 入力編集と候補選択の純粋操作だけを公開する。
 
@@ -376,20 +376,6 @@ fn body(state: &OverviewModal) -> Vec<String> {
     lines
 }
 
-/// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
-    modal::render_body(
-        raw_height,
-        raw_width,
-        "Overview",
-        INNER_WIDTH,
-        BODY_HEIGHT,
-        body(state),
-    )
-}
-
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
 /// 小端末では [`modal::render_body_over`] が Home の帯を残す。サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
@@ -413,9 +399,13 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{OverviewModal, render, render_over};
+    use super::{OverviewModal, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::ModalSelectionMode;
+
+    fn render(height: usize, width: usize, state: &OverviewModal) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
 
     fn joined(state: &OverviewModal) -> String {
         render(24, 80, state)

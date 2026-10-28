@@ -86,8 +86,7 @@ pub(super) fn dispatch_session_action(
             .sessions()
             .lock()
             .ok()
-            .and_then(|runtime| runtime.snapshot().ok())
-            .and_then(|snapshot| snapshot.get("revision").and_then(serde_json::Value::as_u64))
+            .and_then(|runtime| runtime.revision().ok())
             .unwrap_or_default();
         Ok(usagi_daemon::usecase::session_runtime::SessionReply {
             operation_id: operation_id.to_owned(),

@@ -7,7 +7,6 @@
 
 mod decision;
 use decision::update_decision_editor;
-mod entry;
 mod new;
 mod notes;
 mod preview;
@@ -15,11 +14,7 @@ mod pull_requests;
 
 use chrono::{DateTime, Utc};
 
-pub use entry::{EntryEvent, EntryRoute, EntryState, EntryWorkspace, HomeSnapshot, update_entry};
-pub use new::{
-    NewEvent, NewForm, NewMode, NewRequest, NewRoute, NewState, NewValidationError, update_new,
-    validate_new_form,
-};
+pub use new::{NewForm, NewMode, NewRequest, NewValidationError, validate_new_form};
 pub use notes::{NoteCloseChoice, NoteEditor, NoteSection};
 pub use preview::{
     ArtifactOpenOutcome, ArtifactOpenState, PreviewCandidate, PreviewFileFilter, PreviewOverlay,
@@ -28,7 +23,6 @@ pub use preview::{
 pub use pull_requests::{PrFilter, PrOverlay};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
 use usagi_core::domain::id::{
@@ -1610,6 +1604,7 @@ impl AppState {
     /// A request is invisible and owns no input; the modal appears only once
     /// the daemon's snapshot proves there is something to show.
     #[must_use]
+    #[cfg(test)]
     pub const fn pr_request(&self) -> Option<Target> {
         self.pr_request
     }
@@ -1700,6 +1695,7 @@ impl AppState {
             .is_some_and(|until| self.mascot_tick <= *until)
     }
     #[must_use]
+    #[cfg(test)]
     pub fn role_catalog(&self) -> &SessionRoleCatalog {
         &self.role_catalog
     }
@@ -2678,28 +2674,6 @@ pub enum Effect {
         /// Whether the exact target is a diagnosed integrity orphan whose
         /// unregistered files and unmerged commits may be discarded.
         purge_orphan: bool,
-    },
-    /// Open a workspace and request the Home snapshot for this exact incarnation.
-    ///
-    /// The identity is deliberately not a name or path: a delayed completion for
-    /// a different workspace must never replace the Home currently being opened.
-    AttachWorkspace {
-        workspace: WorkspaceId,
-    },
-    /// Clone a repository through the backend git port, then register the
-    /// resulting project through its project/registry ports.
-    CloneProject {
-        repository: String,
-        destination: PathBuf,
-        branch: Option<String>,
-        token: PendingToken,
-    },
-    /// Register an already-existing directory through the backend
-    /// project/registry ports.
-    RegisterWorkspace {
-        path: PathBuf,
-        name: String,
-        token: PendingToken,
     },
     /// Detach this TUI client and end the process. The adapter owns the
     /// connection cleanup; this effect intentionally carries no terminal or

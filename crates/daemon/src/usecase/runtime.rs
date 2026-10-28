@@ -34,6 +34,7 @@ use super::{
         TerminalState,
     },
     metrics::AgentConcurrencyGauge,
+    resources::StoreError,
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         TerminalRegistry,
@@ -252,8 +253,7 @@ pub enum RuntimeSnapshotError {
 }
 
 pub trait RuntimeStore {
-    #[allow(clippy::result_unit_err)] // Persistence detail is intentionally erased at the usecase port.
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()>;
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError>;
 }
 /// Called exactly once by [`RuntimeCoordinator::launch`], before PTY spawn.
 /// A non-durable instruction to wrap the spawned child in an OS sandbox
@@ -445,6 +445,8 @@ pub enum RuntimeError {
     ConcurrencyExhausted,
     Terminal(RegistryError),
     Store,
+    /// The durable operation ledger refused a fresh reservation without writing.
+    RetentionBackpressure,
     Journal,
     SpawnFailed,
     ReconcileRequired(ReconcileState),
@@ -734,6 +736,7 @@ impl RuntimeCoordinator {
         {
             return Err(RuntimeError::ScopeMismatch);
         }
+        let generation_before = self.generation.clone();
         if self.generation.current().is_none() {
             self.generation
                 .register_standby(
@@ -824,11 +827,13 @@ impl RuntimeCoordinator {
         {
             return Err(RuntimeError::ScopeMismatch);
         }
+        let mut source_records = Vec::with_capacity(superseded_keys.len());
         for source in superseded_keys {
             let record = self
                 .records
                 .get_mut(&source)
                 .expect("validated resume source remains present");
+            source_records.push((source.clone(), record.clone()));
             record.superseded_by = Some(runtime.agent_runtime_id);
             // A replaced source is the least valuable history in its lineage:
             // it keeps its minimum TTL but is collected before anything else.
@@ -860,28 +865,6 @@ impl RuntimeCoordinator {
                         .map_err(RuntimeError::Generation)?;
                 }
             }
-            if !self.retention.mark_superseded(&source_terminal)
-                && matches!(
-                    self.retention.lookup(&source_terminal),
-                    FinalLookup::Unknown
-                )
-            {
-                // A restart-interrupted source has no in-memory final ledger
-                // entry. Once a successful resume reclaims it, import the
-                // bounded tombstone so the durable source can age out exactly
-                // like a normally exited source instead of living forever. An
-                // existing eviction marker remains authoritative and is never
-                // resurrected by resume.
-                let mut final_record = RetainedFinal::new(
-                    source_terminal.clone(),
-                    TerminalKind::Agent,
-                    RESTORED_FINAL_BYTES,
-                    self.retention.now(),
-                );
-                final_record.superseded = true;
-                self.retention.import_existing(final_record);
-            }
-            self.retention.set_pinned(&source_terminal, false);
         }
         self.records.insert(
             key.clone(),
@@ -910,7 +893,42 @@ impl RuntimeCoordinator {
                 debug_assert_eq!(error, GenerationError::TerminalOwnedElsewhere);
                 RuntimeError::Terminal(RegistryError::StaleTarget)
             })?;
-        self.persist(store)?; // durable reservation/snapshot precedes every external effect
+        let persistence = self.persist(store);
+        if persistence == Err(RuntimeError::RetentionBackpressure) {
+            self.records.remove(&key);
+            self.records.extend(source_records);
+            self.generation = generation_before;
+            self.publish_concurrency();
+            return persistence;
+        }
+        // A refusal above is effect zero. A successful or ambiguous save keeps
+        // the source transition and its derived retention bookkeeping together.
+        for (_, source) in source_records {
+            let source_terminal = source.runtime.terminal;
+            if !self.retention.mark_superseded(&source_terminal)
+                && matches!(
+                    self.retention.lookup(&source_terminal),
+                    FinalLookup::Unknown
+                )
+            {
+                // A restart-interrupted source has no in-memory final ledger
+                // entry. Once a successful resume reclaims it, import the
+                // bounded tombstone so the durable source can age out exactly
+                // like a normally exited source instead of living forever. An
+                // existing eviction marker remains authoritative and is never
+                // resurrected by resume.
+                let mut final_record = RetainedFinal::new(
+                    source_terminal.clone(),
+                    TerminalKind::Agent,
+                    RESTORED_FINAL_BYTES,
+                    self.retention.now(),
+                );
+                final_record.superseded = true;
+                self.retention.import_existing(final_record);
+            }
+            self.retention.set_pinned(&source_terminal, false);
+        }
+        persistence?; // durable reservation/snapshot precedes every external effect
         if let Err(error) = self.terminals.register(runtime.terminal.clone(), geometry) {
             // The store already contains a reservation. Keep it in memory too:
             // removing it would make a later actor believe a replacement is safe.
@@ -1861,9 +1879,10 @@ impl RuntimeCoordinator {
         // consults, and they already changed. A failed write must not leave the
         // observed level behind the level that refuses the next launch.
         self.publish_concurrency();
-        store
-            .save(self.snapshot())
-            .map_err(|()| RuntimeError::Store)
+        store.save(self.snapshot()).map_err(|error| match error {
+            StoreError::Unavailable => RuntimeError::Store,
+            StoreError::RetentionBackpressure => RuntimeError::RetentionBackpressure,
+        })
     }
     fn validate_scope(
         &self,

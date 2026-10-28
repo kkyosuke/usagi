@@ -59,11 +59,13 @@ use crate::usecase::resources::identity::{ChildIdentity, ChildObservation};
 use crate::usecase::resources::migration::{LegacyRuntimeRecord, UnknownRecord, adopt_legacy};
 use usagi_core::domain::clock::LogicalClock;
 
-use crate::usecase::resources::retention::{GcReport, RetentionLimits, collect_garbage};
+use crate::usecase::resources::retention::{
+    GcReport, RetentionLimits, collect_garbage, retain_for_admission,
+};
 use crate::usecase::resources::shard::{
     CollectionBlocker, OwnerShard, ShardDocument, ShardResource, collectable, retired_collectable,
 };
-use crate::usecase::resources::{CasDocument, CasFile, ResourceError, ResourceFailure};
+use crate::usecase::resources::{CasDocument, CasFile, ResourceError, ResourceFailure, StoreError};
 use crate::usecase::runtime::{DurableRuntimeRecord, RuntimeStore, RuntimeStoreSnapshot};
 use crate::usecase::terminal::TerminalRuntimeState;
 
@@ -339,6 +341,7 @@ pub struct ShardedRuntimeState {
     archive: Box<dyn ShardArchive + Send>,
     identity: Box<dyn IdentityAuthority + Send>,
     clock: Box<dyn LogicalClock + Send>,
+    retention_limits: RetentionLimits,
 }
 
 impl ShardedRuntimeState {
@@ -368,6 +371,7 @@ impl ShardedRuntimeState {
             archive,
             identity,
             clock,
+            retention_limits: shipping_retention_limits(),
         })
     }
 
@@ -526,12 +530,15 @@ impl ShardedRuntimeState {
     /// Returns a store failure. A shard that is not collectable is left alone
     /// rather than refused.
     pub fn collect_retired(&self, retained: &BTreeSet<String>) -> Result<usize, ResourceFailure> {
-        let allocator = self.allocator.load()?.to_document();
+        let snapshot = self.allocator.load()?;
+        let allocator = snapshot.document();
         let mut collected = 0;
         for document in self.retained()? {
+            if document.owner == self.owner {
+                continue;
+            }
             let collection_view = self.retired_collection_view(&document);
-            if document.owner == self.owner
-                || retired_collectable(&collection_view, &allocator).is_err()
+            if retired_collectable(&collection_view, allocator).is_err()
                 || document
                     .resources
                     .iter()
@@ -626,11 +633,12 @@ impl ShardedRuntimeState {
     /// # Errors
     /// Returns the shard or allocator read failure.
     pub fn self_collectable(&self) -> Result<Option<CollectionBlocker>, ResourceFailure> {
-        let allocator = self.allocator.load()?.to_document();
+        let snapshot = self.allocator.load()?;
+        let allocator = snapshot.document();
         let (_, swept) = self
             .shard
-            .update(|document| Ok(document.reclaim(&allocator)))?;
-        Ok(collectable(swept.document(), &allocator).err())
+            .update(|document| Ok(document.reclaim(allocator)))?;
+        Ok(collectable(swept.document(), allocator).err())
     }
 
     /// L1: every record that holds capacity has a durable claim first.
@@ -644,8 +652,14 @@ impl ShardedRuntimeState {
         let owner = self.owner;
         let now = self.clock.now();
         self.allocator.update(|document| {
+            let mut fresh = false;
             for projection in projections {
+                fresh |= projection.state.holds_capacity()
+                    && document.operation(&projection.operation).is_none();
                 claim_one(document, projection, owner, policy, now)?;
+            }
+            if fresh {
+                retain_for_admission(document, &self.retention_limits, now)?;
             }
             Ok(())
         })?;
@@ -683,9 +697,9 @@ impl ShardedRuntimeState {
             return Ok(0);
         }
         let report = ActiveConsumer::new(&self.allocator).consume(shard)?;
-        let consumed = self.allocator.load()?.to_document();
+        let consumed = self.allocator.load()?;
         self.shard
-            .update(|document| Ok(document.reclaim(&consumed)))?;
+            .update(|document| Ok(document.reclaim(consumed.document())))?;
         Ok(report.applied)
     }
 
@@ -1287,7 +1301,7 @@ impl ShardedAgentStore {
 }
 
 impl RuntimeStore for ShardedAgentStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         let projections: Vec<RuntimeProjection> = snapshot
             .records
             .iter()
@@ -1296,7 +1310,7 @@ impl RuntimeStore for ShardedAgentStore {
         self.state
             .commit(ResourceKind::Agent, &projections)
             .map(|_| ())
-            .map_err(|_| ())
+            .map_err(StoreError::from)
     }
 }
 
@@ -1320,7 +1334,7 @@ impl ShardedTerminalStore {
 }
 
 impl TerminalStore for ShardedTerminalStore {
-    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), StoreError> {
         let projections: Vec<RuntimeProjection> = snapshot
             .records
             .iter()
@@ -1329,7 +1343,7 @@ impl TerminalStore for ShardedTerminalStore {
         self.state
             .commit(ResourceKind::Terminal, &projections)
             .map(|_| ())
-            .map_err(|_| ())
+            .map_err(StoreError::from)
     }
 }
 

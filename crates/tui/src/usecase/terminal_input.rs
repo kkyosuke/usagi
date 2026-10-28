@@ -373,6 +373,7 @@ impl LiveInputClassifier {
 
     /// Returns whether a leader is still waiting at `now`.
     #[must_use]
+    #[cfg(test)]
     pub fn leader_pending(&self, now: Duration) -> bool {
         self.leader_at
             .is_some_and(|started| now.saturating_sub(started) < LEADER_TIMEOUT)

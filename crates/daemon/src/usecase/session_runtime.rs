@@ -18,8 +18,8 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
-    AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal,
-    OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
+    AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, ManagedSession,
+    OperationJournal, OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
 };
 use usagi_core::infrastructure::git::{GitRunner, delete_branch, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
@@ -29,8 +29,8 @@ use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_di
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
 use usagi_core::infrastructure::session_snapshot::{
-    SessionListItem, SessionListSnapshot, SessionRuntimeObservation, SessionStatusItem,
-    SessionStatusSnapshot, SessionWorktreeStatus,
+    SessionListItem, SessionListLifecycle, SessionListSnapshot, SessionRuntimeObservation,
+    SessionStatusItem, SessionStatusSnapshot, SessionWorktreeStatus,
 };
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
@@ -621,18 +621,6 @@ fn perform_create_from(
 /// hold the requesting connection past every client attempt deadline (TUI 2 s /
 /// CLI 10 s / MCP 30 s) and block the other requests queued on that connection.
 ///
-/// # Errors
-///
-/// Returns a typed safe error when the request cannot be admitted.
-pub fn perform_remove(
-    runtime: &Mutex<SessionRuntime>,
-    teardown: &TeardownSignal,
-    operation_id: &str,
-    payload: &Value,
-) -> Result<SessionReply, SessionRuntimeError> {
-    perform_remove_with_merged_head(runtime, teardown, operation_id, payload, None)
-}
-
 /// Admits a requested removal with an optional provider-verified merged PR head.
 /// The durable teardown rechecks this OID against the branch after removing the
 /// worktree, so commits added after the PR remain protected.
@@ -1069,7 +1057,7 @@ impl SessionRuntime {
                     operation_id: operation_id.to_owned(),
                     revision: state.state_revision,
                     body: projected_snapshot(
-                        &state,
+                        state,
                         self.root_worktree_id,
                         &self.data_home,
                         &self.repo_root,
@@ -1394,11 +1382,35 @@ impl SessionRuntime {
     pub fn snapshot(&self) -> Result<Value, SessionRuntimeError> {
         let state = self.state()?;
         Ok(projected_snapshot(
-            &state,
+            state,
             self.root_worktree_id,
             &self.data_home,
             &self.repo_root,
         ))
+    }
+
+    /// Read the durable revision without constructing a client snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable lifecycle state cannot be read.
+    pub fn revision(&self) -> Result<u64, SessionRuntimeError> {
+        Ok(self.state()?.state_revision)
+    }
+
+    /// Observe every session lifecycle without role lookup or JSON conversion.
+    /// Setup commands and creator credentials remain private recovery state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable lifecycle state cannot be read.
+    pub fn session_lifecycles(&self) -> Result<Vec<SessionListLifecycle>, SessionRuntimeError> {
+        Ok(self
+            .state()?
+            .sessions
+            .into_iter()
+            .map(observed_lifecycle)
+            .collect())
     }
 
     /// Resolves only an available, fully fenced managed session to a path.
@@ -2795,7 +2807,7 @@ fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
 }
 
 fn projected_snapshot(
-    state: &WorkspaceLifecycleState,
+    state: WorkspaceLifecycleState,
     root_worktree_id: WorktreeId,
     data_home: &Path,
     repo_root: &Path,
@@ -2804,9 +2816,8 @@ fn projected_snapshot(
         usagi_core::infrastructure::role_catalog::load_effective(data_home, repo_root).ok();
     let sessions = state
         .sessions
-        .iter()
-        .cloned()
-        .map(|mut session| {
+        .into_iter()
+        .map(|session| {
             let role_summary = session.role_id.as_ref().and_then(|id| {
                 catalog
                     .as_ref()?
@@ -2814,13 +2825,9 @@ fn projected_snapshot(
                     .get(id)
                     .map(|role| role.summary.clone())
             });
-            // Setup command bodies are durable recovery state, not client
-            // observation data. Keep them out of typed list projections just
-            // as mutation snapshots do below.
-            session.setup_plan = None;
             SessionListItem {
                 role_summary,
-                session: session.into(),
+                session: observed_lifecycle(session),
                 runtime: None.into(),
             }
         })
@@ -2832,6 +2839,12 @@ fn projected_snapshot(
         sessions,
     })
     .expect("typed lifecycle snapshot is serializable")
+}
+
+fn observed_lifecycle(mut session: ManagedSession) -> SessionListLifecycle {
+    // Setup command bodies are durable recovery state, not observation data.
+    session.setup_plan = None;
+    session.into()
 }
 
 /// The completion fence for one session operation, taken from the journal entry
