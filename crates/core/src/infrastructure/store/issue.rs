@@ -929,6 +929,45 @@ mod tests {
         assert!(source_issues(&store).is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn lenient_source_scan_rejects_dangling_directory_and_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        for dangling_ancestor in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            // This read goes directly through MarkdownStore::entry_files,
+            // without reserving issue numbers, locking, or repository discovery.
+            assert!(store.scan_sources_lenient().unwrap().is_empty());
+            let state = tmp.path().join(STATE_DIR);
+            assert!(!state.exists());
+            let link = if dangling_ancestor {
+                state
+            } else {
+                fs::create_dir(&state).unwrap();
+                store.dir().to_path_buf()
+            };
+            let target = PathBuf::from("missing-source-target");
+            symlink(&target, &link).unwrap();
+
+            let Err(error) = store.scan_sources_lenient() else {
+                panic!("a dangling source path must not look like an empty store");
+            };
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("failed to read {}", store.dir().display())
+            );
+            assert_eq!(fs::read_link(&link).unwrap(), target);
+            assert!(!link.parent().unwrap().join(&target).exists());
+            assert!(!store.index_path().exists());
+        }
+    }
+
     #[test]
     fn source_set_validation_rejects_corrupt_and_ambiguous_identities() {
         let tmp = tempfile::tempdir().unwrap();
