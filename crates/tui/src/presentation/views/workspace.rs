@@ -362,8 +362,6 @@ pub struct HomeProjection {
     session_states: SessionStateCounts,
     feedback: Option<Feedback>,
     mascot_tick: u64,
-    /// Presentation-only message. Runtime state currently supplies `None`; this
-    /// keeps a future event source out of the renderer and prevents dummy copy.
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,

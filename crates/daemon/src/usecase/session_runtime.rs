@@ -1812,7 +1812,7 @@ impl SessionRuntime {
     }
 
     /// Removes a session synchronously: admit, tear down, finalize, all on this
-    /// thread. The IPC path uses [`perform_remove`] plus the teardown worker
+    /// thread. The IPC path uses [`perform_remove_with_merged_head`] plus the teardown worker
     /// instead, so no client connection waits for the worktree effect.
     fn remove(
         &mut self,

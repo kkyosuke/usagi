@@ -162,8 +162,9 @@ impl ResourceFailure {
     }
 }
 
-/// The coordinator only rolls back reservations when persistence proves that
-/// neither durable object changed. Other failures may follow a partial write.
+/// The coordinator only rolls back reservations when this save proves that
+/// neither durable object changed. Earlier maintenance commits remain valid;
+/// other failures may follow a partial write within this save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
     Unavailable,

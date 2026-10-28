@@ -2969,9 +2969,10 @@ shipping store の新規 reservation は allocator の CAS 内で、追加後の
 4096 件・serialize 後 4 MiB の上限を検査する。revision 増加の byte 数も含め、競合時は最新 document で再検査する。
 上限を超える場合は同じ candidate に安全な GC 段階を適用し、reservation と一緒に commit する。収まらなければ
 GC も reservation も保存せず、typed retention backpressure（IPC `resource_exhausted`）で拒否する。
-拒否された新規 record・resume source の変更・process-local reservation も戻すため、allocator / shard の書込や
-PTY spawn は起こらず、拒否された起動が capacity や resume source を占有し続けない。IPC の producer operation
-に対する既存の idempotency 契約は変えず、記録済みの refusal の再送は同じ結果を返す。
+拒否された新規 record・resume source の変更・process-local reservation も戻すため、当該 reservation による
+allocator / shard の書込や PTY spawn は起こらず、拒否された起動が capacity や resume source を占有し続けない。
+起動前に行う既存 Terminal final の GC は独立した処理であり、その保存は admission の拒否で戻さない。
+IPC の producer operation に対する既存の idempotency 契約は変えず、記録済みの refusal の再送は同じ結果を返す。
 
 既存 operation の exact replay、finalization、exit と partial-write retry は新規 admission ではなく、上限下でも
 進行できる。digest と完全な resource identity の fence は同じまま適用する。minimum replay window 内の final、
