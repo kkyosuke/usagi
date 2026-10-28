@@ -951,9 +951,10 @@ mod tests {
             let target = PathBuf::from("missing-source-target");
             symlink(&target, &link).unwrap();
 
-            let Err(error) = store.scan_sources_lenient() else {
-                panic!("a dangling source path must not look like an empty store");
-            };
+            let error = store
+                .scan_sources_lenient()
+                .err()
+                .expect("a dangling source path must not look like an empty store");
             assert_eq!(
                 error.downcast_ref::<std::io::Error>().unwrap().kind(),
                 std::io::ErrorKind::NotFound
