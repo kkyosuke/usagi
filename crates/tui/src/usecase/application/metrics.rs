@@ -33,6 +33,14 @@ pub struct GitDiff {
     pub removed: usize,
 }
 
+/// Last completed artifact scan. A failed scan is distinct from an empty list;
+/// sessions without an observation have not been scanned yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCount {
+    Ready(usize),
+    Unavailable,
+}
+
 /// One changed metrics / git-diff observation returned by [`MetricsBackend`].
 ///
 /// A poll may yield any changed observations. The shell applies them to
@@ -43,8 +51,8 @@ pub enum MetricsUpdate {
     Metrics(Option<DaemonMetrics>),
     /// The latest completed per-session git diffs.
     GitDiffs(BTreeMap<SessionId, GitDiff>),
-    /// Regular generated files observed in each session's artifact directory.
-    ArtifactCounts(BTreeMap<SessionId, usize>),
+    /// Deliverable counts or scan failures for each session's artifact directory.
+    ArtifactCounts(BTreeMap<SessionId, ArtifactCount>),
 }
 
 /// Pulls the latest safe daemon observation at an application polling boundary.
@@ -66,7 +74,7 @@ pub trait MetricsPort {
 pub struct MetricsProjection {
     metrics: Option<DaemonMetrics>,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
-    artifact_counts: Arc<BTreeMap<SessionId, usize>>,
+    artifact_counts: Arc<BTreeMap<SessionId, ArtifactCount>>,
     /// Diagnostic-only daemon health, folded from the same drained samples.
     ///
     /// It lives beside the metrics cache because health is a projection *of*
@@ -134,9 +142,9 @@ impl MetricsProjection {
         Arc::clone(&self.git_diffs)
     }
 
-    /// Shared artifact observations; absent and zero counts draw no badge.
+    /// Shared artifact observations; failures retain an entry distinct from zero.
     #[must_use]
-    pub fn shared_artifact_counts(&self) -> Arc<BTreeMap<SessionId, usize>> {
+    pub fn shared_artifact_counts(&self) -> Arc<BTreeMap<SessionId, ArtifactCount>> {
         Arc::clone(&self.artifact_counts)
     }
 
@@ -188,7 +196,7 @@ impl MetricsBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitDiff, MetricsPort};
+    use super::{ArtifactCount, GitDiff, MetricsPort};
     use super::{MetricsBackend, MetricsProjection, MetricsUpdate};
     use crate::usecase::application::daemon_health::DaemonHealthTracker;
     use std::cell::RefCell;
@@ -347,10 +355,10 @@ mod tests {
     }
 
     #[test]
-    fn artifact_updates_invalidate_the_frame_only_when_counts_change() {
+    fn artifact_updates_invalidate_the_frame_only_when_observations_change() {
         let session = SessionId::new();
         let mut projection = MetricsProjection::default();
-        let counts = BTreeMap::from([(session, 2)]);
+        let counts = BTreeMap::from([(session, ArtifactCount::Ready(2))]);
         assert!(projection.shared_artifact_counts().is_empty());
         projection.apply(MetricsUpdate::ArtifactCounts(counts.clone()));
         assert_eq!(projection.shared_artifact_counts().as_ref(), &counts);
@@ -362,9 +370,19 @@ mod tests {
             &shared,
             &projection.shared_artifact_counts()
         ));
+        let unavailable = BTreeMap::from([(session, ArtifactCount::Unavailable)]);
+        projection.apply(MetricsUpdate::ArtifactCounts(unavailable.clone()));
+        assert_eq!(projection.shared_artifact_counts().as_ref(), &unavailable);
+        assert_eq!(projection.generation(), 2);
+        projection.apply(MetricsUpdate::ArtifactCounts(unavailable));
+        assert_eq!(projection.generation(), 2);
+        let empty = BTreeMap::from([(session, ArtifactCount::Ready(0))]);
+        projection.apply(MetricsUpdate::ArtifactCounts(empty.clone()));
+        assert_eq!(projection.shared_artifact_counts().as_ref(), &empty);
+        assert_eq!(projection.generation(), 3);
         projection.apply(MetricsUpdate::ArtifactCounts(BTreeMap::new()));
         assert!(projection.shared_artifact_counts().is_empty());
-        assert_eq!(projection.generation(), 2);
+        assert_eq!(projection.generation(), 4);
     }
 
     #[test]

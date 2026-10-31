@@ -346,7 +346,10 @@ fn sidebar_pointer_adapter_uses_the_frame_on_screen_and_keeps_its_identity() {
         None,
         health(),
         std::sync::Arc::new(BTreeMap::new()),
-        std::sync::Arc::new(BTreeMap::from([(first, 2)])),
+        std::sync::Arc::new(BTreeMap::from([(
+            first,
+            crate::usecase::application::metrics::ArtifactCount::Ready(2),
+        )])),
         None,
         None,
         None,

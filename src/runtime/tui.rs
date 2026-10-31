@@ -93,7 +93,9 @@ use usagi_tui::usecase::application::daemon_backend::{
     DecisionPort as BackendDecisionPort, OverlayPort as BackendOverlayPort,
     TargetStorePort as BackendTargetStorePort, WorkspaceCommandPort as BackendWorkspaceCommandPort,
 };
-use usagi_tui::usecase::application::metrics::{GitDiff, MetricsPort, MetricsUpdate};
+use usagi_tui::usecase::application::metrics::{
+    ArtifactCount, GitDiff, MetricsPort, MetricsUpdate,
+};
 use usagi_tui::usecase::application::pr::BrowserOpener;
 use usagi_tui::usecase::application::runtime_ports::{
     DecisionCommandPort, EnvironmentStorePort, ExternalTerminalPort, RestoreConnectionPort,
@@ -1372,7 +1374,7 @@ impl SessionRefreshPort for DaemonSessionRefreshPort {
 struct SessionSidebarObservation {
     session: SessionId,
     git_diff: Option<GitDiff>,
-    artifact_count: usize,
+    artifact_count: ArtifactCount,
 }
 
 /// The mascot's metrics and the sidebar's Git and artifact observations.
@@ -1386,7 +1388,7 @@ struct DaemonMetricsPort {
     metrics: RefreshPump<Option<DaemonMetrics>>,
     latest: Option<DaemonMetrics>,
     git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
-    artifact_counts: BTreeMap<SessionId, usize>,
+    artifact_counts: BTreeMap<SessionId, ArtifactCount>,
     git_sessions: Vec<(usagi_core::domain::id::SessionId, PathBuf)>,
     git_receiver: Option<mpsc::Receiver<SessionSidebarObservation>>,
     last_git_refresh: Option<Instant>,
@@ -1481,7 +1483,9 @@ impl MetricsPort for DaemonMetricsPort {
                     let artifact_count = usagi_core::infrastructure::artifacts::presented_files(
                         &path.join(usagi_core::infrastructure::artifacts::ARTIFACTS_DIR),
                     )
-                    .map_or(0, |files| files.len());
+                    .map_or(ArtifactCount::Unavailable, |files| {
+                        ArtifactCount::Ready(files.len())
+                    });
                     let git_diff =
                         diff_status(&runner, &path)
                             .ok()

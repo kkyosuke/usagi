@@ -3,6 +3,8 @@
 use std::io;
 use std::sync::mpsc;
 
+use crate::usecase::application::metrics::ArtifactCount;
+
 use super::{
     AgentTabIntentMutation, AppEvent, AppKey, AppState, Arc, AvailableAgentModels, BTreeMap,
     BTreeSet, BackendEvent, BackendFlow, Color, Completions, Config, ConfigStep, ConfirmationView,
@@ -191,7 +193,7 @@ pub(super) fn home_frame_material_shared(
     metrics: Option<usagi_core::infrastructure::ipc::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
-    artifact_counts: Arc<BTreeMap<SessionId, usize>>,
+    artifact_counts: Arc<BTreeMap<SessionId, ArtifactCount>>,
     managed_terminal_view: Option<Arc<TerminalViewProjection>>,
     root_terminal_view: Option<&TerminalViewProjection>,
     create_pending: Option<&str>,

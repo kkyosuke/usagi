@@ -14,6 +14,7 @@ mod session;
 
 use super::*;
 use crate::usecase::application::environment_source::parse_environment_source;
+use crate::usecase::application::metrics::ArtifactCount;
 use std::collections::VecDeque;
 
 /// effect を実行し、backend event を取り出す TUI-local port。
@@ -126,7 +127,13 @@ fn pointer_event(state: &AppState, column: u16, row: u16, at: std::time::Duratio
             })
             .collect::<Vec<_>>();
         let home = HomeProjection::from_state(state, "test", &sessions).with_artifact_counts(
-            std::sync::Arc::new(state.sessions().iter().map(|id| (*id, 1)).collect()),
+            std::sync::Arc::new(
+                state
+                    .sessions()
+                    .iter()
+                    .map(|id| (*id, ArtifactCount::Ready(1)))
+                    .collect(),
+            ),
         );
         sidebar_pointer_target(
             usize::from(height),

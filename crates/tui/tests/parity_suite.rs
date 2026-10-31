@@ -21,7 +21,7 @@ use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, Feedback, Overlay, SafeError, SafeMessage,
     TabDirection, Target, TargetPhase, update,
 };
-use usagi_tui::usecase::application::metrics::GitDiff;
+use usagi_tui::usecase::application::metrics::{ArtifactCount, GitDiff};
 use usagi_tui::usecase::application::pane::{
     PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
 };
@@ -488,7 +488,10 @@ fn home_frame_golden_covers_sidebar_git_diffs() {
     ]);
     let home = HomeProjection::from_state(&state, "atlas", &[alpha, beta])
         .with_git_diffs(&diffs)
-        .with_artifact_counts(std::sync::Arc::new(BTreeMap::from([(first, 2)])));
+        .with_artifact_counts(std::sync::Arc::new(BTreeMap::from([(
+            first,
+            ArtifactCount::Ready(2),
+        )])));
 
     let actual = render_home(14, 60, &home)
         .iter()
