@@ -92,6 +92,17 @@ jobs:
         ruby scripts/coverage-report-comment.rb coverage.json > coverage-comment.md
         cat coverage-comment.md >> "$GITHUB_STEP_SUMMARY"
 
+    - name: Preserve complete coverage reports
+      if: always() && hashFiles('coverage.json') != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: coverage-report-${{ github.sha }}-${{ github.run_attempt }}
+        path: |
+          coverage.json
+          lcov.info
+          coverage-comment.md
+        retention-days: 7
+
     # PR コメントは同一リポジトリの PR に限定する。fork PR は token が read-only に
     # 降格されコメントできないため Job Summary にフォールバックする。continue-on-error で
     # コメント投稿の失敗が coverage gate（下の Enforce step の exit code）に波及しないようにする。
