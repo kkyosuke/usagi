@@ -1648,8 +1648,14 @@ mod tests {
 
         let paths = authority.legacy_v2_sequences().unwrap();
         assert!(authority.shared_legacy_sequence().is_none());
-        assert!(authority.registered_worktrees().unwrap().is_empty());
-        assert!(authority.materialized_git_issue_roots().unwrap().is_empty());
+        assert_eq!(
+            authority.registered_worktrees().unwrap(),
+            [] as [PathBuf; 0]
+        );
+        assert_eq!(
+            authority.materialized_git_issue_roots().unwrap(),
+            [] as [PathBuf; 0]
+        );
         assert!(
             paths
                 .iter()

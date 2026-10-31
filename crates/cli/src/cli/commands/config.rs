@@ -22,6 +22,6 @@ mod tests {
     fn requests_config_without_output() {
         let (outcome, output) = execute(Command::Config);
         assert_eq!(outcome, RunOutcome::LaunchTui(TuiRequest::Config));
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 }

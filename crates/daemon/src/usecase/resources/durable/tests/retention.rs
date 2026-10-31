@@ -203,7 +203,10 @@ fn admission_collects_only_safe_history_in_the_same_allocator_commit() {
     let after = world.allocator();
     assert_eq!(after.revision, 1, "collection and admission share one CAS");
     assert!(after.operation(&old).is_none());
-    assert!(after.tombstones.is_empty());
+    assert_eq!(
+        after.tombstones,
+        [] as [crate::usecase::resources::allocator::OperationTombstone; 0]
+    );
     assert_eq!(after.watermark, Some(old));
     assert!(after.operation(&record.operation.operation_id).is_some());
     assert_eq!(
@@ -398,7 +401,10 @@ fn coordinator_rolls_back_an_effect_zero_shipping_refusal_before_spawn() {
             ),
             Err(GenericTerminalError::RetentionBackpressure)
         );
-        assert!(coordinator.snapshot().records.is_empty());
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
         assert_eq!(coordinator.retention().metrics().reserved_finals, 0);
         assert!(world.allocator.get().is_none());
         assert!(world.archive.bytes(owner).get().is_none());

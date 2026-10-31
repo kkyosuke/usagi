@@ -217,7 +217,7 @@ mod tests {
                 hook_event: None,
             }
         );
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 
     #[test]

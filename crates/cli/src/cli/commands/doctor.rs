@@ -27,6 +27,6 @@ mod tests {
             outcome,
             RunOutcome::LaunchTui(TuiRequest::Doctor { fix: false })
         );
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 }

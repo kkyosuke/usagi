@@ -3056,7 +3056,7 @@ mod tests {
 
         assert!(!socket.exists());
         assert!(!daemon.join("current.json").exists());
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -3336,7 +3336,7 @@ mod tests {
 
         assert_eq!(read_locator(&daemon).unwrap(), *listener.locator());
         assert_eq!(fs::read(orphan).unwrap(), b"orphan");
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
         let client = connect_current(temp.path()).unwrap();
         let accepted = listener.accept().unwrap();
         drop((client, accepted));
@@ -3367,7 +3367,7 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert!(!current.exists());
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
         let hardlink = daemon.join(LOCATOR_HARDLINK_ALIAS);
         assert!(hardlink.exists());
         assert_eq!(fs::metadata(&hardlink).unwrap().nlink(), 1);
@@ -3429,11 +3429,11 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(!target.exists());
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
 
         write_locator_unverified(&daemon, &locator).unwrap();
         assert_eq!(read_locator(&daemon).unwrap(), locator);
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -3618,7 +3618,7 @@ mod tests {
         assert!(replacement_socket.exists());
         assert!(!attempted_dir.join(".sock.bind").exists());
         assert!(!attempted_dir.join("sock").exists());
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
         let client = connect_current(temp.path()).unwrap();
         let accepted = replacement.accept().unwrap();
         drop((client, accepted));
@@ -3646,7 +3646,7 @@ mod tests {
         assert_eq!(read_locator(&daemon).unwrap(), old_locator);
         assert!(!attempted_dir.join(".sock.bind").exists());
         assert!(!attempted_dir.join("sock").exists());
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
         let client = connect_current(temp.path()).unwrap();
         let accepted = old.accept().unwrap();
         drop((client, accepted));
@@ -3668,7 +3668,7 @@ mod tests {
         write_locator_unverified(&daemon, &locator).unwrap();
 
         assert_eq!(read_locator(&daemon).unwrap(), locator);
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -3701,7 +3701,7 @@ mod tests {
             assert_eq!(metadata.mode() & 0o777, SOCKET_MODE);
             assert_eq!(metadata.nlink(), 1);
             assert_eq!(read_locator(&daemon)?, *listener.locator());
-            assert!(locator_temp_names(&daemon).is_empty());
+            assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
             Ok::<_, io::Error>(())
         })();
         // SAFETY: restores the value returned by the paired umask call above.
@@ -4143,7 +4143,7 @@ mod tests {
 
         let published = read_locator(&daemon).unwrap();
         assert!(published == first || published == second);
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -4158,7 +4158,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &path).unwrap();
         assert!(read_locator(&daemon).is_err());
         assert!(write_locator_unverified(&daemon, &locator()).is_err());
-        assert!(locator_temp_names(&daemon).is_empty());
+        assert_eq!(locator_temp_names(&daemon), [] as [std::string::String; 0]);
 
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();

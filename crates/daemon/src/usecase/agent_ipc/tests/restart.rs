@@ -654,12 +654,12 @@ fn daemon_restart_plan_refuses_every_unprovable_agent_authority() {
         )
         .unwrap();
     historical.exit(&exited.terminal, 0).unwrap();
-    assert!(
+    assert_eq!(
         historical
             .plan_daemon_restart_agents(&expected, true)
             .unwrap()
-            .agents
-            .is_empty()
+            .agents,
+        [] as [usagi_core::domain::agent::DaemonRestartAgent; 0]
     );
 }
 

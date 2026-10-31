@@ -244,8 +244,14 @@ fn fresh_admission_rejects_decision_authority_from_another_conversation_before_e
             Err(RuntimeError::ScopeMismatch)
         );
         assert_eq!(resolver.calls, 0);
-        assert!(store.0.is_empty());
-        assert!(coordinator.snapshot().records.is_empty());
+        assert_eq!(
+            store.0,
+            [] as [crate::usecase::runtime::RuntimeStoreSnapshot; 0]
+        );
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+        );
     }
 }
 
@@ -1009,15 +1015,18 @@ fn closing_an_empty_session_converges_without_a_terminal_snapshot() {
     let mut store = Store::default();
     let mut spawner = CompensatingSpawner { terminated: false };
 
-    assert!(
+    assert_eq!(
         coordinator
             .close_session(SessionId::new(), &mut store, &mut spawner)
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [usagi_core::domain::id::AgentRuntimeRef; 0]
     );
     assert!(!spawner.terminated);
     assert_eq!(store.0.len(), 1, "only the converging save is required");
-    assert!(store.0[0].records.is_empty());
+    assert_eq!(
+        store.0[0].records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1060,7 +1069,10 @@ fn closing_a_session_terminates_and_forgets_its_agent_runtime() {
 
     assert!(spawner.terminated);
     assert_eq!(closed, [runtime]);
-    assert!(coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
     coordinator.snapshot().validate_ownership().unwrap();
     assert_eq!(
         store.0[store.0.len() - 2].records[0].state,
@@ -1073,7 +1085,10 @@ fn closing_a_session_terminates_and_forgets_its_agent_runtime() {
         .unwrap();
     assert_eq!(provider.last_known_status, ProviderResumeStatus::Exited);
     assert_eq!(provider.last_known_phase, Some(ProviderResumePhase::Ended));
-    assert!(store.0.last().unwrap().records.is_empty());
+    assert_eq!(
+        store.0.last().unwrap().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1137,13 +1152,19 @@ fn closing_a_session_forgets_an_agent_that_already_exited() {
         [runtime]
     );
     assert!(!spawner.terminated);
-    assert!(coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
     assert_eq!(
         store.0[store.0.len() - 2].records[0].state,
         RuntimeState::Reclaimed,
         "the acknowledged terminal state is durable before removal"
     );
-    assert!(store.0.last().unwrap().records.is_empty());
+    assert_eq!(
+        store.0.last().unwrap().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1256,7 +1277,10 @@ fn closing_a_reconciled_session_persists_termination_before_forgetting_it() {
         RuntimeState::Reclaimed,
         "startup reconciliation remains durable long enough to release a foreign claim"
     );
-    assert!(store.0.last().unwrap().records.is_empty());
+    assert_eq!(
+        store.0.last().unwrap().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1718,7 +1742,10 @@ fn inventory_lists_only_in_scope_agents_and_marks_live_until_exit() {
         session_id: Some(SessionId::new()),
         worktree_id: request.scope.worktree_id,
     };
-    assert!(c.inventory(&foreign).is_empty());
+    assert_eq!(
+        c.inventory(&foreign),
+        [] as [usagi_core::domain::terminal_launch::TerminalInventoryEntry; 0]
+    );
 
     // After the Agent exits it is no longer attachable (`live == false`).
     c.exit(&runtime, 0, &mut store).unwrap();
@@ -2538,13 +2565,19 @@ fn a_collected_agent_final_leaves_no_record_and_answers_typed() {
     clock.advance(1000);
     retention.collect();
     assert_eq!(coordinator.collect_garbage(&mut store), 1);
-    assert!(coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
     let scope = usagi_core::domain::terminal_launch::TerminalLaunchScope {
         workspace_id: runtime.terminal.workspace_id,
         session_id: runtime.terminal.session_id,
         worktree_id: runtime.terminal.worktree_id,
     };
-    assert!(coordinator.completed_inventory(&scope).is_empty());
+    assert_eq!(
+        coordinator.completed_inventory(&scope),
+        [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+    );
     assert_eq!(
         coordinator.terminal_snapshot(&runtime),
         Err(RuntimeError::FinalEvicted(
@@ -2724,8 +2757,14 @@ fn a_reclaimed_resume_source_ages_out_without_leaving_generation_ownership() {
     restored.collect();
     assert_eq!(restarted.collect_garbage(&mut store), 1);
     let collected = restarted.snapshot();
-    assert!(collected.records.is_empty());
-    assert!(collected.generation.terminals.is_empty());
+    assert_eq!(
+        collected.records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
+    assert_eq!(
+        collected.generation.terminals,
+        [] as [crate::usecase::generation::TerminalOwnership; 0]
+    );
     collected.validate_ownership().unwrap();
 }
 

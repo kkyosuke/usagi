@@ -231,9 +231,7 @@ impl Open {
             OpenView::Projects => {
                 let marked = self.unite_paths();
                 if marked.is_empty() {
-                    self.selected()
-                        .map(|w| vec![w.path.clone()])
-                        .unwrap_or_default()
+                    self.selected().map_or_default(|w| vec![w.path.clone()])
                 } else {
                     marked
                 }
@@ -838,7 +836,7 @@ mod tests {
         assert!(history_lines(80, &open, 6).join("\n").contains('↑'));
         open.toggle_unite_member();
         open.request_unregister();
-        assert!(open.unite_paths().is_empty());
+        assert_eq!(open.unite_paths(), [] as [std::path::PathBuf; 0]);
         assert!(open.unregistering_path().is_none());
         let group_time = open.history[0].updated_at();
         open.remove_paths(&["/tmp/alpha".into()]);
@@ -850,7 +848,7 @@ mod tests {
         open.remove_paths(&["/tmp/beta".into()]);
         assert_eq!(open.history.len(), 12);
         open.cycle_view();
-        assert!(open.chosen_paths().is_empty());
+        assert_eq!(open.chosen_paths(), [] as [std::path::PathBuf; 0]);
         open.select_next();
         open.select_prev();
     }
@@ -1027,7 +1025,7 @@ mod tests {
     fn unite_members_follow_registry_order_and_cleanup_removes_them() {
         let mut empty = Open::new(Vec::new());
         empty.toggle_unite_member();
-        assert!(empty.unite_paths().is_empty());
+        assert_eq!(empty.unite_paths(), [] as [std::path::PathBuf; 0]);
 
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
         open.toggle_unite_member();

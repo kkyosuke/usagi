@@ -556,7 +556,7 @@ mod tests {
             ["artifacts/assets/data.json"]
         );
         fs::write(output.join(ARTIFACT_INDEX), "[]").unwrap();
-        assert!(list(&session, false).unwrap().is_empty());
+        assert_eq!(list(&session, false).unwrap(), [] as [String; 0]);
         assert_eq!(files(&output).unwrap().len(), 6);
     }
 
@@ -659,8 +659,8 @@ mod tests {
     #[test]
     fn missing_artifacts_are_empty_and_non_directories_or_links_are_refused() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(list(temp.path(), false).unwrap().is_empty());
-        assert!(list(temp.path(), true).unwrap().is_empty());
+        assert_eq!(list(temp.path(), false).unwrap(), [] as [String; 0]);
+        assert_eq!(list(temp.path(), true).unwrap(), [] as [String; 0]);
         assert!(archive(temp.path()).unwrap().is_none());
         fs::write(temp.path().join("artifacts"), "occupied").unwrap();
         assert!(prepare(temp.path()).is_err());
@@ -722,7 +722,7 @@ mod tests {
         let (result, warnings) = archive_with_warnings(&session, false);
         let error = result.unwrap_err();
         assert!(error.to_string().contains("--force"));
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, [] as [String; 0]);
         let (result, warnings) = archive_with_warnings(&session, true);
         result.unwrap();
         assert_eq!(warnings.len(), 1);
@@ -743,7 +743,7 @@ mod tests {
             fs::write(session.join("artifacts/report.txt"), "report").unwrap();
             let (result, warnings) = archive_with_warnings(&session, force);
             result.unwrap();
-            assert!(warnings.is_empty());
+            assert_eq!(warnings, [] as [String; 0]);
             let snapshots = temp
                 .path()
                 .join(".usagi/artifacts")
@@ -857,7 +857,7 @@ mod tests {
         assert!(files(&many).is_err());
         let (result, warnings) = archive_with_warnings(&session, false);
         assert!(result.is_err());
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, [] as [String; 0]);
         let (result, warnings) = archive_with_warnings(&session, true);
         result.unwrap();
         assert_eq!(warnings.len(), 1);

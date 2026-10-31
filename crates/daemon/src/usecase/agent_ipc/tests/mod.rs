@@ -940,7 +940,10 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     let launch_intent = intent(None);
     let workspace = launch_intent.workspace;
-    assert!(runtime.cache_cleanup_activity(workspace).is_empty());
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     let admission = runtime
         .launch(
             &OperationId::new().to_string(),
@@ -957,10 +960,9 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
             super::super::runtime::RuntimeState::Running
         )]
     );
-    assert!(
-        runtime
-            .cache_cleanup_activity(WorkspaceId::new())
-            .is_empty()
+    assert_eq!(
+        runtime.cache_cleanup_activity(WorkspaceId::new()),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
     );
     let running_snapshot = runtime.coordinator.snapshot();
     for (state, ownership_state, expected) in [
@@ -1014,7 +1016,10 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
     assert_eq!(runtime.retirement_blocker_count(workspace), 0);
-    assert!(runtime.cache_cleanup_activity(workspace).is_empty());
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     assert!(runtime.reported_phases.is_empty());
     assert!(
         !runtime
@@ -1284,11 +1289,9 @@ fn session_close_removes_the_agent_from_runtime_inventory_and_replay() {
         [session].into_iter().collect()
     );
     assert_eq!(runtime.close_session(session).unwrap(), 1);
-    assert!(
-        runtime
-            .inventory(launch_intent.workspace)
-            .runtimes
-            .is_empty()
+    assert_eq!(
+        runtime.inventory(launch_intent.workspace).runtimes,
+        [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
     );
     assert!(runtime.managed_session_ids().is_empty());
     assert!(!runtime.operations.contains_key(&operation));

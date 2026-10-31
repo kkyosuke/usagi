@@ -274,7 +274,7 @@ mod tests {
     fn an_empty_query_matches_everything_without_positions() {
         let matched = fuzzy_match("crates/tui/src/lib.rs", "").unwrap();
         assert_eq!(matched.score(), 0);
-        assert!(cells(matched).is_empty());
+        assert_eq!(cells(matched), [] as [usize; 0]);
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
     fn an_empty_query_keeps_every_path_at_rank_zero() {
         let matched = path_match("src/lib.rs", "").unwrap();
         assert_eq!(matched.score(), 0);
-        assert!(cells(matched).is_empty());
+        assert_eq!(cells(matched), [] as [usize; 0]);
         assert_eq!(path_match("src/lib.rs", "zz"), None);
     }
     #[test]

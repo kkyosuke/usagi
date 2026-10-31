@@ -365,7 +365,10 @@ fn a_compacted_or_below_watermark_operation_can_never_be_admitted_again() {
         ),
         Err(ResourceError::OperationExpired)
     );
-    assert!(document.claims.is_empty());
+    assert_eq!(
+        document.claims,
+        [] as [crate::usecase::resources::allocator::ResourceClaim; 0]
+    );
     assert_eq!(document.tombstone(&old), None);
 }
 

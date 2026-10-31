@@ -2116,7 +2116,10 @@ mod tests {
         // cached list is not evidence that the project owns no Agents.
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(!plot.agents_observed);
-        assert!(plot.agents.is_empty());
+        assert_eq!(
+            plot.agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
 
         let live = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
         let closed = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
@@ -2156,7 +2159,10 @@ mod tests {
         assert!(deck.apply_garden_inventory(&inventory(beta.workspace_id, Vec::new())));
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(plot.agents_observed);
-        assert!(plot.agents.is_empty());
+        assert_eq!(
+            plot.agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
         assert_eq!(plot.agent_status, None);
     }
 
@@ -2186,7 +2192,10 @@ mod tests {
         )));
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(!plot.agents_observed);
-        assert!(plot.agents.is_empty());
+        assert_eq!(
+            plot.agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
     }
 
     /// Rebuilding a slot's cache — the active tab's sessions changing, or a tab

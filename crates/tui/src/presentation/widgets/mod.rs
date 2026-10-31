@@ -790,8 +790,8 @@ mod tests {
 
     #[test]
     fn wrap_to_width_zero_yields_no_lines() {
-        assert!(wrap_to_width("abc", 0).is_empty());
-        assert!(wrap_to_width("", 5).is_empty());
+        assert_eq!(wrap_to_width("abc", 0), [] as [String; 0]);
+        assert_eq!(wrap_to_width("", 5), [] as [String; 0]);
     }
 
     #[test]

@@ -2006,7 +2006,7 @@ impl DispatchStore {
         // crash between compaction and append from leaving an ACK watermark
         // above an empty journal's published range. An unread tail already
         // provides that durable sequence floor.
-        let sequence_floor = usize::from(records.last().is_some_and(&is_read));
+        let sequence_floor = usize::from(records.last().is_some_and(is_read));
         let replay_floor = self.limits.inbox_read_replay_floor.max(sequence_floor);
         let removable = read_count.saturating_sub(replay_floor);
         let retention_excess = read_count
@@ -2340,7 +2340,10 @@ mod tests {
 
         assert_eq!(store.upsert_binding(binding.clone()).unwrap(), binding);
         assert_eq!(store.binding(binding.run_id).unwrap(), Some(binding));
-        assert!(store.load_workspace_registry().unwrap().lineages.is_empty());
+        assert_eq!(
+            store.load_workspace_registry().unwrap().lineages,
+            [] as [SessionLineage; 0]
+        );
     }
 
     #[test]
@@ -3533,12 +3536,12 @@ mod tests {
             session_id: Some(session),
             agent_id,
         };
-        assert!(
+        assert_eq!(
             store
                 .inbox_page(&caller, None, 1, true, None)
                 .unwrap()
-                .messages
-                .is_empty()
+                .messages,
+            [] as [InboxMessage; 0]
         );
         for limit in [0, INBOX_PAGE_MAX + 1] {
             assert!(store.inbox_page(&caller, None, limit, false, None).is_err());
@@ -3564,12 +3567,12 @@ mod tests {
         let since_epoch = Utc.timestamp_opt(0, 0).single().unwrap();
         let page = store.inbox_page(&caller, None, 2, false, Some(since_epoch));
         assert_eq!(page.unwrap().messages.len(), 2);
-        assert!(
+        assert_eq!(
             store
                 .inbox_page(&caller, None, 2, false, Some(now()))
                 .unwrap()
-                .messages
-                .is_empty()
+                .messages,
+            [] as [InboxMessage; 0]
         );
         assert_eq!(
             store.inbox_page(&caller, None, 2, true, None).unwrap(),
@@ -3591,12 +3594,12 @@ mod tests {
         assert_eq!(unread.messages[0].run_id, run_ids[2]);
         assert_eq!(unread.next_cursor.next_sequence, 4);
         reopened.ack_inbox(&caller, unread.next_cursor).unwrap();
-        assert!(
+        assert_eq!(
             reopened
                 .inbox_page(&caller, None, 2, true, None)
                 .unwrap()
-                .messages
-                .is_empty()
+                .messages,
+            [] as [InboxMessage; 0]
         );
         assert!(
             reopened
@@ -3746,19 +3749,19 @@ mod tests {
             session_id: Some(session),
             agent_id,
         };
-        assert!(store.inbox(&caller).unwrap().is_empty());
+        assert_eq!(store.inbox(&caller).unwrap(), [] as [InboxMessage; 0]);
         fs::create_dir_all(store.inbox_path(&caller).parent().unwrap()).unwrap();
         fs::write(store.inbox_path(&caller), "broken\nalso-broken\n").unwrap();
         assert!(store.inbox(&caller).is_err());
         fs::write(store.inbox_path(&caller), "{final-torn").unwrap();
-        assert!(store.inbox(&caller).unwrap().is_empty());
+        assert_eq!(store.inbox(&caller).unwrap(), [] as [InboxMessage; 0]);
         let complete_but_uncommitted = serde_json::to_string(&InboxRecord {
             sequence: 1,
             message: message(OperationId::new(), worker.clone()),
         })
         .unwrap();
         fs::write(store.inbox_path(&caller), complete_but_uncommitted).unwrap();
-        assert!(store.inbox(&caller).unwrap().is_empty());
+        assert_eq!(store.inbox(&caller).unwrap(), [] as [InboxMessage; 0]);
         store
             .append_inbox(&caller, message(OperationId::new(), worker))
             .unwrap();
@@ -4655,9 +4658,9 @@ mod tests {
             ..Registry::default()
         };
         assert!(registry.drop_oldest_terminal_run(0));
-        assert!(registry.runs.is_empty());
-        assert!(registry.bindings.is_empty());
-        assert!(registry.admissions.is_empty());
+        assert_eq!(registry.runs, [] as [DispatchRun; 0]);
+        assert_eq!(registry.bindings, [] as [DispatchBinding; 0]);
+        assert_eq!(registry.admissions, [] as [AgentAdmissionReservation; 0]);
     }
 
     #[cfg(unix)]

@@ -50,8 +50,7 @@ impl AppState {
     /// Dismissed rows are never visible, whatever the active status tab is.
     fn visible_prs(&self, target: Target) -> Vec<PrEntry> {
         self.prs_for(target)
-            .map(|prs| filtered_prs(prs, PrFilter::All))
-            .unwrap_or_default()
+            .map_or_default(|prs| filtered_prs(prs, PrFilter::All))
     }
     /// Whether a PR modal may take the foreground without displacing something
     /// the user is already looking at.

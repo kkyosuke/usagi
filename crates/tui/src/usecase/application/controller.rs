@@ -1838,8 +1838,7 @@ impl AppState {
         self.preview_recent
             .iter()
             .find(|(recorded, _)| *recorded == target)
-            .map(|(_, files)| files.clone())
-            .unwrap_or_default()
+            .map_or_default(|(_, files)| files.clone())
     }
 
     /// Replace one target's recently opened preview files.

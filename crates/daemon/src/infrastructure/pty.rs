@@ -704,7 +704,10 @@ mod tests {
         assert_eq!(writer.write_all(b"\x1b[A"), Ok(()));
         assert_eq!(writer.inner.written, b"\x1b[A");
         assert_eq!(writer.inner.calls, 1);
-        assert!(writer.readiness.waits.is_empty());
+        assert_eq!(
+            writer.readiness.waits,
+            [] as [(i16, std::option::Option<std::time::Duration>); 0]
+        );
         assert!(writer.inner.flush().is_ok());
     }
 
@@ -868,7 +871,10 @@ mod tests {
             Err(crate::usecase::terminal::PtyWriteError { applied_prefix: 0 })
         );
         assert!(exhausted.stalled);
-        assert!(exhausted.readiness.waits.is_empty());
+        assert_eq!(
+            exhausted.readiness.waits,
+            [] as [(i16, std::option::Option<std::time::Duration>); 0]
+        );
     }
 
     #[test]
@@ -1205,6 +1211,6 @@ mod tests {
                 .unwrap(),
             InputAck::Cached(Box::new(InputAck::Failed))
         );
-        assert!(failed.inner.written.is_empty());
+        assert_eq!(failed.inner.written, [] as [u8; 0]);
     }
 }

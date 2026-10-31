@@ -745,19 +745,15 @@ impl PaneLaunchCommandPort for IdentityRecordingLaunchPort {
 
 /// The live terminals `target`'s pane currently shows.
 fn live_tab_terminals(runtime: &WorkspaceRuntime, target: Target) -> Vec<TerminalRef> {
-    runtime
-        .panes()
-        .pane(target)
-        .map(|pane| {
-            pane.tabs()
-                .iter()
-                .filter_map(|tab| match tab {
-                    PaneTab::Live(live) => Some(live.terminal.clone()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    runtime.panes().pane(target).map_or_default(|pane| {
+        pane.tabs()
+            .iter()
+            .filter_map(|tab| match tab {
+                PaneTab::Live(live) => Some(live.terminal.clone()),
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 type SessionCommandCall = (String, Option<String>, SessionCommand);

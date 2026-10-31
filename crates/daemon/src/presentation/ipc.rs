@@ -1566,7 +1566,7 @@ mod tests {
             &mut serve_ordinary,
         )
         .unwrap();
-        assert!(refused.clients.is_empty());
+        assert_eq!(refused.clients, [] as [usagi_core::domain::id::ClientId; 0]);
         let mut output = Cursor::new(output);
         let _ = read_json_frame::<Bootstrap>(&mut output, 4096).unwrap();
         let response = serde_json::to_value(
@@ -1842,7 +1842,10 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let mut owner = RecordingTerminal::default();
-        assert!(TerminalOwner::completed_inventory(&owner, &scope).is_empty());
+        assert_eq!(
+            TerminalOwner::completed_inventory(&owner, &scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
         TerminalOwner::disconnect(&mut owner, usagi_core::domain::id::ConnectionId::new());
         assert_eq!(owner.disconnects, 1);
     }

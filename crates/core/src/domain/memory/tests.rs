@@ -103,7 +103,7 @@ fn from_markdown_accepts_crlf_and_empty_related() {
         created_at: 2026-06-17T00:00:00Z\r\nupdated_at: 2026-06-17T00:00:00Z\r\n---\r\n\r\nbody\r\n";
     let m = Memory::from_markdown(text).unwrap();
     assert_eq!(m.name, "n");
-    assert!(m.related.is_empty());
+    assert_eq!(m.related, [] as [String; 0]);
     assert_eq!(m.kind, MemoryType::Project);
     assert_eq!(m.body, "body");
 }
@@ -230,7 +230,10 @@ fn empty_related_list_round_trips() {
     memory.related.clear();
     let text = memory.to_markdown();
     assert!(text.contains("related: []\n"));
-    assert!(Memory::from_markdown(&text).unwrap().related.is_empty());
+    assert_eq!(
+        Memory::from_markdown(&text).unwrap().related,
+        [] as [String; 0]
+    );
 }
 
 #[test]

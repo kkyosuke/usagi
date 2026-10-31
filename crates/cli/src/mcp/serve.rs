@@ -1245,7 +1245,10 @@ mod tests {
         for response in &responses[2..] {
             assert_eq!(response["error"]["code"], -32601);
         }
-        assert!(client.requests.is_empty());
+        assert_eq!(
+            client.requests,
+            [] as [usagi_core::infrastructure::ipc::DaemonRequest; 0]
+        );
     }
 
     #[test]
@@ -1282,7 +1285,10 @@ mod tests {
             },
         );
         assert_eq!(response["error"]["code"], -32601);
-        assert!(client.requests.is_empty());
+        assert_eq!(
+            client.requests,
+            [] as [usagi_core::infrastructure::ipc::DaemonRequest; 0]
+        );
     }
 
     #[test]
@@ -1374,7 +1380,10 @@ mod tests {
                 .join(".usagi/memory/dispatch-lessons.md")
                 .exists()
         );
-        assert!(client.requests.is_empty());
+        assert_eq!(
+            client.requests,
+            [] as [usagi_core::infrastructure::ipc::DaemonRequest; 0]
+        );
     }
 
     #[test]
@@ -1730,8 +1739,11 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidData);
             }
-            assert!(output.is_empty());
-            assert!(client.requests.is_empty());
+            assert_eq!(output, [] as [u8; 0]);
+            assert_eq!(
+                client.requests,
+                [] as [usagi_core::infrastructure::ipc::DaemonRequest; 0]
+            );
         }
     }
 
@@ -1768,8 +1780,8 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(error.kind(), ErrorKind::InvalidData);
-            assert!(output.is_empty());
-            assert!(client.requests.is_empty());
+            assert_eq!(output, [] as [u8; 0]);
+            assert_eq!(client.requests, [] as [usagi_core::infrastructure::ipc::DaemonRequest; 0]);
         }
     }
 
@@ -2006,7 +2018,10 @@ mod tests {
                 "resume-secret",
             )
             .unwrap();
-            assert!(client.requests.is_empty());
+            assert_eq!(
+                client.requests,
+                [] as [usagi_core::infrastructure::ipc::DaemonRequest; 0]
+            );
             let text = String::from_utf8(out).unwrap();
             let response: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
             assert_eq!(response["error"]["code"], super::error_code::INVALID_PARAMS);

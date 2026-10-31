@@ -31,7 +31,6 @@ pub struct SupportedAgentRuntime {
 ///
 /// [`DefaultModel::ALL`] is the closed-vocabulary `SSoT`; adding a provider there
 /// automatically makes it a candidate on every catalog consumer.
-#[must_use]
 pub fn supported_agent_runtimes() -> impl ExactSizeIterator<Item = SupportedAgentRuntime> {
     DefaultModel::ALL
         .into_iter()
@@ -310,11 +309,11 @@ mod tests {
     #[test]
     fn session_cache_config_is_opt_in_and_preserved_by_setup_editor() {
         let workspace = tempdir().unwrap();
-        assert!(
+        assert_eq!(
             WorkspaceSessionConfig::read(workspace.path())
                 .cache_cleanup()
-                .paths
-                .is_empty()
+                .paths,
+            [] as [std::path::PathBuf; 0]
         );
         std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
         let path = workspace.path().join(".usagi/config.toml");
@@ -338,11 +337,11 @@ mod tests {
         )
         .unwrap();
         assert!(WorkspaceSessionConfig::load(workspace.path()).is_err());
-        assert!(
+        assert_eq!(
             WorkspaceSessionConfig::read(workspace.path())
                 .cache_cleanup()
-                .paths
-                .is_empty()
+                .paths,
+            [] as [std::path::PathBuf; 0]
         );
     }
 
@@ -366,7 +365,7 @@ mod tests {
         let config = WorkspaceAgentConfig::read(workspace.path());
         assert!(config.allows("claude", "sonnet"));
         assert!(!config.allows("claude", "opus"));
-        assert!(config.models("codex").is_empty());
+        assert_eq!(config.models("codex"), [] as [String; 0]);
         assert!(config.allows("agy", "gemini-model"));
         assert_eq!(
             WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
@@ -377,28 +376,25 @@ mod tests {
         for runtime in supported_agent_runtimes() {
             assert!(missing.allows(runtime.id, "default"));
         }
-        assert!(
+        assert_eq!(
             WorkspaceSessionConfig::read(workspace.path().join("missing").as_path())
-                .setup_commands()
-                .is_empty()
+                .setup_commands(),
+            [] as [String; 0]
         );
         std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path())
-                .models("claude")
-                .is_empty()
+        assert_eq!(
+            WorkspaceAgentConfig::read(workspace.path()).models("claude"),
+            [] as [String; 0]
         );
-        assert!(
-            WorkspaceSessionConfig::read(workspace.path())
-                .setup_commands()
-                .is_empty()
+        assert_eq!(
+            WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
+            [] as [String; 0]
         );
         std::fs::remove_file(workspace.path().join(".usagi/config.toml")).unwrap();
         std::fs::create_dir(workspace.path().join(".usagi/config.toml")).unwrap();
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path())
-                .models("claude")
-                .is_empty()
+        assert_eq!(
+            WorkspaceAgentConfig::read(workspace.path()).models("claude"),
+            [] as [String; 0]
         );
         assert!(WorkspaceSessionConfig::load(workspace.path()).is_err());
         assert!(
@@ -408,17 +404,17 @@ mod tests {
             )
             .is_err()
         );
-        assert!(config.models("unknown").is_empty());
+        assert_eq!(config.models("unknown"), [] as [String; 0]);
     }
 
     #[test]
     fn session_setup_writer_preserves_other_toml_and_round_trips_atomically() {
         let workspace = tempdir().unwrap();
-        assert!(
+        assert_eq!(
             WorkspaceSessionConfig::load(workspace.path())
                 .unwrap()
-                .setup_commands()
-                .is_empty()
+                .setup_commands(),
+            [] as [String; 0]
         );
         WorkspaceSessionConfig::save_setup_commands(
             workspace.path(),

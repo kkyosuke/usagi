@@ -267,10 +267,16 @@ mod tests {
                 },
             ]
         );
-        assert!(journal.pending().is_empty());
+        assert_eq!(
+            journal.pending(),
+            [] as [crate::usecase::session_teardown::PendingTeardown; 0]
+        );
         // A second drain re-derives the (now empty) pending set: a completed
         // teardown is never re-run.
-        assert!(drain_pending_teardowns(&journal, &effect, &|| false).is_empty());
+        assert_eq!(
+            drain_pending_teardowns(&journal, &effect, &|| false),
+            [] as [crate::usecase::session_teardown::TeardownReport; 0]
+        );
         assert_eq!(calls.lock().unwrap().len(), 2);
     }
 

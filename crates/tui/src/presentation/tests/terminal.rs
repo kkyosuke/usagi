@@ -359,7 +359,7 @@ fn decision_copy_retains_the_text_in_a_one_row_body() {
     ] {
         assert!(selection.handle_input(&decision_pointer(kind, column, viewport.top), &mut term));
     }
-    assert!(!term.copied[0].trim().is_empty());
+    assert_ne!(term.copied[0].trim(), "");
     let mut painted = frame.clone();
     selection.paint(&mut painted, 80);
     assert_eq!(widgets::strip_ansi(&painted[viewport.top]), original);
@@ -402,13 +402,13 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
     ] {
         assert!(selection.handle_input(&key, &mut term));
     }
-    assert!(term.copied.is_empty());
+    assert_eq!(term.copied, [] as [String; 0]);
     let mut painted = decision_selection_frame(&runtime, 24, 80);
     selection.paint(&mut painted, 80);
     assert!(painted.join("\n").contains("no decision text is selected"));
     for key in [Key::Tab, Key::Paste("Pasted comment".into())] {
         assert!(!selection.handle_input(&key, &mut term));
-        assert!(runtime.handle_key(key).is_empty());
+        assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
     }
     assert_eq!(
         runtime
@@ -422,7 +422,7 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
     );
     for key in [Key::Tab, Key::Paste("Pasted answer".into())] {
         assert!(!selection.handle_input(&key, &mut term));
-        assert!(runtime.handle_key(key).is_empty());
+        assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
     }
     assert_eq!(
         runtime
@@ -1206,7 +1206,10 @@ fn a_blocked_pane_launch_keeps_every_live_pane_streaming() {
     // accepting input, resizing, and detaching.
     let resizes_before = stream.lock().unwrap().resizes;
     ui.resize_terminals(terminal_geometry(24, 100));
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(ui.send_terminal_bytes(&first, b"a"), Ok(()));
     assert_eq!(ui.send_terminal_bytes(&second, b"b"), Ok(()));
     ui.close_terminal(&second);
@@ -1507,7 +1510,10 @@ fn a_panicking_launch_worker_fails_only_its_pane() {
     assert!(!pending.contains_key(&dying));
 
     // The live pane never noticed, and the next launch reaches the daemon.
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(ui.send_terminal_bytes(&live, b"c"), Ok(()));
     crate::presentation::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
     let outcome = drain_next_completion(&mut ui, &mut runtime, &mut pending);
@@ -1823,7 +1829,7 @@ fn an_exited_terminal_auto_closes_its_pane_and_detaches_through_the_runtime() {
     // the client subscription — the #1011 behavior lost in the migration.
     close_exited_panes(&mut ui, &mut runtime);
 
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(!runtime.state().has_live_pane());
     assert_eq!(*detaches.lock().unwrap(), vec![5]);
     assert!(
@@ -1870,7 +1876,10 @@ fn a_replaced_shared_connection_reattaches_every_pane_before_it_streams_again() 
     //    the same connection, so B keeps its attachment and its ledger
     //    position, and A continues from the sequence the daemon expects.
     script.lock().unwrap().poll_resync.push("A");
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(ui.send_terminal_bytes(&generic, b"b2"), Ok(()));
     assert_eq!(ui.send_terminal_bytes(&agent, b"a2"), Ok(()));
 
@@ -2057,7 +2066,10 @@ fn reconnecting_and_stale_terminal_states_are_projected_into_the_pane_footer() {
         );
         let mut controls = LiveTerminalControls::default();
 
-        assert!(ui.poll_all_terminals().is_empty());
+        assert_eq!(
+            ui.poll_all_terminals(),
+            [] as [usagi_core::domain::id::TerminalRef; 0]
+        );
         let view = controller_terminal_view(&ui, &runtime, &mut controls, 10).unwrap();
 
         assert_eq!(view.feedback.as_deref(), Some(expected));
@@ -2083,10 +2095,16 @@ fn terminal_reconnect_fake_port_contract() {
         }),
     );
 
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert!(!ui.take_terminal_reconnected());
     std::thread::sleep(std::time::Duration::from_millis(110));
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert!(ui.take_terminal_reconnected());
     assert!(!ui.take_terminal_reconnected());
 }
@@ -2199,7 +2217,7 @@ fn generic_terminal_ctrl_l_and_ctrl_c_clear_the_shell_and_close_requests_exit() 
             b"\x03exit\r".to_vec()
         ]
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(ui.closed_generic_terminals.contains(&terminal));
 }
 
@@ -2501,8 +2519,8 @@ fn switch_consumes_right_pane_controls_without_mutating_the_dimmed_pane() {
     assert!(!controls.has_selection());
     assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
     assert!(detaches.lock().unwrap().is_empty());
-    assert!(term.copied.is_empty());
-    assert!(browser.opened.is_empty());
+    assert_eq!(term.copied, [] as [String; 0]);
+    assert_eq!(browser.opened, [] as [String; 0]);
 }
 
 #[test]
@@ -2660,7 +2678,7 @@ fn close_tab_live_action_cancels_the_focused_pending_launch() {
         &mut pending_runtime,
         &mut pending_targets,
     );
-    assert!(pending_runtime.active_pane().tabs().is_empty());
+    assert_eq!(pending_runtime.active_pane().tabs(), []);
     assert!(pending_targets.is_empty());
 }
 
@@ -2708,13 +2726,13 @@ fn coherent_empty_projection_authoritatively_clears_every_scoped_live_target() {
     assert!(empty.iter().all(|target| target.panes.is_empty()));
     let fence = runtime.restore_fence();
     assert!(runtime.restore_snapshot(fence.0, fence.1, empty));
-    assert!(
+    assert_eq!(
         runtime
             .panes()
             .pane(Target::Session(session))
             .unwrap()
-            .tabs()
-            .is_empty()
+            .tabs(),
+        []
     );
 }
 
@@ -3383,7 +3401,7 @@ fn a_live_terminal_drag_selects_and_release_copies_to_the_clipboard() {
         "selection highlight lost after release: {projected:?}"
     );
     // A drag that copied a selection never also opens a link.
-    assert!(browser.opened.is_empty());
+    assert_eq!(browser.opened, [] as [String; 0]);
 }
 
 #[test]
@@ -3474,7 +3492,7 @@ fn a_down_up_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
     assert_eq!(browser.opened, vec!["https://example.com/x".to_owned()]);
     // A pointer release is not keyboard input, so nothing was forwarded to the
     // child PTY, and the clipboard was left alone.
-    assert!(term.copied.is_empty());
+    assert_eq!(term.copied, [] as [String; 0]);
 
     // A complete click on the leading prose (frame column 37 = content
     // column 0) opens nothing.

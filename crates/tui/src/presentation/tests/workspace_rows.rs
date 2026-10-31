@@ -56,7 +56,10 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
     ui.set_allowed_agent_sessions(allowed_sessions.iter().copied());
     ui.resize_terminals(Geometry { cols: 20, rows: 5 });
     assert!(ui.send_terminal_bytes(&terminal, b"x").is_err());
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(
         crate::presentation::session_name_for(&ui, session).as_deref(),
         Some("demo-session")
@@ -76,8 +79,8 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
         None,
         None,
     );
-    assert!(ui.workspace.sessions().is_empty());
-    assert!(ui.workspace.session_ids().is_empty());
+    assert_eq!(ui.workspace.sessions(), []);
+    assert_eq!(ui.workspace.session_ids(), []);
     crate::presentation::apply_session_projection(
         &mut ui,
         Some(records),
@@ -355,7 +358,10 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
 
     // Two more requests: admission takes exactly one worker and leaves the
     // rest visibly pending, without ever touching the stream port.
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     let queued_before = ui.pane_launches.len();
     ui.pane_launches
         .push(crate::presentation::PaneLaunch::Agent {
@@ -375,7 +381,10 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
     crate::presentation::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
     assert_eq!(ui.pane_launches.len(), queued_before + 1);
     assert!(ui.active_pane_launch.is_some());
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
 }
 
 #[test]
@@ -464,8 +473,14 @@ fn drawer_root_final_without_conversation_identity_fails_closed() {
     );
 
     assert!(pending.is_empty());
-    assert!(live_tab_terminals(&runtime, target).is_empty());
-    assert!(durable.lock().unwrap().targets.is_empty());
+    assert_eq!(
+        live_tab_terminals(&runtime, target),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
+    assert_eq!(
+        durable.lock().unwrap().targets,
+        [] as [crate::usecase::application::agent_tab_intent::AgentTabTargetIntent; 0]
+    );
     assert!(mutations.lock().unwrap().is_empty());
 }
 
@@ -607,7 +622,7 @@ fn production_input_order_reserves_drawer_picker_before_root_agent_pty() {
         route_workspace_input_before_reducer(&mut ui, &mut runtime, &mut controls, &mut term, &new,),
         WorkspaceInputRoute::Unhandled
     );
-    assert!(runtime.handle_key(new).is_empty());
+    assert_eq!(runtime.handle_key(new), [] as [Effect; 0]);
     assert!(runtime.state().director_drawer_open());
     assert!(matches!(
         runtime.state().director_new(),
@@ -647,7 +662,7 @@ fn production_input_order_reserves_drawer_picker_before_root_agent_pty() {
         ),
         WorkspaceInputRoute::Unhandled
     );
-    assert!(runtime.handle_key(reopen).is_empty());
+    assert_eq!(runtime.handle_key(reopen), [] as [Effect; 0]);
     for key in [Key::Down, Key::Up] {
         assert_eq!(
             route_workspace_input_before_reducer(
@@ -784,14 +799,14 @@ fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
     let mut term = FakeTerminal::default();
 
     let open = Key::Live(LiveTerminalAction::Director);
-    assert!(runtime.handle_key(open).is_empty());
+    assert_eq!(runtime.handle_key(open), [] as [Effect; 0]);
     assert!(runtime.state().director_drawer_open());
     assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
     assert_eq!(
         runtime.state().director_route(),
         DirectorRoute::Organization
     );
-    assert!(runtime.handle_key(Key::Enter).is_empty());
+    assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
 
     // The live conversation owns Esc: it reaches the PTY once and the drawer
     // stays open.
@@ -829,10 +844,9 @@ fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
     let empty_view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
     let mut empty_ui = io_runtime(empty_view, Box::new(UnavailableSessionCommandPort));
     let mut empty_runtime = WorkspaceRuntime::new(workspace, vec![session]);
-    assert!(
-        empty_runtime
-            .handle_key(Key::Live(LiveTerminalAction::Director))
-            .is_empty()
+    assert_eq!(
+        empty_runtime.handle_key(Key::Live(LiveTerminalAction::Director)),
+        [] as [Effect; 0]
     );
     assert!(empty_runtime.state().director_drawer_open());
     assert_eq!(empty_runtime.focused_terminal(), None);
@@ -1881,7 +1895,10 @@ fn project_deck_composition_helpers_cover_safe_fallbacks() {
         ))),
         vec![PathBuf::from("/tmp/alpha")]
     );
-    assert!(recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))).is_empty());
+    assert_eq!(
+        recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))),
+        [] as [std::path::PathBuf; 0]
+    );
 }
 
 /// A workspace opened directly (`usagi open <path>`) has no Welcome behind it, so

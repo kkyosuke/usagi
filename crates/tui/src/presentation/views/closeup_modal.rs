@@ -625,7 +625,10 @@ mod tests {
             modal.insert_char(character);
         }
 
-        assert!(modal.matches().is_empty());
+        assert_eq!(
+            modal.matches(),
+            [] as [crate::usecase::closeup::CommandInfo; 0]
+        );
         assert_eq!(modal.submission(), "agent -m codex");
 
         // A trailing separator is also meaningful: it submits the command and
@@ -887,7 +890,7 @@ mod tests {
     fn an_out_of_range_selection_has_no_subcommands() {
         let mut modal = CloseupModal::new("s");
         modal.selected = usize::MAX;
-        assert!(modal.subcommands().is_empty());
+        assert_eq!(modal.subcommands(), [] as [super::ModalSubcommand; 0]);
     }
 
     #[test]

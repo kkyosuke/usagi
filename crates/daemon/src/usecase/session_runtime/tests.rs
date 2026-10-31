@@ -163,11 +163,12 @@ fn artifact_preparation_failure_can_be_removed_and_release_the_session_name() {
         reports[0].effect_error
     );
     assert!(reports[0].finalize_error.is_none());
-    assert!(
+    assert_eq!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
     std::fs::remove_file(root.join("artifacts")).unwrap();
     assert!(SystemGit.run(&root, &["add", "-u"]).unwrap().success);
@@ -1090,7 +1091,10 @@ fn startup_adopts_a_clean_merged_orphan_and_safe_remove_deletes_actual_branch() 
             &json!({"name":"review"}),
         )
         .unwrap();
-    assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        removed.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
     let calls = git_calls.lock().unwrap();
     assert!(
@@ -1218,7 +1222,10 @@ fn explicit_orphan_purge_removes_unregistered_files_and_unmerged_work() {
             )
             .unwrap();
 
-        assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+        assert_eq!(
+            removed.body["sessions"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
         assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
         let calls = git_calls.lock().unwrap();
         assert!(
@@ -1281,7 +1288,10 @@ fn create_lists_overview_and_removes_a_durable_session() {
     let removed = runtime
         .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
         .unwrap();
-    assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        removed.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -1421,7 +1431,7 @@ fn role_errors_preserve_their_derived_value_contract() {
         let cloned = error.clone();
         assert_eq!(cloned, error);
         assert_eq!(format!("{cloned:?}"), format!("{error:?}"));
-        assert!(!error.safe_message().is_empty());
+        assert_ne!(error.safe_message(), "");
     }
 }
 
@@ -1565,7 +1575,10 @@ fn lists_a_failed_session_but_refuses_to_resolve_it_then_removes_it_to_free_the_
     let removed = runtime
         .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
         .unwrap();
-    assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        removed.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     let recreated = runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -1680,7 +1693,10 @@ fn adopts_a_non_worktree_stale_workspace_before_create_without_invoking_git() {
         lifecycle_state.sessions[0].failure.as_ref().unwrap().stage,
         FailureStage::Integrity
     );
-    assert!(runtime.state().unwrap().operations.is_empty());
+    assert_eq!(
+        runtime.state().unwrap().operations,
+        [] as [usagi_core::domain::session_lifecycle::OperationJournal; 0]
+    );
 }
 
 #[test]
@@ -2998,7 +3014,10 @@ fn pending_teardowns_skip_incomplete_delete_records() {
     state.sessions = vec![missing_plan, missing_operation];
     runtime.store.replace_if_revision(revision, &state).unwrap();
 
-    assert!(runtime.pending_teardowns().unwrap().is_empty());
+    assert_eq!(
+        runtime.pending_teardowns().unwrap(),
+        [] as [crate::usecase::session_teardown::PendingTeardown; 0]
+    );
 }
 
 /// A Git runner that records whether the shared session lock was free at the
@@ -3476,7 +3495,10 @@ fn a_session_without_an_owning_operation_is_not_a_delegation_candidate() {
         rt.state().unwrap().sessions[0].lifecycle,
         SessionLifecycle::Available
     );
-    assert!(rt.delegated_sessions().unwrap().is_empty());
+    assert_eq!(
+        rt.delegated_sessions().unwrap(),
+        [] as [crate::usecase::session_runtime::DelegatedCreate; 0]
+    );
 }
 
 /// Compensating a delegated create undoes the branch too, so the same session
@@ -3674,7 +3696,10 @@ fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
     );
 
     assert_eq!(reports[0].effect_error, None);
-    assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
+    assert_eq!(
+        runtime.lock().unwrap().state().unwrap().sessions,
+        [] as [usagi_core::domain::session_lifecycle::ManagedSession; 0]
+    );
     assert!(
         calls
             .lock()
@@ -3753,7 +3778,10 @@ fn removing_a_failed_session_deletes_its_branch() {
 
     assert_eq!(reports[0].effect_error, None);
     assert!(!session_root.exists());
-    assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
+    assert_eq!(
+        runtime.lock().unwrap().state().unwrap().sessions,
+        [] as [usagi_core::domain::session_lifecycle::ManagedSession; 0]
+    );
     assert!(calls.lock().unwrap().iter().any(|(repo, args)| {
         repo == tmp.path() && args == &["branch", "-d", "--", "usagi/one"]
     }));
@@ -3847,19 +3875,16 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
     // Checkout removal, owning-repository registration removal, branch deletion.
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(!session_root.exists());
-    assert!(
+    assert_eq!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
-    assert!(
-        runtime
-            .lock()
-            .unwrap()
-            .pending_teardowns()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        runtime.lock().unwrap().pending_teardowns().unwrap(),
+        [] as [crate::usecase::session_teardown::PendingTeardown; 0]
     );
 }
 
@@ -4251,13 +4276,9 @@ fn a_teardown_failure_records_the_reason_on_a_failed_row_and_frees_the_name_afte
     assert!(summary.contains("could not remove the session worktree \"one\""));
     assert!(summary.contains("contains modified or untracked files"));
     // The failed row still owns the name; removing it frees it again.
-    assert!(
-        runtime
-            .lock()
-            .unwrap()
-            .pending_teardowns()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        runtime.lock().unwrap().pending_teardowns().unwrap(),
+        [] as [crate::usecase::session_teardown::PendingTeardown; 0]
     );
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
     drain_pending_teardowns(
@@ -4332,11 +4353,12 @@ fn an_interrupted_teardown_is_resumed_after_restart_instead_of_failing() {
         &|| false,
     );
     assert!(!session_root.exists());
-    assert!(
+    assert_eq!(
         restarted.lock().unwrap().snapshot().unwrap()["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
 }
 
@@ -4595,7 +4617,10 @@ fn finalizing_a_teardown_twice_reports_durable_truth_without_a_stale_write() {
         .unwrap();
 
     assert_eq!(repeated.revision, completed.revision);
-    assert!(repeated.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        repeated.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]

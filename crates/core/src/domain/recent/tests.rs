@@ -43,7 +43,7 @@ fn unite_aggregates_counts_and_takes_the_latest_time() {
 #[test]
 fn empty_unite_reports_neutral_values() {
     let unite = UniteOverview::new(Vec::new());
-    assert!(unite.members().is_empty());
+    assert_eq!(unite.members(), []);
     assert_eq!(unite.updated_at(), None);
     assert_eq!(unite.session_count(), 0);
     assert_eq!(unite.open_issue_count(), 0);

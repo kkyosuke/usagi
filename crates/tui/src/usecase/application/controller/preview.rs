@@ -1145,7 +1145,10 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
         let _ = update(&mut state, AppEvent::Backend(event));
         assert!(state.preview_overlay().unwrap().artifact_open().is_none());
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            [] as [Effect; 0]
+        );
         let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
     }
 
@@ -1231,7 +1234,10 @@ mod tests {
         );
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('/')));
         let _ = update(&mut state, AppEvent::Key(AppKey::Paste("needle".into())));
-        assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Tab)),
+            [] as [Effect; 0]
+        );
         assert!(state.preview_overlay().unwrap().is_search_editing());
         assert_eq!(state.preview_overlay().unwrap().search(), "needle");
         assert!(state.preview_overlay().unwrap().artifact_open().is_none());
@@ -1303,7 +1309,10 @@ mod tests {
         );
         let overlay = state.preview_overlay().unwrap();
         assert!(overlay.is_loading());
-        assert!(overlay.visible_candidates().is_empty());
+        assert_eq!(
+            overlay.visible_candidates(),
+            [] as [PreviewCandidate<'_>; 0]
+        );
 
         complete(
             &mut state,
@@ -1428,13 +1437,19 @@ mod tests {
         let mut overlay = PreviewOverlay::loading(Target::Root(WorkspaceId::new()), Vec::new());
         overlay.path = Some("file".to_owned());
         overlay.lines = vec!["n n".to_owned()];
-        assert!(update_preview_document(&mut overlay, &AppKey::Char('/')).is_empty());
+        assert_eq!(
+            update_preview_document(&mut overlay, &AppKey::Char('/')),
+            [] as [Effect; 0]
+        );
         update_preview_search(&mut overlay, &AppKey::Char('n'));
         update_preview_search(&mut overlay, &AppKey::Enter);
         assert_eq!(overlay.search(), "n");
         assert!(!overlay.is_search_editing());
 
-        assert!(update_preview_document(&mut overlay, &AppKey::Char('N')).is_empty());
+        assert_eq!(
+            update_preview_document(&mut overlay, &AppKey::Char('N')),
+            [] as [Effect; 0]
+        );
         assert_eq!(overlay.current_match(), 1);
     }
 
@@ -1539,7 +1554,10 @@ mod tests {
         // 群の切り替えは候補を空にし、選択も先頭へ戻す。
         let _ = update(&mut state, AppEvent::Key(AppKey::Right));
         let overlay = state.preview_overlay().unwrap();
-        assert!(overlay.visible_candidates().is_empty());
+        assert_eq!(
+            overlay.visible_candidates(),
+            [] as [PreviewCandidate<'_>; 0]
+        );
         assert_eq!(overlay.total_files(), 0);
         assert_eq!(overlay.selected(), 0);
     }
@@ -1686,7 +1704,7 @@ mod tests {
         state.set_preview_recent(first, vec!["kept.rs".to_owned(), "again.rs".to_owned()]);
         state.set_preview_recent(Target::Root(WorkspaceId::new()), vec!["new.rs".to_owned()]);
         assert_eq!(state.preview_recent_of(first), ["kept.rs", "again.rs"]);
-        assert!(state.preview_recent_of(others[0]).is_empty());
+        assert_eq!(state.preview_recent_of(others[0]), [] as [String; 0]);
     }
 
     fn rows(overlay: &PreviewOverlay) -> Vec<&str> {
@@ -1827,8 +1845,8 @@ mod tests {
             }),
         );
         let overlay = state.preview_overlay().unwrap();
-        assert!(overlay.lines().is_empty());
-        assert!(overlay.pane().lines().is_empty());
+        assert_eq!(overlay.lines(), [] as [String; 0]);
+        assert_eq!(overlay.pane().lines(), [] as [String; 0]);
         assert!(overlay.pane().is_loading());
     }
 }

@@ -347,7 +347,10 @@ mod observation_worker_tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert_eq!(result.attention.len(), 1);
-        assert!(result.inventories.is_empty());
+        assert_eq!(
+            result.inventories,
+            [] as [usagi_core::domain::agent::AgentWorkspaceObservation; 0]
+        );
         assert_eq!(attention_calls.load(Ordering::SeqCst), 1);
         assert_eq!(inventory_calls.load(Ordering::SeqCst), 0);
         // Even cancellation returns a usable port to its owner.

@@ -34,13 +34,13 @@ mod tests {
                 path: Some("/tmp/x".into()),
             })
         );
-        assert!(with_output.is_empty());
+        assert_eq!(with_output, "");
 
         let (without_outcome, without_output) = execute(Command::Open { path: None });
         assert_eq!(
             without_outcome,
             RunOutcome::LaunchTui(TuiRequest::Workspace { path: None })
         );
-        assert!(without_output.is_empty());
+        assert_eq!(without_output, "");
     }
 }

@@ -936,6 +936,9 @@ mod tests {
         pump.watch(1, std::slice::from_ref(&background));
         rx.recv_timeout(Duration::from_secs(5))
             .expect("a failing scope is still observed");
-        assert!(pump.take_exited(8).is_empty());
+        assert_eq!(
+            pump.take_exited(8),
+            [] as [usagi_core::domain::id::TerminalRef; 0]
+        );
     }
 }

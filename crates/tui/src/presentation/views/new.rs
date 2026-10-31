@@ -509,8 +509,7 @@ fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
     };
     let prefix = path
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().into_owned());
     (parent.to_path_buf(), prefix)
 }
 
@@ -538,8 +537,7 @@ fn suggest_directory(url: &str) -> String {
 fn suggest_name(path: &str) -> String {
     std::path::Path::new(path.trim())
         .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default()
+        .map_or_default(|s| s.to_string_lossy().into_owned())
 }
 
 /// フォーカス中の入力欄のテキスト。共通 block cursor を使い、編集位置の 1 文字を
@@ -910,7 +908,7 @@ mod tests {
         for _ in 0.."projx".len() {
             state.backspace();
         }
-        assert!(state.directory().is_empty());
+        assert_eq!(state.directory(), "");
         state.focus_prev(); // Location
         state.focus_prev(); // Url
         state.insert_char('/');

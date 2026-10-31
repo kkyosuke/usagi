@@ -46,7 +46,10 @@ fn inactive_garden_counts_follow_dismissal_and_reopen() {
     retain_visible_interrupted(&mut closed.inventory, &BTreeSet::from([continuation]));
     assert!(deck.apply_garden_inventory(&closed));
     let (_, plots) = deck.garden_projection(&[]);
-    assert!(plots[0].1.agents.is_empty());
+    assert_eq!(
+        plots[0].1.agents,
+        [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+    );
     assert!(plots[0].1.agents_observed);
     assert!(
         !deck.apply_garden_inventory(&closed),

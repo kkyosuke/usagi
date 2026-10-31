@@ -240,9 +240,7 @@ impl PaneRegistry {
     #[must_use]
     pub fn new(active: impl Into<Option<Target>>) -> Self {
         let active = active.into();
-        let entries = active
-            .map(|target| vec![PaneRegistryEntry::empty(target)])
-            .unwrap_or_default();
+        let entries = active.map_or_default(|target| vec![PaneRegistryEntry::empty(target)]);
         Self {
             active,
             entries,
@@ -1198,7 +1196,7 @@ mod tests {
 
     fn request(state: &mut PaneState, target: Target, kind: PaneKind) -> OperationId {
         let operation = OperationId::new();
-        assert!(
+        assert_eq!(
             reduce(
                 state,
                 PaneEvent::Request {
@@ -1206,8 +1204,8 @@ mod tests {
                     target,
                     kind,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         operation
     }
@@ -1266,7 +1264,10 @@ mod tests {
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
 
-        assert!(reduce(&mut state, PaneEvent::Resolved { operation }).is_empty());
+        assert_eq!(
+            reduce(&mut state, PaneEvent::Resolved { operation }),
+            [] as [PaneEffect; 0]
+        );
         assert!(matches!(
             state.tabs(),
             [PaneTab::Ready(ready)] if ready.kind == PaneKind::Diff && ready.operation == operation
@@ -1288,7 +1289,10 @@ mod tests {
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(first))),
         );
 
-        assert!(reduce(&mut state, PaneEvent::CloseSelected).is_empty());
+        assert_eq!(
+            reduce(&mut state, PaneEvent::CloseSelected),
+            [] as [PaneEffect; 0]
+        );
         assert_eq!(state.tabs().len(), 1);
         assert_eq!(
             state.selected(),
@@ -1357,15 +1361,15 @@ mod tests {
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
 
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Failed {
                     operation,
                     message: "agent failed safely".to_owned(),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(state.tabs().len(), 1);
         assert_eq!(state.error(), Some("agent failed safely"));
@@ -1385,17 +1389,17 @@ mod tests {
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
 
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Failed {
                     operation,
                     message: "agent failed safely".to_owned(),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
-        assert!(state.tabs().is_empty());
+        assert_eq!(state.tabs(), []);
         assert_eq!(state.selected(), &PaneSelection::Target(target));
     }
 
@@ -1418,7 +1422,10 @@ mod tests {
             ],
         );
 
-        assert!(reduce(&mut state, PaneEvent::Exited(first)).is_empty());
+        assert_eq!(
+            reduce(&mut state, PaneEvent::Exited(first)),
+            [] as [PaneEffect; 0]
+        );
         assert_eq!(
             state.selected(),
             &PaneSelection::Tab(TabSelection::Live(second.clone()))
@@ -1444,30 +1451,33 @@ mod tests {
         let operation = request(&mut state, requested, PaneKind::Agent);
         let opened = terminal(requested);
 
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Succeeded {
                     operation,
                     terminal: opened.clone(),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Resolved {
                     operation: OperationId::new(),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(
             state.selected(),
             &PaneSelection::Tab(TabSelection::Live(selected.clone()))
         );
-        assert!(reduce(&mut state, PaneEvent::Exited(opened)).is_empty());
+        assert_eq!(
+            reduce(&mut state, PaneEvent::Exited(opened)),
+            [] as [PaneEffect; 0]
+        );
         assert_eq!(
             state.selected(),
             &PaneSelection::Tab(TabSelection::Live(selected))
@@ -1705,12 +1715,12 @@ mod tests {
         let second = terminal(target);
 
         let mut too_short = PaneState::new(PaneSelection::Target(target));
-        assert!(
+        assert_eq!(
             reduce(
                 &mut too_short,
                 PaneEvent::ReorderSelected(TabDirection::Next),
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
 
         let live_tabs = vec![
@@ -1735,12 +1745,12 @@ mod tests {
             PaneState::new(PaneSelection::Tab(TabSelection::Live(terminal(target))));
         stale_selected.tabs = live_tabs.clone();
         let stale_selection = stale_selected.selected.clone();
-        assert!(
+        assert_eq!(
             reduce(
                 &mut stale_selected,
                 PaneEvent::ReorderSelected(TabDirection::Next),
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(stale_selected.tabs, live_tabs);
         assert_eq!(stale_selected.selected, stale_selection);
@@ -1883,7 +1893,7 @@ mod tests {
         );
         let before = registry.pane(managed).unwrap().clone();
 
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
@@ -1893,8 +1903,8 @@ mod tests {
                         terminal: terminal(root),
                     },
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
         assert_eq!(registry.pane(managed), Some(&before));
     }
@@ -1917,7 +1927,7 @@ mod tests {
                 kind: PaneKind::Terminal,
             },
         );
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Request {
@@ -1925,8 +1935,8 @@ mod tests {
                     target: root,
                     kind: PaneKind::Terminal,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(
             reduce(
@@ -1942,36 +1952,39 @@ mod tests {
             state.selected(),
             &PaneSelection::Tab(TabSelection::Live(live.clone()))
         );
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Succeeded {
                     operation: OperationId::new(),
                     terminal: terminal(target),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Failed {
                     operation: OperationId::new(),
                     message: "stale failure".to_owned(),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
-        assert!(reduce(&mut state, PaneEvent::Exited(terminal(target))).is_empty());
-        assert!(
+        assert_eq!(
+            reduce(&mut state, PaneEvent::Exited(terminal(target))),
+            [] as [PaneEffect; 0]
+        );
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::Restore(LivePane {
                     terminal: live.clone(),
                     kind: PaneKind::Terminal,
                 }),
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
 
         let _ = reduce(
@@ -1982,7 +1995,10 @@ mod tests {
                 kind: PaneKind::Agent,
             },
         );
-        assert!(reduce(&mut state, PaneEvent::Exited(live)).is_empty());
+        assert_eq!(
+            reduce(&mut state, PaneEvent::Exited(live)),
+            [] as [PaneEffect; 0]
+        );
         assert_eq!(
             state.selected(),
             &PaneSelection::Tab(TabSelection::Pending(next_pending))
@@ -1995,7 +2011,7 @@ mod tests {
         kind: PaneKind,
     ) -> OperationId {
         let operation = OperationId::new();
-        assert!(
+        assert_eq!(
             reduce_registry(
                 registry,
                 PaneRegistryEvent::Pane {
@@ -2006,8 +2022,8 @@ mod tests {
                         kind,
                     },
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
         operation
     }
@@ -2037,15 +2053,15 @@ mod tests {
         );
 
         // Background exit changes A only; B's pending tab and forced modal stay put.
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
                     target: session_a,
                     event: PaneEvent::Exited(terminal_a),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
         assert_eq!(registry.active(), Some(session_b));
         assert!(registry.action_modal_visible(session_b));
@@ -2085,7 +2101,7 @@ mod tests {
         let background_operation = registry_request(&mut registry, background, PaneKind::Agent);
         let background_terminal = terminal(background);
 
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
@@ -2095,10 +2111,10 @@ mod tests {
                         terminal: background_terminal.clone(),
                     },
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
@@ -2107,18 +2123,18 @@ mod tests {
                         background_terminal,
                     ))),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
                     target: background,
                     event: PaneEvent::CloseSelected,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
 
         assert_eq!(registry.active(), Some(visible));
@@ -2141,16 +2157,19 @@ mod tests {
         let target = target();
         let mut registry = PaneRegistry::new(target);
         assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
-        assert!(route_tab_command(&mut registry, PaneTabCommand::Passthrough).is_empty());
+        assert_eq!(
+            route_tab_command(&mut registry, PaneTabCommand::Passthrough),
+            [] as [PaneRegistryEffect; 0]
+        );
 
         let operation = registry_request(&mut registry, target, PaneKind::Terminal);
         assert_eq!(registry.input_owner(), PaneInputOwner::Tab);
-        assert!(
+        assert_eq!(
             route_tab_command(
                 &mut registry,
                 PaneTabCommand::Select(TabSelection::Pending(operation)),
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
         assert_eq!(
             route_tab_command(&mut registry, PaneTabCommand::Passthrough),
@@ -2159,7 +2178,10 @@ mod tests {
 
         let _ = reduce_registry(&mut registry, PaneRegistryEvent::OpenActionModal { target });
         assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
-        assert!(route_tab_command(&mut registry, PaneTabCommand::Close).is_empty());
+        assert_eq!(
+            route_tab_command(&mut registry, PaneTabCommand::Close),
+            [] as [PaneRegistryEffect; 0]
+        );
         assert!(registry.pane(target).unwrap().has_tabs());
 
         let _ = reduce_registry(
@@ -2184,7 +2206,7 @@ mod tests {
         let target = target();
         let foreign = Target::Session(SessionId::new());
         let mut registry = PaneRegistry::new(target);
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
@@ -2195,10 +2217,10 @@ mod tests {
                         kind: PaneKind::Terminal,
                     },
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
@@ -2208,8 +2230,8 @@ mod tests {
                         kind: PaneKind::Terminal,
                     }),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
 
         let operation = registry_request(&mut registry, target, PaneKind::Diff);
@@ -2227,15 +2249,15 @@ mod tests {
                 event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal(target)))),
             },
         );
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
                     target,
                     event: PaneEvent::CloseSelected,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
         let _ = route_tab_command(
             &mut registry,
@@ -2274,7 +2296,10 @@ mod tests {
             reduce(&mut state, PaneEvent::CloseSelected),
             vec![PaneEffect::ReturnToCloseup]
         );
-        assert!(reduce(&mut state, PaneEvent::CloseSelected).is_empty());
+        assert_eq!(
+            reduce(&mut state, PaneEvent::CloseSelected),
+            [] as [PaneEffect; 0]
+        );
 
         let mut ready = PaneState::new(PaneSelection::Target(target));
         let first = request(&mut ready, target, PaneKind::Diff);
@@ -2285,7 +2310,10 @@ mod tests {
             &mut ready,
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(first))),
         );
-        assert!(reduce(&mut ready, PaneEvent::CloseSelected).is_empty());
+        assert_eq!(
+            reduce(&mut ready, PaneEvent::CloseSelected),
+            [] as [PaneEffect; 0]
+        );
         assert_eq!(
             ready.selected(),
             &PaneSelection::Tab(TabSelection::Ready(second))
@@ -2352,15 +2380,15 @@ mod tests {
         let first = interrupted(target, true);
         let second = interrupted(target, true);
 
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::RestoreInterrupted {
                     // A duplicated inventory row must not create a second tab.
                     tabs: vec![first.clone(), second.clone(), first.clone()],
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(
             interrupted_tabs(&state),
@@ -2510,7 +2538,7 @@ mod tests {
 
         let mut registry = PaneRegistry::new(root);
         // An interrupted batch for another target cannot touch this entry.
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
@@ -2519,8 +2547,8 @@ mod tests {
                         tabs: vec![history.clone()],
                     },
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
         assert!(!registry.active_pane().has_tabs());
 
@@ -2599,17 +2627,20 @@ mod tests {
 
         // A background success stays a live tab without attaching.
         let background = terminal(target);
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::ResumeReplaced {
                     continuation: other.continuation,
                     terminal: background,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
-        assert!(interrupted_tabs(&state).is_empty());
+        assert_eq!(
+            interrupted_tabs(&state),
+            [] as [usagi_core::domain::id::AgentContinuationRef; 0]
+        );
     }
 
     #[test]
@@ -2634,7 +2665,7 @@ mod tests {
                 message: "ignored".to_owned(),
             },
         ] {
-            assert!(reduce(&mut state, event).is_empty());
+            assert_eq!(reduce(&mut state, event), [] as [PaneEffect; 0]);
         }
         assert_eq!(state, before);
     }
@@ -2671,7 +2702,7 @@ mod tests {
         );
         assert_eq!(resuming(&state, history.continuation), Some(operation));
 
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::ResumeFailed {
@@ -2679,8 +2710,8 @@ mod tests {
                     operation: Some(operation),
                     message: "This conversation cannot be resumed".to_owned(),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(interrupted_tabs(&state), vec![history.continuation]);
         assert_eq!(resuming(&state, history.continuation), None);
@@ -2755,14 +2786,14 @@ mod tests {
             .is_empty(),
             "an unknown lineage is inert"
         );
-        assert!(
+        assert_eq!(
             reduce(
                 &mut state,
                 PaneEvent::DismissInterrupted {
                     continuation: second.continuation,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(interrupted_tabs(&state), vec![first.continuation]);
         assert_eq!(
@@ -2788,14 +2819,14 @@ mod tests {
                 tabs: vec![first.clone(), second.clone()],
             },
         );
-        assert!(
+        assert_eq!(
             reduce(
                 &mut with_successor,
                 PaneEvent::DismissInterrupted {
                     continuation: first.continuation,
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneEffect; 0]
         );
         assert_eq!(interrupted_tabs(&with_successor), vec![second.continuation]);
         assert_eq!(
@@ -2855,15 +2886,15 @@ mod tests {
         ];
         assert_eq!(registry.live_terminals(), vec![live]);
 
-        assert!(
+        assert_eq!(
             reduce_registry(
                 &mut registry,
                 PaneRegistryEvent::Pane {
                     target,
                     event: PaneEvent::Select(PaneSelection::None),
                 },
-            )
-            .is_empty()
+            ),
+            [] as [PaneRegistryEffect; 0]
         );
     }
 

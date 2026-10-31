@@ -380,7 +380,10 @@ mod tests {
             .map(|n| (n.to_string(), State::Quiet))
             .collect();
         assert!(deliver(&[], &store, &mut notifier).is_err());
-        assert!(notifier.sent.is_empty());
+        assert_eq!(
+            notifier.sent,
+            [] as [crate::usecase::desktop_notifications::Notification; 0]
+        );
         assert_eq!(store.writes.get(), 0);
     }
 

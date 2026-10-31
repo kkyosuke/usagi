@@ -942,7 +942,10 @@ mod tests {
         let all = first.into_iter().chain(second).collect::<HashSet<_>>();
         assert_eq!(all.len(), 22);
         deck.slots.clear();
-        assert!(deck.attention_workspaces().is_empty());
+        assert_eq!(
+            deck.attention_workspaces(),
+            [] as [usagi_core::domain::id::WorkspaceId; 0]
+        );
     }
     #[test]
     fn inbox_preserves_exact_question_targets_and_rejects_invalid_metadata() {

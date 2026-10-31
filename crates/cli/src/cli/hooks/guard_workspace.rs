@@ -233,7 +233,7 @@ mod tests {
     fn hidden_handler_requests_composition_evaluation_without_output() {
         let (outcome, output) = execute(Command::GuardWorkspace);
         assert_eq!(outcome, RunOutcome::GuardWorkspace);
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 
     fn layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -279,7 +279,7 @@ mod tests {
         let mut out = Vec::new();
         evaluate(&mut Cursor::new(payload), &mut out).unwrap();
         // 許可時は何も書かないので、ツールは Claude 通常の許可フローで進む。
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
     }
 
     #[test]

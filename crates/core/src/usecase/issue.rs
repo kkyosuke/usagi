@@ -910,10 +910,9 @@ mod tests {
         assert!(!store.dir().exists());
 
         assert!(get(&store, 1).unwrap().is_none());
-        assert!(
-            search(&store, "", &IssueFilter::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            search(&store, "", &IssueFilter::default()).unwrap(),
+            [] as [super::ListedIssue; 0]
         );
 
         assert!(!store.dir().exists());
@@ -1317,10 +1316,9 @@ mod tests {
         .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].summary.number, ready.number);
-        assert!(
-            search(&store, "absent", &IssueFilter::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            search(&store, "absent", &IssueFilter::default()).unwrap(),
+            [] as [super::ListedIssue; 0]
         );
     }
 

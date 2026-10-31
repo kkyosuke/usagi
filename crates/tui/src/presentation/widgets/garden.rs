@@ -1208,7 +1208,10 @@ fn agent_plot(
     reduced_motion: bool,
 ) -> ([String; PLOT_CONTENT_ROWS - 1], Vec<PlacedRabbit>) {
     let agents = agent_status::ordered(&session.agents);
-    debug_assert!(!agents.is_empty());
+    debug_assert_ne!(
+        agents,
+        [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+    );
 
     let session_status =
         if session.pr_merged {
@@ -2192,7 +2195,10 @@ mod tests {
     fn an_empty_garden_has_a_calm_explicit_message() {
         let frame = render(24, 100, "my-project", &[], 0, false).expect("garden fits");
         assert!(frame.rows.join("\n").contains("No sessions in the garden"));
-        assert!(frame.hitboxes.is_empty());
+        assert_eq!(
+            frame.hitboxes,
+            [] as [crate::presentation::widgets::garden::GardenHitbox; 0]
+        );
     }
 
     #[test]

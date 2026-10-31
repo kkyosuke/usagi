@@ -393,6 +393,7 @@ pub fn render_over(
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
     use super::*;
+    use crate::usecase::application::controller::Effect;
 
     fn editor_body(
         editor: &crate::usecase::application::controller::DecisionEditor,
@@ -1057,7 +1058,6 @@ mod tests {
 
     #[test]
     fn pending_list_identifies_answer_kinds_and_opens_the_freeform_request() {
-        use crate::usecase::application::controller::Effect;
         use usagi_core::domain::user_decision::UserDecisionAnswer;
 
         let workspace = WorkspaceId::new();
@@ -1139,7 +1139,10 @@ mod tests {
                     decisions: vec![request],
                 }),
             );
-            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                [] as [Effect; 0]
+            );
             let editor = state.decision_overlay().unwrap().editor().unwrap();
             assert!(
                 editor_rows(editor, 70, 100)
@@ -1206,7 +1209,10 @@ mod tests {
             }
             for review in [false, true] {
                 if review {
-                    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                    assert_eq!(
+                        update(&mut state, AppEvent::Key(AppKey::Enter)),
+                        [] as [Effect; 0]
+                    );
                     assert!(
                         state
                             .decision_overlay()
@@ -1228,7 +1234,7 @@ mod tests {
                             .any(|text| row.contains(text))
                     })
                     .collect::<Vec<_>>();
-                assert!(!expected.is_empty());
+                assert_ne!(expected, [] as [String; 0]);
                 for height in [11, 12, 16, 24] {
                     for key in [AppKey::PageDown, AppKey::PageUp] {
                         // Traverse from the corresponding edge. Paging from a
@@ -1319,7 +1325,7 @@ mod tests {
                     AppKey::DecisionNext,
                     AppKey::Paste("lternative".into()),
                 ] {
-                    assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                    assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
                     assert!(
                         state
                             .decision_overlay()
@@ -1331,11 +1337,20 @@ mod tests {
                 }
                 assert!(body(&state).contains("> freeform: Alternative"));
                 if confirmation {
-                    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                    assert_eq!(
+                        update(&mut state, AppEvent::Key(AppKey::Enter)),
+                        [] as [Effect; 0]
+                    );
                     assert!(body(&state).contains("Answer: Alternative"));
-                    assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+                    assert_eq!(
+                        update(&mut state, AppEvent::Key(AppKey::Escape)),
+                        [] as [Effect; 0]
+                    );
                     assert!(body(&state).contains("> freeform: Alternative"));
-                    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                    assert_eq!(
+                        update(&mut state, AppEvent::Key(AppKey::Enter)),
+                        [] as [Effect; 0]
+                    );
                 }
                 assert!(
                     matches!(update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
@@ -1417,7 +1432,10 @@ mod tests {
                             );
                         }
                         if confirmation {
-                            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                            assert_eq!(
+                                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                                [] as [Effect; 0]
+                            );
                             assert!(body(&state).contains("Choice: Safe [safe]"));
                         }
                         let comment = allow_comment.then(|| "Only staging".to_owned());
@@ -1751,7 +1769,10 @@ mod tests {
                 decisions: vec![request],
             }),
         );
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            [] as [Effect; 0]
+        );
         let editor = state.decision_overlay().unwrap().editor().unwrap();
         assert_eq!(editor.scroll_offset(), None);
         let body = editor_body(editor, 70).join("\n");
@@ -1783,14 +1804,20 @@ mod tests {
                 decisions: vec![request],
             }),
         );
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            [] as [Effect; 0]
+        );
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let editor = state.decision_overlay().unwrap().editor().unwrap();
         assert!(editor.error().is_none());
         let body = editor_body(editor, 70).join("\n");
         assert!(body.contains("Choice number 1"));
         assert!(!body.contains("Choice number 31"));
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            [] as [Effect; 0]
+        );
         let _ = update(&mut state, AppEvent::Key(AppKey::Up));
         let editor = state.decision_overlay().unwrap().editor().unwrap();
         assert!(editor.error().is_none());
@@ -1839,7 +1866,10 @@ mod tests {
         assert!(body(&state).contains("0 selected (2-2)"));
         assert!(!body(&state).contains("[x]"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            [] as [Effect; 0]
+        );
         assert!(body(&state).contains("Choose 2-2 options (1 selected)"));
         for key in [
             AppKey::Down,
@@ -1847,7 +1877,7 @@ mod tests {
             AppKey::Down,
             AppKey::Char(' '),
         ] {
-            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         }
         let editor = state.decision_overlay().unwrap().editor().unwrap();
         assert!(!editor.option_checked("C"));
@@ -1972,7 +2002,10 @@ mod tests {
             });
             let _ = update(&mut state, snapshot.clone());
             if mode == UserDecisionSelectionMode::Multiple {
-                assert!(update(&mut state, AppEvent::Key(AppKey::Char(' '))).is_empty());
+                assert_eq!(
+                    update(&mut state, AppEvent::Key(AppKey::Char(' '))),
+                    [] as [Effect; 0]
+                );
             }
             for key in [
                 AppKey::Tab,
@@ -1980,14 +2013,17 @@ mod tests {
                 AppKey::Backspace,
                 AppKey::Char('!'),
             ] {
-                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
             }
             let body = |state: &AppState| {
                 editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n")
             };
             assert!(body(&state).contains("comment (optional): Only staging!"));
             assert!(body(&state).contains("Enter: review"));
-            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                [] as [Effect; 0]
+            );
             assert!(body(&state).contains("Review answer"));
             assert!(body(&state).contains("Choice: Safe [safe]"));
             assert!(body(&state).contains("Comment: Only staging!"));
@@ -1997,12 +2033,12 @@ mod tests {
                 AppKey::PageUp,
                 AppKey::Escape,
             ] {
-                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
             }
             assert!(!body(&state).contains("Review answer"));
             assert!(body(&state).contains("Only staging!"));
             for key in [AppKey::Backspace, AppKey::Char('.'), AppKey::Enter] {
-                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
             }
             let _ = update(&mut state, snapshot);
             assert!(body(&state).contains("Comment: Only staging."));
@@ -2067,7 +2103,7 @@ mod tests {
                         AppKey::Tab,
                         AppKey::Tab,
                     ] {
-                        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
                     }
                 }
                 let text = "Alternative\n".repeat(25);
@@ -2078,7 +2114,10 @@ mod tests {
                 let body =
                     editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
                 assert!(body.contains("Enter: review"));
-                assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                assert_eq!(
+                    update(&mut state, AppEvent::Key(AppKey::Enter)),
+                    [] as [Effect; 0]
+                );
                 let body =
                     editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
                 assert!(body.contains("Answer: Alternative"));
@@ -2117,7 +2156,7 @@ mod tests {
             }
             assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
             for key in [AppKey::Tab, AppKey::Char(' '), AppKey::Tab, AppKey::Tab] {
-                assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+                assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
             }
             let body =
                 editor_body(state.decision_overlay().unwrap().editor().unwrap(), 70).join("\n");
@@ -2125,7 +2164,10 @@ mod tests {
             assert!(body.contains("Enter: submit"));
             assert_eq!(update(&mut state, AppEvent::Key(AppKey::Enter)).len(), 1);
             let _ = update(&mut state, AppEvent::Key(AppKey::Paste("x".repeat(2049))));
-            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                [] as [Effect; 0]
+            );
             assert!(
                 state
                     .decision_overlay()

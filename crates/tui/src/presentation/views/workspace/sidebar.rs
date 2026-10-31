@@ -211,7 +211,7 @@ mod tests {
                 let frame = render_home_at(30, 100, &home, now);
                 for row in [3, 4] {
                     if removing {
-                        assert!(left(&frame[row], LEFT_WIDTH).trim().is_empty());
+                        assert_eq!(left(&frame[row], LEFT_WIDTH).trim(), "");
                     }
                     assert_eq!(
                         sidebar_pointer_target(

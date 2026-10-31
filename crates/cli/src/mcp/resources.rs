@@ -82,8 +82,8 @@ mod tests {
         let guide = &reg[0];
         assert_eq!(guide.uri, "usagi://guides/orchestration");
         assert_eq!(guide.mime_type, "text/markdown");
-        assert!(!guide.name.is_empty());
-        assert!(!guide.description.is_empty());
+        assert_ne!(guide.name, "");
+        assert_ne!(guide.description, "");
         assert!(guide.text.contains("orchestration"));
     }
 
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(guide["uri"], "usagi://guides/orchestration");
         assert_eq!(guide["name"], "usagi orchestration guide");
         assert_eq!(guide["mimeType"], "text/markdown");
-        assert!(!guide["description"].as_str().unwrap().is_empty());
+        assert_ne!(guide["description"].as_str().unwrap(), "");
     }
 
     #[test]

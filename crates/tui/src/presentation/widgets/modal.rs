@@ -876,7 +876,7 @@ mod tests {
                 "  [ 保存 ]  [ keep ]"
             );
         }
-        assert!(super::choice_buttons(0, &[]).is_empty());
+        assert_eq!(super::choice_buttons(0, &[]), "");
     }
 
     #[test]
@@ -1078,8 +1078,8 @@ mod tests {
             }
         }
         // A zero capacity and an empty list both draw nothing.
-        assert!(bounded_list_rows(&rows, 3, 0).is_empty());
-        assert!(bounded_list_rows(&[], 0, 4).is_empty());
+        assert_eq!(bounded_list_rows(&rows, 3, 0), [] as [String; 0]);
+        assert_eq!(bounded_list_rows(&[], 0, 4), [] as [String; 0]);
     }
 
     #[test]

@@ -10,7 +10,10 @@ fn garden_shortcut_opens_without_replacing_a_front_surface() {
     let mut state = AppState::home(workspace, vec![session]);
 
     state.notice = Some(Notice::new("stale feedback"));
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenGarden)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenGarden)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
     assert!(state.notice().is_none());
 
@@ -25,13 +28,19 @@ fn garden_shortcut_opens_without_replacing_a_front_surface() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
     assert_eq!(state.overlay(), None);
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenGarden)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenGarden)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
     assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
 
     for overlay in [Overlay::Overview, Overlay::Closeup] {
         state.overlay = Some(overlay);
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenGarden)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenGarden)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), Some(overlay));
     }
 }
@@ -42,12 +51,12 @@ fn overview_garden_opens_a_screen_saver_that_any_key_wakes() {
     let mut state = AppState::home(workspace, Vec::new());
     state.overlay = Some(Overlay::Overview);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("garden".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
     assert!(state.notice().is_none());
@@ -63,18 +72,18 @@ fn overview_garden_opens_a_screen_saver_that_any_key_wakes() {
         AppKey::OpenDirectorNew,
     ] {
         state.overlay = Some(Overlay::Garden);
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert_eq!(state.overlay(), None);
         assert!(!state.director_drawer_open());
     }
 
     state.overlay = Some(Overlay::Overview);
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("garden extra".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert!(
@@ -90,11 +99,17 @@ fn garden_click_and_arrow_keys_wake_the_overlay() {
     let mut state = AppState::home(workspace, Vec::new());
     state.overlay = Some(Overlay::Garden);
 
-    assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Left)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
     state.overlay = Some(Overlay::Garden);
-    assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 }
 
@@ -104,27 +119,30 @@ fn garden_list_scroll_keeps_home_selection_and_does_not_emit_effects() {
     let mut state = AppState::home(workspace, vec![a, b]);
     let selected = state.selected();
     let active = state.active();
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::GardenClick(GardenClick::Scroll { offset: 8 })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.garden_sidebar_scroll(), 0);
     let _ = update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::GardenClick(GardenClick::Scroll { offset: 8 })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
     assert_eq!(state.garden_sidebar_scroll(), 8);
     assert_eq!(state.selected(), selected);
     assert_eq!(state.active(), active);
-    assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
     assert_eq!(state.garden_sidebar_scroll(), 0);
 }
@@ -133,15 +151,18 @@ fn garden_list_scroll_keeps_home_selection_and_does_not_emit_effects() {
 fn manual_garden_refuses_an_unavailable_layout_without_leaving_an_overlay() {
     let (workspace, _, _) = ids();
     let mut state = AppState::home(workspace, Vec::new());
-    assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenAvailability(false)),
+        [] as [Effect; 0]
+    );
     state.overlay = Some(Overlay::Overview);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("garden".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), None);
     assert!(
@@ -149,13 +170,25 @@ fn manual_garden_refuses_an_unavailable_layout_without_leaving_an_overlay() {
             .notice()
             .is_some_and(|notice| { notice.message.as_str().contains("at least 64 columns") })
     );
-    assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
-    assert!(update(&mut state, AppEvent::GardenAvailability(true)).is_empty());
-    assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenAvailability(true)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
-    assert!(update(&mut state, AppEvent::GardenAvailability(false)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenAvailability(false)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 }
 
@@ -169,15 +202,24 @@ fn the_garden_opens_only_once_home_reaches_the_idle_threshold() {
     let almost = GARDEN_IDLE_THRESHOLD
         .checked_sub(std::time::Duration::from_millis(1))
         .expect("the threshold is longer than a millisecond");
-    assert!(update(&mut state, AppEvent::IdleElapsed(almost)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::IdleElapsed(almost)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
-    assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
 
     // Idle keeps being reported while the garden is up; that is inert rather
     // than a second open, and the route underneath is untouched.
-    assert!(update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD * 4)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::IdleElapsed(GARDEN_IDLE_THRESHOLD * 4)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::Garden));
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
 }
@@ -283,7 +325,10 @@ fn unavailable_garden_closes_with_visible_feedback() {
     let mut state = sized_home(workspace, vec![first, second], 40, 10);
     state.overlay = Some(Overlay::Garden);
 
-    assert!(update(&mut state, AppEvent::GardenUnavailable).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenUnavailable),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
     assert!(
         state
@@ -302,7 +347,7 @@ fn a_click_on_a_vanished_usagi_only_closes_the_garden() {
     let (selected, active) = (state.selected(), state.active());
     state.overlay = Some(Overlay::Garden);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::GardenClick(GardenClick::Visit {
@@ -310,8 +355,8 @@ fn a_click_on_a_vanished_usagi_only_closes_the_garden() {
                 session: gone,
                 agent: None,
             })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), None);
     assert_eq!(state.selected(), selected);
@@ -335,7 +380,10 @@ fn a_garden_click_without_an_open_garden_is_inert() {
         },
         GardenClick::Dismiss,
     ] {
-        assert!(update(&mut state, AppEvent::GardenClick(click)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::GardenClick(click)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), None);
         assert_eq!(state.route(), route);
     }

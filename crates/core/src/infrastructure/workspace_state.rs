@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn adoption_lists_recorded_subtrees_and_ignores_the_rest() {
         let daemon = daemon_dir();
-        assert!(adopted(daemon.path()).unwrap().is_empty());
+        assert_eq!(adopted(daemon.path()).unwrap(), [] as [WorkspaceState; 0]);
 
         resolve(daemon.path(), Path::new("/workspace/two")).unwrap();
         resolve(daemon.path(), Path::new("/workspace/one")).unwrap();

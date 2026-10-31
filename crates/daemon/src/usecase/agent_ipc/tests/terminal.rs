@@ -356,7 +356,13 @@ fn agent_resize_rejects_each_forged_terminal_ref_field_before_pty_effect() {
             TerminalOutcome::NotOwned
         ));
     }
-    assert!(pty(&runtime).resized.is_empty());
+    assert_eq!(
+        pty(&runtime).resized,
+        [] as [(
+            usagi_core::domain::id::TerminalRef,
+            crate::usecase::terminal::Geometry
+        ); 0]
+    );
 }
 
 #[test]
@@ -479,7 +485,10 @@ fn shared_owner_inventory_merges_agent_and_generic_and_rejects_invalid_scope() {
     let client = ClientId::new();
     // The shared owner handles Inventory through `request`; when used as a
     // nested generic owner its trait-level default inventory is empty.
-    assert!(TerminalOwner::inventory(&owner, &inventory_scope).is_empty());
+    assert_eq!(
+        TerminalOwner::inventory(&owner, &inventory_scope),
+        [] as [usagi_core::domain::terminal_launch::TerminalInventoryEntry; 0]
+    );
 
     let reply = owner
         .request(
@@ -803,7 +812,10 @@ fn search_inspection_does_not_attach_or_write_and_rejects_replaced_identity() {
         agent.search_targets(admission.terminal.workspace_id),
         vec![admission.terminal.clone()]
     );
-    assert!(agent.search_targets(WorkspaceId::new()).is_empty());
+    assert_eq!(
+        agent.search_targets(WorkspaceId::new()),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     let before = agent.inventory(admission.terminal.workspace_id);
     std::fs::write(agent.dispatch.registry_path(), "broken").unwrap();
     assert_eq!(agent.inventory(admission.terminal.workspace_id), before);

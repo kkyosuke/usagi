@@ -82,7 +82,10 @@ fn the_minimum_window_replays_the_full_exact_outcome_and_only_then_expires_it() 
     let limits = limits();
 
     // One tick before the window closes the full record is still there.
-    assert!(plan_gc(&ledger.document, &limits, 9).phases.is_empty());
+    assert_eq!(
+        plan_gc(&ledger.document, &limits, 9).phases,
+        [] as [crate::usecase::resources::retention::GcPhase; 0]
+    );
     let replay = ledger
         .document
         .admit(&operation, "digest", ResourceKind::Terminal, policy(8, 8))
@@ -109,7 +112,10 @@ fn the_minimum_window_replays_the_full_exact_outcome_and_only_then_expires_it() 
         ledger.document.claim(&resource).is_none(),
         "the released claim and its consumed event go with the record"
     );
-    assert!(ledger.document.consumed.is_empty());
+    assert_eq!(
+        ledger.document.consumed,
+        [] as [crate::usecase::resources::allocator::ConsumedEvent; 0]
+    );
     assert_eq!(
         ledger
             .document
@@ -180,7 +186,10 @@ fn a_tombstone_is_compacted_only_after_the_horizon_and_stays_expired_afterwards(
         .find(|phase| matches!(phase, GcPhase::Compact(_)))
         .unwrap();
     apply_phase(&mut ledger.document, compact, &limits, 200).unwrap();
-    assert!(ledger.document.tombstones.is_empty());
+    assert_eq!(
+        ledger.document.tombstones,
+        [] as [crate::usecase::resources::allocator::OperationTombstone; 0]
+    );
     assert!(
         ledger.document.is_expired(&operation),
         "the watermark keeps the id expired with no record left at all"
@@ -293,7 +302,10 @@ fn compaction_requires_a_watermark_that_actually_covers_the_ids() {
         200,
     )
     .unwrap();
-    assert!(ledger.document.tombstones.is_empty());
+    assert_eq!(
+        ledger.document.tombstones,
+        [] as [crate::usecase::resources::allocator::OperationTombstone; 0]
+    );
 }
 
 #[test]
@@ -311,7 +323,10 @@ fn a_hard_cap_of_uncollectable_records_reports_backpressure_without_eviction() {
     ledger.document.mark_spawned(&live, 0).unwrap();
 
     let plan = plan_gc(&ledger.document, &limits, 1_000);
-    assert!(plan.phases.is_empty());
+    assert_eq!(
+        plan.phases,
+        [] as [crate::usecase::resources::retention::GcPhase; 0]
+    );
     assert!(plan.backpressure);
     assert_eq!(ledger.document.operations.len(), 3);
     assert!(
@@ -371,8 +386,14 @@ fn a_full_pass_walks_the_phases_and_reports_what_it_did() {
     let report = collect_garbage(&allocator, &limits, &clock).unwrap();
     assert_eq!(report.compacted, 1);
     let document = allocator.load().unwrap().to_document();
-    assert!(document.operations.is_empty());
-    assert!(document.tombstones.is_empty());
+    assert_eq!(
+        document.operations,
+        [] as [crate::usecase::resources::allocator::OperationRecord; 0]
+    );
+    assert_eq!(
+        document.tombstones,
+        [] as [crate::usecase::resources::allocator::OperationTombstone; 0]
+    );
     assert!(document.is_expired(&operation));
     assert_eq!(document.watermark, Some(operation));
 }
@@ -450,7 +471,10 @@ fn a_phase_whose_record_was_reclaimed_between_plan_and_apply_is_dropped() {
         document.operation(&operation).is_some(),
         "the full outcome is still replayable"
     );
-    assert!(document.tombstones.is_empty());
+    assert_eq!(
+        document.tombstones,
+        [] as [crate::usecase::resources::allocator::OperationTombstone; 0]
+    );
 }
 
 #[test]

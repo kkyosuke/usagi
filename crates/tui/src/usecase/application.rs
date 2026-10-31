@@ -725,7 +725,7 @@ mod tests {
 
         for entry in entries {
             assert_eq!(entry.clone(), entry);
-            assert!(!format!("{entry:?}").is_empty());
+            assert_ne!(format!("{entry:?}"), "");
         }
     }
 
@@ -762,7 +762,7 @@ mod tests {
         ];
         for key in keys {
             assert_eq!(key.clone(), key);
-            assert!(!format!("{key:?}").is_empty());
+            assert_ne!(format!("{key:?}"), "");
         }
         assert_ne!(Key::Char('a'), Key::Char('b'));
         assert_ne!(

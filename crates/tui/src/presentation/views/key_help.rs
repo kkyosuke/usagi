@@ -648,8 +648,11 @@ mod tests {
 
     #[test]
     fn zero_capacity_help_omits_body_rows_without_panicking() {
-        assert!(bounded_command_rows(&["row".to_owned()], 0, 0).is_empty());
-        assert!(bounded_command_rows(&[], 0, 3).is_empty());
+        assert_eq!(
+            bounded_command_rows(&["row".to_owned()], 0, 0),
+            [] as [String; 0]
+        );
+        assert_eq!(bounded_command_rows(&[], 0, 3), [] as [String; 0]);
 
         let rendered = render_over(5, 80, &vec![String::new(); 5], help(Context::Switch));
         assert!(!rendered.join("\n").contains("close help"));

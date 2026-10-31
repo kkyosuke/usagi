@@ -278,7 +278,7 @@ mod tests {
             ] if *m == metrics() && g.get(&session) == Some(&git_diff())
         ));
         // The drain empties the channel.
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(backend.drain_events(), [] as [MetricsUpdate; 0]);
     }
 
     #[test]

@@ -926,7 +926,7 @@ mod tests {
     fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(source_issues(&store).is_empty());
+        assert_eq!(source_issues(&store), [] as [Issue; 0]);
     }
 
     #[cfg(unix)]
@@ -1133,7 +1133,7 @@ mod tests {
         fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
         fs::create_dir(store.dir().join(".lock")).unwrap();
 
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [IssueSummary; 0]);
         assert!(dirty.exists());
 
         unsafe {
@@ -1557,7 +1557,7 @@ mod tests {
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [IssueSummary; 0]);
         assert!(!store.dir().exists());
     }
 
@@ -2680,10 +2680,10 @@ mod tests {
             let outcome = store.remove_with_outcome(1).unwrap();
             assert!(outcome.value);
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert!(source_issues(&store).is_empty());
+            assert_eq!(source_issues(&store), [] as [Issue; 0]);
 
             let reopened = IssueStore::new(tmp.path());
-            assert!(reopened.summaries().unwrap().is_empty());
+            assert_eq!(reopened.summaries().unwrap(), [] as [IssueSummary; 0]);
             let retry = reopened.remove_with_outcome(1).unwrap();
             assert!(!retry.value);
             assert_eq!(retry.derived, DerivedState::Fresh);
@@ -2702,7 +2702,7 @@ mod tests {
             let source = store.dir().join("001-created.md");
             fail_next_atomic_write(&source, stage);
             assert!(store.write(&issue(1, "Created")).is_err());
-            assert!(source_issues(&store).is_empty());
+            assert_eq!(source_issues(&store), [] as [Issue; 0]);
 
             store.write(&issue(1, "Old")).unwrap();
             let updated_source = store.dir().join("001-updated.md");

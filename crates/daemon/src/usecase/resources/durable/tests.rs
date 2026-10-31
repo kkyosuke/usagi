@@ -596,7 +596,10 @@ fn a_foreign_record_is_never_written_and_is_released_only_when_terminated() {
         world.allocator().claim(&old_resource).unwrap().state,
         ClaimState::Live
     );
-    assert!(world.shard(new).resources.is_empty());
+    assert_eq!(
+        world.shard(new).resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
     assert_eq!(world.shard(old).resources.len(), 1);
 
     let terminated = RuntimeProjection {
@@ -776,7 +779,10 @@ fn a_terminated_record_whose_ledger_entry_was_collected_still_saves() {
         )
         .unwrap();
     assert_eq!(report.owned, 1);
-    assert!(world.allocator().operations.is_empty());
+    assert_eq!(
+        world.allocator().operations,
+        [] as [crate::usecase::resources::allocator::OperationRecord; 0]
+    );
     assert_eq!(
         world.shard(owner).resource(&resource).unwrap().state,
         ResourceState::Exited { status: None }
@@ -1316,7 +1322,10 @@ fn a_legacy_store_is_adopted_once_and_only_where_it_can_prove_itself() {
             .iter()
             .all(|entry| entry.state == ResourceState::OwnershipUnknown)
     );
-    assert!(world.allocator().claims.is_empty());
+    assert_eq!(
+        world.allocator().claims,
+        [] as [crate::usecase::resources::allocator::ResourceClaim; 0]
+    );
     assert_eq!(hydrated.agents.records.len(), 1);
     assert_eq!(hydrated.terminals.records.len(), 1);
     assert!(world.archive.marker().is_some());
@@ -1812,8 +1821,14 @@ fn a_shard_resource_without_a_record_is_skipped_rather_than_guessed() {
         .state(owner, ObservedChildren::new())
         .hydrate()
         .unwrap();
-    assert!(hydrated.terminals.records.is_empty());
-    assert!(hydrated.agents.records.is_empty());
+    assert_eq!(
+        hydrated.terminals.records,
+        [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+    );
+    assert_eq!(
+        hydrated.agents.records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1844,7 +1859,10 @@ fn a_shard_transition_that_contradicts_itself_refuses_the_save() {
             .refusal(),
         Some(ResourceError::DuplicateResource)
     );
-    assert!(world.shard(owner).resources.is_empty());
+    assert_eq!(
+        world.shard(owner).resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
 
     // A resource id that two records claim is a contradiction the shard refuses:
     // the terminated one takes no claim, so the refusal comes from the shard
@@ -1861,7 +1879,10 @@ fn a_shard_transition_that_contradicts_itself_refuses_the_save() {
             .refusal(),
         Some(ResourceError::DuplicateResource)
     );
-    assert!(world.shard(owner).resources.is_empty());
+    assert_eq!(
+        world.shard(owner).resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
 
     // A running record cannot be handed a different child either.
     let running = RuntimeProjection {
@@ -1911,7 +1932,10 @@ fn a_terminated_legacy_record_is_adopted_without_being_called_live() {
 
     assert_eq!(migration.marker.adopted, 1);
     assert_eq!(world.shard(old).live_resources(), 0);
-    assert!(world.allocator().claims.is_empty());
+    assert_eq!(
+        world.allocator().claims,
+        [] as [crate::usecase::resources::allocator::ResourceClaim; 0]
+    );
 }
 
 #[test]

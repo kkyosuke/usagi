@@ -665,12 +665,17 @@ mod tests {
     fn retained_window_is_empty_for_empty_reversed_or_out_of_bounds_ranges() {
         let mut screen = TerminalScreen::new(2, 8);
         screen.advance(b"one\r\ntwo");
-        assert!(screen.rows_with_scrollback_window(1, 1, true).is_empty());
-        assert!(screen.rows_with_scrollback_window(2, 1, true).is_empty());
-        assert!(
-            screen
-                .rows_with_scrollback_window(usize::MAX, usize::MAX, true)
-                .is_empty()
+        assert_eq!(
+            screen.rows_with_scrollback_window(1, 1, true),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            screen.rows_with_scrollback_window(2, 1, true),
+            [] as [String; 0]
+        );
+        assert_eq!(
+            screen.rows_with_scrollback_window(usize::MAX, usize::MAX, true),
+            [] as [String; 0]
         );
     }
 
@@ -680,20 +685,17 @@ mod tests {
         screen.advance(b"one\r\ntwo");
         let anchor = (0, 0);
         let focus = (1, 2);
-        assert!(
-            screen
-                .rows_with_scrollback_window_selection(1, 1, anchor, focus)
-                .is_empty()
+        assert_eq!(
+            screen.rows_with_scrollback_window_selection(1, 1, anchor, focus),
+            [] as [String; 0]
         );
-        assert!(
-            screen
-                .rows_with_scrollback_window_selection(2, 1, anchor, focus)
-                .is_empty()
+        assert_eq!(
+            screen.rows_with_scrollback_window_selection(2, 1, anchor, focus),
+            [] as [String; 0]
         );
-        assert!(
-            screen
-                .rows_with_scrollback_window_selection(usize::MAX, usize::MAX, anchor, focus,)
-                .is_empty()
+        assert_eq!(
+            screen.rows_with_scrollback_window_selection(usize::MAX, usize::MAX, anchor, focus,),
+            [] as [String; 0]
         );
     }
 

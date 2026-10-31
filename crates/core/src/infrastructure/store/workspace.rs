@@ -105,7 +105,7 @@ impl Storage {
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
         let file: Option<WorkspacesOwned> =
             json_file::read_versioned(&self.dir.join(WORKSPACES_FILE))?;
-        let workspaces = file.map(|file| file.workspaces).unwrap_or_default();
+        let workspaces = file.map_or_default(|file| file.workspaces);
         for workspace in &workspaces {
             validate_workspace_name(&workspace.name)?;
         }
@@ -137,7 +137,7 @@ impl Storage {
     pub fn load_unites(&self) -> Result<Vec<Unite>> {
         let file: Option<UnitesOwned> =
             json_file::read_supported_version(&self.dir.join(UNITES_FILE))?;
-        Ok(file.map(|file| file.unites).unwrap_or_default())
+        Ok(file.map_or_default(|file| file.unites))
     }
 
     /// Atomically persist the complete Unite recent list.
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn workspaces_round_trip_through_disk() {
         let (_dir, storage) = temp_storage();
-        assert!(storage.load_workspaces().unwrap().is_empty());
+        assert_eq!(storage.load_workspaces().unwrap(), [] as [Workspace; 0]);
 
         let workspaces = vec![Workspace::new("alpha", "/tmp/alpha")];
         storage.save_workspaces(&workspaces).unwrap();
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn unites_round_trip_through_disk_in_tab_order() {
         let (_dir, storage) = temp_storage();
-        assert!(storage.load_unites().unwrap().is_empty());
+        assert_eq!(storage.load_unites().unwrap(), [] as [Unite; 0]);
         let now = Utc::now();
         let unites = vec![Unite::new(
             vec![PathBuf::from("/beta"), PathBuf::from("/alpha")],

@@ -2082,9 +2082,7 @@ fn drawer_close_reopen_continues_input_on_the_same_daemon_connection() {
 fn wait_for_spawns(count: &Path, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let observed = fs::read_to_string(count)
-            .map(|body| body.lines().count())
-            .unwrap_or_default();
+        let observed = fs::read_to_string(count).map_or_default(|body| body.lines().count());
         assert!(
             observed <= expected,
             "the fixture spawned more children than the {expected} expected"
@@ -3341,7 +3339,7 @@ fn managed_update_defers_live_agent_handoff_without_reporting_an_update_failure(
     .output()
     .expect("an older embedded installer can still complete an update");
     assert!(legacy.status.success());
-    assert!(legacy.stderr.is_empty());
+    assert_eq!(legacy.stderr, [] as [u8; 0]);
     assert!(String::from_utf8_lossy(&legacy.stdout).contains("deferred to preserve"));
     assert_eq!(daemon_pid(&data_dir), old_pid);
     assert_eq!(read_locator(&data_dir.join("daemon")).unwrap(), old_locator);
@@ -3844,10 +3842,7 @@ fn root_restart_recovers_agents_after_requester_exit() {
 
     let deadline = Instant::now() + Duration::from_secs(20);
     while pending.exists()
-        || fs::read_to_string(&agent_spawns)
-            .map(|body| body.lines().count())
-            .unwrap_or_default()
-            != 2
+        || fs::read_to_string(&agent_spawns).map_or_default(|body| body.lines().count()) != 2
     {
         assert!(
             Instant::now() < deadline,

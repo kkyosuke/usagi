@@ -50,7 +50,7 @@ fn shipping_issue_adapters_cover_defensive_parsing_and_missing_projection() {
         &IssueUpdate,
         &IssueDelete,
     ] {
-        assert!(!tool.description().is_empty());
+        assert_ne!(tool.description(), "");
         assert!(matches!(
             tool.call("{", Path::new(".")),
             Err(ToolError::InvalidParams(_))
@@ -1089,7 +1089,7 @@ fn a_second_active_daemon_is_refused_without_disturbing_the_registry() {
         "{}",
         stderr(&second)
     );
-    assert!(stdout(&second).is_empty());
+    assert_eq!(stdout(&second), "");
     assert_eq!(std::fs::read(&registry).unwrap(), before);
     assert_eq!(
         std::fs::read(daemon_dir.join("current.json")).unwrap(),
@@ -1341,7 +1341,7 @@ fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes
     let refused = owner_home.run(&[OsStr::new("daemon"), OsStr::new("serve")]);
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
     assert!(stderr(&refused).contains(&expected), "{}", stderr(&refused));
-    assert!(stdout(&refused).is_empty());
+    assert_eq!(stdout(&refused), "");
 
     // Same workspace, different `$USAGI_HOME`: likewise a free instance lock in a
     // wholly separate data directory, and likewise refused.
@@ -1356,7 +1356,7 @@ fn a_second_daemon_for_the_same_workspace_is_refused_across_modes_and_data_homes
         .expect("usagi バイナリを起動できる");
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
     assert!(stderr(&refused).contains(&expected), "{}", stderr(&refused));
-    assert!(stdout(&refused).is_empty());
+    assert_eq!(stdout(&refused), "");
 
     // Fencing is per workspace, not global: a daemon for a different workspace
     // still starts, so parallel workspaces (and parallel tests) keep working.
@@ -2364,7 +2364,7 @@ fn config_entry_renders_the_config_screen() {
     assert!(out.contains("OpenAI") || out.contains("none"));
     assert!(!out.contains("Scope:"));
     assert!(out.contains("Esc: back"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     let status = home.run(&[OsStr::new("daemon"), OsStr::new("status")]);
     assert!(status.status.success());
     assert!(stdout(&status).contains("daemon not running"));
@@ -2447,7 +2447,7 @@ fn doctor_reports_real_diagnostics() {
     assert!(out.contains("[ok] Settings: settings storage is readable"));
     assert!(out.contains("[ok] Daemon: daemon is reachable"));
     assert!(out.contains("result: healthy"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     stop_daemon(&home);
 }
 
@@ -2760,7 +2760,7 @@ fn open_validates_non_utf8_workspace_paths() {
     let missing = roots.path().join(missing_name);
     let output = run_with_home(&[OsStr::new("open"), missing.as_os_str()], &home);
     assert!(!output.status.success());
-    assert!(!output.stderr.is_empty());
+    assert_ne!(output.stderr, [] as [u8; 0]);
 
     // 相対の非 UTF-8 path は絶対 path へ解決できるが、解決できても serve できないので
     // 開けない（解決不能な場合と同じく失敗し、理由を出す）。
@@ -2769,7 +2769,7 @@ fn open_validates_non_utf8_workspace_paths() {
     let relative_fixture_exists = std::fs::create_dir(&absolute_relative).is_ok();
     let output = home.run_at(roots.path(), &[OsStr::new("open"), relative.as_os_str()]);
     assert!(!output.status.success());
-    assert!(!output.stderr.is_empty());
+    assert_ne!(output.stderr, [] as [u8; 0]);
     if relative_fixture_exists {
         assert!(
             stderr(&output).contains("not valid UTF-8"),
@@ -2785,7 +2785,7 @@ fn open_validates_non_utf8_workspace_paths() {
         Ok(()) => {
             let output = run_with_home(&[OsStr::new("open"), file.as_os_str()], &home);
             assert!(!output.status.success());
-            assert!(!output.stderr.is_empty());
+            assert_ne!(output.stderr, [] as [u8; 0]);
         }
         Err(_) if cfg!(target_os = "macos") => {}
         Err(error) => panic!("non-UTF-8 file fixtureを作成できない: {error}"),

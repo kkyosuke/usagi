@@ -160,16 +160,13 @@ impl OverviewModal {
             return self.input.value().to_owned();
         }
         if self.expanded {
-            return self
-                .selected_command()
-                .map(|command| {
-                    format!(
-                        "{} {}",
-                        command.name,
-                        self.subcommands()[self.selected_subcommand]
-                    )
-                })
-                .unwrap_or_default();
+            return self.selected_command().map_or_default(|command| {
+                format!(
+                    "{} {}",
+                    command.name,
+                    self.subcommands()[self.selected_subcommand]
+                )
+            });
         }
         if self.input.value().contains(char::is_whitespace) || self.matches().is_empty() {
             return self.input.value().to_owned();
@@ -659,7 +656,10 @@ mod tests {
     fn selection_is_a_noop_when_there_are_no_matches() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "zzz"); // 何にも一致しない
-        assert!(modal.matches().is_empty());
+        assert_eq!(
+            modal.matches(),
+            [] as [crate::usecase::overview::CommandInfo; 0]
+        );
         modal.select_next();
         modal.select_prev();
         assert_eq!(modal.selected(), 0);

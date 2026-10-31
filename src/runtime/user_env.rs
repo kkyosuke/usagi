@@ -1205,7 +1205,7 @@ mod tests {
             environment.resolved(workspace.path()),
             Err(UserEnvironmentError::Limits(EnvLimitError::TooManyBindings))
         );
-        assert!(environment.resolver.reads().is_empty());
+        assert_eq!(environment.resolver.reads(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1319,7 +1319,7 @@ mod tests {
             global.resolved(workspace.path()),
             Err(UserEnvironmentError::Limits(EnvLimitError::TooManyBindings))
         );
-        assert!(global.resolver.reads().is_empty());
+        assert_eq!(global.resolver.reads(), [] as [std::string::String; 0]);
 
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -1340,7 +1340,10 @@ mod tests {
             workspace_env.resolved(workspace.path()),
             Err(UserEnvironmentError::Limits(EnvLimitError::TooManyBindings))
         );
-        assert!(workspace_env.resolver.reads().is_empty());
+        assert_eq!(
+            workspace_env.resolver.reads(),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]

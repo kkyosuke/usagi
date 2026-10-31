@@ -237,9 +237,7 @@ impl WorkspaceIoRuntime {
         focused: Option<&TerminalRef>,
         geometry: Geometry,
     ) {
-        let visible = focused
-            .map(|terminal| vec![(terminal.clone(), geometry)])
-            .unwrap_or_default();
+        let visible = focused.map_or_default(|terminal| vec![(terminal.clone(), geometry)]);
         self.sync_visible_terminals(&visible);
     }
 

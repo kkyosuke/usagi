@@ -1273,14 +1273,14 @@ mod tests {
 
         let mut codex = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         codex.command = vec!["codex".to_owned()];
-        assert!(writable_prefixes(&codex).is_empty());
+        assert_eq!(writable_prefixes(&codex), [] as [PathBuf; 0]);
         let (_, argv) = plan(&codex).into_launch().unwrap();
         assert!(!argv[1].contains("regex"));
 
         // `$HOME` が無ければ prefix も無い。
         let mut homeless = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
         homeless.home = None;
-        assert!(writable_prefixes(&homeless).is_empty());
+        assert_eq!(writable_prefixes(&homeless), [] as [PathBuf; 0]);
     }
 
     #[test]

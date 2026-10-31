@@ -2202,10 +2202,9 @@ mod tests {
         let first_body = &plain[top + 1];
         let left_border = first_body.find('│').unwrap();
         let right_border = first_body.rfind('│').unwrap();
-        assert!(
-            first_body[left_border + '│'.len_utf8()..right_border]
-                .trim()
-                .is_empty()
+        assert_eq!(
+            first_body[left_border + '│'.len_utf8()..right_border].trim(),
+            ""
         );
     }
 

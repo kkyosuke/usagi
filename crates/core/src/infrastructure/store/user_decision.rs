@@ -976,7 +976,7 @@ mod tests {
         let first = item();
         let second = item();
         let terminal = item();
-        assert!(store.pending_all().unwrap().is_empty());
+        assert_eq!(store.pending_all().unwrap(), [] as [UserDecision; 0]);
         for decision in [&first, &second, &terminal] {
             store.create(decision.clone()).unwrap().unwrap();
         }
@@ -1149,7 +1149,7 @@ mod tests {
                 serde_json::from_slice::<UserDecisionPage>(&encoded).unwrap(),
                 page
             );
-            assert!(!page.decisions.is_empty());
+            assert_ne!(page.decisions, [] as [UserDecision; 0]);
             collected.extend(page.decisions);
             pages += 1;
             let Some(next) = page.next_cursor else {
@@ -1351,7 +1351,10 @@ mod tests {
         assert_eq!(Some(event.answer.clone()), resolved.answer);
         assert!(store.ack_event(event.decision_id).unwrap());
         assert!(!store.ack_event(event.decision_id).unwrap());
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
         assert_eq!(
             store
                 .resolve(
@@ -1398,11 +1401,9 @@ mod tests {
         let reopened = UserDecisionStore::new(temp.path());
         assert!(reopened.ack_event(decision.decision_id).unwrap());
         assert!(!reopened.ack_event(decision.decision_id).unwrap());
-        assert!(
-            UserDecisionStore::new(temp.path())
-                .events()
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            UserDecisionStore::new(temp.path()).events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
         );
     }
 
@@ -1414,7 +1415,10 @@ mod tests {
         let store = UserDecisionStore::new(temp.path());
         // With no decisions at all the sweep must not even create the document,
         // so an idle daemon's maintenance tick costs one read and no fsync.
-        assert!(store.expire_due(Utc::now()).unwrap().is_empty());
+        assert_eq!(
+            store.expire_due(Utc::now()).unwrap(),
+            [] as [UserDecisionId; 0]
+        );
         assert!(!store.path().exists());
 
         // A decision that is not yet due must not be rewritten either. An atomic
@@ -1424,7 +1428,10 @@ mod tests {
         decision.expires_at = Some(Utc::now() + chrono::Duration::seconds(60));
         store.create(decision).unwrap().unwrap();
         let before = std::fs::metadata(store.path()).unwrap().ino();
-        assert!(store.expire_due(Utc::now()).unwrap().is_empty());
+        assert_eq!(
+            store.expire_due(Utc::now()).unwrap(),
+            [] as [UserDecisionId; 0]
+        );
         assert_eq!(std::fs::metadata(store.path()).unwrap().ino(), before);
     }
 
@@ -1439,7 +1446,7 @@ mod tests {
         store.create(decision.clone()).unwrap().unwrap();
 
         assert_eq!(store.expire_due(now).unwrap(), vec![decision.decision_id]);
-        assert!(store.expire_due(now).unwrap().is_empty());
+        assert_eq!(store.expire_due(now).unwrap(), [] as [UserDecisionId; 0]);
         assert_eq!(
             store
                 .get(decision.owner.workspace_id, decision.decision_id)
@@ -1448,7 +1455,10 @@ mod tests {
                 .status,
             UserDecisionStatus::Expired
         );
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
     }
 
     #[test]
@@ -1475,8 +1485,8 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(page.decisions.is_empty());
-        assert!(page.deferred.is_empty());
+        assert_eq!(page.decisions, [] as [UserDecision; 0]);
+        assert_eq!(page.deferred, [] as [wire::DecisionReference; 0]);
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
         assert_eq!(store.events().unwrap().len(), 1);
     }
@@ -1509,7 +1519,10 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
     }
 
     #[test]
@@ -1526,7 +1539,10 @@ mod tests {
         );
         store.create(decision.clone()).unwrap().unwrap();
         assert_eq!(store.pending(workspace).unwrap(), vec![decision.clone()]);
-        assert!(store.pending(WorkspaceId::new()).unwrap().is_empty());
+        assert_eq!(
+            store.pending(WorkspaceId::new()).unwrap(),
+            [] as [UserDecision; 0]
+        );
 
         let mut conflict = decision.clone();
         conflict.title = "other".into();
@@ -1544,7 +1560,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(expired.status, UserDecisionStatus::Expired);
-        assert!(store.pending(workspace).unwrap().is_empty());
+        assert_eq!(store.pending(workspace).unwrap(), [] as [UserDecision; 0]);
         assert_eq!(
             store
                 .terminal(
@@ -1736,7 +1752,10 @@ mod tests {
             Err(UserDecisionError::InvalidRequest)
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
 
         let mut state = store.load().unwrap();
         state.decisions[0].title = "t".repeat(UserDecisionPolicy::TITLE_MAX_BYTES + 1);
@@ -2163,7 +2182,7 @@ mod tests {
 
         let reopened = UserDecisionStore::with_limits(temp.path(), limits);
         let state = reopened.load().unwrap();
-        assert!(state.events.is_empty());
+        assert_eq!(state.events, [] as [UserDecisionResolvedEvent; 0]);
         assert!(state.decisions.len() <= 4);
     }
 

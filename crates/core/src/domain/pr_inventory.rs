@@ -513,7 +513,10 @@ mod tests {
         assert!(canonicalize("https://github.com/o/r/pull/nope").is_none());
         assert!(canonicalize("https://github.com/o/r/pull/1?x=%a!").is_none());
         assert!(canonicalize("https://github.com/o/r/pull/1?x=%aa").is_some());
-        assert!(extract(b"nothing here\xff https://example.com/o/r/pull/1\n").is_empty());
+        assert_eq!(
+            extract(b"nothing here\xff https://example.com/o/r/pull/1\n"),
+            [] as [PrIdentity; 0]
+        );
     }
     #[test]
     fn extraction_trims_punctuation_and_deduplicates() {
@@ -567,10 +570,16 @@ mod tests {
     fn extraction_treats_a_glued_scheme_as_one_rejected_token() {
         // One token, not two candidates: the inner URL is a component of an
         // outer non-GitHub URL, so it is not a PR the agent produced.
-        assert!(extract(b"http://https://github.com/o/r/pull/1").is_empty());
-        assert!(extract(b"http://x.com/r?u=https://github.com/o/r/pull/1").is_empty());
+        assert_eq!(
+            extract(b"http://https://github.com/o/r/pull/1"),
+            [] as [PrIdentity; 0]
+        );
+        assert_eq!(
+            extract(b"http://x.com/r?u=https://github.com/o/r/pull/1"),
+            [] as [PrIdentity; 0]
+        );
         // A trailing truncated scheme is not a candidate either.
-        assert!(extract(b"tail https:/").is_empty());
+        assert_eq!(extract(b"tail https:/"), [] as [PrIdentity; 0]);
     }
     #[test]
     fn reducer_is_noop_for_duplicates_and_preserves_dismissal() {

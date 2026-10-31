@@ -36,8 +36,8 @@ fn empty_scratchpad_is_empty_and_serializes_to_an_empty_object() {
     let pad = Scratchpad::default();
     assert!(pad.is_empty());
     assert_eq!(pad.note(), None);
-    assert!(pad.todos().is_empty());
-    assert!(pad.decisions().is_empty());
+    assert_eq!(pad.todos(), []);
+    assert_eq!(pad.decisions(), []);
     // All sections are omitted when empty.
     assert_eq!(serde_json::to_string(&pad).unwrap(), "{}");
 }

@@ -1206,7 +1206,7 @@ mod tests {
             TerminalPoint { row: 0, column: 28 },
             &mut browser
         ));
-        assert!(browser.opened.is_empty());
+        assert_eq!(browser.opened, [] as [String; 0]);
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("earlier")
@@ -1225,7 +1225,7 @@ mod tests {
             TerminalPoint { row: 0, column: 5 },
             &mut browser
         ));
-        assert!(browser.opened.is_empty());
+        assert_eq!(browser.opened, [] as [String; 0]);
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("Could not open browser: browser launch failed")

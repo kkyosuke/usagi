@@ -221,8 +221,8 @@ fn parse_accepts_closing_fence_without_trailing_newline() {
     assert_eq!(issue.number, 1);
     assert_eq!(issue.body, "");
     // Missing labels/dependson default to empty.
-    assert!(issue.labels.is_empty());
-    assert!(issue.dependson.is_empty());
+    assert_eq!(issue.labels, [] as [String; 0]);
+    assert_eq!(issue.dependson, [] as [u32; 0]);
 }
 
 #[test]
@@ -406,7 +406,10 @@ fn empty_label_list_round_trips() {
     issue.labels.clear();
     let text = issue.to_markdown();
     assert!(text.contains("labels: []\n"));
-    assert!(Issue::from_markdown(&text).unwrap().labels.is_empty());
+    assert_eq!(
+        Issue::from_markdown(&text).unwrap().labels,
+        [] as [String; 0]
+    );
 }
 
 #[test]

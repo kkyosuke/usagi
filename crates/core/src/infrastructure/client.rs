@@ -2930,7 +2930,7 @@ mod deadline_and_retry_tests {
             ScriptedConn::new(clock.clone(), vec![1, 2, 3, 4]),
             100,
         );
-        assert!(stream.get_ref().written.is_empty());
+        assert_eq!(stream.get_ref().written, [] as [u8; 0]);
 
         clock.advance(200); // past the deadline
         let mut buf = [0u8; 4];

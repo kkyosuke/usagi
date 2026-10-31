@@ -215,7 +215,7 @@ mod tests {
             parse_env_bindings(&format_env_bindings(&bindings)),
             bindings
         );
-        assert!(format_env_bindings(&EnvBindings::new()).is_empty());
+        assert_eq!(format_env_bindings(&EnvBindings::new()), "");
     }
 
     #[test]

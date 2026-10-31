@@ -495,7 +495,10 @@ fn visible_grids_are_refused_before_allocation_or_pty_resize() {
     registry
         .attach_for_client(&terminal, connection, client, Some(oversized), &mut writer)
         .unwrap();
-    assert!(writer.resized.is_empty());
+    assert_eq!(
+        writer.resized,
+        [] as [crate::usecase::terminal::Geometry; 0]
+    );
     assert_eq!(registry.snapshot(&terminal).unwrap().geometry, initial);
     // The refused resize left the accepted grid in place, not the one it
     // asked for.

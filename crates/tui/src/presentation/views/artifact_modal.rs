@@ -263,7 +263,10 @@ mod tests {
         for height in [0, 4, 8, 9, 24] {
             let _ = frame(&state, height, 100);
         }
-        assert!(body(state.preview_overlay().unwrap(), 0, 40).is_empty());
+        assert_eq!(
+            body(state.preview_overlay().unwrap(), 0, 40),
+            [] as [String; 0]
+        );
         assert!(
             body(state.preview_overlay().unwrap(), 1, 40)
                 .join("\n")

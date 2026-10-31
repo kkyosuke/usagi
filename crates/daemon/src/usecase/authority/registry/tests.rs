@@ -422,7 +422,7 @@ fn every_refusal_reads_as_a_safety_outcome() {
         RegistryError::WrongPhase,
         RegistryError::AuthorityRetained,
     ] {
-        assert!(!error.to_string().is_empty());
+        assert_ne!(error.to_string(), "");
         assert!(error.source().is_none());
         let failure: RegistryFailure = error.into();
         assert_eq!(failure.refusal(), Some(error));

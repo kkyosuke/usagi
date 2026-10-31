@@ -1455,8 +1455,8 @@ mod tests {
             ),
             Err(LifecycleError::InvalidSessionName)
         );
-        assert!(state.sessions.is_empty());
-        assert!(state.operations.is_empty());
+        assert_eq!(state.sessions, [] as [ManagedSession; 0]);
+        assert_eq!(state.operations, [] as [OperationJournal; 0]);
     }
 
     // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。

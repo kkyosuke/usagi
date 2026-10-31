@@ -163,11 +163,11 @@ mod tests {
         let macos = commands_for(&Platform::Macos, false, false);
         assert_eq!(macos.len(), 1);
         assert_eq!(macos[0].program, "pbcopy");
-        assert!(macos[0].arguments.is_empty());
+        assert_eq!(macos[0].arguments, [] as [&str; 0]);
         let windows = commands_for(&Platform::Windows, false, false);
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].program, "clip.exe");
-        assert!(windows[0].arguments.is_empty());
+        assert_eq!(windows[0].arguments, [] as [&str; 0]);
     }
 
     #[test]
