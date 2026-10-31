@@ -496,7 +496,7 @@ fn workspace_env_adds_to_and_overrides_the_global_bindings() {
 
     let effective = global.with_local(&local);
     assert_eq!(
-        effective.env_bindings().collect::<Vec<_>>(),
+        super::valid_bindings(&effective.env).collect::<Vec<_>>(),
         [
             ("GH_TOKEN", "op://Private/GitHub/token"),
             ("PROJECT", "usagi"),
@@ -504,7 +504,7 @@ fn workspace_env_adds_to_and_overrides_the_global_bindings() {
         ]
     );
     assert_eq!(
-        local.env_bindings().collect::<Vec<_>>(),
+        super::valid_bindings(&local.env).collect::<Vec<_>>(),
         [("PROJECT", "usagi"), ("RUST_LOG", "debug")]
     );
 }

@@ -724,7 +724,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         )
         .unwrap();
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::LiveOrOwnershipUnknown)
     );
     let first_runtime = runtime
@@ -796,10 +796,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         .unwrap()
         .provenance = ProviderCaptureProvenance::DaemonIssued;
     assert_eq!(
-        runtime.resume_source_availability(
-            &wrong_capture_policy,
-            std::slice::from_ref(&wrong_capture_policy),
-        ),
+        runtime.resume_source_availability(&wrong_capture_policy, &[&wrong_capture_policy],),
         (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
     assert_eq!(
@@ -861,7 +858,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         ErrorCode::OwnershipUnknown
     );
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (true, ProviderResumeReason::ExplicitResumeAvailable)
     );
     let mut ambiguous_snapshot = runtime.coordinator.snapshot();
@@ -905,14 +902,14 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         RuntimeCoordinator::hydrate(ambiguous_snapshot, 16, 64 * 1024, 64).unwrap(),
     );
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::AmbiguousProviderMetadata)
     );
     runtime.coordinator = original_coordinator;
 
     let original_registry = std::mem::replace(&mut runtime.registry, AdapterRegistry::new());
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
     assert_eq!(
@@ -1072,7 +1069,7 @@ fn codex_without_structured_identity_fails_closed_for_resume() {
         .unwrap();
     runtime.exit(&first.terminal, 0).unwrap();
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::ProviderMetadataUnavailable)
     );
     let item = &runtime.inventory(workspace).resumable[0];
@@ -1262,6 +1259,7 @@ fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
 
     let inventory = runtime.inventory(workspace);
     assert!(inventory.runtimes.is_empty());
+    assert!(runtime.search_targets(workspace).is_empty());
     assert_eq!(inventory.resumable.len(), 1);
     assert!(inventory.resumable[0].target.is_none());
     assert!(!inventory.resumable[0].available);

@@ -28,8 +28,7 @@ fn unite_aggregates_counts_and_takes_the_latest_time() {
         overview("beta", 10, 1, 0, 2),
     ]);
     assert_eq!(unite.members().len(), 2);
-    assert_eq!(unite.primary_name(), "alpha");
-    assert_eq!(unite.extra_count(), 1);
+    assert_eq!(unite.members()[0].workspace.name, "alpha");
     // Counts are summed across the members.
     assert_eq!(unite.session_count(), 3);
     assert_eq!(unite.open_issue_count(), 4);
@@ -44,8 +43,7 @@ fn unite_aggregates_counts_and_takes_the_latest_time() {
 #[test]
 fn empty_unite_reports_neutral_values() {
     let unite = UniteOverview::new(Vec::new());
-    assert_eq!(unite.primary_name(), "");
-    assert_eq!(unite.extra_count(), 0);
+    assert!(unite.members().is_empty());
     assert_eq!(unite.updated_at(), None);
     assert_eq!(unite.session_count(), 0);
     assert_eq!(unite.open_issue_count(), 0);

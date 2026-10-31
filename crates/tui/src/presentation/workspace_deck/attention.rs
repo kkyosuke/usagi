@@ -51,14 +51,8 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
                     Some(AttentionTarget::Decision { decision_id }) => {
                         AttentionDestination::Decision(*decision_id)
                     }
-                    Some(AttentionTarget::PullRequest { identity }) => {
-                        AttentionDestination::PullRequest(identity.clone())
-                    }
-                    None if item.kind == AttentionKind::Decision => AttentionDestination::Decisions,
-                    None if item.key.starts_with("pr:") || item.kind == AttentionKind::Review => {
-                        AttentionDestination::PullRequests
-                    }
-                    None => AttentionDestination::Session,
+                    _ if item.kind == AttentionKind::Decision => AttentionDestination::Decisions,
+                    _ => AttentionDestination::Session,
                 };
                 let intent = OverlayIntent::AttentionVisit {
                     path: slot.path.clone(),
@@ -72,35 +66,21 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
                     reason: sanitize_presentation_line(&item.reason),
                     action: match item.kind {
                         AttentionKind::Decision => "Answer question",
-                        AttentionKind::Review => "Review PR",
-                        AttentionKind::Blocked
-                            if matches!(
-                                &destination,
-                                AttentionDestination::PullRequests
-                                    | AttentionDestination::PullRequest(_)
-                            ) =>
-                        {
-                            "Check PR problem"
-                        }
                         AttentionKind::Blocked => "Check stopped task",
-                        AttentionKind::System if item.status_unknown => "Checking status",
-                        AttentionKind::System => "Waiting",
+                        AttentionKind::System | AttentionKind::Review => "Waiting",
                         AttentionKind::Running => "Running",
                     },
                     open_label: match destination {
                         AttentionDestination::Decision(_) => "Answer question",
                         AttentionDestination::Decisions => "Open questions",
-                        AttentionDestination::PullRequests
-                        | AttentionDestination::PullRequest(_) => "Open PR",
-                        AttentionDestination::Session => "Open session",
+                        _ => "Open session",
                     },
                     intent,
                     rank: match item.kind {
                         AttentionKind::Decision => 0,
-                        AttentionKind::Review => 1,
-                        AttentionKind::Blocked => 2,
-                        AttentionKind::System => 3,
-                        AttentionKind::Running => 4,
+                        AttentionKind::Blocked => 1,
+                        AttentionKind::System | AttentionKind::Review => 2,
+                        AttentionKind::Running => 3,
                     },
                 });
             }
@@ -211,11 +191,10 @@ pub(super) fn badge(slot: &WorkspaceSlot) -> String {
                 .iter()
                 .filter(|item| item.kind.needs_action())
                 .count();
-            let unknown = snapshot.items.iter().any(|item| item.status_unknown);
             if count == 0 {
-                if unknown { " ?".into() } else { String::new() }
+                String::new()
             } else {
-                format!(" !{count}{}", if unknown { "+" } else { "" })
+                format!(" !{count}")
             }
         }
     }
@@ -226,7 +205,6 @@ struct Summary {
     actions: usize,
     updates: usize,
     unknown: usize,
-    unknown_items: usize,
 }
 
 impl Summary {
@@ -235,7 +213,6 @@ impl Summary {
         for slot in slots {
             if let Some(snapshot) = slot.attention.as_ref().filter(|_| !slot.attention_stale) {
                 for item in &snapshot.items {
-                    summary.unknown_items += usize::from(item.status_unknown);
                     if item.kind.needs_action() {
                         summary.actions += 1;
                     } else {
@@ -258,7 +235,7 @@ impl Summary {
     }
 
     fn has_unknown(&self) -> bool {
-        self.unknown > 0 || self.unknown_items > 0
+        self.unknown > 0
     }
 }
 
@@ -366,7 +343,14 @@ impl WorkspaceDeck {
         };
         let previous = (slot.attention.clone(), slot.attention_stale);
         match result {
-            Ok(snapshot) if valid_snapshot(workspace, &snapshot) => {
+            Ok(mut snapshot) if valid_snapshot(workspace, &snapshot) => {
+                // Older daemons may still send GitHub work. Keep Inbox scoped to
+                // questions and task state owned by usagi, including its badges.
+                snapshot.items.retain(|item| {
+                    item.kind != AttentionKind::Review
+                        && !matches!(item.target, Some(AttentionTarget::PullRequest { .. }))
+                        && !item.key.starts_with("pr:")
+                });
                 slot.attention = Some(snapshot);
                 slot.attention_stale = false;
                 slot.attention_observed_at = Some(std::time::Instant::now());
@@ -537,8 +521,8 @@ mod tests {
     #[test]
     fn attention_preserves_selected_identity_when_rows_move_or_disappear() {
         let mut deck = deck();
-        let first = item("a", AttentionKind::Review);
-        let second = item("b", AttentionKind::Review);
+        let first = item("a", AttentionKind::Decision);
+        let second = item("b", AttentionKind::Decision);
         update(&mut deck, 0, vec![first.clone(), second.clone()]);
         update(&mut deck, 1, vec![]);
         deck.open_attention();
@@ -632,9 +616,9 @@ mod tests {
             item("agent", AttentionKind::Running),
         ];
         update(&mut deck, 0, work);
-        assert_notice(&deck, "! Action needed (3+)", warning);
+        assert_notice(&deck, "! Action needed (2+)", warning);
         update(&mut deck, 1, vec![item("other", AttentionKind::Decision)]);
-        assert_notice(&deck, "! Action needed (4)", warning);
+        assert_notice(&deck, "! Action needed (3)", warning);
 
         let workspace = deck.slots[0].workspace_id;
         deck.apply_attention(workspace, Err("offline".into()));
@@ -731,7 +715,7 @@ mod tests {
             0,
             vec![
                 item("blocked", AttentionKind::Blocked),
-                item("review", AttentionKind::Review),
+                item("question", AttentionKind::Decision),
             ],
         );
         update(&mut deck, 1, vec![]);
@@ -741,7 +725,7 @@ mod tests {
         assert!(matches!(
             deck.handle_overlay_key(&Key::Enter),
             OverlayIntent::AttentionVisit {
-                destination: AttentionDestination::PullRequests,
+                destination: AttentionDestination::Decisions,
                 ..
             }
         ));
@@ -770,15 +754,15 @@ mod tests {
         let mut deck = deck();
         let question = item("question", AttentionKind::Decision);
         let question_session = question.session;
-        let mut ci = item("pr:ci", AttentionKind::System);
-        ci.reason = "CI is still running".into();
+        let mut waiting = item("session:creating", AttentionKind::System);
+        waiting.reason = "Session is being created".into();
         update(
             &mut deck,
             0,
             vec![
                 question,
                 item("review", AttentionKind::Review),
-                ci,
+                waiting,
                 item("agent", AttentionKind::Running),
             ],
         );
@@ -786,10 +770,10 @@ mod tests {
         deck.open_attention();
         let frame = render_overlay(&deck, 24, 120, &vec![String::new(); 24]).join("\n");
         assert!(frame.contains("Answer question"));
-        assert!(frame.contains("Review PR"));
+        assert!(!frame.contains("Review PR"));
         assert!(frame.contains("Check stopped task"));
         assert!(frame.contains("Enter: Open questions"));
-        assert!(!frame.contains("CI is still running"));
+        assert!(!frame.contains("Session is being created"));
         assert!(!frame.contains("Running"));
         assert!(
             matches!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::AttentionVisit { session, destination: AttentionDestination::Decisions, .. } if session == question_session)
@@ -797,13 +781,13 @@ mod tests {
 
         deck.handle_overlay_key(&Key::Right);
         let frame = render_overlay(&deck, 24, 120, &vec![String::new(); 24]).join("\n");
-        assert!(frame.contains("CI is still running"));
+        assert!(frame.contains("Session is being created"));
         assert!(frame.contains("No action needed here"));
         assert!(!frame.contains("Answer question"));
         assert!(matches!(
             deck.handle_overlay_key(&Key::Enter),
             OverlayIntent::AttentionVisit {
-                destination: AttentionDestination::PullRequests,
+                destination: AttentionDestination::Session,
                 ..
             }
         ));
@@ -816,13 +800,13 @@ mod tests {
             }
         ));
 
-        deck.handle_overlay_key(&Key::Paste("CI is still running".into()));
+        deck.handle_overlay_key(&Key::Paste("Session is being created".into()));
         assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
         deck.handle_overlay_key(&Key::Right);
         assert!(matches!(
             deck.handle_overlay_key(&Key::Enter),
             OverlayIntent::AttentionVisit {
-                destination: AttentionDestination::PullRequests,
+                destination: AttentionDestination::Session,
                 ..
             }
         ));
@@ -961,7 +945,7 @@ mod tests {
         assert!(deck.attention_workspaces().is_empty());
     }
     #[test]
-    fn inbox_preserves_exact_question_and_pr_targets_and_rejects_invalid_metadata() {
+    fn inbox_preserves_exact_question_targets_and_rejects_invalid_metadata() {
         use usagi_core::domain::{
             id::UserDecisionId,
             pr_inventory::{PrIdentity, canonicalize},
@@ -987,13 +971,13 @@ mod tests {
         for destination in [
             AttentionDestination::Decision(first),
             AttentionDestination::Decision(second),
-            AttentionDestination::PullRequest(pr),
         ] {
             assert!(
                 matches!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::AttentionVisit { destination: actual, .. } if actual == destination)
             );
             deck.handle_overlay_key(&Key::Down);
         }
+        assert_eq!(deck.slots[0].attention.as_ref().unwrap().items.len(), 2);
         let workspace = deck.slots[0].workspace_id;
         question.kind = AttentionKind::Review;
         assert!(!valid_snapshot(
@@ -1025,41 +1009,65 @@ mod tests {
     }
 
     #[test]
-    fn unknown_pr_status_is_not_a_confirmed_zero_and_fragment_search_omits_gapped_matches() {
+    fn fragment_search_omits_gapped_matches() {
         let mut deck = deck();
-        let mut review = item("review", AttentionKind::Review);
-        review.label = "notice-ui".into();
-        review.reason = "PR ready".into();
-        let mut failed = item("pr:failed", AttentionKind::Blocked);
-        failed.label = "fix-login".into();
-        failed.reason = "CI checks failed".into();
+        let mut question = item("question", AttentionKind::Decision);
+        question.label = "notice-ui".into();
+        let mut failed = item("session:failed", AttentionKind::Blocked);
+        failed.label = "fix-ci".into();
+        failed.reason = "Agent failed".into();
         let mut stopped = item("stopped", AttentionKind::Blocked);
         stopped.label = "import-data".into();
         stopped.reason = "Agent stopped".into();
-        update(&mut deck, 0, vec![review, failed, stopped]);
+        update(&mut deck, 0, vec![question, failed, stopped]);
         update(&mut deck, 1, vec![]);
         let matches = rows(&deck.slots, "ci", InboxView::Actions);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].reason, "CI checks failed");
-        let mut unknown = item("pr:unknown", AttentionKind::System);
-        unknown.status_unknown = true;
-        unknown.reason = "PR status unknown / refreshing".into();
-        update(&mut deck, 0, vec![unknown.clone()]);
-        let summary = Summary::from_slots(&deck.slots);
-        assert_eq!(summary.action_total(), "?");
-        assert_eq!(indicator(&deck.slots).0, "Checking status…");
-        assert_eq!(badge(&deck.slots[0]), " ?");
-        deck.open_attention();
-        deck.handle_overlay_key(&Key::Right);
-        let frame = render_overlay(&deck, 24, 100, &vec![String::new(); 24]).join("\n");
-        assert!(frame.contains("Checking status"));
-        assert!(!frame.contains("No action needed"));
-        update(
-            &mut deck,
-            0,
-            vec![unknown, item("question", AttentionKind::Decision)],
-        );
-        assert_eq!(indicator(&deck.slots).0, "! Action needed (1+)");
-        assert_eq!(badge(&deck.slots[0]), " !1+");
+        assert_eq!(matches[0].reason, "Agent failed");
+    }
+
+    #[test]
+    fn github_items_never_enter_inbox_counts_rows_or_unknown_status() {
+        use usagi_core::domain::pr_inventory::canonicalize;
+        let mut deck = deck();
+        let mut pr_items = vec![
+            item("legacy-review", AttentionKind::Review),
+            item("pr:failed", AttentionKind::Blocked),
+            item("pr:pending", AttentionKind::System),
+        ];
+        for (index, kind) in [AttentionKind::Blocked, AttentionKind::System]
+            .into_iter()
+            .enumerate()
+        {
+            let mut entry = item(&format!("external-{index}"), kind);
+            entry.target = Some(AttentionTarget::PullRequest {
+                identity: canonicalize("https://github.com/example/repo/pull/2").unwrap(),
+            });
+            entry.status_unknown = kind == AttentionKind::System;
+            pr_items.push(entry);
+        }
+        update(&mut deck, 0, pr_items.clone());
+        update(&mut deck, 1, vec![]);
+        assert_eq!(badge(&deck.slots[0]), "");
+        assert_eq!(indicator(&deck.slots).0, "No action needed");
+        for view in [InboxView::Actions, InboxView::Updates] {
+            assert!(rows(&deck.slots, "", view).is_empty());
+        }
+
+        pr_items.extend([
+            item("question", AttentionKind::Decision),
+            item("session:failed", AttentionKind::Blocked),
+            item("session:running", AttentionKind::Running),
+        ]);
+        update(&mut deck, 0, pr_items);
+        assert_eq!(badge(&deck.slots[0]), " !2");
+        assert_eq!(indicator(&deck.slots).0, "! Action needed (2)");
+        let actions = rows(&deck.slots, "", InboxView::Actions);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].action, "Answer question");
+        assert_eq!(actions[1].action, "Check stopped task");
+        let updates = rows(&deck.slots, "", InboxView::Updates);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].action, "Running");
     }
 }

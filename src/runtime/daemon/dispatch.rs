@@ -60,42 +60,20 @@ pub(super) struct DispatchToolContext<'a> {
 pub(super) fn dispatch_dispatch_tool(
     context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
+    request: DaemonRequest,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
-    let action = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::DispatchTool { action, .. } => Some(action),
-            _ => None,
-        });
-    if action.is_some_and(|action| {
-        matches!(
-            action,
-            DispatchToolAction::Dispatch
-                | DispatchToolAction::AgentHandoff
-                | DispatchToolAction::AgentPeers
-                | DispatchToolAction::AgentMessage
-                | DispatchToolAction::AgentMessages
-                | DispatchToolAction::AgentMessageAck
-                | DispatchToolAction::SessionGet
-                | DispatchToolAction::AgentList
-                | DispatchToolAction::AgentGet
-                | DispatchToolAction::TerminalList
-                | DispatchToolAction::TerminalRead
-                | DispatchToolAction::AgentComplete
-                | DispatchToolAction::AgentFail
-                | DispatchToolAction::AgentInbox
-                | DispatchToolAction::AgentInboxAck
-        )
-    }) {
-        dispatch_agent_tool(context, request_id, body, hello)
+    if matches!(&request, DaemonRequest::DispatchTool { action, .. } if !action.is_user_decision())
+    {
+        dispatch_agent_tool(context, request_id, request, body, hello)
     } else {
         dispatch_user_decision(
             context.agent,
             context.bound,
             context.decisions,
             request_id,
+            request,
             body,
             hello,
         )
@@ -107,6 +85,7 @@ pub(super) fn dispatch_dispatch_tool(
 pub(super) fn dispatch_agent_tool(
     context: &DispatchToolContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
+    request: DaemonRequest,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
@@ -176,17 +155,15 @@ pub(super) fn dispatch_agent_tool(
     let bound = context.bound;
     let pr_inventory = context.pr_inventory;
 
-    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::DispatchTool {
-                action,
-                operation_id,
-                payload,
-                caller_context,
-            } => Some((action, operation_id, payload, caller_context)),
-            _ => None,
-        });
+    let parsed = match request {
+        DaemonRequest::DispatchTool {
+            action,
+            operation_id,
+            payload,
+            caller_context,
+        } => Some((action, operation_id, payload, caller_context)),
+        _ => None,
+    };
     let Some((action, operation_id, payload, caller_context)) = parsed else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
@@ -204,25 +181,18 @@ pub(super) fn dispatch_agent_tool(
                     "agent caller provenance is unknown",
                 )
             })?;
-        let snapshot = bound
+        let workspace = bound
             .sessions()
             .lock()
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
             })?
-            .snapshot()
+            .workspace_id()
             .map_err(|_| {
                 ProtocolError::new(
                     ErrorCode::Unavailable,
                     "daemon could not read managed sessions",
                 )
-            })?;
-        let workspace = snapshot
-            .get("workspace_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or_else(|| {
-                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })?;
         let runtime = agent.lock().map_err(|_| {
             ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable")
@@ -407,12 +377,28 @@ pub(super) fn dispatch_agent_tool(
                 .last()
                 .map_or(serde_json::Value::Null, |run| serde_json::json!(run)))
         };
+        let session_snapshot = || {
+            bound
+                .sessions()
+                .lock()
+                .map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+                })?
+                .snapshot()
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::Unavailable,
+                        "daemon could not read managed sessions",
+                    )
+                })
+        };
         match action {
             DispatchToolAction::Dispatch | DispatchToolAction::AgentHandoff => {
                 let handoff = action == DispatchToolAction::AgentHandoff;
-                let payload = if handoff {
+                let handoff_snapshot = handoff.then(session_snapshot).transpose()?;
+                let payload = if let Some(snapshot) = &handoff_snapshot {
                     usagi_daemon::usecase::peer_messages::handoff_payload(
-                        &caller, &snapshot, payload,
+                        &caller, snapshot, payload,
                     )?
                 } else {
                     payload
@@ -494,7 +480,7 @@ pub(super) fn dispatch_agent_tool(
                 .map_err(|error| {
                     ProtocolError::new(ErrorCode::PermissionDenied, error.safe_message())
                 })?;
-                let created_body = if handoff {
+                let created_body = if let Some(snapshot) = handoff_snapshot {
                     snapshot
                 } else {
                     perform_create(
@@ -616,6 +602,7 @@ pub(super) fn dispatch_agent_tool(
                 let input = serde_json::from_value::<SessionPayload>(payload).map_err(|_| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid session_get payload")
                 })?;
+                let snapshot = session_snapshot()?;
                 let session_id = session_id_by_name(&snapshot, &input.name).ok_or_else(|| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                 })?;
@@ -652,6 +639,7 @@ pub(super) fn dispatch_agent_tool(
                     .get("session")
                     .and_then(serde_json::Value::as_str)
                     .map(|name| {
+                        let snapshot = session_snapshot()?;
                         session_id_by_name(&snapshot, name).ok_or_else(|| {
                             ProtocolError::new(ErrorCode::InvalidArgument, "session was not found")
                         })
@@ -860,37 +848,35 @@ pub(super) fn map_inbox_query_error(
 pub(super) fn dispatch_pr_snapshot(
     inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{DaemonRequest, PrAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    let result = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Pr {
-                action: PrAction::Snapshot,
-                payload,
-            } => inventory
-                .lock()
-                .ok()
-                .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
-                .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
-            DaemonRequest::PrBatch { payload } => inventory
-                .lock()
-                .ok()
-                .and_then(|mut projector| projector.snapshots(&payload.session_ids).ok())
-                .and_then(|snapshots| serde_json::to_value(snapshots).ok()),
-            DaemonRequest::PrDismiss { payload } => inventory
-                .lock()
-                .ok()
-                .and_then(|mut projector| {
-                    projector.dismiss(payload.session_id, &payload.url).ok()?;
-                    projector.snapshot(payload.session_id).ok()
-                })
-                .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
-            _ => None,
-        });
+    let result = match request {
+        DaemonRequest::Pr {
+            action: PrAction::Snapshot,
+            payload,
+        } => inventory
+            .lock()
+            .ok()
+            .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+        DaemonRequest::PrBatch { payload } => inventory
+            .lock()
+            .ok()
+            .and_then(|mut projector| projector.snapshots(&payload.session_ids).ok())
+            .and_then(|snapshots| serde_json::to_value(snapshots).ok()),
+        DaemonRequest::PrDismiss { payload } => inventory
+            .lock()
+            .ok()
+            .and_then(|mut projector| {
+                projector.dismiss(payload.session_id, &payload.url).ok()?;
+                projector.snapshot(payload.session_id).ok()
+            })
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+        _ => None,
+    };
     let (outcome, body) = result.map_or_else(
         || {
             (
@@ -938,6 +924,7 @@ pub(super) fn dispatch_user_decision(
     bound: &ConnectionWorkspace,
     store: &UserDecisionStore,
     request_id: usagi_core::infrastructure::ipc::RequestId,
+    request: DaemonRequest,
     body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
@@ -982,33 +969,31 @@ pub(super) fn dispatch_user_decision(
         answer: UserDecisionAnswer,
     }
 
-    let parsed = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::DispatchTool {
-                action,
-                payload,
-                caller_context,
-                ..
-            } => Some((action, payload, caller_context, false, false)),
-            DaemonRequest::UserDecision { action, payload } => {
-                use usagi_core::infrastructure::ipc::TuiUserDecisionAction;
-                let list_all = action == TuiUserDecisionAction::ListAll;
-                let action = match action {
-                    TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
-                    TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll => {
-                        DispatchToolAction::UserDecisionList
-                    }
-                    TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
-                    TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
-                    // The human receipt lane explicitly discards an answer;
-                    // it never acknowledges delivery on the agent's behalf.
-                    TuiUserDecisionAction::Discard => DispatchToolAction::UserDecisionAck,
-                };
-                Some((action, payload, None, true, list_all))
-            }
-            _ => None,
-        });
+    let parsed = match request {
+        DaemonRequest::DispatchTool {
+            action,
+            payload,
+            caller_context,
+            ..
+        } => Some((action, payload, caller_context, false, false)),
+        DaemonRequest::UserDecision { action, payload } => {
+            use usagi_core::infrastructure::ipc::TuiUserDecisionAction;
+            let list_all = action == TuiUserDecisionAction::ListAll;
+            let action = match action {
+                TuiUserDecisionAction::Get => DispatchToolAction::UserDecisionGet,
+                TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll => {
+                    DispatchToolAction::UserDecisionList
+                }
+                TuiUserDecisionAction::Resolve => DispatchToolAction::UserDecisionResolve,
+                TuiUserDecisionAction::Cancel => DispatchToolAction::UserDecisionCancel,
+                // The human receipt lane explicitly discards an answer;
+                // it never acknowledges delivery on the agent's behalf.
+                TuiUserDecisionAction::Discard => DispatchToolAction::UserDecisionAck,
+            };
+            Some((action, payload, None, true, list_all))
+        }
+        _ => None,
+    };
     let Some((action, payload, caller_context, tui_access, list_all)) = parsed else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
@@ -1042,18 +1027,12 @@ pub(super) fn dispatch_user_decision(
             .map_err(|_| {
                 ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
             })?
-            .snapshot()
+            .workspace_id()
             .map_err(|_| {
                 ProtocolError::new(
                     ErrorCode::Unavailable,
                     "daemon could not read managed sessions",
                 )
-            })?
-            .get("workspace_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or_else(|| {
-                ProtocolError::new(ErrorCode::Unavailable, "workspace identity is unavailable")
             })
     })();
     let owners = workspace.and_then(|workspace| -> Result<_, ProtocolError> {
@@ -1269,25 +1248,22 @@ pub(super) fn dispatch_dispatch(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
     launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Dispatch {
-                operation_id,
-                intent,
-            } => Some((operation_id, intent)),
-            _ => None,
-        })
-    else {
+    let Some((operation_id, intent)) = (match request {
+        DaemonRequest::Dispatch {
+            operation_id,
+            intent,
+        } => Some((operation_id, intent)),
+        _ => None,
+    }) else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1416,24 +1392,22 @@ pub(super) fn dispatch_rollover(
     tenants: &super::TenantRegistry<super::FileWorkspaceFences, super::SystemTenantOpener>,
     terminal: &SharedTerminalRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Rollover {
-                operation_id,
-                restart_agents,
-            } => Some((OperationId(operation_id), restart_agents)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::Rollover {
+            operation_id,
+            restart_agents,
+        } => Some((OperationId(operation_id), restart_agents)),
+        _ => None,
+    };
     let Some((operation, restart_agents)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1658,22 +1632,20 @@ pub(super) fn dispatch_metrics(
     pipeline_metrics: &TerminalPipelineMetrics,
     observer: &mut Option<MetricsObserver>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: &DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{DaemonRequest, MetricsAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let action = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Metrics { action } => Some(action),
-            _ => None,
-        });
+    let action = match request {
+        DaemonRequest::Metrics { action } => Some(action),
+        _ => None,
+    };
     let Some(action) = action else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1756,24 +1728,22 @@ pub(super) struct SessionDispatchContext<'a> {
 pub(super) fn dispatch_session(
     context: &SessionDispatchContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Session {
-                action,
-                operation_id,
-                payload,
-            } => Some((action, operation_id, payload)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::Session {
+            action,
+            operation_id,
+            payload,
+        } => Some((action, operation_id, payload)),
+        _ => None,
+    };
     let Some((action, operation_id, payload)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1803,17 +1773,14 @@ pub(super) fn dispatch_mcp_child_claim(
     peer_process: &PeerProcess,
     connection: ConnectionId,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: &DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     let result = (|| {
-        if !matches!(
-            serde_json::from_value::<DaemonRequest>(body.clone()),
-            Ok(DaemonRequest::McpChildClaim)
-        ) {
+        if !matches!(request, DaemonRequest::McpChildClaim) {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "invalid MCP child claim",
@@ -2455,73 +2422,71 @@ pub(super) fn dispatch_agent(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
     launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Agent {
-                operation_id,
-                intent,
-            } => Some((AgentDispatchRequest::Launch(operation_id, intent), None)),
-            DaemonRequest::AgentInventory {
-                workspace,
-                caller_context,
-            } => Some((AgentDispatchRequest::Inventory(workspace), caller_context)),
-            DaemonRequest::AgentWorkspaceObservation { workspace } => {
-                Some((AgentDispatchRequest::WorkspaceObservation(workspace), None))
-            }
-            DaemonRequest::DiagnoseAgents {
-                workspace,
-                expected,
-            } => Some((AgentDispatchRequest::Diagnose(workspace, expected), None)),
-            DaemonRequest::PlanDaemonRestartAgents { expected, force } => {
-                Some((AgentDispatchRequest::PlanRestart(expected, force), None))
-            }
-            DaemonRequest::RestartAgents {
-                workspace,
-                expected,
-                runtimes,
-                force,
-            } => Some((
-                AgentDispatchRequest::Restart(workspace, expected, runtimes, force),
-                None,
-            )),
-            DaemonRequest::ResumeAgent {
-                operation_id,
-                target,
-                caller_context,
-            } => Some((
-                AgentDispatchRequest::Resume(operation_id, target, None),
-                caller_context,
-            )),
-            DaemonRequest::ResumeAgentHeadless {
-                operation_id,
-                target,
-                prompt,
-                caller_context,
-            } => Some((
-                AgentDispatchRequest::Resume(operation_id, target, Some(prompt)),
-                caller_context,
-            )),
-            DaemonRequest::ResumeAgentWithCurrentIntegration {
-                operation_id,
-                target,
-                expected_revision,
-            } => Some((
-                AgentDispatchRequest::RepairResume(operation_id, target, expected_revision),
-                None,
-            )),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::Agent {
+            operation_id,
+            intent,
+        } => Some((AgentDispatchRequest::Launch(operation_id, intent), None)),
+        DaemonRequest::AgentInventory {
+            workspace,
+            caller_context,
+        } => Some((AgentDispatchRequest::Inventory(workspace), caller_context)),
+        DaemonRequest::AgentWorkspaceObservation { workspace } => {
+            Some((AgentDispatchRequest::WorkspaceObservation(workspace), None))
+        }
+        DaemonRequest::DiagnoseAgents {
+            workspace,
+            expected,
+        } => Some((AgentDispatchRequest::Diagnose(workspace, expected), None)),
+        DaemonRequest::PlanDaemonRestartAgents { expected, force } => {
+            Some((AgentDispatchRequest::PlanRestart(expected, force), None))
+        }
+        DaemonRequest::RestartAgents {
+            workspace,
+            expected,
+            runtimes,
+            force,
+        } => Some((
+            AgentDispatchRequest::Restart(workspace, expected, runtimes, force),
+            None,
+        )),
+        DaemonRequest::ResumeAgent {
+            operation_id,
+            target,
+            caller_context,
+        } => Some((
+            AgentDispatchRequest::Resume(operation_id, target, None),
+            caller_context,
+        )),
+        DaemonRequest::ResumeAgentHeadless {
+            operation_id,
+            target,
+            prompt,
+            caller_context,
+        } => Some((
+            AgentDispatchRequest::Resume(operation_id, target, Some(prompt)),
+            caller_context,
+        )),
+        DaemonRequest::ResumeAgentWithCurrentIntegration {
+            operation_id,
+            target,
+            expected_revision,
+        } => Some((
+            AgentDispatchRequest::RepairResume(operation_id, target, expected_revision),
+            None,
+        )),
+        _ => None,
+    };
     let Some((request, caller_context)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -2718,24 +2683,22 @@ pub(super) fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
     peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::CodexSessionCapture {
-                native_session_id,
-                caller_context,
-            } => Some((native_session_id, caller_context)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::CodexSessionCapture {
+            native_session_id,
+            caller_context,
+        } => Some((native_session_id, caller_context)),
+        _ => None,
+    };
     let Some((native_session_id, caller_context)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -2786,21 +2749,19 @@ pub(super) fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
     peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::AgentPhaseReport {
-                phase,
-                native_session_id,
-                caller_context,
-            } => Some((phase, native_session_id, caller_context)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::AgentPhaseReport {
+            phase,
+            native_session_id,
+            caller_context,
+        } => Some((phase, native_session_id, caller_context)),
+        _ => None,
+    };
     let result = request
         .ok_or_else(|| {
             ProtocolError::new(ErrorCode::InvalidArgument, "agent phase report is invalid")

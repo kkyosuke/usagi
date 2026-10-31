@@ -55,7 +55,7 @@ use crate::usecase::application::controller::{
 };
 use crate::usecase::application::metrics::GitDiff;
 use crate::usecase::application::pane::{
-    PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection,
+    PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab,
 };
 use crate::usecase::application::runtime_identities_are_valid;
 use crate::usecase::application::terminal_selection::TerminalPoint;
@@ -223,7 +223,7 @@ impl ProjectedSession {
             last_modified: record.last_active_or_created(),
             has_notes: !record.notes.is_empty(),
             memo: record.notes.note.clone(),
-            pr_count: visible_pr_links(&record.prs),
+            pr_count: PrLink::visible_count(&record.prs),
             removing: false,
             agent_resume: None,
             // Lifecycle is daemon-authoritative and joined by stable ID before
@@ -305,10 +305,6 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
     format!("{role}{lineage}")
 }
 
-pub(crate) fn visible_pr_links(prs: &[PrLink]) -> usize {
-    prs.iter().filter(|pr| pr.is_visible()).count()
-}
-
 pub(crate) fn visible_pr_entries(prs: &[PrEntry]) -> usize {
     prs.iter().filter(|pr| pr.is_visible()).count()
 }
@@ -366,9 +362,6 @@ pub struct HomeProjection {
     session_states: SessionStateCounts,
     feedback: Option<Feedback>,
     mascot_tick: u64,
-    /// Presentation-only message. Runtime state currently supplies `None`; this
-    /// keeps a future event source out of the renderer and prevents dummy copy.
-    mascot_speech: Option<widgets::mascot::MascotSpeech>,
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,
@@ -766,7 +759,6 @@ impl HomeProjection {
             session_states,
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
-            mascot_speech: None,
             metrics: None,
             client_build: None,
             health: DaemonHealthTracker::default(),
@@ -1013,14 +1005,6 @@ impl HomeProjection {
                 PaneTab::Interrupted(interrupted) => Some(interrupted_detail(interrupted)),
                 PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
             });
-        self
-    }
-
-    /// Attach a presentation-safe mascot message without changing controller or
-    /// input state. `None` intentionally leaves the mascot silent.
-    #[must_use]
-    pub fn with_mascot_speech(mut self, speech: Option<widgets::mascot::MascotSpeech>) -> Self {
-        self.mascot_speech = speech;
         self
     }
 
@@ -1458,16 +1442,7 @@ fn pane_tab_label(tab: &PaneTab) -> String {
 fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
     // Each tab kind carries its own stable selection key, so comparing keys is
     // enough: a mismatched kind or identity simply compares unequal.
-    *selection == PaneSelection::Tab(pane_tab_selection(tab))
-}
-
-fn pane_tab_selection(tab: &PaneTab) -> TabSelection {
-    match tab {
-        PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
-        PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
-        PaneTab::Ready(ready) => TabSelection::Ready(ready.operation),
-        PaneTab::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
-    }
+    *selection == PaneSelection::Tab(tab.selection())
 }
 
 /// Workspace 画面でキーボードが操作する対象。
@@ -2721,8 +2696,7 @@ fn render_pr_overlay(
         height,
         width,
         base,
-        &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected())
-            .with_filter(overlay.filter()),
+        &PrModal::with_selection(overlay.prs(), overlay.selected()).with_filter(overlay.filter()),
     )
 }
 
@@ -3876,7 +3850,6 @@ mod tests {
     use crate::presentation::views::root_terminal_drawer::{
         self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
     };
-    use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, BranchChoice, Feedback, GARDEN_IDLE_THRESHOLD,
@@ -7948,9 +7921,12 @@ mod tests {
 
     #[test]
     fn home_speech_reserves_a_blank_row_and_does_not_change_home_state() {
-        let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
-        let home = HomeProjection::from_state(&state, "work", &[]).with_mascot_speech(Some(speech));
+        let mut state = AppState::home(WorkspaceId::new(), Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
+        );
+        let home = HomeProjection::from_state(&state, "work", &[]);
         let frame = render_home(30, 80, &home);
         let left_rows = frame[CHROME_ROWS..]
             .iter()
@@ -8510,21 +8486,6 @@ mod tests {
         let text = strip(&render_home(30, 80, &home).join("\n"));
         assert!(!text.contains("╰──┬"), "healthy state stays silent");
         assert!(text.contains("(o.o)?"));
-    }
-
-    #[test]
-    fn explicit_mascot_speech_wins_over_the_daemon_state_bubble() {
-        let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
-        );
-        let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
-        let home = HomeProjection::from_state(&state, "work", &[]).with_mascot_speech(Some(speech));
-        let text = strip(&render_home(30, 80, &home).join("\n"));
-        assert!(text.contains("同期済み"));
-        assert!(!text.contains("daemon 切断"));
     }
 
     #[test]
@@ -9409,6 +9370,11 @@ mod tests {
         assert_eq!(
             ProjectedSession::from_record(SessionId::new(), &one).pr_count,
             2
+        );
+        one.prs[0].state = PrState::Dismissed;
+        assert_eq!(
+            ProjectedSession::from_record(SessionId::new(), &one).pr_count,
+            1
         );
 
         let target = Target::Root(WorkspaceId::new());

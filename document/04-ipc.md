@@ -432,7 +432,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | response | 同じ `RequestId` | immediate result、accepted operation、または typed error |
 | event | `SubscriptionId`、`StreamRef`、sequence | server push |
 
-現行 production handler で `RequestId` は一回の RPC correlation にだけ使い、`ResponseCache` は接続されていない。
+現行 production handler で `RequestId` は一回の RPC correlation にだけ使う。
 再接続すると client の request sequence も変わるため、`RequestId` を durable idempotency key として扱わない。
 session / Agent / dispatch / generic Terminal Launch 等の durable mutation は request correlation と独立した
 `OperationId` を持ち、target scope と semantic digest が同じ場合だけ既存 operation として再利用する。producer が
@@ -701,9 +701,10 @@ provider-native identity、prompt、path は map に含めない。この reques
 `workspace_attention { workspace: WorkspaceId }` は local TUI 用の read-only request で、daemon が既に adopt している
 workspace のみを参照する。応答の `WorkspaceAttention` は exact workspace identity と、stable key・optional SessionId・
 label・分類・短い理由を持つ一覧である。decision 本文、回答、provider identity、path は含めない。
-各項目は任意の `target`（`kind: decision` と `decision_id`、または `kind: pull_request` と canonical PR `identity`）を持つ。
-TUI は個別項目を開く際にこの stable identity を使う。`status_unknown: true` は workspace の取得自体に成功しても、
-項目の PR 状態をまだ確認できていないことを示し、対応不要とは判定しない。旧応答の欠落 field はそれぞれ `None` / `false` として読む。
+質問は任意の `target`（`kind: decision` と `decision_id`）を持ち、TUI は個別項目を開く際にこの stable identity を使う。
+観測対象は usagi の質問と session / Agent の状態で、PR inventory は参照しない。
+旧応答の `review` 分類、`kind: pull_request` と canonical PR `identity`、PR 状態の未確認を示す `status_unknown` は
+引き続き読み取れるが、TUI は PR 由来の項目を一覧・件数の集計前に除外する。欠落 field はそれぞれ `None` / `false` として読む。
 MCP caller context は拒否し、観測による adopt・状態変更・runtime 起動は行わない。取得に失敗した入力を空一覧へ
 置き換えず request 全体を unavailable とする。fresh connection で安全に retry できる。
 表示上の分類と移動先は [workspace 横断の対応待ち](03-tui.md#workspace-横断の対応待ち) を参照する。

@@ -10,20 +10,18 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use usagi_core::domain::id::{
-    DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
 
 use crate::usecase::generation::ProcessIdentity;
 use crate::usecase::resources::CasFile;
-use crate::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator, ResourceKind};
+use crate::usecase::resources::allocator::{CapacityPolicy, ResourceAllocator};
 use crate::usecase::resources::durable::{IdentityAuthority, LegacySnapshots, ShardArchive};
 use crate::usecase::resources::identity::{
     ChildIdentity, ChildObservation, ChildProcessProbe, IDENTITY_SOURCE_OS,
 };
-use crate::usecase::resources::launch::{LaunchIntent, ResourceSpawner, SpawnRefusal};
 use usagi_core::domain::clock::LogicalClock;
 
-use crate::usecase::resources::retention::RetentionLimits;
 use crate::usecase::resources::shard::OwnerShard;
 
 /// The bytes of one durable document, shared by every store bound to it.
@@ -306,48 +304,6 @@ impl LogicalClock for FakeLogicalClock {
     }
 }
 
-/// What a fake spawn does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpawnPlan {
-    /// Succeed with a child at this pid, whose identity the probe agrees with.
-    Child { pid: u32, start: String },
-    /// Fail definitely: no process exists.
-    Definite,
-    /// Succeed, but the identity could not be observed.
-    Ambiguous,
-}
-
-/// A [`ResourceSpawner`] that counts every spawn, so "spawned at most once" is
-/// checkable rather than assumed.
-#[derive(Debug)]
-pub struct FakeResourceSpawner {
-    plan: SpawnPlan,
-    pub spawns: usize,
-}
-
-impl FakeResourceSpawner {
-    /// A spawner following `plan`.
-    pub fn new(plan: SpawnPlan) -> Self {
-        Self { plan, spawns: 0 }
-    }
-}
-
-impl ResourceSpawner for FakeResourceSpawner {
-    fn spawn(&mut self, _resource: &TerminalRef) -> Result<ChildIdentity, SpawnRefusal> {
-        self.spawns += 1;
-        match &self.plan {
-            SpawnPlan::Child { pid, start } => Ok(ChildIdentity {
-                pid: *pid,
-                process_group: *pid,
-                source: IDENTITY_SOURCE_OS.to_owned(),
-                start_identity: start.clone(),
-            }),
-            SpawnPlan::Definite => Err(SpawnRefusal::Definite),
-            SpawnPlan::Ambiguous => Err(SpawnRefusal::Ambiguous),
-        }
-    }
-}
-
 /// An OS-verified identity, as a spawn would record it.
 pub fn verified(pid: u32, start: &str) -> ChildIdentity {
     ChildIdentity {
@@ -356,17 +312,6 @@ pub fn verified(pid: u32, start: &str) -> ChildIdentity {
         source: IDENTITY_SOURCE_OS.to_owned(),
         start_identity: start.to_owned(),
     }
-}
-
-/// A probe that agrees with [`verified`] for `pid`.
-pub fn probe_for(pid: u32, start: &str) -> FakeChildProbe {
-    FakeChildProbe::new().with(
-        pid,
-        ProbeAnswer::Alive {
-            start: start.to_owned(),
-            group: pid,
-        },
-    )
 }
 
 /// A fresh resource identity owned by `owner`.
@@ -378,21 +323,6 @@ pub fn terminal(owner: DaemonGeneration) -> TerminalRef {
         session_id: Some(SessionId::new()),
         worktree_id: WorktreeId::new(),
     }
-}
-
-/// A canonical launch intent for `resource`.
-pub fn intent(operation: &OperationId, digest: &str, resource: &TerminalRef) -> LaunchIntent {
-    LaunchIntent {
-        operation: *operation,
-        digest: digest.to_owned(),
-        kind: ResourceKind::Terminal,
-        resource: resource.clone(),
-    }
-}
-
-/// Generous limits, so a test that is not about retention never trips it.
-pub fn wide_limits() -> RetentionLimits {
-    RetentionLimits::new(64, 1 << 20, 1_000, 100, 200)
 }
 
 /// The two-pool policy used across the tests.

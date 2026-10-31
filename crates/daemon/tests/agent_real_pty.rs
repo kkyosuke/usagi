@@ -47,6 +47,7 @@ use usagi_daemon::usecase::generation::{
     GenerationCoordinator, GenerationError, ProcessIdentity, TerminalOwnership, TerminalState,
 };
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
+use usagi_daemon::usecase::resources::StoreError;
 use usagi_daemon::usecase::runtime::{
     AdapterError, AgentAdapter, OutputJournal, ProvisionContext, PtySpawner, ResolvedLaunch,
     RuntimeStore, RuntimeStoreSnapshot, SpawnProvision, TerminateReapError,
@@ -80,7 +81,7 @@ impl TerminalOwner for EmptyGeneric {
 #[derive(Default)]
 struct MemoryStore(Vec<RuntimeStoreSnapshot>);
 impl RuntimeStore for MemoryStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0.push(snapshot);
         Ok(())
     }
@@ -89,8 +90,11 @@ impl RuntimeStore for MemoryStore {
 #[derive(Clone, Default)]
 struct SharedMemoryStore(Arc<Mutex<Vec<RuntimeStoreSnapshot>>>);
 impl RuntimeStore for SharedMemoryStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
-        self.0.lock().map_err(|_| ())?.push(snapshot);
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+        self.0
+            .lock()
+            .map_err(|_| StoreError::Unavailable)?
+            .push(snapshot);
         Ok(())
     }
 }
@@ -102,15 +106,15 @@ struct FailSecondSaveStore {
 }
 struct FailFirstSaveStore;
 impl RuntimeStore for FailFirstSaveStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
-        Err(())
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+        Err(StoreError::Unavailable)
     }
 }
 impl RuntimeStore for FailSecondSaveStore {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.saves += 1;
         if self.saves == 2 {
-            return Err(());
+            return Err(StoreError::Unavailable);
         }
         self.snapshots.push(snapshot);
         Ok(())
@@ -892,13 +896,13 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
         .launch(&OperationId::new().to_string(), &history, &scope)
         .unwrap();
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, history.workspace, session),
         (false, ProviderResumeReason::LiveOrOwnershipUnknown)
     );
     report_real_session_start(&mut runtime, &store, &first.terminal, "first-session");
     finish_real_pty(&mut runtime, &observations, &first.terminal);
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, history.workspace, session),
         (true, ProviderResumeReason::ExplicitResumeAvailable)
     );
 
@@ -940,7 +944,7 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
     report_real_session_start(&mut runtime, &store, &second.terminal, "second-session");
     finish_real_pty(&mut runtime, &observations, &second.terminal);
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, history.workspace, session),
         (false, ProviderResumeReason::AmbiguousProviderMetadata)
     );
 
@@ -949,11 +953,11 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
         .unwrap();
     report_real_session_start(&mut runtime, &store, &live.terminal, "live-session");
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, history.workspace, session),
         (false, ProviderResumeReason::LiveOrOwnershipUnknown)
     );
     assert_eq!(
-        runtime.session_resume_status(SessionId::new()),
+        session_resume_status(&runtime, history.workspace, SessionId::new()),
         (false, ProviderResumeReason::ProviderMetadataUnavailable)
     );
     finish_real_pty(&mut runtime, &observations, &live.terminal);
@@ -965,7 +969,7 @@ fn production_resume_status_distinguishes_exact_claude_histories() {
         .unwrap();
     finish_real_pty(&mut runtime, &observations, &admission.terminal);
     assert_eq!(
-        runtime.session_resume_status(unavailable_session),
+        session_resume_status(&runtime, unavailable.workspace, unavailable_session),
         (false, ProviderResumeReason::ProviderMetadataUnavailable)
     );
 }
@@ -1060,4 +1064,18 @@ fn production_runtime_rejects_terminal_ownership_without_its_generation() {
         GenerationCoordinator::restore(snapshot.generation, 1).unwrap_err(),
         GenerationError::UnknownGeneration
     );
+}
+
+fn session_resume_status(
+    runtime: &AgentRuntime,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> (bool, ProviderResumeReason) {
+    let observation = runtime
+        .session_observations(workspace)
+        .unwrap()
+        .get(&session)
+        .copied()
+        .unwrap_or_default();
+    (observation.resumable, observation.resume_reason)
 }

@@ -50,7 +50,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
 | 過去の Issue や Memory の本文を探したい | [Issue・Memory 検索](document/03-tui.md#issue-と-memory-の検索) で検索・閲覧できる |
-| session ごとの生成物を探しづらい | 生成物がある session 行の [Artifacts アイコンと件数](document/03-tui.md#artifacts)から閲覧でき、外部表示の失敗・未確認も一覧内で確認できる。削除後の保管済み成果物も検索できる |
+| 調査結果や確認用の HTML・画像を探しづらい | ユーザー向け成果物がある session 行の [Artifacts アイコンと件数](document/03-tui.md#artifacts)から閲覧できる。ログや補助ファイルを一覧から外し、削除後の保管済み成果物も検索できる |
 
 `Ctrl-O` → `Ctrl-F` で統合検索を開き、`Tab` で検索対象を切り替えられます。
 小さい画面でも選択中の結果を優先して表示します。
@@ -59,9 +59,10 @@ Artifacts は本人だけが読める状態で保管し、外部アプリでは�
 session 削除の `--force` は、保管に失敗した成果物も破棄します。
 詳細は [削除前の成果物保管](document/05-daemon.md#session-artifacts-と削除前の保管) を参照してください。
 
-複数の workspace の対応待ちは、右上の黄色い `Action needed` から確認し、回答・PR 確認へ進めます。
+複数の workspace の対応待ちは、右上の黄色い `Action needed` から確認し、質問への回答・停止したタスクへの対応へ進めます。
+対象は usagi 内で操作が必要な項目で、GitHub の PR・CI 状態は受信箱に含めません。
 一覧は「要対応」と進行状況の `Updates` に分かれ、最初に対応が必要な項目だけを表示します。
-選んだ質問の回答画面や該当 PR へ進め、未確認の情報は「確認中」として区別します。
+選んだ質問の回答画面や該当 session へ進め、状態を未取得の project は「確認中」として区別します。
 分類と表示は [workspace 横断の対応待ち](document/03-tui.md#workspace-横断の対応待ち) を参照してください。
 TUI を閉じても、稼働中 daemon が判断待ち・CI 失敗・レビュー可能を desktop に通知します。
 通知条件と OS の要件は [desktop notifications](document/05-daemon.md#desktop-notifications) を参照してください。

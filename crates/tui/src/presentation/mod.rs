@@ -7,6 +7,7 @@
 //! 領域配置（[`layouts`]）。view が layout で領域を割り、そこへ widget を配置する。
 //! 色は [`theme`] が意味的な役割で一元管理する（役割→具体色の単一情報源）。
 
+mod background_job;
 mod banner;
 mod config_setup;
 mod controller_host;
@@ -196,19 +197,15 @@ use crate::usecase::application::daemon_backend::{
     Completions, DaemonBackend, Flow as BackendFlow,
 };
 use crate::usecase::application::interrupted_tab::{InterruptedTab, ResumeCommand};
-#[cfg(test)]
-use crate::usecase::application::metrics::MetricsPortFactory;
 use crate::usecase::application::metrics::{
     GitDiff, MetricsBackend, MetricsPort, MetricsProjection,
 };
 use crate::usecase::application::observation_lane::ObservationLane;
 use crate::usecase::application::pane::{PaneKind, PaneRegistry, PaneTab, TabSelection};
-use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::BrowserOpener;
-#[cfg(test)]
-use crate::usecase::application::pr::PrSnapshotPort;
 use crate::usecase::application::terminal_screen::{PasteMode, TerminalBuffer, TerminalInputModes};
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
+use crate::usecase::application::terminal_session::Geometry;
 use crate::usecase::application::terminal_session::{
     SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome,
     TerminalInputResolution, TerminalSession, TerminalStreamPort, TerminalSubscription,
@@ -219,6 +216,8 @@ use crate::usecase::terminal_input::{
     LiveTerminalAction, PointerEvent, PointerKind, WHEEL_LINES, encode_mouse_wheel,
     encode_wheel_arrows,
 };
+#[cfg(test)]
+use tests::MetricsPortFactory;
 use usagi_core::usecase::settings::SettingsPort;
 
 #[cfg(test)]
@@ -425,7 +424,14 @@ fn route_workspace_input_before_reducer(
 #[cfg(test)]
 struct NoMetrics;
 #[cfg(test)]
-impl MetricsPort for NoMetrics {}
+impl MetricsPort for NoMetrics {
+    fn poll_updates(
+        &mut self,
+        _sessions: Option<&[(SessionId, PathBuf)]>,
+    ) -> Vec<crate::usecase::application::metrics::MetricsUpdate> {
+        Vec::new()
+    }
+}
 
 /// Complete production port set for one opened workspace.
 pub struct ControllerBackendComposition {
@@ -914,20 +920,6 @@ impl EnvironmentStorePort for UnavailableEnvironmentStore {
             scope,
             error: unavailable_environment_error(),
         }
-    }
-}
-
-/// PR snapshot fallback for entry points that do not inject the daemon PR port
-/// (the Welcome/Open/Recent screen graph). The PR overlay shows a safe notice.
-#[cfg(test)]
-struct UnavailablePrSnapshotPort;
-#[cfg(test)]
-impl PrSnapshotPort for UnavailablePrSnapshotPort {
-    fn snapshot(
-        &mut self,
-        _session: SessionId,
-    ) -> Result<usagi_core::infrastructure::ipc::PrSnapshot, String> {
-        Err("Pull Request data is unavailable.".to_owned())
     }
 }
 
@@ -2667,7 +2659,6 @@ pub(crate) fn run_workspace_controller(
     _environment: Box<dyn EnvironmentStorePort>,
     _desktop_notifications: Box<dyn DesktopNotificationPort>,
     metrics: Box<dyn MetricsPort>,
-    _pr_port: Box<dyn PrSnapshotPort>,
     browser: Box<dyn BrowserOpener>,
 ) -> io::Result<Exit> {
     let mut factory = FixedBackendFactory {

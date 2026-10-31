@@ -54,7 +54,7 @@ fn output_search_worker_is_nonblocking_cancels_between_workspaces_and_returns_po
             .unwrap(),
         first
     );
-    job.cancel();
+    job.cancel_unless_current(None);
     release.send(false).unwrap();
     let completion = completions
         .recv_timeout(std::time::Duration::from_secs(5))

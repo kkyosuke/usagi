@@ -504,7 +504,6 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
         "ExternalTerminalPort",
         "GardenInventoryPort",
         "MetricsPort",
-        "MetricsPortFactory",
         "PaneLaunchCommandPort",
         "RestoreConnectionPort",
         "SessionBranchCatalogPort",
@@ -690,11 +689,8 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
     let controller =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/controller.rs"))
             .expect("TUI Home controller is readable");
-    let entry =
-        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/entry.rs"))
-            .expect("TUI entry controller is readable");
     let new = fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/new.rs"))
-        .expect("TUI new-workspace controller is readable");
+        .expect("TUI new-workspace validation is readable");
     let mut controller_test_sources = Vec::new();
     rust_sources(
         &root.join("crates/tui/src/usecase/application/controller/tests"),
@@ -710,7 +706,6 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
     .expect("TUI pull request controller is readable");
 
     for module in [
-        "mod entry;",
         "mod new;",
         "mod preview;",
         "mod pull_requests;",
@@ -719,13 +714,10 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
         assert!(controller.contains(module));
     }
     assert!(!controller.contains("mod tests {"));
-    assert!(!controller.contains("pub struct EntryState"));
-    assert!(!controller.contains("pub struct NewState"));
     assert!(!controller.contains("pub struct PrOverlay"));
     assert!(!controller.contains("pub struct PreviewOverlay"));
     assert!(pull_requests.contains("pub struct PrOverlay"));
-    assert!(entry.contains("pub fn update_entry("));
-    assert!(new.contains("pub fn update_new("));
+    assert!(new.contains("pub fn validate_new_form("));
     for path in &controller_test_sources {
         let source = fs::read_to_string(path).expect("TUI controller tests are readable");
         assert!(

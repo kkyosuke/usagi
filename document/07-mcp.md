@@ -140,8 +140,10 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
 validator、execution route、caller policy の正本である。Issue / Memory がともに有効な場合も、tool 件数は descriptor
 registry から導出し、本書へ転記しない。
-`tools/list` と `tools/call` は同じ descriptor registry を参照するため、掲載された tool は必ず
-1 つの実行経路と caller policy を持つ。`tools/call` の実挙動は次のとおりである。
+接続開始時に descriptor registry を一度だけ検証し、runtime/model snapshot を反映した実効 schema とともに
+保持する。`tools/list` と `tools/call` はこの同じ集合・schema を参照するため、掲載された tool は必ず
+1 つの実行経路と caller policy を持つ。request ごとの引数検証・caller policy 適用は毎回行い、
+設定・runtime availability の変更は再接続時に反映する。`tools/call` の実挙動は次のとおりである。
 
 MCP server は起動時に Global と Workspace の `issue_enabled` / `memory_enabled` を解決し、server lifetime 中は
 同じ availability snapshot を使う。`issue_enabled = false` では `issue_*` と `session_delegate_issue`、
@@ -596,10 +598,12 @@ reviewer: agent_messages → 差分確認 → agent_message(changes_requested �
 
 tool descriptor の実装は `crates/cli/src/mcp/tools/` と `crates/cli/src/mcp/tool.rs` に置く。
 新しい tool は対象系統の `Tool` 実装へ metadata と schema を定義し、同じ registry entry へ
-execution route と caller policy を割り当てる。serve 側へ name match を追加しない。
+typed execution route を割り当てる。caller policy はその route から導出し、別の可変状態として保持しない。
+serve 側へ name match を追加しない。
 
 実効設定で filter された registry は MCP serve loop が入力を受け付ける前に検証される。重複 name、重複 execution route、
-route を持つ非公開 entry、不正な object schema は起動を拒否する。runtime validator は `tools/list` が返した同じ schema（runtime/model の動的列挙を
+不正な object schema は起動を拒否する。registry への登録が公開の正本であり、entry に公開フラグを重複保持しない。
+runtime validator は `tools/list` が返した同じ schema（runtime/model の動的列挙を
 含む）で arguments を検証してから route を実行する。
 
 tool を追加・変更するときは registry の全件回帰テストへ valid/invalid arguments が自動的に列挙される。

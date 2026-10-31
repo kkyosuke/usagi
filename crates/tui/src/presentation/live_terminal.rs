@@ -288,10 +288,9 @@ impl LiveTerminalControls {
         self.active.selection.is_some()
     }
 
-    /// Whether a mouse drag is actively extending the selection. The shell uses
-    /// this to decide whether a drag event extends the live selection or starts
-    /// a fresh one over a lingering, finished selection.
+    /// Observe the drag state in input-routing regression tests.
     #[must_use]
+    #[cfg(test)]
     pub fn is_dragging(&self) -> bool {
         self.active.dragging
     }
@@ -362,17 +361,6 @@ impl LiveTerminalControls {
         } else {
             Some(text)
         }
-    }
-
-    /// Explicitly drop a retained selection while preserving scroll position
-    /// and the focused terminal.
-    pub fn clear_selection(&mut self) {
-        self.revision = self.revision.saturating_add(1);
-        self.active.pointer_press = None;
-        self.active.selection = None;
-        self.active.selection_buffer = None;
-        self.active.dragging = false;
-        self.active.feedback = Some("terminal selection cleared".to_owned());
     }
 
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
@@ -1098,30 +1086,6 @@ mod tests {
         let mut controls = LiveTerminalControls::default();
         controls.extend_selection(TerminalPoint { row: 0, column: 0 });
         assert!(controls.finish_drag().is_none());
-    }
-
-    #[test]
-    fn clearing_a_retained_selection_preserves_scroll_and_focus() {
-        let mut controls = LiveTerminalControls::default();
-        let terminal = terminal();
-        controls.sync_focus(Some(&terminal));
-        let _ = controls.project(rows(10), 5);
-        controls.scroll_up();
-        controls.begin_selection(TerminalSelection::begin(
-            vec!["hello".to_owned()],
-            TerminalPoint { row: 0, column: 0 },
-        ));
-        let _ = controls.finish_drag();
-
-        controls.clear_selection();
-
-        assert!(!controls.has_selection());
-        assert!(!controls.is_dragging());
-        assert_eq!(controls.project(rows(10), 5).scroll, 1);
-        assert_eq!(
-            controls.project(rows(10), 5).feedback.as_deref(),
-            Some("terminal selection cleared")
-        );
     }
 
     #[test]

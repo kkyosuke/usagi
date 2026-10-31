@@ -45,52 +45,6 @@ fn pr_key_returns_the_whole_url_without_a_pull_segment() {
 }
 
 #[test]
-fn aggregate_dedups_by_key_and_upgrades_a_missing_title() {
-    let untitled = PrLink::new(412, "https://x/pull/412");
-    let mut titled = PrLink::new(412, "https://x/pull/412/files");
-    titled.title = Some("Add feature".to_string());
-
-    let folded = PrLink::aggregate([untitled, titled]);
-    assert_eq!(folded.len(), 1);
-    // The first sighting keeps its URL but adopts the later title.
-    assert_eq!(folded[0].url, "https://x/pull/412");
-    assert_eq!(folded[0].title.as_deref(), Some("Add feature"));
-}
-
-#[test]
-fn aggregate_keeps_the_first_title_when_both_are_set() {
-    let mut first = PrLink::new(1, "https://x/pull/1");
-    first.title = Some("First".to_string());
-    let mut second = PrLink::new(1, "https://x/pull/1/files");
-    second.title = Some("Second".to_string());
-
-    let folded = PrLink::aggregate([first, second]);
-    assert_eq!(folded.len(), 1);
-    assert_eq!(folded[0].title.as_deref(), Some("First"));
-}
-
-#[test]
-fn aggregate_keeps_distinct_prs_and_makes_dismissal_and_pin_sticky() {
-    let a = PrLink::new(1, "https://x/pull/1");
-    let mut a_dismissed = PrLink::new(1, "https://x/pull/1/files");
-    a_dismissed.state = PrState::Dismissed;
-    let mut a_pinned = PrLink::new(1, "https://x/pull/1?w=1");
-    a_pinned.pinned = true;
-    let b = PrLink::new(2, "https://x/pull/2");
-
-    let folded = PrLink::aggregate([a, a_dismissed, a_pinned, b]);
-    assert_eq!(folded.len(), 2);
-    let one = folded.iter().find(|p| p.number == 1).unwrap();
-    assert_eq!(one.state, PrState::Dismissed); // dismissal folded in
-    assert!(one.pinned); // pin folded in
-}
-
-#[test]
-fn aggregate_of_nothing_is_empty() {
-    assert!(PrLink::aggregate([]).is_empty());
-}
-
-#[test]
 fn state_default_is_open_and_serializes_snake_case() {
     assert_eq!(PrState::default(), PrState::Open);
     assert_eq!(serde_json::to_value(PrState::Merged).unwrap(), "merged");

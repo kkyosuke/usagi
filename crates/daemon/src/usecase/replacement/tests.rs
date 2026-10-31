@@ -211,49 +211,6 @@ fn live_resources_sum_both_kinds_and_name_only_the_ones_that_are_live() {
 }
 
 #[test]
-fn only_states_that_still_hold_a_pty_master_are_counted_as_live() {
-    use crate::usecase::terminal::{TerminalReconcileState, TerminalRuntimeState};
-
-    for owned in [
-        TerminalRuntimeState::Reserved,
-        TerminalRuntimeState::Running,
-    ] {
-        assert!(super::owns_pty(owned), "{owned:?} holds the PTY master");
-    }
-    // An exited, reclaimed, failed, or crash-orphaned record has no owner left
-    // to take anything from.
-    for released in [
-        TerminalRuntimeState::Exited,
-        TerminalRuntimeState::Reclaimed,
-        TerminalRuntimeState::SpawnFailed,
-        TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
-        TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
-    ] {
-        assert!(
-            !super::owns_pty(released),
-            "{released:?} owns no PTY master"
-        );
-    }
-
-    assert_eq!(
-        super::census_of(
-            &[
-                TerminalRuntimeState::Running,
-                TerminalRuntimeState::Exited,
-                TerminalRuntimeState::Reserved,
-            ],
-            &[TerminalRuntimeState::Running],
-        ),
-        LiveResources {
-            agents: 2,
-            terminals: 1,
-        }
-    );
-    // Two daemons that have never launched anything are equally idle.
-    assert_eq!(super::census_of(&[], &[]), LiveResources::default());
-}
-
-#[test]
 fn an_absent_registry_has_no_successor_to_hand_authority_to() {
     assert_eq!(
         seamless_refusal(None, false, EndpointObservation::NotObserved, 2, None),

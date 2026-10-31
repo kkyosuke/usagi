@@ -765,6 +765,16 @@ fn runtime(git: FakeSessionGit) -> (TempDir, SessionRuntime) {
     .unwrap();
     (tmp, runtime)
 }
+// Most removal fixtures have no provider-verified merged head.
+fn perform_remove(
+    runtime: &Mutex<SessionRuntime>,
+    teardown: &TeardownSignal,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
+    perform_remove_with_merged_head(runtime, teardown, operation_id, payload, None)
+}
+
 fn operation() -> String {
     OperationId::new().to_string()
 }
@@ -1525,6 +1535,19 @@ fn lists_a_failed_session_but_refuses_to_resolve_it_then_removes_it_to_free_the_
     assert_eq!(listed["sessions"][0]["name"], "one");
     assert_eq!(listed["sessions"][0]["lifecycle"], "failed");
     assert_eq!(listed["sessions"][0]["failure"]["summary"], "create failed");
+    let observed = runtime.session_lifecycles().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].session_id, state.sessions[0].session_id);
+    assert_eq!(observed[0].name, "one");
+    assert_eq!(observed[0].lifecycle, SessionLifecycle::Failed);
+    assert_eq!(
+        observed[0].failure.as_ref().unwrap().summary,
+        "create failed"
+    );
+    assert_eq!(
+        runtime.revision().unwrap(),
+        listed["revision"].as_u64().unwrap()
+    );
 
     // Scope resolution still refuses it: attach targets only Available.
     let workspace = state.workspace_id;
@@ -1932,6 +1955,12 @@ fn legacy_conversation_stays_unknown_when_an_agent_starts_new_conversations() {
     }
     // There is deliberately no runtime-history input: collection cannot change membership.
     std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
+
+    assert_eq!(runtime.revision(), Err(SessionRuntimeError::Storage));
+    assert_eq!(
+        runtime.session_lifecycles(),
+        Err(SessionRuntimeError::Storage)
+    );
     assert_eq!(
         runtime.session_conversations(),
         Err(SessionRuntimeError::Storage)
@@ -3286,6 +3315,9 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
         state.sessions[0].setup_plan.as_ref().unwrap().commands,
         ["fail", "fail", "after"]
     );
+    let observed = runtime.lock().unwrap().session_lifecycles().unwrap();
+    assert_eq!(observed[0].lifecycle, SessionLifecycle::Failed);
+    assert!(observed[0].setup_plan.is_none());
     assert!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"][0]
             .get("setup_plan")

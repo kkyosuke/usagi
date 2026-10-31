@@ -26,7 +26,7 @@
 use usagi_core::domain::id::DaemonGeneration;
 
 use crate::usecase::resources::allocator::{ConsumeOutcome, ResourceAllocator};
-use crate::usecase::resources::shard::{OutboxEvent, OwnerShard, ShardDocument};
+use crate::usecase::resources::shard::{OutboxEvent, ShardDocument};
 use crate::usecase::resources::{ResourceError, ResourceFailure};
 
 /// What consuming one shard's outbox did.
@@ -97,33 +97,6 @@ impl<'a> ActiveConsumer<'a> {
         })?;
         Ok(outcome.0)
     }
-}
-
-/// E1: the owner commits a child's exit to its own shard and publishes it once.
-///
-/// # Errors
-/// Returns [`ResourceError::UnknownResource`], [`ResourceError::WrongState`], or
-/// a store failure.
-pub fn publish_exit(
-    shard: &OwnerShard,
-    resource: &usagi_core::domain::id::TerminalRef,
-    status: Option<i32>,
-) -> Result<(), ResourceFailure> {
-    shard.update(|document| document.commit_exit(resource, status))?;
-    Ok(())
-}
-
-/// E3: the owner drops the outbox entries the allocator records as consumed.
-///
-/// # Errors
-/// Returns a store failure.
-pub fn reclaim_outbox(
-    shard: &OwnerShard,
-    allocator: &ResourceAllocator,
-) -> Result<usize, ResourceFailure> {
-    let consumed = allocator.load()?.to_document();
-    let (reclaimed, _) = shard.update(|document| Ok(document.reclaim(&consumed)))?;
-    Ok(reclaimed)
 }
 
 #[cfg(test)]

@@ -6,10 +6,7 @@ use crate::{
     infrastructure::persistence::json_file,
 };
 use anyhow::Result;
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, path::PathBuf};
 
 /// Hard ceiling for the complete durable inventory document.
 pub const PR_INVENTORY_SNAPSHOT_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -17,6 +14,11 @@ pub const PR_INVENTORY_SNAPSHOT_MAX_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct PrInventoryStoreSnapshot {
     pub sessions: BTreeMap<SessionId, PrInventory>,
+}
+
+#[derive(serde::Serialize)]
+struct PrInventoryStoreSnapshotRef<'a> {
+    sessions: &'a BTreeMap<SessionId, PrInventory>,
 }
 
 pub struct PrInventoryStore {
@@ -44,10 +46,14 @@ impl PrInventoryStore {
     ///
     /// Returns an error when the atomic snapshot write fails.
     pub fn save(&self, snapshot: &PrInventoryStoreSnapshot) -> Result<()> {
+        self.save_sessions(&snapshot.sessions)
+    }
+
+    fn save_sessions(&self, sessions: &BTreeMap<SessionId, PrInventory>) -> Result<()> {
         json_file::write_atomic_bounded(
-            Path::new(&self.dir),
+            &self.dir,
             &self.path(),
-            snapshot,
+            &PrInventoryStoreSnapshotRef { sessions },
             PR_INVENTORY_SNAPSHOT_MAX_BYTES,
         )
     }
@@ -61,12 +67,7 @@ impl PrInventoryPort for PrInventoryStore {
     }
 
     fn save(&self, sessions: &BTreeMap<SessionId, PrInventory>) -> Result<(), Self::Error> {
-        PrInventoryStore::save(
-            self,
-            &PrInventoryStoreSnapshot {
-                sessions: sessions.clone(),
-            },
-        )
+        self.save_sessions(sessions)
     }
 }
 

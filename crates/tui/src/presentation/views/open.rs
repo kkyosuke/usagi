@@ -296,6 +296,7 @@ impl Open {
 
     /// Whether the destructive action is selected in the unregister modal.
     #[must_use]
+    #[cfg(test)]
     pub const fn unregister_confirm_selected(&self) -> bool {
         self.unregister_confirmation.is_confirm_selected()
     }
@@ -374,12 +375,6 @@ impl Open {
     /// Extend the filter selection to the end of the line (Shift+End).
     pub fn filter_select_end(&mut self) {
         self.input_mut().select_end();
-    }
-
-    /// Switch between Single and Unite selection. A new Unite set starts empty.
-    pub fn toggle_unite(&mut self) {
-        self.unite = !self.unite;
-        self.unite_paths.clear();
     }
 
     /// Add or remove the selected workspace from the Unite set.
@@ -1035,7 +1030,6 @@ mod tests {
         assert!(empty.unite_paths().is_empty());
 
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
-        open.toggle_unite();
         open.toggle_unite_member();
         open.select_next();
         open.toggle_unite_member();

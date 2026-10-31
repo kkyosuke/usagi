@@ -90,21 +90,6 @@ impl UniteOverview {
         &self.members
     }
 
-    /// The primary (first) member's workspace name, or `""` when the unite is
-    /// empty.
-    #[must_use]
-    pub fn primary_name(&self) -> &str {
-        self.members
-            .first()
-            .map_or("", |member| member.workspace.name.as_str())
-    }
-
-    /// How many members there are beyond the primary (0 for a lone workspace).
-    #[must_use]
-    pub fn extra_count(&self) -> usize {
-        self.members.len().saturating_sub(1)
-    }
-
     /// The most recent `updated_at` across the members, or `None` when the unite
     /// is empty.
     #[must_use]

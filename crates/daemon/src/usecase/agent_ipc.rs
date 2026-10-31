@@ -1,7 +1,7 @@
 //! Daemon-owned Agent launch IPC owner.
 //!
 //! This module turns a product-neutral [`AgentLaunchIntent`] into a durable
-//! launch through the [`Orchestrator`] and [`RuntimeCoordinator`], resolving the
+//! launch through [`super::orchestration`] and [`RuntimeCoordinator`], resolving the
 //! target checkout only through the injected #268 [`SessionScopeResolver`].  It
 //! reuses the shared terminal registry/stream contract owned by the coordinator
 //! rather than duplicating the generic terminal (#264) owner loop: agent
@@ -65,7 +65,7 @@ use crate::usecase::{
 use usagi_core::domain::terminal_visibility::VisibilityOutcome;
 
 use super::{
-    orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
+    orchestration::{AdapterRegistry, OrchestrationError, RuntimeAuthorization},
     runtime::{OutputJournal, ProviderResumeWrite, PtySpawner, RuntimeCoordinator, RuntimeError},
     terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
     terminal_owner::{
@@ -139,6 +139,26 @@ pub struct AgentAdmission {
     /// the semantic key was persisted; such a record replays without a digest and
     /// the client refuses the final rather than guessing.
     pub semantic_digest: Option<String>,
+}
+
+/// Safe per-session runtime projection captured once for a workspace request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentSessionObservation {
+    pub phase: AgentPhase,
+    pub resumable: bool,
+    pub resume_reason: ProviderResumeReason,
+    pub status: Option<AgentStatus>,
+}
+
+impl Default for AgentSessionObservation {
+    fn default() -> Self {
+        Self {
+            phase: AgentPhase::Absent,
+            resumable: false,
+            resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,
+            status: None,
+        }
+    }
 }
 
 /// Outcome of an authenticated worker report.
@@ -366,7 +386,7 @@ pub trait AgentTerminalActor {
 }
 
 /// The daemon's single Agent owner.  It holds the durable runtime coordinator,
-/// orchestrator, adapter registry, runtime store, output journal, and PTY
+/// adapter registry, runtime store, output journal, and PTY
 /// spawner/writer, plus the producer-issued operation ledger for idempotency.
 trait RuntimeStorePort: super::runtime::RuntimeStore + Send {
     #[cfg(test)]
@@ -404,7 +424,6 @@ impl<T: PtySpawner + PtyWriter + Send + 'static> AgentPtyPort for T {
 
 pub struct AgentRuntime {
     coordinator: RuntimeCoordinator,
-    orchestrator: Orchestrator,
     registry: AdapterRegistry,
     store: Box<dyn RuntimeStorePort>,
     journal: Box<dyn OutputJournalPort>,
@@ -710,7 +729,6 @@ impl AgentRuntime {
             .expect("a fresh Agent coordinator accepts its production generation");
         Self {
             coordinator,
-            orchestrator: Orchestrator::new(),
             registry,
             store: Box::new(store),
             journal: Box::new(journal),
@@ -780,18 +798,16 @@ impl AgentRuntime {
         coordinator.activate_generation(generation)?;
         store
             .save(coordinator.snapshot())
-            .map_err(|()| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
+            .map_err(|_| super::runtime::RuntimeSnapshotError::OwnershipPersist)?;
         dispatch
             .reconcile_incomplete_admissions()
             .map_err(|_| super::runtime::RuntimeSnapshotError::DispatchReconcile)?;
         let recorded_at = Utc::now();
         let operations = coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .map(|record| {
                 let operation_id = record.operation.operation_id.to_string();
-                let outcome = durable_operation_outcome(&record);
+                let outcome = durable_operation_outcome(record);
                 (
                     operation_id,
                     AgentOperation::new(record.semantic_key.as_deref(), outcome, recorded_at),
@@ -800,7 +816,6 @@ impl AgentRuntime {
             .collect();
         Ok(Self {
             coordinator,
-            orchestrator: Orchestrator::new(),
             registry,
             store: Box::new(store),
             journal: Box::new(journal),
@@ -835,9 +850,7 @@ impl AgentRuntime {
     fn prune_operations(&mut self, now: DateTime<Utc>) {
         let protected = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .map(|record| record.operation.operation_id.to_string())
             .collect::<BTreeSet<_>>();
         let max_age_seconds = self.operation_bounds.age_seconds;
@@ -888,9 +901,7 @@ impl AgentRuntime {
         let failed = self.failed_dispatch_ids()?;
         Ok(self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| Self::is_failed_reservation(record, &failed))
             .map(|record| record.runtime.agent_runtime_id)
             .collect())
@@ -925,13 +936,14 @@ impl AgentRuntime {
     /// [`Self::failed_reservation_ids`].
     pub fn clean_failed_reservations(&mut self) -> Result<usize, ProtocolError> {
         let ids = self.failed_reservation_ids()?;
-        let records = self.coordinator.snapshot().records;
-        let mut cleaned = 0;
-        for runtime in records
-            .into_iter()
+        let runtimes = self
+            .coordinator
+            .records()
             .filter(|record| ids.contains(&record.runtime.agent_runtime_id))
-            .map(|record| record.runtime)
-        {
+            .map(|record| record.runtime.clone())
+            .collect::<Vec<_>>();
+        let mut cleaned = 0;
+        for runtime in runtimes {
             cleaned += usize::from(
                 self.coordinator
                     .clean_failed_launch(&runtime, &mut *self.store)
@@ -1038,24 +1050,6 @@ impl AgentRuntime {
         true
     }
 
-    /// Releases only the active transport lease owned by this connection.
-    ///
-    /// The exact process claim remains so a policy client may reconnect with
-    /// the same credential. Cleanup from an older connection cannot clear a
-    /// newer connection lease, and a reused PID cannot acquire the claim.
-    pub fn release_mcp_connection(&mut self, connection: ConnectionId) {
-        for caller in self.mcp_callers.values_mut() {
-            if caller
-                .child
-                .as_ref()
-                .is_some_and(|child| child.connection == Some(connection))
-                && let Some(child) = caller.child.as_mut()
-            {
-                child.connection = None;
-            }
-        }
-    }
-
     /// Releases stale transport leases against the daemon's bounded live
     /// connection census while retaining each exact process claim.
     pub fn retain_live_mcp_connections(&mut self, live: &BTreeSet<ConnectionId>) {
@@ -1111,15 +1105,6 @@ impl AgentRuntime {
         matches.next().is_none().then_some(credential.as_str())
     }
 
-    /// Resolves the durable dispatch identity authenticated by an MCP child.
-    /// The credential is daemon-minted after an OS-authenticated child claim; no client supplied
-    /// agent or session name participates in this lookup.
-    #[must_use]
-    pub fn mcp_dispatch_caller(&self, credential: &str) -> Option<CallerRef> {
-        self.mcp_dispatch_context(credential)
-            .map(|context| context.caller)
-    }
-
     /// Resolves all dispatch provenance from the same live credential and
     /// verifies the durable Agent ownership sidecar before returning it.
     #[must_use]
@@ -1161,7 +1146,7 @@ impl AgentRuntime {
     /// session is running work or lacks resume metadata, the whole request is
     /// refused before signalling a process.
     pub fn sleep_session(&mut self, session: SessionId) -> Result<usize, ProtocolError> {
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let live = records
             .iter()
             .filter(|record| {
@@ -1228,24 +1213,48 @@ impl AgentRuntime {
         self.mcp_callers.len()
     }
 
-    /// Returns the runtime phase projected for one session.
-    ///
-    /// The daemon-observed [`RuntimeState`](super::runtime::RuntimeState) is the
-    /// authority: a phase an agent reported through its own lifecycle hook
-    /// refines the projection only while that exact runtime is still `Running`.
-    /// A report therefore never makes a reserved, interrupted, or exited runtime
-    /// look alive, and never hides an interruption.
-    #[must_use]
-    pub fn session_phase(&self, session: SessionId) -> AgentPhase {
-        let failed = self.failed_dispatch_ids().unwrap_or_default();
-        self.coordinator
-            .snapshot()
-            .records
+    /// Captures list/status projections without copying durable runtime payloads
+    /// or reading dispatch history separately for every session row.
+    pub fn session_observations(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<BTreeMap<SessionId, AgentSessionObservation>, ProtocolError> {
+        let mut observations = self
+            .workspace_agent_statuses(workspace)?
             .into_iter()
-            .filter(|record| record.runtime.session_id == Some(session))
-            .map(|record| self.record_phase(&record, &failed))
-            .max_by_key(|(priority, _)| *priority)
-            .map_or(AgentPhase::Absent, |(_, phase)| phase)
+            .map(|(session, status)| {
+                (
+                    session,
+                    AgentSessionObservation {
+                        status: Some(status),
+                        ..AgentSessionObservation::default()
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Runtime state remains authoritative if failed-run history becomes
+        // unavailable after the workspace status read.
+        let failed = self.failed_dispatch_ids().unwrap_or_default();
+        let records = self.coordinator.records().collect::<Vec<_>>();
+        let mut sessions: BTreeMap<SessionId, Vec<_>> = BTreeMap::new();
+        for record in &records {
+            if record.runtime.terminal.workspace_id == workspace
+                && let Some(session) = record.runtime.session_id
+            {
+                sessions.entry(session).or_default().push(*record);
+            }
+        }
+        for (session, session_records) in sessions {
+            let observation = observations.entry(session).or_default();
+            observation.phase = session_records
+                .iter()
+                .map(|record| self.record_phase(record, &failed))
+                .max_by_key(|(priority, _)| *priority)
+                .map_or(AgentPhase::Absent, |(_, phase)| phase);
+            (observation.resumable, observation.resume_reason) =
+                self.session_resume_status_from(&session_records, &records);
+        }
+        Ok(observations)
     }
 
     fn record_phase(
@@ -1283,11 +1292,9 @@ impl AgentRuntime {
         workspace: WorkspaceId,
     ) -> Vec<(TerminalRef, super::runtime::RuntimeState)> {
         self.coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
-            .map(|record| (record.runtime.terminal, record.state))
+            .map(|record| (record.runtime.terminal.clone(), record.state))
             .collect()
     }
 
@@ -1295,20 +1302,10 @@ impl AgentRuntime {
     #[must_use]
     pub fn retirement_blocker_count(&self, workspace: WorkspaceId) -> usize {
         self.coordinator
-            .snapshot()
-            .records
-            .iter()
+            .records()
             .filter(|record| {
                 record.runtime.terminal.workspace_id == workspace
-                    && matches!(
-                        record.state,
-                        super::runtime::RuntimeState::Running
-                            | super::runtime::RuntimeState::ReconcileRequired(
-                                super::runtime::ReconcileState::OrphanRunning
-                                    | super::runtime::ReconcileState::SpawnAmbiguous
-                                    | super::runtime::ReconcileState::PersistAfterSpawn
-                            )
-                    )
+                    && record.state.requires_termination()
             })
             .count()
     }
@@ -1321,7 +1318,7 @@ impl AgentRuntime {
         expected: &[AgentIntegrationRevision],
     ) -> Result<AgentIntegrationDiagnosis, ProtocolError> {
         let expected = expected_integration_revisions(expected)?;
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let failed = self.failed_dispatch_ids().unwrap_or_default();
         let mut outdated = records
             .iter()
@@ -1332,7 +1329,8 @@ impl AgentRuntime {
             .filter_map(|record| {
                 let expected_revision = expected.get(record.launch.plan.profile_id.as_str())?;
                 (record.launch.plan.profile_revision < *expected_revision).then(|| {
-                    let resume_available = Self::repair_source_availability(record, &records).0;
+                    let resume_available =
+                        Self::resume_source_metadata_availability(record, &records).0;
                     OutdatedAgentRuntime {
                         runtime: record.runtime.clone(),
                         continuation: record.continuation,
@@ -1464,23 +1462,20 @@ impl AgentRuntime {
     /// Retained Agent terminal identities available to the human search lane.
     #[must_use]
     pub fn search_targets(&self, workspace: WorkspaceId) -> Vec<TerminalRef> {
-        self.inventory(workspace)
-            .runtimes
+        self.workspace_records(workspace)
             .into_iter()
-            .map(|entry| entry.runtime.terminal)
+            .filter(|record| record.continuation.is_some())
+            .map(|record| record.runtime.terminal.clone())
             .collect()
     }
 
-    /// Returns one deterministic, secret-free inventory for workspace-root and
-    /// managed-session Agent runtimes.
-    #[must_use]
-    pub fn inventory(&self, workspace: WorkspaceId) -> AgentInventory {
-        let failed = self.failed_dispatch_ids().unwrap_or_default();
+    fn workspace_records(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Vec<&super::runtime::DurableRuntimeRecord> {
         let mut records = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
             .collect::<Vec<_>>();
         records.sort_by_key(|record| {
@@ -1489,6 +1484,15 @@ impl AgentRuntime {
                 record.runtime.agent_runtime_id.as_str(),
             )
         });
+        records
+    }
+
+    /// Returns one deterministic, secret-free inventory for workspace-root and
+    /// managed-session Agent runtimes.
+    #[must_use]
+    pub fn inventory(&self, workspace: WorkspaceId) -> AgentInventory {
+        let dispatch = self.dispatch.runtime_projection().unwrap_or_default();
+        let records = self.workspace_records(workspace);
         let runtimes = records
             .iter()
             .filter_map(|record| {
@@ -1497,12 +1501,10 @@ impl AgentRuntime {
                     .map(|continuation| AgentRuntimeInventoryItem {
                         runtime: record.runtime.clone(),
                         operation_id: Some(record.operation.operation_id),
-                        agent_id: self
-                            .dispatch
-                            .binding(record.operation.operation_id)
-                            .ok()
-                            .flatten()
-                            .map(|binding| binding.worker.agent_id)
+                        agent_id: dispatch
+                            .agent_ids_by_run
+                            .get(&record.operation.operation_id)
+                            .copied()
                             .or_else(|| {
                                 record
                                     .launch_provenance
@@ -1510,7 +1512,7 @@ impl AgentRuntime {
                                     .and_then(|audit| audit.agent_id)
                             }),
                         continuation,
-                        state: if Self::is_failed_reservation(record, &failed) {
+                        state: if Self::is_failed_reservation(record, &dispatch.failed_runs) {
                             AgentRuntimeInventoryState::Unavailable
                         } else {
                             runtime_inventory_state(record.state)
@@ -1566,11 +1568,14 @@ impl AgentRuntime {
     > {
         let origins = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
-            .map(|record| (record.operation.operation_id, record.launch_provenance))
+            .map(|record| {
+                (
+                    record.operation.operation_id,
+                    record.launch_provenance.clone(),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         let mut latest = BTreeMap::<AgentId, (chrono::DateTime<Utc>, OperationId)>::new();
         for run in self.dispatch.runs().map_err(map_dispatch_storage_error)? {
@@ -1612,7 +1617,7 @@ impl AgentRuntime {
                 })
                 .or_insert(agent.status);
         }
-        for record in self.coordinator.snapshot().records {
+        for record in self.coordinator.records() {
             if record.runtime.terminal.workspace_id != workspace
                 || record.state != super::runtime::RuntimeState::Running
                 || !matches!(
@@ -1766,52 +1771,6 @@ impl AgentRuntime {
         Ok(true)
     }
 
-    fn repair_source_availability(
-        record: &super::runtime::DurableRuntimeRecord,
-        records: &[super::runtime::DurableRuntimeRecord],
-    ) -> (bool, ProviderResumeReason) {
-        let (Some(continuation), Some(_source), Some(reference)) = (
-            record.continuation,
-            record.resume_source,
-            record.provider_resume.as_ref(),
-        ) else {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
-        };
-        if record.superseded_by.is_some() {
-            return (false, ProviderResumeReason::SourceAlreadySuperseded);
-        }
-        if records.iter().any(|candidate| {
-            candidate.runtime.agent_runtime_id != record.runtime.agent_runtime_id
-                && candidate.continuation == Some(continuation)
-                && holds_live_or_unknown_agent(candidate.state)
-        }) {
-            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
-        }
-        let capture_compatible = matches!(
-            (reference.provider, reference.provenance),
-            (
-                ProviderKind::Claude,
-                ProviderCaptureProvenance::DaemonIssued
-                    | ProviderCaptureProvenance::ProviderStructured
-            ) | (
-                ProviderKind::Codex | ProviderKind::Agy,
-                ProviderCaptureProvenance::ProviderStructured
-            )
-        );
-        let internally_compatible = capture_compatible
-            && record.launch.plan.profile_revision == reference.adapter_revision
-            && record.launch.request.scope == reference.scope
-            && record.runtime.terminal.workspace_id == reference.scope.workspace_id
-            && record.runtime.terminal.session_id == reference.scope.session_id
-            && record.runtime.terminal.worktree_id == reference.scope.worktree_id
-            && provider_matches_profile(reference.provider, &record.launch.plan.profile_id);
-        if internally_compatible {
-            (true, ProviderResumeReason::ExplicitResumeAvailable)
-        } else {
-            (false, ProviderResumeReason::IncompatibleProviderMetadata)
-        }
-    }
-
     /// Journals daemon-owned PTY output before it becomes replayable.  A stale
     /// terminal is a safe no-op error, never a replacement.
     pub fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) -> Result<(), ProtocolError> {
@@ -1911,9 +1870,7 @@ impl AgentRuntime {
     pub fn close_session(&mut self, session: SessionId) -> Result<usize, ProtocolError> {
         let owned_operations = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.session_id == Some(session))
             .map(|record| {
                 (
@@ -1934,9 +1891,7 @@ impl AgentRuntime {
     pub fn close_workspace(&mut self, workspace: WorkspaceId) -> Result<usize, ProtocolError> {
         let owned_operations = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter(|record| record.runtime.terminal.workspace_id == workspace)
             .map(|record| {
                 (
@@ -1957,9 +1912,7 @@ impl AgentRuntime {
     #[must_use]
     pub fn managed_session_ids(&self) -> std::collections::BTreeSet<SessionId> {
         self.coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .filter_map(|record| record.runtime.session_id)
             .collect()
     }
@@ -1972,9 +1925,7 @@ impl AgentRuntime {
     #[must_use]
     pub fn retained_resources(&self) -> std::collections::BTreeSet<String> {
         self.coordinator
-            .snapshot()
-            .records
-            .iter()
+            .records()
             .map(|record| record.runtime.terminal.terminal_id.as_str())
             .collect()
     }
@@ -2567,7 +2518,6 @@ fn map_orchestration_error(error: OrchestrationError) -> ProtocolError {
         OrchestrationError::UnknownProfile => {
             ProtocolError::new(ErrorCode::InvalidArgument, "unknown agent profile")
         }
-        OrchestrationError::UnknownRuntime => stale_terminal(),
         OrchestrationError::Runtime(runtime) => map_runtime_error(runtime),
     }
 }
@@ -2600,6 +2550,10 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         ),
         // A launch whose worst-case final does not fit the aggregate retention
         // budget is refused before spawn, like any other exhausted capacity.
+        RuntimeError::RetentionBackpressure => (
+            ErrorCode::ResourceExhausted,
+            "daemon operation history retention budget is exhausted",
+        ),
         RuntimeError::RetentionExhausted(_) => (
             ErrorCode::ResourceExhausted,
             "daemon retention budget cannot admit another agent runtime",

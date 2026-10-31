@@ -15,6 +15,7 @@ use usagi_core::domain::{
 use super::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner, PROFILE_REVISION,
 };
+use crate::usecase::resources::StoreError;
 use crate::usecase::{
     generation::ProcessIdentity,
     runtime::{
@@ -423,7 +424,7 @@ fn provisioned_environment_is_an_allowlist_not_an_environment_value_map() {
 struct Store(Vec<RuntimeStoreSnapshot>);
 
 impl RuntimeStore for Store {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0.push(snapshot);
         Ok(())
     }

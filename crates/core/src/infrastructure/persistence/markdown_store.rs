@@ -2,20 +2,27 @@
 //!
 //! [`MarkdownStore`] owns the common mechanics for stores whose source of truth
 //! is a directory of frontmatter markdown files and whose JSON index is only a
-//! rebuildable metadata cache. Store-specific code supplies parsing, filename
-//! derivation, summary extraction, the on-disk index shape, and any extra
-//! derived artifact such as memory's `MEMORY.md` table of contents.
+//! rebuildable metadata cache. It uses the entity's [`FrontmatterDoc`] format
+//! and owns cancellable locking and derived-file repair. Store-specific code
+//! supplies filename derivation, summary extraction, the on-disk index shape,
+//! and extra derived artifacts such as memory's `MEMORY.md` table of contents.
 
 use std::fs;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 use super::json_file;
+use super::store_lock::StoreLock;
+use crate::domain::frontmatter::FrontmatterDoc;
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::store::{DerivedState, MutationOutcome};
 
@@ -48,7 +55,7 @@ pub(crate) fn source_file_name(path: &Path) -> Result<String> {
 
 /// Store-specific behavior for one kind of markdown entry.
 pub(crate) trait MarkdownEntry: Sync {
-    type Entry: Send;
+    type Entry: FrontmatterDoc + Send;
     type Summary: Clone + Serialize + DeserializeOwned + Send + Sync;
     type IndexFile: DeserializeOwned;
     type IndexFileRef<'a>: Serialize
@@ -59,8 +66,6 @@ pub(crate) trait MarkdownEntry: Sync {
     const NAME: &'static str;
 
     fn is_entry_file(path: &Path) -> bool;
-    fn parse_markdown(text: &str) -> Result<Self::Entry>;
-    fn to_markdown(entry: &Self::Entry) -> String;
     fn file_name(entry: &Self::Entry) -> Result<String>;
     /// Build a summary for `entry`, reported as living in the source `file`.
     fn summary(entry: &Self::Entry, file: &str) -> Self::Summary;
@@ -89,6 +94,7 @@ struct MarkdownIndex<E: MarkdownEntry> {
 /// Common markdown + derived-index persistence rooted at one store directory.
 pub(crate) struct MarkdownStore<E: MarkdownEntry> {
     dir: PathBuf,
+    lock_cancellation: Option<Arc<AtomicBool>>,
     _entry: PhantomData<E>,
 }
 
@@ -96,12 +102,26 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     pub(crate) fn new(dir: PathBuf) -> Self {
         Self {
             dir,
+            lock_cancellation: None,
             _entry: PhantomData,
         }
     }
 
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub(crate) fn with_lock_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.lock_cancellation = Some(cancelled);
+        self
+    }
+
+    pub(crate) fn lock(&self) -> Result<StoreLock> {
+        StoreLock::acquire_cancellable(self.dir(), || {
+            self.lock_cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Acquire))
+        })
     }
 
     /// Whether the source directory exists, distinguishing a genuinely absent
@@ -135,37 +155,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         self.dir.join(DIRTY_FILE)
     }
 
-    /// Read and parse every entry markdown file, sorted by its store-specific key.
-    pub(crate) fn scan(&self) -> Result<Vec<E::Entry>> {
-        use rayon::prelude::*;
-
-        let mut sources: Vec<MarkdownSource<E::Entry>> = self
-            .entry_files()?
-            .into_par_iter()
-            .map(|path| {
-                Ok(MarkdownSource {
-                    entry: self.read_existing_path(&path)?,
-                    file: source_file_name(&path)?,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        E::sort_sources(&mut sources);
-        Ok(sources.into_iter().map(|source| source.entry).collect())
-    }
-
-    /// Like [`scan`](Self::scan), but records unreadable/unparseable files to the
-    /// error log and skips them so one corrupt sibling cannot break listings or
-    /// cache rebuilds.
-    pub(crate) fn scan_lenient(&self) -> Result<Vec<E::Entry>> {
-        Ok(self
-            .scan_sources_lenient()?
-            .into_iter()
-            .map(|source| source.entry)
-            .collect())
-    }
-
-    /// Like [`scan_lenient`](Self::scan_lenient), but retains the exact file each
-    /// entry came from so summaries can name a source that exists.
+    /// Read parseable entries with their exact source filenames, logging and
+    /// skipping corrupt siblings so healthy entries remain available.
     pub(crate) fn scan_sources_lenient(&self) -> Result<Vec<MarkdownSource<E::Entry>>> {
         use rayon::prelude::*;
 
@@ -275,14 +266,15 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     pub(crate) fn read_existing_path(&self, path: &Path) -> Result<E::Entry> {
         let text =
             fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
-        E::parse_markdown(&text).with_context(|| format!("failed to parse {}", path.display()))
+        E::Entry::from_markdown(&text)
+            .with_context(|| format!("failed to parse {}", path.display()))
     }
 
     pub(crate) fn write_markdown(&self, entry: &E::Entry) -> Result<PathBuf> {
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
         let target = self.dir.join(E::file_name(entry)?);
-        json_file::write_text_atomic(&target, &E::to_markdown(entry))?;
+        json_file::write_text_atomic(&target, &entry.to_markdown())?;
         Ok(target)
     }
 
@@ -306,11 +298,34 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Repair a previously scheduled rebuild while the caller holds the store
     /// lock. Missing markers make this a no-op.
     pub(crate) fn repair_derived_locked(&self) -> Result<()> {
-        if !self.dirty_path().exists() {
+        if !self.derived_is_dirty() {
             return Ok(());
         }
         self.rebuild_derived()?;
         self.clear_derived_dirty()
+    }
+
+    /// Readers keep committed source available when a scheduled rebuild fails.
+    pub(crate) fn repair_derived_best_effort(&self) {
+        if !self.derived_is_dirty() {
+            return;
+        }
+        let repair = self.lock().and_then(|_lock| self.repair_derived_locked());
+        Self::log_repair_failure(repair);
+    }
+
+    /// Repair without reacquiring a lock already held across a read snapshot.
+    pub(crate) fn repair_derived_best_effort_locked(&self, _lock: &StoreLock) {
+        Self::log_repair_failure(self.repair_derived_locked());
+    }
+
+    fn log_repair_failure(repair: Result<()>) {
+        if let Err(error) = repair {
+            ErrorLog::record(&format!(
+                "{} derived rebuild remains scheduled after read: {error:#}",
+                E::NAME
+            ));
+        }
     }
 
     pub(crate) fn derived_is_dirty(&self) -> bool {
@@ -326,18 +341,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
                 self.dirty_path().display()
             )),
         }
-    }
-
-    /// Refresh derived files after a source write. Re-scan all sources so an
-    /// unrelated manual edit cannot be hidden behind a newly stamped identity.
-    pub(crate) fn reindex_after_write(&self, _entry: &E::Entry) -> Result<()> {
-        self.rebuild_derived().map(|_| ())
-    }
-
-    /// Refresh derived files after a source removal under the same contract as
-    /// [`reindex_after_write`](Self::reindex_after_write).
-    pub(crate) fn reindex_after_remove(&self) -> Result<()> {
-        self.rebuild_derived().map(|_| ())
     }
 
     /// Metadata summaries for every entry. The index is used only when it is
@@ -373,7 +376,8 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)
     }
 
-    /// Rebuild all derived files from the markdown source of truth.
+    /// Rebuild all derived files from the complete markdown source set, so an
+    /// unrelated manual edit cannot be hidden behind a newly stamped identity.
     pub(crate) fn rebuild_derived(&self) -> Result<Vec<E::Summary>> {
         let summaries = self.source_summaries()?;
         if summaries.is_empty() && !self.dir.exists() {

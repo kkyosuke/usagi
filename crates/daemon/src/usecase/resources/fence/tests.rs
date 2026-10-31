@@ -9,7 +9,7 @@ use usagi_core::usecase::pr_inventory::PrInventoryPort;
 
 use super::{
     FencedError, FencedPrInventory, SHARED_WRITERS, SharedWriter, WriteMode, WriteVerdict,
-    fenced_writers, shared_write_verdict,
+    shared_write_verdict,
 };
 use crate::usecase::generation::GenerationRole;
 
@@ -60,7 +60,10 @@ fn a_draining_generation_defers_its_only_deferrable_writer_and_is_refused_the_re
 #[test]
 fn the_inventory_names_every_writer_that_needs_the_fence() {
     assert_eq!(
-        fenced_writers(),
+        SHARED_WRITERS
+            .into_iter()
+            .filter(|writer| writer.mode() == WriteMode::WholeSnapshot)
+            .collect::<Vec<_>>(),
         vec![
             SharedWriter::PrInventory,
             SharedWriter::SessionLifecycle,

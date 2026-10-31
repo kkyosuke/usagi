@@ -131,30 +131,29 @@ impl AgentRuntime {
                 "prompt must not be empty",
             ));
         }
-        let live = self
+        let live_terminal = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .find(|record| {
                 record.runtime.terminal.workspace_id == workspace
                     && record.runtime.session_id == session
                     && record.state == crate::usecase::runtime::RuntimeState::Running
-            });
-        if matches!(mode, PromptMode::Live) && live.is_none() {
+            })
+            .map(|record| record.runtime.terminal.clone());
+        if matches!(mode, PromptMode::Live) && live_terminal.is_none() {
             return Err(ProtocolError::new(
                 ErrorCode::Unavailable,
                 "target session has no live agent; use session_dispatch to start it or mode=queue for intentional deferred delivery",
             ));
         }
-        if matches!(mode, PromptMode::Queue) && live.is_some() {
+        if matches!(mode, PromptMode::Queue) && live_terminal.is_some() {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "target session already has a live agent; use mode=live",
             ));
         }
-        if let Some(record) = live {
-            self.submit_live_prompt(&record.runtime.terminal, prompt)?;
+        if let Some(terminal) = live_terminal {
+            self.submit_live_prompt(&terminal, prompt)?;
             return Ok(PromptDelivery {
                 delivered_to: "live",
                 queued: false,
@@ -177,19 +176,18 @@ impl AgentRuntime {
                 "prompt must not be empty",
             ));
         }
-        let live = self
+        let terminal = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .find(|record| {
                 record.operation.operation_id == operation
                     && record.state == crate::usecase::runtime::RuntimeState::Running
             })
+            .map(|record| record.runtime.terminal.clone())
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::Unavailable, "target agent run is no longer live")
             })?;
-        self.submit_live_prompt(&live.runtime.terminal, prompt)?;
+        self.submit_live_prompt(&terminal, prompt)?;
         Ok(PromptDelivery {
             delivered_to: "live",
             queued: false,

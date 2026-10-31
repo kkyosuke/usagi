@@ -743,7 +743,7 @@ fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
             .claim_mcp_child(9001, "start-a", 4321, 9999, second_connection, &|_, _| true)
             .is_err()
     );
-    runtime.release_mcp_connection(first_connection);
+    runtime.retain_live_mcp_connections(&BTreeSet::from([second_connection]));
     assert_eq!(
         runtime.mcp_callers[&credential]
             .child
@@ -769,7 +769,7 @@ fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
     );
     let reconnect = ConnectionId::new();
     assert!(runtime.authenticate_mcp_child_connection(&credential, 9001, "start-a", reconnect));
-    runtime.release_mcp_connection(reconnect);
+    runtime.retain_live_mcp_connections(&BTreeSet::new());
     assert!(
         runtime
             .claim_mcp_child(9003, "start-c", 4321, 4321, reconnect, &|_, _| true)
@@ -870,7 +870,11 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         ErrorCode::OwnershipUnknown
     );
     assert_eq!(
-        runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
+        runtime
+            .mcp_dispatch_context(&credential)
+            .unwrap()
+            .caller
+            .session_id,
         Some(session)
     );
     let authenticated = runtime.mcp_dispatch_context(&credential).unwrap();
@@ -894,7 +898,7 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             worktree_id: admission.terminal.worktree_id,
         }
     );
-    assert!(runtime.mcp_dispatch_caller("forged").is_none());
+    assert!(runtime.mcp_dispatch_context("forged").is_none());
     let runtime_ref = runtime
         .coordinator
         .runtime_for_terminal(&admission.terminal)

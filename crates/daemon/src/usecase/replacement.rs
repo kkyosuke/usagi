@@ -53,7 +53,6 @@ use crate::usecase::resources::allocator::AllocatorDocument;
 use crate::usecase::resources::durable::shard_census;
 use crate::usecase::resources::shard::{CollectionBlocker, ShardDocument, retired_collectable};
 use crate::usecase::stop::StaleDaemonCleanup;
-use crate::usecase::terminal::TerminalRuntimeState;
 use crate::usecase::{restart, stop};
 
 /// How much live runtime a daemon still owns.
@@ -101,38 +100,6 @@ impl fmt::Display for LiveResources {
             ),
         }
     }
-}
-
-/// Whether this durable state means the daemon holds the PTY master.
-///
-/// A record left needing reconciliation is deliberately *not* live: its owner
-/// is already gone, so no transition can take anything from it. Exactly the two
-/// states below are the ones a cold transition would destroy.
-#[must_use]
-pub const fn owns_pty(state: TerminalRuntimeState) -> bool {
-    matches!(
-        state,
-        TerminalRuntimeState::Reserved | TerminalRuntimeState::Running
-    )
-}
-
-/// Count the live runtime behind the two durable snapshots' record states.
-///
-/// The snapshots are the daemon's own single-writer state, so a lifecycle verb
-/// taking this census reads exactly what the running daemon last committed.
-#[must_use]
-pub fn census_of(
-    agents: &[TerminalRuntimeState],
-    terminals: &[TerminalRuntimeState],
-) -> LiveResources {
-    let mut live = LiveResources::default();
-    for state in agents {
-        live.agents += usize::from(owns_pty(*state));
-    }
-    for state in terminals {
-        live.terminals += usize::from(owns_pty(*state));
-    }
-    live
 }
 
 /// Reading how much live runtime the recorded daemon owns.

@@ -32,105 +32,69 @@ pub enum CallerPolicy {
     AgentCredential,
 }
 
+impl ToolRoute {
+    /// Caller provenance is determined by the execution route, so registration
+    /// cannot weaken a daemon route by attaching a different policy.
+    const fn caller_policy(self) -> CallerPolicy {
+        match self {
+            Self::Store(_) => CallerPolicy::Public,
+            Self::Session(_) => CallerPolicy::SessionCredential,
+            Self::AgentInventory | Self::AgentResume | Self::Dispatch(_) => {
+                CallerPolicy::AgentCredential
+            }
+        }
+    }
+}
+
 /// The single source of truth consumed by both `tools/list` and `tools/call`.
 pub struct ToolDescriptor {
     tool: Box<dyn Tool>,
     route: ToolRoute,
-    caller_policy: CallerPolicy,
-    advertised: bool,
 }
 
 impl ToolDescriptor {
     #[must_use]
-    fn with_route(tool: Box<dyn Tool>, route: ToolRoute, caller_policy: CallerPolicy) -> Self {
+    fn with_route(tool: impl Tool + 'static, route: ToolRoute) -> Self {
         Self {
-            tool,
+            tool: Box::new(tool),
             route,
-            caller_policy,
-            advertised: true,
         }
     }
 
     /// Registers a workspace-backed public tool.
     #[must_use]
     pub fn workspace_store(tool: impl Tool + 'static) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::Store(StoreRoot::Workspace),
-            CallerPolicy::Public,
-        )
+        Self::with_route(tool, ToolRoute::Store(StoreRoot::Workspace))
     }
 
     /// Registers a daemon-owned Agent memory tool.
     #[must_use]
     pub fn memory_store(tool: impl Tool + 'static) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::Store(StoreRoot::Memory),
-            CallerPolicy::Public,
-        )
+        Self::with_route(tool, ToolRoute::Store(StoreRoot::Memory))
     }
 
     /// Registers a session lifecycle tool whose caller is bound by the daemon.
     #[must_use]
     pub fn session(tool: impl Tool + 'static, action: SessionAction) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::Session(action),
-            CallerPolicy::SessionCredential,
-        )
+        Self::with_route(tool, ToolRoute::Session(action))
     }
 
     /// Registers the exact-resume inventory route.
     #[must_use]
     pub fn agent_inventory(tool: impl Tool + 'static) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::AgentInventory,
-            CallerPolicy::AgentCredential,
-        )
+        Self::with_route(tool, ToolRoute::AgentInventory)
     }
 
     /// Registers the exact-resume mutation route.
     #[must_use]
     pub fn agent_resume(tool: impl Tool + 'static) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::AgentResume,
-            CallerPolicy::AgentCredential,
-        )
+        Self::with_route(tool, ToolRoute::AgentResume)
     }
 
     /// Registers an authenticated Agent dispatch tool.
     #[must_use]
     pub fn dispatch(tool: impl Tool + 'static, action: DispatchToolAction) -> Self {
-        Self::with_route(
-            Box::new(tool),
-            ToolRoute::Dispatch(action),
-            CallerPolicy::AgentCredential,
-        )
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn new(tool: Box<dyn Tool>, route: ToolRoute, caller_policy: CallerPolicy) -> Self {
-        Self::with_route(tool, route, caller_policy)
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn fixture(
-        tool: Box<dyn Tool>,
-        route: ToolRoute,
-        caller_policy: CallerPolicy,
-        advertised: bool,
-    ) -> Self {
-        Self {
-            tool,
-            route,
-            caller_policy,
-            advertised,
-        }
+        Self::with_route(tool, ToolRoute::Dispatch(action))
     }
 
     #[must_use]
@@ -155,12 +119,7 @@ impl ToolDescriptor {
 
     #[must_use]
     pub const fn caller_policy(&self) -> CallerPolicy {
-        self.caller_policy
-    }
-
-    #[must_use]
-    pub const fn is_advertised(&self) -> bool {
-        self.advertised
+        self.route.caller_policy()
     }
 
     /// Executes the descriptor's store adapter.
@@ -453,8 +412,6 @@ pub trait Tool {
 /// tool の dispatch・実行のエラー。
 #[derive(Debug, PartialEq, Eq)]
 pub enum ToolError {
-    /// 指定された名前の tool が存在しない。
-    UnknownTool(String),
     /// tool の枠だけがあり、中身が未実装。
     Unimplemented(&'static str),
     /// tool の JSON 引数が wire 契約に合わない。
@@ -466,7 +423,6 @@ pub enum ToolError {
 impl fmt::Display for ToolError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ToolError::UnknownTool(name) => write!(f, "unknown tool `{name}`"),
             ToolError::Unimplemented(name) => write!(f, "tool `{name}` is not yet implemented"),
             ToolError::InvalidParams(message) | ToolError::Execution(message) => {
                 f.write_str(message)
@@ -483,11 +439,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn display_covers_both_variants() {
-        assert_eq!(
-            ToolError::UnknownTool("nope".into()).to_string(),
-            "unknown tool `nope`"
-        );
+    fn display_covers_all_variants() {
         assert_eq!(
             ToolError::Unimplemented("issue_create").to_string(),
             "tool `issue_create` is not yet implemented"

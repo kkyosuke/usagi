@@ -1,13 +1,11 @@
 //! Read-only summary of already adopted workspaces. Never adopts or reconciles.
-use super::{ConnectionWorkspace, SharedAgentRuntime, SharedPrInventory, envelope};
-use serde::Deserialize;
+use super::{ConnectionWorkspace, SharedAgentRuntime, envelope};
 use usagi_core::domain::{
     agent::AgentStatus,
     attention::{
         ATTENTION_ITEMS_MAX, AttentionItem, AttentionKind, AttentionTarget, WorkspaceAttention,
     },
     id::{SessionId, WorkspaceId},
-    pr_inventory::{PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState},
     presentation_text::sanitize_presentation_line,
     session_lifecycle::{AgentPhase, SessionLifecycle},
     user_decision::UserDecision,
@@ -17,19 +15,16 @@ use usagi_core::infrastructure::{
     store::user_decision::UserDecisionStore,
 };
 
-#[derive(Deserialize)]
 struct SessionRow {
     session_id: SessionId,
     name: String,
     lifecycle: SessionLifecycle,
 }
 
-#[allow(clippy::too_many_arguments)] // The existing IPC owners are borrowed, not copied into another authority.
 pub(super) fn dispatch(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     decisions: &UserDecisionStore,
-    prs: &SharedPrInventory,
     workspace: WorkspaceId,
     request_id: RequestId,
     raw: &serde_json::Value,
@@ -41,7 +36,7 @@ pub(super) fn dispatch(
             "Attention is human-only",
         ))
     } else {
-        snapshot(agent, bound, decisions, prs, workspace)
+        snapshot(agent, bound, decisions, workspace)
             .and_then(|snapshot| serde_json::to_value(snapshot).map_err(unavailable))
     };
     match result {
@@ -63,45 +58,41 @@ fn snapshot(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     decisions: &UserDecisionStore,
-    prs: &SharedPrInventory,
     workspace: WorkspaceId,
 ) -> Result<WorkspaceAttention, ProtocolError> {
     let tenant = bound.workspaces.workspace(workspace).ok_or_else(|| {
         ProtocolError::new(ErrorCode::OwnershipUnknown, "Workspace is not adopted")
     })?;
-    let value = tenant
+    let sessions = tenant
         .runtime()
         .lock()
         .map_err(unavailable)?
-        .snapshot()
-        .map_err(unavailable)?;
-    let sessions: Vec<SessionRow> =
-        serde_json::from_value(value["sessions"].clone()).map_err(unavailable)?;
+        .session_lifecycles()
+        .map_err(unavailable)?
+        .into_iter()
+        .map(|session| SessionRow {
+            session_id: session.session_id,
+            name: session.name,
+            lifecycle: session.lifecycle,
+        })
+        .collect::<Vec<_>>();
     let decisions = decisions.pending(workspace).map_err(unavailable)?;
     let agent = agent.lock().map_err(unavailable)?;
-    let observation = agent.workspace_observation(workspace)?;
+    let observations = agent.session_observations(workspace)?;
+    let statuses = observations
+        .iter()
+        .filter_map(|(session, observation)| observation.status.map(|status| (*session, status)))
+        .collect();
     let phases = sessions
         .iter()
-        .map(|session| agent.session_phase(session.session_id))
+        .map(|session| {
+            observations
+                .get(&session.session_id)
+                .map_or(AgentPhase::Absent, |observation| observation.phase)
+        })
         .collect::<Vec<_>>();
     drop(agent);
-    let ids = sessions
-        .iter()
-        .map(|session| session.session_id)
-        .collect::<Vec<_>>();
-    let prs = prs
-        .lock()
-        .map_err(unavailable)?
-        .snapshots(&ids)
-        .map_err(unavailable)?;
-    project(
-        workspace,
-        &sessions,
-        &decisions,
-        &observation.session_statuses,
-        &phases,
-        &prs,
-    )
+    project(workspace, &sessions, &decisions, &statuses, &phases)
 }
 
 fn project(
@@ -110,7 +101,6 @@ fn project(
     decisions: &[UserDecision],
     statuses: &std::collections::BTreeMap<SessionId, AgentStatus>,
     phases: &[AgentPhase],
-    prs: &[usagi_core::infrastructure::ipc::PrSnapshot],
 ) -> Result<WorkspaceAttention, ProtocolError> {
     let mut items = Vec::new();
     for decision in decisions {
@@ -136,7 +126,7 @@ fn project(
             });
         }
     }
-    for ((session, phase), prs) in sessions.iter().zip(phases).zip(prs) {
+    for (session, phase) in sessions.iter().zip(phases) {
         let pending_decision = items
             .iter()
             .any(|item| item.session == Some(session.session_id));
@@ -148,18 +138,6 @@ fn project(
                 && kind == AttentionKind::System)
         {
             items.push(session_item(session, kind, &reason));
-        }
-        for pr in &prs.entries {
-            if let Some((kind, reason)) = pr_attention(pr) {
-                let mut item = session_item(session, kind, reason);
-                item.key = format!("pr:{}:{}", session.session_id, pr.identity.as_url());
-                item.reason = format!("PR #{} · {}", pr.identity.number(), reason);
-                item.target = Some(AttentionTarget::PullRequest {
-                    identity: pr.identity.clone(),
-                });
-                item.status_unknown = pr.refresh != PrRefreshState::Idle || pr.head_oid.is_none();
-                items.push(item);
-            }
         }
     }
     // Fail the whole observation rather than silently omitting waiting work.
@@ -221,28 +199,6 @@ fn session_attention(
     }
 }
 
-fn pr_attention(pr: &PrEntry) -> Option<(AttentionKind, &'static str)> {
-    if pr.state != PrState::Open {
-        return None;
-    }
-    if pr.refresh != PrRefreshState::Idle || pr.head_oid.is_none() {
-        return Some((AttentionKind::System, "PR status unknown / refreshing"));
-    }
-    if pr.checks == Some(PrChecksState::Failing) {
-        return Some((AttentionKind::Blocked, "CI checks failed"));
-    }
-    if pr.review == Some(PrReviewDecision::ChangesRequested) {
-        return Some((AttentionKind::Blocked, "Changes requested"));
-    }
-    if pr.checks == Some(PrChecksState::Pending) {
-        return Some((AttentionKind::System, "CI pending"));
-    }
-    if !pr.draft {
-        return Some((AttentionKind::Review, "PR is ready for review or merge"));
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,15 +245,6 @@ mod tests {
             resolved_at: None,
         }
     }
-    fn pr() -> PrEntry {
-        PrEntry::new(
-            usagi_core::domain::pr_inventory::canonicalize(
-                "https://github.com/example/repo/pull/1",
-            )
-            .unwrap(),
-        )
-    }
-
     #[test]
     fn session_attention_distinguishes_activity_waiting_interruption_and_intentional_sleep() {
         let mut row = session();
@@ -353,28 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn pr_attention_distinguishes_ci_review_draft_and_closed_states() {
-        let mut pr = pr();
-        assert_eq!(pr_attention(&pr).unwrap().0, AttentionKind::System);
-        pr.head_oid = Some("a".repeat(40));
-        pr.refresh = PrRefreshState::Idle;
-        assert_eq!(pr_attention(&pr).unwrap().0, AttentionKind::Review);
-        pr.draft = true;
-        assert!(pr_attention(&pr).is_none());
-        pr.checks = Some(PrChecksState::Pending);
-        assert_eq!(pr_attention(&pr).unwrap().0, AttentionKind::System);
-        pr.checks = Some(PrChecksState::Failing);
-        assert_eq!(pr_attention(&pr).unwrap().0, AttentionKind::Blocked);
-        pr.checks = Some(PrChecksState::Passing);
-        pr.review = Some(PrReviewDecision::ChangesRequested);
-        assert_eq!(pr_attention(&pr).unwrap().0, AttentionKind::Blocked);
-        for state in [PrState::Merged, PrState::Closed, PrState::Dismissed] {
-            pr.state = state;
-            assert!(pr_attention(&pr).is_none());
-        }
-    }
-
-    #[test]
     fn projection_fences_decisions_deduplicates_wait_and_keeps_independent_failures() {
         let workspace = WorkspaceId::new();
         let mut sessions = vec![session(), session()];
@@ -383,25 +308,10 @@ mod tests {
             decision(workspace, None),
             decision(workspace, Some(SessionId::new())),
         ];
-        let mut pr = pr();
-        pr.head_oid = Some("a".repeat(40));
-        pr.refresh = PrRefreshState::Idle;
-        let prs = vec![
-            usagi_core::infrastructure::ipc::PrSnapshot {
-                session_id: sessions[0].session_id,
-                revision: 1,
-                entries: vec![pr.clone()],
-            },
-            usagi_core::infrastructure::ipc::PrSnapshot {
-                session_id: sessions[1].session_id,
-                revision: 1,
-                entries: vec![],
-            },
-        ];
         let phases = [AgentPhase::Waiting, AgentPhase::Running];
         let statuses = [(sessions[1].session_id, AgentStatus::Running)].into();
-        let result = project(workspace, &sessions, &decisions, &statuses, &phases, &prs).unwrap();
-        assert_eq!(result.items.len(), 4);
+        let result = project(workspace, &sessions, &decisions, &statuses, &phases).unwrap();
+        assert_eq!(result.items.len(), 3);
         assert_eq!(
             result
                 .items
@@ -411,7 +321,6 @@ mod tests {
             vec![
                 AttentionKind::Decision,
                 AttentionKind::Decision,
-                AttentionKind::Review,
                 AttentionKind::Running
             ]
         );
@@ -421,48 +330,21 @@ mod tests {
                 .iter()
                 .all(|item| !item.reason.contains('\u{1b}') && !item.reason.contains('\n'))
         );
-        assert!(
-            result
-                .items
-                .iter()
-                .any(|item| item.reason == "PR #1 · PR is ready for review or merge")
-        );
         assert!(result.items.iter().any(|item| item.target
             == Some(AttentionTarget::Decision {
                 decision_id: decisions[0].decision_id
             })));
-        assert!(result.items.iter().any(|item| item.target
-            == Some(AttentionTarget::PullRequest {
-                identity: pr.identity.clone()
-            })));
         assert!(result.items.iter().all(|item| !item.status_unknown));
-        let mut refreshing = prs.clone();
-        refreshing[0].entries[0].head_oid = None;
-        let unconfirmed =
-            project(workspace, &sessions, &[], &statuses, &phases, &refreshing).unwrap();
-        assert!(unconfirmed.items.iter().any(|item| item.status_unknown
-            && item.kind == AttentionKind::System
-            && item.target
-                == Some(AttentionTarget::PullRequest {
-                    identity: pr.identity.clone()
-                })));
         let failed_statuses = [(sessions[0].session_id, AgentStatus::Failed)].into();
         assert!(
-            project(
-                workspace,
-                &sessions,
-                &decisions,
-                &failed_statuses,
-                &phases,
-                &prs
-            )
-            .unwrap()
-            .items
-            .iter()
-            .any(|item| item.kind == AttentionKind::Blocked)
+            project(workspace, &sessions, &decisions, &failed_statuses, &phases)
+                .unwrap()
+                .items
+                .iter()
+                .any(|item| item.kind == AttentionKind::Blocked)
         );
         sessions[0].lifecycle = SessionLifecycle::Failed;
-        let result = project(workspace, &sessions, &decisions, &statuses, &phases, &prs).unwrap();
+        let result = project(workspace, &sessions, &decisions, &statuses, &phases).unwrap();
         assert!(
             result
                 .items
@@ -472,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_oversized_backlogs_and_omits_closed_prs() {
+    fn projection_rejects_oversized_backlogs_and_omits_idle_sessions() {
         let workspace = WorkspaceId::new();
         let sessions = [session()];
         let too_many = (0..=ATTENTION_ITEMS_MAX)
@@ -484,28 +366,19 @@ mod tests {
                 &[],
                 &too_many,
                 &std::collections::BTreeMap::default(),
-                &[],
                 &[]
             )
             .unwrap_err()
             .code,
             ErrorCode::Unavailable
         );
-        let mut closed = pr();
-        closed.state = PrState::Closed;
-        let closed_prs = vec![usagi_core::infrastructure::ipc::PrSnapshot {
-            session_id: sessions[0].session_id,
-            revision: 2,
-            entries: vec![closed],
-        }];
         assert!(
             project(
                 workspace,
                 &sessions[..1],
                 &[],
                 &std::collections::BTreeMap::default(),
-                &[AgentPhase::Absent],
-                &closed_prs
+                &[AgentPhase::Absent]
             )
             .unwrap()
             .items

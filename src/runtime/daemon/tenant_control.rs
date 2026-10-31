@@ -23,15 +23,15 @@ pub(super) fn dispatch(
     terminal: &SharedTerminalRuntime,
     agent: &SharedAgentRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> Envelope {
-    let request = match serde_json::from_value::<DaemonRequest>(body.clone()) {
-        Ok(DaemonRequest::Tenant {
+    let request = match request {
+        DaemonRequest::Tenant {
             action,
             root,
             force,
-        }) => (action, root, force),
+        } => (action, root, force),
         _ => {
             return envelope(
                 hello,

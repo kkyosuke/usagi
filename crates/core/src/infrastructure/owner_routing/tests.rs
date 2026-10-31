@@ -5,9 +5,16 @@ use std::rc::Rc;
 use serde_json::json;
 
 use super::*;
+use crate as core_crate;
+use crate::infrastructure::client::DaemonSession;
+use crate::infrastructure::ipc::DaemonReply;
+
+#[path = "../../../tests/support/owner_router.rs"]
+mod owner_router;
 use crate::domain::id::{SessionId, TerminalId, WorkspaceId, WorktreeId};
 use crate::domain::terminal_launch::TerminalKind;
 use crate::infrastructure::ipc::{SessionAction, TerminalGeometry};
+use owner_router::*;
 
 // ------------------------------------------------------------------ fixtures
 

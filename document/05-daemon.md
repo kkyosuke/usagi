@@ -39,6 +39,11 @@ managed session と terminal を所有する daemon の現在の契約である�
 後半は metrics と cross-process generation の handoff・回収契約を扱う。IPC の wire、request payload、client retry を調べる
 場合は [4. daemon IPC](04-ipc.md) を先に参照し、本書では daemon が保持する state と effect の境界を確認する。
 
+request body は dispatch 境界で一度だけ typed request に decode し、後続 handler はその値を受け取る。
+daemon 内の session 観測は typed lifecycle projection、revision だけの観測は scalar を使い、wire 応答の境界で
+serialize する。内部観測のために JSON snapshot を作成して読み戻さない。setup plan の公開 projection は共通の
+redaction を適用し、内部観測にも secret を含む argv / environment を複製しない。
+
 ## authority と lifecycle
 
 managed session の lifecycle vocabulary は daemon のために定義されている。CLI、MCP、TUI は command を
@@ -67,6 +72,14 @@ workspace root（`⌂ root`）も一つの scope として同じ仕組みで解�
 client に返す session 一覧は、使用可能な `available` に加えて、名前を占有し続ける `failed`（作成に失敗した reservation と中断後に reconcile された record）と、teardown が進行中の `deleting` も lifecycle と失敗理由付きで投影する。`deleting` を出すのは、remove が受理を返してから worker が撤去を終えるまでの間（巨大な `target/` では分オーダー）が client から見える状態だからである（[session teardown worker](#session-teardown-worker)）。reservation 状態（`creating` / `initializing`）は 1 request で完結し、client 側に固有の pending 表現があるため一覧に出さない。各行の可否（attach / remove など）は wire に載る lifecycle から client 側で導出する（`SessionLifecycle::capabilities` が正本）。`failed` 行は使用不可（attach を提示しない）だが削除可能で、削除すると worktree 未作成でも名前が解放されて同名 create が再び通る。`deleting` 行は使用不可かつ削除不可で、同じ session の teardown が二重に走らない。一覧への投影は attach 対象を広げない: scope 解決は引き続き `available` だけを対象とする（前述）。
 
 ## session tree と ignore rules
+
+session 一覧・status と attention の Agent 情報は、request ごとに workspace の phase・resume 可否・status を
+まとめて取得する。runtime record は借用し、各 session 行のために durable snapshot の複製や dispatch 履歴の
+再読込を繰り返さない。phase と resume の判定はそれぞれの既存 policy を共有する。
+
+Agent inventory の failed run と agent binding は、request ごとに dispatch registry を一度読み込んだ projection
+から取得する。terminal 検索は同じ workspace・continuation 条件と順序で runtime identity を取り出し、dispatch
+registry や resume metadata を投影しない。
 
 `session_status` は lifecycle とその revision の snapshot を短い session lock で取得し、各 worktree の Git
 観測を lock の外で行う。観測中の session 作成・削除は次の snapshot に反映される。daemon の Git subprocess は
@@ -109,7 +122,27 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `artifacts/` を用意する。
 新規の `artifacts/.gitignore` には `*` を書き、生成物を Git の未追跡差分から除外する。既存の ignore file は上書きしない。
 この準備に失敗した場合は、作成した Git worktree・branch と session tree を補償処理で取り消す。mirror 内の repository も対象とする。
-Agent の起動指示は調査結果・設計書・画像・HTML・検証レポートをこの場所へ保存するよう案内する。
+`artifacts/` はユーザーに提示する成果物の保存先であり、この節が保存対象と一覧への掲載規則の正本である。
+Agent の起動指示は次の区分を案内する。
+
+| 保存先 | 対象 |
+|---|---|
+| `artifacts/` | ユーザーに見せる調査結果、表示用 HTML・画像、検証結果の要約 |
+| `artifacts/assets/` | HTML などの表示に必要な画像・font・補助データ。単独で提示しない素材は一覧へ登録しない |
+| worktree 内の `.work/` など Git 対象外の作業領域 | 生ログ、途中経過、補助スクリプト、一時設定、キャッシュ。Agent が `.work/.gitignore` に `*` を書く |
+
+Agent は提示するファイルを保存した後、`artifacts/.index.json` を相対パスの JSON 配列として更新し、既存の提示対象を保持する。
+たとえば `["findings.md", "preview.html", "verification.txt"]` とすると、この3件だけを sidebar の件数・一覧・統合検索へ出す。
+`.index.json` 自体、未登録の素材・作業ファイル、存在しないパスは表示しない。重複は1件にまとめ、空の配列は表示対象なしとする。
+明示登録したファイルは拡張子を制限せず、ユーザーが指定したデータ形式も提示できる。
+index は1 MiB・20,000件までとし、絶対パス・パス逸脱・制御文字・管理ファイルの登録と不正な JSON は拒否する。
+不正な index を読み込めない場合に、未登録のファイルを代わりに表示することはない。
+
+index のない既存 directory は `md` / `txt` / `html` / `htm` / `pdf` / `csv` と画像
+`png` / `jpg` / `jpeg` / `gif` / `webp` / `svg` を表示する（拡張子の大文字小文字は区別しない）。
+ドットで始まるパス要素と `assets` / `logs` / `tmp` / `cache` / `node_modules` / `target` の下は表示しない。
+既存ファイルの削除・自動移動は行わず、過去の保存先にも index を追加して提示対象を絞れる。
+
 旧 session でディレクトリが無い場合は Agent が作成する。コードとして管理するファイルは従来どおり Git / PR に載せる。
 生成中の保存先は session 内の `artifacts/` であり、保管先の `.usagi/artifacts/` は workspace root を基準にする。
 Agent が生成するときに root 側へ直接書き込む必要はない。全 session の一覧は両方の保存先を表示する。
@@ -118,6 +151,7 @@ session の削除と orphan worktree の cleanup は、Git / filesystem の削�
 `.usagi/artifacts/<name>/<snapshot-id>/` へコピーする。snapshot ID は毎回新しい UUID で、同名 session の再作成や
 削除の再試行でも既存の成果物を上書きしない。空の出力は保管しない。コピー元は変更しないため、削除が失敗した場合も
 作業中の成果物が残る。再試行時には別の snapshot が作られることがある。
+保管は index と未登録の補助素材も含めた directory 全体を対象とし、保管後の一覧でも同じ掲載規則を使う。
 
 コピーは `.partial-<id>` へ行い、ファイルとディレクトリを同期してから公開名へ rename する。
 snapshot の root・各 directory は本人だけが到達できる `0700`、file は `0600` で作成し、保管によって他の OS user へ公開しない。
@@ -1226,9 +1260,13 @@ terminal が exit すると carry を flush して回収する。これにより
 
 ### bounded queue
 
-queue は未投影 byte 数で bound する。満杯なら **incoming chunk を捨て、同じ順序位置に gap を記録する**。gap は
+queue は未投影データを4 MiB、output・gap・exit・resetを合わせた項目数を4096件に制限する。
+byte 上限では **incoming chunk を捨て、同じ順序位置に gap を記録する**。gap は
 carry を破棄させる: dropped bytes を跨いで連結すると、出力に存在しなかった PR URL を合成し得るためである。
-同一 terminal の隣接 chunk は merge 上限まで coalesce し、entry 数が chunk 数ではなく byte 数に比例するようにする。
+同一 terminal の隣接 chunk は merge 上限まで coalesce する。異なる terminal の gap や exit は byte を持たないため、
+項目数の上限でも検査する。項目を追加できない場合、未処理の全項目を破棄して reset を先頭に置き、その後へ新しい
+項目を追加する。worker は reset で全 terminal の未完成 token を破棄し、保存済み PR inventory は保持する。
+過負荷中は未処理出力からの PR 検出や exit 時の未終端 token 検出を失う場合があるが、捨てた出力を跨ぐ URL の合成は行わない。
 
 worker の停止は queue の close で行う。close 後に drain し終えると `recv` が終端を返して thread が終わるため、
 worker は timer も shutdown flag の polling も持たない。
@@ -2712,31 +2750,47 @@ bound するため、上限を64へ上げても64台分の画面を予約しな�
 
 ### launch の書き込み順序
 
-launch は allocator・shard・OS process の 3 つを触るため、1 回の write では動かせない。順序を 1 つに固定し、
-各境界の意味を durable state として持つ。
+Agent は `RuntimeCoordinator`、generic Terminal は `GenericTerminalCoordinator` が launch を進める。
+どちらも spawn 前に `Reserved` record を保存し、spawn の結果を受けて再び保存する。保存先の
+`ShardedAgentStore` / `ShardedTerminalStore` は `ShardedRuntimeState::commit` を呼び、各保存で
+allocator の claim / outcome を先に更新し、その後に owner shard の state と payload を同時に更新する。
 
 ```text
-L1  allocator CAS   claim reserved + operation reserved     authority が effect に先行する
-L2  shard CAS       owner reservation reserved              ここで初めて spawn してよい
-L3  spawn           child を起動し identity を観測する       唯一の非可逆な段
-L4  shard CAS       resource running + 検証済み identity     child が durable に所有される
-L5  allocator CAS   operation final（spawned）               producer への答えが durable になる
+L1  allocator CAS   claim reserved + operation reserved
+L2  shard CAS       resource reserved + launch record payload
+L3  spawn           coordinator が child を起動し identity を取得
+L4  allocator CAS   claim live + operation spawned（検証済み Running の保存時）
+L5  shard CAS       resource running + identity + launch record payload
 ```
 
-| crash 境界 | durable state | recovery |
-|---|---|---|
-| L1 より前 | 何もない | 再送は fresh admission |
-| L1〜L2 | claim だけ | reservation を完成させ、1 度だけ spawn する |
-| L2〜L3 | claim + reservation | 1 度だけ spawn する（まだ何も起動していない） |
-| L3〜L4 | claim + reservation・child は生存 | 未記録の child として `ambiguous` を返し、replacement spawn をしない |
-| L4〜L5 | running record | record から final を commit する |
-| L5 より後 | final | final を verbatim に replay する |
+L1 / L2 が成功するまで spawn しない。L4 / L5 は 1 transaction ではなく、allocator の final が shard の
+Running record より先に durable になる。allocator の outcome だけから PTY を復元したり、新しい terminal の
+spawn 権限を作ったりしない。
 
-claim は常に reservation より先に durable になるため、**claim の無い reservation** は state 喪失か偽造しかあり得ず、
-`ownership_unknown` で fail closed にする（推測 spawn・推測 release をしない）。definite failure は capacity を
-1 度だけ解放し、ambiguous outcome は child が存在し得るので capacity を保持したまま durable final になる。
-spawn には成功したが L4 の record が書けなかった場合（persist-after-spawn）も definite failure ではなく ambiguous
-final とする。記録されていない child に対して replacement spawn を行わず、再送は同じ final を replay する。
+| crash 境界 | 残り得る durable state | startup / 再送での扱い |
+|---|---|---|
+| L1 より前 | claim も record もない | 通常の admission から開始する |
+| L1〜L2 | claim のみ、launch payload はない | hydrate は record を補完しない。別 `TerminalRef` で同じ operation を保存すると `ownership_unknown` で拒否する |
+| L2〜L3 | claim と Reserved payload | hydrate は record を `identity_unknown` として復元し、自動 spawn しない |
+| L3〜L4 | Reserved payload、未記録の child が存在し得る | Reserved と同様に fail closed。記録から生存・不在を推測しない |
+| L4〜L5 | allocator は Spawned、shard は Reserved のままの場合がある | final だけで Running に修復せず、payload に従って `identity_unknown` として復元する |
+| L5 より後 | allocator final と Running payload | 消失した所有 process の PTY は再接続・再生成せず、record を `identity_unknown` として復元する |
+
+retired generation の child が OS 観測で確実に消えている場合は、hydrate が対応 record を `Interrupted` にして
+claim を解放できる。shard に裏付けのない claim の回収には generation registry の証跡も必要であり、
+claim と shard の保存間隔だけを根拠に解放しない。元の `TerminalRef` を保った保存は同じ claim / final に収束し、
+同じ operation の final を後続の保存で上書きしない。
+
+definite spawn failure は `SpawnFailed` の保存で claim を解放する。identity が不明な spawn は `Unproven` の
+保存で ambiguous outcome と capacity を保持する。ただし保存自体が失敗した場合に ambiguous final が durable に
+なったとは扱わない。spawn 成功後の保存失敗では、generic Terminal はメモリ上で `PersistAfterSpawn` の
+reconciliation 状態を持つ。
+Agent は保存失敗後に spawn 済み child の terminate / reap を試み、成功なら `SpawnFailed`、完遂できなければ
+`OrphanRunning` を保存する。補償の保存も失敗した場合は reconciliation が必要な状態として返す。
+
+producer への再送応答は各 coordinator の durable record と intent の照合で決める。generic Terminal は同じ
+operation / digest の既存 `TerminalRef` を返し、再送を契機に PTY を起動しない。起動途中の Reserved record を
+起動完了まで自動実行する別の executor は持たない。
 
 ### producer launch operation
 
@@ -2892,8 +2946,8 @@ generation 上限と衝突する。次の rollover が上限に当たったと�
 
 ### operation ledger の retention / expiry / GC
 
-producer operation の記憶は無限には持てないため、collectable な final だけを 3 段で回収する。各段は独立した
-compare-and-swap である。
+producer operation の記憶は無限には持てないため、collectable な final だけを 3 段で回収する。定期 GC では各段が
+独立した compare-and-swap となり、中断後も次の pass で収束する。
 
 ```text
 G1  allocator CAS   full outcome ──▶ compact tombstone      exact な答えを atomic に置換する
@@ -2911,8 +2965,18 @@ G3  allocator CAS   watermark 以下の tombstone を破棄        最後の byt
 watermark は server が自分で seal した id からだけ進み、client の timestamp では進まない。live な operation を
 追い越さないため、走行中の launch が expired 判定されることはない。GC 対象は「collectable な final（ambiguous は
 永久に対象外）」かつ「capacity release が 1 度 commit 済み」かつ「consumer dependency 0」の record だけである。
-count / byte / age の hard cap に達しても安全な候補が無い場合は、既存 record を evict せず、新規 launch を typed
-backpressure で effect zero に拒否する。
+shipping store の新規 reservation は allocator の CAS 内で、追加後の record 数（full outcome と tombstone の合計）
+4096 件・serialize 後 4 MiB の上限を検査する。revision 増加の byte 数も含め、競合時は最新 document で再検査する。
+上限を超える場合は同じ candidate に安全な GC 段階を適用し、reservation と一緒に commit する。収まらなければ
+GC も reservation も保存せず、typed retention backpressure（IPC `resource_exhausted`）で拒否する。
+拒否された新規 record・resume source の変更・process-local reservation も戻すため、当該 reservation による
+allocator / shard の書込や PTY spawn は起こらず、拒否された起動が capacity や resume source を占有し続けない。
+起動前に行う既存 Terminal final の GC は独立した処理であり、その保存は admission の拒否で戻さない。
+IPC の producer operation に対する既存の idempotency 契約は変えず、記録済みの refusal の再送は同じ結果を返す。
+
+既存 operation の exact replay、finalization、exit と partial-write retry は新規 admission ではなく、上限下でも
+進行できる。digest と完全な resource identity の fence は同じまま適用する。minimum replay window 内の final、
+live / ambiguous outcome、expiry horizon 内の tombstone を上限回復だけのために捨てない。
 
 ### legacy record の adoption
 
@@ -3000,12 +3064,10 @@ old generation は `draining` へ移ったあと control / spawn を失い、自
 daemon owner process の exact identity と fenced SIGTERM は lifecycle record に実装されている。そのため PID reuse や
 legacy record を daemon owner と推測しない。
 
-generation record は optional `expected_build` を持つ。process-local / legacy record は unknown のまま復元できるが、
-cross-process standby contract の `register_standby_for_build` は known identity を必須とする。readiness 後の
-`verify_standby_build` は expected artifact と実 `ServerHello` artifact の exact match だけを受理する。unknown または
-mismatch は active generation を変えず、candidate を standby のまま保つ。known expected build の record は
-`build_verified` が立つまで `rollover` も拒否する。同じ artifact 契約を durable registry の
-[standby readiness](#standby-readiness) が使い、TOCTOU で別 artifact を active にしない。
+process-local generation record の `expected_build` / `build_verified` は既存 snapshot との互換性のために保持する。
+cross-process の standby 登録、artifact 検証、rollover、crash recovery と回収は durable authority registry が所有する。
+artifact の照合条件と activation の順序は [standby readiness](#standby-readiness) を正本とし、
+process-local coordinator に別の lifecycle 判定を持たせない。
 
 current generation の exact fence は stale request の誤適用を防ぎ、owner generation routing は planned restart 中の
 旧 PTY を draining endpoint へ送り続ける。回収待ちの draining が generation slot を占有している間の次の restart は

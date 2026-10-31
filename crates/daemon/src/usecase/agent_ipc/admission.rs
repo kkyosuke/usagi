@@ -38,12 +38,10 @@ impl AgentRuntime {
             None => None,
             Some(run) => self
                 .coordinator
-                .snapshot()
-                .records
-                .into_iter()
+                .records()
                 .find(|record| record.operation.operation_id == run.run_id)
-                .and_then(|record| record.launch_provenance)
-                .and_then(|provenance| provenance.created),
+                .and_then(|record| record.launch_provenance.as_ref())
+                .and_then(|provenance| provenance.created.clone()),
         };
         Ok(AgentLaunchProvenance {
             agent_id: Some(agent),
@@ -59,7 +57,7 @@ impl AgentRuntime {
         if !self.coordinator.concurrency().is_saturated() {
             return Ok(false);
         }
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let mut candidate = None;
         for record in &records {
             let eligible = record.state == crate::usecase::runtime::RuntimeState::Running
@@ -230,7 +228,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::launch_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -241,11 +239,7 @@ impl AgentRuntime {
             Some(credential.clone()),
             semantic_key.to_owned(),
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -293,7 +287,7 @@ impl AgentRuntime {
                 "agent resume admission is incomplete and cannot be spawned again",
             ));
         }
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let source = records
             .iter()
             .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
@@ -345,7 +339,9 @@ impl AgentRuntime {
             return durable_operation_outcome(replacement);
         }
         let (available, reason) = match repair_revision {
-            Some(revision) => self.repair_resume_source_availability(source, &records, revision),
+            Some(revision) => {
+                self.resume_source_availability_at_revision(source, &records, revision)
+            }
             None => self.resume_source_availability(source, &records),
         };
         if !available {
@@ -486,7 +482,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.resume_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::resume_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -498,11 +494,7 @@ impl AgentRuntime {
             semantic_key.to_owned(),
             &superseded,
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -707,7 +699,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::launch_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -718,11 +710,7 @@ impl AgentRuntime {
             Some(credential.clone()),
             launch_semantic.to_owned(),
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -740,6 +728,21 @@ impl AgentRuntime {
             completed: false,
             semantic_digest: Some(semantic_digest),
         })
+    }
+
+    /// Release the ephemeral caller and fail both reservations after an
+    /// unsuccessful launch. Preserve the original launch failure if cleanup fails.
+    fn rollback_uncommitted_admission(
+        &mut self,
+        operation: OperationId,
+        credential: &str,
+        runtime: &AgentRuntimeRef,
+    ) {
+        self.mcp_callers.remove(credential);
+        let _ = self
+            .coordinator
+            .fail_reserved_launch(runtime, &mut *self.store);
+        let _ = self.dispatch.fail_admission(operation);
     }
 
     pub(super) fn commit_admission(

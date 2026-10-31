@@ -15,31 +15,11 @@
 //!   字句上は worktree 内でも実体が外へ出る書き込みを弾く。新規作成のため、存在しない末尾
 //!   component は許容する。
 //! - **root モード**（[`is_write_tool`] / [`command_mutates_repo`]）: コーディネータが workspace
-//!   root（cwd が `.usagi/sessions/` 配下でない。[`is_session_worktree`] 参照）で動く場合。
+//!   root（CLI が canonical な cwd から session worktree を解決できない場合）で動く場合。
 //!   リポジトリを一切変更してはならないため、パスによらず file 書き込みツールをすべて拒否し、
 //!   曖昧さなく read-only な shell command だけを許可する。
 
 use std::path::{Component, Path, PathBuf};
-
-/// `cwd` が usagi の session worktree（`<repo>/.usagi/sessions/<name>/…`）の内側かどうか。
-///
-/// コーディネータが動く workspace root とは区別する。pre-commit フックの免除
-/// （`.usagi/sessions/` セグメントで判定。[06-conventions.md](../../../../document/06-conventions.md)）と
-/// 同じ軸で、連続する `.usagi` → `sessions` component を含むパスを session worktree とみなす。
-/// guard はこれで session モードと（より厳しい）root モードを選ぶ。
-#[must_use]
-pub fn is_session_worktree(cwd: &Path) -> bool {
-    let names: Vec<&std::ffi::OsStr> = cwd
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect();
-    names
-        .windows(2)
-        .any(|pair| pair[0] == ".usagi" && pair[1] == "sessions")
-}
 
 /// root モードで一律拒否する、ファイルへ書き込むツール。フック payload の `tool_name` に
 /// 対して大文字小文字を区別して照合する。`Bash` はここに含めない（[`command_mutates_repo`]
@@ -418,20 +398,6 @@ fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
     None
 }
 
-/// `target` が `worktree` の外へ解決されるとき真。相対 `target` は `worktree`（エージェントの
-/// cwd）を基準にするため常に内側に留まる。絶対パス、または `..` で外へ出る相対パスは、正規化した
-/// 形が worktree 配下でないとき escape する。比較は component 単位なので、名前 prefix を共有する
-/// 兄弟（`…/sessions/work` と `…/sessions/work2`）は「内側」と見なさない。
-#[must_use]
-pub fn escapes_worktree(worktree: &Path, target: &Path) -> bool {
-    let absolute = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        worktree.join(target)
-    };
-    !normalize(&absolute).starts_with(normalize(worktree))
-}
-
 /// ツールの対象パスが `root`（session worktree）の外へ解決されるかどうか。true のとき呼び出し側は
 /// 拒否する。新規ファイルのため末尾の存在しない component は許容し、存在する symlink 付き ancestor
 /// まで解決してから字句的に付け直す。`root` / `cwd` を canonicalize できない、または cwd が root の
@@ -485,8 +451,6 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const WT: &str = "/repo/.usagi/sessions/work";
 
     #[test]
     fn write_tools_and_shell_are_classified_by_name() {
@@ -569,61 +533,28 @@ mod tests {
     }
 
     #[test]
-    fn a_file_under_the_worktree_stays_inside() {
-        assert!(!escapes_worktree(
-            Path::new(WT),
-            Path::new("/repo/.usagi/sessions/work/src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn the_worktree_itself_is_inside() {
-        assert!(!escapes_worktree(Path::new(WT), Path::new(WT)));
-    }
-
-    #[test]
-    fn a_relative_path_is_resolved_against_the_worktree_and_stays_inside() {
-        assert!(!escapes_worktree(Path::new(WT), Path::new("src/lib.rs")));
-    }
-
-    #[test]
-    fn an_absolute_path_into_the_parent_repo_escapes() {
-        assert!(escapes_worktree(
-            Path::new(WT),
-            Path::new("/repo/src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn a_relative_path_climbing_out_with_dotdot_escapes() {
-        assert!(escapes_worktree(
-            Path::new(WT),
-            Path::new("../../../src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn dotdot_that_stays_inside_does_not_escape() {
-        // `work/src/../Cargo.toml` は `work/Cargo.toml` に畳み込まれる。まだ内側。
-        assert!(!escapes_worktree(
-            Path::new(WT),
-            Path::new("src/../Cargo.toml")
-        ));
-    }
-
-    #[test]
-    fn a_sibling_worktree_sharing_a_name_prefix_escapes() {
-        // component 単位の包含: 文字列 prefix が一致しても `work2` は `work` の配下ではない。
-        assert!(escapes_worktree(
-            Path::new(WT),
-            Path::new("/repo/.usagi/sessions/work2/src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn dotdot_at_the_root_does_not_climb_above_it() {
-        // `/..` は `/` に正規化される。worktree 配下ではないので escape 扱い（panic も wrap もしない）。
-        assert!(escapes_worktree(Path::new(WT), Path::new("/../etc/passwd")));
+    fn canonical_paths_preserve_component_boundaries_and_relative_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let sibling = temp.path().join("work2");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        for target in [
+            root.clone(),
+            root.join("src/new.rs"),
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/../Cargo.toml"),
+        ] {
+            assert!(!path_escapes_root(&root, &root, &target), "{target:?}");
+        }
+        for target in [
+            temp.path().join("outside.rs"),
+            sibling.join("src/main.rs"),
+            PathBuf::from("../outside.rs"),
+        ] {
+            assert!(path_escapes_root(&root, &root, &target), "{target:?}");
+        }
+        assert_eq!(normalize(Path::new("/../../")), PathBuf::from("/"));
     }
 
     #[test]
@@ -631,24 +562,6 @@ mod tests {
         // 先頭の `.` は `Path::components` が唯一保持する `CurDir` 形（途中の `.` は既に畳まれる）。
         // 直接正規化すると skip され、実 component だけが残る。
         assert_eq!(normalize(Path::new("./a/b")), PathBuf::from("a/b"));
-    }
-
-    #[test]
-    fn a_session_worktree_path_is_recognized() {
-        assert!(is_session_worktree(Path::new("/repo/.usagi/sessions/work")));
-        assert!(is_session_worktree(Path::new(
-            "/repo/.usagi/sessions/work/src"
-        )));
-    }
-
-    #[test]
-    fn the_workspace_root_and_unrelated_paths_are_not_session_worktrees() {
-        // コーディネータの cwd は repo root。`.usagi/sessions` セグメントを持たない。
-        assert!(!is_session_worktree(Path::new("/repo")));
-        // `sessions` 子を持たない `.usagi`（例: issue ストア）。
-        assert!(!is_session_worktree(Path::new("/repo/.usagi/issues")));
-        // `.usagi` 親を持たない `sessions` は該当しない。
-        assert!(!is_session_worktree(Path::new("/repo/sessions/work")));
     }
 
     #[test]

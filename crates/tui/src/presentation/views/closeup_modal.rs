@@ -4,7 +4,7 @@
 //! 中央に浮かぶ枠付きダイアログとして描く（枠・配置は共通の [`modal`]
 //! widget に委譲）。
 //!
-//! 状態 [`CloseupModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
+//! 状態 [`CloseupModal`] は端末 IO を持たない純粋な値で、[`render_over`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。キー入力の解釈は入力層が整うときに載せ、ここでは
 //! カーソル移動と選択の純粋操作だけを公開する。
 
@@ -512,19 +512,6 @@ fn error_row(state: &CloseupModal) -> String {
     })
 }
 
-/// 生の端末サイズに対する closeup modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<String> {
-    modal::render_modal(
-        raw_height,
-        raw_width,
-        &format!("Closeup: {}", state.session()),
-        INNER_WIDTH,
-        &body(state),
-    )
-}
-
 /// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
 /// 小端末では [`modal::render_body_over`] が背景の帯を残す。サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
@@ -547,9 +534,13 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{CloseupModal, render, render_over};
+    use super::{CloseupModal, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
+
+    fn render(height: usize, width: usize, state: &CloseupModal) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
 
     #[test]
     fn action_selection_keeps_the_closeup_box_height_stable() {

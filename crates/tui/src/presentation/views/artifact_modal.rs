@@ -103,7 +103,7 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
             lines.push(modal::error_line(error.message.as_str(), inner));
         } else if state.visible_len() == 0 {
             lines.push(modal::empty_notice(if state.filter().is_empty() {
-                "No artifacts yet. Save generated files in artifacts/."
+                "No deliverables yet. Save reports, HTML, or images in artifacts/."
             } else {
                 "No matching artifacts. Backspace edits the filter."
             }));
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn empty_loading_failed_and_filtered_lists_have_distinct_messages() {
         let mut state = loaded(Vec::new());
-        assert!(text(&state).contains("Save generated files in artifacts/"));
+        assert!(text(&state).contains("Save reports, HTML, or images in artifacts/"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         assert!(text(&state).contains("No matching artifacts"));
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
