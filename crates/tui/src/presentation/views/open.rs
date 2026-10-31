@@ -296,6 +296,7 @@ impl Open {
 
     /// Whether the destructive action is selected in the unregister modal.
     #[must_use]
+    #[cfg(test)]
     pub const fn unregister_confirm_selected(&self) -> bool {
         self.unregister_confirmation.is_confirm_selected()
     }

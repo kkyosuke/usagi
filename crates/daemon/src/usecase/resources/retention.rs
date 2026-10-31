@@ -27,8 +27,9 @@
 //! (never ambiguous), its capacity must already be released exactly once, and its
 //! consumer dependencies must be zero. When the hard caps are reached and no
 //! record satisfies that, the ledger does not evict anything — fresh launches are
-//! refused with [`ResourceError::RetentionBackpressure`] instead
-//! ([`admission_guard`]).
+//! refused with [`ResourceError::RetentionBackpressure`] instead. Shipping
+//! admission applies these same phases to its staged allocator, so collection
+//! and a new reservation either commit together or have no durable effect.
 
 use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::id::OperationId;
@@ -77,8 +78,8 @@ impl RetentionLimits {
     }
 }
 
-/// One collection phase. Each is applied as its own compare-and-swap, so a crash
-/// between phases leaves a state the next pass rolls forward.
+/// One collection phase. Background GC commits each phase separately; admission
+/// composes the phases into its staged reservation before committing once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GcPhase {
     /// Replace these full outcomes with compact tombstones.
@@ -113,19 +114,32 @@ pub fn serialized_bytes(document: &AllocatorDocument) -> usize {
     serde_json::to_vec(document).unwrap_or_default().len()
 }
 
-/// Refuse a fresh admission that would grow a ledger which is already at a hard
-/// cap and cannot be collected safely.
-///
-/// # Errors
-/// Returns [`ResourceError::RetentionBackpressure`], which is effect zero: no
-/// reservation, no capacity claim, and no spawn happen.
-pub fn admission_guard(
-    document: &AllocatorDocument,
+/// Fit a staged fresh admission inside both caps without shortening replay
+/// protection. The caller commits this document only if the complete admission
+/// succeeds; existing operations and their finalization do not call this guard.
+pub(super) fn retain_for_admission(
+    document: &mut AllocatorDocument,
     limits: &RetentionLimits,
     now: u64,
 ) -> Result<(), ResourceError> {
-    if plan_gc(document, limits, now).backpressure {
-        return Err(ResourceError::RetentionBackpressure);
+    // The CAS increments revision after its change closure. Account for a
+    // decimal digit boundary in the exact bytes that will be committed.
+    let next_revision = document
+        .revision
+        .checked_add(1)
+        .ok_or(ResourceError::WrongState)?;
+    let revision_growth = next_revision.checked_ilog10().unwrap_or(0)
+        - document.revision.checked_ilog10().unwrap_or(0);
+    while document.operations.len() + document.tombstones.len() > limits.max_operations
+        || serialized_bytes(document) + revision_growth as usize > limits.max_bytes
+    {
+        let plan = plan_gc(document, limits, now);
+        if plan.phases.is_empty() {
+            return Err(ResourceError::RetentionBackpressure);
+        }
+        for phase in &plan.phases {
+            apply_phase(document, phase, limits, now)?;
+        }
     }
     Ok(())
 }
@@ -257,7 +271,7 @@ pub fn collect_garbage(
     clock: &dyn LogicalClock,
 ) -> Result<GcReport, ResourceFailure> {
     let now = clock.now();
-    let plan = plan_gc(&allocator.load()?.to_document(), limits, now);
+    let plan = plan_gc(allocator.load()?.document(), limits, now);
     let mut report = GcReport {
         backpressure: plan.backpressure,
         ..GcReport::default()

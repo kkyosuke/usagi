@@ -1,9 +1,6 @@
 //! Reuse normal navigation and command editors after checking exact targets.
 
-use super::{
-    AppEvent, AppKey, Overlay, PaneKind, PaneTab, Target, WorkspaceId, WorkspaceRuntime,
-    tab_selection,
-};
+use super::{AppEvent, AppKey, Overlay, PaneKind, PaneTab, Target, WorkspaceId, WorkspaceRuntime};
 use crate::presentation::workspace_deck::palette::{Action, CachedTab};
 use crate::usecase::{closeup, overview};
 
@@ -35,7 +32,7 @@ impl WorkspaceRuntime {
                             Some(CachedTab {
                                 action: Action::Tab {
                                     target,
-                                    selection: tab_selection(tab),
+                                    selection: tab.selection(),
                                     kind,
                                 },
                                 label: format!("Tab · {label} {}{state}", index + 1),

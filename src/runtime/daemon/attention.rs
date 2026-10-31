@@ -1,6 +1,5 @@
 //! Read-only summary of already adopted workspaces. Never adopts or reconciles.
 use super::{ConnectionWorkspace, SharedAgentRuntime, envelope};
-use serde::Deserialize;
 use usagi_core::domain::{
     agent::AgentStatus,
     attention::{
@@ -16,7 +15,6 @@ use usagi_core::infrastructure::{
     store::user_decision::UserDecisionStore,
 };
 
-#[derive(Deserialize)]
 struct SessionRow {
     session_id: SessionId,
     name: String,
@@ -65,14 +63,19 @@ fn snapshot(
     let tenant = bound.workspaces.workspace(workspace).ok_or_else(|| {
         ProtocolError::new(ErrorCode::OwnershipUnknown, "Workspace is not adopted")
     })?;
-    let value = tenant
+    let sessions = tenant
         .runtime()
         .lock()
         .map_err(unavailable)?
-        .snapshot()
-        .map_err(unavailable)?;
-    let sessions: Vec<SessionRow> =
-        serde_json::from_value(value["sessions"].clone()).map_err(unavailable)?;
+        .session_lifecycles()
+        .map_err(unavailable)?
+        .into_iter()
+        .map(|session| SessionRow {
+            session_id: session.session_id,
+            name: session.name,
+            lifecycle: session.lifecycle,
+        })
+        .collect::<Vec<_>>();
     let decisions = decisions.pending(workspace).map_err(unavailable)?;
     let agent = agent.lock().map_err(unavailable)?;
     let observations = agent.session_observations(workspace)?;

@@ -255,20 +255,6 @@ impl AgentTabIntent {
         }
     }
 
-    /// Project the current state against inventories without changing the
-    /// caller's value. Useful after a close/reopen mutation with a cached daemon
-    /// snapshot.
-    #[must_use]
-    pub fn projected(
-        &self,
-        terminals: &[TerminalInventoryEntry],
-        agents: &AgentInventory,
-        allowed_sessions: &BTreeSet<SessionId>,
-    ) -> AgentTabProjection {
-        let mut copy = self.clone();
-        copy.reconcile(terminals, agents, allowed_sessions)
-    }
-
     /// Project a stale observation after a compare-and-swap conflict without
     /// substituting any saved exact terminal fence or discovering a new slot.
     /// A saved lineage absent from the observation is omitted until a fresh
@@ -1201,7 +1187,13 @@ mod tests {
         intent.apply(AgentTabIntentMutation::Reopen {
             continuation: closed,
         });
-        let reopened = intent.projected(&terminals, &inventory, &BTreeSet::from([session]));
+        let reopened = intent
+            .apply(AgentTabIntentMutation::Observe {
+                terminals,
+                agents: inventory,
+                allowed_sessions: BTreeSet::from([session]),
+            })
+            .unwrap();
         assert_eq!(reopened.targets[0].tabs.len(), 2);
         assert!(!intent.dismissed.contains(&closed));
         assert_eq!(AgentTabIntent::safe_label(closed).len(), "Agent ".len() + 8);
@@ -1292,7 +1284,12 @@ mod tests {
         });
         assert_eq!(
             intent
-                .projected(&[live_entry(replacement)], &replaced, &allowed)
+                .apply(AgentTabIntentMutation::Observe {
+                    terminals: vec![live_entry(replacement)],
+                    agents: replaced,
+                    allowed_sessions: allowed,
+                })
+                .unwrap()
                 .targets[0]
                 .tabs
                 .len(),
@@ -1453,11 +1450,12 @@ mod tests {
         };
         assert!(
             intent
-                .projected(
-                    &[live_entry(replacement)],
-                    &inventory,
-                    &BTreeSet::from([session]),
-                )
+                .apply(AgentTabIntentMutation::Observe {
+                    terminals: vec![live_entry(replacement)],
+                    agents: inventory,
+                    allowed_sessions: BTreeSet::from([session]),
+                })
+                .unwrap()
                 .targets
                 .is_empty()
         );

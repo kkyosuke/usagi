@@ -117,17 +117,6 @@ impl AgentPhase {
     }
 }
 
-/// The git relationship of a worktree; it is intentionally independent of lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BranchStatus {
-    New,
-    Dirty,
-    Local,
-    Pushed,
-    Synced,
-}
-
 // いずれも独立した設定で、enum にまとめると組み合わせが表現できなくなる。
 #[allow(clippy::struct_excessive_bools)]
 /// Permission derived solely from the session lifecycle.
@@ -1079,7 +1068,6 @@ mod tests {
     fn lifecycle_axes_and_capabilities_stay_separate() {
         assert!(SessionLifecycle::Available.capabilities().can_use);
         assert_eq!(AgentPhase::Running, AgentPhase::Running);
-        assert_eq!(BranchStatus::Dirty, BranchStatus::Dirty);
         let adopted = ManagedSession::adopt_available("legacy".into(), now());
         assert_eq!(adopted.name, "legacy");
         assert_eq!(adopted.lifecycle, SessionLifecycle::Available);

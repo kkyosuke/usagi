@@ -21,6 +21,12 @@ use super::tool::{ToolDescriptor, ToolRoute, validate_schema_definition};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::infrastructure::ipc::SessionAction;
 
+/// A descriptor and its parsed, validated schema for one MCP connection.
+pub(super) struct RegisteredTool {
+    pub(super) descriptor: ToolDescriptor,
+    pub(super) schema: serde_json::Value,
+}
+
 /// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal を連結）。
 ///
 /// # Panics
@@ -28,7 +34,7 @@ use usagi_core::infrastructure::ipc::SessionAction;
 /// Panics before the MCP serve loop starts when descriptor validation fails.
 #[must_use]
 #[cfg(test)]
-pub(super) fn registry() -> Vec<ToolDescriptor> {
+pub(super) fn registry() -> Vec<RegisteredTool> {
     registry_with_families(McpToolFamilies::all())
 }
 
@@ -42,7 +48,7 @@ pub(super) fn registry() -> Vec<ToolDescriptor> {
 ///
 /// Panics before the MCP serve loop starts when descriptor validation fails.
 #[must_use]
-pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> {
+pub(super) fn registry_with_families(families: McpToolFamilies) -> Vec<RegisteredTool> {
     let mut tools = Vec::new();
     if families.issue {
         tools.extend(issue::tools());
@@ -58,12 +64,11 @@ pub fn registry_with_families(families: McpToolFamilies) -> Vec<ToolDescriptor> 
             )
     }));
     tools.extend(terminal::tools());
-    validate_registry(&tools).expect("invalid MCP tool descriptor registry");
-    tools
+    validate_registry(tools).expect("invalid MCP tool descriptor registry")
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct RegistryError(String);
+struct RegistryError(String);
 
 impl fmt::Display for RegistryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -77,9 +82,12 @@ impl fmt::Display for RegistryError {
 ///
 /// Returns a registry error for duplicate names or routes,
 /// or schema vocabulary the runtime validator cannot enforce.
-pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryError> {
+fn validate_registry(
+    descriptors: Vec<ToolDescriptor>,
+) -> Result<Vec<RegisteredTool>, RegistryError> {
     let mut names = HashSet::new();
     let mut routes = HashSet::new();
+    let mut registered = Vec::with_capacity(descriptors.len());
     for descriptor in descriptors {
         if !names.insert(descriptor.name()) {
             return Err(RegistryError(format!(
@@ -111,8 +119,9 @@ pub fn validate_registry(descriptors: &[ToolDescriptor]) -> Result<(), RegistryE
                 descriptor.name()
             )));
         }
+        registered.push(RegisteredTool { descriptor, schema });
     }
-    Ok(())
+    Ok(registered)
 }
 
 #[cfg(test)]
@@ -217,17 +226,17 @@ mod tests {
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
-            let name = tool.name();
+            let name = tool.descriptor.name();
             assert!(seen.insert(name));
-            assert!(!tool.description().is_empty());
+            assert!(!tool.descriptor.description().is_empty());
 
-            let schema: serde_json::Value = serde_json::from_str(tool.input_schema()).unwrap();
+            let schema = &tool.schema;
             assert_eq!(schema["type"], "object");
             assert!(schema.get("properties").is_some());
 
-            if !matches!(tool.route(), ToolRoute::Store(_)) {
+            if !matches!(tool.descriptor.route(), ToolRoute::Store(_)) {
                 assert!(
-                    matches!(tool.call_store(&serde_json::json!({}), Path::new(".")), Err(ToolError::Unimplemented(n)) if n == name)
+                    matches!(tool.descriptor.call_store(&serde_json::json!({}), Path::new(".")), Err(ToolError::Unimplemented(n)) if n == name)
                 );
             }
         }
@@ -238,12 +247,15 @@ mod tests {
         let registry = registry();
         let list = registry
             .iter()
-            .find(|tool| tool.name() == "user_decision_list")
+            .find(|tool| tool.descriptor.name() == "user_decision_list")
             .unwrap();
-        let schema: serde_json::Value = serde_json::from_str(list.input_schema()).unwrap();
+        let schema = &list.schema;
         let cursor = serde_json::json!({"revision":"a".repeat(64),"offset":1});
         for arguments in [serde_json::json!({}), serde_json::json!({"cursor":cursor})] {
-            assert!(list.validate(&arguments, &schema).is_ok(), "{arguments}");
+            assert!(
+                list.descriptor.validate(&arguments, schema).is_ok(),
+                "{arguments}"
+            );
         }
         for arguments in [
             serde_json::json!({"cursor":null}),
@@ -261,7 +273,10 @@ mod tests {
             serde_json::json!({"cursor":cursor,"caller":{}}),
             serde_json::json!({"cursor":cursor,"run_id":"other"}),
         ] {
-            assert!(list.validate(&arguments, &schema).is_err(), "{arguments}");
+            assert!(
+                list.descriptor.validate(&arguments, schema).is_err(),
+                "{arguments}"
+            );
         }
     }
 
@@ -270,31 +285,31 @@ mod tests {
         let registry = registry();
         let request = registry
             .iter()
-            .find(|tool| tool.name() == "user_decision_request")
+            .find(|tool| tool.descriptor.name() == "user_decision_request")
             .unwrap();
-        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
-        assert!(request.validate(&serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}], "allow_comment":true, "require_confirmation":true}), &schema).is_ok());
+        let schema = &request.schema;
+        assert!(request.descriptor.validate(&serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A"}], "allow_comment":true, "require_confirmation":true}), schema).is_ok());
         let resolve = registry
             .iter()
-            .find(|tool| tool.name() == "user_decision_resolve")
+            .find(|tool| tool.descriptor.name() == "user_decision_resolve")
             .unwrap();
-        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let schema = &resolve.schema;
         for choice in [
             serde_json::json!({"kind":"option", "option_id":"a"}),
             serde_json::json!({"kind":"options", "option_ids":["a"]}),
         ] {
             let mut args = serde_json::json!({"decision_id":"id", "answer":choice});
             args["answer"]["comment"] = serde_json::json!("Only staging");
-            assert!(resolve.validate(&args, &schema).is_ok());
+            assert!(resolve.descriptor.validate(&args, schema).is_ok());
             for invalid in [
                 String::new(),
                 "界".repeat(UserDecisionPolicy::COMMENT_MAX_BYTES / 3 + 1),
             ] {
                 args["answer"]["comment"] = serde_json::json!(invalid);
-                assert!(resolve.validate(&args, &schema).is_err());
+                assert!(resolve.descriptor.validate(&args, schema).is_err());
             }
         }
-        assert!(resolve.validate(&serde_json::json!({"decision_id":"id", "answer":{"kind":"freeform", "text":"Other", "comment":"Ignored?"}}), &schema).is_err());
+        assert!(resolve.descriptor.validate(&serde_json::json!({"decision_id":"id", "answer":{"kind":"freeform", "text":"Other", "comment":"Ignored?"}}), schema).is_err());
     }
 
     #[test]
@@ -302,12 +317,12 @@ mod tests {
         let registry = registry();
         let request = registry
             .iter()
-            .find(|tool| tool.name() == "user_decision_request")
+            .find(|tool| tool.descriptor.name() == "user_decision_request")
             .unwrap();
-        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let schema = &request.schema;
         let option = &schema["properties"]["options"]["items"]["properties"];
         let rich = serde_json::json!({"title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A", "pros":["Fast"],"cons":["Limited scope"]}]});
-        assert!(request.validate(&rich, &schema).is_ok());
+        assert!(request.descriptor.validate(&rich, schema).is_ok());
         for field in ["pros", "cons"] {
             assert_eq!(
                 option[field]["maxItems"],
@@ -325,7 +340,7 @@ mod tests {
             ] {
                 let mut invalid = rich.clone();
                 invalid["options"][0][field] = value;
-                assert!(request.validate(&invalid, &schema).is_err());
+                assert!(request.descriptor.validate(&invalid, schema).is_err());
             }
         }
     }
@@ -335,9 +350,9 @@ mod tests {
         let registry = registry();
         let request = registry
             .iter()
-            .find(|tool| tool.name() == "user_decision_request")
+            .find(|tool| tool.descriptor.name() == "user_decision_request")
             .unwrap();
-        let schema: serde_json::Value = serde_json::from_str(request.input_schema()).unwrap();
+        let (request, schema) = (&request.descriptor, &request.schema);
         let properties = &schema["properties"];
         assert_eq!(
             properties["title"]["maxLength"],
@@ -378,13 +393,13 @@ mod tests {
             "prompt": "prompt",
             "options": [],
         });
-        assert!(request.validate(&overlong, &schema).is_err());
+        assert!(request.validate(&overlong, schema).is_err());
         let multibyte = serde_json::json!({
             "title": "界".repeat(UserDecisionPolicy::TITLE_MAX_BYTES / 3 + 1),
             "prompt": "prompt",
             "options": [],
         });
-        assert!(request.validate(&multibyte, &schema).is_err());
+        assert!(request.validate(&multibyte, schema).is_err());
 
         let rich = serde_json::json!({
             "title":"Choose", "prompt":"Compare", "options":[{"id":"a","label":"A","pros":["Fast"],"cons":["Limited scope"]}],
@@ -396,7 +411,7 @@ mod tests {
                 {"kind":"diagram", "title":"Flow", "text":"A -> B"}
             ]
         });
-        assert!(request.validate(&rich, &schema).is_ok());
+        assert!(request.validate(&rich, schema).is_ok());
         assert_eq!(
             properties["context"]["maxItems"],
             UserDecisionPolicy::CONTEXT_COUNT_MAX
@@ -404,25 +419,25 @@ mod tests {
         let mut invalid_reason = rich.clone();
         invalid_reason["recommendation"]["reason"] =
             serde_json::json!("界".repeat(UserDecisionPolicy::RECOMMENDATION_REASON_MAX_BYTES));
-        assert!(request.validate(&invalid_reason, &schema).is_err());
+        assert!(request.validate(&invalid_reason, schema).is_err());
         let mut invalid = rich.clone();
         invalid["selection_mode"] = serde_json::json!("unknown");
-        assert!(request.validate(&invalid, &schema).is_err());
+        assert!(request.validate(&invalid, schema).is_err());
         invalid = rich;
         invalid["context"][1]["text"] =
             serde_json::json!("x".repeat(UserDecisionPolicy::DIAGRAM_MAX_BYTES + 1));
-        assert!(request.validate(&invalid, &schema).is_err());
+        assert!(request.validate(&invalid, schema).is_err());
 
         let resolve = registry
             .iter()
-            .find(|tool| tool.name() == "user_decision_resolve")
+            .find(|tool| tool.descriptor.name() == "user_decision_resolve")
             .unwrap();
-        let schema: serde_json::Value = serde_json::from_str(resolve.input_schema()).unwrap();
+        let (resolve, schema) = (&resolve.descriptor, &resolve.schema);
         let multiple = serde_json::json!({
             "decision_id":"00000000-0000-0000-0000-000000000000",
             "answer":{"kind":"options", "option_ids":["a", "b"]}
         });
-        assert!(resolve.validate(&multiple, &schema).is_ok());
+        assert!(resolve.validate(&multiple, schema).is_ok());
         let overlong = serde_json::json!({
             "decision_id": "00000000-0000-0000-0000-000000000000",
             "answer": {
@@ -430,7 +445,7 @@ mod tests {
                 "text": "a".repeat(UserDecisionPolicy::FREEFORM_ANSWER_MAX_BYTES + 1),
             },
         });
-        assert!(resolve.validate(&overlong, &schema).is_err());
+        assert!(resolve.validate(&overlong, schema).is_err());
     }
 
     /// 系統ごとの tool 数を固定する（IF の増減に気づけるように）。
@@ -451,13 +466,13 @@ mod tests {
         assert!(
             without_issue
                 .iter()
-                .all(|tool| !tool.name().starts_with("issue_")
-                    && tool.name() != "session_delegate_issue")
+                .all(|tool| !tool.descriptor.name().starts_with("issue_")
+                    && tool.descriptor.name() != "session_delegate_issue")
         );
         assert!(
             without_issue
                 .iter()
-                .any(|tool| tool.name() == "memory_search")
+                .any(|tool| tool.descriptor.name() == "memory_search")
         );
 
         let without_memory = registry_with_families(McpToolFamilies {
@@ -467,17 +482,17 @@ mod tests {
         assert!(
             without_memory
                 .iter()
-                .all(|tool| !tool.name().starts_with("memory_"))
+                .all(|tool| !tool.descriptor.name().starts_with("memory_"))
         );
         assert!(
             without_memory
                 .iter()
-                .any(|tool| tool.name() == "issue_search")
+                .any(|tool| tool.descriptor.name() == "issue_search")
         );
         assert!(
             without_memory
                 .iter()
-                .any(|tool| tool.name() == "session_delegate_issue")
+                .any(|tool| tool.descriptor.name() == "session_delegate_issue")
         );
 
         let neither = registry_with_families(McpToolFamilies {
@@ -485,25 +500,24 @@ mod tests {
             memory: false,
         });
         assert_eq!(neither.len(), 40);
-        assert!(neither.iter().any(|tool| tool.name() == "session_dispatch"));
+        assert!(
+            neither
+                .iter()
+                .any(|tool| tool.descriptor.name() == "session_dispatch")
+        );
     }
 
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
         assert_eq!(registry.len(), 51);
-        validate_registry(&registry).unwrap();
-        for descriptor in &registry {
+        for tool in &registry {
+            let descriptor = &tool.descriptor;
             assert!(!descriptor.description().is_empty());
-            let schema: serde_json::Value =
-                serde_json::from_str(descriptor.input_schema()).unwrap();
-            let valid = valid_value(&schema);
-            descriptor.validate(&valid, &schema).unwrap();
-            assert!(
-                descriptor
-                    .validate(&serde_json::json!([]), &schema)
-                    .is_err()
-            );
+            let schema = &tool.schema;
+            let valid = valid_value(schema);
+            descriptor.validate(&valid, schema).unwrap();
+            assert!(descriptor.validate(&serde_json::json!([]), schema).is_err());
             assert!(matches!(
                 (descriptor.route(), descriptor.caller_policy()),
                 (ToolRoute::Store(_), CallerPolicy::Public)
@@ -739,7 +753,8 @@ mod tests {
         ];
         let actual = registry()
             .iter()
-            .map(|descriptor| {
+            .map(|tool| {
+                let descriptor = &tool.descriptor;
                 (
                     descriptor.name(),
                     descriptor.route(),
@@ -757,24 +772,26 @@ mod tests {
             FixtureTool("call").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
-        let duplicate_name = [
+        let duplicate_name = vec![
             ToolDescriptor::workspace_store(FixtureTool("same")),
             ToolDescriptor::session(FixtureTool("same"), SessionAction::List),
         ];
         assert!(
-            validate_registry(&duplicate_name)
-                .unwrap_err()
+            validate_registry(duplicate_name)
+                .err()
+                .unwrap()
                 .to_string()
                 .contains("duplicate tool name")
         );
 
-        let duplicate_route = [
+        let duplicate_route = vec![
             ToolDescriptor::session(FixtureTool("one"), SessionAction::List),
             ToolDescriptor::session(FixtureTool("two"), SessionAction::List),
         ];
         assert!(
-            validate_registry(&duplicate_route)
-                .unwrap_err()
+            validate_registry(duplicate_route)
+                .err()
+                .unwrap()
                 .to_string()
                 .contains("duplicate executable route")
         );
@@ -792,10 +809,11 @@ mod tests {
             SchemaFixture("call", "{}").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
-        let unsupported_schema = [ToolDescriptor::workspace_store(UnsupportedSchema)];
+        let unsupported_schema = vec![ToolDescriptor::workspace_store(UnsupportedSchema)];
         assert!(
-            validate_registry(&unsupported_schema)
-                .unwrap_err()
+            validate_registry(unsupported_schema)
+                .err()
+                .unwrap()
                 .to_string()
                 .contains("unsupported keyword")
         );
@@ -805,7 +823,7 @@ mod tests {
             SchemaFixture("not_object", r#"{"type":"array","properties":{}}"#),
             SchemaFixture("no_properties", r#"{"type":"object"}"#),
         ] {
-            assert!(validate_registry(&[ToolDescriptor::workspace_store(fixture)]).is_err());
+            assert!(validate_registry(vec![ToolDescriptor::workspace_store(fixture)]).is_err());
         }
 
         assert!(matches!(

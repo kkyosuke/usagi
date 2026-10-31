@@ -162,6 +162,25 @@ impl ResourceFailure {
     }
 }
 
+/// The coordinator only rolls back reservations when this save proves that
+/// neither durable object changed. Earlier maintenance commits remain valid;
+/// other failures may follow a partial write within this save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreError {
+    Unavailable,
+    RetentionBackpressure,
+}
+
+impl From<ResourceFailure> for StoreError {
+    fn from(error: ResourceFailure) -> Self {
+        if error.refusal() == Some(ResourceError::RetentionBackpressure) {
+            Self::RetentionBackpressure
+        } else {
+            Self::Unavailable
+        }
+    }
+}
+
 /// The durable byte seam every document is read and written through.
 ///
 /// The real adapter serializes both operations under one cross-process lock and

@@ -432,7 +432,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | response | 同じ `RequestId` | immediate result、accepted operation、または typed error |
 | event | `SubscriptionId`、`StreamRef`、sequence | server push |
 
-現行 production handler で `RequestId` は一回の RPC correlation にだけ使い、`ResponseCache` は接続されていない。
+現行 production handler で `RequestId` は一回の RPC correlation にだけ使う。
 再接続すると client の request sequence も変わるため、`RequestId` を durable idempotency key として扱わない。
 session / Agent / dispatch / generic Terminal Launch 等の durable mutation は request correlation と独立した
 `OperationId` を持ち、target scope と semantic digest が同じ場合だけ既存 operation として再利用する。producer が

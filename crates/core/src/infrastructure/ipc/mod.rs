@@ -14,7 +14,6 @@ pub mod request;
 // protocol.
 pub use request::*;
 
-use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -1214,59 +1213,6 @@ pub fn agent_operation_digest(semantic_key: &str) -> String {
             let _ = write!(acc, "{byte:02x}");
             acc
         })
-}
-
-/// A cache entry ties a response to the exact request body digest.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CachedResponse {
-    pub body_digest: String,
-    pub response: Envelope,
-    pub received_at_ms: u64,
-}
-#[derive(Debug, Default)]
-pub struct ResponseCache {
-    capacity: usize,
-    entries: HashMap<(ClientId, RequestId), CachedResponse>,
-    order: VecDeque<(ClientId, RequestId)>,
-}
-impl ResponseCache {
-    #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            ..Self::default()
-        }
-    }
-    pub fn get(
-        &self,
-        client: &ClientId,
-        request: &RequestId,
-        body_digest: &str,
-    ) -> Result<Option<&Envelope>, ProtocolError> {
-        match self.entries.get(&(client.clone(), request.clone())) {
-            Some(entry) if entry.body_digest == body_digest => Ok(Some(&entry.response)),
-            Some(_) => Err(ProtocolError::new(
-                ErrorCode::IdempotencyConflict,
-                "request id was reused with a different body",
-            )),
-            None => Ok(None),
-        }
-    }
-    pub fn insert(&mut self, client: ClientId, request: RequestId, entry: CachedResponse) {
-        if self.capacity == 0 {
-            return;
-        }
-        let key = (client, request);
-        if !self.entries.contains_key(&key) {
-            self.order.push_back(key.clone());
-        }
-        self.entries.insert(key, entry);
-        while self.entries.len() > self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.entries.remove(&old);
-            }
-        }
-    }
 }
 
 /// Write one bounded u32-big-endian JSON payload frame.

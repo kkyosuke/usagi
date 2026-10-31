@@ -874,46 +874,7 @@ fn envelope_keeps_response_and_event_routing_independent() {
     assert_eq!(stream.epoch, "e");
 }
 #[test]
-fn response_cache_rejects_a_request_id_reused_with_different_content() {
-    let response = Envelope {
-        protocol: ProtocolVersion {
-            generation: 1,
-            revision: 1,
-        },
-        daemon_generation: DaemonGeneration("d".into()),
-        kind: EnvelopeKind::Response {
-            request_id: RequestId("r".into()),
-            outcome: ResponseOutcome::Ok,
-            body: json!({}),
-        },
-    };
-    let mut cache = ResponseCache::new(1);
-    cache.insert(
-        ClientId("c".into()),
-        RequestId("r".into()),
-        CachedResponse {
-            body_digest: "a".into(),
-            response,
-            received_at_ms: 0,
-        },
-    );
-    assert!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("r".into()), "a")
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("r".into()), "b")
-            .unwrap_err()
-            .code,
-        ErrorCode::IdempotencyConflict
-    );
-}
-
-#[test]
-fn covers_protocol_error_and_cache_edge_cases() {
+fn protocol_error_retry_modes_and_framing_failures_are_preserved() {
     assert_eq!(
         ProtocolError::new(ErrorCode::ResyncRequired, "x").retry_mode,
         RetryMode::Resync
@@ -931,52 +892,6 @@ fn covers_protocol_error_and_cache_edge_cases() {
     assert_eq!(
         negotiate(&incompatible, &server()).unwrap_err().code,
         ErrorCode::ProtocolMismatch
-    );
-    let mut cache = ResponseCache::new(0);
-    let response = Envelope {
-        protocol: ProtocolVersion {
-            generation: 1,
-            revision: 1,
-        },
-        daemon_generation: DaemonGeneration("d".into()),
-        kind: EnvelopeKind::Response {
-            request_id: RequestId("r".into()),
-            outcome: ResponseOutcome::Ok,
-            body: json!({}),
-        },
-    };
-    cache.insert(
-        ClientId("c".into()),
-        RequestId("r".into()),
-        CachedResponse {
-            body_digest: "d".into(),
-            response: response.clone(),
-            received_at_ms: 0,
-        },
-    );
-    assert!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("r".into()), "d")
-            .unwrap()
-            .is_none()
-    );
-    let mut cache = ResponseCache::new(1);
-    for id in ["a", "b"] {
-        cache.insert(
-            ClientId("c".into()),
-            RequestId(id.into()),
-            CachedResponse {
-                body_digest: id.into(),
-                response: response.clone(),
-                received_at_ms: 0,
-            },
-        );
-    }
-    assert!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("a".into()), "a")
-            .unwrap()
-            .is_none()
     );
     assert!(read_frame(&mut Bad).is_err());
     assert!(write_frame(&mut BadWriter, b"x").is_err());

@@ -361,20 +361,6 @@ impl IssueStore {
         Ok(IssueSourceSnapshot { sources, claims })
     }
 
-    /// The highest issue number currently stored, or 0 if there are none.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be read.
-    pub fn max_number(&self) -> Result<u32> {
-        Ok(self
-            .issue_files()?
-            .iter()
-            .filter_map(|path| number_from_filename(path))
-            .max()
-            .unwrap_or(0))
-    }
-
     /// Highest identity claim in either a filename or parseable frontmatter.
     ///
     /// Allocation cannot rely on filename prefixes alone: a prefixless source,
@@ -941,7 +927,46 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         assert!(source_issues(&store).is_empty());
-        assert_eq!(store.max_number().unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lenient_source_scan_rejects_dangling_directory_and_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        for dangling_ancestor in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            // This read goes directly through MarkdownStore::entry_files,
+            // without reserving issue numbers, locking, or repository discovery.
+            assert!(store.scan_sources_lenient().unwrap().is_empty());
+            let state = tmp.path().join(STATE_DIR);
+            assert!(!state.exists());
+            let link = if dangling_ancestor {
+                state
+            } else {
+                fs::create_dir(&state).unwrap();
+                store.dir().to_path_buf()
+            };
+            let target = PathBuf::from("missing-source-target");
+            symlink(&target, &link).unwrap();
+
+            let error = store
+                .scan_sources_lenient()
+                .err()
+                .expect("a dangling source path must not look like an empty store");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("failed to read {}", store.dir().display())
+            );
+            assert_eq!(fs::read_link(&link).unwrap(), target);
+            assert!(!link.parent().unwrap().join(&target).exists());
+            assert!(!store.index_path().exists());
+        }
     }
 
     #[test]
@@ -1005,7 +1030,6 @@ mod tests {
         );
         assert!(store.index_path().is_file());
         assert_eq!(store.read(1).unwrap().unwrap(), i);
-        assert_eq!(store.max_number().unwrap(), 1);
     }
 
     #[test]
@@ -1669,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn max_number_reflects_files_added_outside_usagi() {
+    fn number_reservation_reflects_files_added_outside_usagi() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
@@ -1679,7 +1703,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(store.max_number().unwrap(), 2);
+        assert_eq!(store.reserve_next_number().unwrap(), 3);
     }
 
     #[test]
@@ -1693,7 +1717,7 @@ mod tests {
         )
         .unwrap();
 
-        let next = store.max_number().unwrap() + 1;
+        let next = store.reserve_next_number().unwrap();
         store.write(&issue(next, "Three")).unwrap();
 
         assert_eq!(next, 3);
@@ -2534,7 +2558,6 @@ mod tests {
         let issues = tmp.path().join(".usagi/issues");
         symlink("missing-issues", &issues).unwrap();
         let dangling_store = IssueStore::new(tmp.path());
-        assert!(dangling_store.max_number().is_err());
         assert!(dangling_store.read(1).is_err());
         assert!(dangling_store.source_snapshot().is_err());
         assert_eq!(
@@ -2548,7 +2571,6 @@ mod tests {
         let state = session.join(".usagi");
         symlink("missing-state", &state).unwrap();
         let dangling_store = IssueStore::new(&session);
-        assert!(dangling_store.max_number().is_err());
         assert!(dangling_store.read(1).is_err());
         assert!(dangling_store.source_snapshot().is_err());
         assert_eq!(

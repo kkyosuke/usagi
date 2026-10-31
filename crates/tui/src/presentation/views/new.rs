@@ -227,9 +227,8 @@ impl New {
 
     /// フォームを検証し、必須項目が揃っていれば workspace を作る backend request を返す。
     ///
-    /// 検証は controller reducer の [`validate_new_form`] を通し、実端末経路（この view）と
-    /// controller runtime が同じ規則を共有する（SSoT）。フィールドは controller の [`NewForm`]
-    /// へ写して渡す。
+    /// 入力検証の正本 [`validate_new_form`] に、編集フィールドを TUI-local な [`NewForm`]
+    /// へ写して渡す。画面グラフは検証済み request を workspace loader に渡す。
     ///
     /// # Errors
     ///

@@ -96,7 +96,7 @@ impl TextOverlay {
     fn body(&self, body_height: usize) -> Vec<String> {
         let lines = self.lines();
         // border 2, status 1, footer 1 を先に確保する。極小 terminal でも 1 行だけは
-        // viewport に残し、render_modal / render_over が最終 clip を担う。
+        // viewport に残し、render_over が最終 clip を担う。
         // scroll indicator（最大 2 行）と footer（空行を含め 2 行）および枠を
         // 先に差し引く。これにより通常サイズでは footer が clip されない。
         let viewport = body_height.saturating_sub(4).max(1);
@@ -154,20 +154,6 @@ impl TextOverlay {
     }
 }
 
-/// 空の画面に中央配置して描く。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &TextOverlay) -> Vec<String> {
-    let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
-    let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
-    modal::render_modal(
-        raw_height,
-        raw_width,
-        &state.title,
-        INNER_WIDTH,
-        &state.body(body_height),
-    )
-}
-
 /// `base` を背景に残して中央配置して描く。
 #[must_use]
 pub fn render_over(
@@ -214,8 +200,12 @@ pub(crate) fn render_over_with_layout(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayDocument, TextOverlay, render, render_over};
+    use super::{OverlayDocument, TextOverlay, render_over};
     use crate::presentation::widgets::display_width;
+
+    fn render(height: usize, width: usize, state: &TextOverlay) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
 
     #[test]
     fn reserved_status_stays_visible_while_the_document_scrolls() {

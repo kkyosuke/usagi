@@ -490,6 +490,14 @@ pub struct QueuedPrompt {
     pub caller: Option<CallerRef>,
 }
 
+/// Request-scoped runtime facts from one consistent dispatch-registry read.
+/// Prompts and caller credentials are not retained in this projection.
+#[derive(Debug, Default)]
+pub struct DispatchRuntimeProjection {
+    pub failed_runs: BTreeSet<OperationId>,
+    pub agent_ids_by_run: BTreeMap<OperationId, AgentId>,
+}
+
 /// File-backed durable dispatch state rooted at the daemon state directory.
 pub struct DispatchStore {
     dir: PathBuf,
@@ -1153,6 +1161,32 @@ impl DispatchStore {
         Ok(self.load_registry()?.runs)
     }
 
+    /// Observe failed runs and worker identities from the same registry version.
+    ///
+    /// # Errors
+    /// Returns an error when the registry cannot be read or exceeds its bounds.
+    pub fn runtime_projection(&self) -> Result<DispatchRuntimeProjection> {
+        let registry = self.load_registry()?;
+        let failed_runs = registry
+            .runs
+            .into_iter()
+            .filter(|run| run.status == RunStatus::Failed)
+            .map(|run| run.run_id)
+            .collect();
+        let mut agent_ids_by_run = BTreeMap::new();
+        for binding in registry.bindings {
+            // Match the exact-run reader's first binding when legacy state
+            // contains duplicates; a later row cannot silently change identity.
+            agent_ids_by_run
+                .entry(binding.run_id)
+                .or_insert(binding.worker.agent_id);
+        }
+        Ok(DispatchRuntimeProjection {
+            failed_runs,
+            agent_ids_by_run,
+        })
+    }
+
     /// Reads one run by its durable operation identity.
     ///
     /// # Errors
@@ -1675,41 +1709,6 @@ impl DispatchStore {
             record.message.read = record.message.read || record.sequence < ack.next_sequence;
         }
         Ok(records.into_iter().map(|record| record.message).collect())
-    }
-
-    /// Marks all messages for `run_id` read and returns whether anything changed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the inbox cannot be locked, read, or written.
-    pub fn mark_inbox_read(&self, caller: &CallerRef, run_id: OperationId) -> Result<bool> {
-        let _lock = StoreLock::acquire(&self.dir)?;
-        let index = self.inbox_index(caller)?;
-        let mut records = self.read_inbox_records(caller, &index.entries)?;
-        let mut changed = false;
-        for record in &mut records {
-            if record.message.run_id == run_id && !record.message.read {
-                record.message.read = true;
-                changed = true;
-            }
-        }
-        if changed {
-            let mut remove = records
-                .iter()
-                .filter(|record| record.message.read)
-                .count()
-                .saturating_sub(self.limits.inbox_read_retention);
-            records.retain(|record| {
-                if record.message.read && remove > 0 {
-                    remove -= 1;
-                    false
-                } else {
-                    true
-                }
-            });
-            self.write_inbox_records(caller, &records)?;
-        }
-        Ok(changed)
     }
 
     fn mutate_registry<T>(&self, mutate: impl FnOnce(&mut Registry) -> T) -> Result<T> {
@@ -2237,6 +2236,92 @@ mod tests {
         );
         assert_eq!(store.agents().unwrap().len(), 2);
         assert!(store.registry_path().is_file());
+    }
+
+    #[test]
+    fn runtime_projection_uses_failed_runs_and_the_first_binding_from_one_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, agent_id, caller) = ids();
+        let empty = store.runtime_projection().unwrap();
+        assert!(empty.failed_runs.is_empty());
+        assert!(empty.agent_ids_by_run.is_empty());
+
+        let mut registry = Registry::default();
+        for status in [
+            RunStatus::Preparing,
+            RunStatus::Running,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::NoReport,
+        ] {
+            registry.runs.push(DispatchRun {
+                run_id: OperationId::new(),
+                agent_id,
+                prompt: "private prompt".into(),
+                started_at: now(),
+                ended_at: None,
+                status,
+            });
+        }
+        let failed = registry.runs[3].run_id;
+        let binding = DispatchBinding {
+            run_id: failed,
+            caller,
+            worker: WorkerRef {
+                session_id: Some(session),
+                agent_id,
+            },
+        };
+        registry.bindings.push(binding.clone());
+        let mut later = binding;
+        later.worker.agent_id = AgentId::new();
+        registry.bindings.push(later);
+        // Seed duplicated legacy bindings directly: current upserts replace by
+        // run ID. Observation must preserve the existing first-match behavior.
+        json_file::write_atomic(&store.dir, &store.registry_path(), &registry).unwrap();
+
+        let snapshot = store.runtime_projection().unwrap();
+        assert_eq!(snapshot.failed_runs, BTreeSet::from([failed]));
+        assert_eq!(
+            snapshot.agent_ids_by_run,
+            BTreeMap::from([(failed, agent_id)])
+        );
+        assert_eq!(
+            snapshot.agent_ids_by_run[&failed],
+            store.binding(failed).unwrap().unwrap().worker.agent_id
+        );
+
+        store
+            .transition_run(failed, RunStatus::Completed, Some(now()))
+            .unwrap();
+        assert!(store.runtime_projection().unwrap().failed_runs.is_empty());
+        assert!(
+            snapshot.failed_runs.contains(&failed),
+            "a later read cannot mutate an existing request's observation"
+        );
+    }
+
+    #[test]
+    fn runtime_projection_propagates_corrupt_and_oversized_registry_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        fs::write(store.registry_path(), "malformed").unwrap();
+        assert!(store.runtime_projection().is_err());
+
+        let limits = DispatchStoreLimits {
+            registry_bytes: 1,
+            ..DispatchStoreLimits::default()
+        };
+        fs::write(store.registry_path(), "{}").unwrap();
+        let limited = DispatchStore::with_limits(tmp.path(), limits);
+        assert!(
+            limited
+                .runtime_projection()
+                .unwrap_err()
+                .to_string()
+                .contains("serialized byte limit")
+        );
     }
 
     #[test]
@@ -3417,12 +3502,18 @@ mod tests {
             .unwrap();
         let other = OperationId::new();
         store.append_inbox(&caller, message(other, worker)).unwrap();
-        let unread = store
-            .inbox_page(&caller, None, INBOX_PAGE_MAX, true, None)
-            .unwrap();
-        assert_eq!(unread.messages.len(), 2);
-        assert!(store.mark_inbox_read(&caller, run_id).unwrap());
-        assert!(!store.mark_inbox_read(&caller, run_id).unwrap());
+        let unread = store.inbox_page(&caller, None, 1, true, None).unwrap();
+        assert_eq!(unread.messages.len(), 1);
+        assert_eq!(unread.messages[0].run_id, run_id);
+        assert!(unread.has_more);
+        assert_eq!(
+            store.ack_inbox(&caller, unread.next_cursor).unwrap(),
+            unread.next_cursor
+        );
+        assert_eq!(
+            store.ack_inbox(&caller, unread.next_cursor).unwrap(),
+            unread.next_cursor
+        );
         let unread = DispatchStore::new(tmp.path())
             .inbox_page(&caller, None, INBOX_PAGE_MAX, true, None)
             .unwrap();
@@ -4122,17 +4213,27 @@ mod tests {
         };
 
         let awaited = OperationId::new();
-        store
-            .append_inbox(&caller, message(awaited, worker.clone()))
-            .unwrap();
-
-        for _ in 0..(INBOX_READ_RETENTION + 40) {
-            let run_id = OperationId::new();
-            store
-                .append_inbox(&caller, message(run_id, worker.clone()))
-                .unwrap();
-            store.mark_inbox_read(&caller, run_id).unwrap();
+        // Legacy journals can mark later individual rows read while an earlier
+        // report is still unread. Seed that historical shape directly; current
+        // ACKs advance a prefix watermark and cannot create this arrangement.
+        let mut legacy = vec![InboxRecord {
+            sequence: 1,
+            message: message(awaited, worker.clone()),
+        }];
+        for index in 0..(INBOX_READ_RETENTION + 40) {
+            let mut read = message(OperationId::new(), worker.clone());
+            read.read = true;
+            legacy.push(InboxRecord {
+                sequence: u64::try_from(index).unwrap() + 2,
+                message: read,
+            });
         }
+        store.write_inbox_records(&caller, &legacy).unwrap();
+        // A live append must compact eligible legacy history while retaining
+        // both unread reports and their stable sequence identities.
+        store
+            .append_inbox(&caller, message(OperationId::new(), worker))
+            .unwrap();
 
         let inbox = store.inbox(&caller).unwrap();
         let read = inbox.iter().filter(|item| item.read).count();
@@ -4287,7 +4388,11 @@ mod tests {
             inbox_store
                 .append_inbox(&caller, message(run_id, worker.clone()))
                 .unwrap();
-            inbox_store.mark_inbox_read(&caller, run_id).unwrap();
+            let page = inbox_store
+                .inbox_page(&caller, None, 1, true, None)
+                .unwrap();
+            assert_eq!(page.messages[0].run_id, run_id);
+            inbox_store.ack_inbox(&caller, page.next_cursor).unwrap();
         }
         let index = inbox_store.inbox_index(&caller).unwrap();
         assert!(index.entries.len() < 128);
@@ -4412,7 +4517,8 @@ mod tests {
         };
         let store = DispatchStore::with_limits(tmp.path(), limits);
         store.append_inbox(&caller, first).unwrap();
-        assert!(store.mark_inbox_read(&caller, first_run).unwrap());
+        let page = store.inbox_page(&caller, None, 1, true, None).unwrap();
+        store.ack_inbox(&caller, page.next_cursor).unwrap();
         store.append_inbox(&caller, second).unwrap();
         store.append_inbox(&caller, third).unwrap();
 

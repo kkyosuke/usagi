@@ -15,6 +15,7 @@ use std::sync::{
 };
 
 use super::*;
+use crate::usecase::resources::StoreError;
 use crate::usecase::terminal::SnapshotWire;
 use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
 use serde_json::{Value, json};
@@ -113,14 +114,14 @@ struct Store {
     snapshot_path: Option<PathBuf>,
 }
 impl RuntimeStore for Store {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.saves += 1;
         if self.fail_after.is_some_and(|limit| self.saves > limit) {
-            return Err(());
+            return Err(StoreError::Unavailable);
         }
         if let Some(path) = &self.snapshot_path {
-            let bytes = serde_json::to_vec(&snapshot).map_err(|_| ())?;
-            std::fs::write(path, bytes).map_err(|_| ())?;
+            let bytes = serde_json::to_vec(&snapshot).map_err(|_| StoreError::Unavailable)?;
+            std::fs::write(path, bytes).map_err(|_| StoreError::Unavailable)?;
         }
         Ok(())
     }
@@ -1832,6 +1833,14 @@ fn exact_inventory_separates_root_sessions_and_same_scope_histories() {
     let inventory = runtime.inventory(workspace);
     assert_eq!(inventory, runtime.inventory(workspace));
     assert_eq!(inventory.runtimes.len(), 5);
+    assert_eq!(
+        runtime.search_targets(workspace),
+        inventory
+            .runtimes
+            .iter()
+            .map(|item| item.runtime.terminal.clone())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(inventory.resumable.len(), 5);
     assert_eq!(
         inventory
@@ -3352,6 +3361,10 @@ fn helper_error_routes_and_durable_replay_outcomes_are_total() {
             ErrorCode::StaleTarget,
         ),
         (RuntimeError::Store, ErrorCode::OwnershipUnknown),
+        (
+            RuntimeError::RetentionBackpressure,
+            ErrorCode::ResourceExhausted,
+        ),
         (RuntimeError::Journal, ErrorCode::OwnershipUnknown),
         (
             RuntimeError::ReconcileRequired(ReconcileState::IdentityUnknown),

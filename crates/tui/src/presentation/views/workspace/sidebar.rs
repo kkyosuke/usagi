@@ -47,7 +47,7 @@ impl SidebarLayout {
             home.icon_mode,
         );
         let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
-        let speech = home.mascot_speech.as_ref().or(daemon_speech.as_ref());
+        let speech = daemon_speech.as_ref();
         let mascot =
             widgets::mascot::sidebar_block_with_sidecar(width, home.mascot_tick, speech, &sidecar)
                 .filter(|block| body_capacity >= block.reserved_rows() + 2);

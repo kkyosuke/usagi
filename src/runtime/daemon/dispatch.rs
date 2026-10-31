@@ -848,37 +848,35 @@ pub(super) fn map_inbox_query_error(
 pub(super) fn dispatch_pr_snapshot(
     inventory: &SharedPrInventory,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{DaemonRequest, PrAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    let result = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Pr {
-                action: PrAction::Snapshot,
-                payload,
-            } => inventory
-                .lock()
-                .ok()
-                .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
-                .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
-            DaemonRequest::PrBatch { payload } => inventory
-                .lock()
-                .ok()
-                .and_then(|mut projector| projector.snapshots(&payload.session_ids).ok())
-                .and_then(|snapshots| serde_json::to_value(snapshots).ok()),
-            DaemonRequest::PrDismiss { payload } => inventory
-                .lock()
-                .ok()
-                .and_then(|mut projector| {
-                    projector.dismiss(payload.session_id, &payload.url).ok()?;
-                    projector.snapshot(payload.session_id).ok()
-                })
-                .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
-            _ => None,
-        });
+    let result = match request {
+        DaemonRequest::Pr {
+            action: PrAction::Snapshot,
+            payload,
+        } => inventory
+            .lock()
+            .ok()
+            .and_then(|mut projector| projector.snapshot(payload.session_id).ok())
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+        DaemonRequest::PrBatch { payload } => inventory
+            .lock()
+            .ok()
+            .and_then(|mut projector| projector.snapshots(&payload.session_ids).ok())
+            .and_then(|snapshots| serde_json::to_value(snapshots).ok()),
+        DaemonRequest::PrDismiss { payload } => inventory
+            .lock()
+            .ok()
+            .and_then(|mut projector| {
+                projector.dismiss(payload.session_id, &payload.url).ok()?;
+                projector.snapshot(payload.session_id).ok()
+            })
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok()),
+        _ => None,
+    };
     let (outcome, body) = result.map_or_else(
         || {
             (
@@ -1250,25 +1248,22 @@ pub(super) fn dispatch_dispatch(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
     launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
-    let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Dispatch {
-                operation_id,
-                intent,
-            } => Some((operation_id, intent)),
-            _ => None,
-        })
-    else {
+    let Some((operation_id, intent)) = (match request {
+        DaemonRequest::Dispatch {
+            operation_id,
+            intent,
+        } => Some((operation_id, intent)),
+        _ => None,
+    }) else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1397,24 +1392,22 @@ pub(super) fn dispatch_rollover(
     tenants: &super::TenantRegistry<super::FileWorkspaceFences, super::SystemTenantOpener>,
     terminal: &SharedTerminalRuntime,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Rollover {
-                operation_id,
-                restart_agents,
-            } => Some((OperationId(operation_id), restart_agents)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::Rollover {
+            operation_id,
+            restart_agents,
+        } => Some((OperationId(operation_id), restart_agents)),
+        _ => None,
+    };
     let Some((operation, restart_agents)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1639,22 +1632,20 @@ pub(super) fn dispatch_metrics(
     pipeline_metrics: &TerminalPipelineMetrics,
     observer: &mut Option<MetricsObserver>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: &DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{DaemonRequest, MetricsAction};
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let action = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Metrics { action } => Some(action),
-            _ => None,
-        });
+    let action = match request {
+        DaemonRequest::Metrics { action } => Some(action),
+        _ => None,
+    };
     let Some(action) = action else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1737,24 +1728,22 @@ pub(super) struct SessionDispatchContext<'a> {
 pub(super) fn dispatch_session(
     context: &SessionDispatchContext<'_>,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Session {
-                action,
-                operation_id,
-                payload,
-            } => Some((action, operation_id, payload)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::Session {
+            action,
+            operation_id,
+            payload,
+        } => Some((action, operation_id, payload)),
+        _ => None,
+    };
     let Some((action, operation_id, payload)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -1784,17 +1773,14 @@ pub(super) fn dispatch_mcp_child_claim(
     peer_process: &PeerProcess,
     connection: ConnectionId,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: &DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
     let result = (|| {
-        if !matches!(
-            serde_json::from_value::<DaemonRequest>(body.clone()),
-            Ok(DaemonRequest::McpChildClaim)
-        ) {
+        if !matches!(request, DaemonRequest::McpChildClaim) {
             return Err(ProtocolError::new(
                 ErrorCode::InvalidArgument,
                 "invalid MCP child claim",
@@ -2436,73 +2422,71 @@ pub(super) fn dispatch_agent(
     agent: &SharedAgentRuntime,
     bound: &ConnectionWorkspace,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
     launch_client: &AgentLaunchClient,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::DaemonRequest;
     use usagi_core::infrastructure::ipc::ResponseOutcome;
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::Agent {
-                operation_id,
-                intent,
-            } => Some((AgentDispatchRequest::Launch(operation_id, intent), None)),
-            DaemonRequest::AgentInventory {
-                workspace,
-                caller_context,
-            } => Some((AgentDispatchRequest::Inventory(workspace), caller_context)),
-            DaemonRequest::AgentWorkspaceObservation { workspace } => {
-                Some((AgentDispatchRequest::WorkspaceObservation(workspace), None))
-            }
-            DaemonRequest::DiagnoseAgents {
-                workspace,
-                expected,
-            } => Some((AgentDispatchRequest::Diagnose(workspace, expected), None)),
-            DaemonRequest::PlanDaemonRestartAgents { expected, force } => {
-                Some((AgentDispatchRequest::PlanRestart(expected, force), None))
-            }
-            DaemonRequest::RestartAgents {
-                workspace,
-                expected,
-                runtimes,
-                force,
-            } => Some((
-                AgentDispatchRequest::Restart(workspace, expected, runtimes, force),
-                None,
-            )),
-            DaemonRequest::ResumeAgent {
-                operation_id,
-                target,
-                caller_context,
-            } => Some((
-                AgentDispatchRequest::Resume(operation_id, target, None),
-                caller_context,
-            )),
-            DaemonRequest::ResumeAgentHeadless {
-                operation_id,
-                target,
-                prompt,
-                caller_context,
-            } => Some((
-                AgentDispatchRequest::Resume(operation_id, target, Some(prompt)),
-                caller_context,
-            )),
-            DaemonRequest::ResumeAgentWithCurrentIntegration {
-                operation_id,
-                target,
-                expected_revision,
-            } => Some((
-                AgentDispatchRequest::RepairResume(operation_id, target, expected_revision),
-                None,
-            )),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::Agent {
+            operation_id,
+            intent,
+        } => Some((AgentDispatchRequest::Launch(operation_id, intent), None)),
+        DaemonRequest::AgentInventory {
+            workspace,
+            caller_context,
+        } => Some((AgentDispatchRequest::Inventory(workspace), caller_context)),
+        DaemonRequest::AgentWorkspaceObservation { workspace } => {
+            Some((AgentDispatchRequest::WorkspaceObservation(workspace), None))
+        }
+        DaemonRequest::DiagnoseAgents {
+            workspace,
+            expected,
+        } => Some((AgentDispatchRequest::Diagnose(workspace, expected), None)),
+        DaemonRequest::PlanDaemonRestartAgents { expected, force } => {
+            Some((AgentDispatchRequest::PlanRestart(expected, force), None))
+        }
+        DaemonRequest::RestartAgents {
+            workspace,
+            expected,
+            runtimes,
+            force,
+        } => Some((
+            AgentDispatchRequest::Restart(workspace, expected, runtimes, force),
+            None,
+        )),
+        DaemonRequest::ResumeAgent {
+            operation_id,
+            target,
+            caller_context,
+        } => Some((
+            AgentDispatchRequest::Resume(operation_id, target, None),
+            caller_context,
+        )),
+        DaemonRequest::ResumeAgentHeadless {
+            operation_id,
+            target,
+            prompt,
+            caller_context,
+        } => Some((
+            AgentDispatchRequest::Resume(operation_id, target, Some(prompt)),
+            caller_context,
+        )),
+        DaemonRequest::ResumeAgentWithCurrentIntegration {
+            operation_id,
+            target,
+            expected_revision,
+        } => Some((
+            AgentDispatchRequest::RepairResume(operation_id, target, expected_revision),
+            None,
+        )),
+        _ => None,
+    };
     let Some((request, caller_context)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -2699,24 +2683,22 @@ pub(super) fn dispatch_codex_session_capture(
     agent: &SharedAgentRuntime,
     peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::CodexSessionCapture {
-                native_session_id,
-                caller_context,
-            } => Some((native_session_id, caller_context)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::CodexSessionCapture {
+            native_session_id,
+            caller_context,
+        } => Some((native_session_id, caller_context)),
+        _ => None,
+    };
     let Some((native_session_id, caller_context)) = request else {
         return usagi_daemon::presentation::ipc::reject_unhandled_request(
             request_id,
-            body.clone(),
+            serde_json::Value::Null,
             hello,
         );
     };
@@ -2767,21 +2749,19 @@ pub(super) fn dispatch_agent_phase_report(
     agent: &SharedAgentRuntime,
     peer_process: &PeerProcess,
     request_id: usagi_core::infrastructure::ipc::RequestId,
-    body: &serde_json::Value,
+    request: DaemonRequest,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
 
-    let request = serde_json::from_value::<DaemonRequest>(body.clone())
-        .ok()
-        .and_then(|request| match request {
-            DaemonRequest::AgentPhaseReport {
-                phase,
-                native_session_id,
-                caller_context,
-            } => Some((phase, native_session_id, caller_context)),
-            _ => None,
-        });
+    let request = match request {
+        DaemonRequest::AgentPhaseReport {
+            phase,
+            native_session_id,
+            caller_context,
+        } => Some((phase, native_session_id, caller_context)),
+        _ => None,
+    };
     let result = request
         .ok_or_else(|| {
             ProtocolError::new(ErrorCode::InvalidArgument, "agent phase report is invalid")

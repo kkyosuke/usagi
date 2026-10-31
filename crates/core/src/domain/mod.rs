@@ -25,7 +25,6 @@ pub mod settings;
 pub mod terminal_launch;
 pub mod terminal_retention;
 pub mod terminal_visibility;
-pub mod trace;
 pub mod user_decision;
 pub mod workspace;
 pub mod workspace_layout;

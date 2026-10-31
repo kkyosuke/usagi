@@ -864,12 +864,13 @@ fn a_gated_rollover_hands_authority_over_when_every_participant_can_route_by_own
         from: Some(world.old),
         to: world.next,
     };
-    let outcome = execute_gated_rollover(
+    let outcome = execute_gated_rollover_with_guard(
         &world.store,
         &world.locator,
-        Some(&world.gate),
+        &world.gate,
         &plan,
         &operation("a"),
+        &mut || Ok(()),
     )
     .unwrap();
     assert_eq!(outcome, RolloverOutcome::Advanced);
@@ -894,12 +895,13 @@ fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write(
         from: Some(world.old),
         to: world.next,
     };
-    let failure = execute_gated_rollover(
+    let failure = execute_gated_rollover_with_guard(
         &world.store,
         &world.locator,
-        Some(&world.gate),
+        &world.gate,
         &plan,
         &operation("a"),
+        &mut || Ok(()),
     )
     .unwrap_err();
 
