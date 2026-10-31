@@ -1122,10 +1122,8 @@ pub(super) fn drive_workspace_controller(
             garden_inventory = Some(completion.port);
             output_job = None;
         }
-        if let Some(job) = &output_job
-            && deck.output_search_token() != Some(job.token)
-        {
-            job.cancel();
+        if let Some(job) = &output_job {
+            job.cancel_unless_current(deck.output_search_token());
         }
         if deck.expire_attention(std::time::Instant::now()) {
             garden_observations = garden_observations.wrapping_add(1);

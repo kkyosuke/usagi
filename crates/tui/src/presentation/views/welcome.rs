@@ -409,7 +409,7 @@ mod tests {
         welcome.remove_paths(&["/tmp/alpha".into()]);
         assert_eq!(welcome.all_recent().len(), 1);
         assert!(matches!(&welcome.all_recent()[0], Recent::Unite(group)
-            if group.members().len() == 1 && group.primary_name() == "beta"));
+            if group.members().len() == 1 && group.members()[0].workspace.name == "beta"));
         welcome.remove_paths(&["/tmp/beta".into()]);
         assert!(welcome.all_recent().is_empty());
         assert!(welcome.last_projects().is_none());

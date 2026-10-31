@@ -8,7 +8,7 @@ use super::{
     AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime, AgentRuntimeRef,
     BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan, DaemonRestartInterruptionError,
     DaemonRestartResumeOptions, ErrorCode, OperationId, ProtocolError, ProviderCaptureProvenance,
-    ProviderKind, ProviderResumeReason, ResumePrompt, SessionId, SessionScopeResolver,
+    ProviderKind, ProviderResumeReason, ResumePrompt, SessionScopeResolver,
     daemon_restart_resume_semantic_key, expected_integration_revisions,
     holds_live_or_unknown_agent, is_resume_source_state, map_dispatch_storage_error,
     map_runtime_error, provider_matches_profile, repair_resume_semantic_key, resume_semantic_key,
@@ -130,14 +130,12 @@ impl AgentRuntime {
         })?;
         let record = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::StaleTarget, "agent resume target is stale")
             })?;
-        self.readiness_ticket(record.launch.plan.profile_id)
+        self.readiness_ticket(record.launch.plan.profile_id.clone())
             .map(Some)
     }
 
@@ -363,7 +361,7 @@ impl AgentRuntime {
         force: bool,
     ) -> Result<DaemonRestartAgentPlan, ProtocolError> {
         let expected = expected_integration_revisions(expected)?;
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let failed = self.failed_dispatch_ids().unwrap_or_default();
         if records.iter().any(|record| {
             holds_live_or_unknown_agent(record.state)
@@ -397,7 +395,7 @@ impl AgentRuntime {
                             "a live Agent profile has no current integration revision",
                         )
                     })?;
-                let (available, reason) = Self::repair_source_availability(record, &records);
+                let (available, reason) = Self::resume_source_metadata_availability(record, &records);
                 let target = resume_target(record).filter(|_| available).ok_or_else(|| {
                     ProtocolError::new(
                         ErrorCode::Busy,
@@ -483,9 +481,7 @@ impl AgentRuntime {
         {
             let stopped = self
                 .coordinator
-                .snapshot()
-                .records
-                .into_iter()
+                .records()
                 .filter(|record| {
                     runtime_ids.contains(&record.runtime.agent_runtime_id.as_str())
                         && record.state == crate::usecase::runtime::RuntimeState::Exited
@@ -543,25 +539,19 @@ impl AgentRuntime {
             record.superseded_by,
             record.resume_source,
             record.continuation,
-        ) && self
-            .coordinator
-            .snapshot()
-            .records
-            .iter()
-            .any(|replacement| {
-                use crate::usecase::runtime::DurableOperationOutcome;
-                replacement.runtime.agent_runtime_id == replacement_id
-                    && replacement.resumed_from == Some(source_id)
-                    && replacement.continuation == Some(continuation)
-                    && replacement.launch.request.scope == record.launch.request.scope
-                    && matches!(
-                        replacement.outcome,
-                        DurableOperationOutcome::ResumeSucceeded
-                            | DurableOperationOutcome::Completed
-                            | DurableOperationOutcome::ExitUnavailable
-                    )
-            })
-        {
+        ) && self.coordinator.records().any(|replacement| {
+            use crate::usecase::runtime::DurableOperationOutcome;
+            replacement.runtime.agent_runtime_id == replacement_id
+                && replacement.resumed_from == Some(source_id)
+                && replacement.continuation == Some(continuation)
+                && replacement.launch.request.scope == record.launch.request.scope
+                && matches!(
+                    replacement.outcome,
+                    DurableOperationOutcome::ResumeSucceeded
+                        | DurableOperationOutcome::Completed
+                        | DurableOperationOutcome::ExitUnavailable
+                )
+        }) {
             // A later generation would use integration-repair semantics while
             // an old-owner rollback used the original integration. A committed
             // spawn closes this pending item; replaying its operation under the
@@ -716,31 +706,26 @@ impl AgentRuntime {
         outcome
     }
 
-    /// Safe interrupted/resume projection for a managed session. Provider IDs
-    /// are never returned; only availability and a stable reason cross IPC.
-    #[must_use]
-    pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
-        let records = self.coordinator.snapshot().records;
-        let mut resumable = Vec::new();
-        for record in &records {
-            if record.runtime.session_id != Some(session) {
-                continue;
-            }
-            if holds_live_or_unknown_agent(record.state) {
-                return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
-            }
-            if is_resume_source_state(record.state) {
-                resumable.push(record);
-            }
-        }
-        if resumable.is_empty() {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+    pub(super) fn session_resume_status_from(
+        &self,
+        session_records: &[&crate::usecase::runtime::DurableRuntimeRecord],
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        if session_records
+            .iter()
+            .any(|record| holds_live_or_unknown_agent(record.state))
+        {
+            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
         }
         let mut available = 0;
         let mut reason = ProviderResumeReason::ProviderMetadataUnavailable;
-        for record in resumable {
+        for record in session_records
+            .iter()
+            .copied()
+            .filter(|record| is_resume_source_state(record.state))
+        {
             let (candidate_available, candidate_reason) =
-                self.resume_source_availability(record, &records);
+                self.resume_source_availability(record, records);
             available += usize::from(candidate_available);
             if reason == ProviderResumeReason::ProviderMetadataUnavailable
                 && candidate_reason != ProviderResumeReason::ProviderMetadataUnavailable
@@ -757,10 +742,11 @@ impl AgentRuntime {
         (false, reason)
     }
 
-    pub(super) fn resume_source_availability(
-        &self,
+    /// Validates durable lineage and provider metadata independently from the
+    /// installed adapter revision, which integration repair may intentionally migrate.
+    pub(super) fn resume_source_metadata_availability(
         record: &crate::usecase::runtime::DurableRuntimeRecord,
-        records: &[crate::usecase::runtime::DurableRuntimeRecord],
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
     ) -> (bool, ProviderResumeReason) {
         let (Some(continuation), Some(_source), Some(reference)) = (
             record.continuation,
@@ -795,43 +781,46 @@ impl AgentRuntime {
             && record.launch.request.scope == reference.scope
             && record.runtime.terminal.workspace_id == reference.scope.workspace_id
             && record.runtime.terminal.session_id == reference.scope.session_id
-            && record.runtime.terminal.worktree_id == reference.scope.worktree_id;
-        let adapter_compatible = self
-            .registry
-            .profile(&record.launch.plan.profile_id)
-            .is_ok_and(|profile| {
-                profile.revision == reference.adapter_revision
-                    && profile.capabilities.contains(&AgentCapability::Resume)
-                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
-            });
-        if internally_compatible && adapter_compatible {
+            && record.runtime.terminal.worktree_id == reference.scope.worktree_id
+            && provider_matches_profile(reference.provider, &record.launch.plan.profile_id);
+        if internally_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
         } else {
             (false, ProviderResumeReason::IncompatibleProviderMetadata)
         }
     }
 
-    pub(super) fn repair_resume_source_availability(
+    pub(super) fn resume_source_availability(
         &self,
         record: &crate::usecase::runtime::DurableRuntimeRecord,
-        records: &[crate::usecase::runtime::DurableRuntimeRecord],
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        self.resume_source_availability_at_revision(
+            record,
+            records,
+            record.launch.plan.profile_revision,
+        )
+    }
+
+    /// Normal resume uses the captured revision; integration repair supplies
+    /// the current revision while preserving the same durable source checks.
+    pub(super) fn resume_source_availability_at_revision(
+        &self,
+        record: &crate::usecase::runtime::DurableRuntimeRecord,
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
         expected_revision: u32,
     ) -> (bool, ProviderResumeReason) {
-        let (source_compatible, reason) = Self::repair_source_availability(record, records);
+        let (source_compatible, reason) =
+            Self::resume_source_metadata_availability(record, records);
         if !source_compatible {
             return (false, reason);
         }
-        let reference = record
-            .provider_resume
-            .as_ref()
-            .expect("repair-compatible source has provider metadata");
         let current_compatible = self
             .registry
             .profile(&record.launch.plan.profile_id)
             .is_ok_and(|profile| {
                 profile.revision == expected_revision
                     && profile.capabilities.contains(&AgentCapability::Resume)
-                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
             });
         if current_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
@@ -871,7 +860,7 @@ impl AgentRuntime {
             .filter(|run| run.agent_id == agent_id && Some(run.run_id) != source)
             .map(|run| run.run_id)
             .collect();
-        Ok(!self.coordinator.snapshot().records.iter().any(|record| {
+        Ok(!self.coordinator.records().any(|record| {
             runs.contains(&record.operation.operation_id)
                 && !matches!(
                     record.state,

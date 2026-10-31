@@ -242,11 +242,9 @@ impl Config {
         }
     }
 
-    /// Read the current workspace settings and open its focused editor.
-    ///
-    /// Overview uses this entry point so `config` targets the workspace that owns
-    /// the command palette instead of initially presenting the global defaults.
+    /// Open workspace settings without Git-ref candidates in controller/view tests.
     #[must_use]
+    #[cfg(test)]
     pub fn load_workspace_with_available_models(
         port: &mut dyn SettingsPort,
         available_models: AvailableAgentModels,

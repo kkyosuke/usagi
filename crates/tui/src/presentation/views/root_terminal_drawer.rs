@@ -55,6 +55,7 @@ pub struct RootTerminalViewport {
 
 /// Compute a full-width drawer that rises from the bottom edge.
 #[must_use]
+#[cfg(test)]
 pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeometry {
     geometry_for(raw_height, raw_width, usize::MAX)
 }
@@ -62,6 +63,7 @@ pub fn geometry(raw_height: usize, raw_width: usize) -> RootTerminalDrawerGeomet
 /// Compute the bottom drawer inside a bounded horizontal band. Director uses
 /// its left background band here so both drawers remain fully visible.
 #[must_use]
+#[cfg(test)]
 pub fn geometry_for(
     raw_height: usize,
     raw_width: usize,
@@ -111,6 +113,7 @@ pub fn geometry_for_mode(
 
 /// Terminal rows/columns inside the drawer's border, padding, and footer.
 #[must_use]
+#[cfg(test)]
 pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> RootTerminalViewport {
     terminal_viewport_for(raw_height, raw_width, usize::MAX)
 }
@@ -140,6 +143,7 @@ pub fn terminal_viewport_for_mode(
 }
 
 #[must_use]
+#[cfg(test)]
 pub fn terminal_point_at(
     raw_height: usize,
     raw_width: usize,
@@ -160,6 +164,7 @@ pub fn terminal_point_at(
 }
 
 #[must_use]
+#[cfg(test)]
 pub fn terminal_point_at_for(
     raw_height: usize,
     raw_width: usize,
@@ -212,6 +217,7 @@ pub fn terminal_point_at_for_mode(
 
 /// Resolve a click on the visible terminal-only tab strip.
 #[must_use]
+#[cfg(test)]
 pub fn tab_at(
     raw_height: usize,
     raw_width: usize,
@@ -256,6 +262,7 @@ pub fn tab_at_for_mode(
 
 /// Render the terminal drawer above a dimmed Home background.
 #[must_use]
+#[cfg(test)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
@@ -267,17 +274,6 @@ pub fn render_over(
 
 #[must_use]
 pub fn render_over_for(
-    raw_height: usize,
-    raw_width: usize,
-    available_width: usize,
-    base: &[String],
-    projection: &RootTerminalDrawerProjection,
-) -> Vec<String> {
-    render_over_for_mode(raw_height, raw_width, available_width, base, projection)
-}
-
-#[must_use]
-pub fn render_over_for_mode(
     raw_height: usize,
     raw_width: usize,
     available_width: usize,

@@ -4,9 +4,8 @@
 //! A session's terminal output is scanned for pull-request URLs; each becomes a
 //! [`PrLink`] rendered as a `#<number>` badge. Lifecycle state is re-exported
 //! from the canonical inventory module so persisted compatibility records and
-//! daemon snapshots cannot disagree on its vocabulary. A session usually shows
-//! several, rolled up by
-//! [`PrLink::aggregate`] and de-duplicated by [`PrLink::pr_key`].
+//! daemon snapshots cannot disagree on its vocabulary. Recent-workspace counts
+//! de-duplicate these compatibility links with [`PrLink::pr_key`].
 
 use serde::{Deserialize, Serialize};
 
@@ -107,38 +106,6 @@ impl PrLink {
             Some(end) => &self.url[..end],
             None => &self.url,
         }
-    }
-
-    /// Roll a session's per-worktree pull requests up into the single list its
-    /// sidebar row shows: every worktree's PRs, in order, de-duplicated by
-    /// [`pr_key`](Self::pr_key) so a PR shared across repositories — or seen with
-    /// both its plain and `/files` URL — is listed once. When duplicates carry
-    /// different titles the first sighting keeps its URL but adopts a title if it
-    /// still lacks one. Dismissal and a user pin are sticky across the fold.
-    #[must_use]
-    pub fn aggregate(prs: impl IntoIterator<Item = PrLink>) -> Vec<PrLink> {
-        let mut out: Vec<PrLink> = Vec::new();
-        for pr in prs {
-            if let Some(existing) = out.iter_mut().find(|p| p.pr_key() == pr.pr_key()) {
-                // Read these before moving `pr.title` out below (a partial move
-                // would otherwise forbid borrowing `pr` again).
-                let dismissed = pr.is_dismissed();
-                let pinned = pr.pinned;
-                if existing.title.is_none() {
-                    existing.title = pr.title;
-                }
-                // Dismissal is sticky: if any worktree hid this PR it stays hidden
-                // folded, so a tombstone is never resurrected by a sibling that
-                // still lists it. A user-pinned state on either side is preserved.
-                if dismissed {
-                    existing.state = PrState::Dismissed;
-                }
-                existing.pinned |= pinned;
-            } else {
-                out.push(pr);
-            }
-        }
-        out
     }
 }
 

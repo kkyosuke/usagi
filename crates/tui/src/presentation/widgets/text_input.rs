@@ -71,15 +71,16 @@ impl TextInput {
         self.value.is_empty()
     }
 
-    /// キャレットより前のテキスト（描画側は [`Self::after`] と対にして、間に
-    /// キャレットのグリフを置く）。
+    /// キャレットより前のテキストを編集テストで観測する。
     #[must_use]
+    #[cfg(test)]
     pub fn before(&self) -> &str {
         &self.value[..self.cursor]
     }
 
     /// キャレットから行末までのテキスト。
     #[must_use]
+    #[cfg(test)]
     pub fn after(&self) -> &str {
         &self.value[self.cursor..]
     }
@@ -90,11 +91,6 @@ impl TextInput {
     pub fn selection(&self) -> Option<(usize, usize)> {
         let anchor = self.anchor?;
         (anchor != self.cursor).then(|| (anchor.min(self.cursor), anchor.max(self.cursor)))
-    }
-
-    /// 選択を解除する（Esc や非選択移動から使う）。キャレット・テキストは変えない。
-    pub fn clear_selection(&mut self) {
-        self.anchor = None;
     }
 
     /// 値全体を差し替え、キャレットを末尾に置く。キーボード以外から値が入るとき
@@ -513,17 +509,6 @@ mod tests {
             mv(&mut input);
             assert_eq!(input.selection(), None, "move must drop the selection");
         }
-    }
-
-    #[test]
-    fn clear_selection_keeps_the_text_and_caret() {
-        let mut input = TextInput::with_value("abcd");
-        input.select_home();
-        let cursor = input.cursor();
-        input.clear_selection();
-        assert_eq!(input.selection(), None);
-        assert_eq!(input.value(), "abcd");
-        assert_eq!(input.cursor(), cursor);
     }
 
     #[test]

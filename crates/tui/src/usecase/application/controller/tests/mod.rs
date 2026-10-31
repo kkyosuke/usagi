@@ -16,96 +16,6 @@ use super::*;
 use crate::usecase::application::environment_source::parse_environment_source;
 use std::collections::VecDeque;
 
-/// Fake entry backend for Welcome / Open attach scenarios. It has no IO: tests
-/// inspect dispatched effects and enqueue typed completions in deterministic order.
-#[derive(Debug, Default)]
-#[cfg(test)]
-struct FakeEntryBackend {
-    effects: Vec<Effect>,
-    events: VecDeque<EntryEvent>,
-}
-
-#[cfg(test)]
-impl FakeEntryBackend {
-    /// Queue one attach completion (including a deliberately stale one).
-    fn push_event(&mut self, event: EntryEvent) {
-        self.events.push_back(event);
-    }
-
-    /// Effects dispatched by the entry reducer.
-    #[must_use]
-    fn effects(&self) -> &[Effect] {
-        &self.effects
-    }
-}
-
-/// Dispatch entry effects and replay queued fake-backend completions.
-#[cfg(test)]
-fn run_entry_fake_cycle(
-    state: &mut EntryState,
-    backend: &mut FakeEntryBackend,
-    effects: Vec<Effect>,
-) {
-    backend.effects.extend(effects);
-    while let Some(event) = backend.events.pop_front() {
-        let _ = update_entry(state, event);
-    }
-}
-
-/// Backend seam for New. Implementations route clone through git then project
-/// registration, and Existing directly through project/registry registration.
-#[cfg(test)]
-trait NewProjectPort {
-    /// Dispatch one New operation.
-    fn dispatch(&mut self, effect: Effect);
-    /// Return the next completion, if any.
-    fn next_event(&mut self) -> Option<NewEvent>;
-}
-
-/// IO-free backend used by New reducer scenarios.
-#[derive(Debug, Default)]
-#[cfg(test)]
-struct FakeNewBackend {
-    effects: Vec<Effect>,
-    events: VecDeque<NewEvent>,
-}
-
-#[cfg(test)]
-impl FakeNewBackend {
-    fn push_event(&mut self, event: NewEvent) {
-        self.events.push_back(event);
-    }
-    #[must_use]
-    fn effects(&self) -> &[Effect] {
-        &self.effects
-    }
-}
-
-#[cfg(test)]
-impl NewProjectPort for FakeNewBackend {
-    fn dispatch(&mut self, effect: Effect) {
-        self.effects.push(effect);
-    }
-    fn next_event(&mut self) -> Option<NewEvent> {
-        self.events.pop_front()
-    }
-}
-
-/// Dispatch New effects and replay queued fake-backend completions.
-#[cfg(test)]
-fn run_new_fake_cycle(
-    state: &mut NewState,
-    backend: &mut impl NewProjectPort,
-    effects: Vec<Effect>,
-) {
-    for effect in effects {
-        backend.dispatch(effect);
-    }
-    while let Some(event) = backend.next_event() {
-        let _ = update_new(state, event);
-    }
-}
-
 /// effect を実行し、backend event を取り出す TUI-local port。
 #[cfg(test)]
 trait BackendPort {
@@ -2138,27 +2048,6 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         "directory name must be a safe name without path separators"
     );
 
-    let mut entry = EntryState::new(
-        vec![EntryWorkspace::new(workspace, "repo")],
-        vec![workspace],
-    );
-    assert_eq!(
-        update_entry(&mut entry, EntryEvent::OpenRecent(workspace)).len(),
-        1
-    );
-    assert!(update_entry(&mut entry, EntryEvent::OpenRecent(workspace)).is_empty());
-
-    let mut new = NewState::new(NewMode::Existing, existing_form());
-    assert_eq!(update_new(&mut new, NewEvent::Submit).len(), 1);
-    assert!(update_new(&mut new, NewEvent::Submit).is_empty());
-    assert!(
-        new.request(NewRequest::Existing {
-            path: PathBuf::from("/work/existing"),
-            name: "existing".to_owned(),
-        })
-        .is_empty()
-    );
-
     let mut state = AppState::home(workspace, vec![session]);
     assert!(!update_editor_backend(
         &mut state,
@@ -2467,31 +2356,6 @@ fn coverage_contract_executes_guarded_reducer_success_paths() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
     state.select_row(Selection::Target(Target::Session(session)));
-
-    let choice = EntryWorkspace::new(workspace, "demo");
-    let mut entry = EntryState::new(vec![choice.clone()], vec![workspace]);
-    let _ = update_entry(&mut entry, EntryEvent::ShowOpen);
-    let _ = update_entry(&mut entry, EntryEvent::OpenSingle(workspace));
-    let mut entry = EntryState::new(vec![choice], vec![workspace]);
-    let _ = update_entry(&mut entry, EntryEvent::OpenRecent(workspace));
-    let mut entry = EntryState::new(Vec::new(), Vec::new());
-    let _ = update_entry(&mut entry, EntryEvent::ShowOpen);
-    let _ = update_entry(&mut entry, EntryEvent::Back);
-
-    let mut new = NewState::new(NewMode::Existing, existing_form());
-    let effects = update_new(&mut new, NewEvent::Submit);
-    let token = match effects.as_slice() {
-        [Effect::RegisterWorkspace { token, .. }] => *token,
-        other => panic!("unexpected new effect: {other:?}"),
-    };
-    let _ = update_new(
-        &mut new,
-        NewEvent::Result {
-            token,
-            result: Err(Notice::new("failed")),
-        },
-    );
-    let _ = update_new(&mut new, NewEvent::Retry);
 
     let decision = pending_decision(workspace);
     state.decisions = vec![decision.clone()];

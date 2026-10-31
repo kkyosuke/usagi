@@ -137,45 +137,6 @@ pub fn adopt_legacy(owner: DaemonGeneration, records: &[LegacyRuntimeRecord]) ->
     AdoptionReport { shard, unknown }
 }
 
-/// Why a planned rollover was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RolloverRefusal {
-    /// The predecessor's children have no OS-observable identity.
-    NoRealChildIdentity,
-    /// The predecessor still writes whole-snapshot stores.
-    NoShardedStore,
-}
-
-/// Whether the predecessor may take part in a planned rollover.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RolloverAdmission {
-    /// Both capabilities are advertised: a seamless handoff is possible.
-    Allowed,
-    /// The predecessor cannot hand over safely, so the caller must refuse or
-    /// perform an explicit cold transition (stop, then start).
-    ColdTransitionRequired(RolloverRefusal),
-}
-
-/// Decide whether an old active generation may hand over while it stays alive.
-#[must_use]
-pub fn planned_rollover_admission(capabilities: &[String]) -> RolloverAdmission {
-    for (capability, refusal) in [
-        (
-            REAL_CHILD_IDENTITY_CAPABILITY,
-            RolloverRefusal::NoRealChildIdentity,
-        ),
-        (SHARDED_STORE_CAPABILITY, RolloverRefusal::NoShardedStore),
-    ] {
-        if !capabilities
-            .iter()
-            .any(|advertised| advertised == capability)
-        {
-            return RolloverAdmission::ColdTransitionRequired(refusal);
-        }
-    }
-    RolloverAdmission::Allowed
-}
-
 fn classify(record: &LegacyRuntimeRecord) -> Option<AdoptionRefusal> {
     if record.operation.is_none() {
         return Some(AdoptionRefusal::NoOperation);

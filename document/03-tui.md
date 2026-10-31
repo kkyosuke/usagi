@@ -223,20 +223,19 @@ project bar 右端の `Action needed` または `Ctrl-O i` は、開いている
 この節が横断一覧の表示・観測契約の正本である。登録済みでも deck に開いていない workspace は対象外とする。
 
 受信箱は `Action needed`（要対応）と `Updates`（お知らせ）の 2 つの表示を持ち、開くたびに要対応を選ぶ。
-質問・レビュー・問題の確認が必要な項目を最初に示し、実行中や CI 待ちなどの進行状況は Updates に表示する。
+usagi 内で質問への回答や停止したタスクへの対応が必要な項目を最初に示し、実行中や作成・削除待ちなどの進行状況は
+Updates に表示する。GitHub の PR レビュー・マージ待ち、CI 失敗・待機、修正要求、PR 状態の取得中は
+受信箱の両方の表示・件数・確認中の判定から除外する。PR 状態は各 session の PR 一覧で確認する。
 
 | 表示 | 項目の先頭 | 内容 | 開く先 |
 |---|---|---|---|
 | Action needed | Answer question | 回答待ちの質問 | 選んだ質問の回答画面 |
-| Action needed | Review PR | 確認済みの open・非 draft PR | 対象 session の PR 一覧で該当 PR を選択 |
-| Action needed | Check PR problem | CI 失敗・修正要求 | 対象 session の PR 一覧で該当 PR を選択 |
 | Action needed | Check stopped task | session / Agent の失敗・中断 | 対象 session |
-| Updates | Waiting | 作成・削除、Agent の待機、CI 待ち | 対象 session または PR 一覧 |
-| Updates | Checking status | PR 状態の未確認・再取得 | 対象 session の PR 一覧で該当 PR を選択 |
+| Updates | Waiting | 作成・削除、Agent の待機 | 対象 session |
 | Updates | Running | 実行中の Agent | 対象 session |
 
 各項目は「次にすること・project / session」と「理由」の 2 行で表示する。狭幅では操作・対象・理由を 3 行に分ける。
-選択項目を開く操作は footer の `Enter: Answer question` / `Open PR` / `Open session` に示す。
+選択項目を開く操作は footer の `Enter: Answer question` / `Open questions` / `Open session` に示す。
 `Tab` または左右キー、見出しのクリックで要対応とお知らせを切り替える。文字入力は現在の表示の操作・名前・理由を検索する。
 検索は大文字・小文字を区別しない連続一致で、各 field 内の一致位置が早いもの、同順位では対応種別の順に並べる。
 離れた文字や field 間の文字をつなげて一致させず、一致部分を grapheme を壊さず強調する。
@@ -245,33 +244,29 @@ project bar 右端の `Action needed` または `Ctrl-O i` は、開いている
 横幅に応じて要対応タブを `Actions` と短縮する。理由まで描けない場合はリサイズを案内し、見えていない項目の Enter は実行しない。
 更新時も workspace と項目の identity で選択を保ち、選択項目が消えた直後の Enter は別項目を開かない。
 移動時は session identity を再確認し、未保存の編集があれば切り替えを拒否する。
-質問 ID / PR identity を移動先まで引き継ぐ。質問は取得中に別項目を開けず、最新 snapshot の該当質問を回答画面で開く。
+質問 ID を移動先まで引き継ぐ。質問は取得中に別項目を開けず、最新 snapshot の該当質問を回答画面で開く。
 個別の質問を開いても、ほかの質問の未読状態は保持する。
 古い観測で選んだ質問が見つからなくても、後続の更新で同じ ID を確認できればその回答画面を開く。
 対象が消失・取得失敗した場合は説明を表示し、一覧の先頭へ置き換えない。質問の読み込み・エラー画面を閉じた後の返答で再度開かない。
-PR も cache / 非同期取得のどちらでも該当番号を選ぶ。個別の質問・PR を表示した後も、更新や取得失敗だけで別項目へ置き換えない。
-受信箱を開く前から Director / Shell が表示されていても、個別 PR の取得結果・失敗を前面に表示する。
-PR の取得待ちは `Esc` または新しいキー・クリック操作で取り消し、遅延した返答で再び開かない。
-旧応答で個別の識別情報がない場合は、従来どおり質問一覧 / PR 一覧を開く（wire 契約は [IPC](04-ipc.md) を参照）。
+個別の質問を表示した後も、更新や取得失敗だけで別項目へ置き換えない。
+旧応答で個別の識別情報がない場合は、従来どおり質問一覧を開く（wire 契約は [IPC](04-ipc.md) を参照）。
 
 対応待ちがなければ「対応不要」、状態を確認できていない場合は「確認済みの対応待ちはない」と区別して表示する。
 状態を取得できない project 数は、自動で再試行中の情報として本文の下に表示し、選択できる対応項目にしない。
-workspace の観測に成功しても PR の状態が未確認なら「確認中」とする。未確認の PR を対応ゼロと断定せず、
-Updates の説明も「確認中」に切り替える。確認済みの CI 待ちや実行中とは区別する。
 Idle や正常終了だけでは人の対応待ちと判定しない。Agent の Waiting は通常の処理途中にも発生するため、
 明示的な質問がなければ Updates に表示し、人に terminal の確認を促さない。
 
 project bar の右端は操作から余白で分け、確認できた対応待ちがあるときだけ黄色で表示する。
-件数には最新の観測の判断・レビュー・停止だけを数え、進行状況や未確認の項目を加えない。
+件数には最新の観測の質問・停止だけを数え、進行状況や未確認の項目を加えない。
 
 | 右端の表示 | 意味 |
 |---|---|
 | `! Action needed (N)`（黄色） | 全 project を確認済みで、対応待ちが N 件ある |
-| `! Action needed (N+)`（黄色） | 確認できた対応待ちが N 件あり、未確認の project / PR 状態もある |
-| `Checking status…`（dim） | 確認できた対応待ちはなく、未確認の project / PR 状態がある |
-| `No action needed`（dim） | 全 project / PR 状態を確認済みで対応待ちがない |
+| `! Action needed (N+)`（黄色） | 確認できた対応待ちが N 件あり、未確認の project もある |
+| `Checking status…`（dim） | 確認できた対応待ちはなく、未確認の project がある |
+| `No action needed`（dim） | 全 project を確認済みで対応待ちがない |
 
-project tab の黄色い `!N` は確認できた対応待ちの件数、`!N+` は未確認 PR もある状態、控えめな `?` は未取得・失敗・古い観測・PR の未確認を示す。
+project tab の黄色い `!N` は確認できた対応待ちの件数、控えめな `?` は project の未取得・失敗・古い観測を示す。
 背景観測は Garden を閉じていても継続し、1 round 最大16 project を順番に巡回する。成功後3秒、全件取得失敗後5秒で再取得する。
 30秒以上更新されない結果は Stale とする。取得失敗時は以前の観測を保持するが、受信箱の項目・件数・移動の対象から外す。
 状態不明の表示は未取得・失敗した project を含み、未取得を「対応待ちゼロ」とみなさない。
@@ -1854,8 +1849,9 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 | Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
 | Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
 
-Artifacts は生成物の実ファイルがある利用可能な session だけ、Agent 状態行の右端にアイコンと件数を下線付きで表示する。
-空の directory とルートの `.gitignore` は数えない。未取得・取得失敗時も表示しない。件数は背景で約1秒ごとに更新する。
+Artifacts はユーザー向けの成果物がある利用可能な session だけ、Agent 状態行の右端にアイコンと件数を下線付きで表示する。
+件数・一覧・統合検索は[成果物の掲載規則](05-daemon.md#session-artifacts-と削除前の保管)に従う。
+未取得・取得失敗時は表示しない。件数は背景で約1秒ごとに更新する。
 表示は [Icons 設定](#settings-scope-と-workspace-entry)に従い、`text` では `Artifacts N` とする。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は[統合検索](#統合検索)を開く。`Tab` で Artifact を選ぶと成果物を横断検索できる。
 sidebar が16桁未満の場合は label を省略し、`artifact` コマンドまたは統合検索から開く。
@@ -1888,9 +1884,9 @@ HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
 アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。
 未確認の helper やアプリは終了させず、自然終了を回収する。失敗が確認できたコピーは取り除く。
-本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には `artifacts/` への保存案内を表示する。
+本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には調査結果・HTML・画像を `artifacts/` へ保存する案内を表示する。
 
-Git の tracked / changed / ignore 判定を使わず、`artifacts/` のファイルを列挙する。横断一覧は
+Git の tracked / changed / ignore 判定を使わず、`artifacts/` の掲載対象ファイルを列挙する。横断一覧は
 `.usagi/sessions/<name>/artifacts/` と `.usagi/artifacts/<name>/<snapshot-id>/` を対象とし、作成途中の保管先は表示しない。
 ファイル一覧は開き直すと更新される。パス逸脱・symlink・特殊ファイルは拒否し、読み込み失敗は一覧内に表示する。
 テキストのサイズ上限・UTF-8 判定・制御文字の無害化は File Preview と共通である。
@@ -2419,7 +2415,8 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 完全な `TerminalRef` にだけ attach する。daemon 不通、拒否、未知・古い completion では local spawn や
 名前からの terminal 推測をしない。
 
-daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
+daemon inventory の tab 復元は presentation の `restore`、attach/resume、stream、resync は
+`terminal_session::TerminalSession` が担当する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry の
 変化時に送り、失敗した場合は同じ pending geometry を capped exponential backoff で再試行する。ACK 後にだけ
 右ペインの VT screen を resize して PTY と同じ viewport に確定する。detach はこの client の
@@ -2430,7 +2427,7 @@ live tab と client subscription を直ちに外し、残る tab または Close
 [config の `default_model`](#settings-scope-と-workspace-entry) を解決して明示 profile として送る。controller が発行した
 `OperationId` は pending tab と IPC request で同一のまま保持され、adapter は同じ ID の effect を一度しか
 送らない。accepted の間は Agent pending tab を残し、replay を含む final は workspace と session が一致する
-完全な `TerminalRef` のときだけ既存の `PaneRuntime` へ渡す。
+完全な `TerminalRef` のときだけ pane reducer へ渡し、選択された tab に `TerminalSession` が attach する。
 
 ```text
 Closeup agent ─► LaunchAgent(operation, profile?) ─► daemon Agent request

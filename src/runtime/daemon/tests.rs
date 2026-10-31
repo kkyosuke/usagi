@@ -294,7 +294,10 @@ fn terminal_capacity_uses_the_global_setting_and_falls_back_safely() {
 struct FixtureAgentStore;
 
 impl RuntimeStore for FixtureAgentStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(
+        &mut self,
+        _: RuntimeStoreSnapshot,
+    ) -> Result<(), usagi_daemon::usecase::resources::StoreError> {
         Ok(())
     }
 }
@@ -5697,7 +5700,7 @@ fn metrics_response(
         pipeline,
         observer,
         usagi_core::infrastructure::ipc::RequestId("metrics".into()),
-        &serde_json::to_value(DaemonRequest::Metrics { action }).unwrap(),
+        &DaemonRequest::Metrics { action },
         &session_test_hello(),
     );
     let EnvelopeKind::Response { outcome, body, .. } = response.kind else {
@@ -8470,7 +8473,10 @@ impl TerminalScopeResolver for TestTerminalScope {
 struct TestTerminalStore;
 
 impl TerminalStore for TestTerminalStore {
-    fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
+    fn save(
+        &mut self,
+        _: TerminalStoreSnapshot,
+    ) -> Result<(), usagi_daemon::usecase::resources::StoreError> {
         Ok(())
     }
 }
@@ -8947,6 +8953,48 @@ fn await_projection(condition: impl Fn() -> bool) {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn projection_worker_resets_partial_urls_after_metadata_overflow() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut projector = OutputPrProjector::new(FencedPrInventory::new(
+        PrInventoryStore::new(directory.path()),
+        GenerationRole::Active,
+    ));
+    let session = SessionId::new();
+    let terminal = TerminalId::new();
+    projector
+        .observe_committed(
+            terminal,
+            Some(session),
+            b" https://github.com/o/r/pull/11\n https://github.com/o/r/pu",
+        )
+        .unwrap();
+    let projector = Arc::new(Mutex::new(projector));
+    let projection = Arc::new(PrProjectionQueue::new());
+    let shutdown = Arc::new(ShutdownRequest::new());
+    // Fill before starting the consumer, so the item-bound reset is deterministic.
+    for _ in 0..=usagi_daemon::usecase::pr_projection::QUEUE_ITEMS_MAX {
+        projection.submit_closed(TerminalId::new(), None);
+    }
+    projection.submit_output(terminal, Some(session), b"ll/12\n".to_vec());
+    projection.submit_closed(terminal, Some(session));
+    projection.close();
+    shutdown.request();
+    let worker =
+        start_pr_projection_worker(Arc::clone(&projector), Arc::clone(&projection), shutdown)
+            .unwrap();
+    worker.join().unwrap();
+    let mut projector = projector.lock().unwrap();
+    assert_eq!(projector.carried_terminals(), 0);
+    let inventory = projector.snapshot(session).unwrap();
+    assert_eq!(inventory.entries.len(), 1);
+    assert_eq!(
+        inventory.entries[0].identity.as_url(),
+        "https://github.com/o/r/pull/11",
+        "reset preserves discoveries without joining a pre-overflow partial URL"
+    );
 }
 
 #[test]
@@ -11620,16 +11668,11 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
     );
     let agent = empty_agent_runtime(DispatchStore::new(temporary.path().join("dispatch")));
     let decisions = UserDecisionStore::new(temporary.path().join("decisions"));
-    let prs = Arc::new(Mutex::new(OutputPrProjector::new(FencedPrInventory::new(
-        PrInventoryStore::new(temporary.path().join("prs")),
-        GenerationRole::Active,
-    ))));
     let call = |workspace, raw: &serde_json::Value| {
         super::attention::dispatch(
             &agent,
             &bound,
             &decisions,
-            &prs,
             workspace,
             usagi_core::infrastructure::ipc::RequestId("attention".into()),
             raw,

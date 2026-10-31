@@ -78,7 +78,7 @@ impl Search {
             }
             return OverlayIntent::Stay;
         }
-        let before = self.input.value().to_owned();
+        let mut query_changed = false;
         match key {
             Key::Escape | Key::Quit => return OverlayIntent::Cancel,
             Key::Enter => {
@@ -105,34 +105,9 @@ impl Search {
                     .saturating_add(if matches!(key, Key::Down) { 1 } else { 5 })
                     .min(self.rows().len().saturating_sub(1));
             }
-            Key::Char(ch)
-                if !ch.is_control() && self.input.value().chars().count() < QUERY_LIMIT =>
-            {
-                self.input.insert(*ch);
-            }
-            Key::Paste(text) => {
-                let remaining = QUERY_LIMIT.saturating_sub(self.input.value().chars().count());
-                self.input.insert_str(
-                    &text
-                        .chars()
-                        .filter(|ch| !ch.is_control())
-                        .take(remaining)
-                        .collect::<String>(),
-                );
-            }
-            Key::Backspace => {
-                self.input.backspace();
-            }
-            Key::Delete => {
-                self.input.delete_forward();
-            }
-            Key::Left => self.input.move_left(),
-            Key::Right => self.input.move_right(),
-            Key::Home | Key::LineStart => self.input.move_home(),
-            Key::End | Key::LineEnd => self.input.move_end(),
-            _ => {}
+            _ => query_changed = super::search_input::edit(&mut self.input, key, QUERY_LIMIT),
         }
-        if self.input.value() != before {
+        if query_changed {
             self.refresh();
         }
         OverlayIntent::Stay

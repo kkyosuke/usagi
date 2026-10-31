@@ -2,10 +2,10 @@
 //!
 //! workspace 画面で `:` を押すと開く、workspace 全体に効くコマンドの入力パレット。入力欄に
 //! 打つと候補が前方一致で絞り込まれ、Tab で補完、↑↓ で履歴を遡れる。選択中 command の
-//! usage / long help と直前の結果も同じ固定位置に表示する。中央に浮かぶ枠付きダイアログとして
+//! usage / long help も同じ固定位置に表示する。中央に浮かぶ枠付きダイアログとして
 //! 描く（配置は共通の [`modal`] widget に委譲）。
 //!
-//! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
+//! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render_over`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。キー入力の解釈は入力層が整うときに載せ、ここでは
 //! 入力編集と候補選択の純粋操作だけを公開する。
 
@@ -18,7 +18,7 @@ use usagi_core::domain::settings::ModalSelectionMode;
 const INNER_WIDTH: usize = 56;
 /// 候補一覧に使う最大行数（スクロール表示・展開したサブコマンドを含む）。
 const MAX_MATCHES: usize = 8;
-/// input, heading, candidates, help, result, and footer.
+/// Input, heading, candidates, help, spacing, and footer.
 const BODY_HEIGHT: usize = 20;
 
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
@@ -31,16 +31,6 @@ pub struct OverviewModal {
     history_index: Option<usize>,
     expanded: bool,
     selected_subcommand: usize,
-    result: Option<PaletteResult>,
-}
-
-/// command 実行後に palette の結果帯へ残す安全な 1 行。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaletteResult {
-    /// 成功または通常の通知。
-    Notice(String),
-    /// 入力・実行時の安全なエラー。
-    Error(String),
 }
 
 impl OverviewModal {
@@ -93,12 +83,6 @@ impl OverviewModal {
     #[must_use]
     pub fn history(&self) -> &[String] {
         &self.history
-    }
-
-    /// 直前の command 実行結果。
-    #[must_use]
-    pub fn result(&self) -> Option<&PaletteResult> {
-        self.result.as_ref()
     }
 
     /// 入力の前方一致で絞り込んだコマンド候補。入力が空なら全件。
@@ -167,21 +151,6 @@ impl OverviewModal {
             self.history.push(submission);
         }
         self.history_index = None;
-    }
-
-    /// command 実行の通常結果を結果帯へ表示する。
-    pub fn set_result(&mut self, result: impl Into<String>) {
-        self.result = Some(PaletteResult::Notice(result.into()));
-    }
-
-    /// command 実行の安全なエラーを結果帯へ表示する。
-    pub fn set_error(&mut self, error: impl Into<String>) {
-        self.result = Some(PaletteResult::Error(error.into()));
-    }
-
-    /// 結果帯を消す。
-    pub fn clear_result(&mut self) {
-        self.result = None;
     }
 
     /// Enter で controller へ渡す入力。空欄では選択中候補を実行する。
@@ -396,17 +365,7 @@ fn body(state: &OverviewModal) -> Vec<String> {
         lines.push(modal::caption(help.usage));
         lines.push(modal::caption(help.long_description));
     }
-    lines.push(String::new());
-    match state.result() {
-        Some(PaletteResult::Notice(result)) => {
-            lines.push(Role::Success.style().paint(&format!("  {result}")));
-        }
-        Some(PaletteResult::Error(error)) => {
-            lines.push(Role::Danger.style().paint(&format!("  {error}")));
-        }
-        None => lines.push(String::new()),
-    }
-    lines.push(String::new());
+    lines.extend([String::new(), String::new(), String::new()]);
     lines.push(modal::footer(
         if state.selection_mode == ModalSelectionMode::Action {
             "Tab: complete ↑↓ select → expand Enter run Esc: close"
@@ -415,20 +374,6 @@ fn body(state: &OverviewModal) -> Vec<String> {
         },
     ));
     lines
-}
-
-/// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
-    modal::render_body(
-        raw_height,
-        raw_width,
-        "Overview",
-        INNER_WIDTH,
-        BODY_HEIGHT,
-        body(state),
-    )
 }
 
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
@@ -454,9 +399,13 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{OverviewModal, PaletteResult, render, render_over};
+    use super::{OverviewModal, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::ModalSelectionMode;
+
+    fn render(height: usize, width: usize, state: &OverviewModal) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
 
     fn joined(state: &OverviewModal) -> String {
         render(24, 80, state)
@@ -650,12 +599,12 @@ mod tests {
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
-        modal.set_error("safe error");
-        let error = render(40, 80, &modal)
+        type_str(&mut modal, "session");
+        let filtered = render(40, 80, &modal)
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
-        assert_eq!(empty, error);
+        assert_eq!(empty, filtered);
     }
 
     #[test]
@@ -698,26 +647,12 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_long_help_and_a_result_strip() {
+    fn render_shows_long_help_and_controls() {
         let mut modal = OverviewModal::new();
         modal.select_next(); // clean
-        modal.set_result("Settings saved");
         let text = joined(&modal);
         assert!(text.contains("Compare daemon lifecycle state"));
-        assert!(text.contains("Settings saved"));
         assert!(text.contains("Tab: complete"));
-        assert_eq!(
-            modal.result(),
-            Some(&PaletteResult::Notice("Settings saved".to_owned()))
-        );
-
-        modal.set_error("Settings are unavailable");
-        assert_eq!(
-            modal.result(),
-            Some(&PaletteResult::Error("Settings are unavailable".to_owned()))
-        );
-        modal.clear_result();
-        assert_eq!(modal.result(), None);
     }
 
     #[test]

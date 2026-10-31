@@ -162,7 +162,7 @@ impl Search {
         if self.document.is_some() {
             return self.handle_document(key, slots);
         }
-        let before = self.input.value().to_owned();
+        let mut query_changed = false;
         match key {
             Key::Escape | Key::Quit => return OverlayIntent::Cancel,
             Key::Enter => {
@@ -212,34 +212,9 @@ impl Search {
                 };
                 self.selected = self.entries.get(next).cloned();
             }
-            Key::Char(ch)
-                if !ch.is_control() && self.input.value().chars().count() < QUERY_LIMIT =>
-            {
-                self.input.insert(*ch);
-            }
-            Key::Paste(text) => {
-                let remaining = QUERY_LIMIT.saturating_sub(self.input.value().chars().count());
-                self.input.insert_str(
-                    &text
-                        .chars()
-                        .filter(|ch| !ch.is_control())
-                        .take(remaining)
-                        .collect::<String>(),
-                );
-            }
-            Key::Backspace => {
-                self.input.backspace();
-            }
-            Key::Delete => {
-                self.input.delete_forward();
-            }
-            Key::Left => self.input.move_left(),
-            Key::Right => self.input.move_right(),
-            Key::Home | Key::LineStart => self.input.move_home(),
-            Key::End | Key::LineEnd => self.input.move_end(),
-            _ => {}
+            _ => query_changed = super::search_input::edit(&mut self.input, key, QUERY_LIMIT),
         }
-        if before != self.input.value() {
+        if query_changed {
             self.refresh(slots);
         }
         OverlayIntent::Stay

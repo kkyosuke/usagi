@@ -86,8 +86,7 @@ pub(super) fn dispatch_session_action(
             .sessions()
             .lock()
             .ok()
-            .and_then(|runtime| runtime.snapshot().ok())
-            .and_then(|snapshot| snapshot.get("revision").and_then(serde_json::Value::as_u64))
+            .and_then(|runtime| runtime.revision().ok())
             .unwrap_or_default();
         Ok(usagi_daemon::usecase::session_runtime::SessionReply {
             operation_id: operation_id.to_owned(),
@@ -202,22 +201,22 @@ pub(super) fn dispatch_session_action(
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_conversations()?;
             let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-            let agent_statuses = runtime
-                .workspace_agent_statuses(workspace)
+            let agent_observations = runtime
+                .session_observations(workspace)
                 .map_err(|_| SessionRuntimeError::Storage)?;
             let runtime_observation = |id, names: &_, parents: &_| {
                 use usagi_core::infrastructure::session_snapshot::SessionRuntimeObservation;
 
                 let (parent_session_name, organization_depth, organization_path) =
                     session_organization(id, names, parents);
-                let (agent_resumable, agent_resume_reason) = runtime.session_resume_status(id);
+                let observation = agent_observations.get(&id).copied().unwrap_or_default();
                 SessionRuntimeObservation {
                     creator_continuation: conversations.get(&id).and_then(|value| value.creator),
                     director_continuation: conversations.get(&id).and_then(|value| value.director),
-                    agent_phase: runtime.session_phase(id),
-                    agent_resumable,
-                    agent_resume_reason,
-                    agent_status: agent_statuses.get(&id).copied(),
+                    agent_phase: observation.phase,
+                    agent_resumable: observation.resumable,
+                    agent_resume_reason: observation.resume_reason,
+                    agent_status: observation.status,
                     parent_session_name,
                     organization_depth,
                     organization_path,
@@ -881,13 +880,7 @@ fn delegate_brief(
             .sessions()
             .lock()
             .map_err(|_| SessionRuntimeError::Storage)?;
-        let workspace = sessions
-            .snapshot()
-            .map_err(|_| SessionRuntimeError::Storage)?
-            .get("workspace_id")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .ok_or(SessionRuntimeError::Storage)?;
+        let workspace = sessions.workspace_id()?;
         if authenticated.workspace_id != workspace {
             return Err(SessionRuntimeError::ScopeUnavailable);
         }

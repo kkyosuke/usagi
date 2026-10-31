@@ -2139,19 +2139,12 @@ mod attention {
         let attention = WorkspaceAttention {
             workspace: snapshot.workspace_id,
             items: vec![AttentionItem {
-                key: "pr:waiting".into(),
+                key: "session:creating".into(),
                 session: Some(session),
-                label: "checks".into(),
+                label: "setup".into(),
                 kind: AttentionKind::System,
-                reason: "CI is running".into(),
-                target: Some(
-                    usagi_core::domain::attention::AttentionTarget::PullRequest {
-                        identity: usagi_core::domain::pr_inventory::canonicalize(
-                            "https://github.com/example/repo/pull/2",
-                        )
-                        .unwrap(),
-                    },
-                ),
+                reason: "Session is being created".into(),
+                target: None,
                 status_unknown: false,
             }],
         };
@@ -2213,11 +2206,11 @@ mod attention {
                 .iter()
                 .any(|frame| { frame.iter().any(|line| line.contains("Progress updates")) })
         );
-        assert_eq!(*requests.lock().unwrap(), vec![Target::Session(session)]);
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn attention_pr_visit_never_reuses_the_previous_active_session_when_target_is_unusable() {
+    fn inbox_ignores_legacy_pr_rows_for_every_session_lifecycle() {
         use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
         for lifecycle in [
             SessionLifecycle::Available,
@@ -2259,6 +2252,7 @@ mod attention {
                 Key::Enter,
                 Key::Live(LiveTerminalAction::OpenAttention),
                 Key::Enter,
+                Key::Escape,
                 Key::CtrlQ,
                 Key::Char('y'),
             ]);
@@ -2278,15 +2272,17 @@ mod attention {
             )
             .unwrap();
             assert!(matches!(result, WorkspaceStep::Quit));
-            let requested = pr_requests.lock().unwrap().clone();
-            assert_eq!(
-                requested,
-                if lifecycle == SessionLifecycle::Available {
-                    vec![Target::Session(target)]
-                } else {
-                    vec![]
-                },
-                "{lifecycle:?}"
+            assert!(pr_requests.lock().unwrap().is_empty(), "{lifecycle:?}");
+            assert!(
+                term.frames
+                    .iter()
+                    .any(|frame| { frame.iter().any(|line| line.contains("Action needed (0)")) })
+            );
+            assert!(
+                !term
+                    .frames
+                    .iter()
+                    .any(|frame| { frame.iter().any(|line| line.contains("Review target PR")) })
             );
         }
     }

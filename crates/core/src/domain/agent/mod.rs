@@ -45,19 +45,6 @@ pub enum AgentStatus {
     Failed,
 }
 
-/// Deterministically reduces the durable states of every Agent in one session.
-///
-/// A session can retain several dispatchable Agents.  Live work wins over a
-/// retained terminal state, while a failure wins over an idle or exited Agent
-/// once no Agent is running or starting.  Equal states are indistinguishable,
-/// so this result never depends on registry insertion order.
-#[must_use]
-pub fn aggregate_agent_status(
-    statuses: impl IntoIterator<Item = AgentStatus>,
-) -> Option<AgentStatus> {
-    statuses.into_iter().reduce(dominant_agent_status)
-}
-
 /// Returns the status that represents the stronger session-level state.
 #[must_use]
 pub const fn dominant_agent_status(current: AgentStatus, candidate: AgentStatus) -> AgentStatus {
@@ -1185,12 +1172,19 @@ mod tests {
             AgentStatus::Running,
         ];
         let reversed = ordered.into_iter().rev();
-        assert_eq!(aggregate_agent_status(ordered), Some(AgentStatus::Running));
-        assert_eq!(aggregate_agent_status(reversed), Some(AgentStatus::Running));
         assert_eq!(
-            aggregate_agent_status([AgentStatus::Exited, AgentStatus::Idle, AgentStatus::Failed,]),
+            ordered.into_iter().reduce(dominant_agent_status),
+            Some(AgentStatus::Running)
+        );
+        assert_eq!(
+            reversed.reduce(dominant_agent_status),
+            Some(AgentStatus::Running)
+        );
+        assert_eq!(
+            [AgentStatus::Exited, AgentStatus::Idle, AgentStatus::Failed]
+                .into_iter()
+                .reduce(dominant_agent_status),
             Some(AgentStatus::Failed)
         );
-        assert_eq!(aggregate_agent_status([]), None);
     }
 }

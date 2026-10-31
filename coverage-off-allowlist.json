@@ -26,7 +26,7 @@
       "reason": "composition",
       "owner": "root-cli",
       "expires": "2027-01-31",
-      "tests": "every_parsed_outcome_maps_to_one_typed_runtime_action"
+      "tests": "welcome_entry_renders_the_welcome_screen, cli_daemon_reply_contract_maps_stdout_stderr_and_exit_code, mcp_autostarts_without_manual_daemon_start, config_entry_renders_the_config_screen, doctor_reports_real_diagnostics, open_registers_and_renders_an_explicit_or_current_workspace"
     },
     {
       "path": "src/runtime/clipboard.rs",

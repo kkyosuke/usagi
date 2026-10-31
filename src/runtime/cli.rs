@@ -26,28 +26,7 @@ pub(crate) fn dispatch(
     info: &AppInfo,
 ) -> std::io::Result<ExitCode> {
     let outcome = usagi_cli::cli::run(args, info.version, out, err)?;
-    let action = Action::from(&outcome);
-    action_io::execute_action(action, outcome, out, err, info)
-}
-
-enum Action {
-    Exit,
-    LaunchWelcome,
-    LaunchWorkspace,
-    LaunchConfig,
-    LaunchDoctor,
-    LaunchDaemon,
-    SyncDaemonAfterUpdate,
-    RequestDaemonReplacement,
-    LaunchMcp,
-    Clean,
-    CaptureCodexSession,
-    ReportAgentPhase,
-    EmitAgySystemPrompt,
-    GuardWorkspace,
-    ClaudeSandbox,
-    DaemonRequest,
-    SelfUpdate,
+    action_io::execute_action(outcome, out, err, info)
 }
 
 /// How an MCP stdio process reaches the daemon.
@@ -71,37 +50,12 @@ fn mcp_daemon_route(workspace_root: Option<&std::ffi::OsStr>) -> McpDaemonRoute 
     }
 }
 
-impl From<&RunOutcome> for Action {
-    fn from(outcome: &RunOutcome) -> Self {
-        match outcome {
-            RunOutcome::Exit(_) => Self::Exit,
-            RunOutcome::LaunchTui(TuiRequest::Welcome) => Self::LaunchWelcome,
-            RunOutcome::LaunchTui(TuiRequest::Workspace { .. }) => Self::LaunchWorkspace,
-            RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
-            RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
-            RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
-            RunOutcome::SyncDaemonAfterUpdate { .. } => Self::SyncDaemonAfterUpdate,
-            RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
-            RunOutcome::LaunchMcp => Self::LaunchMcp,
-            RunOutcome::Clean { .. } => Self::Clean,
-            RunOutcome::CaptureCodexSession => Self::CaptureCodexSession,
-            RunOutcome::ReportAgentPhase { .. } => Self::ReportAgentPhase,
-            RunOutcome::EmitAgySystemPrompt => Self::EmitAgySystemPrompt,
-            RunOutcome::GuardWorkspace => Self::GuardWorkspace,
-            RunOutcome::ClaudeSandbox { .. } => Self::ClaudeSandbox,
-            RunOutcome::DaemonRequest(_) => Self::DaemonRequest,
-            RunOutcome::SelfUpdate(_) => Self::SelfUpdate,
-        }
-    }
-}
-
-// Each action arm binds a fully classified route to production stdin, process,
-// daemon, or terminal IO. The classification above remains coverage-visible.
+// Bind parsed outcomes directly to production stdin, process, daemon or terminal IO.
 mod action_io {
     #![coverage(off)]
 
     use super::{
-        Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
+        AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
         LauncherPolicyInputs, McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox, clean,
         daemon, execute_self_update, exit_code, guard_workspace, managed_update_sync_exit_code,
         mcp_daemon_route, tui, write_client_error, write_daemon_outcome,
@@ -109,34 +63,30 @@ mod action_io {
 
     #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     pub(super) fn execute_action(
-        action: Action,
         outcome: RunOutcome,
         out: &mut dyn Write,
         err: &mut dyn Write,
         info: &AppInfo,
     ) -> std::io::Result<ExitCode> {
-        match (action, outcome) {
-            (Action::Exit, RunOutcome::Exit(code)) => Ok(exit_code(code)),
-            (Action::LaunchWelcome, RunOutcome::LaunchTui(TuiRequest::Welcome)) => {
+        match outcome {
+            RunOutcome::Exit(code) => Ok(exit_code(code)),
+            RunOutcome::LaunchTui(TuiRequest::Welcome) => {
                 tui::launch(out, info, &EntryScreen::Welcome).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchWorkspace, RunOutcome::LaunchTui(TuiRequest::Workspace { path })) => {
+            RunOutcome::LaunchTui(TuiRequest::Workspace { path }) => {
                 let path = tui::resolve_workspace_path(&path.unwrap_or(std::env::current_dir()?))?;
                 tui::launch(out, info, &EntryScreen::Workspace { path }).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchConfig, RunOutcome::LaunchTui(TuiRequest::Config)) => {
+            RunOutcome::LaunchTui(TuiRequest::Config) => {
                 tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchDoctor, RunOutcome::LaunchTui(TuiRequest::Doctor { fix })) => {
+            RunOutcome::LaunchTui(TuiRequest::Doctor { fix }) => {
                 tui::launch_doctor(out, info, fix).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
+            RunOutcome::LaunchDaemon(command) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
-            (
-                Action::SyncDaemonAfterUpdate,
-                RunOutcome::SyncDaemonAfterUpdate { restart_agents },
-            ) => {
+            RunOutcome::SyncDaemonAfterUpdate { restart_agents } => {
                 match daemon::sync_after_update(out, ClientPolicy::cli(), info, restart_agents)? {
                     Ok(outcome) => {
                         let managed_request = std::env::var("USAGI_MANAGED_UPDATE").as_deref()
@@ -168,7 +118,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::RequestDaemonReplacement, RunOutcome::RequestDaemonReplacement { force }) => {
+            RunOutcome::RequestDaemonReplacement { force } => {
                 match daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)? {
                     Ok(()) => Ok(ExitCode::SUCCESS),
                     Err(error) => {
@@ -177,7 +127,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::LaunchMcp, RunOutcome::LaunchMcp) => {
+            RunOutcome::LaunchMcp => {
                 let stdin = std::io::stdin();
                 let workspace_root =
                     std::env::var_os(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
@@ -269,10 +219,8 @@ mod action_io {
                     }
                 }
             }
-            (Action::Clean, RunOutcome::Clean { apply, force }) => {
-                clean::run(out, err, apply, force)
-            }
-            (Action::CaptureCodexSession, RunOutcome::CaptureCodexSession) => {
+            RunOutcome::Clean { apply, force } => clean::run(out, err, apply, force),
+            RunOutcome::CaptureCodexSession => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
                 let request = match usagi_cli::cli::hooks::codex_session_capture::request_from_hook(
@@ -305,7 +253,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase, hook_event }) => {
+            RunOutcome::ReportAgentPhase { phase, hook_event } => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
                 let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
@@ -353,7 +301,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::EmitAgySystemPrompt, RunOutcome::EmitAgySystemPrompt) => {
+            RunOutcome::EmitAgySystemPrompt => {
                 let prompt = std::env::var(usagi_daemon::usecase::agy::SYSTEM_PROMPT_ENV).ok();
                 if usagi_cli::cli::hooks::agy_system_prompt::write_response(prompt.as_deref(), out)
                     .is_ok()
@@ -364,22 +312,19 @@ mod action_io {
                     Ok(ExitCode::FAILURE)
                 }
             }
-            (Action::GuardWorkspace, RunOutcome::GuardWorkspace) => guard_workspace(out),
-            (
-                Action::ClaudeSandbox,
-                RunOutcome::ClaudeSandbox {
-                    mode,
-                    agent,
-                    protected_root,
-                    backend,
-                    tmpdir,
-                    home,
-                    cache_dir,
-                    writable_roots,
-                    read_only_roots,
-                    command,
-                },
-            ) => claude_sandbox(
+            RunOutcome::GuardWorkspace => guard_workspace(out),
+            RunOutcome::ClaudeSandbox {
+                mode,
+                agent,
+                protected_root,
+                backend,
+                tmpdir,
+                home,
+                cache_dir,
+                writable_roots,
+                read_only_roots,
+                command,
+            } => claude_sandbox(
                 mode,
                 agent.as_deref(),
                 LauncherPolicyInputs {
@@ -394,7 +339,7 @@ mod action_io {
                 command,
                 err,
             ),
-            (Action::DaemonRequest, RunOutcome::DaemonRequest(request)) => {
+            RunOutcome::DaemonRequest(request) => {
                 match daemon::policy_client(ClientPolicy::cli()) {
                     Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
                     Err(error) => {
@@ -403,10 +348,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::SelfUpdate, RunOutcome::SelfUpdate(request)) => {
-                execute_self_update(&request, out, err)
-            }
-            _ => unreachable!("action classification and outcome diverged"),
+            RunOutcome::SelfUpdate(request) => execute_self_update(&request, out, err),
         }
     }
 }
@@ -871,13 +813,12 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
-    use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
-    use usagi_core::infrastructure::ipc::{ClientError, DaemonReply, DaemonRequest};
+    use usagi_cli::cli::InstallerRequest;
+    use usagi_core::infrastructure::ipc::{ClientError, DaemonReply};
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
-    use usagi_core::usecase::claude_sandbox::SandboxMode;
 
     use super::{
-        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
+        ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
         execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
         process_outcome, resolve_launch_agent, update_installer_command,
         validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
@@ -1126,93 +1067,6 @@ mod tests {
         assert_eq!(exit_code(7), std::process::ExitCode::from(7));
         assert_eq!(exit_code(-1), std::process::ExitCode::from(1));
         assert_eq!(exit_code(256), std::process::ExitCode::from(1));
-    }
-
-    #[test]
-    fn every_parsed_outcome_maps_to_one_typed_runtime_action() {
-        let assert_route = |outcome: RunOutcome, expected: Action| {
-            assert_eq!(
-                std::mem::discriminant(&Action::from(&outcome)),
-                std::mem::discriminant(&expected)
-            );
-        };
-        assert_route(RunOutcome::Exit(7), Action::Exit);
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Welcome),
-            Action::LaunchWelcome,
-        );
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Workspace {
-                path: Some(PathBuf::from("workspace")),
-            }),
-            Action::LaunchWorkspace,
-        );
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Config),
-            Action::LaunchConfig,
-        );
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Doctor { fix: false }),
-            Action::LaunchDoctor,
-        );
-        assert_route(
-            RunOutcome::LaunchDaemon(DaemonCommand::Start),
-            Action::LaunchDaemon,
-        );
-        assert_route(
-            RunOutcome::SyncDaemonAfterUpdate {
-                restart_agents: false,
-            },
-            Action::SyncDaemonAfterUpdate,
-        );
-        assert_route(
-            RunOutcome::RequestDaemonReplacement { force: true },
-            Action::RequestDaemonReplacement,
-        );
-        assert_route(RunOutcome::LaunchMcp, Action::LaunchMcp);
-        assert_route(
-            RunOutcome::Clean {
-                apply: false,
-                force: false,
-            },
-            Action::Clean,
-        );
-        assert_route(RunOutcome::CaptureCodexSession, Action::CaptureCodexSession);
-        assert_route(RunOutcome::EmitAgySystemPrompt, Action::EmitAgySystemPrompt);
-        assert_route(
-            RunOutcome::ReportAgentPhase {
-                phase: "working".into(),
-                hook_event: None,
-            },
-            Action::ReportAgentPhase,
-        );
-        assert_route(RunOutcome::GuardWorkspace, Action::GuardWorkspace);
-        assert_route(
-            RunOutcome::ClaudeSandbox {
-                mode: SandboxMode::Session,
-                agent: Some("claude".to_owned()),
-                protected_root: None,
-                backend: None,
-                tmpdir: None,
-                home: None,
-                cache_dir: None,
-                writable_roots: vec![PathBuf::from("worktree")],
-                read_only_roots: vec![],
-                command: vec!["claude".into()],
-            },
-            Action::ClaudeSandbox,
-        );
-        assert_route(
-            RunOutcome::DaemonRequest(DaemonRequest::Rollover {
-                operation_id: "operation".into(),
-                restart_agents: None,
-            }),
-            Action::DaemonRequest,
-        );
-        assert_route(
-            RunOutcome::SelfUpdate(InstallerRequest::new(b"", [0; 32], false)),
-            Action::SelfUpdate,
-        );
     }
 
     #[test]

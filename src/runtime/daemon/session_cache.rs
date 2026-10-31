@@ -10,7 +10,6 @@ use usagi_core::domain::id::{SessionId, TerminalRef};
 use usagi_core::domain::session_cache::SessionCachePolicy;
 use usagi_core::infrastructure::git::GitRunner;
 use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
-use usagi_core::infrastructure::session_snapshot::SessionListSnapshot;
 use usagi_daemon::usecase::session_cache::{
     self, CacheCandidate, CacheNode, CacheTreeIo, CacheUsage, SessionCacheIo,
 };
@@ -338,20 +337,19 @@ impl SessionCacheIo for SystemSessionCaches<'_> {
         let agent = lock_owner(&self.agent.owner)?;
         let terminal = lock_owner(self.terminal)?;
         let runtime = lock_owner(self.bound.sessions())?;
-        let snapshot: SessionListSnapshot =
-            serde_json::from_value(runtime.snapshot().map_err(session_error)?)?;
+        let sessions = runtime.session_lifecycles().map_err(session_error)?;
         let workspace = self.bound.tenant.workspace_id();
         self.observation.activity = (
             agent.cache_cleanup_activity(workspace),
             terminal.cache_cleanup_activity(workspace),
         );
         let mut scopes = Vec::new();
-        for item in snapshot.sessions {
+        for session in sessions {
             scopes.push((
                 runtime
-                    .session_scope_by_id(item.session.session_id)
+                    .session_scope_by_id(session.session_id)
                     .map_err(session_error),
-                item.session.name,
+                session.name,
             ));
         }
         drop(runtime);
@@ -482,15 +480,14 @@ impl CacheMaintenanceIo for SystemSessionCaches<'_> {
     #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_cache_cleanup_reports_usage_and_keeps_the_session
     fn purge_detached(&mut self) -> io::Result<()> {
         let runtime = lock_owner(self.bound.sessions())?;
-        let snapshot: SessionListSnapshot =
-            serde_json::from_value(runtime.snapshot().map_err(session_error)?)?;
+        let sessions = runtime.session_lifecycles().map_err(session_error)?;
         let mut scopes = Vec::new();
-        for item in snapshot.sessions {
+        for session in sessions {
             scopes.push((
                 runtime
-                    .session_scope_by_id(item.session.session_id)
+                    .session_scope_by_id(session.session_id)
                     .map_err(session_error),
-                item.session.name,
+                session.name,
             ));
         }
         drop(runtime);

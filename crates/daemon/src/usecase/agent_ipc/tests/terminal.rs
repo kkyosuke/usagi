@@ -804,6 +804,13 @@ fn search_inspection_does_not_attach_or_write_and_rejects_replaced_identity() {
         vec![admission.terminal.clone()]
     );
     assert!(agent.search_targets(WorkspaceId::new()).is_empty());
+    let before = agent.inventory(admission.terminal.workspace_id);
+    std::fs::write(agent.dispatch.registry_path(), "broken").unwrap();
+    assert_eq!(agent.inventory(admission.terminal.workspace_id), before);
+    assert_eq!(
+        agent.search_targets(admission.terminal.workspace_id),
+        vec![admission.terminal.clone()]
+    );
     let snapshot = agent.inspect_terminal(&admission.terminal).unwrap();
     assert_eq!(snapshot.output_offset, 5);
     assert_eq!(pty(&agent).writes, writes);

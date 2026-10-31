@@ -22,6 +22,37 @@ fn refresh_artifact_counts(port: &mut DaemonMetricsPort) -> Vec<MetricsUpdate> {
     updates
 }
 
+fn initialize_git_repo(directory: &Path) {
+    for args in [
+        vec!["init", "--quiet", "--initial-branch=main", "."],
+        vec![
+            "-c",
+            "user.name=Artifact test",
+            "-c",
+            "user.email=artifact@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "base",
+        ],
+        vec!["checkout", "--quiet", "-b", "artifact-test"],
+    ] {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[test]
 fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -45,41 +76,39 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
     usagi_core::infrastructure::artifacts::prepare(tmp.path()).unwrap();
     fs::create_dir(tmp.path().join("artifacts/empty")).unwrap();
     assert!(refresh_artifact_counts(&mut port).is_empty());
+    for name in ["build.log", "build-report.ts", "metrics.json"] {
+        fs::write(tmp.path().join("artifacts").join(name), "working data").unwrap();
+    }
+    assert!(refresh_artifact_counts(&mut port).is_empty());
 
     // The same worker also retains Git summaries when they are available.
-    for args in [
-        vec!["init", "--quiet", "--initial-branch=main", "."],
-        vec![
-            "-c",
-            "user.name=Artifact test",
-            "-c",
-            "user.email=artifact@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "base",
-        ],
-        vec!["checkout", "--quiet", "-b", "artifact-test"],
-    ] {
-        let output = Command::new("git")
-            .current_dir(tmp.path())
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    initialize_git_repo(tmp.path());
     assert!(refresh_artifact_counts(&mut port).iter().any(|update| {
         matches!(update, MetricsUpdate::GitDiffs(diffs) if diffs.contains_key(&session))
     }));
 
     fs::write(tmp.path().join("artifacts/empty/report.txt"), "report").unwrap();
+    assert!(
+        refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
+            BTreeMap::from([(session, 1)])
+        ))
+    );
+
+    fs::write(
+        tmp.path().join("artifacts/other-report.md"),
+        "another report",
+    )
+    .unwrap();
+    assert!(
+        refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
+            BTreeMap::from([(session, 2)])
+        ))
+    );
+    fs::write(
+        tmp.path().join("artifacts/.index.json"),
+        r#"["empty/report.txt"]"#,
+    )
+    .unwrap();
     assert!(
         refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
             BTreeMap::from([(session, 1)])

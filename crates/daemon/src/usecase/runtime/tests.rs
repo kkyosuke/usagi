@@ -1,6 +1,7 @@
 //! runtime の振る舞いを固定するテスト。
 
 use super::*;
+use crate::usecase::resources::StoreError;
 use std::{collections::BTreeSet, path::PathBuf};
 use usagi_core::domain::{
     agent::{
@@ -31,7 +32,7 @@ fn spawn_provision_carries_an_optional_ephemeral_sandbox_launcher() {
 #[derive(Default)]
 struct Store(Vec<RuntimeStoreSnapshot>);
 impl RuntimeStore for Store {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0.push(snapshot);
         Ok(())
     }
@@ -41,10 +42,10 @@ struct ConditionalStore {
     fail_after: Option<usize>,
 }
 impl RuntimeStore for ConditionalStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.saves += 1;
         if self.fail_after.is_some_and(|limit| self.saves > limit) {
-            Err(())
+            Err(StoreError::Unavailable)
         } else {
             Ok(())
         }
@@ -52,9 +53,30 @@ impl RuntimeStore for ConditionalStore {
 }
 struct FailingStore(usize);
 impl RuntimeStore for FailingStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0 += 1;
-        if self.0 == 2 { Err(()) } else { Ok(()) }
+        if self.0 == 2 {
+            Err(StoreError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+}
+struct BackpressureStore;
+impl RuntimeStore for BackpressureStore {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+        Err(StoreError::RetentionBackpressure)
+    }
+}
+struct NoSpawn;
+impl PtySpawner for NoSpawn {
+    fn spawn(
+        &mut self,
+        _: &DurableLaunchSnapshot,
+        _: &SpawnProvision,
+        _: &TerminalRef,
+    ) -> Result<ProcessIdentity, SpawnFailure> {
+        panic!("refused admission must not spawn")
     }
 }
 #[derive(Default)]
@@ -1422,6 +1444,98 @@ fn sleeping_an_agent_releases_its_slot_and_becomes_bounded_resume_history() {
 }
 
 #[test]
+fn durable_retention_pressure_restores_fresh_admission_and_generation() {
+    let request = request();
+    let (runtime, fence) = refs(&request);
+    let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+    let before = coordinator.snapshot();
+    for _ in 0..2 {
+        assert_eq!(
+            launch(
+                &mut coordinator,
+                &request,
+                runtime.clone(),
+                fence.clone(),
+                &mut NoSpawn,
+                &mut BackpressureStore
+            ),
+            Err(RuntimeError::RetentionBackpressure)
+        );
+        assert_eq!(coordinator.snapshot(), before);
+        assert_eq!(coordinator.retention().metrics().reserved_finals, 0);
+        assert_eq!(coordinator.occupied_slots(), 0);
+    }
+}
+
+#[test]
+fn durable_retention_pressure_leaves_a_resume_source_available_for_retry() {
+    let request = request();
+    let (source, fence) = refs(&request);
+    let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+    let mut store = Store::default();
+    let mut spawner = CompensatingSpawner { terminated: false };
+    launch(
+        &mut coordinator,
+        &request,
+        source.clone(),
+        fence,
+        &mut spawner,
+        &mut store,
+    )
+    .unwrap();
+    coordinator
+        .sleep_agents(
+            &[source.agent_runtime_id.as_str()].into_iter().collect(),
+            &mut store,
+            &mut spawner,
+        )
+        .unwrap();
+    let before = coordinator.snapshot();
+    let retained = coordinator.retention().metrics().retained_finals;
+    let reserved = coordinator.retention().metrics().reserved_finals;
+    let source_retention = coordinator.retention().lookup(&source.terminal);
+    let (replacement, fence) = refs(&request);
+    assert_eq!(
+        coordinator.resume_with_semantic(
+            &request,
+            replacement.clone(),
+            fence.clone(),
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver::default(),
+            &mut BackpressureStore,
+            &mut NoSpawn,
+            None,
+            "retry".into(),
+            std::slice::from_ref(&source)
+        ),
+        Err(RuntimeError::RetentionBackpressure)
+    );
+    assert_eq!(coordinator.snapshot(), before);
+    assert_eq!(
+        coordinator.retention().lookup(&source.terminal),
+        source_retention
+    );
+    assert_eq!(coordinator.retention().metrics().retained_finals, retained);
+    assert_eq!(coordinator.retention().metrics().reserved_finals, reserved);
+    coordinator
+        .resume_with_semantic(
+            &request,
+            replacement,
+            fence,
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver::default(),
+            &mut store,
+            &mut spawner,
+            None,
+            "retry".into(),
+            &[source],
+        )
+        .unwrap();
+    coordinator.snapshot().validate_ownership().unwrap();
+    assert_eq!(coordinator.occupied_slots(), 1);
+}
+
+#[test]
 fn sleeping_an_agent_fails_closed_when_the_process_cannot_be_reaped() {
     let request = request();
     let (runtime, fence) = refs(&request);
@@ -2243,8 +2357,8 @@ fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
     }
     struct RejectingStore;
     impl RuntimeStore for RejectingStore {
-        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
-            Err(())
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+            Err(StoreError::Unavailable)
         }
     }
     struct RejectingJournal;

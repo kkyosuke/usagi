@@ -5,8 +5,8 @@ use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 use usagi_core::domain::clock::LogicalClock;
 
 use super::{
-    GcPhase, GcPlan, GcReport, RetentionLimits, admission_guard, apply_phase, collect_garbage,
-    plan_gc, serialized_bytes,
+    GcPhase, GcPlan, GcReport, RetentionLimits, apply_phase, collect_garbage, plan_gc,
+    serialized_bytes,
 };
 use crate::usecase::resources::allocator::{
     AllocatorDocument, ClaimState, ExpiryClass, LaunchFailure, OperationOutcome, ResourceAllocator,
@@ -72,7 +72,6 @@ fn nothing_is_collected_while_the_ledger_is_small_and_young() {
     let plan = plan_gc(&ledger.document, &limits(), 5);
     assert_eq!(plan, GcPlan::default());
     assert!(serialized_bytes(&ledger.document) > 0);
-    admission_guard(&ledger.document, &limits(), 5).unwrap();
 }
 
 #[test]
@@ -298,7 +297,7 @@ fn compaction_requires_a_watermark_that_actually_covers_the_ids() {
 }
 
 #[test]
-fn a_hard_cap_of_uncollectable_records_refuses_fresh_admission_instead_of_evicting() {
+fn a_hard_cap_of_uncollectable_records_reports_backpressure_without_eviction() {
     let mut ledger = Ledger::new();
     let limits = RetentionLimits::new(3, 1 << 20, 100, 10, 20);
     // A live reservation, an ambiguous final, and an unreleased spawn: three
@@ -314,10 +313,6 @@ fn a_hard_cap_of_uncollectable_records_refuses_fresh_admission_instead_of_evicti
     let plan = plan_gc(&ledger.document, &limits, 1_000);
     assert!(plan.phases.is_empty());
     assert!(plan.backpressure);
-    assert_eq!(
-        admission_guard(&ledger.document, &limits, 1_000),
-        Err(ResourceError::RetentionBackpressure)
-    );
     assert_eq!(ledger.document.operations.len(), 3);
     assert!(
         ledger.document.operation(&ambiguous).is_some(),

@@ -552,6 +552,12 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         self.carries.remove(&terminal);
     }
 
+    /// Discards partial URLs when the projection queue loses pending work.
+    /// Already discovered PRs remain in the durable inventory.
+    pub fn reset_carries(&mut self) {
+        self.carries.clear();
+    }
+
     /// Reclaims the carry for an exited terminal, crediting a candidate that the
     /// output never terminated.
     ///
@@ -1034,6 +1040,40 @@ mod tests {
         );
         assert!(projector.into_store().values.borrow().is_empty());
     }
+    #[test]
+    fn resetting_carries_preserves_discoveries_and_never_flushes_truncated_urls() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let session = SessionId::new();
+        let first = TerminalId::new();
+        let second = TerminalId::new();
+        projector
+            .observe_committed(first, Some(session), b"https://github.com/o/r/pull/7\n")
+            .unwrap();
+        projector
+            .observe_committed(first, Some(session), b"https://github.com/o/r/pu")
+            .unwrap();
+        projector
+            .observe_committed(second, Some(session), b"https://github.com/o/r/pull/1")
+            .unwrap();
+        assert_eq!(projector.carried_terminals(), 2);
+        projector.reset_carries();
+        assert_eq!(projector.carried_terminals(), 0);
+        assert!(
+            !projector
+                .observe_committed(first, Some(session), b"ll/42\n")
+                .unwrap()
+        );
+        assert!(!projector.release_terminal(second, Some(session)).unwrap());
+        let store = projector.into_store();
+        let values = store.values.borrow();
+        let urls = values[&session]
+            .entries
+            .keys()
+            .map(PrIdentity::as_url)
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["https://github.com/o/r/pull/7"]);
+    }
+
     #[test]
     fn exit_reclaims_the_carry_and_credits_an_unterminated_candidate() {
         let mut projector = OutputPrProjector::new(Store::default());

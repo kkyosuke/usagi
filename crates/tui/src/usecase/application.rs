@@ -48,8 +48,6 @@ pub mod metrics;
 pub mod observation_lane;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
-/// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
-pub mod pane_runtime;
 /// Daemon-backed PR projection and browser effect ports.
 pub mod pr;
 /// IO-free runtime boundaries used by the controller composition.

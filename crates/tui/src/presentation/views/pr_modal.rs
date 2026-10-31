@@ -5,11 +5,11 @@
 //! 枠付きダイアログとして描く（枠・配置は共通の [`modal`] widget に委譲）。
 //!
 //! 一覧する PR は daemon inventory の canonical [`PrEntry`] を持つ。状態 [`PrModal`] は端末 IO を持たない
-//! 純粋な値で、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。キー入力の
-//! 解釈は入力層が整うときに載せ、ここではカーソル移動の純粋操作だけを公開する。
+//! controller-owned の一覧と選択位置を借用する描画値で、[`render_over`] が
+//! 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。入力と選択更新は controller が所有する。
 
 use usagi_core::domain::pr_inventory::{
-    PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
+    PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState,
 };
 
 use crate::presentation::theme::{Role, Style};
@@ -27,60 +27,20 @@ const MAX_GAP_HEIGHT: usize = 2;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
-pub struct PrModal {
-    prs: Vec<PrEntry>,
+pub struct PrModal<'a> {
+    prs: &'a [PrEntry],
     selected: usize,
     filter: PrFilter,
 }
 
-/// ダミーの [`PrEntry`] を 1 件組む。
-fn dummy_pr(url: &str, title: &str, state: PrState) -> PrEntry {
-    let mut pr = PrEntry::new(canonicalize(url).expect("dummy PR URL is canonical"));
-    pr.title = Some(title.to_string());
-    pr.state = state;
-    pr
-}
-
-impl PrModal {
-    /// デモ用のダミー PR 一覧（open 2 件・merged 1 件）。
-    #[must_use]
-    pub fn dummy() -> Self {
-        Self::new(vec![
-            dummy_pr(
-                "https://github.com/kkyosuke/usagi/pull/812",
-                "feat(tui): workspace 画面を実装する",
-                PrState::Open,
-            ),
-            dummy_pr(
-                "https://github.com/kkyosuke/usagi/pull/809",
-                "feat(tui): new 画面を実装する",
-                PrState::Open,
-            ),
-            dummy_pr(
-                "https://github.com/kkyosuke/usagi/pull/801",
-                "feat(tui): config 画面を実装する",
-                PrState::Merged,
-            ),
-        ])
-    }
-
-    /// 与えた PR 一覧で開く。先頭を選択する。
-    #[must_use]
-    pub fn new(prs: Vec<PrEntry>) -> Self {
-        Self {
-            prs,
-            selected: 0,
-            filter: PrFilter::All,
-        }
-    }
-
+impl<'a> PrModal<'a> {
     /// Open with a caller-owned cursor, clamped to the list. The controller
     /// [`Overlay::Prs`] owns the selection, so `render_home` rebuilds the modal
     /// at that index each frame instead of mutating a modal-local cursor.
     ///
     /// [`Overlay::Prs`]: crate::usecase::application::controller::Overlay::Prs
     #[must_use]
-    pub fn with_selection(prs: Vec<PrEntry>, selected: usize) -> Self {
+    pub fn with_selection(prs: &'a [PrEntry], selected: usize) -> Self {
         let selected = selected.min(prs.len().saturating_sub(1));
         Self {
             prs,
@@ -95,36 +55,10 @@ impl PrModal {
         self
     }
 
-    /// PR 一覧。
-    #[must_use]
-    pub fn prs(&self) -> &[PrEntry] {
-        &self.prs
-    }
-
-    /// 選択中の添字。
-    #[must_use]
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
     /// 選択中の PR。一覧が空なら `None`。
     #[must_use]
     pub fn selected_pr(&self) -> Option<&PrEntry> {
         self.prs.get(self.selected)
-    }
-
-    /// 選択を次へ（末尾で先頭へ回り込む）。一覧が空なら何もしない。
-    pub fn select_next(&mut self) {
-        if !self.prs.is_empty() {
-            self.selected = (self.selected + 1) % self.prs.len();
-        }
-    }
-
-    /// 選択を前へ（先頭で末尾へ回り込む）。一覧が空なら何もしない。
-    pub fn select_prev(&mut self) {
-        if !self.prs.is_empty() {
-            self.selected = (self.selected + self.prs.len() - 1) % self.prs.len();
-        }
     }
 }
 
@@ -213,12 +147,12 @@ fn grouped_pr_rows(prs: &[PrEntry], start: usize, end: usize, selected: usize) -
 /// in the fixed list region. PR rows retain priority and the cursor always stays
 /// visible; only the number of visible PRs shrinks when several repositories
 /// need headings at once.
-fn grouped_window(state: &PrModal, list_height: usize) -> Vec<String> {
+fn grouped_window(state: &PrModal<'_>, list_height: usize) -> Vec<String> {
     let len = state.prs.len();
     let mut capacity = len.min(MAX_VISIBLE).min(list_height);
     loop {
         let (start, end) = modal::list_window(len, state.selected, capacity);
-        let rows = grouped_pr_rows(&state.prs, start, end, state.selected);
+        let rows = grouped_pr_rows(state.prs, start, end, state.selected);
         let indicators = usize::from(start > 0) + usize::from(end < len);
         if rows.len() + indicators <= list_height {
             let mut visible = Vec::with_capacity(rows.len() + indicators);
@@ -255,7 +189,7 @@ fn status_tabs(active: PrFilter) -> String {
 ///
 /// 選択追従の viewport は [`modal::list_window`] を使い、repository 見出しと
 /// `↑/↓ N more` を含めて固定高へ収める。
-fn body(state: &PrModal, body_height: usize) -> Vec<String> {
+fn body(state: &PrModal<'_>, body_height: usize) -> Vec<String> {
     let footer_height = FOOTER_HEIGHT.min(body_height.saturating_sub(TAB_HEIGHT));
     let flexible = body_height.saturating_sub(TAB_HEIGHT + footer_height);
     let gap_height = MAX_GAP_HEIGHT.min(flexible.saturating_sub(1));
@@ -294,20 +228,6 @@ pub fn contains(raw_height: usize, raw_width: usize, column: u16, row: u16) -> b
     modal::body_contains(raw_height, raw_width, INNER_WIDTH, BODY_HEIGHT, column, row)
 }
 
-/// 生の端末サイズに対する pull request modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠・中央寄せ・body 予約は [`modal::render_body`] に委譲）。サイズ 0 は 80×24 にフォールバック。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &PrModal) -> Vec<String> {
-    modal::render_body(
-        raw_height,
-        raw_width,
-        "Pull Request",
-        INNER_WIDTH,
-        BODY_HEIGHT,
-        body(state, BODY_HEIGHT),
-    )
-}
-
 /// `base` の workspace フレームを背景に残し、pull request modal を中央に合成する。
 /// 小端末では [`modal::render_body_over`] が背景の帯を残す。サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
@@ -315,7 +235,7 @@ pub fn render_over(
     raw_height: usize,
     raw_width: usize,
     base: &[String],
-    state: &PrModal,
+    state: &PrModal<'_>,
 ) -> Vec<String> {
     let body_height = modal::reserved_body_height(raw_height, raw_width, BODY_HEIGHT);
     modal::render_body_over(
@@ -332,12 +252,31 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{PrModal, body, contains, render, render_over, status_tabs};
+    use super::{PrModal, body, contains, render_over, status_tabs};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use crate::usecase::application::controller::PrFilter;
     use usagi_core::domain::pr_inventory::{
         PrChecksState, PrEntry, PrRefreshState, PrReviewDecision, PrState, canonicalize,
     };
+
+    fn dummy_prs() -> Vec<PrEntry> {
+        [
+            (812, "feat(tui): workspace 画面を実装する", PrState::Open),
+            (809, "feat(tui): new 画面を実装する", PrState::Open),
+            (801, "feat(tui): config 画面を実装する", PrState::Merged),
+        ]
+        .into_iter()
+        .map(|(number, title, state)| {
+            let mut pr = pr_entry(
+                number,
+                &format!("https://github.com/kkyosuke/usagi/pull/{number}"),
+            );
+            pr.title = Some(title.to_owned());
+            pr.state = state;
+            pr
+        })
+        .collect()
+    }
 
     fn pr_entry(number: u64, url: &str) -> PrEntry {
         let identity = canonicalize(url).unwrap_or_else(|| {
@@ -351,19 +290,19 @@ mod tests {
 
     #[test]
     fn empty_and_populated_lists_keep_the_pr_box_height_stable() {
-        let empty = render(40, 80, &PrModal::new(Vec::new()))
+        let empty = render_over(40, 80, &[], &PrModal::with_selection(&[], 0))
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
-        let populated = render(40, 80, &PrModal::dummy())
+        let populated = render_over(40, 80, &[], &PrModal::with_selection(&dummy_prs(), 0))
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
         assert_eq!(empty, populated);
     }
 
-    fn joined(state: &PrModal) -> String {
-        render(24, 80, state)
+    fn joined(state: &PrModal<'_>) -> String {
+        render_over(24, 80, &[], state)
             .iter()
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
@@ -372,9 +311,10 @@ mod tests {
 
     #[test]
     fn dummy_lists_pull_requests() {
-        let modal = PrModal::dummy();
-        assert_eq!(modal.prs().len(), 3);
-        assert_eq!(modal.selected(), 0);
+        let prs = dummy_prs();
+        let modal = PrModal::with_selection(&prs, 0);
+        assert_eq!(modal.prs.len(), 3);
+        assert_eq!(modal.selected, 0);
         assert_eq!(modal.selected_pr().map(PrEntry::number), Some(812));
         // derive された Clone / Debug も触れる。
         assert!(format!("{modal:?}").contains("812"));
@@ -409,9 +349,9 @@ mod tests {
                 auto_open: true,
             })
             .collect::<Vec<_>>();
-        let modal = PrModal::new(entries);
-        assert_eq!(modal.prs().len(), 4);
-        assert_eq!(modal.prs()[0].refresh, PrRefreshState::Pending);
+        let modal = PrModal::with_selection(&entries, 0);
+        assert_eq!(modal.prs.len(), 4);
+        assert_eq!(modal.prs[0].refresh, PrRefreshState::Pending);
         let rendered = joined(&modal);
         assert!(rendered.contains("open"));
     }
@@ -456,7 +396,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let rendered = joined(&PrModal::new(entries));
+        let rendered = joined(&PrModal::with_selection(&entries, 0));
         for label in [
             "draft",
             "ci✓",
@@ -476,45 +416,23 @@ mod tests {
             pr_entry(1, "https://example.com/pull/1"),
             pr_entry(2, "https://example.com/pull/2"),
         ];
-        let at_second = PrModal::with_selection(prs.clone(), 1);
-        assert_eq!(at_second.selected(), 1);
+        let at_second = PrModal::with_selection(&prs, 1);
+        assert_eq!(at_second.selected, 1);
         assert_eq!(at_second.selected_pr().map(PrEntry::number), Some(2));
         // An out-of-range index clamps to the last entry.
-        assert_eq!(PrModal::with_selection(prs, 9).selected(), 1);
+        assert_eq!(PrModal::with_selection(&prs, 9).selected, 1);
         // An empty list stays at zero with no selection.
-        let empty = PrModal::with_selection(Vec::new(), 3);
-        assert_eq!(empty.selected(), 0);
+        let empty = PrModal::with_selection(&[], 3);
+        assert_eq!(empty.selected, 0);
         assert!(empty.selected_pr().is_none());
-    }
-
-    #[test]
-    fn selection_wraps_both_ways() {
-        let mut modal = PrModal::dummy();
-        modal.select_prev(); // wrap to last (index 2 = #801)
-        assert_eq!(modal.selected(), 2);
-        assert_eq!(modal.selected_pr().map(PrEntry::number), Some(801));
-        modal.select_next(); // wrap to 0
-        assert_eq!(modal.selected(), 0);
-    }
-
-    #[test]
-    fn selection_is_a_noop_when_empty() {
-        let mut modal = PrModal::new(Vec::new());
-        assert!(modal.selected_pr().is_none());
-        modal.select_next();
-        modal.select_prev();
-        assert_eq!(modal.selected(), 0);
     }
 
     #[test]
     fn long_lists_scroll_to_keep_the_selection_and_footer_visible() {
         let prs = (1..=10)
             .map(|number| pr_entry(number, &format!("https://example.com/pull/{number}")))
-            .collect();
-        let mut modal = PrModal::new(prs);
-        for _ in 0..8 {
-            modal.select_next();
-        }
+            .collect::<Vec<_>>();
+        let modal = PrModal::with_selection(&prs, 8);
 
         let text = joined(&modal);
         assert!(text.contains("#9"));
@@ -523,8 +441,7 @@ mod tests {
         assert!(!text.contains("#1 "));
         assert!(text.contains("Esc: close"));
 
-        modal.select_next();
-        let last = joined(&modal);
+        let last = joined(&PrModal::with_selection(&prs, 9));
         assert!(last.contains("#10"));
         assert!(last.contains("↑ 2 more"));
         assert!(!last.contains("↓ 1 more"));
@@ -542,14 +459,14 @@ mod tests {
         assert_eq!(labels.matches('[').count(), 4);
         assert_ne!(open, closed);
 
-        let text = joined(&PrModal::dummy().with_filter(PrFilter::Merged));
+        let text = joined(&PrModal::with_selection(&dummy_prs(), 0).with_filter(PrFilter::Merged));
         assert!(text.contains("←→: status  ↑↓: select"));
         assert!(!text.contains("f: filter"));
     }
 
     #[test]
     fn render_lists_each_pr_once_under_one_modal_title() {
-        let text = joined(&PrModal::dummy());
+        let text = joined(&PrModal::with_selection(&dummy_prs(), 0));
         assert_eq!(text.matches("Pull Request").count(), 1);
         assert!(text.contains("#812"));
         assert_eq!(text.matches("#812").count(), 1);
@@ -569,7 +486,7 @@ mod tests {
             pr_entry(12, "https://github.com/acme/api/pull/12"),
             pr_entry(21, "https://github.com/acme/web/pull/21"),
         ];
-        let text = joined(&PrModal::with_selection(prs, 2));
+        let text = joined(&PrModal::with_selection(&prs, 2));
 
         assert_eq!(text.matches("acme/api").count(), 1);
         assert_eq!(text.matches("acme/web").count(), 1);
@@ -592,8 +509,8 @@ mod tests {
 
     #[test]
     fn moving_selection_does_not_add_a_duplicate_detail_row() {
-        let mut modal = PrModal::dummy();
-        modal.select_prev(); // #801（merged）を選択
+        let prs = dummy_prs();
+        let modal = PrModal::with_selection(&prs, 2);
         let text = joined(&modal);
         assert_eq!(text.matches("#801").count(), 1);
         assert!(!text.contains("github.com/kkyosuke/usagi/pull/801"));
@@ -602,7 +519,8 @@ mod tests {
     #[test]
     fn render_handles_a_missing_title() {
         // タイトル無しの PR は "(no title)" を出す。
-        let modal = PrModal::new(vec![pr_entry(7, "https://example.com/pull/7")]);
+        let prs = [pr_entry(7, "https://example.com/pull/7")];
+        let modal = PrModal::with_selection(&prs, 0);
         let text = joined(&modal);
         assert!(text.contains("#7"));
         assert!(text.contains("(no title)"));
@@ -616,16 +534,16 @@ mod tests {
         let mut inventory = PrInventory::default();
         inventory.discover([identity.clone()]);
         let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
-        assert!(joined(&PrModal::new(entries)).contains("refresh pending"));
+        assert!(joined(&PrModal::with_selection(&entries, 0)).contains("refresh pending"));
 
         inventory.entries.get_mut(&identity).unwrap().refresh = PrRefreshState::BackingOff;
         let entries = inventory.entries.values().cloned().collect::<Vec<_>>();
-        assert!(joined(&PrModal::new(entries)).contains("refresh retrying"));
+        assert!(joined(&PrModal::with_selection(&entries, 0)).contains("refresh retrying"));
     }
 
     #[test]
     fn render_shows_an_empty_notice() {
-        let text = joined(&PrModal::new(Vec::new()));
+        let text = joined(&PrModal::with_selection(&[], 0));
         assert!(text.contains("no pull requests"));
     }
 
@@ -633,17 +551,20 @@ mod tests {
     fn render_labels_a_dismissed_pr() {
         let mut pr = pr_entry(3, "https://example.com/pull/3");
         pr.state = PrState::Dismissed;
-        let text = joined(&PrModal::new(vec![pr]));
+        let text = joined(&PrModal::with_selection(&[pr], 0));
         assert!(text.contains("dismissed"));
     }
 
     #[test]
     fn render_fills_the_terminal() {
-        let frame = render(24, 80, &PrModal::dummy());
+        let frame = render_over(24, 80, &[], &PrModal::with_selection(&dummy_prs(), 0));
         assert_eq!(frame.len(), 24);
         assert!(frame.iter().all(|l| display_width(l) <= 80));
         // サイズ 0 は 80×24 にフォールバック。
-        assert_eq!(render(0, 0, &PrModal::dummy()).len(), 24);
+        assert_eq!(
+            render_over(0, 0, &[], &PrModal::with_selection(&dummy_prs(), 0)).len(),
+            24
+        );
     }
 
     #[test]
@@ -651,7 +572,7 @@ mod tests {
         let base: Vec<String> = (0..24)
             .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
             .collect();
-        let frame = render_over(24, 80, &base, &PrModal::dummy());
+        let frame = render_over(24, 80, &base, &PrModal::with_selection(&dummy_prs(), 0));
         let text = frame.join("\n");
 
         assert_eq!(frame.len(), 24);
@@ -668,7 +589,7 @@ mod tests {
     #[test]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
         let base = vec![format!("\u{1b}[36m{}\u{1b}[0m", "背景".repeat(8)); 16];
-        let frame = render_over(16, 9, &base, &PrModal::new(Vec::new()));
+        let frame = render_over(16, 9, &base, &PrModal::with_selection(&[], 0));
 
         assert_eq!(frame.len(), 16);
         assert!(frame.iter().all(|line| display_width(line) == 9));
@@ -680,11 +601,8 @@ mod tests {
     fn short_terminal_keeps_the_selected_pr_tabs_and_footer_visible() {
         let prs = (1..=10)
             .map(|number| pr_entry(number, &format!("https://example.com/pull/{number}")))
-            .collect();
-        let mut modal = PrModal::new(prs);
-        for _ in 0..8 {
-            modal.select_next();
-        }
+            .collect::<Vec<_>>();
+        let modal = PrModal::with_selection(&prs, 8);
         let base = vec![".".repeat(80); 10];
         let frame = render_over(10, 80, &base, &modal);
         let text = frame
@@ -702,7 +620,7 @@ mod tests {
 
     #[test]
     fn minimal_body_prioritizes_tabs_and_footers_over_the_pr_list() {
-        let lines = body(&PrModal::dummy(), 3)
+        let lines = body(&PrModal::with_selection(&dummy_prs(), 0), 3)
             .into_iter()
             .map(|line| strip_ansi(&line))
             .collect::<Vec<_>>();

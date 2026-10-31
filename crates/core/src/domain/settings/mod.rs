@@ -629,12 +629,6 @@ impl Settings {
         }
         self
     }
-
-    /// The bindings usable for injection, with invalid names and blank values
-    /// dropped.
-    pub fn env_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
-        valid_bindings(&self.env)
-    }
 }
 
 /// Per-workspace Agent, Base branch, Team, Issue, and Memory settings stored in
@@ -678,12 +672,6 @@ impl LocalSettings {
         self.memory_enabled = Some(settings.memory_enabled);
         self.team_template = Some(settings.team_template);
         self
-    }
-
-    /// The bindings usable for injection, with invalid names and blank values
-    /// dropped.
-    pub fn env_bindings(&self) -> impl Iterator<Item = (&str, &str)> {
-        valid_bindings(&self.env)
     }
 }
 

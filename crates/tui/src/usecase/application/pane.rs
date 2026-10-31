@@ -73,6 +73,19 @@ pub enum PaneTab {
     Interrupted(InterruptedPane),
 }
 
+impl PaneTab {
+    /// Stable identity shared by pane mutations, navigation, and rendering.
+    #[must_use]
+    pub(crate) fn selection(&self) -> TabSelection {
+        match self {
+            Self::Pending(pending) => TabSelection::Pending(pending.operation),
+            Self::Live(live) => TabSelection::Live(live.terminal.clone()),
+            Self::Ready(ready) => TabSelection::Ready(ready.operation),
+            Self::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
+        }
+    }
+}
+
 /// tab を index でなく stable identity により選ぶための key。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabSelection {
@@ -117,8 +130,9 @@ impl PaneState {
         }
     }
 
-    /// local storage から復元した live tabs で state を作る。
+    /// Build a live-tab fixture for reducer and view tests.
     #[must_use]
+    #[cfg(test)]
     pub fn with_live(selected: PaneSelection, tabs: Vec<LivePane>) -> Self {
         Self {
             tabs: tabs.into_iter().map(PaneTab::Live).collect(),
@@ -1140,14 +1154,7 @@ fn restore_batch(
 }
 
 fn selection_for(tab: &PaneTab) -> PaneSelection {
-    match tab {
-        PaneTab::Pending(pending) => PaneSelection::Tab(TabSelection::Pending(pending.operation)),
-        PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
-        PaneTab::Ready(ready) => PaneSelection::Tab(TabSelection::Ready(ready.operation)),
-        PaneTab::Interrupted(pane) => {
-            PaneSelection::Tab(TabSelection::Interrupted(pane.tab.continuation))
-        }
-    }
+    PaneSelection::Tab(tab.selection())
 }
 
 /// The pane target an interrupted lineage belongs to. It mirrors
