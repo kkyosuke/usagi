@@ -367,9 +367,9 @@ impl New {
         else {
             return;
         };
-        if let Some(input) = self.field_mut(field) {
-            input.set_value(format!("{candidate}/"));
-        }
+        self.field_mut(field)
+            .expect("directory completion targets a path input")
+            .set_value(format!("{candidate}/"));
         if field == Field::Path {
             self.sync_name();
         }
@@ -827,6 +827,9 @@ mod tests {
         assert!(!state.is_creating());
         assert_eq!(state.url(), "https://example.com/acme/app.git");
         assert!(!joined(&state).contains("creating workspace"));
+        let settled = state.clone();
+        state.advance_create_animation();
+        assert_eq!(state, settled, "an idle wake-up must not restart creation");
     }
 
     #[test]
@@ -1175,6 +1178,20 @@ mod tests {
         type_str(&mut state, "/tmp/");
         complete_with(&mut state, &["child"]);
         assert_eq!(state.path(), "/tmp/child/");
+    }
+
+    #[test]
+    fn clone_location_completion_preserves_the_repository_directory() {
+        let mut state = New::default();
+        state.focus_next();
+        type_str(&mut state, "https://example.com/acme/repository.git");
+        state.focus_next();
+        assert_eq!(state.focus(), Field::Location);
+        type_str(&mut state, "/projects/pr");
+        complete_with(&mut state, &["private", "public"]);
+        assert_eq!(state.location(), "/projects/private/");
+        assert_eq!(state.directory(), "repository");
+        assert_eq!(state.name(), "");
     }
 
     #[test]

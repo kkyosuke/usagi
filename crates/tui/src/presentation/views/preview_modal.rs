@@ -915,6 +915,46 @@ mod tests {
     }
 
     #[test]
+    fn a_recent_file_remains_selected_after_the_last_changed_row_moves_to_recent() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target: Target::Session(session),
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec!["README.md".into()],
+                changed: vec!["README.md".into()],
+                lines: Vec::new(),
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let rendered = joined(&state);
+        assert!(rendered.contains("recent"));
+        assert!(!rendered.contains("changed ·"));
+        assert!(rendered.contains("README.md"));
+        assert_eq!(
+            state.preview_overlay().unwrap().selected_file(),
+            Some("README.md")
+        );
+    }
+
+    #[test]
+    fn highlighting_empty_text_has_no_spurious_style_or_cells() {
+        assert_eq!(highlighted("", &[], 0, Role::Accent.style()), "");
+        assert_eq!(
+            widgets::strip_ansi(&highlighted("日本語", &[1], 0, Style::new())),
+            "日本語"
+        );
+    }
+
+    #[test]
     fn a_resting_finder_with_nothing_to_show_points_at_the_search() {
         let workspace = WorkspaceId::new();
         let target = Target::Session(SessionId::new());

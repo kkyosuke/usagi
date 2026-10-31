@@ -946,9 +946,7 @@ impl VtScreen {
             (ch, width)
         };
         if self.cursor_col >= self.cols || self.cursor_col + width > self.cols {
-            if let Some(cell) = self.grid[self.cursor_row].last_mut() {
-                cell.wrapped = true;
-            }
+            self.grid[self.cursor_row][self.cols - 1].wrapped = true;
             self.cursor_col = 0;
             self.line_feed();
         }
@@ -2253,7 +2251,13 @@ mod tests {
     #[test]
     fn saved_cursor_restores_the_input_position_after_a_right_prompt() {
         let mut screen = VtScreen::new(1, 30);
-        screen.advance(b"left\x1b[s\x1b[25G\x1b[36mright\x1b[0m\x1b[u input");
+        screen.advance(b"\x1b[4G\x1b[u");
+        assert_eq!(
+            screen.cursor(),
+            (0, 3),
+            "restore before save keeps the cursor"
+        );
+        screen.advance(b"\rleft\x1b[s\x1b[25G\x1b[36mright\x1b[0m\x1b[u input");
         assert_eq!(screen.cursor(), (0, 10));
         // The right-prompt columns keep their color on the cells that hold them.
         assert_eq!(screen.cells(), vec!["left input              right "]);
@@ -3000,6 +3004,22 @@ mod tests {
             CheckpointError::RowLength {
                 expected: 3,
                 actual: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_malformed_scrollback_row_rejects_the_checkpoint() {
+        let mut cp = valid_checkpoint();
+        cp.primary
+            .scrollback
+            .push(RowCheckpoint { runs: Vec::new() });
+
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::RowLength {
+                expected: 1,
+                actual: 0,
             }
         );
     }

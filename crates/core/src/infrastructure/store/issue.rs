@@ -1562,6 +1562,30 @@ mod tests {
     }
 
     #[test]
+    fn point_read_refuses_a_source_changed_after_identity_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        let original = issue(7, "First");
+        store.write(&original).unwrap();
+        let source = store.dir().join(original.file_name());
+
+        let error = store
+            .read_observing_lock(7, |phase| {
+                if phase == ReadLockPhase::DerivedRepaired {
+                    // A non-cooperative writer, such as Git, can replace source
+                    // bytes despite the store lock held by this read.
+                    fs::write(&source, "no longer valid frontmatter").unwrap();
+                }
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+        assert_eq!(
+            fs::read_to_string(source).unwrap(),
+            "no longer valid frontmatter"
+        );
+    }
+
+    #[test]
     fn point_read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -2370,6 +2394,20 @@ mod tests {
         assert!(!tmp.path().join("missing-common").exists());
         assert!(!private.join("usagi").exists());
         assert!(!tmp.path().join(".usagi").exists());
+    }
+
+    #[test]
+    fn session_root_discovery_ignores_regular_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join(".usagi/sessions");
+        let session = sessions.join("work");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(sessions.join("README"), "operator notes").unwrap();
+        let mut roots = BTreeSet::new();
+
+        insert_session_roots(&mut roots, tmp.path()).unwrap();
+
+        assert_eq!(roots, BTreeSet::from([session]));
     }
 
     #[test]

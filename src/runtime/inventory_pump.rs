@@ -495,9 +495,12 @@ impl Drop for TerminalInventoryPump {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.signal();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        // Construction installs the handle; only Drop takes ownership of it.
+        let handle = self
+            .handle
+            .take()
+            .expect("worker handle is present until drop");
+        let _ = handle.join();
     }
 }
 

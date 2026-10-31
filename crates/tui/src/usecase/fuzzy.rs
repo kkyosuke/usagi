@@ -358,6 +358,7 @@ mod tests {
         );
         // 早い greedy 一致に隠れず、連続一致を選び直す。
         assert_eq!(cells(path_match("aXbXabc", "abc").unwrap()), [4, 5, 6]);
+        assert_eq!(cells(path_match("abc-abc", "abc").unwrap()), [0, 1, 2]);
     }
 
     #[test]

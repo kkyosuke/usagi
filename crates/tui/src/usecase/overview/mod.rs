@@ -583,15 +583,17 @@ mod tests {
             Err("session name must not contain whitespace")
         );
         assert_eq!(parse_session("sleep"), Err("session name is required"));
-        assert_eq!(
-            parse_session("remove feature-x --force"),
-            Ok(SessionCommand::Remove {
-                name: "feature-x".into(),
-                force: true,
-                force_delete_branch: true,
-                purge_orphan: false,
-            })
-        );
+        for input in ["remove feature-x --force", "remove --force feature-x"] {
+            assert_eq!(
+                parse_session(input),
+                Ok(SessionCommand::Remove {
+                    name: "feature-x".into(),
+                    force: true,
+                    force_delete_branch: true,
+                    purge_orphan: false,
+                })
+            );
+        }
         assert_eq!(
             parse_session("remove feature-x"),
             Ok(SessionCommand::Remove {

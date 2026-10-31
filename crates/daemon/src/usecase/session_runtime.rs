@@ -532,7 +532,7 @@ impl SessionStatusPlan {
             revision: state.state_revision,
             sessions,
         })
-        .map_err(|_| SessionRuntimeError::Storage)?;
+        .or(Err(SessionRuntimeError::Storage))?;
         Ok(SessionReply {
             operation_id: operation_id.to_owned(),
             revision: state.state_revision,

@@ -440,6 +440,34 @@ fn live_legacy_credential_resolves_owners_without_creating_a_replacement() {
 }
 
 #[test]
+fn retained_decision_aliases_are_deduplicated_without_changing_owner_order() {
+    let mut conversation = Conversation::delegated();
+    let original = conversation.owner();
+    conversation.finish();
+    conversation.resume();
+    conversation.collect_ancestors();
+    let alias = UserDecisionOwner {
+        run_id: conversation.operation(),
+        ..original.clone()
+    };
+    let mut snapshot = conversation.agent.coordinator.snapshot();
+    snapshot.records[0].user_decision_owner_aliases = vec![
+        alias.clone(),
+        original.clone(),
+        alias.clone(),
+        original.clone(),
+    ];
+    // The durable format permits repeated aliases. Rehydrate it through the
+    // normal validator, then resolve the live credential without rewriting it.
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    conversation.restore(serde_json::from_slice(&bytes).unwrap());
+
+    assert_eq!(conversation.owners(), vec![alias.clone(), original]);
+    assert_eq!(conversation.owner(), alias);
+    assert_eq!(conversation.agent.coordinator.snapshot(), snapshot);
+}
+
+#[test]
 fn legacy_missing_ancestor_binding_is_a_safe_authority_boundary() {
     let mut conversation = Conversation::delegated();
     let original = conversation.operation();

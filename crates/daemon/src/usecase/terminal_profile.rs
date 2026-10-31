@@ -343,12 +343,17 @@ mod tests {
     }
 
     #[test]
-    fn no_usable_user_leaves_the_variable_absent_without_failing_the_launch() {
-        for inherited_user in [None, Some(""), Some("with\0nul")] {
+    fn unresolved_user_inherits_only_a_usable_value_without_failing_the_launch() {
+        for (inherited_user, expected_user) in [
+            (Some("inherited-user"), Some("inherited-user")),
+            (None, None),
+            (Some(""), None),
+            (Some("with\0nul"), None),
+        ] {
             let inherited = daemon_environment(inherited_user);
             let environment =
                 public_terminal_environment(|name| inherited.get(name).cloned(), None);
-            assert!(!environment.contains_key("USER"));
+            assert_eq!(environment.get("USER").map(String::as_str), expected_user);
             assert_eq!(environment["TERM"], "xterm-256color");
         }
     }

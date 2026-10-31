@@ -44,6 +44,43 @@ fn registry(reference: TerminalRef) -> TerminalRegistry {
         .unwrap();
     registry
 }
+
+#[test]
+fn a_zero_byte_journal_still_projects_output_into_the_screen() {
+    let terminal = reference();
+    let mut registry = TerminalRegistry::new(0, 2);
+    registry
+        .register(terminal.clone(), Geometry { cols: 80, rows: 24 })
+        .unwrap();
+    let output = registry
+        .append_output(&terminal, b"visible".to_vec())
+        .unwrap();
+    assert_eq!(output.end_offset, 7);
+    let snapshot = registry.snapshot(&terminal).unwrap();
+    let mut expected = VtScreen::new(24, 80);
+    expected.advance(b"visible");
+    assert_eq!(
+        restored(&snapshot.into_frame(SnapshotWire::ScreenCheckpoint)).cells(),
+        expected.cells()
+    );
+    let entry = registry.entry(&terminal).unwrap();
+    assert_eq!(entry.retained_bytes, 0);
+    assert!(entry.journal.is_empty());
+}
+
+#[test]
+fn user_clear_preserves_alternate_screen_output_and_retention() {
+    let terminal = reference();
+    let mut registry = registry(terminal.clone());
+    registry
+        .append_output(&terminal, b"\x1b[?1049halternate".to_vec())
+        .unwrap();
+    let before = registry.snapshot(&terminal).unwrap();
+    let retained = registry.entry(&terminal).unwrap().retained_bytes;
+    assert!(!registry.clear_primary_for_user(&terminal).unwrap());
+    assert_eq!(registry.snapshot(&terminal).unwrap(), before);
+    assert_eq!(registry.entry(&terminal).unwrap().retained_bytes, retained);
+}
 fn input(
     subscription: u64,
     connection: ConnectionId,

@@ -2198,6 +2198,14 @@ mod tests {
         );
         assert!(!registry.pane(target).unwrap().has_tabs());
         assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
+        assert_eq!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::CloseActionModal { target }
+            ),
+            [] as [PaneRegistryEffect; 0]
+        );
+        assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
     }
 
     #[test]

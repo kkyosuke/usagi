@@ -667,13 +667,13 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> V
         ));
         return lines;
     }
-    if open.filtered().is_empty() {
+    let filtered = open.filtered();
+    if filtered.is_empty() {
         lines.push(indent(
             &Style::new().dim().paint("No workspaces match the filter."),
         ));
         return lines;
     }
-    let filtered = open.filtered();
     let (start, capacity) = viewport(filtered.len(), open.selected_index(), budget);
     // 隠れている件数は隠れている側に置く（窓の上に残る件数を一覧の下で伝えない）。
     if let Some(above) = overflow_line("↑", start) {
@@ -696,11 +696,11 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> V
     }
 
     // 一覧の下に選択中 workspace の絶対パスを添える（どこを開くのか一目でわかるように）。
-    if let Some(workspace) = open.selected() {
-        lines.push(String::new());
-        let path = format!("↳ {}", workspace.path.display());
-        lines.push(indent(&Style::new().dim().paint(&path)));
-    }
+    // Filtering and navigation keep the selection inside this nonempty list.
+    let workspace = &filtered[open.selected_index()].workspace;
+    lines.push(String::new());
+    let path = format!("↳ {}", workspace.path.display());
+    lines.push(indent(&Style::new().dim().paint(&path)));
     // The cleanup confirmation is composited as a shared confirmation overlay by
     // `render_open`, so this list body stays free of a bespoke y/n prompt.
     lines

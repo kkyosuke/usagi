@@ -1745,20 +1745,15 @@ fn project_batch_settings_failure_is_all_or_nothing() {
 }
 
 #[test]
-fn project_registry_path_fence_covers_empty_match_and_mismatch() {
+fn project_registry_records_each_path_once_and_removes_only_matching_paths() {
     let alpha = snapshot("alpha");
-    assert!(!registry_contains_path(&[], &alpha.workspace.path));
-    assert!(registry_contains_path(
-        std::slice::from_ref(&alpha.workspace),
-        &alpha.workspace.path,
-    ));
-    assert!(!registry_contains_path(
-        std::slice::from_ref(&alpha.workspace),
-        Path::new("/tmp/beta"),
-    ));
-
     let beta = snapshot("beta");
-    let mut registry = vec![alpha.workspace, beta.workspace.clone()];
+    let mut registry = Vec::new();
+    remember_registry_workspace(&mut registry, &alpha.workspace);
+    remember_registry_workspace(&mut registry, &alpha.workspace);
+    remember_registry_workspace(&mut registry, &beta.workspace);
+    assert_eq!(registry, [alpha.workspace, beta.workspace.clone()]);
+
     remove_registry_paths(&mut registry, &[]);
     remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/missing")]);
     remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/alpha")]);

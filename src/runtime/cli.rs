@@ -527,9 +527,10 @@ fn claude_sandbox(
 }
 
 fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut entries = std::fs::read_dir(home)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        entries.push(entry?.path());
+    }
     entries.sort();
     Ok(entries)
 }

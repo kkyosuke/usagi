@@ -1293,13 +1293,14 @@ fn recent_paths(recent: &Recent) -> Vec<PathBuf> {
     }
 }
 
-fn registry_contains_path(registry: &[Workspace], path: &Path) -> bool {
-    for workspace in registry {
-        if workspace.path == path {
-            return true;
-        }
+/// Keep successful creation, resume, and Open results in one path-deduplicated registry.
+fn remember_registry_workspace(registry: &mut Vec<Workspace>, opened: &Workspace) {
+    if !registry
+        .iter()
+        .any(|workspace| workspace.path == opened.path)
+    {
+        registry.push(opened.clone());
     }
-    false
 }
 
 fn remove_registry_paths(registry: &mut Vec<Workspace>, removed: &[PathBuf]) {
@@ -2034,7 +2035,7 @@ fn cached_workspace_switch_frame(
     let home_height = height.saturating_sub(PROJECT_BAR_ROWS);
     let home = render_home(home_height, width, &projection);
     let mut preview_deck = deck.clone();
-    preview_deck.preview_path(path);
+    preview_deck.preview_slot(slot);
     Some(compose_workspace_shell_frame(
         &preview_deck,
         home_height,
@@ -2912,9 +2913,7 @@ fn enter_workspace_deck(
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Option<Exit>> {
-    if deck.slots().len() > 1 {
-        let _ = loader.record_unite(&deck.paths());
-    }
+    remember_unite(loader, &deck);
     // The lane outlives every composition this loop builds, which is what lets a
     // create started before a project switch still reach the user (#768).
     let mut lane = SessionCommandLane::new();
@@ -2937,12 +2936,17 @@ fn enter_workspace_deck(
             WorkspaceStep::Activate(prepared) => {
                 deck.activate_snapshot(&prepared);
                 remember_project_deck(loader, &mut deck);
-                if deck.slots().len() > 1 {
-                    let _ = loader.record_unite(&deck.paths());
-                }
+                remember_unite(loader, &deck);
                 snapshot = *prepared;
             }
         }
+    }
+}
+
+/// The recent multi-project entry is refreshed on entry and successful activation.
+fn remember_unite(loader: &mut dyn WorkspaceLoader, deck: &WorkspaceDeck) {
+    if deck.slots().len() > 1 {
+        let _ = loader.record_unite(&deck.paths());
     }
 }
 

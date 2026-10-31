@@ -2027,13 +2027,11 @@ impl DispatchStore {
             .saturating_add(1)
             .saturating_sub(self.limits.inbox_count)
             .min(removable);
-        let record_bytes = records
-            .iter()
-            .map(|record| -> Result<u64> {
-                let bytes = serde_json::to_vec(record)?;
-                Ok(u64::try_from(bytes.len() + 1)?)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut record_bytes = Vec::with_capacity(records.len());
+        for record in &records {
+            let bytes = serde_json::to_vec(record)?;
+            record_bytes.push(u64::try_from(bytes.len() + 1)?);
+        }
         let mut retained_bytes = record_bytes.iter().copied().sum::<u64>();
         let read_bytes = records
             .iter()
@@ -3389,6 +3387,69 @@ mod tests {
     }
 
     #[test]
+    fn session_prompts_refuse_corrupt_legacy_state_before_changing_the_scoped_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let workspace = WorkspaceId::new();
+        let session = Some(SessionId::new());
+        store
+            .queue_prompt(workspace, session, "original".into(), now())
+            .unwrap();
+        let before = fs::read(store.workspace_registry_path()).unwrap();
+        fs::write(store.registry_path(), "malformed").unwrap();
+
+        assert!(
+            store
+                .queue_prompt(workspace, session, "replacement".into(), now())
+                .is_err()
+        );
+        assert_eq!(fs::read(store.workspace_registry_path()).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(store.registry_path()).unwrap(),
+            "malformed"
+        );
+    }
+
+    #[test]
+    fn orphaned_legacy_admissions_can_be_completed_and_reconciled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let operation = OperationId::new();
+        let interrupted = OperationId::new();
+        let mut legacy = Registry::default();
+        for run_id in [operation, interrupted] {
+            legacy.runs.push(DispatchRun {
+                run_id,
+                agent_id: AgentId::new(),
+                prompt: "retained legacy work".into(),
+                started_at: now(),
+                ended_at: None,
+                status: RunStatus::Preparing,
+            });
+            legacy.admissions.push(AgentAdmissionReservation {
+                operation_id: run_id,
+                semantic_key: "legacy".into(),
+                credential_provenance: CredentialProvenance::DaemonMintedEphemeral,
+            });
+        }
+        json_file::write_atomic(&store.dir, &store.registry_path(), &legacy).unwrap();
+
+        assert!(store.commit_admission(operation).unwrap());
+        assert_eq!(
+            store.run(operation).unwrap().unwrap().status,
+            RunStatus::Running
+        );
+        assert!(store.fail_admission(operation).unwrap());
+        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 1);
+        assert_eq!(store.reconcile_incomplete_admissions().unwrap(), 0);
+        for run in store.runs().unwrap() {
+            assert_eq!(run.status, RunStatus::Failed);
+            assert!(run.ended_at.is_some());
+        }
+        assert_eq!(store.agents().unwrap(), [] as [Agent; 0]);
+    }
+
+    #[test]
     fn admission_reservation_rejects_semantic_incomplete_and_workspace_conflicts() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -3630,6 +3691,25 @@ mod tests {
                 .to_string()
                 .contains("outside the retained")
         );
+    }
+
+    #[test]
+    fn an_empty_inbox_replays_its_returned_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (_, _, caller) = ids();
+
+        let first = store.inbox_page(&caller, None, 1, true, None).unwrap();
+        assert_eq!(first.messages, [] as [InboxMessage; 0]);
+        assert_eq!(first.next_cursor.next_sequence, 1);
+        assert!(!first.has_more);
+        assert_eq!(
+            store
+                .inbox_page(&caller, Some(first.next_cursor), 1, true, None)
+                .unwrap(),
+            first
+        );
+        assert!(!store.inbox_ack_path(&caller).exists());
     }
 
     #[test]

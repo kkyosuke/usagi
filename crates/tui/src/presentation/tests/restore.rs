@@ -895,6 +895,33 @@ fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
 }
 
 #[test]
+fn changed_observations_coalesce_without_bypassing_backoff_or_reconnect_priority() {
+    use crate::presentation::{RestoreJobOutcome, RestoreRetryState};
+    use std::time::Duration;
+
+    let mut retry = RestoreRetryState::new();
+    assert!(retry.begin_if_due(Duration::ZERO));
+    assert!(retry.complete(Duration::ZERO, RestoreJobOutcome::TransportFailed));
+    retry.request_changed_observation(Duration::from_millis(10));
+    assert!(!retry.begin_if_due(Duration::from_millis(10)));
+    assert!(retry.begin_if_due(Duration::from_millis(250)));
+
+    retry.request_changed_observation(Duration::from_millis(251));
+    retry.request_changed_observation(Duration::from_millis(252));
+    assert!(!retry.complete(Duration::from_millis(253), RestoreJobOutcome::Applied));
+    assert!(retry.begin_if_due(Duration::from_millis(253)));
+    retry.reconnected(1, Duration::from_millis(254));
+    retry.request_changed_observation(Duration::from_millis(255));
+    assert!(!retry.complete(
+        Duration::from_millis(256),
+        RestoreJobOutcome::TransportFailed
+    ));
+    assert!(retry.begin_if_due(Duration::from_millis(256)));
+    assert!(!retry.complete(Duration::from_millis(257), RestoreJobOutcome::Applied));
+    assert!(!retry.begin_if_due(Duration::from_secs(1)));
+}
+
+#[test]
 fn failed_restore_keeps_the_port_for_a_reconnect_dispatch() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();

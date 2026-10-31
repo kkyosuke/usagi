@@ -353,14 +353,12 @@ pub fn render_over_for(
     let panel = modal::boxed(&title, inner_width, &body);
     for (offset, panel_line) in panel.iter().take(drawer.height).enumerate() {
         let row = drawer.top + offset;
-        if row < frame.len() {
-            let suffix = modal::columns(
-                &frame[row],
-                drawer.width,
-                width.saturating_sub(drawer.width),
-            );
-            frame[row] = format!("{panel_line}\u{1b}[0m{suffix}");
-        }
+        let suffix = modal::columns(
+            &frame[row],
+            drawer.width,
+            width.saturating_sub(drawer.width),
+        );
+        frame[row] = format!("{panel_line}\u{1b}[0m{suffix}");
     }
     frame
 }

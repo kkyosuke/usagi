@@ -75,9 +75,10 @@ fn walk(
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path)?;
     if metadata.is_dir() {
-        let mut entries = fs::read_dir(path)?
-            .take(MAX_ENTRIES + 1)
-            .collect::<io::Result<Vec<_>>>()?;
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path)?.take(MAX_ENTRIES + 1) {
+            entries.push(entry?);
+        }
         if entries.len() > MAX_ENTRIES {
             return Err(invalid());
         }
@@ -612,6 +613,22 @@ mod tests {
         assert!(!displayable_path(Path::new("bad\u{1b}.md")));
         let non_utf8 = std::ffi::OsString::from_vec(b"bad-\xff.txt".to_vec());
         assert!(!displayable_path(Path::new(&non_utf8)));
+    }
+
+    #[test]
+    fn presentation_omits_unsafe_session_names_without_removing_their_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid = session(temp.path(), "safe");
+        fs::write(valid.join("artifacts/report.md"), "safe").unwrap();
+        let unsafe_session = session(temp.path(), "unsafe\u{1b}");
+        let unsafe_file = unsafe_session.join("artifacts/report.md");
+        fs::write(&unsafe_file, "retained").unwrap();
+
+        assert_eq!(
+            list(temp.path(), true).unwrap(),
+            [".usagi/sessions/safe/artifacts/report.md"]
+        );
+        assert_eq!(fs::read_to_string(unsafe_file).unwrap(), "retained");
     }
 
     #[test]

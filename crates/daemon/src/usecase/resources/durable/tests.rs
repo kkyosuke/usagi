@@ -1505,6 +1505,73 @@ fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
 }
 
 #[test]
+fn collecting_a_mixed_shard_keeps_the_child_without_proof_of_exit() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let gone = terminal(old);
+    let retained = terminal(old);
+    ShardedTerminalStore::new(
+        world.state(
+            old,
+            ObservedChildren::new()
+                .with(41, "gone")
+                .with(42, "retained"),
+        ),
+    )
+    .save(terminal_snapshot(vec![
+        terminal_record(
+            &gone,
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(41, "gone")),
+        ),
+        terminal_record(
+            &retained,
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(42, "retained")),
+        ),
+    ]))
+    .unwrap();
+    let before = world.shard(old);
+    let active = world.state(
+        DaemonGeneration::new(),
+        ObservedChildren::new().with_gone(41),
+    );
+    assert_eq!(active.collect_retired(&BTreeSet::new()).unwrap(), 0);
+    assert_eq!(world.shard(old), before);
+    assert_eq!(world.archive.collected(), [] as [String; 0]);
+}
+
+#[test]
+fn hydration_rejects_a_terminal_payload_whose_launch_scope_disagrees() {
+    let world = World::new();
+    let owner = DaemonGeneration::new();
+    let resource = terminal(owner);
+    let mut record = terminal_record(
+        &resource,
+        OperationId::new(),
+        TerminalRuntimeState::Reserved,
+        None,
+    );
+    ShardedTerminalStore::new(world.state(owner, ObservedChildren::new()))
+        .save(terminal_snapshot(vec![record.clone()]))
+        .unwrap();
+    record.launch.request.scope.worktree_id = usagi_core::domain::id::WorktreeId::new();
+    let mut shard = world.shard(owner);
+    shard.resources[0].payload = Some(serde_json::to_string(&record).unwrap());
+    world
+        .archive
+        .bytes(owner)
+        .set(&serde_json::to_string(&shard).unwrap());
+    assert!(matches!(
+        world.state(owner, ObservedChildren::new()).hydrate().err(),
+        Some(ResourceFailure::Refused(ResourceError::Corrupt))
+    ));
+    assert_eq!(world.shard(owner), shard);
+}
+
+#[test]
 fn a_draining_owner_observes_its_own_shard_and_global_claim_together() {
     let world = World::new();
     let owner = DaemonGeneration::new();

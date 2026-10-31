@@ -145,15 +145,12 @@ impl Canvas {
         match self.cells[index] {
             Cell::Glyph { width: 2, .. } => {
                 self.cells[index] = Cell::Empty;
-                if column + 1 < self.width {
-                    self.cells[index + 1] = Cell::Empty;
-                }
+                // `put` admits a wide glyph only when both cells fit.
+                self.cells[index + 1] = Cell::Empty;
             }
             Cell::Continuation => {
                 self.cells[index] = Cell::Empty;
-                if column > 0 {
-                    self.cells[index - 1] = Cell::Empty;
-                }
+                self.cells[index - 1] = Cell::Empty;
             }
             Cell::Empty | Cell::Glyph { .. } => self.cells[index] = Cell::Empty,
         }
@@ -201,9 +198,7 @@ impl Canvas {
                     segment_style = style;
                     segment.push(scalar);
                 }
-                if !segment.is_empty() {
-                    line.push_str(&segment_style.paint(&segment));
-                }
+                line.push_str(&segment_style.paint(&segment));
                 pad_to_width(
                     &format!("{}{}", " ".repeat(SIDE_PADDING), line),
                     self.width + SIDE_PADDING * 2,

@@ -986,6 +986,33 @@ mod tests {
     }
 
     #[test]
+    fn motion_in_another_buffer_preserves_the_selection_without_redrawing() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.visible_range(TerminalBuffer::Alternate, 0, 1, 1);
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["selected".into()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 7 });
+        let before = controls.revision();
+        controls.apply_retained_row_motions(
+            &terminal,
+            &[RetainedRowMotion::Up {
+                buffer: ActiveBuffer::Primary,
+                top: 0,
+                bottom: 0,
+                count: 1,
+            }],
+        );
+        assert_eq!(controls.revision(), before);
+        let selection = controls.selection_for(TerminalBuffer::Alternate).unwrap();
+        assert_eq!(selection.text(), "selected");
+        assert_eq!(selection.visual_columns_at(0), Some((0, 7)));
+    }
+
+    #[test]
     fn agent_row_motion_also_follows_a_pointer_press_before_it_becomes_a_drag() {
         let mut controls = LiveTerminalControls::default();
         let terminal = terminal();

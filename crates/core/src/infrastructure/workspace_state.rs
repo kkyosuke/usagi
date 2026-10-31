@@ -597,6 +597,31 @@ mod tests {
         );
     }
 
+    // Linux permits non-UTF-8 filenames; macOS filesystems reject their creation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_canonical_root_does_not_consume_the_legacy_document() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let daemon = tempfile::tempdir().unwrap();
+        let real = daemon
+            .path()
+            .join(std::ffi::OsString::from_vec(b"workspace-\xff".to_vec()));
+        std::fs::create_dir(&real).unwrap();
+        let link = daemon.path().join("readable-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let legacy = daemon.path().join(LEGACY_STATE_FILE);
+        let before = serde_json::to_vec(&serde_json::json!({
+            "repository_root": link,
+            "state": { "retained": true },
+        }))
+        .unwrap();
+        std::fs::write(&legacy, &before).unwrap();
+
+        assert!(migrate_legacy(daemon.path()).is_err());
+        assert_eq!(std::fs::read(legacy).unwrap(), before);
+    }
+
     #[test]
     fn a_subtree_that_cannot_be_resolved_stops_the_migration() {
         let daemon = daemon_dir();

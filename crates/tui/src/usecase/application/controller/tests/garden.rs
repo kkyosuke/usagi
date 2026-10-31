@@ -388,3 +388,17 @@ fn a_garden_click_without_an_open_garden_is_inert() {
         assert_eq!(state.route(), route);
     }
 }
+
+#[test]
+fn a_late_garden_refusal_preserves_the_current_overlay() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+    assert_eq!(state.overlay(), Some(Overlay::Overview));
+    assert_eq!(
+        update(&mut state, AppEvent::GardenUnavailable),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Overview));
+    assert!(state.notice().is_none());
+}

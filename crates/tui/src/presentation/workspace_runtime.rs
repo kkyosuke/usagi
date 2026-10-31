@@ -865,9 +865,10 @@ impl WorkspaceRuntime {
                 // into it — otherwise the refusal looks like a dead key.
                 if effects.is_empty() {
                     let message = self.state.notice().map(|notice| notice.message.clone());
-                    if let Some(modal) = self.closeup_modal.as_mut() {
-                        modal.set_error(message);
-                    }
+                    self.closeup_modal
+                        .as_mut()
+                        .expect("a refused Closeup submission keeps its modal open")
+                        .set_error(message);
                 }
                 effects
             }
@@ -1711,12 +1712,11 @@ impl WorkspaceRuntime {
         else {
             return None;
         };
-        self.interrupted_pane(*selected)
-    }
-
-    fn interrupted_pane(&self, continuation: AgentContinuationRef) -> Option<&InterruptedPane> {
-        let target = self.panes.active()?;
-        self.interrupted_pane_for(target, continuation)
+        let target = self
+            .panes
+            .active()
+            .expect("the selected tab belongs to an active pane");
+        self.interrupted_pane_for(target, *selected)
     }
 
     fn interrupted_pane_for(
@@ -3549,6 +3549,16 @@ mod tests {
     }
 
     #[test]
+    fn feedback_without_an_active_target_does_not_create_a_pane() {
+        let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
+        let revision = runtime.panes().revision();
+        runtime.surface_focused_pane_feedback("terminal unavailable");
+        assert_eq!(runtime.panes().active(), None);
+        assert_eq!(runtime.panes().revision(), revision);
+        assert!(runtime.active_pane().error().is_none());
+    }
+
+    #[test]
     fn on_effect_records_a_terminal_placeholder_for_the_active_session() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -4522,9 +4532,7 @@ mod tests {
         let mut history = interrupted_tab(workspace, session, true);
         history.session_id = None;
         history.last_terminal.session_id = None;
-        if let Some(target) = history.target.as_mut() {
-            target.session_id = None;
-        }
+        history.target.as_mut().unwrap().session_id = None;
         let continuation = history.continuation;
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         // The drawer can open before its asynchronous inventory observation
@@ -4818,15 +4826,15 @@ mod tests {
     /// the resulting launch into the pane registry as the shell would, returning
     /// the launch operation id.
     fn submit_agent(runtime: &mut WorkspaceRuntime) -> OperationId {
+        assert_eq!(runtime.pane_focus_at_request.len(), 0);
         let effects = runtime.handle_key(Key::Enter);
-        let mut operation = None;
-        for effect in &effects {
-            if let Effect::LaunchAgent { operation_id, .. } = effect {
-                operation = Some(*operation_id);
-            }
-            runtime.on_effect(effect);
-        }
-        operation.expect("Enter submits a LaunchAgent effect")
+        assert!(
+            matches!(effects.as_slice(), [Effect::LaunchAgent { .. }]),
+            "Enter submits one LaunchAgent effect: {effects:?}"
+        );
+        runtime.on_effect(&effects[0]);
+        assert_eq!(runtime.pane_focus_at_request.len(), 1);
+        *runtime.pane_focus_at_request.keys().next().unwrap()
     }
 
     // ── R1: pending must not be re-covered by the action modal ───────────────

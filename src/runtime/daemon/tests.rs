@@ -7668,6 +7668,17 @@ fn broker_stop_before_wait_cannot_lose_shutdown() {
     }
 }
 
+#[test]
+fn poisoned_broker_activity_stops_the_idle_watch() {
+    let activity = BrokerActivity::started();
+    let poisoned = std::panic::catch_unwind(|| {
+        let _state = activity.state.lock().unwrap();
+        panic!("broker activity poison fixture");
+    });
+    assert!(poisoned.is_err());
+    assert_eq!(activity.wait_for_poll(Duration::ZERO), None);
+}
+
 /// With no daemon to outlive and no request to serve, the broker is holding
 /// a process open for a workspace nobody is using.
 #[test]
@@ -11732,6 +11743,7 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
 #[test]
 #[allow(clippy::too_many_lines)] // A single adopted tenant proves human scope and read-only inspection together.
 fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
+    use usagi_core::infrastructure::ipc::ProtocolError;
     use usagi_core::usecase::terminal_search::{
         MATCHES_MAX, SearchTerminalKind, TERMINALS_MAX, WorkspaceOutputSearch,
     };
@@ -11856,6 +11868,12 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
         vec![(reference.clone(), SearchTerminalKind::Agent); TERMINALS_MAX + 2],
         |reference, _| {
             reads += 1;
+            if reads == 1 {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "terminal exited during search",
+                ));
+            }
             Ok(usagi_daemon::usecase::terminal::Snapshot {
                 terminal: reference.clone(),
                 revision: 1,
@@ -11868,15 +11886,41 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
             })
         },
     );
-    assert_eq!(reads, 1);
+    assert_eq!(reads, 2);
     assert_eq!(result.omitted_terminals, 2);
-    assert_eq!(result.terminals[0].matches.len(), MATCHES_MAX);
-    assert!(result.terminals[0].exited);
-    assert!(result.terminals[1].limited);
+    assert!(result.terminals[0].unavailable);
+    assert_eq!(result.terminals[1].matches.len(), MATCHES_MAX);
+    assert!(result.terminals[1].exited);
+    assert!(result.terminals[2].limited);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _lock = terminal.lock().unwrap();
         panic!("poison fixture");
     }));
+    assert!(
+        matches!(call(workspace, "x", &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::Unavailable)
+    );
+    assert_eq!(
+        super::terminal_search::inspect(
+            &agent,
+            &terminal,
+            &reference,
+            SearchTerminalKind::Terminal
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Unavailable
+    );
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lock = agent.lock().unwrap();
+        panic!("agent owner poison fixture");
+    }));
+    assert!(poisoned.is_err());
+    assert_eq!(
+        super::terminal_search::inspect(&agent, &terminal, &reference, SearchTerminalKind::Agent)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
     assert!(
         matches!(call(workspace, "x", &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::Unavailable)
     );
@@ -11948,5 +11992,37 @@ fn terminal_search_scope_wire_field_is_optional_and_roundtrips() {
             .unwrap()
             .session,
         None
+    );
+}
+
+#[test]
+fn session_lineage_requires_a_valid_available_session_and_parent_id() {
+    use serde_json::json;
+    let session = SessionId::new();
+    let parent = SessionId::new();
+    let available = json!({"name": "child", "lifecycle": "available", "session_id": session});
+    for snapshot in [
+        json!({}),
+        json!({"sessions": {}}),
+        json!({"sessions": []}),
+        json!({"sessions": [{"name": "child", "lifecycle": "removed", "session_id": session}]}),
+        json!({"sessions": [{"name": "child", "lifecycle": "available"}]}),
+        json!({"sessions": [{"name": "child", "lifecycle": "available", "session_id": "invalid"}]}),
+        json!({"sessions": [{"name": "child", "lifecycle": "available", "session_id": session, "parent_session_id": "invalid"}]}),
+    ] {
+        assert_eq!(available_worktree(&snapshot, session), None);
+        assert_eq!(dispatch::session_lineage_by_name(&snapshot, "child"), None);
+    }
+    for parent_value in [json!(null), json!(parent)] {
+        let mut row = available.clone();
+        row["parent_session_id"] = parent_value.clone();
+        assert_eq!(
+            dispatch::session_lineage_by_name(&json!({"sessions": [row]}), "child"),
+            Some((session, serde_json::from_value(parent_value).unwrap()))
+        );
+    }
+    assert_eq!(
+        dispatch::session_lineage_by_name(&json!({"sessions": [available]}), "child"),
+        Some((session, None))
     );
 }

@@ -780,9 +780,7 @@ pub(super) fn forget_untracked_target(state: &mut AppState) -> Vec<Effect> {
         matches!(overlay.target, Target::Session(id) if !state.sessions.contains(&id) || !state.session_can_use(id))
     }) {
         state.preview_overlay = None;
-        if state.overlay == Some(super::Overlay::Preview) {
-            state.overlay = None;
-        }
+        state.overlay = None;
         return vec![Effect::CancelPreview];
     }
     Vec::new()
@@ -1113,9 +1111,10 @@ mod tests {
                 .is_opening()
         );
         let mut success = retry.clone();
-        if let BackendEvent::ArtifactOpenFinished { result, .. } = &mut success {
-            *result = Ok(ArtifactOpenOutcome::Sent);
-        }
+        let BackendEvent::ArtifactOpenFinished { result, .. } = &mut success else {
+            unreachable!("open_artifact returns an artifact completion");
+        };
+        *result = Ok(ArtifactOpenOutcome::Sent);
         let _ = update(&mut state, AppEvent::Backend(success));
         let _ = update(&mut state, AppEvent::Backend(retry));
         let status = state.preview_overlay().unwrap().artifact_open().unwrap();
@@ -1409,6 +1408,9 @@ mod tests {
         );
         assert_eq!(overlay.search.chars().count(), MAX_PREVIEW_SEARCH_CHARS);
         assert!(!overlay.search.contains('\u{1b}'));
+        let full_query = overlay.search.clone();
+        update_preview_search(&mut overlay, &AppKey::Char('x'));
+        assert_eq!(overlay.search, full_query);
 
         overlay.search = "missing".to_owned();
         overlay.move_search_match(true);
@@ -1420,6 +1422,9 @@ mod tests {
         overlay.search = "a👩‍💻".to_owned();
         update_preview_search(&mut overlay, &AppKey::Backspace);
         assert_eq!(overlay.search, "a");
+        update_preview_search(&mut overlay, &AppKey::Backspace);
+        update_preview_search(&mut overlay, &AppKey::Backspace);
+        assert_eq!(overlay.search, "");
     }
 
     #[test]

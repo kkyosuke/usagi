@@ -3212,6 +3212,33 @@ fn root_terminal_drawer_retargets_plain_new_to_a_terminal_tab() {
 }
 
 #[test]
+fn visible_terminals_wait_for_a_stream_port_without_creating_local_sessions() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let terminal = live_terminal_ref(workspace, session);
+    let mut ui = io_runtime(
+        WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]),
+        Box::new(UnavailableSessionCommandPort),
+    );
+    ui.sync_visible_terminals(&[(terminal.clone(), terminal_geometry(20, 80))]);
+    assert_eq!(ui.terminals.len(), 0);
+    assert!(ui.retained_terminal_view(&terminal, 5).is_none());
+}
+
+#[test]
+fn root_terminal_tab_navigation_waits_for_the_first_pane() {
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+    assert!(runtime.state().root_terminal_drawer_open());
+    for key in [LiveTerminalAction::NextTab, LiveTerminalAction::PreviousTab] {
+        assert!(select_root_terminal_tab(&Key::Live(key), &mut runtime));
+    }
+    assert!(runtime.root_terminal_selection_at(0).is_none());
+    assert!(runtime.focused_terminal().is_none());
+    assert!(runtime.state().root_terminal_drawer_open());
+}
+
+#[test]
 fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();

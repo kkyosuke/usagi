@@ -61,21 +61,20 @@ pub(super) fn pending_page(
         });
     }
 
-    let references: Vec<_> = decisions
-        .iter()
-        .enumerate()
-        .map(|(index, decision)| {
-            let bytes = super::wire::record_bytes(decision);
-            page.next_cursor = (index + 1 < decisions.len()).then(|| UserDecisionCursor {
-                revision: revision.clone(),
-                offset: index + 1,
-            });
-            let overhead = serde_json::to_vec(&page)?.len();
-            Ok((bytes > super::wire::MAX_RECORD_BYTES
+    let mut references = Vec::with_capacity(decisions.len());
+    for (index, decision) in decisions.iter().enumerate() {
+        let bytes = super::wire::record_bytes(decision);
+        page.next_cursor = (index + 1 < decisions.len()).then(|| UserDecisionCursor {
+            revision: revision.clone(),
+            offset: index + 1,
+        });
+        let overhead = serde_json::to_vec(&page)?.len();
+        references.push(
+            (bytes > super::wire::MAX_RECORD_BYTES
                 || (index == start && bytes + overhead > max_page_bytes))
-                .then(|| super::wire::reference(decision)))
-        })
-        .collect::<Result<_>>()?;
+                .then(|| super::wire::reference(decision)),
+        );
+    }
     let mut record_bytes = 0;
     let mut deferred_count = 0;
     let mut full_count = 0;

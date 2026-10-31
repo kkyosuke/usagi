@@ -456,6 +456,9 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         ..LocalSettings::default()
     };
 
+    let json = serde_json::to_string(&local).unwrap();
+    assert_eq!(serde_json::from_str::<LocalSettings>(&json).unwrap(), local);
+
     assert_eq!(
         global.with_local(&local),
         Settings {
@@ -614,6 +617,7 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         }
     );
     let json = serde_json::to_string(&local).unwrap();
+    assert_eq!(serde_json::from_str::<LocalSettings>(&json).unwrap(), local);
     assert!(!json.contains("theme"));
     assert!(!json.contains("modal_selection_mode"));
     assert!(format!("{local:?}").contains("Claude"));

@@ -1955,9 +1955,10 @@ fn remove_recoverable_generation_sockets(
         Err(error) => return Err(error),
     }
     let root_guard = lock_setup_directory(&generations, true)?;
-    let entries = fs::read_dir(&generations)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&generations)? {
+        entries.push(entry?.path());
+    }
     verify_open_directory(&generations, &root_guard, true)?;
     for generation in entries {
         // A live generation's directory is skipped whole. Its socket is not
@@ -4031,10 +4032,9 @@ mod tests {
             .custom_flags(libc::O_DIRECTORY | PRIVATE_FILE_FLAGS)
             .open(&daemon)
             .unwrap();
-        let setup_lock_result = FileExt::try_lock_exclusive(&directory);
-        if setup_lock_result.is_ok() {
+        let setup_lock_result = FileExt::try_lock_exclusive(&directory).inspect(|()| {
             FileExt::unlock(&directory).unwrap();
-        }
+        });
         setup_resume.wait();
         drop(held);
         drop(writer.join().unwrap().unwrap());

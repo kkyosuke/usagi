@@ -200,11 +200,12 @@ pub(super) fn saved(
     if state.note_editor.as_ref().is_some_and(|e| {
         e.target == target && e.request_id == request_id && e.phase == NotePhase::Saving
     }) {
-        if let Target::Session(id) = target {
-            state.saved_notes = Some((id, pad.clone()));
-            state.saved_note_at = updated_at;
-            state.note_revision = state.note_revision.saturating_add(1);
-        }
+        let id = target
+            .session_id()
+            .expect("memo editors belong to managed sessions");
+        state.saved_notes = Some((id, pad.clone()));
+        state.saved_note_at = updated_at;
+        state.note_revision = state.note_revision.saturating_add(1);
         state.notice = Some(Notice::new("Memo saved"));
         close(state);
     }

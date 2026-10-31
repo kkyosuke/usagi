@@ -386,6 +386,42 @@ fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
 }
 
 #[test]
+fn delayed_pr_errors_preserve_drawers_opened_after_the_request() {
+    for (key, focus) in [
+        (AppKey::ToggleDirectorDrawer, WorkspaceDrawerFocus::Director),
+        (
+            AppKey::ToggleRootTerminalDrawer,
+            WorkspaceDrawerFocus::Terminal,
+        ),
+    ] {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPrs)),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        let _ = update(&mut state, AppEvent::Key(key));
+        assert_eq!(state.pr_request(), Some(target));
+        assert_eq!(state.workspace_drawer_focus(), Some(focus));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+
+        assert_eq!(state.pr_request(), None);
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+        assert!(state.workspace_drawer_open());
+        assert_eq!(state.workspace_drawer_focus(), Some(focus));
+        assert!(state.pr_focus.is_none());
+    }
+}
+
+#[test]
 fn newly_detected_pr_auto_opens_without_reopening_or_stealing_focus() {
     let (workspace, session, _) = ids();
     let target = Target::Session(session);

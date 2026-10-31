@@ -69,11 +69,11 @@ impl ErrorLog {
     /// `main`, such as the markdown stores' lenient scan skipping a corrupt file:
     /// routing those here keeps every failure inspectable in `<data dir>/logs/`.
     pub fn record(message: &str) {
-        // `if let` (not `let … else { return }`) so the data-dir-not-found case
-        // is just "skip the block" rather than its own statement: there is no
-        // way to make `open_default` fail under test, and an unreachable early
-        // return would leave a line uncovered.
-        if let Ok(log) = Self::open_default() {
+        Self::record_opened(&Self::open_default(), message);
+    }
+
+    fn record_opened(log: &Result<Self>, message: &str) {
+        if let Ok(log) = log {
             let now = Local::now();
             log.prune_once(now.date_naive());
             let _ = log.append(now, message);
@@ -210,6 +210,22 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let log = ErrorLog::new(dir.path().join("logs"));
         (dir, log)
+    }
+
+    #[test]
+    fn unavailable_log_destinations_do_not_replace_the_original_failure() {
+        ErrorLog::record_opened(
+            &Err(anyhow::anyhow!("data directory unavailable")),
+            "original",
+        );
+
+        let (directory, log) = temp_log();
+        std::fs::write(log.dir(), "not a directory").unwrap();
+        ErrorLog::record_opened(&Ok(log), "original");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("logs")).unwrap(),
+            "not a directory"
+        );
     }
 
     /// A detached daemon writes here and nowhere else, so this reader is the

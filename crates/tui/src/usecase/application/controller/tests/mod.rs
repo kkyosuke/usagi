@@ -3085,3 +3085,93 @@ mod decision_inbox {
         assert_eq!(state.decision_answers(), []);
     }
 }
+
+#[test]
+fn editor_completions_after_closing_do_not_reopen_the_editor() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    for event in [
+        BackendEvent::EnvironmentLoaded {
+            scope: EnvScope::Workspace,
+            entries: Vec::new(),
+            inherited: Vec::new(),
+        },
+        BackendEvent::RolesLoaded {
+            scope: RoleEditorScope::Workspace,
+            source: "version = 1".into(),
+        },
+        BackendEvent::RolesError {
+            scope: RoleEditorScope::Workspace,
+            error: SafeError {
+                message: SafeMessage::new("roles unavailable"),
+                error_id: "test".into(),
+            },
+        },
+    ] {
+        assert_eq!(
+            update(&mut state, AppEvent::Backend(event)),
+            [] as [Effect; 0]
+        );
+        assert!(state.environment_editor().is_none());
+        assert!(state.role_editor().is_none());
+        assert_eq!(state.overlay(), None);
+    }
+}
+
+#[test]
+fn environment_loading_and_saving_preserve_the_draft_against_edit_keys() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
+    for saving in [false, true] {
+        if saving {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                    scope: EnvScope::Workspace,
+                    entries: vec![EnvironmentEntry {
+                        name: "KEY".into(),
+                        value: "value".into(),
+                    }],
+                    inherited: Vec::new(),
+                }),
+            );
+            assert!(matches!(
+                update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).as_slice(),
+                [Effect::SaveEnvironment { .. }]
+            ));
+        }
+        let draft = state.environment_editor().unwrap().draft().to_owned();
+        for key in [
+            AppKey::Char('x'),
+            AppKey::Backspace,
+            AppKey::Paste("new".into()),
+            AppKey::Enter,
+        ] {
+            assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
+            assert_eq!(state.environment_editor().unwrap().draft(), draft);
+        }
+        assert_eq!(state.environment_editor().unwrap().is_saving(), saving);
+        assert_eq!(state.environment_editor().unwrap().is_loading(), !saving);
+    }
+}
+
+#[test]
+fn a_stale_decision_scroll_does_not_move_another_overlay() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+    let interactions = state.interaction_count;
+    assert_eq!(
+        update(
+            &mut state,
+            AppEvent::DecisionScrolled {
+                decision_id: usagi_core::domain::id::UserDecisionId::new(),
+                offset: 42,
+            }
+        ),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Overview));
+    assert_eq!(state.interaction_count, interactions);
+}

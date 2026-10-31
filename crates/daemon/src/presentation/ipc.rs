@@ -1123,6 +1123,15 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(registered.registered_connection().is_some());
+        assert_eq!(
+            connection_id(&fence, registered.registered_connection(), &client_hello()).unwrap(),
+            registered.registered_connection().unwrap()
+        );
+        assert_eq!(
+            fence.admitted.get(),
+            1,
+            "a registered peer must not be admitted twice"
+        );
 
         let refused_connection = RefusingConnection {
             refuse_handshake: true,

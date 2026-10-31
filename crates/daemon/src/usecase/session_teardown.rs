@@ -360,6 +360,21 @@ mod tests {
     }
 
     #[test]
+    fn a_poisoned_signal_leaves_the_worker_on_its_periodic_durable_scan() {
+        let signal = TeardownSignal::new();
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = signal.woken.lock().unwrap();
+            panic!("notification lock failed while held");
+        });
+        assert!(poisoned.is_err());
+
+        // Notifications are an optimization; durable pending teardowns remain
+        // authoritative when the signal cannot latch a notification.
+        signal.notify();
+        assert!(!signal.wait(Duration::from_secs(30)));
+    }
+
+    #[test]
     fn the_signal_wakes_a_waiting_worker_from_another_thread() {
         let signal = Arc::new(TeardownSignal::new());
         let waiter = Arc::clone(&signal);

@@ -914,6 +914,21 @@ fn corrupt_generation_binding_fails_closed_before_hydrate() {
 }
 
 #[test]
+fn hydrate_refuses_a_missing_active_generation_in_current_and_legacy_snapshots() {
+    for schema_version in [1, RUNTIME_SNAPSHOT_SCHEMA_VERSION] {
+        let mut snapshot = RuntimeStoreSnapshot {
+            schema_version,
+            ..RuntimeStoreSnapshot::default()
+        };
+        snapshot.generation.current = Some(DaemonGeneration::new());
+        assert_eq!(
+            RuntimeCoordinator::hydrate(snapshot, 1, 64, 1).unwrap_err(),
+            RuntimeSnapshotError::Generation
+        );
+    }
+}
+
+#[test]
 fn terminal_ownership_projection_covers_orphan_and_lost_states() {
     assert_eq!(
         terminal_ownership_state(RuntimeState::ReconcileRequired(
@@ -1371,6 +1386,38 @@ fn interrupting_agents_marks_a_process_that_cannot_be_reaped_for_reconcile() {
     assert_eq!(
         coordinator.snapshot().records[0].state,
         RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
+    );
+}
+
+#[test]
+fn interrupting_an_agent_without_a_provider_session_retains_its_final() {
+    let request = request();
+    let (runtime, fence) = refs(&request);
+    let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+    let mut store = Store::default();
+    let mut spawner = CompensatingSpawner { terminated: false };
+    launch(
+        &mut coordinator,
+        &request,
+        runtime.clone(),
+        fence,
+        &mut spawner,
+        &mut store,
+    )
+    .unwrap();
+    let ids = BTreeSet::from([runtime.agent_runtime_id.as_str()]);
+    assert_eq!(
+        coordinator.interrupt_agents(&ids, &mut store, &mut spawner),
+        Ok(1)
+    );
+    let record = &coordinator.snapshot().records[0];
+    assert_eq!(record.state, RuntimeState::Exited);
+    assert_eq!(record.process, None);
+    assert_eq!(record.provider_resume, None);
+    assert!(spawner.terminated);
+    assert_eq!(
+        coordinator.interrupt_agents(&ids, &mut store, &mut spawner),
+        Ok(0)
     );
 }
 

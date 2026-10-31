@@ -262,6 +262,9 @@ impl WorkspaceIoRuntime {
         for terminal in stale {
             self.close_terminal(&terminal);
         }
+        if self.agent.is_none() {
+            return;
+        }
 
         for (terminal, geometry) in visible {
             if let Some(index) = self
@@ -269,10 +272,11 @@ impl WorkspaceIoRuntime {
                 .iter()
                 .position(|session| session.terminal().fences(terminal))
             {
-                if let Some(agent) = self.agent.as_mut() {
-                    self.terminals[index]
-                        .resize(&mut AgentStreamPort(agent.port.as_mut()), *geometry);
-                }
+                let agent = self
+                    .agent
+                    .as_mut()
+                    .expect("visible terminals use the checked stream port");
+                self.terminals[index].resize(&mut AgentStreamPort(agent.port.as_mut()), *geometry);
             } else {
                 self.start_terminal_session(terminal.clone(), *geometry);
             }

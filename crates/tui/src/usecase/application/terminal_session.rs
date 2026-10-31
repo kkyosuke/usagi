@@ -3203,7 +3203,8 @@ mod tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("terminal.sock");
+        // Keep the socket name short enough for macOS worktree paths.
+        let path = temp.path().join("t.sock");
         // Connecting is exactly one round trip: the attach carries this pane's
         // viewport, so nothing precedes it.
         let first_server = serve(UnixListener::bind(&path).unwrap(), 1);
@@ -3620,6 +3621,16 @@ mod tests {
             error.contains("unknown checkpoint schema version"),
             "{error}"
         );
+
+        let mut initial_port = FakeTerminalPort {
+            attach: vec![Ok(hostile(4)), Ok(hostile(5))],
+            ..FakeTerminalPort::default()
+        };
+        let mut initial = TerminalSession::new(terminal(), geometry());
+        initial.connect_at(&mut initial_port, now);
+        assert_eq!(initial.state(), SessionState::Reconnecting);
+        assert_eq!(initial_port.detached, [sub(4), sub(5)]);
+        assert!(initial.error().unwrap().contains("snapshot was rejected"));
     }
 
     #[test]

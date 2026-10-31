@@ -693,3 +693,25 @@ fn every_existing_modal_blocks_director_drawer_entry() {
         }
     }
 }
+
+#[test]
+fn an_empty_background_director_preserves_terminal_focus() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::DirectorDrawerEmptied),
+        [] as [Effect; 0]
+    );
+    assert!(!state.director_drawer_open());
+    assert!(state.root_terminal_drawer_open());
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+}

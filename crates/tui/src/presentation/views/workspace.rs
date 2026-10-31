@@ -2773,7 +2773,11 @@ fn home_left_pane(
                     .into_iter()
                     .take(row.height),
             );
-        } else if let Some(name) = home.create_pending.as_deref() {
+        } else {
+            let name = home
+                .create_pending
+                .as_deref()
+                .expect("sidebar skeleton rows require a pending create");
             lines.extend(
                 create_skeleton_lines(width, name, home.mascot_tick, home.icon_mode)
                     .into_iter()
@@ -5349,6 +5353,14 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert_eq!(state.overlay(), None);
         let mut home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
+        for width in [1, 18] {
+            let layout = home_header_layout(width, &home);
+            assert_eq!(display_width(&layout.line), width);
+            assert!(
+                (0..width)
+                    .all(|column| layout.action_at(column) != Some(HomeHeaderAction::Decisions))
+            );
+        }
 
         let text_banner = strip(&home_notice_banner(
             100,
@@ -6370,25 +6382,23 @@ mod tests {
         // controller が集約する phase をすべて踏みつつ、Garden は runtime ごとの
         // phase を失わず投影することを固定する。
         let phases = [
-            Some(AgentPhase::Absent),
-            Some(AgentPhase::Ready),
-            Some(AgentPhase::Running),
-            Some(AgentPhase::Waiting),
-            Some(AgentPhase::Ended),
+            AgentPhase::Absent,
+            AgentPhase::Ready,
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Ended,
         ];
         let ids = phases.iter().map(|_| SessionId::new()).collect::<Vec<_>>();
         let mut state = AppState::home(workspace, ids.clone());
         let mut projected = Vec::new();
         for (index, phase) in phases.iter().enumerate() {
-            if let Some(phase) = *phase {
-                let _ = update(
-                    &mut state,
-                    AppEvent::Backend(BackendEvent::RuntimePhase {
-                        runtime: runtime_ref(workspace, ids[index]),
-                        phase,
-                    }),
-                );
-            }
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime_ref(workspace, ids[index]),
+                    phase: *phase,
+                }),
+            );
             projected.push(projected_session(ids[index], &format!("s{index}"), "/work"));
         }
         projected[4].lifecycle = SessionLifecycle::Failed;

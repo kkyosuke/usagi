@@ -1326,6 +1326,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn draining_release_rechecks_a_tenant_retired_during_observation() {
+        use super::super::authority::admission::{AdmissionGate, LeaseClass};
+        use super::super::generation::GenerationRole;
+        struct RetireDuringObservation<'a>(&'a TenantRegistry<FakeFences, FakeOpener>);
+        impl WorkspaceActivity<String> for RetireDuringObservation<'_> {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                assert!(self.0.retire(Path::new("/second")));
+                false
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (registry, live) = fixture(directory.path(), WorkspaceFenceOutcome::Acquired, 8);
+        drop(registry.adopt(Path::new("/second")).unwrap());
+        let gate = AdmissionGate::new(
+            usagi_core::domain::id::DaemonGeneration::new(),
+            GenerationRole::Active,
+        );
+        gate.close(LeaseClass::ActiveControl);
+        gate.enter_draining().unwrap();
+        gate.confirm_draining();
+        assert_eq!(
+            registry.release_draining(&gate, &RetireDuringObservation(&registry)),
+            [] as [PathBuf; 0]
+        );
+        // A late cleanup cancellation cannot recreate the retired tenant.
+        registry.cancel_retire(Path::new("/second"));
+        assert_eq!(registry.adopted(), [] as [Tenant<String>; 0]);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
     /// The initial release observes the workspace with the registry lock free,
     /// for the same lock-order reason the idle sweep does.
     #[test]

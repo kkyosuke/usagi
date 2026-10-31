@@ -50,68 +50,8 @@ pub(super) fn step_setup_commands_editor(
             }
             config.save_setup_commands(settings);
         }
-        Key::Enter => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.newline();
-            }
-        }
-        Key::Tab => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.toggle_save_focus(true);
-            }
-        }
-        Key::Backspace => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.backspace();
-            }
-        }
-        Key::Delete => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.delete_forward();
-            }
-        }
-        Key::Left => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.move_cursor(false);
-            }
-        }
-        Key::Right => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.move_cursor(true);
-            }
-        }
-        Key::Up => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.move_vertical(false);
-            }
-        }
-        Key::Down => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.move_vertical(true);
-            }
-        }
-        Key::Home | Key::LineStart => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.move_edge(false);
-            }
-        }
-        Key::End | Key::LineEnd => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.move_edge(true);
-            }
-        }
-        Key::Char(character) if !character.is_control() => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.insert(&character.to_string());
-            }
-        }
-        Key::Paste(text) => {
-            if let Some(editor) = config.setup_commands_editor_mut() {
-                editor.paste(&text);
-            }
-        }
         Key::Escape => config.cancel_setup_commands(),
-        _ => {}
+        _ => config.edit_setup_commands(key),
     }
     ConfigStep::Stay
 }

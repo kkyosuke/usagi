@@ -220,6 +220,7 @@ struct FakeSessionWorktreeIo {
 struct SetupSessionWorktreeIo {
     calls: Arc<Mutex<Vec<(PathBuf, String)>>>,
     fail_on: Option<String>,
+    after_command: Option<fn(&Arc<Mutex<SessionRuntime>>)>,
     runtime: Arc<Mutex<Option<std::sync::Weak<Mutex<SessionRuntime>>>>>,
     observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -493,6 +494,9 @@ impl SessionWorktreeIo for SetupSessionWorktreeIo {
             && runtime.try_lock().is_ok()
         {
             self.observed_unlocked.store(true, Ordering::SeqCst);
+            if let Some(after_command) = self.after_command {
+                after_command(&runtime);
+            }
         }
         if self.fail_on.as_deref() == Some(command) {
             Err(anyhow::anyhow!("injected setup failure"))
@@ -534,6 +538,7 @@ fn specialized_worktree_fakes_keep_their_noop_contracts_explicit() {
     let setup = SetupSessionWorktreeIo {
         calls: Arc::new(Mutex::new(Vec::new())),
         fail_on: None,
+        after_command: None,
         runtime: Arc::new(Mutex::new(None)),
         observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -958,13 +963,20 @@ fn removal_identity_treats_a_missing_branch_as_absent_and_rejects_unknown_names(
         &json!({"name":"one"}),
     )
     .unwrap();
-    let runtime = runtime.lock().unwrap();
+    let mut runtime = runtime.lock().unwrap();
     let session_id = runtime.session_id("one").unwrap();
     assert_eq!(runtime.removal_identity("one").unwrap(), (session_id, None));
     assert_eq!(
         runtime.removal_identity("missing"),
         Err(SessionRuntimeError::UnknownSession)
     );
+    let before = runtime.state().unwrap();
+    runtime.git = Box::new(ScriptedGit::new([ScriptedGitResult::Error]));
+    assert_eq!(
+        runtime.removal_identity("one"),
+        Err(SessionRuntimeError::Storage)
+    );
+    assert_eq!(runtime.state().unwrap(), before);
 }
 
 #[test]
@@ -2717,6 +2729,18 @@ fn open_repairs_a_legacy_failed_session_and_replays_failure() {
         .store
         .replace_if_revision(revision, &legacy)
         .unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |_| {
+        SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .err()
+        .expect("legacy repair must persist before startup succeeds")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
     drop(runtime);
 
     let mut reopened = SessionRuntime::open(
@@ -3115,6 +3139,7 @@ fn configured_setup_commands_run_in_order_without_holding_the_session_lock() {
             SetupSessionWorktreeIo {
                 calls: Arc::clone(&calls),
                 fail_on: None,
+                after_command: None,
                 runtime: Arc::clone(&runtime_probe),
                 observed_unlocked: Arc::clone(&observed_unlocked),
             },
@@ -3162,6 +3187,7 @@ fn create_and_setup_completion_refresh_the_fence_after_unrelated_mutations() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -3224,6 +3250,7 @@ fn create_and_setup_completion_rejects_a_different_workspace_identity() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -3294,6 +3321,7 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
             SetupSessionWorktreeIo {
                 calls: Arc::clone(&calls),
                 fail_on: Some("fail".into()),
+                after_command: None,
                 runtime: Arc::new(Mutex::new(None)),
                 observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
@@ -3374,6 +3402,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -3403,6 +3432,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -4731,6 +4761,43 @@ fn perform_remove_maps_a_poisoned_session_lock_to_storage() {
     ));
 }
 
+#[test]
+fn perform_create_preserves_initializing_state_when_setup_poisons_the_owner() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    std::fs::write(
+        temp.path().join(".usagi/config.toml"),
+        "[session]\nsetup_commands = [\"setup\"]\n",
+    )
+    .unwrap();
+    let probe = Arc::new(Mutex::new(None));
+    runtime.io = Arc::new(SetupSessionWorktreeIo {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        fail_on: None,
+        after_command: Some(poison_lock),
+        runtime: Arc::clone(&probe),
+        observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let state_path = runtime.store.state_path();
+    let runtime = Arc::new(Mutex::new(runtime));
+    *probe.lock().unwrap() = Some(Arc::downgrade(&runtime));
+    assert_eq!(
+        perform_create(
+            &runtime,
+            &FakeSessionGit::ok(),
+            &operation(),
+            &json!({"name":"pending"})
+        ),
+        Err(SessionRuntimeError::Storage)
+    );
+    let store = DaemonLifecycleStore::new(state_path.parent().unwrap());
+    let state = store.load().unwrap().unwrap();
+    assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Initializing);
+    assert_eq!(
+        state.sessions[0].setup_plan.as_ref().unwrap().commands,
+        ["setup"]
+    );
+}
+
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 #[test]
@@ -5200,4 +5267,324 @@ fn status_git_observations_run_without_the_session_owner_lock() {
     let reply = perform_status(&runtime, &git, &operation()).unwrap();
     assert_eq!(reply.body["sessions"][0]["name"], "sample");
     assert_eq!(git.1.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn status_git_io_failures_preserve_the_durable_session_state() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({"name":"sample"}),
+        )
+        .unwrap();
+    let state_path = temp.path().join("daemon/sessions.json");
+    let before = std::fs::read(&state_path).unwrap();
+    let runtime = Mutex::new(runtime);
+
+    // Base branch, worktree status, worktree branch and ancestry each perform
+    // independent Git IO. An unavailable command must not yield partial status
+    // or mutate the lifecycle snapshot captured before observation.
+    for failed_command in 0..4 {
+        let git = ScriptedGit::new(
+            (0..failed_command)
+                .map(|_| ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "main\n",
+                    stderr: "",
+                })
+                .chain(std::iter::once(ScriptedGitResult::Error)),
+        );
+        assert_eq!(
+            perform_status(&runtime, &git, &operation()),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(git.results.lock().unwrap().len(), 0);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    }
+}
+
+#[test]
+fn status_refuses_an_unavailable_owner_before_git_without_rewriting_state() {
+    for poisoned in [false, true] {
+        let (temp, runtime) = runtime(FakeSessionGit::ok());
+        let state_path = temp.path().join("daemon/sessions.json");
+        let runtime = Arc::new(Mutex::new(runtime));
+        if poisoned {
+            poison_lock(&runtime);
+        } else {
+            std::fs::write(&state_path, "corrupt lifecycle state").unwrap();
+        }
+        let before = std::fs::read(&state_path).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let git = CountingGit {
+            calls: Arc::clone(&calls),
+        };
+
+        assert_eq!(
+            perform_status(&runtime, &git, &operation()),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    }
+}
+
+/// Keep reads available while refusing the real store's next write lock.
+/// Every failed lifecycle transition must leave the serialized state intact.
+fn with_lifecycle_writes_blocked<T>(
+    runtime: &mut SessionRuntime,
+    action: impl FnOnce(&mut SessionRuntime) -> T,
+) -> T {
+    let state = runtime.store.state_path();
+    let lock = state.with_file_name(".lock");
+    let before = std::fs::read(&state).unwrap();
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let result = action(runtime);
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+    std::fs::remove_dir(&lock).unwrap();
+    std::fs::write(&lock, "").unwrap();
+    result
+}
+
+#[test]
+fn lifecycle_reservation_write_failures_leave_create_and_remove_retryable() {
+    let (_temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let create = operation();
+    let payload = json!({"name":"retryable"});
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .begin_create(CreateOrigin::Direct, &create, &payload)
+            .err()
+            .expect("a reservation requires a writable lifecycle store")
+    });
+    assert_eq!(error, SessionRuntimeError::Rejected);
+    runtime
+        .handle(SessionAction::Create, &create, &payload)
+        .unwrap();
+
+    let remove = operation();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .begin_remove(RemoveKind::Requested, &remove, &payload, None)
+            .err()
+            .expect("removal must be durably admitted before worktree teardown")
+    });
+    assert_eq!(error, SessionRuntimeError::Rejected);
+    runtime
+        .begin_remove(RemoveKind::Requested, &remove, &payload, None)
+        .unwrap();
+    let pending = runtime.pending_teardowns().unwrap().pop().unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime.finish_teardown(&pending, Ok(())).unwrap_err()
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        runtime.pending_teardowns().unwrap(),
+        std::slice::from_ref(&pending)
+    );
+    runtime.finish_teardown(&pending, Ok(())).unwrap();
+    assert_eq!(runtime.state().unwrap().sessions, [] as [ManagedSession; 0]);
+}
+
+#[test]
+fn lifecycle_create_completion_write_failure_keeps_the_reservation() {
+    let (_temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let pending = pending_create(
+        runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"pending"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .finish_create(*pending, Ok(()))
+            .err()
+            .expect("a successful effect still requires a durable completion")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        runtime.state().unwrap().sessions[0].lifecycle,
+        SessionLifecycle::Creating
+    );
+    runtime.reconcile().unwrap();
+    assert_eq!(
+        runtime.state().unwrap().sessions[0].lifecycle,
+        SessionLifecycle::Failed
+    );
+}
+
+#[test]
+fn lifecycle_setup_completion_write_failure_keeps_initialization_recoverable() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    std::fs::write(
+        temp.path().join(".usagi/config.toml"),
+        "[session]\nsetup_commands = [\"setup\"]\n",
+    )
+    .unwrap();
+    let pending = pending_create(
+        runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"pending"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let initializing =
+        pending_initialize(runtime.finish_create(*pending, Ok(())).unwrap()).unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime.finish_initialize(initializing, Ok(())).unwrap_err()
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        runtime.state().unwrap().sessions[0].lifecycle,
+        SessionLifecycle::Initializing
+    );
+    let error = with_lifecycle_writes_blocked(&mut runtime, SessionRuntime::reconcile).unwrap_err();
+    assert_eq!(error, SessionRuntimeError::Storage);
+    runtime.reconcile().unwrap();
+    let state = runtime.state().unwrap();
+    assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Failed);
+    assert_eq!(
+        state.sessions[0].failure.as_ref().unwrap().stage,
+        FailureStage::Initialize
+    );
+}
+
+#[test]
+fn startup_refuses_corrupt_legacy_state_without_creating_a_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repository");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let legacy = project_data_dir(&root).join("lifecycle-state.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, "corrupt legacy lifecycle").unwrap();
+    let daemon = temp.path().join("daemon");
+    let error = SessionRuntime::open(
+        root,
+        &daemon,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .err()
+    .expect("corrupt legacy state must not be replaced by an empty workspace");
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        std::fs::read_to_string(legacy).unwrap(),
+        "corrupt legacy lifecycle"
+    );
+    assert!(!daemon.join("sessions.json").exists());
+}
+
+#[test]
+fn startup_refuses_unreadable_repository_metadata_without_rewriting_sessions() {
+    for blocked in [".gitignore", ".usagi/sessions"] {
+        let (temp, runtime) = runtime(FakeSessionGit::ok());
+        let state = runtime.store.state_path();
+        let before = std::fs::read(&state).unwrap();
+        drop(runtime);
+        let path = temp.path().join(blocked);
+        // A directory cannot be read as ignore text; a file cannot be scanned
+        // as the session container. Neither failure permits forgetting state.
+        if blocked == ".gitignore" {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, "occupied session container").unwrap();
+        }
+        let error = SessionRuntime::open(
+            temp.path().into(),
+            &temp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .err()
+        .expect("unreadable repository metadata must fail startup");
+        assert_eq!(error, SessionRuntimeError::Storage);
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+    }
+}
+
+#[test]
+fn startup_requires_a_writable_lock_for_initialization_and_root_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    std::fs::create_dir_all(repository.join(".git")).unwrap();
+    let daemon = temp.path().join("daemon");
+    std::fs::create_dir_all(daemon.join(".lock")).unwrap();
+    let error = SessionRuntime::open(
+        repository.clone(),
+        &daemon,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .err()
+    .expect("initialization must obtain the lifecycle write lock");
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert!(!daemon.join("sessions.json").exists());
+    std::fs::remove_dir(daemon.join(".lock")).unwrap();
+    let mut runtime = SessionRuntime::open(
+        repository.clone(),
+        &daemon,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |_| {
+        SessionRuntime::open(
+            repository,
+            &daemon,
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .err()
+        .expect("root identity must be checked under the lifecycle write lock")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+}
+
+#[test]
+fn lifecycle_orphan_adoption_write_failures_preserve_the_unowned_directory() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let orphan = temp.path().join(".usagi/sessions/orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("user-data"), "retain me").unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"orphan"}),
+            )
+            .err()
+            .expect("an occupied path must be adopted durably before reporting its recovery state")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    let error =
+        with_lifecycle_writes_blocked(&mut runtime, SessionRuntime::reconcile_orphan_worktrees)
+            .unwrap_err();
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        std::fs::read_to_string(orphan.join("user-data")).unwrap(),
+        "retain me"
+    );
+    runtime.reconcile_orphan_worktrees().unwrap();
+    let state = runtime.state().unwrap();
+    assert_eq!(state.sessions[0].name, "orphan");
+    assert_eq!(
+        state.sessions[0].failure.as_ref().unwrap().stage,
+        FailureStage::Integrity
+    );
 }

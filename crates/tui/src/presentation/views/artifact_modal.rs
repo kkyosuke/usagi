@@ -398,4 +398,36 @@ mod tests {
         assert!(open.error().is_none());
         assert!(text(&state).contains("Open result unconfirmed"));
     }
+
+    #[test]
+    fn external_open_failure_preserves_the_selected_artifact_without_a_format_hint() {
+        let mut state = loaded(vec!["artifacts/report.html".into()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let overlay = state.preview_overlay().unwrap();
+        let target = overlay.target();
+        let request_id = overlay.artifact_open().unwrap().request_id();
+        let path = overlay.selected_file().unwrap().to_owned();
+        let filter = overlay.file_filter();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::ArtifactOpenFinished {
+                target,
+                request_id,
+                path: path.clone(),
+                filter,
+                result: Err(SafeError {
+                    message: SafeMessage::new("External application could not start."),
+                    error_id: "artifact-open".into(),
+                }),
+            }),
+        );
+        let rendered = text(&state);
+        assert!(rendered.contains("External application could not start."));
+        assert!(!rendered.contains("Press Tab for a text preview."));
+        assert_eq!(
+            state.preview_overlay().unwrap().selected_file(),
+            Some(path.as_str())
+        );
+        assert!(rendered.contains("Enter open"));
+    }
 }

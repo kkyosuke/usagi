@@ -617,7 +617,8 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(inventory.discover([newest.clone()]));
+        assert!(inventory.discover_with_auto_open([(newest.clone(), false)]));
+        assert!(!inventory.entries[&newest].auto_open);
         assert_eq!(inventory.entries.len(), PR_INVENTORY_ENTRIES_MAX);
         assert!(inventory.entries.contains_key(&dismissed));
         assert!(inventory.entries.contains_key(&pinned));
@@ -770,6 +771,8 @@ mod tests {
         assert!(inventory.discover_with_auto_open([(id.clone(), false)]));
         assert!(!inventory.entries[&id].auto_open);
         assert!(inventory.discover_with_auto_open([(id.clone(), true)]));
+        assert!(inventory.entries[&id].auto_open);
+        assert!(!inventory.discover_with_auto_open([(id.clone(), false)]));
         assert!(inventory.entries[&id].auto_open);
         assert_eq!(inventory.revision, 2);
     }

@@ -401,13 +401,11 @@ impl WorkspaceDeck {
         self.slots.iter().find(|slot| slot.path == path)
     }
 
-    /// Select an existing slot in a presentation-only deck clone.
-    pub fn preview_path(&mut self, path: &Path) {
-        if let Some(slot) = self.slots.iter().find(|slot| slot.path == path) {
-            self.active = slot.workspace_id;
-            self.overlay = None;
-            self.notice = None;
-        }
+    /// Select the already-resolved slot in a presentation-only deck clone.
+    pub(super) fn preview_slot(&mut self, slot: &WorkspaceSlot) {
+        self.active = slot.workspace_id;
+        self.overlay = None;
+        self.notice = None;
     }
 
     /// Append prepared tabs in request order, ignoring duplicate paths.
@@ -1201,28 +1199,27 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         column += widgets::display_width(&hidden);
         line.push_str(&Style::new().dim().paint(&hidden));
     }
-    if column < width {
-        let add = add_button.render(
-            width.saturating_sub(column),
-            Role::Accent.style().bold().reverse(),
-        );
-        let span = add.width;
-        line.push_str(&add.line);
-        hits.push(ProjectBarHit {
-            columns: column..column + span,
-            target: ProjectBarTarget::Add,
-        });
-        column += span;
-        let gap = width.saturating_sub(column + attention_button.width());
-        line.push_str(&" ".repeat(gap));
-        column += gap;
-        let attention = attention_button.render(width.saturating_sub(column), attention_style);
-        line.push_str(&attention.line);
-        hits.push(ProjectBarHit {
-            columns: column..column + attention.width,
-            target: ProjectBarTarget::Attention,
-        });
-    }
+    // The chosen window already reserves space for both action buttons.
+    let add = add_button.render(
+        width.saturating_sub(column),
+        Role::Accent.style().bold().reverse(),
+    );
+    let span = add.width;
+    line.push_str(&add.line);
+    hits.push(ProjectBarHit {
+        columns: column..column + span,
+        target: ProjectBarTarget::Add,
+    });
+    column += span;
+    let gap = width.saturating_sub(column + attention_button.width());
+    line.push_str(&" ".repeat(gap));
+    column += gap;
+    let attention = attention_button.render(width.saturating_sub(column), attention_style);
+    line.push_str(&attention.line);
+    hits.push(ProjectBarHit {
+        columns: column..column + attention.width,
+        target: ProjectBarTarget::Attention,
+    });
     ProjectBar { line, hits }
 }
 
@@ -2243,6 +2240,9 @@ mod tests {
         let beta = snapshot_with_session("beta", "/beta", "review");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta]).unwrap();
         deck.open_switcher();
+        let initial = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
+        assert!(initial.iter().any(|line| line.contains("beta / review")));
+        assert!(!initial.iter().any(|line| line.contains("safe failure")));
         deck.set_notice("safe failure");
         let frame = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
         assert_eq!(frame.len(), 20);

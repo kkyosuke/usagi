@@ -263,31 +263,26 @@ impl OverviewModal {
 
     /// 選択を次の候補へ（末尾で先頭へ回り込む）。候補が無ければ何もしない。
     pub fn select_next(&mut self) {
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
-        if len > 0 {
-            self.selected = (self.selected + 1) % len;
-        }
+        self.move_selection(true);
     }
 
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
     pub fn select_prev(&mut self) {
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + len - 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
+        self.move_selection(false);
+    }
+
+    fn move_selection(&mut self, forward: bool) {
+        let (len, selected) = if self.expanded {
+            (self.subcommands().len(), &mut self.selected_subcommand)
+        } else {
+            (self.matches().len(), &mut self.selected)
+        };
         if len > 0 {
-            self.selected = (self.selected + len - 1) % len;
+            *selected = if forward {
+                (*selected + 1) % len
+            } else {
+                (*selected + len - 1) % len
+            };
         }
     }
 

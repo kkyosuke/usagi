@@ -421,6 +421,14 @@ mod tests {
             runtime: Some(runtime()).into(),
         })
         .unwrap();
+        let mut malformed_runtime = missing_nullable.clone();
+        malformed_runtime["agent_phase"] = serde_json::json!(7);
+        assert!(
+            serde_json::from_value::<SessionListItem>(malformed_runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("session runtime observation is malformed")
+        );
         missing_nullable
             .as_object_mut()
             .unwrap()
