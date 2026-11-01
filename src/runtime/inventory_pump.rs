@@ -725,6 +725,10 @@ mod tests {
         let second = scope_terminal(workspace, None, worktree);
         state.watch(1, std::slice::from_ref(&first), ms(0));
         let job = state.begin_round(ms(0)).remove(0);
+        // Repeating a frame's unchanged watch must preserve the in-flight job.
+        assert!(!state.watch(1, std::slice::from_ref(&first), ms(5)));
+        assert_eq!(state.scopes[0].generation, job.generation);
+        assert_eq!(state.begin_round(ms(5)), [] as [InventoryJob; 0]);
         // The user opened another background tab in the same scope while the
         // observation was in flight.
         state.watch(1, &[first.clone(), second.clone()], ms(10));

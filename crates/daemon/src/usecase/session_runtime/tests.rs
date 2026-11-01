@@ -5460,6 +5460,62 @@ fn lifecycle_setup_completion_write_failure_keeps_initialization_recoverable() {
 }
 
 #[test]
+fn startup_refuses_corrupt_current_state_without_replacing_its_bytes() {
+    let (temp, runtime) = runtime(FakeSessionGit::ok());
+    let state = runtime.store.state_path();
+    drop(runtime);
+    std::fs::write(&state, "corrupt current lifecycle").unwrap();
+
+    let error = SessionRuntime::open(
+        temp.path().into(),
+        &temp.path().join("daemon"),
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .err()
+    .expect("corrupt current state must not be replaced by an empty workspace");
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        std::fs::read_to_string(state).unwrap(),
+        "corrupt current lifecycle"
+    );
+}
+
+#[test]
+fn a_teardown_without_its_journal_entry_cannot_commit_an_unfenced_outcome() {
+    let (_temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let payload = json!({"name":"retained"});
+    runtime
+        .handle(SessionAction::Create, &operation(), &payload)
+        .unwrap();
+    runtime
+        .begin_remove(RemoveKind::Requested, &operation(), &payload, None)
+        .unwrap();
+    let pending = runtime.pending_teardowns().unwrap().pop().unwrap();
+    let mut state = runtime.state().unwrap();
+    let revision = state.state_revision;
+    // Old snapshots may retain the deleting session after its journal row was
+    // lost. Its identity alone cannot authorize a completion from this worker.
+    state
+        .operations
+        .retain(|entry| entry.operation_id != pending.operation_id);
+    state.state_revision += 1;
+    runtime.store.replace_if_revision(revision, &state).unwrap();
+    let before = std::fs::read(runtime.store.state_path()).unwrap();
+
+    for outcome in [Ok(()), Err("late worker failure".into())] {
+        let reply = runtime.finish_teardown(&pending, outcome).unwrap();
+        assert_eq!(reply.revision, state.state_revision);
+        assert_eq!(std::fs::read(runtime.store.state_path()).unwrap(), before);
+        assert_eq!(
+            runtime.state().unwrap().sessions[0].lifecycle,
+            SessionLifecycle::Deleting
+        );
+    }
+}
+
+#[test]
 fn startup_refuses_corrupt_legacy_state_without_creating_a_replacement() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("repository");

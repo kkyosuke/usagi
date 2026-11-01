@@ -4177,25 +4177,23 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             _ => Vec::new(),
         },
-        Overlay::ForceRemoveConfirmation => {
-            let Some((_, confirm)) = state.force_remove_confirmation.as_mut() else {
-                state.overlay = None;
-                return Vec::new();
-            };
-            match key {
-                AppKey::Char('y' | 'Y') => commit_force_remove(state, true),
-                AppKey::Char('n' | 'N') | AppKey::Escape => commit_force_remove(state, false),
-                AppKey::Enter => {
-                    let confirmed = *confirm;
-                    commit_force_remove(state, confirmed)
-                }
-                AppKey::Left | AppKey::Right | AppKey::Tab => {
+        Overlay::ForceRemoveConfirmation => match key {
+            AppKey::Char('y' | 'Y') => commit_force_remove(state, true),
+            AppKey::Char('n' | 'N') | AppKey::Escape => commit_force_remove(state, false),
+            AppKey::Enter => commit_force_remove(
+                state,
+                state
+                    .force_remove_confirmation
+                    .is_some_and(|(_, confirm)| confirm),
+            ),
+            AppKey::Left | AppKey::Right | AppKey::Tab => {
+                if let Some((_, confirm)) = state.force_remove_confirmation.as_mut() {
                     *confirm = !*confirm;
-                    Vec::new()
                 }
-                _ => Vec::new(),
+                Vec::new()
             }
-        }
+            _ => Vec::new(),
+        },
         Overlay::Notes => notes::key(state, &key),
         Overlay::Environment => {
             if matches!(key, AppKey::Escape) {

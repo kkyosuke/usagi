@@ -585,6 +585,34 @@ fn local_settings_ignore_global_only_and_unknown_workspace_values() {
 }
 
 #[test]
+fn local_team_templates_preserve_explicit_overrides_and_absence() {
+    for template in [
+        None,
+        Some(TeamTemplate::None),
+        Some(TeamTemplate::Hierarchical),
+        Some(TeamTemplate::Flat),
+        Some(TeamTemplate::Pipeline),
+    ] {
+        let local = LocalSettings {
+            team_template: template,
+            ..LocalSettings::default()
+        };
+        let json = serde_json::to_string(&local).unwrap();
+        let decoded: LocalSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, local);
+        let global = Settings {
+            team_template: TeamTemplate::Hierarchical,
+            ..Settings::default()
+        };
+        assert_eq!(
+            global.with_local(&decoded).team_template,
+            template.unwrap_or(TeamTemplate::Hierarchical),
+            "only an absent override inherits the global template"
+        );
+    }
+}
+
+#[test]
 fn full_settings_convert_to_workspace_owned_values_only() {
     let settings = Settings {
         theme: Theme::Light,

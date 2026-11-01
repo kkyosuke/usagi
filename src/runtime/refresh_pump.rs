@@ -527,6 +527,7 @@ mod tests {
         let mut result = pump.take();
         assert_eq!(result, None);
         release_tx.send(()).unwrap();
+        drop(release_tx);
         while result.is_none() {
             assert!(Instant::now() < deadline, "the lane published no result");
             std::thread::sleep(Duration::from_millis(5));
@@ -577,6 +578,7 @@ mod tests {
         result = pump.take();
         assert_eq!(result, None);
         release_tx.send(()).unwrap();
+        drop(release_tx);
         while result.is_none() {
             assert!(Instant::now() < deadline, "the wake produced no fetch");
             std::thread::sleep(Duration::from_millis(5));

@@ -1110,11 +1110,14 @@ mod tests {
                 .unwrap()
                 .is_opening()
         );
-        let mut success = retry.clone();
-        let BackendEvent::ArtifactOpenFinished { result, .. } = &mut success else {
-            unreachable!("open_artifact returns an artifact completion");
+        let overlay = state.preview_overlay().unwrap();
+        let success = BackendEvent::ArtifactOpenFinished {
+            target: overlay.target(),
+            request_id: overlay.artifact_open().unwrap().request_id(),
+            path: overlay.selected_file().unwrap().to_owned(),
+            filter: overlay.file_filter(),
+            result: Ok(ArtifactOpenOutcome::Sent),
         };
-        *result = Ok(ArtifactOpenOutcome::Sent);
         let _ = update(&mut state, AppEvent::Backend(success));
         let _ = update(&mut state, AppEvent::Backend(retry));
         let status = state.preview_overlay().unwrap().artifact_open().unwrap();

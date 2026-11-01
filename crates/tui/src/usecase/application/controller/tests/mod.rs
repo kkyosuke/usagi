@@ -3096,6 +3096,11 @@ fn editor_completions_after_closing_do_not_reopen_the_editor() {
             entries: Vec::new(),
             inherited: Vec::new(),
         },
+        BackendEvent::EnvironmentSaved {
+            scope: EnvScope::Workspace,
+            entries: Vec::new(),
+            inherited: Vec::new(),
+        },
         BackendEvent::RolesLoaded {
             scope: RoleEditorScope::Workspace,
             source: "version = 1".into(),

@@ -859,16 +859,14 @@ impl WorkspaceRuntime {
             Key::Enter => {
                 let submission = modal.submission();
                 let effects = self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)));
-                // An accepted command produces its effect and closes the overlay
-                // (which drops the modal). A refused one produces nothing and
-                // leaves the modal on screen, so carry the reducer's safe message
-                // into it — otherwise the refusal looks like a dead key.
+                // Empty effects can mean a validation refusal or dismissal of a
+                // session that can no longer launch. Show feedback only while
+                // the reducer keeps the modal open.
                 if effects.is_empty() {
                     let message = self.state.notice().map(|notice| notice.message.clone());
-                    self.closeup_modal
-                        .as_mut()
-                        .expect("a refused Closeup submission keeps its modal open")
-                        .set_error(message);
+                    if let Some(modal) = self.closeup_modal.as_mut() {
+                        modal.set_error(message);
+                    }
                 }
                 effects
             }
@@ -2273,6 +2271,32 @@ mod tests {
         let _ = runtime.handle_key(Key::Char('?'));
         assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
         assert_eq!(runtime.overview_modal().unwrap().input(), "?");
+    }
+
+    #[test]
+    fn palette_wakeups_preserve_drafts_selection_and_material_revision() {
+        let workspace = WorkspaceId::new();
+        for mut runtime in [
+            overview_on(workspace),
+            closeup_on(workspace, SessionId::new()),
+        ] {
+            let _ = runtime.handle_key(Key::Paste("agent".to_owned()));
+            let _ = runtime.handle_key(Key::SelectHome);
+            let overview = runtime.overview_modal().cloned();
+            let closeup = runtime.closeup_modal().cloned();
+            let selected = runtime.state().selected();
+            let overlay = runtime.state().overlay();
+            let revision = runtime.material_key();
+
+            for key in [Key::Other, Key::Resize] {
+                assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
+                assert_eq!(runtime.overview_modal(), overview.as_ref());
+                assert_eq!(runtime.closeup_modal(), closeup.as_ref());
+                assert_eq!(runtime.state().selected(), selected);
+                assert_eq!(runtime.state().overlay(), overlay);
+                assert_eq!(runtime.material_key(), revision);
+            }
+        }
     }
 
     fn type_str(runtime: &mut WorkspaceRuntime, text: &str) {
@@ -4968,6 +4992,12 @@ mod tests {
         assert_eq!(runtime.focused_terminal(), Some(terminal));
         assert!(runtime.wants_live_input());
         assert_eq!(runtime.state().overlay(), None);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Switch));
     }
 
     // ── R2: completion focus is gated on no later interaction ────────────────

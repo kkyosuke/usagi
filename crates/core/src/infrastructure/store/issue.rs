@@ -1563,26 +1563,54 @@ mod tests {
 
     #[test]
     fn point_read_refuses_a_source_changed_after_identity_validation() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = IssueStore::new(tmp.path());
-        let original = issue(7, "First");
-        store.write(&original).unwrap();
-        let source = store.dir().join(original.file_name());
-
-        let error = store
-            .read_observing_lock(7, |phase| {
-                if phase == ReadLockPhase::DerivedRepaired {
+        for (exists, replace_source) in [(false, false), (true, false), (true, true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            let original = issue(7, "First");
+            let source = store.dir().join(original.file_name());
+            if exists {
+                fs::create_dir_all(store.dir()).unwrap();
+                fs::write(&source, original.to_markdown()).unwrap();
+            }
+            let mut observed = Vec::new();
+            let result = store.read_observing_lock(7, |phase| {
+                observed.push(phase);
+                if replace_source && phase == ReadLockPhase::DerivedRepaired {
                     // A non-cooperative writer, such as Git, can replace source
                     // bytes despite the store lock held by this read.
                     fs::write(&source, "no longer valid frontmatter").unwrap();
                 }
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("failed to parse"));
-        assert_eq!(
-            fs::read_to_string(source).unwrap(),
-            "no longer valid frontmatter"
-        );
+            });
+            if replace_source {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("failed to parse"));
+                assert_eq!(
+                    fs::read_to_string(&source).unwrap(),
+                    "no longer valid frontmatter"
+                );
+                assert_eq!(
+                    observed,
+                    [ReadLockPhase::UniqueChecked, ReadLockPhase::DerivedRepaired]
+                );
+            } else if exists {
+                assert_eq!(result.unwrap(), Some(original));
+                assert_eq!(
+                    observed,
+                    [
+                        ReadLockPhase::UniqueChecked,
+                        ReadLockPhase::DerivedRepaired,
+                        ReadLockPhase::ExactRead
+                    ]
+                );
+            } else {
+                assert_eq!(result.unwrap(), None);
+                assert_eq!(observed, [] as [ReadLockPhase; 0]);
+                assert!(
+                    !store.dir().exists(),
+                    "an absent store is not materialized by reading"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1736,6 +1736,118 @@ fn a_store_failure_is_reported_as_a_refused_save() {
 }
 
 #[test]
+fn an_acknowledged_exit_remains_replayable_until_shard_cleanup_is_durable() {
+    let world = World::new();
+    let owner = DaemonGeneration::new();
+    let resource = terminal(owner);
+    let mut record = terminal_record(
+        &resource,
+        OperationId::new(),
+        TerminalRuntimeState::Running,
+        Some(process(81, "start-81")),
+    );
+    let mut draining = ShardedTerminalStore::new(world.role(
+        owner,
+        GenerationRole::Draining,
+        ObservedChildren::new().with(81, "start-81"),
+    ));
+    draining
+        .save(terminal_snapshot(vec![record.clone()]))
+        .unwrap();
+    record.state = TerminalRuntimeState::Exited;
+    draining
+        .save(terminal_snapshot(vec![record.clone()]))
+        .unwrap();
+    let before = world.shard(owner);
+    assert_eq!(before.unacked_outbox(), 1);
+
+    let mut failing = world.state(owner, ObservedChildren::new());
+    // The exit is already published. Only the owner-local cleanup CAS fails;
+    // the shared allocator remains writable for the active consumer's ACK.
+    failing.shard = OwnerShard::new(
+        MemoryFile::faulty(&world.archive.bytes(owner), FileFault::WriteFails),
+        owner,
+    );
+    let mut store = ShardedTerminalStore::new(failing);
+    assert_eq!(
+        store.save(terminal_snapshot(vec![record.clone()])),
+        Err(StoreError::Unavailable)
+    );
+    let acknowledged = world.allocator();
+    assert_eq!(
+        acknowledged.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    assert_eq!(world.shard(owner), before);
+    assert!(matches!(
+        store.state().self_collectable(),
+        Err(ResourceFailure::Io(_))
+    ));
+    assert_eq!(
+        world.shard(owner),
+        before,
+        "a failed sweep cannot claim collection readiness"
+    );
+
+    let mut retried = ShardedTerminalStore::new(world.state(owner, ObservedChildren::new()));
+    retried.save(terminal_snapshot(vec![record])).unwrap();
+    assert_eq!(
+        world.allocator(),
+        acknowledged,
+        "replaying an ACK must not release capacity twice"
+    );
+    assert_eq!(world.shard(owner).unacked_outbox(), 0);
+    assert_eq!(retried.state().self_collectable().unwrap(), None);
+}
+
+#[test]
+fn a_foreign_exit_releases_no_capacity_until_the_allocator_write_succeeds() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let active = DaemonGeneration::new();
+    let resource = terminal(old);
+    let mut record = agent_record(
+        &resource,
+        OperationId::new(),
+        RuntimeState::Running,
+        Some(process(82, "start-82")),
+    );
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(82, "start-82")))
+        .save(agent_snapshot(vec![record.clone()]))
+        .unwrap();
+    let allocator_before = world.allocator();
+    let shard_before = world.shard(old);
+    record.state = RuntimeState::Reclaimed;
+    record.process = None;
+    let mut failing = world.state(active, ObservedChildren::new());
+    failing.allocator = ResourceAllocator::new(
+        MemoryFile::faulty(&world.allocator, FileFault::WriteFails),
+        policy(2, 2),
+    );
+    assert_eq!(
+        ShardedAgentStore::new(failing).save(agent_snapshot(vec![record.clone()])),
+        Err(StoreError::Unavailable)
+    );
+    assert_eq!(world.allocator(), allocator_before);
+    assert_eq!(
+        world.shard(old),
+        shard_before,
+        "a successor never rewrites the retired owner's shard"
+    );
+
+    let mut retried = ShardedAgentStore::new(world.state(active, ObservedChildren::new()));
+    retried.save(agent_snapshot(vec![record.clone()])).unwrap();
+    let released = world.allocator();
+    assert_eq!(
+        released.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    retried.save(agent_snapshot(vec![record])).unwrap();
+    assert_eq!(world.allocator(), released);
+    assert_eq!(world.shard(old), shard_before);
+}
+
+#[test]
 fn a_census_counts_live_runtime_without_touching_anything() {
     let old = DaemonGeneration::new();
     let unmigrated = terminal(old);

@@ -1301,6 +1301,11 @@ fn force_remove_confirmation_handles_no_and_unsupported_keys_and_a_missing_targe
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     state.force_remove_confirmation = None;
     assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Right)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.force_remove_confirmation(), None);
+    assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::Enter)),
         [] as [Effect; 0]
     );

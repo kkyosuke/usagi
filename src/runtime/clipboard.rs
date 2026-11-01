@@ -1,11 +1,11 @@
 //! Platform clipboard adapter for the TUI composition root.
 //!
-//! The TUI depends only on `ClipboardPort`; this module selects the platform's
-//! conventional command at runtime.  That keeps the binary buildable on every
-//! Rust target without linking a window-system SDK, while supporting macOS,
-//! Windows, Wayland, and X11 when their clipboard service is available. The
-//! module is an OS process adapter; its behaviour is covered through the pure
-//! `ClipboardPort` boundary in `usagi-tui` rather than LLVM line coverage.
+//! The TUI depends only on `ClipboardPort`; this module selects conventional
+//! commands for the compilation target and available display. This keeps the
+//! binary buildable on every Rust target without linking a window-system SDK,
+//! while supporting macOS, Windows, Wayland, and X11 when their clipboard service
+//! is available. Process execution stays behind the OS adapter; selection and fallback
+//! policy are covered by unit tests.
 
 use std::time::Duration;
 
