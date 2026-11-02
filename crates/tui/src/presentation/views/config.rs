@@ -12,7 +12,7 @@ use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style, editor_surface_style};
 use crate::presentation::widgets::{self, modal, select};
 use crate::usecase::application::{
-    controller::BranchChoice, environment_source::EnvironmentSourceEditor,
+    Key, controller::BranchChoice, environment_source::EnvironmentSourceEditor,
 };
 
 const TITLE: &str = "Config";
@@ -570,36 +570,17 @@ impl Config {
         true
     }
 
-    /// Insert text at the textarea caret.
-    pub fn type_environment(&mut self, text: &str) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.insert(text);
-            self.environment_error = None;
-        }
-    }
-
-    /// Paste text into the textarea, preserving line breaks.
-    pub fn paste_environment(&mut self, text: &str) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.paste(text);
-            self.environment_error = None;
-        }
-    }
-
-    /// Insert a newline into the focused textarea.
-    pub fn newline_environment(&mut self) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.newline();
-            self.environment_error = None;
-        }
-    }
-
-    /// Move focus between the textarea and its Save action.
-    pub fn toggle_environment_focus(&mut self) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.toggle_save_focus(self.scope == SettingsScope::Workspace);
-            self.environment_error = None;
-        }
+    /// Edit the environment draft, clearing validation feedback only for editing keys.
+    pub(in crate::presentation) fn edit_environment(&mut self, key: Key) {
+        let Some(editor) = self.environment_editor.as_mut() else {
+            return;
+        };
+        edit_source(
+            editor,
+            &mut self.environment_error,
+            key,
+            self.scope == SettingsScope::Workspace,
+        );
     }
 
     /// Whether Enter should save instead of inserting a newline.
@@ -608,46 +589,6 @@ impl Config {
         self.environment_editor
             .as_ref()
             .is_some_and(EnvironmentSourceEditor::is_save_focused)
-    }
-
-    /// Delete the final character from the focused environment input.
-    pub fn backspace_environment(&mut self) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.backspace();
-            self.environment_error = None;
-        }
-    }
-
-    /// Delete the character at the textarea caret.
-    pub fn delete_environment(&mut self) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.delete_forward();
-            self.environment_error = None;
-        }
-    }
-
-    /// Move the textarea caret horizontally.
-    pub fn move_environment(&mut self, forward: bool) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.move_cursor(forward);
-            self.environment_error = None;
-        }
-    }
-
-    /// Move the textarea caret to the previous or next line.
-    pub fn move_environment_vertical(&mut self, down: bool) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.move_vertical(down);
-            self.environment_error = None;
-        }
-    }
-
-    /// Move the textarea caret to the beginning or end of the buffer.
-    pub fn move_environment_edge(&mut self, end: bool) {
-        if let Some(editor) = self.environment_editor.as_mut() {
-            editor.move_edge(end);
-            self.environment_error = None;
-        }
     }
 
     /// Persist only the environment owned by the modal's scope.
@@ -734,10 +675,14 @@ impl Config {
         true
     }
 
-    /// Mutable access to the open setup source, clearing stale validation feedback.
-    pub fn setup_commands_editor_mut(&mut self) -> Option<&mut EnvironmentSourceEditor> {
-        self.setup_commands_error = None;
-        self.setup_commands_editor.as_mut()
+    /// Edit the setup source while its modal owns Config input.
+    /// Only editing keys clear stale validation feedback.
+    pub(in crate::presentation) fn edit_setup_commands(&mut self, key: Key) {
+        let editor = self
+            .setup_commands_editor
+            .as_mut()
+            .expect("the setup editor owns Config input");
+        edit_source(editor, &mut self.setup_commands_error, key, true);
     }
 
     /// Whether Enter should save the setup source instead of inserting a newline.
@@ -882,6 +827,33 @@ impl Config {
     fn current_mut(&mut self) -> &mut ScopeSettings {
         &mut self.settings
     }
+}
+
+/// Both Config source editors share caret, paste, and validation-feedback policy.
+fn edit_source(
+    editor: &mut EnvironmentSourceEditor,
+    error: &mut Option<String>,
+    key: Key,
+    allow_save_focus: bool,
+) {
+    match key {
+        Key::Enter => editor.newline(),
+        Key::Tab => editor.toggle_save_focus(allow_save_focus),
+        Key::Backspace => editor.backspace(),
+        Key::Delete => editor.delete_forward(),
+        Key::Left => editor.move_cursor(false),
+        Key::Right => editor.move_cursor(true),
+        Key::Up => editor.move_vertical(false),
+        Key::Down => editor.move_vertical(true),
+        Key::Home | Key::LineStart => editor.move_edge(false),
+        Key::End | Key::LineEnd => editor.move_edge(true),
+        Key::Char(character) if !character.is_control() => {
+            editor.insert(&character.to_string());
+        }
+        Key::Paste(text) => editor.paste(&text),
+        _ => return,
+    }
+    *error = None;
 }
 
 fn parse_setup_commands_source(source: &str) -> Result<Vec<String>, String> {
@@ -1496,7 +1468,9 @@ mod tests {
         TEAM_PICKER_COMPACT_FOOTER, TEAM_PICKER_FOOTER, environment_textarea, render, render_over,
         team_template_name,
     };
+    use crate::presentation::flow_steps::step_config;
     use crate::presentation::widgets::{display_width, modal, strip_ansi};
+    use crate::usecase::application::Key;
     use crate::usecase::application::controller::BranchChoice;
     use crate::usecase::application::environment_source::{
         EnvironmentSourceEditor, parse_environment_source,
@@ -1664,7 +1638,7 @@ mod tests {
         assert_eq!(config.field(), Field::Environment);
         assert!(config.open_environment(&mut port));
         assert!(config.is_editing_environment());
-        config.toggle_environment_focus();
+        config.edit_environment(Key::Tab);
         assert!(!config.is_environment_save_focused());
         let frame = render(24, 80, &config).join("\n");
         assert!(!frame.contains('·'));
@@ -1679,14 +1653,14 @@ mod tests {
             display_width(&save[..save.find("[ Save ]").unwrap()]) + 4,
             40
         );
-        config.move_environment(false);
-        config.move_environment_edge(false);
-        config.type_environment("RUST_LOG=debuX");
-        config.backspace_environment();
-        config.type_environment("g");
-        config.newline_environment();
-        config.newline_environment();
-        config.paste_environment("A=1\r\nB=2");
+        config.edit_environment(Key::Left);
+        config.edit_environment(Key::Home);
+        config.edit_environment(Key::Paste("RUST_LOG=debuX".into()));
+        config.edit_environment(Key::Backspace);
+        config.edit_environment(Key::Paste("g".into()));
+        config.edit_environment(Key::Enter);
+        config.edit_environment(Key::Enter);
+        config.edit_environment(Key::Paste("A=1\r\nB=2".into()));
         assert!(config.save_environment(&mut port));
 
         assert!(!config.is_editing_environment());
@@ -1704,8 +1678,8 @@ mod tests {
         );
         config.cancel_environment();
         assert!(!config.is_editing_environment());
-        config.type_environment("ignored");
-        config.backspace_environment();
+        config.edit_environment(Key::Paste("ignored".into()));
+        config.edit_environment(Key::Backspace);
         assert!(!config.save_environment(&mut port));
     }
 
@@ -1738,18 +1712,18 @@ mod tests {
         workspace.next_field();
         assert_eq!(workspace.field(), Field::Environment);
         assert!(workspace.open_environment(&mut port));
-        workspace.toggle_environment_focus();
+        workspace.edit_environment(Key::Tab);
         assert!(workspace.is_environment_save_focused());
-        workspace.move_environment(true);
-        workspace.move_environment_edge(true);
-        workspace.toggle_environment_focus();
+        workspace.edit_environment(Key::Right);
+        workspace.edit_environment(Key::End);
+        workspace.edit_environment(Key::Tab);
         let base = vec!["home background".to_owned(); 24];
         let composited = render_over(24, 80, &base, &workspace);
         let frame = composited.join("\n");
         assert!(frame.contains("workspace env only"));
         assert!(!frame.contains("GLOBAL=kept"));
         assert!(composited.iter().all(|line| display_width(line) <= 80));
-        workspace.type_environment("LOCAL=only");
+        workspace.edit_environment(Key::Paste("LOCAL=only".into()));
         assert!(workspace.save_environment(&mut port));
 
         assert_eq!(port.global.env["GLOBAL"], "kept");
@@ -1779,11 +1753,10 @@ mod tests {
         let frame = render(28, 90, &config).join("\n");
         assert!(frame.contains("Session setup"));
         assert!(frame.contains("cargo fetch"));
-        let editor = config.setup_commands_editor_mut().unwrap();
-        editor.move_edge(true);
-        editor.newline();
-        editor.paste(" cargo test \r\n\n");
-        editor.toggle_save_focus(true);
+        config.edit_setup_commands(Key::End);
+        config.edit_setup_commands(Key::Enter);
+        config.edit_setup_commands(Key::Paste(" cargo test \r\n\n".into()));
+        config.edit_setup_commands(Key::Tab);
         assert!(config.is_setup_commands_save_focused());
         assert!(config.save_setup_commands(&mut port));
         assert_eq!(port.setup_commands, ["cargo fetch", "cargo test"]);
@@ -1791,7 +1764,7 @@ mod tests {
         assert_eq!(config.notice(), Some("Session setup saved"));
 
         assert!(config.open_setup_commands(&mut port));
-        config.setup_commands_editor_mut().unwrap().insert("\0");
+        config.edit_setup_commands(Key::Paste("\0".into()));
         assert!(!config.save_setup_commands(&mut port));
         assert!(config.is_editing_setup_commands());
         assert!(
@@ -1801,8 +1774,33 @@ mod tests {
         );
         config.cancel_setup_commands();
         assert!(!config.is_editing_setup_commands());
-        assert!(config.setup_commands_editor_mut().is_none());
         assert!(!config.save_setup_commands(&mut port));
+    }
+
+    #[test]
+    fn setup_validation_feedback_survives_ignored_keys_until_the_draft_is_edited() {
+        let mut port = FakeSettingsPort::default();
+        let mut config =
+            Config::load_workspace_with_available_models(&mut port, AvailableAgentModels::all());
+        move_to_field(&mut config, Field::SessionSetup);
+        let _ = step_config(&mut config, Key::Enter, &mut port);
+        let _ = step_config(&mut config, Key::Paste("cargo test\0".into()), &mut port);
+        let _ = step_config(&mut config, Key::Tab, &mut port);
+        let _ = step_config(&mut config, Key::Enter, &mut port);
+        let error = config.setup_commands_error.clone().unwrap();
+        assert!(error.contains("cannot contain NUL"));
+
+        for key in [Key::Other, Key::Char('\0')] {
+            let _ = step_config(&mut config, key, &mut port);
+            assert_eq!(config.setup_commands_error.as_ref(), Some(&error));
+        }
+        let _ = step_config(&mut config, Key::Tab, &mut port);
+        assert!(config.setup_commands_error.is_none());
+        let _ = step_config(&mut config, Key::Backspace, &mut port);
+        let _ = step_config(&mut config, Key::Tab, &mut port);
+        let _ = step_config(&mut config, Key::Enter, &mut port);
+        assert!(!config.is_editing_setup_commands());
+        assert_eq!(port.setup_commands, ["cargo test"]);
     }
 
     #[test]
@@ -1814,10 +1812,7 @@ mod tests {
 
         port.fail_setup_save = true;
         assert!(config.open_setup_commands(&mut port));
-        config
-            .setup_commands_editor_mut()
-            .unwrap()
-            .insert("cargo test");
+        config.edit_setup_commands(Key::Paste("cargo test".into()));
         assert!(!config.save_setup_commands(&mut port));
         assert!(config.is_editing_setup_commands());
         assert!(render(28, 90, &config).join("\n").contains("Save failed"));
@@ -1859,7 +1854,7 @@ mod tests {
         let mut config = Config::load(&mut port);
         move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
-        config.type_environment("A=1");
+        config.edit_environment(Key::Paste("A=1".into()));
         assert!(!config.save_environment(&mut port));
         assert!(config.is_editing_environment());
         assert!(render(24, 80, &config).join("\n").contains("Save failed"));
@@ -1867,7 +1862,7 @@ mod tests {
         config.cancel_environment();
         port.fail_save = false;
         assert!(config.open_environment(&mut port));
-        config.type_environment("NUL=a\0b");
+        config.edit_environment(Key::Paste("NUL=a\0b".into()));
         assert!(!config.save_environment(&mut port));
         assert!(
             render(24, 80, &config)
@@ -1882,7 +1877,7 @@ mod tests {
         let mut config = Config::load(&mut port);
         move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
-        config.type_environment("MISSING_EQUALS");
+        config.edit_environment(Key::Paste("MISSING_EQUALS".into()));
 
         let before = render(24, 80, &config);
         assert!(!config.save_environment(&mut port));
@@ -1924,12 +1919,12 @@ mod tests {
         move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
 
-        config.paste_environment("A=1\rB=2\nC=3");
+        config.edit_environment(Key::Paste("A=1\rB=2\nC=3".into()));
         assert!(render(24, 80, &config).join("\n").contains("A=1"));
         assert!(render(24, 80, &config).join("\n").contains("B=2"));
         assert!(render(24, 80, &config).join("\n").contains("C=3"));
 
-        config.paste_environment("\nD=4\nnot-a-binding\nE=5");
+        config.edit_environment(Key::Paste("\nD=4\nnot-a-binding\nE=5".into()));
         assert!(!config.save_environment(&mut port));
         let frame = render(24, 80, &config).join("\n");
         assert!(frame.contains("D=4"));
@@ -1938,7 +1933,7 @@ mod tests {
 
         config.cancel_environment();
         assert!(config.open_environment(&mut port));
-        config.type_environment("1BAD=value");
+        config.edit_environment(Key::Paste("1BAD=value".into()));
         assert!(!config.save_environment(&mut port));
         assert!(
             render(24, 80, &config)
@@ -1948,7 +1943,7 @@ mod tests {
 
         config.cancel_environment();
         assert!(config.open_environment(&mut port));
-        config.type_environment("EMPTY=");
+        config.edit_environment(Key::Paste("EMPTY=".into()));
         assert!(!config.save_environment(&mut port));
         assert!(
             render(24, 80, &config)
@@ -1971,9 +1966,9 @@ mod tests {
         let mut config = Config::load(&mut port);
         move_to_field(&mut config, Field::Environment);
         assert!(config.open_environment(&mut port));
-        config.move_environment_edge(false);
+        config.edit_environment(Key::Home);
         assert!(render(24, 80, &config).join("\n").contains("↓ 1 more"));
-        config.move_environment_edge(true);
+        config.edit_environment(Key::End);
         assert!(render(24, 80, &config).join("\n").contains("↑ 1 more"));
     }
 
@@ -2202,10 +2197,9 @@ mod tests {
         let first_body = &plain[top + 1];
         let left_border = first_body.find('│').unwrap();
         let right_border = first_body.rfind('│').unwrap();
-        assert!(
-            first_body[left_border + '│'.len_utf8()..right_border]
-                .trim()
-                .is_empty()
+        assert_eq!(
+            first_body[left_border + '│'.len_utf8()..right_border].trim(),
+            ""
         );
     }
 

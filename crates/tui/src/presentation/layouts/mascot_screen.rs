@@ -150,7 +150,7 @@ mod tests {
         // 先頭の空行が中央寄せする。
         let top = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top > 0);
-        assert!(!frame[top].is_empty());
+        assert_ne!(frame[top], "");
     }
 
     #[test]

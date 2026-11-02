@@ -341,8 +341,7 @@ pub fn wire_workspace_root(root: impl AsRef<Path>) -> String {
     let root = root.as_ref();
     root.to_str()
         .filter(|_| root.is_absolute())
-        .map(str::to_owned)
-        .unwrap_or_default()
+        .map_or_default(str::to_owned)
 }
 
 /// The digest naming the state subtree of `workspace_root`.

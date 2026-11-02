@@ -41,9 +41,18 @@ fn loading_an_absent_shard_preserves_its_owner_without_writing() {
     assert_eq!(document.owner, owner);
     assert_eq!(document.schema, SHARD_SCHEMA);
     assert_eq!(document.revision, 0);
-    assert!(document.resources.is_empty());
-    assert!(document.outbox.is_empty());
-    assert!(document.in_flight.is_empty());
+    assert_eq!(
+        document.resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
+    assert_eq!(
+        document.outbox,
+        [] as [crate::usecase::resources::shard::OutboxEvent; 0]
+    );
+    assert_eq!(
+        document.in_flight,
+        [] as [crate::usecase::resources::shard::InFlightCommand; 0]
+    );
     assert_eq!(document.event_sequence, 0);
     assert_eq!(snapshot.observed(), None);
     assert_eq!(bytes.get(), None, "a read never creates a durable shard");

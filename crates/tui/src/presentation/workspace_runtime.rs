@@ -859,10 +859,9 @@ impl WorkspaceRuntime {
             Key::Enter => {
                 let submission = modal.submission();
                 let effects = self.apply_event(AppEvent::Key(AppKey::SubmitCloseup(submission)));
-                // An accepted command produces its effect and closes the overlay
-                // (which drops the modal). A refused one produces nothing and
-                // leaves the modal on screen, so carry the reducer's safe message
-                // into it — otherwise the refusal looks like a dead key.
+                // Empty effects can mean a validation refusal or dismissal of a
+                // session that can no longer launch. Show feedback only while
+                // the reducer keeps the modal open.
                 if effects.is_empty() {
                     let message = self.state.notice().map(|notice| notice.message.clone());
                     if let Some(modal) = self.closeup_modal.as_mut() {
@@ -1711,12 +1710,11 @@ impl WorkspaceRuntime {
         else {
             return None;
         };
-        self.interrupted_pane(*selected)
-    }
-
-    fn interrupted_pane(&self, continuation: AgentContinuationRef) -> Option<&InterruptedPane> {
-        let target = self.panes.active()?;
-        self.interrupted_pane_for(target, continuation)
+        let target = self
+            .panes
+            .active()
+            .expect("the selected tab belongs to an active pane");
+        self.interrupted_pane_for(target, *selected)
     }
 
     fn interrupted_pane_for(
@@ -2275,6 +2273,32 @@ mod tests {
         assert_eq!(runtime.overview_modal().unwrap().input(), "?");
     }
 
+    #[test]
+    fn palette_wakeups_preserve_drafts_selection_and_material_revision() {
+        let workspace = WorkspaceId::new();
+        for mut runtime in [
+            overview_on(workspace),
+            closeup_on(workspace, SessionId::new()),
+        ] {
+            let _ = runtime.handle_key(Key::Paste("agent".to_owned()));
+            let _ = runtime.handle_key(Key::SelectHome);
+            let overview = runtime.overview_modal().cloned();
+            let closeup = runtime.closeup_modal().cloned();
+            let selected = runtime.state().selected();
+            let overlay = runtime.state().overlay();
+            let revision = runtime.material_key();
+
+            for key in [Key::Other, Key::Resize] {
+                assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
+                assert_eq!(runtime.overview_modal(), overview.as_ref());
+                assert_eq!(runtime.closeup_modal(), closeup.as_ref());
+                assert_eq!(runtime.state().selected(), selected);
+                assert_eq!(runtime.state().overlay(), overlay);
+                assert_eq!(runtime.material_key(), revision);
+            }
+        }
+    }
+
     fn type_str(runtime: &mut WorkspaceRuntime, text: &str) {
         for character in text.chars() {
             let _ = runtime.handle_key(Key::Char(character));
@@ -2403,7 +2427,7 @@ mod tests {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
         let effects = runtime.handle_key(Key::Escape);
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.overview_modal().is_none());
     }
@@ -2413,8 +2437,11 @@ mod tests {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
         // Ctrl-C is swallowed by the open overlay; passthrough yields nothing.
-        assert!(runtime.handle_key(Key::Quit).is_empty());
-        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
+        assert_eq!(runtime.handle_key(Key::Quit), [] as [Effect; 0]);
+        assert_eq!(
+            runtime.handle_key(Key::Passthrough(vec![0x1b])),
+            [] as [Effect; 0]
+        );
         assert_eq!(runtime.state().overlay(), Some(Overlay::Overview));
     }
 
@@ -2424,13 +2451,13 @@ mod tests {
         let count = runtime.closeup_modal().unwrap().actions().len();
         assert!(count > 1);
         assert_eq!(runtime.closeup_modal().unwrap().selected(), 0);
-        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert_eq!(runtime.handle_key(Key::Up), [] as [Effect; 0]);
         assert_eq!(runtime.closeup_modal().unwrap().selected(), count - 1);
-        assert!(runtime.handle_key(Key::Up).is_empty());
+        assert_eq!(runtime.handle_key(Key::Up), [] as [Effect; 0]);
         assert_eq!(runtime.closeup_modal().unwrap().selected(), count - 2);
-        assert!(runtime.handle_key(Key::Down).is_empty());
+        assert_eq!(runtime.handle_key(Key::Down), [] as [Effect; 0]);
         assert_eq!(runtime.closeup_modal().unwrap().selected(), count - 1);
-        assert!(runtime.handle_key(Key::Down).is_empty());
+        assert_eq!(runtime.handle_key(Key::Down), [] as [Effect; 0]);
         assert_eq!(runtime.closeup_modal().unwrap().selected(), 0);
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
     }
@@ -2575,7 +2602,7 @@ mod tests {
         // The modal persists across the edits (no live pane keeps it the surface).
         assert!(runtime.closeup_modal().is_some());
         let effects = runtime.handle_key(Key::Escape);
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
     }
 
     #[test]
@@ -2627,8 +2654,11 @@ mod tests {
         let mut runtime = closeup_on(workspace, session);
         // Ctrl-Q stays swallowed by the open overlay and raw passthrough is inert;
         // neither leaves the Closeup action modal (unlike Escape / Ctrl-C).
-        assert!(runtime.handle_key(Key::CtrlQ).is_empty());
-        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
+        assert_eq!(runtime.handle_key(Key::CtrlQ), [] as [Effect; 0]);
+        assert_eq!(
+            runtime.handle_key(Key::Passthrough(vec![0x1b])),
+            [] as [Effect; 0]
+        );
         assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
     }
 
@@ -2670,7 +2700,7 @@ mod tests {
         assert_eq!(runtime.state().route(), Route::Home(HomeMode::Closeup));
         assert_eq!(runtime.state().overlay(), None);
         assert!(runtime.closeup_modal().is_none());
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
     }
 
     #[test]
@@ -2750,7 +2780,7 @@ mod tests {
         let runtime = WorkspaceRuntime::new(workspace, vec![session]);
         assert_eq!(runtime.state().active(), Some(session));
         assert_eq!(runtime.panes().active(), Some(Target::Session(session)));
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
         assert!(!runtime.state().has_live_pane());
         assert!(!runtime.wants_live_input());
     }
@@ -2761,7 +2791,7 @@ mod tests {
         let runtime = WorkspaceRuntime::new(workspace, Vec::new());
         assert_eq!(runtime.state().active(), None);
         assert_eq!(runtime.panes().active(), None);
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
         assert!(!runtime.state().has_live_pane());
         assert!(!runtime.wants_live_input());
     }
@@ -2774,14 +2804,20 @@ mod tests {
         // With no overlay open, a key the Home reducer never consumes (raw
         // passthrough) is dropped before the reducer, and a key it consumes but
         // ignores here (Left, which only moves the Yes/No quit focus) is inert.
-        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
-        assert!(runtime.handle_key(Key::Left).is_empty());
+        assert_eq!(
+            runtime.handle_key(Key::Passthrough(vec![0x1b])),
+            [] as [Effect; 0]
+        );
+        assert_eq!(runtime.handle_key(Key::Left), [] as [Effect; 0]);
         // The single session is already selected; Enter activates it.
         let effects = runtime.handle_key(Key::Enter);
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
         assert_eq!(runtime.state().active(), Some(session));
         // Passthrough never reaches the reducer.
-        assert!(runtime.handle_key(Key::Passthrough(vec![0x1b])).is_empty());
+        assert_eq!(
+            runtime.handle_key(Key::Passthrough(vec![0x1b])),
+            [] as [Effect; 0]
+        );
     }
 
     #[test]
@@ -2790,7 +2826,7 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         // Enter on an empty workspace is neutral. Explicit navigation selects
         // the action row before Enter opens its form.
-        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
         assert_eq!(runtime.state().selected(), Selection::Idle);
         let _ = runtime.handle_key(Key::Down);
         assert_eq!(runtime.state().selected(), Selection::NewSession);
@@ -3062,7 +3098,7 @@ mod tests {
 
         // The daemon reporting the terminal exit clears the live pane.
         let _ = runtime.exit_pane(target, terminal);
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
         assert!(!runtime.state().has_live_pane());
     }
 
@@ -3142,7 +3178,7 @@ mod tests {
         // never been opened, so its pane is the inert empty one — while the
         // command target, and therefore live input, stays on the first session.
         let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
-        assert!(runtime.preview_pane().tabs().is_empty());
+        assert_eq!(runtime.preview_pane().tabs(), []);
         assert_eq!(runtime.preview_terminal(), None);
         assert_eq!(runtime.state().active(), Some(first));
         assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
@@ -3189,7 +3225,7 @@ mod tests {
         // the Switch pane visible behind it continues to describe the hovered
         // session instead of falling back to the managed command target.
         assert_eq!(runtime.preview_terminal(), runtime.focused_terminal());
-        assert!(runtime.preview_pane().tabs().is_empty());
+        assert_eq!(runtime.preview_pane().tabs(), []);
         assert_ne!(runtime.preview_pane().tabs(), runtime.managed_pane().tabs());
     }
 
@@ -3202,7 +3238,7 @@ mod tests {
         let operation = OperationId::new();
         let _ = runtime.request_pane(target, operation, PaneKind::Agent);
         let _ = runtime.fail_pane(target, operation, "safe failure".to_owned());
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
         assert_eq!(runtime.active_pane().error(), Some("safe failure"));
     }
 
@@ -3469,8 +3505,14 @@ mod tests {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
-        assert!(runtime.select_tab(TabDirection::Next).is_empty());
-        assert!(runtime.select_tab(TabDirection::Previous).is_empty());
+        assert_eq!(
+            runtime.select_tab(TabDirection::Next),
+            [] as [PaneRegistryEffect; 0]
+        );
+        assert_eq!(
+            runtime.select_tab(TabDirection::Previous),
+            [] as [PaneRegistryEffect; 0]
+        );
     }
 
     #[test]
@@ -3496,7 +3538,7 @@ mod tests {
                 cancel: None,
             }
         );
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
         assert!(!runtime.state().has_live_pane());
     }
 
@@ -3518,7 +3560,7 @@ mod tests {
                 cancel: Some(operation),
             }
         );
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
     }
 
     #[test]
@@ -3527,7 +3569,17 @@ mod tests {
         let session = SessionId::new();
         let mut runtime = closeup_on(workspace, session);
         assert_eq!(runtime.close_focused_pane(), CloseOutcome::default());
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
+    }
+
+    #[test]
+    fn feedback_without_an_active_target_does_not_create_a_pane() {
+        let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
+        let revision = runtime.panes().revision();
+        runtime.surface_focused_pane_feedback("terminal unavailable");
+        assert_eq!(runtime.panes().active(), None);
+        assert_eq!(runtime.panes().revision(), revision);
+        assert!(runtime.active_pane().error().is_none());
     }
 
     #[test]
@@ -3628,7 +3680,7 @@ mod tests {
             Key::CtrlQ,
             Key::Char(':'),
         ] {
-            assert!(runtime.handle_key(key).is_empty());
+            assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
         }
         assert_eq!(
             (
@@ -3662,37 +3714,35 @@ mod tests {
         let background = (runtime.state().route(), runtime.active_pane().clone());
         let back = Key::Live(LiveTerminalAction::DirectorBack);
 
-        assert!(
-            runtime
-                .handle_key(Key::Live(LiveTerminalAction::Director))
-                .is_empty()
+        assert_eq!(
+            runtime.handle_key(Key::Live(LiveTerminalAction::Director)),
+            [] as [Effect; 0]
         );
-        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
         assert_eq!(runtime.state().director_route(), DirectorRoute::Console);
-        assert!(
-            runtime
-                .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
-                .is_empty()
+        assert_eq!(
+            runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew)),
+            [] as [Effect; 0]
         );
         assert!(matches!(
             runtime.state().director_new(),
             DirectorNew::Choosing(_)
         ));
 
-        assert!(runtime.handle_key(back.clone()).is_empty());
+        assert_eq!(runtime.handle_key(back.clone()), [] as [Effect; 0]);
         assert!(runtime.state().director_drawer_open());
         assert_eq!(runtime.state().director_new(), DirectorNew::Idle);
         assert_eq!(runtime.state().director_route(), DirectorRoute::Console);
 
         for _ in 0..2 {
-            assert!(runtime.handle_key(back.clone()).is_empty());
+            assert_eq!(runtime.handle_key(back.clone()), [] as [Effect; 0]);
             assert!(runtime.state().director_drawer_open());
             assert_eq!(
                 runtime.state().director_route(),
                 DirectorRoute::Organization
             );
         }
-        assert!(runtime.handle_key(Key::Escape).is_empty());
+        assert_eq!(runtime.handle_key(Key::Escape), [] as [Effect; 0]);
         assert!(!runtime.state().director_drawer_open());
         assert_eq!(
             (runtime.state().route(), runtime.active_pane().clone()),
@@ -3705,12 +3755,12 @@ mod tests {
         let workspace = WorkspaceId::new();
         let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-        assert!(runtime.handle_key(Key::Up).is_empty());
-        assert!(runtime.handle_key(Key::Char('x')).is_empty());
+        assert_eq!(runtime.handle_key(Key::Up), [] as [Effect; 0]);
+        assert_eq!(runtime.handle_key(Key::Char('x')), [] as [Effect; 0]);
         assert!(runtime.state().director_drawer_open());
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew));
         assert!(!matches!(runtime.state().director_new(), DirectorNew::Idle));
-        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert_eq!(runtime.handle_key(Key::Quit), [] as [Effect; 0]);
         assert!(matches!(runtime.state().director_new(), DirectorNew::Idle));
         assert!(runtime.state().director_drawer_open());
     }
@@ -3832,10 +3882,9 @@ mod tests {
         );
         assert_eq!(runtime.active_pane().tabs().len(), before_terminal + 1);
         let before_diff = runtime.active_pane().tabs().len();
-        assert!(
-            runtime
-                .request_pane(Target::Root(workspace), OperationId::new(), PaneKind::Diff)
-                .is_empty()
+        assert_eq!(
+            runtime.request_pane(Target::Root(workspace), OperationId::new(), PaneKind::Diff),
+            [] as [PaneRegistryEffect; 0]
         );
         assert_eq!(runtime.active_pane().tabs().len(), before_diff);
 
@@ -3913,7 +3962,7 @@ mod tests {
         let effects = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(runtime.state().root_terminal_drawer_open());
         assert_eq!(runtime.focused_terminal(), Some(root_terminal.clone()));
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
 
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
         assert!(!runtime.state().root_terminal_drawer_open());
@@ -3999,17 +4048,15 @@ mod tests {
 
         // Choose the second shell, close its drawer, and reopen it. The restored
         // live tab satisfies `open`, so no pending tab can replace the selection.
-        assert!(
-            runtime
-                .handle_key(Key::Live(LiveTerminalAction::RootTerminal))
-                .is_empty()
+        assert_eq!(
+            runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal)),
+            [] as [Effect; 0]
         );
         let _ = runtime.select_tab_selection(TabSelection::Live(second_terminal.clone()));
         let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
-        assert!(
-            runtime
-                .handle_key(Key::Live(LiveTerminalAction::RootTerminal))
-                .is_empty()
+        assert_eq!(
+            runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal)),
+            [] as [Effect; 0]
         );
         assert_eq!(runtime.focused_terminal(), Some(second_terminal.clone()));
 
@@ -4480,18 +4527,16 @@ mod tests {
 
         let direct_operation = OperationId::new();
         let _ = runtime.request_pane(target, direct_operation, PaneKind::Agent);
-        assert!(
-            runtime
-                .complete_pane(target, direct_operation, managed_terminal.clone(),)
-                .is_empty()
+        assert_eq!(
+            runtime.complete_pane(target, direct_operation, managed_terminal.clone(),),
+            [] as [PaneRegistryEffect; 0]
         );
 
         let focus_operation = OperationId::new();
         let _ = runtime.request_pane(target, focus_operation, PaneKind::Agent);
-        assert!(
-            runtime
-                .complete_pane_focus_if_uninterrupted(target, focus_operation, managed_terminal)
-                .is_empty()
+        assert_eq!(
+            runtime.complete_pane_focus_if_uninterrupted(target, focus_operation, managed_terminal),
+            [] as [PaneRegistryEffect; 0]
         );
 
         let root_pane = runtime.panes().pane(target).unwrap();
@@ -4511,9 +4556,7 @@ mod tests {
         let mut history = interrupted_tab(workspace, session, true);
         history.session_id = None;
         history.last_terminal.session_id = None;
-        if let Some(target) = history.target.as_mut() {
-            target.session_id = None;
-        }
+        history.target.as_mut().unwrap().session_id = None;
         let continuation = history.continuation;
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         // The drawer can open before its asynchronous inventory observation
@@ -4807,15 +4850,15 @@ mod tests {
     /// the resulting launch into the pane registry as the shell would, returning
     /// the launch operation id.
     fn submit_agent(runtime: &mut WorkspaceRuntime) -> OperationId {
+        assert_eq!(runtime.pane_focus_at_request.len(), 0);
         let effects = runtime.handle_key(Key::Enter);
-        let mut operation = None;
-        for effect in &effects {
-            if let Effect::LaunchAgent { operation_id, .. } = effect {
-                operation = Some(*operation_id);
-            }
-            runtime.on_effect(effect);
-        }
-        operation.expect("Enter submits a LaunchAgent effect")
+        assert!(
+            matches!(effects.as_slice(), [Effect::LaunchAgent { .. }]),
+            "Enter submits one LaunchAgent effect: {effects:?}"
+        );
+        runtime.on_effect(&effects[0]);
+        assert_eq!(runtime.pane_focus_at_request.len(), 1);
+        *runtime.pane_focus_at_request.keys().next().unwrap()
     }
 
     // ── R1: pending must not be re-covered by the action modal ───────────────
@@ -4853,7 +4896,7 @@ mod tests {
         assert!(!joined_frame(&runtime).contains("Closeup:"));
         // A failed launch drops the pending tab and reveals the empty pane.
         let _ = runtime.fail_pane(Target::Session(session), operation, "boom".to_owned());
-        assert!(runtime.active_pane().tabs().is_empty());
+        assert_eq!(runtime.active_pane().tabs(), []);
         assert!(
             joined_frame(&runtime).contains("a: agent / t: terminal / Enter: actions"),
             "the empty Closeup returns once the pane is empty again"
@@ -4944,11 +4987,17 @@ mod tests {
             Route::Home(HomeMode::Switch)
         ));
 
-        assert!(runtime.handle_key(Key::Enter).is_empty());
+        assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
         assert_eq!(runtime.state().active(), Some(session));
         assert_eq!(runtime.focused_terminal(), Some(terminal));
         assert!(runtime.wants_live_input());
         assert_eq!(runtime.state().overlay(), None);
+        let _ = runtime.handle_key(Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(runtime.state().overlay(), Some(Overlay::Closeup));
+        assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
+        assert_eq!(runtime.state().overlay(), None);
+        assert!(runtime.closeup_modal().is_none());
+        assert_eq!(runtime.state().route(), Route::Home(HomeMode::Switch));
     }
 
     // ── R2: completion focus is gated on no later interaction ────────────────
@@ -5085,17 +5134,17 @@ mod tests {
         assert_eq!(runtime.state().overlay(), None);
 
         for _ in 0..3 {
-            assert!(runtime.handle_key(Key::Quit).is_empty());
+            assert_eq!(runtime.handle_key(Key::Quit), [] as [Effect; 0]);
             let _ = runtime.apply_event(AppEvent::Tick);
             assert_eq!(runtime.state().overlay(), Some(Overlay::QuitConfirmation));
         }
-        assert!(runtime.handle_key(Key::Char('n')).is_empty());
+        assert_eq!(runtime.handle_key(Key::Char('n')), [] as [Effect; 0]);
         assert_eq!(runtime.state().overlay(), None);
         assert_eq!(
             runtime.focused_interrupted().map(|tab| tab.continuation),
             Some(history.continuation),
         );
-        assert!(runtime.handle_key(Key::Quit).is_empty());
+        assert_eq!(runtime.handle_key(Key::Quit), [] as [Effect; 0]);
         assert_eq!(runtime.handle_key(Key::Enter), vec![Effect::Detach]);
     }
 

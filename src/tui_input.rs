@@ -1480,13 +1480,13 @@ mod tests {
                 vec![byte]
             );
         }
-        assert!(
+        assert_eq!(
             adapt_key_with_legacy_unix_control_aliases(
                 KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL),
                 false,
             )
-            .raw_bytes
-            .is_empty()
+            .raw_bytes,
+            [] as [u8; 0]
         );
         for event in [
             KeyEvent::new(
@@ -1495,10 +1495,9 @@ mod tests {
             ),
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
         ] {
-            assert!(
-                adapt_key_with_legacy_unix_control_aliases(event, true)
-                    .raw_bytes
-                    .is_empty()
+            assert_eq!(
+                adapt_key_with_legacy_unix_control_aliases(event, true).raw_bytes,
+                [] as [u8; 0]
             );
         }
     }

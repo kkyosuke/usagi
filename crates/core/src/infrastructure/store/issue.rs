@@ -926,7 +926,7 @@ mod tests {
     fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(source_issues(&store).is_empty());
+        assert_eq!(source_issues(&store), [] as [Issue; 0]);
     }
 
     #[cfg(unix)]
@@ -1133,7 +1133,7 @@ mod tests {
         fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
         fs::create_dir(store.dir().join(".lock")).unwrap();
 
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [IssueSummary; 0]);
         assert!(dirty.exists());
 
         unsafe {
@@ -1557,8 +1557,60 @@ mod tests {
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [IssueSummary; 0]);
         assert!(!store.dir().exists());
+    }
+
+    #[test]
+    fn point_read_refuses_a_source_changed_after_identity_validation() {
+        for (exists, replace_source) in [(false, false), (true, false), (true, true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            let original = issue(7, "First");
+            let source = store.dir().join(original.file_name());
+            if exists {
+                fs::create_dir_all(store.dir()).unwrap();
+                fs::write(&source, original.to_markdown()).unwrap();
+            }
+            let mut observed = Vec::new();
+            let result = store.read_observing_lock(7, |phase| {
+                observed.push(phase);
+                if replace_source && phase == ReadLockPhase::DerivedRepaired {
+                    // A non-cooperative writer, such as Git, can replace source
+                    // bytes despite the store lock held by this read.
+                    fs::write(&source, "no longer valid frontmatter").unwrap();
+                }
+            });
+            if replace_source {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("failed to parse"));
+                assert_eq!(
+                    fs::read_to_string(&source).unwrap(),
+                    "no longer valid frontmatter"
+                );
+                assert_eq!(
+                    observed,
+                    [ReadLockPhase::UniqueChecked, ReadLockPhase::DerivedRepaired]
+                );
+            } else if exists {
+                assert_eq!(result.unwrap(), Some(original));
+                assert_eq!(
+                    observed,
+                    [
+                        ReadLockPhase::UniqueChecked,
+                        ReadLockPhase::DerivedRepaired,
+                        ReadLockPhase::ExactRead
+                    ]
+                );
+            } else {
+                assert_eq!(result.unwrap(), None);
+                assert_eq!(observed, [] as [ReadLockPhase; 0]);
+                assert!(
+                    !store.dir().exists(),
+                    "an absent store is not materialized by reading"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2373,6 +2425,20 @@ mod tests {
     }
 
     #[test]
+    fn session_root_discovery_ignores_regular_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join(".usagi/sessions");
+        let session = sessions.join("work");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(sessions.join("README"), "operator notes").unwrap();
+        let mut roots = BTreeSet::new();
+
+        insert_session_roots(&mut roots, tmp.path()).unwrap();
+
+        assert_eq!(roots, BTreeSet::from([session]));
+    }
+
+    #[test]
     fn unreadable_workspace_session_listing_fails_before_reservation() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join(".usagi")).unwrap();
@@ -2680,10 +2746,10 @@ mod tests {
             let outcome = store.remove_with_outcome(1).unwrap();
             assert!(outcome.value);
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert!(source_issues(&store).is_empty());
+            assert_eq!(source_issues(&store), [] as [Issue; 0]);
 
             let reopened = IssueStore::new(tmp.path());
-            assert!(reopened.summaries().unwrap().is_empty());
+            assert_eq!(reopened.summaries().unwrap(), [] as [IssueSummary; 0]);
             let retry = reopened.remove_with_outcome(1).unwrap();
             assert!(!retry.value);
             assert_eq!(retry.derived, DerivedState::Fresh);
@@ -2702,7 +2768,7 @@ mod tests {
             let source = store.dir().join("001-created.md");
             fail_next_atomic_write(&source, stage);
             assert!(store.write(&issue(1, "Created")).is_err());
-            assert!(source_issues(&store).is_empty());
+            assert_eq!(source_issues(&store), [] as [Issue; 0]);
 
             store.write(&issue(1, "Old")).unwrap();
             let updated_source = store.dir().join("001-updated.md");

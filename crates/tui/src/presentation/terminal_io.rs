@@ -728,9 +728,10 @@ pub(super) fn close_focused_terminal_pane(
             return;
         }
         let outcome = runtime.close_focused_pane();
-        if let Some(terminal) = outcome.detach {
-            ui.close_generic_terminal(&terminal);
-        }
+        let terminal = outcome
+            .detach
+            .expect("closing the focused live tab detaches it");
+        ui.close_generic_terminal(&terminal);
         return;
     }
     let outcome = runtime.close_focused_pane();
@@ -989,9 +990,10 @@ pub(super) fn intercept_live_terminal_control(
             *column,
             *row,
         ) {
-            if let Some(selection) = runtime.root_terminal_selection_at(index) {
-                let _ = runtime.select_tab_selection(selection);
-            }
+            let selection = runtime
+                .root_terminal_selection_at(index)
+                .expect("the rendered root terminal tab has a stable selection");
+            let _ = runtime.select_tab_selection(selection);
             return true;
         }
     }

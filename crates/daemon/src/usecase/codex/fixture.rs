@@ -364,7 +364,10 @@ fn rejects_unknown_profiles_before_provisioning() {
             LaunchValidationError::UnknownProfile { profile_id: _ }
         ))
     ));
-    assert!(adapter.provisioner.calls.is_empty());
+    assert_eq!(
+        adapter.provisioner.calls,
+        [] as [crate::usecase::runtime::ProvisionContext; 0]
+    );
 }
 
 #[test]

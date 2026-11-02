@@ -1939,7 +1939,7 @@ mod tests {
             session.send_input(&mut port, b"ls\r"),
             Err(TerminalInputError::NotLive(SessionState::Reconnecting))
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     #[test]
@@ -2266,7 +2266,7 @@ mod tests {
         assert_eq!(port.resolution_queries.len(), 1);
         assert_eq!(session.unresolved_input_length(), Some(4));
         assert_eq!(session.fenced_input_count(), 1);
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
         assert!(
             session
                 .error()
@@ -2284,7 +2284,7 @@ mod tests {
             })
         );
         assert_eq!(session.fenced_input_count(), FENCE_QUEUE_MAX_INPUTS);
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     /// Resolution never upgrades an outcome, and a resolution query that fails on
@@ -2325,7 +2325,7 @@ mod tests {
             session.poll_at(&mut port, now + RETRY_INITIAL);
             assert_eq!(session.unresolved_input_length(), Some(2));
             assert_eq!(session.fenced_input_count(), 1);
-            assert!(port.inputs.is_empty());
+            assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
 
             // The second query converges on the recorded non-success, which is
             // reported as itself and still releases the ordered queue.
@@ -2383,7 +2383,7 @@ mod tests {
         assert_eq!(session.unresolved_input_length(), None);
         // "one" was attempted and definitively failed; "two" is still held.
         assert_eq!(session.fenced_input_count(), 1);
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     /// Retracting a resolved input's uncertainty leaves the other uncertain
@@ -2556,7 +2556,7 @@ mod tests {
             session.send_input(&mut port, b"x"),
             Err(TerminalInputError::NotLive(SessionState::Reconnecting))
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
         assert_eq!(session.state(), SessionState::Reconnecting);
     }
 
@@ -2599,7 +2599,7 @@ mod tests {
             session.error(),
             Some("terminal input acknowledgement was lost; delivery is unknown")
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
         // The unknown effect fences this terminal's producer queue, so the next
         // keystroke is held in order rather than merely refused: it must not be
         // able to overtake an input that may still be applied (#519).
@@ -2607,7 +2607,7 @@ mod tests {
             session.send_input(&mut port, b"y"),
             Err(TerminalInputError::Fenced { queued: 1 })
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     #[test]
@@ -2910,7 +2910,7 @@ mod tests {
             session.send_input_at(&mut port, b"typed-later", now + RETRY_INITIAL),
             Err(TerminalInputError::Fenced { queued: 2 })
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
 
         // Recovery delivers what was waiting, oldest first.
         session.poll_at(&mut port, now + RETRY_INITIAL * 4);
@@ -3107,7 +3107,7 @@ mod tests {
             TerminalInputError::Transport(TerminalError::OrderingMismatch),
         ];
         for outcome in outcomes {
-            assert!(!outcome.message().is_empty());
+            assert_ne!(outcome.message(), "");
         }
         assert!(
             TerminalInputError::Rejected(TerminalInputOutcome::Failed)
@@ -3203,7 +3203,8 @@ mod tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("terminal.sock");
+        // Keep the socket name short enough for macOS worktree paths.
+        let path = temp.path().join("t.sock");
         // Connecting is exactly one round trip: the attach carries this pane's
         // viewport, so nothing precedes it.
         let first_server = serve(UnixListener::bind(&path).unwrap(), 1);
@@ -3620,6 +3621,16 @@ mod tests {
             error.contains("unknown checkpoint schema version"),
             "{error}"
         );
+
+        let mut initial_port = FakeTerminalPort {
+            attach: vec![Ok(hostile(4)), Ok(hostile(5))],
+            ..FakeTerminalPort::default()
+        };
+        let mut initial = TerminalSession::new(terminal(), geometry());
+        initial.connect_at(&mut initial_port, now);
+        assert_eq!(initial.state(), SessionState::Reconnecting);
+        assert_eq!(initial_port.detached, [sub(4), sub(5)]);
+        assert!(initial.error().unwrap().contains("snapshot was rejected"));
     }
 
     #[test]

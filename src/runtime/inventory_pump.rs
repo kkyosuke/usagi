@@ -495,9 +495,12 @@ impl Drop for TerminalInventoryPump {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.signal();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        // Construction installs the handle; only Drop takes ownership of it.
+        let handle = self
+            .handle
+            .take()
+            .expect("worker handle is present until drop");
+        let _ = handle.join();
     }
 }
 
@@ -722,6 +725,10 @@ mod tests {
         let second = scope_terminal(workspace, None, worktree);
         state.watch(1, std::slice::from_ref(&first), ms(0));
         let job = state.begin_round(ms(0)).remove(0);
+        // Repeating a frame's unchanged watch must preserve the in-flight job.
+        assert!(!state.watch(1, std::slice::from_ref(&first), ms(5)));
+        assert_eq!(state.scopes[0].generation, job.generation);
+        assert_eq!(state.begin_round(ms(5)), [] as [InventoryJob; 0]);
         // The user opened another background tab in the same scope while the
         // observation was in flight.
         state.watch(1, &[first.clone(), second.clone()], ms(10));
@@ -936,6 +943,9 @@ mod tests {
         pump.watch(1, std::slice::from_ref(&background));
         rx.recv_timeout(Duration::from_secs(5))
             .expect("a failing scope is still observed");
-        assert!(pump.take_exited(8).is_empty());
+        assert_eq!(
+            pump.take_exited(8),
+            [] as [usagi_core::domain::id::TerminalRef; 0]
+        );
     }
 }

@@ -231,9 +231,7 @@ impl Open {
             OpenView::Projects => {
                 let marked = self.unite_paths();
                 if marked.is_empty() {
-                    self.selected()
-                        .map(|w| vec![w.path.clone()])
-                        .unwrap_or_default()
+                    self.selected().map_or_default(|w| vec![w.path.clone()])
                 } else {
                     marked
                 }
@@ -669,13 +667,13 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> V
         ));
         return lines;
     }
-    if open.filtered().is_empty() {
+    let filtered = open.filtered();
+    if filtered.is_empty() {
         lines.push(indent(
             &Style::new().dim().paint("No workspaces match the filter."),
         ));
         return lines;
     }
-    let filtered = open.filtered();
     let (start, capacity) = viewport(filtered.len(), open.selected_index(), budget);
     // 隠れている件数は隠れている側に置く（窓の上に残る件数を一覧の下で伝えない）。
     if let Some(above) = overflow_line("↑", start) {
@@ -698,11 +696,11 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> V
     }
 
     // 一覧の下に選択中 workspace の絶対パスを添える（どこを開くのか一目でわかるように）。
-    if let Some(workspace) = open.selected() {
-        lines.push(String::new());
-        let path = format!("↳ {}", workspace.path.display());
-        lines.push(indent(&Style::new().dim().paint(&path)));
-    }
+    // Filtering and navigation keep the selection inside this nonempty list.
+    let workspace = &filtered[open.selected_index()].workspace;
+    lines.push(String::new());
+    let path = format!("↳ {}", workspace.path.display());
+    lines.push(indent(&Style::new().dim().paint(&path)));
     // The cleanup confirmation is composited as a shared confirmation overlay by
     // `render_open`, so this list body stays free of a bespoke y/n prompt.
     lines
@@ -838,7 +836,7 @@ mod tests {
         assert!(history_lines(80, &open, 6).join("\n").contains('↑'));
         open.toggle_unite_member();
         open.request_unregister();
-        assert!(open.unite_paths().is_empty());
+        assert_eq!(open.unite_paths(), [] as [std::path::PathBuf; 0]);
         assert!(open.unregistering_path().is_none());
         let group_time = open.history[0].updated_at();
         open.remove_paths(&["/tmp/alpha".into()]);
@@ -850,7 +848,7 @@ mod tests {
         open.remove_paths(&["/tmp/beta".into()]);
         assert_eq!(open.history.len(), 12);
         open.cycle_view();
-        assert!(open.chosen_paths().is_empty());
+        assert_eq!(open.chosen_paths(), [] as [std::path::PathBuf; 0]);
         open.select_next();
         open.select_prev();
     }
@@ -1027,7 +1025,7 @@ mod tests {
     fn unite_members_follow_registry_order_and_cleanup_removes_them() {
         let mut empty = Open::new(Vec::new());
         empty.toggle_unite_member();
-        assert!(empty.unite_paths().is_empty());
+        assert_eq!(empty.unite_paths(), [] as [std::path::PathBuf; 0]);
 
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
         open.toggle_unite_member();

@@ -79,9 +79,7 @@ pub fn sidebar_block_with_sidecar(
     // `available` already fits the mascot, whose width exceeds the bubble chrome.
     // A non-empty `MascotSpeech` therefore always has at least one content cell.
     let inner_width = available - SPEECH_CHROME;
-    let mut plain_rows = speech
-        .map(|speech| bubble_rows(speech, inner_width))
-        .unwrap_or_default();
+    let mut plain_rows = speech.map_or_default(|speech| bubble_rows(speech, inner_width));
     let bubble_rows = plain_rows.len();
     let rabbit_start = plain_rows.len();
     plain_rows.extend(rabbit_rows(tick));

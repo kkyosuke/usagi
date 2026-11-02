@@ -29,9 +29,11 @@ impl Job {
 impl Drop for Job {
     fn drop(&mut self) {
         self.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        let worker = self
+            .worker
+            .take()
+            .expect("a job owns its worker until drop");
+        let _ = worker.join();
     }
 }
 

@@ -171,18 +171,20 @@ impl WorkspaceRuntime {
                 name,
             } => {
                 let _ = self.apply_event(AppEvent::Key(AppKey::OpenCloseupOverlay));
-                if let Some(modal) = self.closeup_modal.as_mut() {
-                    modal.paste(name);
-                }
+                self.closeup_modal
+                    .as_mut()
+                    .expect("the validated session's Closeup overlay was opened")
+                    .paste(name);
             }
             Action::Command {
                 session: None,
                 name,
             } => {
                 let _ = self.apply_event(AppEvent::Key(AppKey::OpenOverview));
-                if let Some(modal) = self.overview_modal.as_mut() {
-                    modal.paste(name);
-                }
+                self.overview_modal
+                    .as_mut()
+                    .expect("the Overview overlay was opened")
+                    .paste(name);
             }
         }
         Vec::new()

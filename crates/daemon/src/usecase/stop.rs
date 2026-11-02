@@ -377,7 +377,7 @@ mod tests {
             .unwrap(),
             "usagi v0.1.0: daemon not running"
         );
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
             .unwrap(),
             "usagi v0.1.0: cleared stale daemon record"
         );
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(store.load().unwrap(), None);
     }
 
@@ -532,7 +532,7 @@ mod tests {
             .unwrap(),
             "usagi v0.1.0: cleared stale daemon record"
         );
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(store.load().unwrap(), None);
     }
 
@@ -557,7 +557,7 @@ mod tests {
             .unwrap(),
             "usagi v0.1.0: cleared stale daemon record"
         );
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(store.load().unwrap(), None);
     }
 

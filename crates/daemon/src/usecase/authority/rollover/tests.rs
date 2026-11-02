@@ -849,7 +849,10 @@ fn a_rollover_onto_an_unknown_successor_is_refused_before_any_write() {
             if registry.refusal() == Some(RegistryError::UnknownGeneration)
     ));
     assert_eq!(world.gate.role(), GenerationRole::Active);
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }
 
 #[test]
@@ -912,7 +915,10 @@ fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write(
     // Nothing observable moved: the old generation still admits control work,
     // the locator still names it, and the registry was not rewritten.
     assert_eq!(world.gate.role(), GenerationRole::Active);
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
     assert_eq!(world.file.contents(), before);
     assert_eq!(world.file.writes(), writes);
 }

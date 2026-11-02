@@ -639,7 +639,7 @@ mod tests {
             load_preview_with(Path::new("/repo"), None, PreviewFileFilter::All, &mut run).unwrap();
         assert_eq!(files, ["README.md", "src/lib.rs"]);
         assert_eq!(changed, ["src/lib.rs"]);
-        assert!(lines.is_empty());
+        assert_eq!(lines, [] as [std::string::String; 0]);
 
         // changed の取得失敗を「変更なし」に置き換えない。
         let mut observations = VecDeque::from([output("README.md\0")]);
@@ -673,7 +673,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(files, ["README.md"]);
-        assert!(changed.is_empty());
+        assert_eq!(changed, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1148,7 +1148,7 @@ mod tests {
             FilePreviewError::UnsupportedFormat,
             FilePreviewError::ScopeUnavailable,
         ] {
-            assert!(!error.message().is_empty());
+            assert_ne!(error.message(), "");
             assert!(error.error_id().starts_with("preview-"));
         }
     }
@@ -1205,7 +1205,7 @@ mod tests {
         let (files, changed, _) =
             load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
         assert_eq!(files.len(), 2);
-        assert!(changed.is_empty());
+        assert_eq!(changed, [] as [std::string::String; 0]);
         let (all, _, _) = load_preview(temp.path(), None, PreviewFileFilter::AllArtifacts).unwrap();
         assert_eq!(all.len(), 2);
         let (_, _, lines) = load_preview(

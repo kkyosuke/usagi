@@ -291,33 +291,27 @@ impl CloseupModal {
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
     pub fn select_next(&mut self) {
-        self.completion_cycle = None;
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
-        if len > 0 {
-            self.selected = (self.selected + 1) % len;
-        }
+        self.move_selection(true);
     }
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
     pub fn select_prev(&mut self) {
+        self.move_selection(false);
+    }
+
+    fn move_selection(&mut self, forward: bool) {
         self.completion_cycle = None;
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + len - 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
+        let (len, selected) = if self.expanded {
+            (self.subcommands().len(), &mut self.selected_subcommand)
+        } else {
+            (self.matches().len(), &mut self.selected)
+        };
         if len > 0 {
-            self.selected = (self.selected + len - 1) % len;
+            *selected = if forward {
+                (*selected + 1) % len
+            } else {
+                (*selected + len - 1) % len
+            };
         }
     }
 
@@ -625,7 +619,10 @@ mod tests {
             modal.insert_char(character);
         }
 
-        assert!(modal.matches().is_empty());
+        assert_eq!(
+            modal.matches(),
+            [] as [crate::usecase::closeup::CommandInfo; 0]
+        );
         assert_eq!(modal.submission(), "agent -m codex");
 
         // A trailing separator is also meaningful: it submits the command and
@@ -887,7 +884,7 @@ mod tests {
     fn an_out_of_range_selection_has_no_subcommands() {
         let mut modal = CloseupModal::new("s");
         modal.selected = usize::MAX;
-        assert!(modal.subcommands().is_empty());
+        assert_eq!(modal.subcommands(), [] as [super::ModalSubcommand; 0]);
     }
 
     #[test]

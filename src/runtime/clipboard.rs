@@ -1,11 +1,11 @@
 //! Platform clipboard adapter for the TUI composition root.
 //!
-//! The TUI depends only on `ClipboardPort`; this module selects the platform's
-//! conventional command at runtime.  That keeps the binary buildable on every
-//! Rust target without linking a window-system SDK, while supporting macOS,
-//! Windows, Wayland, and X11 when their clipboard service is available. The
-//! module is an OS process adapter; its behaviour is covered through the pure
-//! `ClipboardPort` boundary in `usagi-tui` rather than LLVM line coverage.
+//! The TUI depends only on `ClipboardPort`; this module selects conventional
+//! commands for the compilation target and available display. This keeps the
+//! binary buildable on every Rust target without linking a window-system SDK,
+//! while supporting macOS, Windows, Wayland, and X11 when their clipboard service
+//! is available. Process execution stays behind the OS adapter; selection and fallback
+//! policy are covered by unit tests.
 
 use std::time::Duration;
 
@@ -73,21 +73,21 @@ mod real_io {
 }
 
 enum Platform {
-    #[cfg(any(test, target_os = "macos"))]
     Macos,
-    #[cfg(any(test, target_os = "windows"))]
     Windows,
-    #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
     Unix,
 }
 
 fn current_platform() -> Platform {
-    #[cfg(target_os = "macos")]
-    return Platform::Macos;
-    #[cfg(target_os = "windows")]
-    return Platform::Windows;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    return Platform::Unix;
+    const {
+        if cfg!(target_os = "macos") {
+            Platform::Macos
+        } else if cfg!(target_os = "windows") {
+            Platform::Windows
+        } else {
+            Platform::Unix
+        }
+    }
 }
 
 fn write_with_fallbacks(
@@ -109,25 +109,19 @@ fn write_with_fallbacks(
 }
 
 fn commands_for(platform: &Platform, wayland: bool, x11: bool) -> Vec<ClipboardCommand> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let _ = (wayland, x11);
     match platform {
-        #[cfg(any(test, target_os = "macos"))]
         Platform::Macos => vec![ClipboardCommand {
             program: "pbcopy",
             arguments: &[],
         }],
-        #[cfg(any(test, target_os = "windows"))]
         Platform::Windows => vec![ClipboardCommand {
             program: "clip.exe",
             arguments: &[],
         }],
-        #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
         Platform::Unix => unix_commands(wayland, x11),
     }
 }
 
-#[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
 fn unix_commands(wayland: bool, x11: bool) -> Vec<ClipboardCommand> {
     // Linux and the other Unix targets may expose either protocol. Prefer the
     // current session's native protocol, then try the other one so remote and
@@ -163,11 +157,11 @@ mod tests {
         let macos = commands_for(&Platform::Macos, false, false);
         assert_eq!(macos.len(), 1);
         assert_eq!(macos[0].program, "pbcopy");
-        assert!(macos[0].arguments.is_empty());
+        assert_eq!(macos[0].arguments, [] as [&str; 0]);
         let windows = commands_for(&Platform::Windows, false, false);
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].program, "clip.exe");
-        assert!(windows[0].arguments.is_empty());
+        assert_eq!(windows[0].arguments, [] as [&str; 0]);
     }
 
     #[test]

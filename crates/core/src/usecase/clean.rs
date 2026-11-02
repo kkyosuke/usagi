@@ -814,7 +814,7 @@ mod tests {
             }],
             ..CleanInventory::default()
         };
-        assert!(plan(&inventory).is_empty());
+        assert_eq!(plan(&inventory), [] as [CleanCandidate; 0]);
     }
 
     #[test]
@@ -875,7 +875,7 @@ mod tests {
             }],
             ..CleanInventory::default()
         };
-        assert!(plan(&inventory).is_empty());
+        assert_eq!(plan(&inventory), [] as [CleanCandidate; 0]);
         inventory.repositories[0].worktrees[0].path = "/repo/.usagi/sessions/active".into();
         assert!(
             plan(&inventory).is_empty(),

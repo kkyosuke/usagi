@@ -285,16 +285,14 @@ fn role_badge(session: &ProjectedSession) -> String {
     session
         .role_id
         .as_ref()
-        .map(|role| format!("  {}", role_identity(role)))
-        .unwrap_or_default()
+        .map_or_default(|role| format!("  {}", role_identity(role)))
 }
 
 fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, &str>) -> String {
     let role = session
         .role_id
         .as_deref()
-        .map(|role| format!("{} · ", role_identity(role)))
-        .unwrap_or_default();
+        .map_or_default(|role| format!("{} · ", role_identity(role)));
     let lineage = session
         .parent_session_id
         .and_then(|parent| names.get(&parent))
@@ -2181,8 +2179,7 @@ fn sidecar_labels_with_icon_mode(
     // 観測が無いときは Agent concurrency 行も CPU / メモリ行も出さない（metrics 導入前と
     // 同じ静けさ）。health だけが非 Ok なら badge 行だけが出る。
     let mut metric_rows = metrics
-        .map(|metrics| mascot_metrics_with_icon_mode(Some(metrics), 0, icon_mode))
-        .unwrap_or_default();
+        .map_or_default(|metrics| mascot_metrics_with_icon_mode(Some(metrics), 0, icon_mode));
     // 供給元は 4 つあるが、sidecar はうさぎの 3 行にしか載らない。4 つとも語ることが
     // あるときは **Agent concurrency 行が譲る**。異常な daemon の方が急を要する報せで
     // あり、ここで明示的に落としておかないと widget の `take(3)` が代わりに最下段の
@@ -2778,7 +2775,11 @@ fn home_left_pane(
                     .into_iter()
                     .take(row.height),
             );
-        } else if let Some(name) = home.create_pending.as_deref() {
+        } else {
+            let name = home
+                .create_pending
+                .as_deref()
+                .expect("sidebar skeleton rows require a pending create");
             lines.extend(
                 create_skeleton_lines(width, name, home.mascot_tick, home.icon_mode)
                     .into_iter()
@@ -3071,7 +3072,7 @@ fn home_row_lines_at(
         );
     }
     let marker = home_row_marker(row, selected, current_marker, home.icon_mode);
-    let badge = session.map(role_badge).unwrap_or_default();
+    let badge = session.map_or_default(role_badge);
     let owned_label = session.map(organization_label);
     let label = if session.is_some() {
         widgets::clip_to_width(
@@ -4992,7 +4993,10 @@ mod tests {
         )
         .with_agent_inventory_and_panes(None, &empty);
         assert!(home.session_agents.is_empty());
-        assert!(home.garden_sessions.as_ref().unwrap()[0].agents.is_empty());
+        assert_eq!(
+            home.garden_sessions.as_ref().unwrap()[0].agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
     }
 
     #[test]
@@ -5373,6 +5377,14 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert_eq!(state.overlay(), None);
         let mut home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
+        for width in [1, 18] {
+            let layout = home_header_layout(width, &home);
+            assert_eq!(display_width(&layout.line), width);
+            assert!(
+                (0..width)
+                    .all(|column| layout.action_at(column) != Some(HomeHeaderAction::Decisions))
+            );
+        }
 
         let text_banner = strip(&home_notice_banner(
             100,
@@ -5401,9 +5413,9 @@ mod tests {
         let terminal_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::RootTerminal))
             .collect::<Vec<_>>();
-        assert!(!workspace_columns.is_empty());
-        assert!(!notice_columns.is_empty());
-        assert!(!terminal_columns.is_empty());
+        assert_ne!(workspace_columns, [] as [usize; 0]);
+        assert_ne!(notice_columns, [] as [usize; 0]);
+        assert_ne!(terminal_columns, [] as [usize; 0]);
         for column in workspace_columns {
             assert_eq!(
                 home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
@@ -6352,7 +6364,7 @@ mod tests {
         };
         for width in [0usize, 1, 2, 3] {
             let lines = new_session_input_lines(width, &draft);
-            assert!(!lines.is_empty());
+            assert_ne!(lines, [] as [String; 0]);
             assert!(lines.iter().all(|line| display_width(line) <= width));
         }
     }
@@ -6394,25 +6406,23 @@ mod tests {
         // controller が集約する phase をすべて踏みつつ、Garden は runtime ごとの
         // phase を失わず投影することを固定する。
         let phases = [
-            Some(AgentPhase::Absent),
-            Some(AgentPhase::Ready),
-            Some(AgentPhase::Running),
-            Some(AgentPhase::Waiting),
-            Some(AgentPhase::Ended),
+            AgentPhase::Absent,
+            AgentPhase::Ready,
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Ended,
         ];
         let ids = phases.iter().map(|_| SessionId::new()).collect::<Vec<_>>();
         let mut state = AppState::home(workspace, ids.clone());
         let mut projected = Vec::new();
         for (index, phase) in phases.iter().enumerate() {
-            if let Some(phase) = *phase {
-                let _ = update(
-                    &mut state,
-                    AppEvent::Backend(BackendEvent::RuntimePhase {
-                        runtime: runtime_ref(workspace, ids[index]),
-                        phase,
-                    }),
-                );
-            }
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime_ref(workspace, ids[index]),
+                    phase: *phase,
+                }),
+            );
             projected.push(projected_session(ids[index], &format!("s{index}"), "/work"));
         }
         projected[4].lifecycle = SessionLifecycle::Failed;
@@ -8370,14 +8380,14 @@ mod tests {
             ),
             super::mascot_metrics(Some(&metrics), 0)
         );
-        assert!(
+        assert_eq!(
             sidecar_labels(
                 LEFT_WIDTH,
                 None,
                 DaemonHealth::Ok,
                 SessionStateCounts::default()
-            )
-            .is_empty()
+            ),
+            [] as [String; 0]
         );
     }
 
@@ -9285,7 +9295,7 @@ mod tests {
                 .filter(|line| line.starts_with("row "))
                 .collect::<Vec<_>>()
         };
-        assert!(!output_rows(&controller).is_empty());
+        assert_ne!(output_rows(&controller), [] as [String; 0]);
         // A two-row scrollback offset keeps the live tail hidden.
         assert!(!output_rows(&controller).iter().any(|line| line == "row 19"));
     }
@@ -9412,9 +9422,9 @@ mod tests {
             let mut item = pending;
             item.kind = kind;
             let tab = PaneTab::Pending(item);
-            assert!(!pane_tab_label(&tab).is_empty());
+            assert_ne!(pane_tab_label(&tab), "");
             let ready = PaneTab::Ready(item);
-            assert!(!pane_tab_label(&ready).is_empty());
+            assert_ne!(pane_tab_label(&ready), "");
             assert!(pane_tab_selected(
                 &ready,
                 &PaneSelection::Tab(TabSelection::Ready(operation))
@@ -9428,14 +9438,14 @@ mod tests {
             daemon_generation: DaemonGeneration::new(),
         };
         for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
-            assert!(
-                !pane_tab_label(&PaneTab::Live(
+            assert_ne!(
+                pane_tab_label(&PaneTab::Live(
                     crate::usecase::application::pane::LivePane {
                         terminal: terminal.clone(),
                         kind,
                     }
-                ))
-                .is_empty()
+                )),
+                ""
             );
         }
 
@@ -9446,7 +9456,7 @@ mod tests {
             TargetPhase::Waiting,
             TargetPhase::Done,
         ] {
-            assert!(!phase_label(phase).is_empty());
+            assert_ne!(phase_label(phase), "");
         }
         for feedback in [
             Feedback::Progress(SafeMessage::new("working")),
@@ -9462,7 +9472,7 @@ mod tests {
             Feedback::Reconnected,
             Feedback::ResyncRequired,
         ] {
-            assert!(!feedback_label(Some(&feedback)).is_empty());
+            assert_ne!(feedback_label(Some(&feedback)), "");
         }
 
         let workspace_id = WorkspaceId::new();

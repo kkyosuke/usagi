@@ -131,9 +131,9 @@ impl AgentRuntime {
                 caller: binding.caller.clone(),
                 run_id: cursor.operation.operation_id,
             };
-            if !aliases.contains(&fallback) {
-                aliases.push(fallback.clone());
-            }
+            // Retained runtimes have unique operation IDs, and `seen` rejects
+            // revisiting a runtime, so each legacy fallback is distinct.
+            aliases.push(fallback.clone());
             let source = cursor.resumed_from.and_then(|source_id| {
                 records
                     .iter()

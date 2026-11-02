@@ -37,7 +37,7 @@ use super::{
     managed_background_terminal_geometry, new_project_notice, open_director_from_new_button,
     open_failure_notice, open_from_registry, opens_workspace_help, prepare_activation_settings,
     prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck, project_bar,
-    project_controller_sessions, registry_contains_path, relative_time_clock,
+    project_controller_sessions, relative_time_clock, remember_registry_workspace,
     remember_workspace_controller_state, remove_registry_paths, render_home, render_home_at,
     render_missing_workspace_prompt, render_open, restore_workspace_closeup,
     restore_workspace_controller_state, retarget_drawer_chords, right_pane_tab_at,
@@ -2479,9 +2479,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             }
         }
         if let Some(snapshot) = created_snapshot {
-            if !registry_contains_path(&registry, &snapshot.workspace.path) {
-                registry.push(snapshot.workspace.clone());
-            }
+            remember_registry_workspace(&mut registry, &snapshot.workspace);
             welcome.record_opened(&snapshot.workspace);
             open.record_opened(&snapshot.workspace);
             if let Some(exit) = enter_workspace(
@@ -2660,9 +2658,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     }
                     welcome.set_notice(None);
                     for snapshot in &snapshots {
-                        if !registry_contains_path(&registry, &snapshot.workspace.path) {
-                            registry.push(snapshot.workspace.clone());
-                        }
+                        remember_registry_workspace(&mut registry, &snapshot.workspace);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
@@ -2728,9 +2724,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                         };
                     open.set_notice(None);
                     for snapshot in &snapshots {
-                        if !registry_contains_path(&registry, &snapshot.workspace.path) {
-                            registry.push(snapshot.workspace.clone());
-                        }
+                        remember_registry_workspace(&mut registry, &snapshot.workspace);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }

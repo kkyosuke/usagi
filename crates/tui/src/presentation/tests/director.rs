@@ -1014,7 +1014,7 @@ fn director_drawer_consumes_shell_pane_controls_without_background_mutation() {
     let launch_effects =
         crate::presentation::open_director_from_new_button(&mut runtime, &new_pointer, 20, 80)
             .expect("the Director New button owns its pointer press");
-    assert!(launch_effects.is_empty());
+    assert_eq!(launch_effects, [] as [Effect; 0]);
     assert!(matches!(
         runtime.state().director_new(),
         DirectorNew::Choosing(_)
@@ -1113,8 +1113,8 @@ fn director_drawer_consumes_shell_pane_controls_without_background_mutation() {
     }
     assert_eq!(controls.project(rows, 1).scroll, scroll_before);
     assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
-    assert!(term.copied.is_empty());
-    assert!(browser.opened.is_empty());
+    assert_eq!(term.copied, [] as [String; 0]);
+    assert_eq!(browser.opened, [] as [String; 0]);
 }
 
 #[test]
@@ -1125,10 +1125,9 @@ fn drawer_header_buttons_remain_active_while_the_director_picker_owns_input() {
         AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
         DefaultModel::Claude,
     );
-    assert!(
-        runtime
-            .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
-            .is_empty()
+    assert_eq!(
+        runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew)),
+        [] as [Effect; 0]
     );
     assert!(runtime.state().director_drawer_open());
     assert!(matches!(
@@ -1283,7 +1282,10 @@ fn director_projection_and_tab_cycle_cover_every_agent_only_slot() {
         crate::presentation::director_drawer_projection(&ui, &runtime, Some(&terminal_view));
     assert_eq!(projected.conversations.len(), 2);
     assert!(projected.conversations[0].selected);
-    assert!(!projected.organization.is_empty());
+    assert_ne!(
+        projected.organization,
+        [] as [crate::presentation::views::director_drawer::DirectorOrganizationRow; 0]
+    );
     assert_eq!(projected.organization[0].label, "♛ Director");
     assert_eq!(projected.terminal_view, Some(terminal_view));
     assert_eq!(projected.interrupted_detail, None);
@@ -1721,7 +1723,7 @@ fn production_route_makes_director_picker_the_exclusive_foreground_owner() {
     let mut controls = LiveTerminalControls::default();
     let mut term = FakeTerminal::default();
     let open_picker = Key::Live(LiveTerminalAction::DirectorNew);
-    assert!(runtime.handle_key(open_picker).is_empty());
+    assert_eq!(runtime.handle_key(open_picker), [] as [Effect; 0]);
 
     let inert_inputs = vec![
         Key::Live(LiveTerminalAction::Switch),
@@ -1877,10 +1879,9 @@ fn production_route_makes_director_picker_the_exclusive_foreground_owner() {
     // Empty has the same exclusive ownership even though it has no
     // selectable row and Enter cannot launch anything.
     runtime.set_agent_models(AvailableModels::default(), DefaultModel::Claude);
-    assert!(
-        runtime
-            .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
-            .is_empty()
+    assert_eq!(
+        runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew)),
+        [] as [Effect; 0]
     );
     assert_eq!(runtime.state().director_new(), DirectorNew::Empty);
     for key in inert_inputs
@@ -1914,10 +1915,9 @@ fn production_route_makes_director_picker_the_exclusive_foreground_owner() {
         AvailableModels::new([DefaultModel::Claude, DefaultModel::OpenAi]),
         DefaultModel::Claude,
     );
-    assert!(
-        runtime
-            .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
-            .is_empty()
+    assert_eq!(
+        runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew)),
+        [] as [Effect; 0]
     );
 
     // Reserved picker operations remain live. Navigation stays local,

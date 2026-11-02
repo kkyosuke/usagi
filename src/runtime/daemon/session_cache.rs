@@ -921,7 +921,7 @@ mod tests {
         );
         tree.unreadable_children
             .insert(format!("{root}/target").into());
-        assert!(
+        assert_eq!(
             discover_candidates(
                 &tree,
                 &git(""),
@@ -931,8 +931,8 @@ mod tests {
                 &activity,
                 &executable,
             )
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+            [] as [usagi_daemon::usecase::session_cache::CacheCandidate; 0]
         );
         tree.unreadable_children.clear();
         tree.unreadable.insert(executable);
@@ -1396,7 +1396,7 @@ mod tests {
                 };
                 assert!(policy.validate().is_ok());
                 assert!(cache_directory(&tree, Path::new(root), &relative).is_err());
-                assert!(
+                assert_eq!(
                     discover_candidates(
                         &tree,
                         &git(""),
@@ -1406,8 +1406,8 @@ mod tests {
                         &(Vec::new(), Vec::new()),
                         Path::new("/bin/usagi"),
                     )
-                    .unwrap()
-                    .is_empty()
+                    .unwrap(),
+                    [] as [usagi_daemon::usecase::session_cache::CacheCandidate; 0]
                 );
                 assert!(
                     super::detach_directory(
@@ -1655,12 +1655,12 @@ mod tests {
             &vec![(terminal, TerminalRuntimeState::Reserved)],
             session
         ));
-        assert!(
-            !session_error(
+        assert_ne!(
+            session_error(
                 usagi_daemon::usecase::session_runtime::SessionRuntimeError::UnknownSession
             )
-            .to_string()
-            .is_empty()
+            .to_string(),
+            ""
         );
     }
 }

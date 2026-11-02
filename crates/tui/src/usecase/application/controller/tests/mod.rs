@@ -435,12 +435,18 @@ fn table_driven_mode_and_overlay_scenarios() {
 fn management_ctrl_q_always_confirms_and_confirmation_can_cancel() {
     let (workspace, _, _) = ids();
     let mut state = AppState::home(workspace, Vec::new());
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlQ)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
     // Opening the prompt focuses Quit by default, so the historical
     // `Ctrl-Q` + `Enter` still ends the process rather than leaving.
     assert_eq!(state.exit_choice(), ExitChoice::Quit);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('n'))),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenQuitConfirmation));
@@ -491,9 +497,15 @@ fn exit_prompt_separates_leaving_from_quitting_on_every_route() {
 
     // Unknown keys neither commit nor close: the prompt is the only way out.
     let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('z'))).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('z'))),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Escape)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -505,7 +517,10 @@ fn exit_prompt_focus_wraps_in_both_directions_and_enter_commits_it() {
     for forward in [AppKey::Right, AppKey::Tab] {
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
         for expected in [ExitChoice::Stay, ExitChoice::Welcome, ExitChoice::Quit] {
-            assert!(update(&mut state, AppEvent::Key(forward.clone())).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(forward.clone())),
+                [] as [Effect; 0]
+            );
             assert_eq!(state.exit_choice(), expected, "{forward:?}");
             assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
         }
@@ -515,7 +530,10 @@ fn exit_prompt_focus_wraps_in_both_directions_and_enter_commits_it() {
     // Left steps backward through the same ring.
     let _ = update(&mut state, AppEvent::Key(AppKey::CtrlQ));
     for expected in [ExitChoice::Welcome, ExitChoice::Stay, ExitChoice::Quit] {
-        assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Left)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.exit_choice(), expected);
     }
 
@@ -546,8 +564,14 @@ fn arrow_keys_are_inert_outside_the_quit_confirmation() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
     let before = state.selected();
-    assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Right)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Left)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Right)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.selected(), before);
     assert_eq!(state.overlay(), None);
 }
@@ -579,7 +603,10 @@ fn overlay_control_chords_follow_the_input_ownership_table() {
             let mut state = AppState::home(workspace, Vec::new());
             state.overlay = Some(overlay);
 
-            assert!(update(&mut state, AppEvent::Key(key.clone())).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(key.clone())),
+                [] as [Effect; 0]
+            );
             assert_eq!(
                 state.overlay(),
                 stays_open.then_some(overlay),
@@ -649,7 +676,7 @@ fn fake_backend_records_effects_and_replays_events() {
         backend.take_effects(),
         vec![Effect::RefreshSessions { workspace }]
     );
-    assert!(backend.effects().is_empty());
+    assert_eq!(backend.effects(), []);
 }
 
 #[test]
@@ -788,7 +815,10 @@ fn navigation_wraps_up_and_ignores_non_command_characters() {
     assert_eq!(state.selected(), Selection::NewSession);
     let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
     assert_eq!(state.selected(), Selection::NewSession);
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlX)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlX)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -826,7 +856,7 @@ fn failed_delete_ctrl_x_retries_the_force_removal_and_plain_x_is_inert() {
     );
 
     for key in [AppKey::Char('x'), AppKey::Char('X')] {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
     }
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::CtrlX)),
@@ -863,7 +893,10 @@ fn selecting_a_delete_failure_confirms_before_forced_removal() {
         )]))),
     );
 
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::ForceRemoveConfirmation));
     assert_eq!(state.force_remove_confirmation(), Some((session, true)));
 
@@ -888,7 +921,10 @@ fn selecting_a_delete_failure_confirms_before_forced_removal() {
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Right));
     assert_eq!(state.force_remove_confirmation(), Some((session, false)));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
@@ -930,31 +966,31 @@ fn modal_registry_dispatches_once_and_rejects_invalid_or_repeated_requests() {
         }]
     );
     assert_eq!(state.overlay(), None);
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("issue list".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("unknown".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Overview));
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitCloseup("close invalid".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
     assert_eq!(
@@ -974,12 +1010,12 @@ fn modal_registry_dispatches_once_and_rejects_invalid_or_repeated_requests() {
         [Effect::OpenTerminal { target: Target::Session(actual), arguments, .. }]
             if *actual == session && arguments == "open"
     ));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitCloseup("terminal open".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
@@ -1134,8 +1170,14 @@ fn daemon_modal_runs_one_non_force_action_and_fences_its_completion() {
     );
     assert_eq!(state.daemon_control().pending(), Some(DaemonAction::Stop));
 
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Up)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.daemon_control().selected(), DaemonAction::Stop);
 
     let _ = update(
@@ -1255,7 +1297,7 @@ fn visiting_a_failed_usagi_selects_it_without_attaching_it() {
     );
     state.overlay = Some(Overlay::Garden);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::GardenClick(GardenClick::Visit {
@@ -1263,8 +1305,8 @@ fn visiting_a_failed_usagi_selects_it_without_attaching_it() {
                 session,
                 agent: None,
             })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), None);
     assert_eq!(
@@ -1350,16 +1392,19 @@ fn role_editor_reducer_keeps_invalid_source_and_switches_scopes() {
 
     state.overlay = Some(Overlay::Roles);
     state.role_editor = None;
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
     state.overlay = Some(Overlay::Overview);
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("roles invalid".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert!(
         state
@@ -1430,7 +1475,10 @@ fn overview_global_env_uses_ctrl_s_source_save_and_ignores_tab() {
     );
 
     assert_eq!(state.environment_editor().unwrap().draft(), "TOKEN=secret");
-    assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Tab)),
+        [] as [Effect; 0]
+    );
     assert!(!state.environment_editor().unwrap().is_save_focused());
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::SaveRoles)),
@@ -1473,12 +1521,12 @@ fn overview_config_targets_the_workspace_and_rejects_extra_arguments() {
 
     let mut state = AppState::home(workspace, Vec::new());
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("config extra".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert_eq!(
@@ -1508,12 +1556,12 @@ fn overview_clean_requires_explicit_apply_before_force() {
 
     let mut state = AppState::home(workspace, Vec::new());
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("clean --force".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert_eq!(
@@ -1736,7 +1784,7 @@ fn cleanup_queue_serializes_selected_removals_by_stable_identity() {
         }]
     );
     let queue = state.cleanup_queue().unwrap();
-    assert!(queue.candidates().is_empty());
+    assert_eq!(queue.candidates(), []);
     assert_eq!(queue.in_flight(), None);
     assert_eq!(queue.feedback().unwrap().message, "cleanup complete");
 }
@@ -1754,7 +1802,10 @@ fn cleanup_queue_navigation_waiting_and_failed_delete_paths_are_explicit() {
     );
 
     assert_eq!(state.cleanup_queue().unwrap().cursor(), 0);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state.cleanup_queue().unwrap().feedback().unwrap().message,
         "select sessions with Space"
@@ -1782,7 +1833,10 @@ fn cleanup_queue_navigation_waiting_and_failed_delete_paths_are_explicit() {
         update(&mut state, AppEvent::Key(AppKey::Enter)).as_slice(),
         [Effect::RemoveSession { session, .. }] if *session == first
     ));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state.cleanup_queue().unwrap().feedback().unwrap().message,
         "waiting for the current removal"
@@ -1812,13 +1866,19 @@ fn cleanup_queue_navigation_waiting_and_failed_delete_paths_are_explicit() {
     assert_eq!(state.cleanup_queue(), None);
 
     state.overlay = Some(Overlay::CleanupQueue);
-    assert!(update_cleanup_queue(&mut state, &AppKey::Down).is_empty());
+    assert_eq!(
+        update_cleanup_queue(&mut state, &AppKey::Down),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
-    assert!(begin_next_cleanup(&mut state, false).is_empty());
+    assert_eq!(begin_next_cleanup(&mut state, false), [] as [Effect; 0]);
 
     state.overlay = Some(Overlay::CleanupQueue);
     state.cleanup_queue = Some(CleanupQueueState::new(Vec::new()));
-    assert!(update_cleanup_queue(&mut state, &AppKey::Char(' ')).is_empty());
+    assert_eq!(
+        update_cleanup_queue(&mut state, &AppKey::Char(' ')),
+        [] as [Effect; 0]
+    );
     assert!(state.cleanup_queue().unwrap().selected().is_empty());
 }
 
@@ -1931,16 +1991,25 @@ fn preview_overlay_resolves_its_target_from_the_home_mode() {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         state.route = Route::Home(HomeMode::Switch);
         state.selected = selection;
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), None);
     }
 
     state.route = Route::Home(HomeMode::Closeup);
     state.active = Some(missing);
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
     state.active = None;
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenPreview)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenPreview)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 }
 
@@ -1959,7 +2028,10 @@ fn decision_editor_covers_freeform_navigation_and_invalid_answers() {
         }),
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-    assert!(update(&mut state, AppEvent::Key(AppKey::SubmitDecision)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::SubmitDecision)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state
             .decision_overlay()
@@ -2063,15 +2135,15 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
             decisions: Vec::new(),
         },
     ));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Backend(BackendEvent::DecisionResolved {
                 workspace: WorkspaceId::new(),
                 decision_id: UserDecisionId::new(),
             })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     for event in [
         BackendEvent::NotesLoaded {
@@ -2127,14 +2199,17 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
             error: safe_error("preview"),
         },
     ] {
-        assert!(update(&mut state, AppEvent::Backend(event)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Backend(event)),
+            [] as [Effect; 0]
+        );
     }
 
     state.ctrl_c_grace = true;
     state.route = Route::Home(HomeMode::Closeup);
-    assert!(update_key(&mut state, AppKey::CtrlC).is_empty());
+    assert_eq!(update_key(&mut state, AppKey::CtrlC), [] as [Effect; 0]);
     state.ctrl_c_grace = false;
-    assert!(update_key(&mut state, AppKey::CtrlC).is_empty());
+    assert_eq!(update_key(&mut state, AppKey::CtrlC), [] as [Effect; 0]);
     assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
 
     state.overlay = Some(Overlay::QuitConfirmation);
@@ -2145,7 +2220,10 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
 
     state.overlay = Some(Overlay::Prs);
     state.pr_overlay = None;
-    assert!(pull_requests::update_key(&mut state, &AppKey::Enter).is_empty());
+    assert_eq!(
+        pull_requests::update_key(&mut state, &AppKey::Enter),
+        [] as [Effect; 0]
+    );
     state.overlay = Some(Overlay::Preview);
     state.preview_overlay = None;
     assert_eq!(
@@ -2153,7 +2231,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         vec![Effect::CancelPreview]
     );
 
-    assert!(commit_note_draft(&mut state).is_empty());
+    assert_eq!(commit_note_draft(&mut state), [] as [Effect; 0]);
     state.overlay = Some(Overlay::Notes);
     state.note_editor = Some(NoteEditor::loading(Target::Root(workspace)));
     for section in [
@@ -2165,7 +2243,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         editor.section = section;
         editor.source.replace("");
         editor.phase = notes::NotePhase::Ready;
-        assert!(commit_note_draft(&mut state).is_empty());
+        assert_eq!(commit_note_draft(&mut state), [] as [Effect; 0]);
     }
 
     let decision = pending_decision(workspace);
@@ -2184,9 +2262,15 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
 
     state.overlay = Some(Overlay::CreateSession);
     state.create_session = None;
-    assert!(update_create_session_form(&mut state, &AppKey::Enter).is_empty());
+    assert_eq!(
+        update_create_session_form(&mut state, &AppKey::Enter),
+        [] as [Effect; 0]
+    );
     state.create_session = Some(CreateSessionForm::new(Vec::new()));
-    assert!(update_create_session_form(&mut state, &AppKey::Backspace).is_empty());
+    assert_eq!(
+        update_create_session_form(&mut state, &AppKey::Backspace),
+        [] as [Effect; 0]
+    );
 
     state.overlay = Some(Overlay::Notes);
     state.note_editor = Some(NoteEditor::loading(Target::Root(workspace)));
@@ -2261,7 +2345,10 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
     }
 
     state.decision_overlay = None;
-    assert!(update_decisions_overlay(&mut state, AppKey::Escape).is_empty());
+    assert_eq!(
+        update_decisions_overlay(&mut state, AppKey::Escape),
+        [] as [Effect; 0]
+    );
     let mut decision = pending_decision(workspace);
     decision.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
     state.decisions = vec![decision.clone()];
@@ -2398,8 +2485,14 @@ fn coverage_contract_executes_guarded_reducer_success_paths() {
         },
     );
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
-    assert!(!update_management_key(&mut state, AppKey::CtrlN).is_empty());
-    assert!(!update_management_key(&mut state, AppKey::CtrlP).is_empty());
+    assert_ne!(
+        update_management_key(&mut state, AppKey::CtrlN),
+        [] as [Effect; 0]
+    );
+    assert_ne!(
+        update_management_key(&mut state, AppKey::CtrlP),
+        [] as [Effect; 0]
+    );
 
     state.route = Route::Home(HomeMode::Switch);
     state.overlay = None;
@@ -2434,7 +2527,10 @@ fn multiple_decision_checks_survive_snapshots_and_submit_only_the_active_answer_
         decisions: vec![request.clone()],
     };
     let _ = update(&mut state, AppEvent::Backend(snapshot.clone()));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     for key in [
         AppKey::Char(' '),
         AppKey::Down,
@@ -2450,7 +2546,10 @@ fn multiple_decision_checks_survive_snapshots_and_submit_only_the_active_answer_
         [Effect::ResolveDecision { answer: UserDecisionAnswer::Options { option_ids, .. }, .. }] if option_ids == &["safe", "fast"])
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     for key in [
         AppKey::Char('a'),
         AppKey::Char(' '),
@@ -2492,9 +2591,15 @@ fn malformed_multiple_decision_without_options_cannot_toggle_or_submit() {
     request.selection_mode = UserDecisionSelectionMode::Multiple;
     request.options.clear();
     let mut editor = DecisionEditor::new(request);
-    assert!(update_decision_editor(workspace, &mut editor, AppKey::Char(' ')).is_empty());
+    assert_eq!(
+        update_decision_editor(workspace, &mut editor, AppKey::Char(' ')),
+        [] as [Effect; 0]
+    );
     assert!(editor.checked_options.is_empty());
-    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert_eq!(
+        update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        [] as [Effect; 0]
+    );
     assert!(editor.error().is_some());
 }
 
@@ -2504,10 +2609,16 @@ fn decision_confirmation_revalidates_expiry_before_sending() {
     let mut request = pending_decision(workspace);
     request.require_confirmation = true;
     let mut editor = DecisionEditor::new(request);
-    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert_eq!(
+        update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        [] as [Effect; 0]
+    );
     assert!(editor.confirmation().is_some());
     editor.decision.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
-    assert!(update_decision_editor(workspace, &mut editor, AppKey::Enter).is_empty());
+    assert_eq!(
+        update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        [] as [Effect; 0]
+    );
     assert!(editor.error().is_some());
     assert!(editor.confirmation().is_some());
 }
@@ -2672,7 +2783,7 @@ mod decision_inbox {
             );
             for _ in 0..3 {
                 snapshot(&mut state, vec![question.clone()]);
-                assert!(state.decisions().is_empty());
+                assert_eq!(state.decisions(), []);
                 assert!(state.unread_decision_ids().is_empty());
                 assert!(state.overlay().is_none());
                 assert_eq!(state.decision_completions.len(), 1);
@@ -2688,7 +2799,7 @@ mod decision_inbox {
             assert!(state.decision_completions.is_empty());
             assert!(state.overlay().is_none());
             snapshot(&mut state, vec![]);
-            assert!(state.decision_answers().is_empty());
+            assert_eq!(state.decision_answers(), []);
             assert!(state.overlay().is_none());
         }
     }
@@ -2723,7 +2834,7 @@ mod decision_inbox {
         let _ = update(&mut state, AppEvent::RestoreDecisions(retained));
         for _ in 0..3 {
             snapshot(&mut state, vec![answer.clone()]);
-            assert!(state.decision_answers().is_empty());
+            assert_eq!(state.decision_answers(), []);
             assert!(state.overlay().is_none());
             assert_eq!(state.decision_completions.len(), 1);
         }
@@ -2811,7 +2922,7 @@ mod decision_inbox {
         let mut expired = pending_decision(workspace);
         expired.status = UserDecisionStatus::Expired;
         snapshot(&mut state, vec![answer.clone(), cancelled, expired]);
-        assert!(state.decisions().is_empty());
+        assert_eq!(state.decisions(), []);
         assert_eq!(state.decision_answers(), std::slice::from_ref(&answer));
         assert!(state.unread_decisions.is_empty());
         assert!(state.overlay().is_none());
@@ -2825,14 +2936,17 @@ mod decision_inbox {
         assert!(state.decision_overlay().unwrap().show_answers());
         let _ = update_decisions_overlay(&mut state, AppKey::Tab);
         assert!(!state.decision_overlay().unwrap().show_answers());
-        assert!(update_decisions_overlay(&mut state, AppKey::Enter).is_empty());
+        assert_eq!(
+            update_decisions_overlay(&mut state, AppKey::Enter),
+            [] as [Effect; 0]
+        );
         assert_eq!(
             update_decisions_overlay(&mut state, AppKey::Tab),
             vec![Effect::RefreshDecisions { workspace }]
         );
         assert!(state.decision_overlay().unwrap().show_answers());
         for key in [AppKey::Down, AppKey::Up, AppKey::Enter] {
-            assert!(update_decisions_overlay(&mut state, key).is_empty());
+            assert_eq!(update_decisions_overlay(&mut state, key), [] as [Effect; 0]);
         }
         for key in [
             AppKey::Enter,
@@ -2842,7 +2956,7 @@ mod decision_inbox {
             AppKey::Char('x'),
             AppKey::Tab,
         ] {
-            assert!(update_decisions_overlay(&mut state, key).is_empty());
+            assert_eq!(update_decisions_overlay(&mut state, key), [] as [Effect; 0]);
         }
         assert_eq!(
             state
@@ -2853,7 +2967,10 @@ mod decision_inbox {
                 .decision(),
             &answer
         );
-        assert!(update_decisions_overlay(&mut state, AppKey::Char('d')).is_empty());
+        assert_eq!(
+            update_decisions_overlay(&mut state, AppKey::Char('d')),
+            [] as [Effect; 0]
+        );
         assert!(
             state
                 .decision_overlay()
@@ -2862,7 +2979,10 @@ mod decision_inbox {
                 .unwrap()
                 .discard_confirmation()
         );
-        assert!(update_decisions_overlay(&mut state, AppKey::Escape).is_empty());
+        assert_eq!(
+            update_decisions_overlay(&mut state, AppKey::Escape),
+            [] as [Effect; 0]
+        );
         assert!(
             !state
                 .decision_overlay()
@@ -2871,7 +2991,10 @@ mod decision_inbox {
                 .unwrap()
                 .discard_confirmation()
         );
-        assert!(update_decisions_overlay(&mut state, AppKey::Enter).is_empty());
+        assert_eq!(
+            update_decisions_overlay(&mut state, AppKey::Enter),
+            [] as [Effect; 0]
+        );
         let _ = update_decisions_overlay(&mut state, AppKey::Char('d'));
         let expected = vec![Effect::DiscardDecision {
             workspace: foreign,
@@ -2914,7 +3037,7 @@ mod decision_inbox {
                 decision_id: answer.decision_id,
             }),
         );
-        assert!(state.decision_answers().is_empty());
+        assert_eq!(state.decision_answers(), []);
         assert!(state.overlay().is_none());
     }
 
@@ -2930,7 +3053,10 @@ mod decision_inbox {
         question.answer = saved(workspace).answer;
         snapshot(&mut state, vec![question.clone()]);
         assert!(state.decision_overlay().unwrap().show_answers());
-        assert!(update_decisions_overlay(&mut state, AppKey::Enter).is_empty());
+        assert_eq!(
+            update_decisions_overlay(&mut state, AppKey::Enter),
+            [] as [Effect; 0]
+        );
         assert_eq!(
             state
                 .decision_overlay()
@@ -2959,7 +3085,105 @@ mod decision_inbox {
         snapshot(&mut state, vec![]);
         assert!(state.decision_overlay().unwrap().editor().is_none());
         assert!(state.decision_overlay().unwrap().request_error().is_some());
-        assert!(update_decisions_overlay(&mut state, AppKey::Char('d')).is_empty());
-        assert!(state.decision_answers().is_empty());
+        assert_eq!(
+            update_decisions_overlay(&mut state, AppKey::Char('d')),
+            [] as [Effect; 0]
+        );
+        assert_eq!(state.decision_answers(), []);
     }
+}
+
+#[test]
+fn editor_completions_after_closing_do_not_reopen_the_editor() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    for event in [
+        BackendEvent::EnvironmentLoaded {
+            scope: EnvScope::Workspace,
+            entries: Vec::new(),
+            inherited: Vec::new(),
+        },
+        BackendEvent::EnvironmentSaved {
+            scope: EnvScope::Workspace,
+            entries: Vec::new(),
+            inherited: Vec::new(),
+        },
+        BackendEvent::RolesLoaded {
+            scope: RoleEditorScope::Workspace,
+            source: "version = 1".into(),
+        },
+        BackendEvent::RolesError {
+            scope: RoleEditorScope::Workspace,
+            error: SafeError {
+                message: SafeMessage::new("roles unavailable"),
+                error_id: "test".into(),
+            },
+        },
+    ] {
+        assert_eq!(
+            update(&mut state, AppEvent::Backend(event)),
+            [] as [Effect; 0]
+        );
+        assert!(state.environment_editor().is_none());
+        assert!(state.role_editor().is_none());
+        assert_eq!(state.overlay(), None);
+    }
+}
+
+#[test]
+fn environment_loading_and_saving_preserve_the_draft_against_edit_keys() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
+    for saving in [false, true] {
+        if saving {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::EnvironmentLoaded {
+                    scope: EnvScope::Workspace,
+                    entries: vec![EnvironmentEntry {
+                        name: "KEY".into(),
+                        value: "value".into(),
+                    }],
+                    inherited: Vec::new(),
+                }),
+            );
+            assert!(matches!(
+                update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).as_slice(),
+                [Effect::SaveEnvironment { .. }]
+            ));
+        }
+        let draft = state.environment_editor().unwrap().draft().to_owned();
+        for key in [
+            AppKey::Char('x'),
+            AppKey::Backspace,
+            AppKey::Paste("new".into()),
+            AppKey::Enter,
+        ] {
+            assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
+            assert_eq!(state.environment_editor().unwrap().draft(), draft);
+        }
+        assert_eq!(state.environment_editor().unwrap().is_saving(), saving);
+        assert_eq!(state.environment_editor().unwrap().is_loading(), !saving);
+    }
+}
+
+#[test]
+fn a_stale_decision_scroll_does_not_move_another_overlay() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+    let interactions = state.interaction_count;
+    assert_eq!(
+        update(
+            &mut state,
+            AppEvent::DecisionScrolled {
+                decision_id: usagi_core::domain::id::UserDecisionId::new(),
+                offset: 42,
+            }
+        ),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Overview));
+    assert_eq!(state.interaction_count, interactions);
 }

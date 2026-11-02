@@ -452,7 +452,10 @@ fn existing_legacy_idle_agent_without_runs_keeps_creation_unknown() {
             ModelSelector::new("default").unwrap(),
         )
         .unwrap();
-    assert!(agent.dispatch.runs().unwrap().is_empty());
+    assert_eq!(
+        agent.dispatch.runs().unwrap(),
+        [] as [usagi_core::domain::agent::DispatchRun; 0]
+    );
     let operation = OperationId::new();
     agent
         .launch(&operation.to_string(), &intent, &FakeScope(Ok(scope())))

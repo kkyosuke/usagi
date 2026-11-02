@@ -4,9 +4,9 @@
 # 無関係な PR まで Rust lint で落ちる。実際 2026-08-11 の main はこの drift だけで赤になった。
 # 更新は「pin を上げる PR」で意図的に行い、そこで新 lint の対応もまとめる。
 #
-# 2026-08-07 = rustc 1.99.0-nightly (84b36a78a 2026-08-06)。CI が最後に green だった toolchain。
-channel = "nightly-2026-08-07"
-# CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は
-# 日付なしの `nightly` である。pin した toolchain へ component を届けるのはこの一覧なので、
-# fmt / clippy / coverage が使うものをすべてここで持つ。
+# Rust / fmt / clippy / coverage はこの日付の同じ toolchain を使う。
+channel = "nightly-2026-10-31"
+# CI の bootstrap は日付なしの nightly を導入する。プロジェクトの build / test が使う
+# 日付付き toolchain の component はこの一覧を正本とし、fmt / clippy / coverage に
+# 必要なものをすべてここで持つ。
 components = ["llvm-tools-preview", "rustfmt", "clippy"]

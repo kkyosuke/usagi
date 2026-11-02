@@ -330,7 +330,10 @@ fn a_scope_query_is_refused_by_the_single_endpoint_path() {
         panic!("a misrouted scope query is a typed refusal");
     };
     assert_eq!(error.code, ErrorCode::StaleTarget);
-    assert!(harness.recorder.borrow().sent.is_empty());
+    assert_eq!(
+        harness.recorder.borrow().sent,
+        [] as [(DaemonGeneration, DaemonRequest); 0]
+    );
 }
 
 #[test]
@@ -361,7 +364,7 @@ fn routing_refusals_are_typed_and_effect_free() {
         };
         assert_eq!(error.code, code);
         assert_eq!(error.side_effect, SideEffect::None);
-        assert!(!routing.to_string().is_empty());
+        assert_ne!(routing.to_string(), "");
     }
     assert_eq!(
         RoutingError::from(DirectoryError::Corrupt("x")),
@@ -434,7 +437,7 @@ fn an_unreachable_generation_is_recorded_as_partial_not_as_absence() {
 
     let nothing = merge_inventory(&[unreachable(old), unreachable(new)], &scope());
     assert!(!nothing.answered_any());
-    assert!(nothing.entries().is_empty());
+    assert_eq!(nothing.entries(), []);
     assert_eq!(MergedInventory::default().entries(), &[]);
 }
 
@@ -763,8 +766,14 @@ fn the_router_refuses_a_payload_that_cannot_name_its_owner_without_connecting() 
     assert_eq!(error.code, ErrorCode::StaleTarget);
     // The refusal precedes the directory entirely: nothing was connected, and
     // nothing was sent under an action the payload does not describe.
-    assert!(harness.recorder.borrow().connects.is_empty());
-    assert!(harness.recorder.borrow().sent.is_empty());
+    assert_eq!(
+        harness.recorder.borrow().connects,
+        [] as [DaemonGeneration; 0]
+    );
+    assert_eq!(
+        harness.recorder.borrow().sent,
+        [] as [(DaemonGeneration, DaemonRequest); 0]
+    );
 }
 
 #[test]
@@ -775,7 +784,10 @@ fn an_unknown_owner_is_refused_after_one_refresh_and_never_rerouted() {
         panic!("an unaddressable owner is a typed refusal");
     };
     assert_eq!(error.code, ErrorCode::StaleTarget);
-    assert!(harness.recorder.borrow().sent.is_empty());
+    assert_eq!(
+        harness.recorder.borrow().sent,
+        [] as [(DaemonGeneration, DaemonRequest); 0]
+    );
 
     // A snapshot that predates the handoff is refreshed exactly once, and the
     // owner published by the refresh is then reachable.
@@ -935,7 +947,10 @@ fn a_refused_owner_connection_leaves_the_request_unsent_and_the_scope_partial() 
     };
     let mut router = OwnerRouter::new(FakeDirectory::of(vec![Ok(two_generations())]), transport);
     assert!(router.request(attach(generation(1))).is_err());
-    assert!(recorder.borrow().sent.is_empty());
+    assert_eq!(
+        recorder.borrow().sent,
+        [] as [(DaemonGeneration, DaemonRequest); 0]
+    );
     let merged = router.inventory(&scope()).unwrap();
     assert_eq!(
         merged.unreachable().iter().copied().collect::<Vec<_>>(),

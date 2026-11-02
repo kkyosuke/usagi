@@ -134,6 +134,33 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn unreadable_scratchpad_reports_storage_errors_for_reads_and_mutations() {
+        let workspace = tempfile::tempdir().unwrap();
+        let store = super::WorkspaceStateStore::new(workspace.path());
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.state_path(), "{invalid").unwrap();
+        for (action, payload) in [
+            (SessionAction::NoteGet, json!({})),
+            (SessionAction::NoteUpdate, json!({"note": "replacement"})),
+            (SessionAction::TodoList, json!({})),
+            (SessionAction::TodoAdd, json!({"text": "new task"})),
+            (SessionAction::TodoUpdate, json!({"index": 0, "done": true})),
+            (SessionAction::TodoRemove, json!({"index": 0})),
+            (SessionAction::DecisionList, json!({})),
+            (SessionAction::DecisionLog, json!({"text": "new decision"})),
+        ] {
+            assert!(matches!(
+                call(action, &payload, workspace.path()),
+                Err(SessionRuntimeError::Storage)
+            ));
+        }
+        assert_eq!(
+            std::fs::read_to_string(store.state_path()).unwrap(),
+            "{invalid"
+        );
+    }
+
+    #[test]
     fn mcp_and_tui_share_one_session_id_scratchpad_and_keep_other_sessions_separate() {
         use usagi_core::domain::id::SessionId;
         use usagi_core::infrastructure::store::state::WorkspaceStateStore;

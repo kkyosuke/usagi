@@ -76,11 +76,17 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
 
     usagi_core::infrastructure::artifacts::prepare(tmp.path()).unwrap();
     fs::create_dir(tmp.path().join("artifacts/empty")).unwrap();
-    assert!(refresh_artifact_counts(&mut port).is_empty());
+    assert_eq!(
+        refresh_artifact_counts(&mut port),
+        [] as [usagi_tui::usecase::application::metrics::MetricsUpdate; 0]
+    );
     for name in ["build.log", "build-report.ts", "metrics.json"] {
         fs::write(tmp.path().join("artifacts").join(name), "working data").unwrap();
     }
-    assert!(refresh_artifact_counts(&mut port).is_empty());
+    assert_eq!(
+        refresh_artifact_counts(&mut port),
+        [] as [usagi_tui::usecase::application::metrics::MetricsUpdate; 0]
+    );
 
     // The same worker also retains Git summaries when they are available.
     initialize_git_repo(tmp.path());

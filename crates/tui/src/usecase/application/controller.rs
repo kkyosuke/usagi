@@ -1838,8 +1838,7 @@ impl AppState {
         self.preview_recent
             .iter()
             .find(|(recorded, _)| *recorded == target)
-            .map(|(_, files)| files.clone())
-            .unwrap_or_default()
+            .map_or_default(|(_, files)| files.clone())
     }
 
     /// Replace one target's recently opened preview files.
@@ -3922,10 +3921,12 @@ fn begin_next_cleanup(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         }
         return Vec::new();
     };
-    if let Some(queue) = state.cleanup_queue.as_mut() {
-        queue.in_flight = Some(session);
-        queue.feedback = None;
-    }
+    let queue = state
+        .cleanup_queue
+        .as_mut()
+        .expect("a cleanup candidate belongs to an open queue");
+    queue.in_flight = Some(session);
+    queue.feedback = None;
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
@@ -3986,11 +3987,13 @@ fn continue_cleanup_after_snapshot(state: &mut AppState) -> Vec<Effect> {
         reconcile_cleanup_queue(state);
         return Vec::new();
     };
-    if let Some(queue) = state.cleanup_queue.as_mut() {
-        queue.in_flight = None;
-        queue.selected.remove(&completed);
-        queue.feedback = None;
-    }
+    let queue = state
+        .cleanup_queue
+        .as_mut()
+        .expect("the completed cleanup belongs to an open queue");
+    queue.in_flight = None;
+    queue.selected.remove(&completed);
+    queue.feedback = None;
     begin_next_cleanup(state, true)
 }
 
@@ -4052,10 +4055,12 @@ fn begin_next_remove(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         .remove_queue
         .as_ref()
         .is_some_and(RemoveQueueState::force);
-    if let Some(queue) = state.remove_queue.as_mut() {
-        queue.in_flight = Some(session);
-        queue.feedback = None;
-    }
+    let queue = state
+        .remove_queue
+        .as_mut()
+        .expect("a removal candidate belongs to an open queue");
+    queue.in_flight = Some(session);
+    queue.feedback = None;
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
@@ -4108,11 +4113,13 @@ fn continue_remove_after_snapshot(state: &mut AppState) -> Vec<Effect> {
         reconcile_remove_queue(state);
         return Vec::new();
     };
-    if let Some(queue) = state.remove_queue.as_mut() {
-        queue.in_flight = None;
-        queue.selected.remove(&completed);
-        queue.feedback = None;
-    }
+    let queue = state
+        .remove_queue
+        .as_mut()
+        .expect("the completed removal belongs to an open queue");
+    queue.in_flight = None;
+    queue.selected.remove(&completed);
+    queue.feedback = None;
     begin_next_remove(state, true)
 }
 

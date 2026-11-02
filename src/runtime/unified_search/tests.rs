@@ -77,7 +77,7 @@ fn artifact_search_respects_curated_reports_and_legacy_work_file_exclusions() {
     let mut query = query(root);
     query.scope = Scope::Artifact;
     let result = port.search(&query, Arc::default());
-    assert!(result.errors.is_empty());
+    assert_eq!(result.errors, [] as [std::string::String; 0]);
     let paths = result
         .artifacts
         .iter()
@@ -104,7 +104,7 @@ fn unified_search_combines_sources_and_isolates_current_session_before_project_l
     let result = port.search(&query, Arc::default());
     assert_eq!(result.artifacts.len(), 3);
     assert_eq!(result.outputs.len(), 1);
-    assert!(result.errors.is_empty());
+    assert_eq!(result.errors, [] as [std::string::String; 0]);
     assert!(
         result
             .artifacts
@@ -112,11 +112,26 @@ fn unified_search_combines_sources_and_isolates_current_session_before_project_l
             .all(|file| file.target == Target::Root(query.projects[0].workspace))
     );
     query.scope = Scope::Terminal;
-    assert!(port.search(&query, Arc::default()).artifacts.is_empty());
+    assert_eq!(
+        port.search(&query, Arc::default()).artifacts,
+        [] as [usagi_tui::usecase::application::unified_search::Artifact; 0]
+    );
     query.scope = Scope::Artifact;
-    assert!(port.search(&query, Arc::default()).outputs.is_empty());
+    assert_eq!(
+        port.search(&query, Arc::default()).outputs,
+        [] as [(
+            usagi_core::domain::id::WorkspaceId,
+            std::result::Result<
+                usagi_core::usecase::terminal_search::WorkspaceOutputSearch,
+                std::string::String,
+            >
+        ); 0]
+    );
     query.text = "missing".into();
-    assert!(port.search(&query, Arc::default()).artifacts.is_empty());
+    assert_eq!(
+        port.search(&query, Arc::default()).artifacts,
+        [] as [usagi_tui::usecase::application::unified_search::Artifact; 0]
+    );
     query.text = "report".into();
     query.scope = Scope::CurrentSession;
     assert_eq!(port.search(&query, Arc::default()).errors.len(), 1);

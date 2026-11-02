@@ -156,22 +156,8 @@ pub(super) fn step_config(
                 }
                 config.save_environment(settings);
             }
-            Key::Enter => config.newline_environment(),
-            Key::Tab => config.toggle_environment_focus(),
-            Key::Backspace => config.backspace_environment(),
-            Key::Delete => config.delete_environment(),
-            Key::Left => config.move_environment(false),
-            Key::Right => config.move_environment(true),
-            Key::Up => config.move_environment_vertical(false),
-            Key::Down => config.move_environment_vertical(true),
-            Key::Home | Key::LineStart => config.move_environment_edge(false),
-            Key::End | Key::LineEnd => config.move_environment_edge(true),
-            Key::Char(character) if !character.is_control() => {
-                config.type_environment(&character.to_string());
-            }
-            Key::Paste(text) => config.paste_environment(&text),
             Key::Escape => config.cancel_environment(),
-            _ => {}
+            _ => config.edit_environment(key),
         }
         return ConfigStep::Stay;
     }

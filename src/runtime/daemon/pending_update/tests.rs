@@ -133,7 +133,7 @@ fn status_reports_the_target_and_automatic_retry_state() {
     let store = Store::new(directory.path());
     let mut out = Vec::new();
     report_pending_update(&mut out, directory.path()).unwrap();
-    assert!(out.is_empty());
+    assert_eq!(out, [] as [u8; 0]);
     enqueue(&store, build("5.0.2"), &mut || Ok(())).unwrap();
     let mut pending = store.read().unwrap().unwrap();
     for (state, expected) in [

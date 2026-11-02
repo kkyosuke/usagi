@@ -40,7 +40,10 @@ fn director_drawer_toggle_preserves_background_state_and_owns_input() {
         state.closeup_action_forced,
     );
 
-    assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)),
+        [] as [Effect; 0]
+    );
     assert!(state.director_drawer_open());
     for event in [
         AppEvent::Key(AppKey::Up),
@@ -53,7 +56,7 @@ fn director_drawer_toggle_preserves_background_state_and_owns_input() {
             at: std::time::Duration::from_millis(1),
         },
     ] {
-        assert!(update(&mut state, event).is_empty());
+        assert_eq!(update(&mut state, event), [] as [Effect; 0]);
         assert!(state.director_drawer_open());
         assert_eq!(
             (
@@ -145,7 +148,10 @@ fn director_new_picker_has_deterministic_candidates_and_cancel() {
 
     // A missing configured default highlights the first installed candidate
     // in vocabulary order without confirming it.
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state.director_new(),
         DirectorNew::Choosing(DefaultModel::Claude)
@@ -173,7 +179,10 @@ fn director_new_picker_has_deterministic_candidates_and_cancel() {
 
     // Escape cancels only the chooser; the drawer and every background
     // selection remain unchanged.
-    assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Escape)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.director_new(), DirectorNew::Idle);
     assert!(state.director_drawer_open());
     assert_eq!(
@@ -220,7 +229,10 @@ fn empty_director_closes_and_returns_focus_to_an_open_workspace_terminal() {
         Some(WorkspaceDrawerFocus::Director)
     );
 
-    assert!(update(&mut state, AppEvent::DirectorDrawerEmptied).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::DirectorDrawerEmptied),
+        [] as [Effect; 0]
+    );
     assert!(!state.director_drawer_open());
     assert!(state.root_terminal_drawer_open());
     assert_eq!(
@@ -265,7 +277,10 @@ fn shell_and_director_toggle_independently_from_either_focused_drawer() {
         state.workspace_drawer_focus(),
         Some(WorkspaceDrawerFocus::Terminal)
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)),
+        [] as [Effect; 0]
+    );
     assert!(!state.director_drawer_open());
     assert!(state.root_terminal_drawer_open());
     assert_eq!(
@@ -401,16 +416,22 @@ fn director_new_picker_covers_default_single_and_empty_availability() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
 
     state.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.director_new(), DirectorNew::Empty);
     assert_eq!(state.director_launching(), None);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
 
     // A composition-policy refresh racing an already-open chooser degrades
     // either movement direction to the same safe empty state.
     for key in [AppKey::Up, AppKey::Down] {
         state.director_new = DirectorNew::Choosing(DefaultModel::Claude);
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert_eq!(state.director_new(), DirectorNew::Empty);
     }
 }
@@ -441,8 +462,14 @@ fn director_picker_submits_one_explicit_root_launch_until_matching_finish() {
 
     // Reopening New, double Enter, and a stale completion cannot cross the
     // operation fence.
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     // Hiding the drawer or focusing Shell must not let New bypass the same
     // launch fence when it brings Director back to the foreground.
     for background in [
@@ -454,14 +481,20 @@ fn director_picker_submits_one_explicit_root_launch_until_matching_finish() {
             state.workspace_drawer_focus(),
             Some(WorkspaceDrawerFocus::Director)
         );
-        assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)),
+            [] as [Effect; 0]
+        );
         assert_eq!(
             state.workspace_drawer_focus(),
             Some(WorkspaceDrawerFocus::Director)
         );
         assert_eq!(state.director_new(), DirectorNew::Idle);
         assert_eq!(state.director_launching(), Some(*operation_id));
-        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            [] as [Effect; 0]
+        );
     }
     let _ = update(
         &mut state,
@@ -542,7 +575,10 @@ fn director_picker_enter_is_inert_while_the_terminal_hides_every_candidate() {
         },
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     let _ = update(
         &mut state,
         AppEvent::Resize {
@@ -651,9 +687,31 @@ fn every_existing_modal_blocks_director_drawer_entry() {
             | Overlay::Garden => {}
         }
         for key in [AppKey::ToggleDirectorDrawer, AppKey::OpenDirectorNew] {
-            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
             assert_eq!(state.overlay(), Some(overlay));
             assert!(!state.director_drawer_open());
         }
     }
+}
+
+#[test]
+fn an_empty_background_director_preserves_terminal_focus() {
+    let (workspace, _, _) = ids();
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::DirectorDrawerEmptied),
+        [] as [Effect; 0]
+    );
+    assert!(!state.director_drawer_open());
+    assert!(state.root_terminal_drawer_open());
+    assert_eq!(
+        state.workspace_drawer_focus(),
+        Some(WorkspaceDrawerFocus::Terminal)
+    );
 }

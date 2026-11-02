@@ -228,7 +228,7 @@ mod tests {
         for tool in &reg {
             let name = tool.descriptor.name();
             assert!(seen.insert(name));
-            assert!(!tool.descriptor.description().is_empty());
+            assert_ne!(tool.descriptor.description(), "");
 
             let schema = &tool.schema;
             assert_eq!(schema["type"], "object");
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(registry.len(), 51);
         for tool in &registry {
             let descriptor = &tool.descriptor;
-            assert!(!descriptor.description().is_empty());
+            assert_ne!(descriptor.description(), "");
             let schema = &tool.schema;
             let valid = valid_value(schema);
             descriptor.validate(&valid, schema).unwrap();

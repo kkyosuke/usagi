@@ -23,7 +23,7 @@ fn knowledge_search_uses_body_matching_readiness_and_exact_source_identity() {
     memory(root, "noncanonical.md", "memory-name", "NEEDLE 日本語");
     let results = reader.search("NeEdLe", Arc::default());
     assert_eq!(results.documents.len(), 5);
-    assert!(results.errors.is_empty());
+    assert_eq!(results.errors, [] as [std::string::String; 0]);
     assert!(results.documents[0].detail.contains("ambiguous"));
     assert!(results.documents[2].detail.ends_with("ready"));
     assert!(results.documents[3].detail.ends_with("not ready"));
@@ -39,11 +39,9 @@ fn knowledge_search_uses_body_matching_readiness_and_exact_source_identity() {
     );
     assert_eq!(reader.search("Remember", Arc::default()).documents.len(), 1);
     assert_eq!(reader.search("Example", Arc::default()).documents.len(), 4);
-    assert!(
-        reader
-            .search("missing", Arc::default())
-            .documents
-            .is_empty()
+    assert_eq!(
+        reader.search("missing", Arc::default()).documents,
+        [] as [usagi_tui::usecase::application::knowledge_search::Document; 0]
     );
 }
 

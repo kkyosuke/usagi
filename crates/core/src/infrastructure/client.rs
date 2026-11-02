@@ -1288,52 +1288,28 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Scripted {
         input: Cursor<Vec<u8>>,
         output: Vec<u8>,
+        fail_read: bool,
+        fail_write: bool,
     }
     impl Read for Scripted {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.fail_read {
+                return Err(io::Error::other("read failed"));
+            }
             self.input.read(buf)
         }
     }
     impl Write for Scripted {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::other("write failed"));
+            }
             self.output.extend_from_slice(buf);
             Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct Broken;
-    impl Read for Broken {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("read failed"))
-        }
-    }
-
-    struct ReadFails {
-        output: Vec<u8>,
-    }
-    impl Read for ReadFails {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("read failed"))
-        }
-    }
-    impl Write for ReadFails {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.output.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    impl Write for Broken {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("write failed"))
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
@@ -1345,7 +1321,7 @@ mod tests {
         write_json_frame(&mut input, &message, 1_048_576).unwrap();
         Scripted {
             input: Cursor::new(input),
-            output: vec![],
+            ..Scripted::default()
         }
     }
 
@@ -1387,12 +1363,20 @@ mod tests {
 
         let unavailable = connect(Scripted {
             input: Cursor::new(vec![]),
-            output: vec![],
+            ..Scripted::default()
         })
         .err()
         .unwrap();
         assert_eq!(unavailable.code(), ErrorCode::OwnershipUnknown);
         assert_eq!(unavailable.side_effect(), SideEffect::None);
+
+        let mut wrong_owner = owner_hello(&record, &generation);
+        wrong_owner.daemon_process = Some(DaemonRecord::identified(record.pid, "replacement"));
+        let ownership_unknown = connect(bootstrap_script(&Bootstrap::ServerHello(wrong_owner)))
+            .err()
+            .unwrap();
+        assert_eq!(ownership_unknown.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(ownership_unknown.side_effect(), SideEffect::None);
 
         let mut wrong_nonce = owner_hello(&record, &generation);
         wrong_nonce.connection_nonce = "other-connection".into();
@@ -1551,13 +1535,9 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::PermissionDenied);
         assert_eq!(error.side_effect(), SideEffect::None);
         assert_eq!(error.retry_mode(), RetryMode::Never);
-        let mut surfaced = None;
-        if let ClientError::Protocol(error) = error {
-            surfaced = Some(error);
-        }
-        assert_eq!(
-            surfaced.expect("the refusal stays a typed protocol error"),
-            refusal
+        assert!(
+            matches!(error, ClientError::Protocol(surfaced) if surfaced == refusal),
+            "the refusal stays a typed protocol error"
         );
     }
 
@@ -1691,7 +1671,7 @@ mod tests {
         write_json_frame(&mut input, &response, 1_048_576).unwrap();
         Scripted {
             input: Cursor::new(input),
-            output: vec![],
+            ..Scripted::default()
         }
     }
 
@@ -2070,7 +2050,7 @@ mod tests {
             IpcClient::connect(
                 Scripted {
                     input: Cursor::new(bytes),
-                    output: vec![]
+                    ..Scripted::default()
                 },
                 "c".into(),
                 "n".into(),
@@ -2084,7 +2064,7 @@ mod tests {
             IpcClient::connect(
                 Scripted {
                     input: Cursor::new(vec![]),
-                    output: vec![]
+                    ..Scripted::default()
                 },
                 "c".into(),
                 "n".into(),
@@ -2096,7 +2076,11 @@ mod tests {
         ));
         assert!(matches!(
             IpcClient::connect(
-                Broken,
+                Scripted {
+                    fail_read: true,
+                    fail_write: true,
+                    ..Scripted::default()
+                },
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
@@ -2107,7 +2091,10 @@ mod tests {
         ));
         assert!(matches!(
             IpcClient::connect(
-                ReadFails { output: vec![] },
+                Scripted {
+                    fail_read: true,
+                    ..Scripted::default()
+                },
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
@@ -2156,7 +2143,11 @@ mod tests {
             artifact: "server-artifact".into(),
         };
         let mut broken = IpcClient {
-            stream: Broken,
+            stream: Scripted {
+                fail_read: true,
+                fail_write: true,
+                ..Scripted::default()
+            },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build: server_build.clone(),
@@ -2171,7 +2162,7 @@ mod tests {
         let mut closed = IpcClient {
             stream: Scripted {
                 input: Cursor::new(vec![]),
-                output: vec![],
+                ..Scripted::default()
             },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
@@ -2185,7 +2176,10 @@ mod tests {
             Err(ClientError::Unavailable(_))
         ));
         let mut read_fails = IpcClient {
-            stream: ReadFails { output: vec![] },
+            stream: Scripted {
+                fail_read: true,
+                ..Scripted::default()
+            },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build,
@@ -2203,15 +2197,22 @@ mod tests {
         assert!(
             Scripted {
                 input: Cursor::new(vec![]),
-                output: vec![]
+                ..Scripted::default()
             }
             .flush()
             .is_ok()
         );
-        let mut broken = Broken;
+        let mut broken = Scripted {
+            fail_read: true,
+            fail_write: true,
+            ..Scripted::default()
+        };
         assert!(broken.read(&mut []).is_err());
         assert!(broken.flush().is_ok());
-        let mut read_fails = ReadFails { output: vec![] };
+        let mut read_fails = Scripted {
+            fail_read: true,
+            ..Scripted::default()
+        };
         assert!(read_fails.flush().is_ok());
     }
 }
@@ -2930,7 +2931,7 @@ mod deadline_and_retry_tests {
             ScriptedConn::new(clock.clone(), vec![1, 2, 3, 4]),
             100,
         );
-        assert!(stream.get_ref().written.is_empty());
+        assert_eq!(stream.get_ref().written, [] as [u8; 0]);
 
         clock.advance(200); // past the deadline
         let mut buf = [0u8; 4];
@@ -3011,6 +3012,11 @@ mod deadline_and_retry_tests {
         clock.advance(200);
         assert_eq!(
             stream.read(&mut buf).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+
+        assert_eq!(
+            stream.write(b"late").unwrap_err().kind(),
             io::ErrorKind::TimedOut
         );
 
@@ -3143,11 +3149,7 @@ mod deadline_and_retry_tests {
             drop(server);
 
             let answer = read_json_frame::<Bootstrap>(&mut stream, 1_048_576).unwrap();
-            let mut surfaced = None;
-            if let Some(Bootstrap::Error(error)) = answer {
-                surfaced = Some(error);
-            }
-            assert_eq!(surfaced, Some(refusal));
+            assert!(matches!(answer, Some(Bootstrap::Error(error)) if error == refusal));
         }
 
         #[test]

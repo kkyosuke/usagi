@@ -984,7 +984,10 @@ mod tests {
         // The refusal is about that workspace only: what this daemon already
         // holds is untouched, and nothing was written for the refused one.
         assert_eq!(registry.adopted(), vec![held]);
-        assert!(refusing.adopted().is_empty());
+        assert_eq!(
+            refusing.adopted(),
+            [] as [crate::usecase::tenant::Tenant<std::string::String>; 0]
+        );
     }
 
     #[test]
@@ -1175,18 +1178,23 @@ mod tests {
         assert_eq!(live.load(Ordering::SeqCst), 1);
 
         // A held handle keeps the workspace, however long it has been quiet.
-        assert!(
-            registry
-                .retire_idle(&activity, start + chrono::Duration::hours(1), idle_for)
-                .is_empty()
+        assert_eq!(
+            registry.retire_idle(&activity, start + chrono::Duration::hours(1), idle_for),
+            [] as [std::path::PathBuf; 0]
         );
         drop(adopted);
 
         // Work of its own keeps it too, and restarts the idle clock.
         activity.0.set(true);
-        assert!(registry.retire_idle(&activity, start, idle_for).is_empty());
+        assert_eq!(
+            registry.retire_idle(&activity, start, idle_for),
+            [] as [std::path::PathBuf; 0]
+        );
         activity.0.set(false);
-        assert!(registry.retire_idle(&activity, start, idle_for).is_empty());
+        assert_eq!(
+            registry.retire_idle(&activity, start, idle_for),
+            [] as [std::path::PathBuf; 0]
+        );
         activity.0.set(true);
         assert!(
             registry
@@ -1195,10 +1203,9 @@ mod tests {
             "work must restart the idle period"
         );
         activity.0.set(false);
-        assert!(
-            registry
-                .retire_idle(&activity, start + idle_for, idle_for)
-                .is_empty()
+        assert_eq!(
+            registry.retire_idle(&activity, start + idle_for, idle_for),
+            [] as [std::path::PathBuf; 0]
         );
 
         // Only a continuous idle period of the full length releases it, and the
@@ -1287,14 +1294,23 @@ mod tests {
             GenerationRole::Active,
         );
         let activity = Activity(Cell::new(false));
-        assert!(registry.release_draining(&gate, &activity).is_empty());
+        assert_eq!(
+            registry.release_draining(&gate, &activity),
+            [] as [std::path::PathBuf; 0]
+        );
         gate.close(LeaseClass::ActiveControl);
         gate.enter_draining().unwrap();
-        assert!(registry.release_draining(&gate, &activity).is_empty());
+        assert_eq!(
+            registry.release_draining(&gate, &activity),
+            [] as [std::path::PathBuf; 0]
+        );
         assert_eq!(live.load(Ordering::SeqCst), 1);
         gate.confirm_draining();
         activity.0.set(true);
-        assert!(registry.release_draining(&gate, &activity).is_empty());
+        assert_eq!(
+            registry.release_draining(&gate, &activity),
+            [] as [std::path::PathBuf; 0]
+        );
         activity.0.set(false);
         assert_eq!(
             registry.release_draining(&gate, &activity),
@@ -1304,7 +1320,41 @@ mod tests {
         assert_eq!(client.root(), Path::new("/second"));
         assert!(registry.tenant(client.root()).is_none());
         assert_eq!(registry.adopted(), [initial]);
-        assert!(registry.release_draining(&gate, &activity).is_empty());
+        assert_eq!(
+            registry.release_draining(&gate, &activity),
+            [] as [std::path::PathBuf; 0]
+        );
+    }
+
+    #[test]
+    fn draining_release_rechecks_a_tenant_retired_during_observation() {
+        use super::super::authority::admission::{AdmissionGate, LeaseClass};
+        use super::super::generation::GenerationRole;
+        struct RetireDuringObservation<'a>(&'a TenantRegistry<FakeFences, FakeOpener>);
+        impl WorkspaceActivity<String> for RetireDuringObservation<'_> {
+            fn has_work(&self, _: WorkspaceId, _: &String) -> bool {
+                assert!(self.0.retire(Path::new("/second")));
+                false
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let (registry, live) = fixture(directory.path(), WorkspaceFenceOutcome::Acquired, 8);
+        drop(registry.adopt(Path::new("/second")).unwrap());
+        let gate = AdmissionGate::new(
+            usagi_core::domain::id::DaemonGeneration::new(),
+            GenerationRole::Active,
+        );
+        gate.close(LeaseClass::ActiveControl);
+        gate.enter_draining().unwrap();
+        gate.confirm_draining();
+        assert_eq!(
+            registry.release_draining(&gate, &RetireDuringObservation(&registry)),
+            [] as [PathBuf; 0]
+        );
+        // A late cleanup cancellation cannot recreate the retired tenant.
+        registry.cancel_retire(Path::new("/second"));
+        assert_eq!(registry.adopted(), [] as [Tenant<String>; 0]);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
     }
 
     /// The initial release observes the workspace with the registry lock free,
@@ -1406,7 +1456,10 @@ mod tests {
             .unwrap();
 
         assert!(!registry.release_initial(Path::new("/workspace/initial"), &observer));
-        assert!(registry.adopted().is_empty());
+        assert_eq!(
+            registry.adopted(),
+            [] as [crate::usecase::tenant::Tenant<std::string::String>; 0]
+        );
     }
 
     /// The observation must not run under the registry lock.

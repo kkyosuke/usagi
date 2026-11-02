@@ -306,7 +306,7 @@ mod tests {
         .scrolled_to(1)
         .with_footer("Esc: back to files");
 
-        assert!(modal.body_with_reserved_footer(0).is_empty());
+        assert_eq!(modal.body_with_reserved_footer(0), [] as [String; 0]);
         assert_eq!(modal.body_with_reserved_footer(1).len(), 1);
         assert_eq!(modal.body_with_reserved_footer(2).len(), 2);
         assert_eq!(modal.body_with_reserved_footer(3).len(), 3);

@@ -179,7 +179,7 @@ pub fn commit_registry(
     document: &mut RegistryDocument,
     operation: &OperationId,
 ) -> Result<RolloverOutcome, RegistryError> {
-    let Some(handoff) = document.handoff.clone() else {
+    let Some(mut handoff) = document.handoff.clone() else {
         return if document.completed_operation.as_ref() == Some(operation) {
             Ok(RolloverOutcome::AlreadyCompleted)
         } else {
@@ -199,9 +199,8 @@ pub fn commit_registry(
     }
     document.transition(handoff.to, GenerationRole::Active)?;
     document.current = Some(handoff.to);
-    if let Some(record) = document.handoff.as_mut() {
-        record.phase = HandoffPhase::Committed;
-    }
+    handoff.phase = HandoffPhase::Committed;
+    document.handoff = Some(handoff);
     Ok(RolloverOutcome::Advanced)
 }
 

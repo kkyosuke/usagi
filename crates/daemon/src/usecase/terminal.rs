@@ -822,7 +822,7 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         connection: ConnectionId,
     ) -> Result<Attached, RegistryError> {
-        self.attach_client(reference, connection, None, None, None)
+        self.attach_client(reference, connection, None, None)
     }
 
     /// Attaches on behalf of `client`, stating that client's viewport and
@@ -838,9 +838,8 @@ impl TerminalRegistry {
         &mut self,
         reference: &TerminalRef,
         connection: ConnectionId,
-        client: Option<ClientId>,
+        client: Option<(ClientId, &mut dyn PtyWriter)>,
         viewport: Option<Geometry>,
-        writer: Option<&mut dyn PtyWriter>,
     ) -> Result<Attached, RegistryError> {
         let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
         let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
@@ -852,7 +851,7 @@ impl TerminalRegistry {
             .find_map(|(subscription, attachment)| {
                 (attachment.connection == connection).then_some(*subscription)
             });
-        if let Some(client) = client {
+        let client = client.map(|(client, writer)| {
             let seen = entry.geometry;
             entry
                 .viewports
@@ -862,12 +861,9 @@ impl TerminalRegistry {
                     requested: viewport,
                     seen,
                 });
-            // A caller without a writer (the internal attach) states no
-            // viewport either, so there is nothing for it to reshape.
-            if let Some(writer) = writer {
-                reconcile_geometry(entry, Some(&client), writer, budgets);
-            }
-        }
+            reconcile_geometry(entry, Some(&client), writer, budgets);
+            client
+        });
         let snapshot = snapshot(entry, checkpoint_bytes_limit)?;
         // The client leaves with a screen at this geometry, so it is no longer
         // out of date with the shared PTY even if a peer moved it earlier.
@@ -911,7 +907,7 @@ impl TerminalRegistry {
         writer: &mut dyn PtyWriter,
     ) -> Result<Attached, RegistryError> {
         let mut attached =
-            self.attach_client(reference, connection, Some(client), viewport, Some(writer))?;
+            self.attach_client(reference, connection, Some((client, writer)), viewport)?;
         let entry = self.entry(reference)?;
         attached.next_input_seq = Some(
             entry

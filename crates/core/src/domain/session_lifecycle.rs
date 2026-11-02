@@ -570,12 +570,10 @@ impl WorkspaceLifecycleState {
                 continue;
             };
             let operation = &mut self.operations[operation_pos];
-            if operation.status == OperationStatus::Succeeded {
-                operation.status = OperationStatus::Failed;
-                operation.progress_revision += 1;
-                self.sessions[session_pos].operation_id = Some(operation.operation_id);
-                repaired += 1;
-            }
+            operation.status = OperationStatus::Failed;
+            operation.progress_revision += 1;
+            self.sessions[session_pos].operation_id = Some(operation.operation_id);
+            repaired += 1;
         }
         if repaired != 0 {
             self.changed(now);
@@ -1340,6 +1338,26 @@ mod tests {
         )
         .unwrap();
         let id = state.sessions[0].session_id;
+        // Legacy snapshots can retain a session's operation identity without
+        // its journal row. Recovery must still fail the interrupted session.
+        let mut without_journal = state.clone();
+        without_journal.operations.clear();
+        reduce(
+            &mut without_journal,
+            LifecycleEvent::ReconcileInterrupted {
+                session_id: id,
+                operation_id: operation.operation_id,
+                stage: FailureStage::Initialize,
+            },
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            without_journal.sessions[0].lifecycle,
+            SessionLifecycle::Failed
+        );
+        assert!(without_journal.sessions[0].failure.is_some());
+        assert_eq!(without_journal.operations, [] as [OperationJournal; 0]);
         reduce(
             &mut state,
             LifecycleEvent::ReconcileInterrupted {
@@ -1455,8 +1473,8 @@ mod tests {
             ),
             Err(LifecycleError::InvalidSessionName)
         );
-        assert!(state.sessions.is_empty());
-        assert!(state.operations.is_empty());
+        assert_eq!(state.sessions, [] as [ManagedSession; 0]);
+        assert_eq!(state.operations, [] as [OperationJournal; 0]);
     }
 
     // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。

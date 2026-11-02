@@ -940,7 +940,10 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     let launch_intent = intent(None);
     let workspace = launch_intent.workspace;
-    assert!(runtime.cache_cleanup_activity(workspace).is_empty());
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     let admission = runtime
         .launch(
             &OperationId::new().to_string(),
@@ -957,10 +960,9 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
             super::super::runtime::RuntimeState::Running
         )]
     );
-    assert!(
-        runtime
-            .cache_cleanup_activity(WorkspaceId::new())
-            .is_empty()
+    assert_eq!(
+        runtime.cache_cleanup_activity(WorkspaceId::new()),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
     );
     let running_snapshot = runtime.coordinator.snapshot();
     for (state, ownership_state, expected) in [
@@ -1014,7 +1016,10 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
     assert_eq!(runtime.retirement_blocker_count(workspace), 0);
-    assert!(runtime.cache_cleanup_activity(workspace).is_empty());
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     assert!(runtime.reported_phases.is_empty());
     assert!(
         !runtime
@@ -1284,11 +1289,9 @@ fn session_close_removes_the_agent_from_runtime_inventory_and_replay() {
         [session].into_iter().collect()
     );
     assert_eq!(runtime.close_session(session).unwrap(), 1);
-    assert!(
-        runtime
-            .inventory(launch_intent.workspace)
-            .runtimes
-            .is_empty()
+    assert_eq!(
+        runtime.inventory(launch_intent.workspace).runtimes,
+        [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
     );
     assert!(runtime.managed_session_ids().is_empty());
     assert!(!runtime.operations.contains_key(&operation));
@@ -2811,86 +2814,95 @@ fn peer_handoff_preserves_identity_and_targets_only_the_named_runtime() {
 }
 
 #[test]
-fn completion_wake_queues_after_live_prompt_write_failure() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let worktree = tempfile::tempdir().unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let workspace = WorkspaceId::new();
-    let parent_session = SessionId::new();
-    let parent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(parent_session),
-            AgentProfileId::new("claude").unwrap(),
-            ModelSelector::new("manager").unwrap(),
-        )
-        .unwrap();
-    let caller = CallerRef {
-        session_id: Some(parent_session),
-        agent_id: parent.agent_id,
-    };
-    let operation = OperationId::new();
-    let worker_session = SessionId::new();
-    runtime
-        .dispatch(
-            &operation.to_string(),
-            &DispatchIntent {
-                workspace,
-                session_name: "worker".into(),
-                caller,
-                agent: DispatchAgentIntent::New {
-                    runtime: AgentProfileId::new("claude").unwrap(),
-                    model: ModelSelector::new("test").unwrap(),
-                },
-                prompt: "finish".into(),
-            },
-            worker_session,
-            &FakeScope(Ok(configured_scope(worktree.path()))),
-        )
-        .unwrap();
-    let credential = runtime
-        .mcp_callers
-        .iter()
-        .find(|(_, caller)| caller.operation == operation)
-        .map(|(credential, _)| credential.clone())
-        .unwrap();
-    runtime
-        .launch(
-            &OperationId::new().to_string(),
-            &AgentLaunchIntent {
-                workspace,
-                session: Some(parent_session),
-                profile: None,
-            },
-            &FakeScope(Ok(configured_scope(worktree.path()))),
-        )
-        .unwrap();
-    assert!(
-        runtime
-            .prompt(
+fn completion_wake_delivers_live_or_queues_after_write_failure() {
+    for write_failure in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let parent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
                 workspace,
                 Some(parent_session),
-                "public queue",
-                PromptMode::Queue,
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("manager").unwrap(),
             )
-            .is_err(),
-        "public queue mode must still reject a live target"
-    );
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
+        };
+        let operation = OperationId::new();
+        let worker_session = SessionId::new();
+        runtime
+            .dispatch(
+                &operation.to_string(),
+                &DispatchIntent {
+                    workspace,
+                    session_name: "worker".into(),
+                    caller,
+                    agent: DispatchAgentIntent::New {
+                        runtime: AgentProfileId::new("claude").unwrap(),
+                        model: ModelSelector::new("test").unwrap(),
+                    },
+                    prompt: "finish".into(),
+                },
+                worker_session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, caller)| caller.operation == operation)
+            .map(|(credential, _)| credential.clone())
+            .unwrap();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(parent_session),
+                    profile: None,
+                },
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .prompt(
+                    workspace,
+                    Some(parent_session),
+                    "public queue",
+                    PromptMode::Queue,
+                )
+                .is_err(),
+            "public queue mode must still reject a live target"
+        );
 
-    pty_mut(&mut runtime).write_failure = true;
-    runtime
-        .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
-        .unwrap();
+        pty_mut(&mut runtime).write_failure = write_failure;
+        runtime
+            .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
+            .unwrap();
 
-    let wake = runtime
-        .dispatch_store()
-        .queued_prompt(workspace, Some(parent_session))
-        .unwrap()
-        .expect("failed live wake must remain durable for the next launch");
-    assert!(wake.prompt.contains("A child report is ready"));
-    assert!(wake.prompt.contains("done"));
+        let queued = runtime
+            .dispatch_store()
+            .queued_prompt(workspace, Some(parent_session))
+            .unwrap();
+        if write_failure {
+            let wake = queued.expect("failed live wake must remain durable for the next launch");
+            assert!(wake.prompt.contains("A child report is ready"));
+            assert!(wake.prompt.contains("done"));
+        } else {
+            assert!(queued.is_none(), "a delivered wake must not also be queued");
+            let written = String::from_utf8_lossy(&pty(&runtime).writes);
+            assert!(written.contains("A child report is ready"));
+            assert!(written.contains("done"));
+        }
+    }
 }
 
 #[test]
@@ -3007,6 +3019,46 @@ fn an_agent_runtime_refuses_a_snapshot_schema_it_cannot_read() {
             99
         ))
     );
+}
+
+#[test]
+fn hydration_requires_ownership_persistence_before_dispatch_reconciliation() {
+    use crate::usecase::runtime::RuntimeSnapshotError;
+    for ownership_fails in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        std::fs::write(temp.path().join("dispatch.json"), "corrupt dispatch state").unwrap();
+        let error = AgentRuntime::hydrate_with_retention(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store {
+                fail_after: ownership_fails.then_some(0),
+                ..Store::default()
+            },
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            dispatch,
+            PathExecutableLocator,
+            RuntimeStoreSnapshot::default(),
+            SharedTerminalRetention::new(),
+        )
+        .err()
+        .expect("hydration must fail closed before accepting work");
+        assert_eq!(
+            error,
+            if ownership_fails {
+                RuntimeSnapshotError::OwnershipPersist
+            } else {
+                RuntimeSnapshotError::DispatchReconcile
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("dispatch.json")).unwrap(),
+            "corrupt dispatch state"
+        );
+    }
 }
 
 #[test]

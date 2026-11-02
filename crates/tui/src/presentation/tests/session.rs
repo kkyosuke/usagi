@@ -334,7 +334,7 @@ fn preview_roots_follow_only_current_snapshots_including_same_named_recreation()
     );
     adopt_session_snapshot(&mut ui, changed(4, vec![], vec![]));
     sync_overlay_session_roots(&mut backend, &ui, &mut revision);
-    assert!(lane.observed_roots().last().unwrap().is_empty());
+    assert_eq!(lane.observed_roots().last().unwrap().as_slice(), []);
 }
 
 /// Dispatching a batch of reducer effects is also where a stop takes effect.
@@ -427,9 +427,12 @@ fn malformed_session_identity_refreshes_clear_rows_ids_and_agent_targets() {
             None,
         );
 
-        assert!(ui.workspace.sessions().is_empty());
-        assert!(ui.workspace.session_ids().is_empty());
-        assert!(ui.agent.as_ref().unwrap().sessions.is_empty());
+        assert_eq!(ui.workspace.sessions(), []);
+        assert_eq!(ui.workspace.session_ids(), []);
+        assert_eq!(
+            ui.agent.as_ref().unwrap().sessions,
+            [] as [usagi_core::domain::id::SessionId; 0]
+        );
     }
 }
 

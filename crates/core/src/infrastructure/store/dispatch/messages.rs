@@ -302,11 +302,11 @@ mod tests {
                 .unwrap(),
             vec![saved.clone()]
         );
-        assert!(
+        assert_eq!(
             reopened
                 .messages(workspace, &codex, None, 100, true)
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            [] as [AgentMessage; 0]
         );
         reopened
             .acknowledge_message(workspace, &claude, request.message_id)
@@ -314,11 +314,11 @@ mod tests {
         reopened
             .acknowledge_message(workspace, &claude, request.message_id)
             .unwrap();
-        assert!(
+        assert_eq!(
             reopened
                 .messages(workspace, &claude, None, 100, true)
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            [] as [AgentMessage; 0]
         );
         let mut verdict = message(&codex);
         verdict.kind = MessageKind::ChangesRequested;
@@ -334,8 +334,14 @@ mod tests {
                 .message,
             verdict
         );
-        assert!(reopened.inbox(&codex).unwrap().is_empty());
-        assert!(reopened.runs().unwrap().is_empty());
+        assert_eq!(
+            reopened.inbox(&codex).unwrap(),
+            [] as [crate::domain::agent::InboxMessage; 0]
+        );
+        assert_eq!(
+            reopened.runs().unwrap(),
+            [] as [crate::domain::agent::DispatchRun; 0]
+        );
         verdict.message_id = OperationId::new();
         verdict.kind = MessageKind::Approved;
         assert!(
@@ -483,11 +489,9 @@ mod tests {
         let c = participant(&store, workspace, session, "claude");
         let run = OperationId::new();
         let private = store.send_message(workspace, &b, run, message(&c)).unwrap();
-        assert!(
-            store
-                .messages(workspace, &a, None, 100, false)
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            store.messages(workspace, &a, None, 100, false).unwrap(),
+            [] as [AgentMessage; 0]
         );
         assert!(
             store
@@ -521,11 +525,11 @@ mod tests {
                 .unwrap(),
             vec![second.clone()]
         );
-        assert!(
+        assert_eq!(
             store
                 .messages(workspace, &a, Some(second.message.message_id), 1, false)
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            [] as [AgentMessage; 0]
         );
         assert!(store.messages(workspace, &a, None, 101, false).is_err());
     }

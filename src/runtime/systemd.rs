@@ -500,6 +500,18 @@ mod tests {
 
         let invalid = Path::new(std::ffi::OsStr::from_bytes(&[0xff]));
         assert_eq!(
+            super::render_with_trust_root(
+                Path::new("/opt/usagi"),
+                Path::new("/tmp/log"),
+                &home(),
+                Path::new(WORKSPACE),
+                Some(invalid)
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
             render(
                 invalid,
                 Path::new("/tmp/log"),

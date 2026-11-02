@@ -968,8 +968,8 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::LaunchDaemon(expected));
-            assert!(out.is_empty());
-            assert!(err.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
+            assert_eq!(err, [] as [u8; 0]);
         }
     }
 
@@ -1010,8 +1010,8 @@ mod tests {
             outcome,
             RunOutcome::RequestDaemonReplacement { force: false }
         );
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1026,15 +1026,15 @@ mod tests {
             outcome,
             RunOutcome::RequestDaemonReplacement { force: true }
         );
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi", "mcp"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(outcome, RunOutcome::LaunchMcp);
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     /// `open` は任意のパス、`completion` は `value_enum` を受け取る。
@@ -1117,7 +1117,7 @@ mod tests {
                 force: false
             }
         );
-        assert!(output.is_empty());
+        assert_eq!(output, "");
 
         let (apply, _) = super::execute(Command::Clean {
             dry_run: false,
@@ -1349,8 +1349,8 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::LaunchTui(expected));
-            assert!(out.is_empty());
-            assert!(err.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
+            assert_eq!(err, [] as [u8; 0]);
         }
     }
 
@@ -1361,8 +1361,8 @@ mod tests {
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(outcome, RunOutcome::LaunchTui(TuiRequest::Welcome));
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     /// `--help` は `out` に出て終了コード 0。
@@ -1372,8 +1372,8 @@ mod tests {
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi", "--help"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(outcome, RunOutcome::Exit(0));
-        assert!(err.is_empty());
-        assert!(!out.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
+        assert_ne!(out, [] as [u8; 0]);
     }
 
     /// daemon service の help は実装済みの macOS / Linux を両方示す。
@@ -1391,7 +1391,7 @@ mod tests {
         let help = String::from_utf8(out).unwrap();
 
         assert_eq!(outcome, RunOutcome::Exit(0));
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
         assert!(help.contains("macOS `LaunchAgent` / Linux systemd user service を install する"));
         assert!(
             help.contains("macOS `LaunchAgent` / Linux systemd user service を uninstall する")
@@ -1406,7 +1406,7 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(0));
-            assert!(err.is_empty());
+            assert_eq!(err, [] as [u8; 0]);
             assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
         }
     }
@@ -1424,7 +1424,7 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, RunOutcome::SelfUpdate { .. }));
         assert!(String::from_utf8(out).unwrap().contains("リリースを選んで"));
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     /// 不正なコマンドは `err` に出て非 0 終了。
@@ -1440,8 +1440,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome, RunOutcome::Exit(2));
-        assert!(out.is_empty());
-        assert!(!err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(err, [] as [u8; 0]);
     }
 
     /// 余分な引数と未知 daemon verb は clap の使い方エラーになり、起動要求へ到達しない。
@@ -1460,7 +1460,7 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(2));
-            assert!(out.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
             assert!(String::from_utf8(err).unwrap().contains("Usage:"));
         }
     }

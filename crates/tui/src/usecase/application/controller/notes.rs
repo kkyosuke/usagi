@@ -200,11 +200,12 @@ pub(super) fn saved(
     if state.note_editor.as_ref().is_some_and(|e| {
         e.target == target && e.request_id == request_id && e.phase == NotePhase::Saving
     }) {
-        if let Target::Session(id) = target {
-            state.saved_notes = Some((id, pad.clone()));
-            state.saved_note_at = updated_at;
-            state.note_revision = state.note_revision.saturating_add(1);
-        }
+        let id = target
+            .session_id()
+            .expect("memo editors belong to managed sessions");
+        state.saved_notes = Some((id, pad.clone()));
+        state.saved_note_at = updated_at;
+        state.note_revision = state.note_revision.saturating_add(1);
         state.notice = Some(Notice::new("Memo saved"));
         close(state);
     }
@@ -528,7 +529,7 @@ mod tests {
         assert_eq!(pad.note.as_deref(), Some("次にやること\nテスト\nを書く"));
         assert!(state.note_editor().unwrap().saving());
         for key in [AppKey::SaveNotes, AppKey::Escape, AppKey::Char('x')] {
-            assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+            assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         }
         let _ = update(
             &mut state,
@@ -657,7 +658,7 @@ mod tests {
         let (mut state, target) = state();
         let _ = open(&mut state);
         let old = state.note_editor().unwrap().request_id();
-        assert!(key(&mut state, &AppKey::SaveRoles).is_empty());
+        assert_eq!(key(&mut state, &AppKey::SaveRoles), [] as [Effect; 0]);
         let _ = key(&mut state, &AppKey::Char('x'));
         assert_eq!(state.note_editor().unwrap().draft(), "");
         let _ = key(&mut state, &AppKey::Escape);
@@ -675,8 +676,11 @@ mod tests {
         let request_id = state.note_editor().unwrap().request_id();
         failed(&mut state, request_id, target, &error());
         assert!(state.note_editor().unwrap().read_failed());
-        assert!(key(&mut state, &AppKey::SaveNotes).is_empty());
-        assert!(key(&mut state, &AppKey::Paste("x".into())).is_empty());
+        assert_eq!(key(&mut state, &AppKey::SaveNotes), [] as [Effect; 0]);
+        assert_eq!(
+            key(&mut state, &AppKey::Paste("x".into())),
+            [] as [Effect; 0]
+        );
         assert!(matches!(
             key(&mut state, &AppKey::Enter).as_slice(),
             [Effect::LoadNotes { .. }]
@@ -685,7 +689,7 @@ mod tests {
         loaded(&mut state, request_id, target, &Scratchpad::default());
         let _ = key(&mut state, &AppKey::Paste("draft".into()));
         state.sessions.clear();
-        assert!(key(&mut state, &AppKey::SaveNotes).is_empty());
+        assert_eq!(key(&mut state, &AppKey::SaveNotes), [] as [Effect; 0]);
         assert_eq!(state.note_editor().unwrap().draft(), "draft");
         assert!(state.note_editor().unwrap().error().is_some());
     }
@@ -700,7 +704,7 @@ mod tests {
         let _ = key(&mut state, &AppKey::CtrlA);
         let _ = key(&mut state, &AppKey::Paste("\0\u{1b}\r\n".into()));
         assert_eq!(state.note_editor().unwrap().draft(), "\n先あい");
-        assert!(key(&mut state, &AppKey::Char('\0')).is_empty());
+        assert_eq!(key(&mut state, &AppKey::Char('\0')), [] as [Effect; 0]);
         let _ = key(&mut state, &AppKey::SetNoteDraft(String::new()));
         let (_, pad) = write(&mut state);
         assert_eq!(pad.note, None);
@@ -725,7 +729,7 @@ mod tests {
     fn only_usable_cursor_sessions_open_in_switch_and_closeup_uses_active_session() {
         let (mut state, target) = state();
         state.selected = Selection::NewSession;
-        assert!(open(&mut state).is_empty());
+        assert_eq!(open(&mut state), [] as [Effect; 0]);
         state.selected = Selection::Target(target);
         let id = target.session_id().unwrap();
         state.session_lifecycles.insert(
@@ -736,7 +740,7 @@ mod tests {
                 failure_summary: None,
             },
         );
-        assert!(open(&mut state).is_empty());
+        assert_eq!(open(&mut state), [] as [Effect; 0]);
         state.route = Route::Home(HomeMode::Closeup);
         assert!(matches!(
             open(&mut state).as_slice(),
@@ -747,10 +751,10 @@ mod tests {
         ));
         close(&mut state);
         state.active = None;
-        assert!(open(&mut state).is_empty());
-        assert!(key(&mut state, &AppKey::Enter).is_empty());
+        assert_eq!(open(&mut state), [] as [Effect; 0]);
+        assert_eq!(key(&mut state, &AppKey::Enter), [] as [Effect; 0]);
         state.overlay = Some(Overlay::Notes);
-        assert!(key(&mut state, &AppKey::Enter).is_empty());
-        assert!(key(&mut state, &AppKey::SaveNotes).is_empty());
+        assert_eq!(key(&mut state, &AppKey::Enter), [] as [Effect; 0]);
+        assert_eq!(key(&mut state, &AppKey::SaveNotes), [] as [Effect; 0]);
     }
 }

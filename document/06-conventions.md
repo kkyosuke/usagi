@@ -228,7 +228,7 @@ CI で full test / coverage gate が必須となる条件は次のとおり（�
   - 計測から外す必要がある item には、ファイル名の正規表現ではなく該当する module または function に `#[coverage(off)]` を付ける（外部 module ファイル全体を外す場合は inner attribute の `#![coverage(off)]`）。使用できるのは、テスト可能なロジックを抜いたあとの「実 IO そのもの」、または LLVM coverage が generic の単相化を重複計上する場合に限る。いずれも振る舞いを検証する fake / integration test を残し、除外理由を同じ変更に記録する。未テストの業務ロジック、到達しにくい error path、短期的な coverage 目標の回避には使わない。
   - `#[coverage(off)]` はその item だけに適用され、内部の closure など別 item には継承されない。除外した合成関数は closure-free に保つか、入れ子の item をテスト可能な関数へ分離し、意図しない未計測 item を作らない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
-  - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は日付なしの `nightly` なので、pin した toolchain が使う component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` の `components` が正本である。
+  - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI は SHA 固定の `dtolnay/rust-toolchain` に `toolchain: nightly` を渡して bootstrap する。プロジェクトの build / test が使う日付と component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` を正本とする。
 - **`#[allow(clippy::…)]` には理由コメントを必ず添える**（属性の直前の行、または同じ行）。pedantic を黙らせるためだけの allow は、後から「まだ要るのか」を判断できなくなる。理由は lint 名の言い換えではなく、その item がその形である理由を書く。
   **allow が不要かどうかをローカルの clippy 1 回で判断しない**。`libc` の型幅のように target で結果が変わる lint は、host によって発火する側が入れ替わる（macOS で `cast_lossless`、Linux で `unnecessary_cast`）。target 依存を理由に両方 allow している箇所は、その旨をコメントに書いて残す。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
@@ -464,6 +464,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   除外規模を隠さず、完全なpath inventoryと上限は `coverage-off-budget.json` が保持する。追加・削除・owner移動は
   budgetを同時にreviewしない限り失敗する。
 - カバレッジ未達（100% 未満）のとき、`coverage.yml` は `cargo llvm-cov report --json` から**未達ファイルと未達関数**（ファイル path・関数名・宣言行・関数率/行率・不足量・未達行レンジ）のレポートを生成し、PR コメント（同一リポジトリ PR。`marocchino/sticky-pull-request-comment` の header + recreate で再実行時も 1 件に更新）と Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも一覧が見え、コメント投稿は `continue-on-error` で **coverage gate の合否（exit code）から独立**させる。関数カバレッジは JSON summary（generic の単相化をマージした集計＝gate と一致。lcov の per-monomorphization な `FN/FNDA` を数えると gate と食い違う）を使い、関数名は `c++filt`（binutils。Rust v0 を demangle）で可読化する。出力はファイル/関数/行レンジの上限で切り詰め、超過分は明示する。レポート生成は `scripts/coverage-report-comment.rb`（Ruby, stdlib のみ）に抽出し、`scripts/tests/coverage-report-comment.sh` の fixture test（`test.yml` の script-tests job で実行）で固定する。閾値・対象パッケージ選択の SSoT は `scripts/coverage.sh`。
+- coverage の完全な JSON・LCOV・コメント用レポートは workflow artifact として 7 日間保存する。PR コメントの表示上限を超えた未達箇所も、この artifact から確認できる。
 - TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれからルート `[package].version` を読む。version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。
 
 ## リリース

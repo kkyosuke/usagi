@@ -174,7 +174,7 @@ mod tests {
             "usagi v0.1.0: daemon restarted (pid 5555)"
         );
         // Nothing was running, so no termination was attempted.
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
     }
 
     /// Reports the seeded pid as reused by an unrelated process and every other
@@ -229,7 +229,7 @@ mod tests {
         );
         // The process occupying the reused pid was never signalled, and exactly
         // one replacement was launched.
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(launcher.launches(), 1);
         assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
     }
@@ -256,7 +256,7 @@ mod tests {
             "usagi v0.1.0: daemon restarted (pid 5555)"
         );
 
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(launcher.launches(), 1);
         assert_eq!(store.load().unwrap().map(|record| record.pid), Some(5555));
     }

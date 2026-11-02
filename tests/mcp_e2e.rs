@@ -112,7 +112,7 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
-        assert!(!tool["description"].as_str().unwrap().is_empty());
+        assert_ne!(tool["description"].as_str().unwrap(), "");
         assert_eq!(tool["inputSchema"]["type"], "object");
         tool["inputSchema"]["properties"]
             .as_object()
@@ -994,7 +994,7 @@ fn production_delegate_issue_preserves_ambiguity_without_session_or_queue_side_e
         .output()
         .unwrap();
     assert!(branch.status.success());
-    assert!(branch.stdout.is_empty());
+    assert_eq!(branch.stdout, [] as [u8; 0]);
 }
 
 #[test]
@@ -1505,7 +1505,7 @@ fn production_role_prompt_contract_reaches_every_shipping_agent_argv() {
 fn production_hook_capture_works_without_an_inherited_credential() {
     let mut mcp = McpHarness::start_in_production();
     let caller_credential = mcp.launch_caller();
-    assert!(caller_credential.is_empty());
+    assert_eq!(caller_credential, "");
     let log = fs::read_to_string(mcp.fixture_log()).unwrap();
     assert!(log.lines().any(|line| line == "credential:unset"));
     assert!(!log.contains("USAGI_MCP_CALLER_CREDENTIAL="));
@@ -1729,7 +1729,10 @@ fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have
         &json!({"decision_id":legacy.decision_id}),
     ));
     assert_eq!(ack["acknowledged"], true);
-    assert!(store.events().unwrap().is_empty());
+    assert_eq!(
+        store.events().unwrap(),
+        [] as [usagi_core::infrastructure::store::user_decision::UserDecisionResolvedEvent; 0]
+    );
 }
 
 #[test]
@@ -1792,7 +1795,10 @@ fn production_user_decision_list_pages_large_owned_backlogs() {
         let body = tool_text(&mcp.tool("user_decision_list", &arguments));
         assert_eq!(body["workspace"], json!(first.owner.workspace_id));
         let page: UserDecisionPage = serde_json::from_value(body).unwrap();
-        assert!(!page.decisions.is_empty());
+        assert_ne!(
+            page.decisions,
+            [] as [usagi_core::domain::user_decision::UserDecision; 0]
+        );
         actual.extend(page.decisions);
         pages += 1;
         assert!(pages <= expected.len());
@@ -2036,7 +2042,10 @@ fn production_cross_workspace_user_decision_requires_explicit_owner_ack() {
         ));
         assert_eq!(ack["acknowledged"], true);
     }
-    assert!(store.events().unwrap().is_empty());
+    assert_eq!(
+        store.events().unwrap(),
+        [] as [usagi_core::infrastructure::store::user_decision::UserDecisionResolvedEvent; 0]
+    );
     let replayed = tool_text(&mcp.tool(
         "user_decision_get",
         &json!({"decision_id":decision.decision_id}),
@@ -2134,7 +2143,10 @@ fn assert_human_decision_discard(
         discarded,
         json!({"decision_id":saved.decision_id,"discarded":true})
     );
-    assert!(store.events().unwrap().is_empty());
+    assert_eq!(
+        store.events().unwrap(),
+        [] as [usagi_core::infrastructure::store::user_decision::UserDecisionResolvedEvent; 0]
+    );
     assert!(
         store
             .get(saved.owner.workspace_id, saved.decision_id)
@@ -2221,7 +2233,10 @@ fn assert_large_decision_inventory_pages(
         matches!(error, ClientError::Protocol(ref problem) if problem.code == ErrorCode::RevisionConflict),
         "a changed inventory must invalidate earlier continuations"
     );
-    assert!(store.events().unwrap().is_empty());
+    assert_eq!(
+        store.events().unwrap(),
+        [] as [usagi_core::infrastructure::store::user_decision::UserDecisionResolvedEvent; 0]
+    );
 }
 
 #[test]
@@ -2372,7 +2387,10 @@ fn decision_restart_round_trip(legacy: bool) {
         tool_text(decision_restart_reply(&resumed, 8))["acknowledged"],
         true
     );
-    assert!(decisions.events().unwrap().is_empty());
+    assert_eq!(
+        decisions.events().unwrap(),
+        [] as [usagi_core::infrastructure::store::user_decision::UserDecisionResolvedEvent; 0]
+    );
     assert_eq!(decisions.pending(workspace).unwrap(), vec![pending.clone()]);
     assert_eq!(
         tool_text(decision_restart_reply(&resumed, 6))["delivered_to"],
@@ -2389,14 +2407,14 @@ fn decision_restart_round_trip(legacy: bool) {
     assert_eq!(binding.caller, caller);
     assert_eq!(binding.worker, source_binding.worker);
     assert_ne!(binding.run_id, pending.owner.run_id);
-    assert!(
+    assert_eq!(
         dispatch
             .inbox(&CallerRef {
                 session_id: binding.worker.session_id,
                 agent_id: binding.worker.agent_id,
             })
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [usagi_core::domain::agent::InboxMessage; 0]
     );
     assert!(mcp.fixture_argv().iter().any(|capture| {
         capture
@@ -3132,19 +3150,29 @@ exit 0
     ));
 
     let list = tool_text(&mcp.tool("session_list", &json!({})));
-    assert!(list["sessions"].as_array().unwrap().is_empty());
-    assert!(
+    assert_eq!(
+        list["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
+    assert_eq!(
         tool_text(&mcp.tool("session_status", &json!({})))["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
     let inventory = tool_text(&mcp.tool(
         "agent_resume_inventory",
         &json!({"workspace_id":workspace_id}),
     ));
-    assert!(inventory["runtimes"].as_array().unwrap().is_empty());
-    assert!(inventory["resumable"].as_array().unwrap().is_empty());
+    assert_eq!(
+        inventory["runtimes"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
+    assert_eq!(
+        inventory["resumable"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 
     for (tool, arguments) in [
         (
@@ -3370,11 +3398,12 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
         worker["launch_provenance"]["created"]["caller"]["agent_id"],
         self_id
     );
-    assert!(
+    assert_eq!(
         tool_text(&mcp.tool("session_list", &json!({})))["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
     let denied = mcp.tool("session_get", &json!({"name":"mcp-caller"}));
     assert!(has_permission_denied(&denied), "{denied}");
@@ -3390,11 +3419,12 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
     let history = tool_text(&mcp.tool("agent_messages", &json!({"limit":1})));
     assert_eq!(history["next_cursor"], json!(message_id));
     assert_eq!(history["messages"].as_array().unwrap().len(), 1);
-    assert!(
+    assert_eq!(
         tool_text(&mcp.tool("agent_messages", &json!({"unread_only":true})))["messages"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
     assert!(
         mcp.tool("agent_message_ack", &json!({"message_id":message_id}))
@@ -3417,11 +3447,12 @@ fn production_same_session_handoff_and_messages_preserve_creator_authority() {
         .get("error")
         .is_some()
     );
-    assert!(
+    assert_eq!(
         tool_text(&mcp.tool("agent_inbox", &json!({})))["messages"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
 }
 
@@ -3528,11 +3559,12 @@ printf '%s\n%s\n%s\n' \
     let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));
     assert!(ack.get("error").is_none(), "{ack}");
     assert_eq!(tool_text(&ack)["acked_cursor"], next_cursor);
-    assert!(
+    assert_eq!(
         tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true})))["messages"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
 
     for (tool, arguments) in [

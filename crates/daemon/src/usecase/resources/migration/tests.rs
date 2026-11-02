@@ -25,7 +25,10 @@ fn a_provable_live_record_becomes_a_running_shard_resource() {
     let owner = DaemonGeneration::new();
     let adoptable = record(owner, true);
     let report = adopt_legacy(owner, std::slice::from_ref(&adoptable));
-    assert!(report.unknown.is_empty());
+    assert_eq!(
+        report.unknown,
+        [] as [crate::usecase::resources::migration::UnknownRecord; 0]
+    );
     assert_eq!(report.adopted(), 1);
     assert_eq!(
         report.shard.resource(&adoptable.resource).unwrap().state,

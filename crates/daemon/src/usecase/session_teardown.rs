@@ -267,10 +267,16 @@ mod tests {
                 },
             ]
         );
-        assert!(journal.pending().is_empty());
+        assert_eq!(
+            journal.pending(),
+            [] as [crate::usecase::session_teardown::PendingTeardown; 0]
+        );
         // A second drain re-derives the (now empty) pending set: a completed
         // teardown is never re-run.
-        assert!(drain_pending_teardowns(&journal, &effect, &|| false).is_empty());
+        assert_eq!(
+            drain_pending_teardowns(&journal, &effect, &|| false),
+            [] as [crate::usecase::session_teardown::TeardownReport; 0]
+        );
         assert_eq!(calls.lock().unwrap().len(), 2);
     }
 
@@ -351,6 +357,21 @@ mod tests {
         signal.notify();
         assert!(signal.wait(Duration::from_secs(30)));
         assert!(!signal.wait(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn a_poisoned_signal_leaves_the_worker_on_its_periodic_durable_scan() {
+        let signal = TeardownSignal::new();
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = signal.woken.lock().unwrap();
+            panic!("notification lock failed while held");
+        });
+        assert!(poisoned.is_err());
+
+        // Notifications are an optimization; durable pending teardowns remain
+        // authoritative when the signal cannot latch a notification.
+        signal.notify();
+        assert!(!signal.wait(Duration::from_secs(30)));
     }
 
     #[test]

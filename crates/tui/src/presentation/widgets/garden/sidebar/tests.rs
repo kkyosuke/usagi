@@ -409,8 +409,8 @@ fn status_columns_align_and_project_spacing_has_no_click_target() {
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let second = headers[1];
-    assert!(rows[second - 1].text.is_empty());
-    assert!(rows[second - 2].text.is_empty());
+    assert_eq!(rows[second - 1].text, "");
+    assert_eq!(rows[second - 2].text, "");
     assert!(rows[second - 1].target.is_none());
     assert!(
         rows.iter()

@@ -522,7 +522,6 @@ impl VtScreen {
     ///
     /// The iterator follows logical history order without requiring the ring
     /// buffer to be made contiguous.
-    #[must_use]
     pub fn scrollback(&self) -> impl DoubleEndedIterator<Item = &[Cell]> + ExactSizeIterator {
         self.scrollback.iter().map(Vec::as_slice)
     }
@@ -947,9 +946,7 @@ impl VtScreen {
             (ch, width)
         };
         if self.cursor_col >= self.cols || self.cursor_col + width > self.cols {
-            if let Some(cell) = self.grid[self.cursor_row].last_mut() {
-                cell.wrapped = true;
-            }
+            self.grid[self.cursor_row][self.cols - 1].wrapped = true;
             self.cursor_col = 0;
             self.line_feed();
         }
@@ -1828,7 +1825,7 @@ mod tests {
         assert_eq!(rows(&partial_region).len(), 4);
         let mut empty = VtScreen::new(2, 2);
         empty.grid = vec![Vec::new(), Vec::new()];
-        assert!(empty.cells_with_scrollback().is_empty());
+        assert_eq!(empty.cells_with_scrollback(), [] as [String; 0]);
     }
 
     #[test]
@@ -2196,16 +2193,18 @@ mod tests {
         let mut screen = VtScreen::new(4, 20);
         screen.advance(b"warning\r\n> ");
 
-        assert!(screen.advance_with_replies(b"\x1b[6").is_empty());
+        assert_eq!(screen.advance_with_replies(b"\x1b[6"), [] as [u8; 0]);
         assert_eq!(screen.advance_with_replies(b"n"), b"\x1b[2;3R");
         assert_eq!(rows(&screen), vec!["warning", ">", "", ""]);
-        assert!(screen.advance_with_replies(b"\x1b[?6n\x1b[5n").is_empty());
+        assert_eq!(
+            screen.advance_with_replies(b"\x1b[?6n\x1b[5n"),
+            [] as [u8; 0]
+        );
 
         let mut synchronized = VtScreen::new(4, 20);
-        assert!(
-            synchronized
-                .advance_with_replies(b"\x1b[?2026h\x1b[3;4H\x1b[6n")
-                .is_empty()
+        assert_eq!(
+            synchronized.advance_with_replies(b"\x1b[?2026h\x1b[3;4H\x1b[6n"),
+            [] as [u8; 0]
         );
         assert_eq!(
             synchronized.advance_with_replies(b"\x1b[?2026l"),
@@ -2252,7 +2251,13 @@ mod tests {
     #[test]
     fn saved_cursor_restores_the_input_position_after_a_right_prompt() {
         let mut screen = VtScreen::new(1, 30);
-        screen.advance(b"left\x1b[s\x1b[25G\x1b[36mright\x1b[0m\x1b[u input");
+        screen.advance(b"\x1b[4G\x1b[u");
+        assert_eq!(
+            screen.cursor(),
+            (0, 3),
+            "restore before save keeps the cursor"
+        );
+        screen.advance(b"\rleft\x1b[s\x1b[25G\x1b[36mright\x1b[0m\x1b[u input");
         assert_eq!(screen.cursor(), (0, 10));
         // The right-prompt columns keep their color on the cells that hold them.
         assert_eq!(screen.cells(), vec!["left input              right "]);
@@ -2533,7 +2538,7 @@ mod tests {
 
         let checkpoint = screen.checkpoint();
         assert_eq!(checkpoint.decoder.phase, DecoderPhase::CsiOverflow);
-        assert!(checkpoint.decoder.params.is_empty());
+        assert_eq!(checkpoint.decoder.params, "");
         let mut restored = VtScreen::from_checkpoint(&checkpoint).expect("overflow restores");
 
         // The oversized final is swallowed instead of dispatching the retained
@@ -3004,6 +3009,22 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_scrollback_row_rejects_the_checkpoint() {
+        let mut cp = valid_checkpoint();
+        cp.primary
+            .scrollback
+            .push(RowCheckpoint { runs: Vec::new() });
+
+        assert_eq!(
+            reject(&cp),
+            CheckpointError::RowLength {
+                expected: 1,
+                actual: 0,
+            }
+        );
+    }
+
+    #[test]
     fn hostile_cursor_and_scroll_region_fail_closed() {
         // Cursor row past the grid.
         let mut cp = valid_checkpoint();
@@ -3089,8 +3110,8 @@ mod tests {
             CheckpointError::ActiveBufferMismatch,
         ];
         for err in errors {
-            assert!(!err.to_string().is_empty());
-            assert!(!format!("{err:?}").is_empty());
+            assert_ne!(err.to_string(), "");
+            assert_ne!(format!("{err:?}"), "");
             let _: &dyn std::error::Error = &err;
         }
     }
@@ -3156,15 +3177,15 @@ mod tests {
         // An alternate-active checkpoint exercises the `Some(alternate)` and
         // `Some(saved_cursor)` arms of the derived Debug / Clone / PartialEq.
         let alt = built(2, 4, &[b"hi\x1b[s\x1b[?1049halt"]).checkpoint();
-        assert!(!format!("{alt:?}").is_empty());
+        assert_ne!(format!("{alt:?}"), "");
         assert_eq!(alt.clone(), alt);
         // A primary-only checkpoint exercises the `None` arms.
         let primary_only = built(1, 2, &[b"x"]).checkpoint();
-        assert!(!format!("{primary_only:?}").is_empty());
+        assert_ne!(format!("{primary_only:?}"), "");
         // VtScreen Debug (referenced by the round-trip assertions).
-        assert!(!format!("{:?}", VtScreen::new(1, 1)).is_empty());
-        assert!(!format!("{:?}", ActiveBuffer::Alternate).is_empty());
-        assert!(!format!("{:?}", DecoderPhase::Csi).is_empty());
-        assert!(!format!("{:?}", Geometry { rows: 1, cols: 1 }).is_empty());
+        assert_ne!(format!("{:?}", VtScreen::new(1, 1)), "");
+        assert_ne!(format!("{:?}", ActiveBuffer::Alternate), "");
+        assert_ne!(format!("{:?}", DecoderPhase::Csi), "");
+        assert_ne!(format!("{:?}", Geometry { rows: 1, cols: 1 }), "");
     }
 }

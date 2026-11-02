@@ -733,19 +733,37 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
 }
 
 #[test]
-fn clipboard_platform_variants_are_compiled_only_for_their_targets_or_tests() {
-    let root = workspace_root();
-    let source = fs::read_to_string(root.join("src/runtime/clipboard.rs"))
+fn clipboard_keeps_one_shared_platform_and_command_policy() {
+    struct SharedPolicy;
+    impl<'ast> Visit<'ast> for SharedPolicy {
+        fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+            assert!(
+                !attribute.path().is_ident("cfg") && !attribute.path().is_ident("cfg_attr"),
+                "clipboard vocabulary and command policy must be shared by all targets and tests"
+            );
+        }
+    }
+
+    let source = fs::read_to_string(workspace_root().join("src/runtime/clipboard.rs"))
         .expect("clipboard adapter is readable");
+    let syntax: File = syn::parse_file(&source).expect("clipboard adapter parses");
+    let declarations = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(declaration) => Some((declaration.ident.to_string(), item)),
+            Item::Fn(declaration) => Some((declaration.sig.ident.to_string(), item)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
 
     assert!(!source.contains("allow(dead_code)"));
-    assert!(source.contains("#[cfg(any(test, target_os = \"macos\"))]"));
-    assert!(source.contains("#[cfg(any(test, target_os = \"windows\"))]"));
-    assert!(
-        source.contains(
-            "#[cfg(any(test, not(any(target_os = \"macos\", target_os = \"windows\"))))]"
-        )
-    );
+    // Native selection is checked by the adapter's behavioral unit test.
+    // Visit nested variants and match arms too, so an inner cfg cannot split
+    // the shared vocabulary or command policy across compilation targets.
+    for name in ["Platform", "commands_for", "unix_commands"] {
+        SharedPolicy.visit_item(declarations[name]);
+    }
 }
 
 /// The daemon composition root grew to twenty-five thousand lines because every

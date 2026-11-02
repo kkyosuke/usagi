@@ -1117,8 +1117,7 @@ impl SessionCatalogPort for ProductionSessionCatalogPort {
     fn roles(&self, workspace: &Path) -> SessionRoleCatalog {
         usagi_core::infrastructure::role_catalog::load_effective(&self.data_home, workspace)
             .ok()
-            .map(project_session_role_catalog)
-            .unwrap_or_default()
+            .map_or_default(project_session_role_catalog)
     }
 
     fn branches(&self, workspace: &Path, configured_default: Option<&str>) -> SessionBranchCatalog {
@@ -2795,8 +2794,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     ) -> Vec<usagi_core::domain::id::TerminalRef> {
         self.inventory
             .as_ref()
-            .map(|inventory| inventory.take_exited(limit))
-            .unwrap_or_default()
+            .map_or_default(|inventory| inventory.take_exited(limit))
     }
 }
 
@@ -5086,10 +5084,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let factory = ProductionBackendFactory::default();
         let mut port = factory.knowledge_search(tmp.path());
-        assert!(
-            port.search("", std::sync::Arc::default())
-                .documents
-                .is_empty()
+        assert_eq!(
+            port.search("", std::sync::Arc::default()).documents,
+            [] as [usagi_tui::usecase::application::knowledge_search::Document; 0]
         );
     }
 
@@ -6240,7 +6237,10 @@ mod tests {
         assert!(port.terminals.is_empty());
         assert_eq!(port.terminal_connection_epoch(), Some(2));
         drop(port);
-        assert!(terminal_actions(server.join().unwrap()).is_empty());
+        assert_eq!(
+            terminal_actions(server.join().unwrap()),
+            [] as [std::string::String; 0]
+        );
     }
 
     /// A lane deadline on one pane does not leave the others stranded: it drops
@@ -7630,7 +7630,10 @@ mod tests {
         let mut state = AppState::home(workspace, vec![session]);
         let event = usagi_tui::presentation::app_event_from_key(key)
             .expect("the shifted key reaches the Home reducer");
-        assert!(update(&mut state, event).is_empty());
+        assert_eq!(
+            update(&mut state, event),
+            [] as [usagi_tui::usecase::application::controller::Effect; 0]
+        );
 
         let ctrl_x = classify_terminal_input(
             &mut usagi_tui::usecase::terminal_input::LiveInputClassifier::default(),
@@ -7915,17 +7918,20 @@ mod tests {
             let workspace = WorkspaceId::new();
             let session = SessionId::new();
             let mut state = AppState::home(workspace, vec![session]);
-            assert!(
+            assert_eq!(
                 update(
                     &mut state,
                     AppEvent::PaneTabAvailability {
                         available: true,
                         error: None,
                     },
-                )
-                .is_empty()
+                ),
+                [] as [usagi_tui::usecase::application::controller::Effect; 0]
             );
-            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                [] as [usagi_tui::usecase::application::controller::Effect; 0]
+            );
             let event = usagi_tui::presentation::app_event_from_key(key)
                 .expect("the resolved tab action reaches the Home reducer");
             assert_eq!(
@@ -8147,15 +8153,21 @@ mod tests {
         let healthy = tempfile::tempdir().unwrap();
         let (workspaces, recent) =
             load_screen_graph_data(&Storage::new(healthy.path()), Start::Welcome).unwrap();
-        assert!(workspaces.is_empty());
-        assert!(recent.is_empty());
+        assert_eq!(
+            workspaces,
+            [] as [usagi_core::domain::workspace::Workspace; 0]
+        );
+        assert_eq!(recent, [] as [usagi_core::domain::recent::Recent; 0]);
 
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();
         let storage = Storage::new(home.path());
         let (workspaces, recent) = load_screen_graph_data(&storage, Start::Config).unwrap();
-        assert!(workspaces.is_empty());
-        assert!(recent.is_empty());
+        assert_eq!(
+            workspaces,
+            [] as [usagi_core::domain::workspace::Workspace; 0]
+        );
+        assert_eq!(recent, [] as [usagi_core::domain::recent::Recent; 0]);
         assert!(load_screen_graph_data(&storage, Start::Welcome).is_err());
     }
 
@@ -8249,7 +8261,10 @@ mod tests {
         assert_eq!(retained.active, PathBuf::from("/alpha"));
         assert_eq!(loader.storage.load_last_projects().unwrap(), Some(saved));
         loader.storage.save_workspaces(&[]).unwrap();
-        assert!(loader.last_projects().unwrap().unwrap().paths.is_empty());
+        assert_eq!(
+            loader.last_projects().unwrap().unwrap().paths,
+            [] as [std::path::PathBuf; 0]
+        );
         std::fs::write(temporary.path().join("last-projects.json"), "broken").unwrap();
         assert!(loader.last_projects().is_err());
     }
@@ -8413,10 +8428,19 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
 
         let state = load_workspace_state(workspace.path()).unwrap();
-        assert!(state.sessions.is_empty());
+        assert_eq!(
+            state.sessions,
+            [] as [usagi_core::domain::session::SessionRecord; 0]
+        );
         assert!(state.root_notes.note.is_none());
-        assert!(state.root_notes.todos.is_empty());
-        assert!(state.root_notes.decisions.is_empty());
+        assert_eq!(
+            state.root_notes.todos,
+            [] as [usagi_core::domain::note::SessionTodo; 0]
+        );
+        assert_eq!(
+            state.root_notes.decisions,
+            [] as [usagi_core::domain::note::SessionDecision; 0]
+        );
     }
 
     #[test]
@@ -9205,7 +9229,10 @@ mod tests {
         );
 
         port.select_workspace(&workspace).unwrap();
-        assert!(port.read_workspace_setup_commands().unwrap().is_empty());
+        assert_eq!(
+            port.read_workspace_setup_commands().unwrap(),
+            [] as [std::string::String; 0]
+        );
         port.save_workspace_setup_commands(&["cargo fetch".to_owned(), "cargo test".to_owned()])
             .unwrap();
         assert_eq!(

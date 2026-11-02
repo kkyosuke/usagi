@@ -366,7 +366,7 @@ fn sidebar_pointer_adapter_uses_the_frame_on_screen_and_keeps_its_identity() {
         }
     );
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(vec![second])));
-    assert!(runtime.apply_event(event).is_empty());
+    assert_eq!(runtime.apply_event(event), [] as [Effect; 0]);
     assert_eq!(
         runtime.state().selected(),
         crate::usecase::application::controller::Selection::Target(Target::Session(second))
@@ -1247,7 +1247,10 @@ fn refresh_requests_coalesce_onto_one_published_snapshot() {
 
     // A second drain with nothing published leaves the frame untouched.
     crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
-    assert!(backend.drain_events().is_empty());
+    assert_eq!(
+        backend.drain_events(),
+        [] as [crate::usecase::application::controller::AppEvent; 0]
+    );
 
     // Rows without stable identities are not actionable: the projection and
     // completion both fail closed instead of retaining the previous target.
@@ -1267,8 +1270,8 @@ fn refresh_requests_coalesce_onto_one_published_snapshot() {
             notes_updated_at: None,
         }));
     crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
-    assert!(ui.workspace.sessions().is_empty());
-    assert!(ui.workspace.session_ids().is_empty());
+    assert_eq!(ui.workspace.sessions(), []);
+    assert_eq!(ui.workspace.session_ids(), []);
     assert!(matches!(
         events.try_recv().unwrap(),
         AppEvent::Backend(BackendEvent::Sessions(ids)) if ids.is_empty()
@@ -1836,7 +1839,7 @@ fn stale_agent_admission_cannot_show_or_focus_a_lineage_closed_by_another_tui() 
         terminal_geometry(20, 80),
     );
 
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert_eq!(runtime.focused_terminal(), None);
     assert!(durable.lock().unwrap().dismissed.contains(&continuation));
     assert!(
@@ -2467,7 +2470,7 @@ fn prepared_existing_tab_uses_the_cached_switch_surface() {
     );
 
     assert!(prepared.is_some());
-    assert!(!term.frames.is_empty());
+    assert_ne!(term.frames, [] as [Vec<String>; 0]);
     assert!(
         term.frames
             .iter()
@@ -3117,7 +3120,10 @@ fn closing_an_inventory_only_history_tab_persists_its_removal_without_resuming()
     let mut controls = LiveTerminalControls::default();
     let mut term = FakeTerminal::default();
     let mut browser = UnavailableBrowserOpener;
-    assert!(ui.agent_slot_order().is_empty());
+    assert_eq!(
+        ui.agent_slot_order(),
+        [] as [usagi_core::domain::id::AgentContinuationRef; 0]
+    );
     assert_eq!(
         runtime.focused_interrupted().map(|tab| tab.continuation),
         Some(history.continuation),
@@ -3166,7 +3172,7 @@ fn closing_an_inventory_only_history_tab_persists_its_removal_without_resuming()
         }],
         resumable: Vec::new(),
     };
-    assert!(
+    assert_eq!(
         crate::usecase::application::interrupted_tab::project(
             &inventory,
             workspace,
@@ -3175,8 +3181,8 @@ fn closing_an_inventory_only_history_tab_persists_its_removal_without_resuming()
             &ui.agent_dismissed(),
             &BTreeSet::new(),
         )
-        .tabs
-        .is_empty()
+        .tabs,
+        [] as [crate::usecase::application::interrupted_tab::InterruptedTab; 0]
     );
 }
 
@@ -3397,7 +3403,10 @@ fn switch_reorder_projects_rows_and_does_not_resync_on_every_frame() {
     let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('N')));
     assert_eq!(runtime.state().sessions(), &[b, a]);
     for _ in 0..2 {
-        assert!(crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]).is_empty());
+        assert_eq!(
+            crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]),
+            [] as [Effect; 0]
+        );
         let rows = crate::presentation::project_controller_sessions(&ui, runtime.state());
         assert_eq!(
             rows.iter().map(|row| row.id).collect::<Vec<_>>(),

@@ -862,7 +862,7 @@ mod tests {
 
         let mut bounded = BoundedJsonWriter::new(4);
         assert!(bounded.write_all(b"12345").is_err());
-        assert!(bounded.bytes.is_empty());
+        assert_eq!(bounded.bytes, [] as [u8; 0]);
         assert!(bounded.exceeded);
 
         assert!(write_atomic(dir.path(), &path, &SerializationFailure).is_err());

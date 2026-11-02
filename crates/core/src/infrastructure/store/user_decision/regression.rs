@@ -44,7 +44,7 @@ fn admission_reserves_every_accepted_worst_case_answer_and_rejects_without_writi
         assert!(std::fs::metadata(store.path()).unwrap().len() <= MAX_SERIALIZED_BYTES as u64);
     }
     assert_eq!(store.events().unwrap().len(), accepted.len());
-    assert!(store.pending_all().unwrap().is_empty());
+    assert_eq!(store.pending_all().unwrap(), [] as [UserDecision; 0]);
 }
 
 fn rich(bytes: usize) -> UserDecision {
@@ -142,7 +142,7 @@ fn legacy_full_store_recovers_answers_cancellation_and_expiry_across_restart() {
         UserDecisionStore::new(dir.path()).events().unwrap().len(),
         1
     );
-    assert!(reopened.pending_all().unwrap().is_empty());
+    assert_eq!(reopened.pending_all().unwrap(), [] as [UserDecision; 0]);
     assert_eq!(
         reopened
             .get(first.owner.workspace_id, first.decision_id)
@@ -513,8 +513,11 @@ fn completed_history_cannot_permanently_block_new_questions() {
     assert_eq!(std::fs::read(store.path()).unwrap(), before);
     assert_eq!(store.events().unwrap().len(), 1);
     store.ack_event(decision.decision_id).unwrap();
-    assert!(store.events().unwrap().is_empty());
-    assert!(store.pending_all().unwrap().is_empty());
+    assert_eq!(
+        store.events().unwrap(),
+        [] as [UserDecisionResolvedEvent; 0]
+    );
+    assert_eq!(store.pending_all().unwrap(), [] as [UserDecision; 0]);
     let admitted = store.create(next.clone()).unwrap();
     assert_eq!(admitted.unwrap().decision_id, next.decision_id);
     assert_eq!(
