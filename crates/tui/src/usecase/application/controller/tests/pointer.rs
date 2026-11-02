@@ -32,7 +32,7 @@ fn pointer_click_resolves_and_selects_each_sidebar_row() {
     // where it last landed.
     let before = state.selected();
     let effects = pointer_effects(&mut state, 5, 8, std::time::Duration::from_millis(4_000));
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(state.selected(), before);
     let _ = click_at(&mut state, 5, 9, 5_000);
     assert_eq!(state.selected(), before);
@@ -44,7 +44,10 @@ fn pointer_click_outside_the_sidebar_body_is_inert() {
     let session = SessionId::new();
     // A pointer before the first resize has no geometry and cannot resolve.
     let mut ungeometried = AppState::home(workspace, vec![session]);
-    assert!(pointer_effects(&mut ungeometried, 5, 2, std::time::Duration::ZERO).is_empty());
+    assert_eq!(
+        pointer_effects(&mut ungeometried, 5, 2, std::time::Duration::ZERO),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         ungeometried.selected(),
         Selection::Target(Target::Session(session))
@@ -135,7 +138,7 @@ fn pointer_click_is_inert_while_an_overlay_owns_the_surface() {
     let before = state.selected();
     state.pending_session_click = Some((session, std::time::Duration::from_millis(1_000)));
     let effects = pointer_effects(&mut state, 5, 2, std::time::Duration::from_millis(1_100));
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(state.selected(), before);
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert!(state.pending_session_click.is_none());
@@ -157,12 +160,12 @@ fn pointer_focus_moves_only_to_an_open_workspace_drawer() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::WorkspaceDrawerFocused(WorkspaceDrawerFocus::Director),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.workspace_drawer_focus(), None);
 
@@ -199,7 +202,10 @@ fn clicking_beside_the_usagi_only_returns_home() {
     let (selected, active) = (state.selected(), state.active());
     state.overlay = Some(Overlay::Garden);
 
-    assert!(update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::GardenClick(GardenClick::Dismiss)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
     assert_eq!(state.selected(), selected);
     assert_eq!(state.active(), active);

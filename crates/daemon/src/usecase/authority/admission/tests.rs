@@ -326,7 +326,7 @@ fn every_refusal_reads_as_a_safety_outcome() {
         AdmissionRefusal::StaleRevision,
         AdmissionRefusal::StillOpen,
     ] {
-        assert!(!refusal.to_string().is_empty());
+        assert_ne!(refusal.to_string(), "");
         assert!(refusal.source().is_none());
     }
 }

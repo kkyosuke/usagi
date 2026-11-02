@@ -40,7 +40,7 @@ mod tests {
     fn handler_defers_environment_access_to_composition() {
         let (outcome, output) = execute(Command::AgySystemPrompt);
         assert_eq!(outcome, RunOutcome::EmitAgySystemPrompt);
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 
     #[test]
@@ -63,7 +63,7 @@ mod tests {
                 write_response(prompt, &mut output).unwrap_err().kind(),
                 io::ErrorKind::InvalidInput
             );
-            assert!(output.is_empty());
+            assert_eq!(output, [] as [u8; 0]);
         }
         assert!(write_response(Some("private role"), &mut io::Cursor::new([0_u8; 0])).is_err());
     }

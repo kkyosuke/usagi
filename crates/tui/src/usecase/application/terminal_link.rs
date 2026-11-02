@@ -73,8 +73,8 @@ impl Columns {
     /// The flattened chars of rows `start..=end`, joined column-for-column.
     fn flatten(&self, start: usize, end: usize) -> Vec<char> {
         let mut chars = Vec::with_capacity((end - start + 1) * self.width);
-        for row in start..=end {
-            chars.extend_from_slice(&self.rows[row]);
+        for row in &self.rows[start..=end] {
+            chars.extend_from_slice(row);
         }
         chars
     }
@@ -650,7 +650,7 @@ mod tests {
         ];
         for variant in variants {
             assert_eq!(variant, variant.clone());
-            assert!(!format!("{variant:?}").is_empty());
+            assert_ne!(format!("{variant:?}"), "");
         }
         assert_ne!(UrlRejection::Empty, UrlRejection::MissingHost);
     }

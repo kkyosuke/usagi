@@ -214,10 +214,10 @@ mod tests {
         assert_eq!(plan(&policy, &candidates, 7201), vec![1, 0]);
         policy.max_bytes = Some(0);
         assert_eq!(plan(&policy, &candidates, 7201), vec![1, 0, 2]);
-        assert!(plan(&policy, &[], 7201).is_empty());
+        assert_eq!(plan(&policy, &[], 7201), [] as [usize; 0]);
         policy.max_bytes = None;
         policy.max_age_hours = Some(u64::MAX);
-        assert!(plan(&policy, &candidates, 7201).is_empty());
+        assert_eq!(plan(&policy, &candidates, 7201), [] as [usize; 0]);
         let same_session = candidates[0].session;
         let tied = vec![
             CacheCandidate {

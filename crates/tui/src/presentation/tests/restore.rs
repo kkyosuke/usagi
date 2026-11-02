@@ -142,7 +142,7 @@ fn restore_without_agent_intent_caches_inventory_and_refresh_clears_it() {
     ui.refresh_agent_inventory();
     assert!(ui.agent_inventory().is_none());
     assert!(ui.take_agent_observation_request());
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
 }
 
 #[test]
@@ -895,6 +895,33 @@ fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
 }
 
 #[test]
+fn changed_observations_coalesce_without_bypassing_backoff_or_reconnect_priority() {
+    use crate::presentation::{RestoreJobOutcome, RestoreRetryState};
+    use std::time::Duration;
+
+    let mut retry = RestoreRetryState::new();
+    assert!(retry.begin_if_due(Duration::ZERO));
+    assert!(retry.complete(Duration::ZERO, RestoreJobOutcome::TransportFailed));
+    retry.request_changed_observation(Duration::from_millis(10));
+    assert!(!retry.begin_if_due(Duration::from_millis(10)));
+    assert!(retry.begin_if_due(Duration::from_millis(250)));
+
+    retry.request_changed_observation(Duration::from_millis(251));
+    retry.request_changed_observation(Duration::from_millis(252));
+    assert!(!retry.complete(Duration::from_millis(253), RestoreJobOutcome::Applied));
+    assert!(retry.begin_if_due(Duration::from_millis(253)));
+    retry.reconnected(1, Duration::from_millis(254));
+    retry.request_changed_observation(Duration::from_millis(255));
+    assert!(!retry.complete(
+        Duration::from_millis(256),
+        RestoreJobOutcome::TransportFailed
+    ));
+    assert!(retry.begin_if_due(Duration::from_millis(256)));
+    assert!(!retry.complete(Duration::from_millis(257), RestoreJobOutcome::Applied));
+    assert!(!retry.begin_if_due(Duration::from_secs(1)));
+}
+
+#[test]
 fn failed_restore_keeps_the_port_for_a_reconnect_dispatch() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
@@ -1214,7 +1241,7 @@ fn cross_tui_stale_observe_omits_old_ref_then_fresh_observation_restores_replace
         stale.outcome,
         crate::presentation::RestoreJobOutcome::FenceRejected
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert_ne!(runtime.focused_terminal(), Some(old));
     assert!(
         durable.lock().unwrap().targets[0].tabs[0]
@@ -1594,7 +1621,7 @@ fn restored_terminal_and_agent_tabs_deliver_ordinary_closeup_input() {
     // selection hidden behind a non-empty tab strip.
     assert!(!runtime.wants_live_input());
     assert_eq!(runtime.focused_terminal(), Some(terminal.clone()));
-    assert!(runtime.handle_key(Key::Enter).is_empty());
+    assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
     assert!(runtime.wants_live_input());
     assert!(forward_live_terminal_input(
         &mut ui,
@@ -1748,7 +1775,7 @@ fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
     );
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(!runtime.state().has_live_pane());
 
     // An embedder with no Agent port simply finds nothing to restore.
@@ -1756,7 +1783,7 @@ fn restore_open_panes_restores_nothing_on_daemon_failure_or_without_a_port() {
     let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
     let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
     restore_open_panes(&mut ui, &mut runtime, terminal_geometry(20, 80));
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
 }
 
 #[test]
@@ -1848,7 +1875,7 @@ fn workspace_switch_preserves_decision_dismissal_unread_and_new_arrivals() {
     assert_eq!(current.state().decisions(), std::slice::from_ref(&second));
     observe(&mut current, Vec::new());
     let current = switch(&current, &beta, &mut deck);
-    assert!(current.state().decisions().is_empty());
+    assert_eq!(current.state().decisions(), []);
     assert!(current.state().unread_decision_ids().is_empty());
     assert_eq!(current.state().overlay(), None);
 }
@@ -2086,7 +2113,10 @@ fn interrupted_history_joins_its_own_scope_in_the_restore_projection() {
         .iter()
         .find(|target| target.target == Target::Session(other))
         .unwrap();
-    assert!(empty.interrupted.is_empty());
+    assert_eq!(
+        empty.interrupted,
+        [] as [crate::usecase::application::interrupted_tab::InterruptedTab; 0]
+    );
 }
 
 #[test]

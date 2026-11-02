@@ -554,7 +554,7 @@ fn a_standby_takes_authority_without_the_old_connection_keeping_its_privileges()
     // exiting, so the client's stream is at end of file rather than hung.
     let mut drained = Vec::new();
     persistent.stream.read_to_end(&mut drained).unwrap();
-    assert!(drained.is_empty());
+    assert_eq!(drained, [] as [u8; 0]);
 }
 
 #[test]

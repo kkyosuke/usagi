@@ -684,6 +684,6 @@ mod tests {
         assert!(bounded.contains("scope-1"));
         assert!(bounded.contains("↓ 5 more"));
         assert!(!bounded.contains("scope-2"));
-        assert!(runtime_lines(Some(&rows), 0).is_empty());
+        assert_eq!(runtime_lines(Some(&rows), 0), [] as [String; 0]);
     }
 }

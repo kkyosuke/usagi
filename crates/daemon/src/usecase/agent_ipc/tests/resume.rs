@@ -509,7 +509,10 @@ fn readiness_ticket_is_revalidated_before_launch_effects() {
         )
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::RevisionConflict);
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 
     std::fs::remove_file(fixture.path().join("claude")).unwrap();
     let error = runtime
@@ -524,7 +527,10 @@ fn readiness_ticket_is_revalidated_before_launch_effects() {
         )
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Unavailable);
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1258,8 +1264,14 @@ fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
     runtime.coordinator = RuntimeCoordinator::hydrate(legacy, 16, 64 * 1024, 64).unwrap();
 
     let inventory = runtime.inventory(workspace);
-    assert!(inventory.runtimes.is_empty());
-    assert!(runtime.search_targets(workspace).is_empty());
+    assert_eq!(
+        inventory.runtimes,
+        [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
+    );
+    assert_eq!(
+        runtime.search_targets(workspace),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(inventory.resumable.len(), 1);
     assert!(inventory.resumable[0].target.is_none());
     assert!(!inventory.resumable[0].available);

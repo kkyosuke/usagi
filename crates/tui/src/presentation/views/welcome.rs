@@ -48,17 +48,14 @@ impl Welcome {
     /// Existing installations use their latest history entry until a deck is saved.
     #[must_use]
     pub fn new(recent: Vec<Recent>) -> Self {
-        let paths = recent
-            .first()
-            .map(|recent| match recent {
-                Recent::Workspace(overview) => vec![overview.workspace.path.clone()],
-                Recent::Unite(unite) => unite
-                    .members()
-                    .iter()
-                    .map(|m| m.workspace.path.clone())
-                    .collect(),
-            })
-            .unwrap_or_default();
+        let paths = recent.first().map_or_default(|recent| match recent {
+            Recent::Workspace(overview) => vec![overview.workspace.path.clone()],
+            Recent::Unite(unite) => unite
+                .members()
+                .iter()
+                .map(|m| m.workspace.path.clone())
+                .collect(),
+        });
         let last_projects = paths
             .first()
             .cloned()
@@ -411,7 +408,7 @@ mod tests {
         assert!(matches!(&welcome.all_recent()[0], Recent::Unite(group)
             if group.members().len() == 1 && group.members()[0].workspace.name == "beta"));
         welcome.remove_paths(&["/tmp/beta".into()]);
-        assert!(welcome.all_recent().is_empty());
+        assert_eq!(welcome.all_recent(), []);
         assert!(welcome.last_projects().is_none());
     }
 

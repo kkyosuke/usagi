@@ -155,14 +155,14 @@ fn unified_search_scopes_preserve_query_current_identity_and_exact_activation() 
     for _ in 0..3 {
         deck.handle_overlay_key(&Key::Tab);
     }
-    assert!(search(&deck).entries.is_empty());
+    assert_eq!(search(&deck).entries, [] as [Entry; 0]);
     assert!(
         render_overlay(&deck, 28, 120, &[])
             .join("\n")
             .contains("No current session")
     );
     complete(&mut deck, result);
-    assert!(search(&deck).entries.is_empty());
+    assert_eq!(search(&deck).entries, [] as [Entry; 0]);
     assert!(!deck.apply_unified_response(token, Response::Search(Results::default())));
 }
 
@@ -399,7 +399,7 @@ fn unified_search_current_navigation_updates_keep_selected_identity_and_source_r
     for _ in 0..3 {
         deck.handle_overlay_key(&Key::Tab);
     }
-    assert!(!search(&deck).entries.is_empty());
+    assert_ne!(search(&deck).entries, [] as [Entry; 0]);
     assert!(search(&deck).entries.iter().all(|entry| matches!(entry, Entry::Navigation(row) if row.identity.action.session() == Some(session))));
     assert!(!deck.refresh_unified_navigation());
     let selected = search(&deck).selected.clone();
@@ -479,7 +479,7 @@ fn unified_search_keeps_tab_selection_when_labels_and_positions_change() {
 
     deck.slots[0].palette_tabs.pop();
     assert!(deck.refresh_unified_navigation());
-    assert!(!search(&deck).entries.is_empty());
+    assert_ne!(search(&deck).entries, [] as [Entry; 0]);
     assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
 }
 

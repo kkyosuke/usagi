@@ -393,7 +393,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fifo_lock_files_are_rejected_without_blocking_the_read_only_fallback() {
-        use std::cell::Cell;
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
         use std::sync::Arc;
@@ -408,14 +407,11 @@ mod tests {
             assert_eq!(unsafe { libc::mkfifo(native.as_ptr(), mode) }, 0);
             let cancelled = Arc::new(AtomicBool::new(false));
             let stop = Arc::clone(&cancelled);
-            let (started, entered) = mpsc::channel();
+            let (started, entered) = mpsc::sync_channel(1);
             let (finished, received) = mpsc::channel();
             let worker = thread::spawn(move || {
-                let announced = Cell::new(false);
                 let result = StoreLock::acquire_cancellable(&dir, || {
-                    if !announced.replace(true) {
-                        started.send(()).unwrap();
-                    }
+                    let _ = started.try_send(());
                     stop.load(Ordering::Acquire)
                 });
                 finished

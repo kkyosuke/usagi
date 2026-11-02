@@ -369,6 +369,35 @@ fn a_dead_active_generation_is_retired_and_never_republished() {
 }
 
 #[test]
+fn recovery_preserves_already_retired_generations() {
+    let Scenario {
+        mut document, old, ..
+    } = scenario();
+    let retired = entry(
+        DaemonGeneration::new(),
+        GenerationRole::Retired,
+        "retired",
+        3,
+    );
+    document.generations.push(retired.clone());
+    document.validate(2).unwrap();
+
+    let plan = plan_recovery(&document, &published(&document, old), &mut none_alive);
+
+    assert_eq!(
+        plan.outcome,
+        RecoveryOutcome::FailedClosed(RecoveryRefusal::ActiveGone)
+    );
+    let repaired = plan.document.unwrap();
+    assert_eq!(repaired.entry(retired.generation), Some(&retired));
+    assert_eq!(repaired.role(old), Some(GenerationRole::Retired));
+    assert_eq!(repaired.current, None);
+    assert!(plan.retire_locator);
+    assert!(plan.publish.is_none());
+    repaired.validate(2).unwrap();
+}
+
+#[test]
 fn pid_reuse_is_not_proof_that_the_recorded_owner_is_alive() {
     let Scenario { document, old, .. } = scenario();
     let locator = published(&document, old);

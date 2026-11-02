@@ -667,7 +667,7 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Target unavailable"))
         );
-        assert!(tiny.item_hits.is_empty());
+        assert_eq!(tiny.item_hits, [] as [(usize, std::ops::Range<usize>); 0]);
         assert_eq!(
             handle_input(
                 &mut list,

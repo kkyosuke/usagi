@@ -1173,7 +1173,7 @@ mod tests {
             error.to_string(),
             "usagi v0.1.0: daemon already running (unverified recorded pid hint 1111)"
         );
-        assert!(buf.is_empty());
+        assert_eq!(buf, [] as [u8; 0]);
         // The existing record is left untouched — we did not register or clear.
         assert_eq!(store.load().unwrap(), Some(existing));
     }
@@ -1197,7 +1197,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(error.to_string(), "usagi v0.1.0: daemon already running");
-        assert!(buf.is_empty());
+        assert_eq!(buf, [] as [u8; 0]);
     }
 
     /// The refusal must land before this data directory's guard is touched, so
@@ -1221,7 +1221,7 @@ mod tests {
             &info(),
         )
         .unwrap_err();
-        assert!(buf.is_empty());
+        assert_eq!(buf, [] as [u8; 0]);
         // The other daemon lives in a different data directory, so this one's
         // record must survive untouched.
         let untouched = store.load().unwrap() == Some(existing);

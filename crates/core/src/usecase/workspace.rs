@@ -525,7 +525,7 @@ mod tests {
             .is_err()
         );
         assert!(open(&storage, &tmp.path().join("line\nbreak"), ts(10)).is_err());
-        assert!(storage.load_workspaces().unwrap().is_empty());
+        assert_eq!(storage.load_workspaces().unwrap(), [] as [Workspace; 0]);
     }
 
     #[test]
@@ -624,10 +624,9 @@ mod tests {
             vec![alpha]
         );
         assert_eq!(storage.load_workspaces().unwrap(), vec![beta]);
-        assert!(
-            remove(&storage, &[PathBuf::from("/tmp/unknown")])
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            remove(&storage, &[PathBuf::from("/tmp/unknown")]).unwrap(),
+            [] as [Workspace; 0]
         );
     }
 
@@ -646,14 +645,14 @@ mod tests {
             opened.path.as_os_str().as_bytes(),
             path.as_os_str().as_bytes()
         );
-        assert!(storage.load_workspaces().unwrap().is_empty());
-        assert!(recent(&storage).unwrap().is_empty());
+        assert_eq!(storage.load_workspaces().unwrap(), [] as [Workspace; 0]);
+        assert_eq!(recent(&storage).unwrap(), [] as [Recent; 0]);
     }
 
     #[test]
     fn recent_is_empty_for_an_empty_registry() {
         let (_tmp, storage) = storage();
-        assert!(recent(&storage).unwrap().is_empty());
+        assert_eq!(recent(&storage).unwrap(), [] as [Recent; 0]);
     }
 
     #[test]
@@ -759,7 +758,7 @@ mod tests {
     fn a_single_workspace_is_not_persisted_as_a_unite() {
         let (_tmp, storage) = storage();
         touch_unite(&storage, &[PathBuf::from("/alpha")], ts(10)).unwrap();
-        assert!(storage.load_unites().unwrap().is_empty());
+        assert_eq!(storage.load_unites().unwrap(), [] as [Unite; 0]);
     }
 
     #[test]
@@ -961,7 +960,7 @@ mod tests {
             NewWorkspaceError::AlreadyRegistered,
         ] {
             let message = error.message();
-            assert!(!message.is_empty());
+            assert_ne!(message, "");
             assert!(!message.contains('\n'));
         }
     }
@@ -969,7 +968,7 @@ mod tests {
     #[test]
     fn remove_with_no_paths_is_a_storage_free_noop() {
         let (_tmp, storage) = storage();
-        assert!(remove(&storage, &[]).unwrap().is_empty());
+        assert_eq!(remove(&storage, &[]).unwrap(), [] as [Workspace; 0]);
         assert!(!storage.dir().exists());
     }
 }

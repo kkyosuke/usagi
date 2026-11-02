@@ -47,7 +47,7 @@ fn search_disambiguates_context_and_reuses_available_commands() {
         }
     );
     assert!(found[0].context.contains("/alpha"));
-    assert!(rows(&deck.slots, "unmatchable-xyz").is_empty());
+    assert_eq!(rows(&deck.slots, "unmatchable-xyz"), [] as [Row; 0]);
     let all = rows(&deck.slots, "");
     assert!(
         !all.iter()
@@ -217,7 +217,7 @@ fn metadata_and_pending_visits_are_scoped_to_workspace_incarnations() {
     assert_eq!(deck.take_palette_visit(&path), None);
     deck.schedule_palette_visit(path.clone(), workspace, Action::Workspace);
     deck.activate_snapshot(&snapshot_with_sessions("new", "/alpha", &[]));
-    assert!(deck.slots[0].palette_tabs.is_empty());
+    assert_eq!(deck.slots[0].palette_tabs, [] as [CachedTab; 0]);
     deck.close_path(&path);
     assert_eq!(deck.take_palette_visit(&path), None);
 }

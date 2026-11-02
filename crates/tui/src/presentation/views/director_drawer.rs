@@ -394,8 +394,6 @@ fn terminal_conversation_body(
         terminal_rows,
     ));
     rows.resize(height.saturating_sub(1), String::new());
-    rows.truncate(height.saturating_sub(1));
-    rows.resize(height.saturating_sub(1), String::new());
     rows.push(
         Style::new()
             .dim()
@@ -715,6 +713,26 @@ mod tests {
     }
 
     #[test]
+    fn organization_keeps_the_conversation_and_footer_before_the_selection_hint() {
+        let projection = DirectorDrawerProjection {
+            conversations: vec![DirectorConversation {
+                label: "Agent 12345678".into(),
+                selected: false,
+            }],
+            ..DirectorDrawerProjection::default()
+        };
+        for height in [9, 20] {
+            let frame = render_over(height, 100, &[], &projection);
+            let text = strip_ansi(&frame.join("\n"));
+            assert_eq!(frame.len(), height);
+            assert!(frame.iter().all(|line| display_width(line) == 100));
+            assert!(text.contains("Agent 12345678"));
+            assert!(text.contains("Enter Console"));
+            assert_eq!(text.contains("Select a Conversation"), height == 20);
+        }
+    }
+
+    #[test]
     fn focus_badge_distinguishes_the_active_director() {
         let projection = DirectorDrawerProjection {
             focused: true,
@@ -824,6 +842,21 @@ mod tests {
     }
 
     #[test]
+    fn console_without_terminal_output_keeps_its_navigation_footer() {
+        let projection = DirectorDrawerProjection {
+            route: DirectorRoute::Console,
+            ..DirectorDrawerProjection::default()
+        };
+        let frame = render_over(20, 100, &[], &projection);
+        let text = strip_ansi(&frame.join("\n"));
+        assert_eq!(frame.len(), 20);
+        assert!(frame.iter().all(|line| display_width(line) == 100));
+        assert!(text.contains("Director / Organization / Console"));
+        assert!(text.contains("Ctrl-O b: Organization · Ctrl-O g: close"));
+        assert!(!text.contains("No conversations yet"));
+    }
+
+    #[test]
     fn interrupted_console_shows_its_detail_and_recovery_feedback() {
         for feedback in [None, Some("Resume was refused".to_owned())] {
             let projection = DirectorDrawerProjection {
@@ -903,6 +936,38 @@ mod tests {
         assert!(text.contains("Waiting for daemon confirmation."));
         assert!(!text.contains("New Conversation"));
         assert!(!text.contains("Start Work Run"));
+    }
+
+    #[test]
+    fn short_terminal_keeps_launch_and_missing_provider_footers_before_details() {
+        for (new, detail, footer) in [
+            (
+                DirectorNewProjection::Launching,
+                "Waiting for daemon confirmation.",
+                "Launch in progress",
+            ),
+            (
+                DirectorNewProjection::Empty,
+                "Install claude, codex, or agy.",
+                "Esc: back",
+            ),
+        ] {
+            let projection = DirectorDrawerProjection {
+                new,
+                ..DirectorDrawerProjection::default()
+            };
+            for height in [6, 7, 8, 9, 10, 12] {
+                let frame = render_over(height, 100, &[], &projection);
+                let text = strip_ansi(&frame.join("\n"));
+                assert_eq!(frame.len(), height);
+                assert!(frame.iter().all(|line| display_width(line) == 100));
+                assert!(text.contains(footer), "{height}: {text}");
+                assert_eq!(text.contains(detail), height >= 10, "{height}: {text}");
+                if projection.new == DirectorNewProjection::Empty {
+                    assert_eq!(text.contains("No Agent CLI installed"), height >= 9);
+                }
+            }
+        }
     }
 
     fn picker_of(candidates: &[&str], selected: usize) -> DirectorDrawerProjection {

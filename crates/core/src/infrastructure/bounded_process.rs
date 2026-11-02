@@ -722,7 +722,7 @@ mod tests {
                 ChildOutputObservation::ObservationFailed,
             ),
         ] {
-            assert!(!error.to_string().is_empty());
+            assert_ne!(error.to_string(), "");
             assert_eq!(public_output(Err(error)), expected);
         }
         let mut command = Command::new("sh");

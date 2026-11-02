@@ -94,8 +94,8 @@ fn trimmed_history_and_screen_edges_are_explicit() {
     result.search(&checkpoint, "edge", &mut SearchBudget::default());
     assert!(result.limited);
     assert_eq!(result.origin, 9);
-    assert!(result.matches[0].before.is_empty());
-    assert!(result.matches.last().unwrap().after.is_empty());
+    assert_eq!(result.matches[0].before, "");
+    assert_eq!(result.matches.last().unwrap().after, "");
     assert_eq!(context(&"a".repeat(CONTEXT_MAX + 10)).len(), CONTEXT_MAX);
 }
 
@@ -114,7 +114,7 @@ fn match_context_keeps_late_unicode_matches_visible_without_unbounded_lines() {
         "missing",
         &mut SearchBudget::default(),
     );
-    assert!(result.matches.is_empty());
+    assert_eq!(result.matches, [] as [OutputMatch; 0]);
     assert!(!result.unavailable);
     assert_eq!(result.scanned_rows, 2);
 }

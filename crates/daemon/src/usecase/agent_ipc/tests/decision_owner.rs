@@ -49,19 +49,13 @@ fn removed_session_answers_remain_reviewable_until_explicit_human_disposal() {
             .unwrap(),
         1
     );
-    assert!(
-        conversation
-            .agent
-            .inventory(owner.workspace_id)
-            .runtimes
-            .is_empty()
+    assert_eq!(
+        conversation.agent.inventory(owner.workspace_id).runtimes,
+        [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
     );
-    assert!(
-        conversation
-            .agent
-            .inventory(owner.workspace_id)
-            .resumable
-            .is_empty()
+    assert_eq!(
+        conversation.agent.inventory(owner.workspace_id).resumable,
+        [] as [usagi_core::domain::agent::AgentResumableInventoryItem; 0]
     );
     assert!(
         conversation
@@ -69,13 +63,16 @@ fn removed_session_answers_remain_reviewable_until_explicit_human_disposal() {
             .mcp_user_decision_owners(&credential)
             .is_err()
     );
-    assert!(store.pending_all().unwrap().is_empty());
+    assert_eq!(
+        store.pending_all().unwrap(),
+        [] as [usagi_core::domain::user_decision::UserDecision; 0]
+    );
     assert_eq!(store.events().unwrap().len(), 1);
-    assert!(
+    assert_eq!(
         store
             .expire_due(Utc::now() + chrono::Duration::days(30))
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [usagi_core::domain::id::UserDecisionId; 0]
     );
     assert_eq!(
         UserDecisionStore::new(dir.path()).events().unwrap().len(),
@@ -95,11 +92,9 @@ fn removed_session_answers_remain_reviewable_until_explicit_human_disposal() {
         .discard_answer(owner.workspace_id, question.decision_id)
         .unwrap()
         .unwrap();
-    assert!(
-        UserDecisionStore::new(dir.path())
-            .events()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        UserDecisionStore::new(dir.path()).events().unwrap(),
+        [] as [usagi_core::infrastructure::store::user_decision::UserDecisionResolvedEvent; 0]
     );
     assert!(
         store
@@ -442,6 +437,34 @@ fn live_legacy_credential_resolves_owners_without_creating_a_replacement() {
         vec![legacy_owner, original]
     );
     assert_eq!(conversation.agent.coordinator.snapshot(), before);
+}
+
+#[test]
+fn retained_decision_aliases_are_deduplicated_without_changing_owner_order() {
+    let mut conversation = Conversation::delegated();
+    let original = conversation.owner();
+    conversation.finish();
+    conversation.resume();
+    conversation.collect_ancestors();
+    let alias = UserDecisionOwner {
+        run_id: conversation.operation(),
+        ..original.clone()
+    };
+    let mut snapshot = conversation.agent.coordinator.snapshot();
+    snapshot.records[0].user_decision_owner_aliases = vec![
+        alias.clone(),
+        original.clone(),
+        alias.clone(),
+        original.clone(),
+    ];
+    // The durable format permits repeated aliases. Rehydrate it through the
+    // normal validator, then resolve the live credential without rewriting it.
+    let bytes = serde_json::to_vec(&snapshot).unwrap();
+    conversation.restore(serde_json::from_slice(&bytes).unwrap());
+
+    assert_eq!(conversation.owners(), vec![alias.clone(), original]);
+    assert_eq!(conversation.owner(), alias);
+    assert_eq!(conversation.agent.coordinator.snapshot(), snapshot);
 }
 
 #[test]

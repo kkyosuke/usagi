@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(input.value(), "👩‍👧");
         assert_eq!(input.cursor(), input.value().len());
         assert!(input.backspace());
-        assert!(input.value().is_empty());
+        assert_eq!(input.value(), "");
     }
 
     #[test]

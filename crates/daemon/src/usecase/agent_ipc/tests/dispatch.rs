@@ -920,7 +920,10 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             None,
         )
         .unwrap();
-    assert!(runtime.dispatch_store().inbox(&caller).unwrap().is_empty());
+    assert_eq!(
+        runtime.dispatch_store().inbox(&caller).unwrap(),
+        [] as [usagi_core::domain::agent::InboxMessage; 0]
+    );
     assert_eq!(
         runtime
             .report_from_mcp(
@@ -1348,8 +1351,14 @@ fn the_dispatch_preflight_refuses_before_anything_is_created() {
     assert_eq!(rejected.code, ErrorCode::InvalidArgument);
     assert!(rejected.message.contains("not allowed"));
     // Nothing above reserved anything: no agent, no run, no occupied slot.
-    assert!(runtime.dispatch_store().agents().unwrap().is_empty());
-    assert!(runtime.dispatch_store().runs().unwrap().is_empty());
+    assert_eq!(
+        runtime.dispatch_store().agents().unwrap(),
+        [] as [usagi_core::domain::agent::Agent; 0]
+    );
+    assert_eq!(
+        runtime.dispatch_store().runs().unwrap(),
+        [] as [usagi_core::domain::agent::DispatchRun; 0]
+    );
     assert_eq!(runtime.coordinator.occupied_slots(), 0);
 
     std::fs::remove_file(&executable).unwrap();
@@ -1507,7 +1516,10 @@ fn dispatch_rejects_invalid_unknown_and_foreign_requests_before_spawn() {
             .code,
         ErrorCode::InvalidArgument
     );
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1655,7 +1667,10 @@ fn clean_never_selects_a_live_runtime_even_if_its_dispatch_run_is_failed() {
         .unwrap();
     runtime.dispatch.fail_admission(operation).unwrap();
 
-    assert!(runtime.failed_reservation_ids().unwrap().is_empty());
+    assert_eq!(
+        runtime.failed_reservation_ids().unwrap(),
+        [] as [usagi_core::domain::id::AgentRuntimeId; 0]
+    );
     assert_eq!(runtime.clean_failed_reservations().unwrap(), 0);
     assert_eq!(
         runtime
@@ -1702,13 +1717,19 @@ fn clean_repairs_a_failed_dispatch_reservation_and_hides_ghost_ready() {
         AgentRuntimeInventoryState::Unavailable
     );
     assert_eq!(runtime.clean_failed_reservations().unwrap(), 1);
-    assert!(runtime.failed_reservation_ids().unwrap().is_empty());
+    assert_eq!(
+        runtime.failed_reservation_ids().unwrap(),
+        [] as [usagi_core::domain::id::AgentRuntimeId; 0]
+    );
     assert_eq!(
         runtime.coordinator.snapshot().records[0].state,
         crate::usecase::runtime::RuntimeState::SpawnFailed
     );
     assert_eq!(runtime.close_session(session).unwrap(), 1);
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]

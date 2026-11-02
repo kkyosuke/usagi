@@ -870,7 +870,7 @@ impl AgentRuntime {
         while self.operations.len() > self.operation_bounds.operations
             || retained_bytes > self.operation_bounds.bytes
         {
-            let Some(oldest) = self
+            let Some((oldest, bytes)) = self
                 .operations
                 .iter()
                 .filter(|(operation_id, _)| !protected.contains(*operation_id))
@@ -879,13 +879,14 @@ impl AgentRuntime {
                         .cmp(&right.recorded_at)
                         .then_with(|| left_id.cmp(right_id))
                 })
-                .map(|(operation_id, _)| operation_id.clone())
+                .map(|(operation_id, operation)| {
+                    (operation_id.clone(), operation.retained_bytes(operation_id))
+                })
             else {
                 break;
             };
-            if let Some(removed) = self.operations.remove(&oldest) {
-                retained_bytes = retained_bytes.saturating_sub(removed.retained_bytes(&oldest));
-            }
+            self.operations.remove(&oldest);
+            retained_bytes = retained_bytes.saturating_sub(bytes);
         }
     }
 

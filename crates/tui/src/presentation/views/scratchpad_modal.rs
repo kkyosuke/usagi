@@ -410,6 +410,24 @@ mod tests {
     }
 
     #[test]
+    fn memo_card_keeps_its_draft_when_resize_leaves_room_only_for_borders_or_footer() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, vec![SessionId::new()]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('n')));
+        let editor = state.note_editor().unwrap();
+        let draft = editor.draft().to_owned();
+        for height in [2, 3, 4] {
+            let frame = super::memo_card(editor, 40, height, "session");
+            assert_eq!(frame.len(), height);
+            assert!(frame.iter().all(|line| display_width(line) <= 40));
+            if height == 3 {
+                assert!(frame.iter().any(|line| line.contains("Ctrl-S")));
+            }
+        }
+        assert_eq!(editor.draft(), draft);
+    }
+
+    #[test]
     fn memo_editor_keeps_caret_status_and_footer_visible_and_labels_the_session() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();

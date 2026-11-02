@@ -118,10 +118,9 @@ fn drawer_new_root_completion_commits_one_selected_exact_tab_across_reopen() {
         DefaultModel::Claude,
     );
     let _ = runtime.handle_key(Key::Live(LiveTerminalAction::Director));
-    assert!(
-        runtime
-            .handle_key(Key::Live(LiveTerminalAction::DirectorNew))
-            .is_empty()
+    assert_eq!(
+        runtime.handle_key(Key::Live(LiveTerminalAction::DirectorNew)),
+        [] as [Effect; 0]
     );
     let effects = runtime.handle_key(Key::Enter);
     let [
@@ -286,7 +285,7 @@ fn reopening_the_create_form_rescans_inside_the_cadence_window() {
     assert_eq!(hint.names(true, workspace, at_tick(1)), ["stale-worktree"]);
     assert_eq!(scans.load(Ordering::SeqCst), 1);
 
-    assert!(hint.names(false, workspace, at_tick(2)).is_empty());
+    assert_eq!(hint.names(false, workspace, at_tick(2)), [] as [String; 0]);
     assert_eq!(hint.names(true, workspace, at_tick(3)), ["stale-worktree"]);
     assert_eq!(scans.load(Ordering::SeqCst), 2);
 }
@@ -630,7 +629,7 @@ fn persistence_failures_leave_close_and_reopen_ui_unchanged_with_typed_notice() 
         &mut std::collections::HashMap::new(),
     );
 
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert_eq!(reopen_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(
         serde_json::to_vec(&*closed.lock().unwrap()).unwrap(),
@@ -714,7 +713,7 @@ fn generic_close_survives_inventory_replay_until_explicit_open() {
         &mut runtime,
         &mut std::collections::HashMap::new(),
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(ui.closed_generic_terminals.contains(&terminal));
 
     // The same live row may arrive from a restore already queued around the
@@ -731,7 +730,7 @@ fn generic_close_survives_inventory_replay_until_explicit_open() {
         replay.outcome,
         crate::presentation::RestoreJobOutcome::Applied
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(ui.closed_generic_terminals.contains(&terminal));
 
     // A completion outside the pending tab's target is rejected by the
@@ -779,7 +778,7 @@ fn generic_close_survives_inventory_replay_until_explicit_open() {
         &mut pending,
         terminal_geometry(20, 80),
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert_eq!(
         runtime.active_pane().error(),
         Some("terminal is still closing; try again")
@@ -800,7 +799,7 @@ fn generic_close_survives_inventory_replay_until_explicit_open() {
         exited.outcome,
         crate::presentation::RestoreJobOutcome::Applied
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(ui.closed_generic_terminals.is_empty());
 
     let fresh = scoped_terminal_ref(workspace, Some(session));
@@ -967,10 +966,9 @@ fn drawer_context_keeps_new_and_next_distinct_after_modifier_normalization() {
         assert_eq!(retarget_drawer_chords(&runtime, key.clone()), key);
     }
 
-    assert!(
-        runtime
-            .handle_key(Key::Live(LiveTerminalAction::Director))
-            .is_empty()
+    assert_eq!(
+        runtime.handle_key(Key::Live(LiveTerminalAction::Director)),
+        [] as [Effect; 0]
     );
     assert!(runtime.state().director_drawer_open());
 
@@ -994,7 +992,7 @@ fn drawer_context_keeps_new_and_next_distinct_after_modifier_normalization() {
 
     // New reaches the reducer without a context-specific swap.
     let retargeted = retarget_drawer_chords(&runtime, Key::Live(LiveTerminalAction::DirectorNew));
-    assert!(runtime.handle_key(retargeted).is_empty());
+    assert_eq!(runtime.handle_key(retargeted), [] as [Effect; 0]);
     assert!(matches!(
         runtime.state().director_new(),
         DirectorNew::Choosing(DefaultModel::Claude)
@@ -2565,7 +2563,7 @@ fn new_form_keeps_the_draft_when_worker_dispatch_fails() {
         run(&mut term, Vec::new(), Vec::new(), now(), &mut loader).unwrap(),
         Exit::Quit
     );
-    assert!(loader.created.is_empty());
+    assert_eq!(loader.created, [] as [NewRequest; 0]);
     let last_new = term
         .frames
         .iter()
@@ -3369,7 +3367,7 @@ fn a_notice_seeded_switcher_opens_with_the_reason_on_its_first_frame() {
     );
     // Nothing was opened: the notice explains an absence, it does not stand
     // in for a workspace that did load.
-    assert!(loader.opened.is_empty());
+    assert_eq!(loader.opened, [] as [std::path::PathBuf; 0]);
 }
 
 /// #556 acceptance. Home can return to Welcome, another workspace opens from
@@ -3554,7 +3552,7 @@ fn a_settings_binding_failure_while_opening_a_workspace_propagates() {
         assert_eq!(error.to_string(), "settings directory is unavailable");
         // The failure happened before any daemon port was created, so nothing
         // was established for a workspace that never opened.
-        assert!(factory.drops_at_create.is_empty());
+        assert_eq!(factory.drops_at_create, [] as [usize; 0]);
         assert_eq!(factory.drops.load(Ordering::SeqCst), 0);
     }
 }
@@ -3771,7 +3769,7 @@ fn the_startup_splash_plays_once_per_process() {
     // Returning to Welcome is not a launch: no size read, no draw, no wait.
     let mut again = SplashTerminal::new(Vec::new());
     assert_eq!(splash.play(&mut again).unwrap(), 0);
-    assert!(again.frames.is_empty());
+    assert_eq!(again.frames, [] as [Vec<String>; 0]);
 }
 
 /// #556 acceptance: an interrupted splash still hands Welcome its correct
@@ -3920,7 +3918,7 @@ fn resume_storage_errors_keep_the_picker_available_and_preserve_saved_data() {
             .iter()
             .any(|frame| frame.join("\n").contains("Filter:"))
     );
-    assert!(loader.opened.is_empty());
+    assert_eq!(loader.opened, [] as [std::path::PathBuf; 0]);
 
     let mut loader = FakeLoader {
         save_projects_error: Some("resume store unwritable"),

@@ -41,7 +41,7 @@ use super::{
     key_to_terminal_bytes_for_mode, new_project_notice, open_from_registry,
     open_workspace_responsive, play_startup_splash, poll_and_project_terminals,
     prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
-    prepare_workspace_deck, projection_build_counts, recent_paths, registry_contains_path,
+    prepare_workspace_deck, projection_build_counts, recent_paths, remember_registry_workspace,
     remember_workspace_controller_state, remove_registry_paths, render_controller_frame,
     render_home_material, render_home_snapshot, render_missing_workspace_prompt, render_open,
     reset_projection_build_counts, restore_open_panes, restore_prepared_workspace,
@@ -745,19 +745,15 @@ impl PaneLaunchCommandPort for IdentityRecordingLaunchPort {
 
 /// The live terminals `target`'s pane currently shows.
 fn live_tab_terminals(runtime: &WorkspaceRuntime, target: Target) -> Vec<TerminalRef> {
-    runtime
-        .panes()
-        .pane(target)
-        .map(|pane| {
-            pane.tabs()
-                .iter()
-                .filter_map(|tab| match tab {
-                    PaneTab::Live(live) => Some(live.terminal.clone()),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    runtime.panes().pane(target).map_or_default(|pane| {
+        pane.tabs()
+            .iter()
+            .filter_map(|tab| match tab {
+                PaneTab::Live(live) => Some(live.terminal.clone()),
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 type SessionCommandCall = (String, Option<String>, SessionCommand);

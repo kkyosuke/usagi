@@ -835,7 +835,7 @@ impl ProcessIdentitySource for FixedIdentitySource {
 fn daemon_process_identity_observation_fences_pid_reuse_and_legacy_records() {
     let pid = std::process::id();
     let identity = ExactProcessControl.process_start_identity(pid).unwrap();
-    assert!(!identity.is_empty());
+    assert_ne!(identity, "");
     let exact = DaemonRecord::identified(pid, identity.clone());
     assert_eq!(
         ExactProcessControl.observe(&exact),
@@ -1895,7 +1895,10 @@ fn an_idle_workspace_is_released_and_a_working_one_is_kept() {
     // observation says, so the sweep only sees it once the handle is gone.
     let now = chrono::Utc::now();
     let idle_for = chrono::Duration::zero();
-    assert!(tenants.retire_idle(&activity, now, idle_for).is_empty());
+    assert_eq!(
+        tenants.retire_idle(&activity, now, idle_for),
+        [] as [std::path::PathBuf; 0]
+    );
     drop(adopted);
 
     // The worker gives it back and leaves the startup workspace alone.
@@ -4706,14 +4709,9 @@ fn structured_pr_report_enters_the_worker_session_inventory_idempotently() {
 
     project_reported_pr(&inventory, Some(session), Some("#1")).unwrap();
     project_reported_pr(&inventory, None, Some("https://github.com/o/r/pull/1")).unwrap();
-    assert!(
-        inventory
-            .lock()
-            .unwrap()
-            .snapshot(session)
-            .unwrap()
-            .entries
-            .is_empty()
+    assert_eq!(
+        inventory.lock().unwrap().snapshot(session).unwrap().entries,
+        [] as [usagi_core::domain::pr_inventory::PrEntry; 0]
     );
 
     project_reported_pr(
@@ -6041,7 +6039,7 @@ fn rendered_codex_hook_toml_parses_and_executes_every_wired_command() {
 
     let arguments = codex_integration_arguments(&command).unwrap();
     let (pairs, remainder) = arguments.as_chunks::<2>();
-    assert!(remainder.is_empty());
+    assert_eq!(remainder, [] as [String; 0]);
     let assignments = pairs
         .iter()
         .filter_map(|pair| pair[1].strip_prefix("hooks.").map(str::to_owned))
@@ -6857,7 +6855,10 @@ fn non_git_tenant_has_no_orphan_git_candidates() {
 
     for apply in [false, true] {
         let result = clean_orphan_session_resources(&bound, None, apply, false, None).unwrap();
-        assert!(result["candidates"].as_array().unwrap().is_empty());
+        assert_eq!(
+            result["candidates"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
         assert_eq!(result["removed"], 0);
         assert_eq!(result["protected"], 0);
     }
@@ -6985,10 +6986,12 @@ fn managed_mcp_child_inherits_the_daemons_explicit_trust_root() {
             .any(|name| name.as_str() == paths::TRUST_ROOT_ENV)
     );
     context.inject_mcp = false;
-    assert!(
-        mcp_environment(&context, &home, Path::new("/managed/repo"))
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        mcp_environment(&context, &home, Path::new("/managed/repo")).unwrap(),
+        [] as [(
+            usagi_core::domain::agent::EnvironmentVariableName,
+            std::string::String
+        ); 0]
     );
 }
 
@@ -7034,7 +7037,7 @@ fn root_agent_writable_roots_include_only_provider_state() {
     }
 
     let roots = root_agent_writable_roots(None, DefaultModel::Claude).unwrap();
-    assert!(roots.is_empty());
+    assert_eq!(roots, [] as [std::path::PathBuf; 0]);
 }
 
 #[test]
@@ -7663,6 +7666,17 @@ fn broker_stop_before_wait_cannot_lose_shutdown() {
         );
         thread.join().unwrap();
     }
+}
+
+#[test]
+fn poisoned_broker_activity_stops_the_idle_watch() {
+    let activity = BrokerActivity::started();
+    let poisoned = std::panic::catch_unwind(|| {
+        let _state = activity.state.lock().unwrap();
+        panic!("broker activity poison fixture");
+    });
+    assert!(poisoned.is_err());
+    assert_eq!(activity.wait_for_poll(Duration::ZERO), None);
 }
 
 /// With no daemon to outlive and no request to serve, the broker is holding
@@ -8422,7 +8436,7 @@ fn a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook() {
 
     // A root launch's cwd and daemon data stay read-only; bootstrap uses the broker.
     let roots = claude_writable_roots(mode, Path::new("/repo"));
-    assert!(roots.is_empty());
+    assert_eq!(roots, [] as [std::path::PathBuf; 0]);
     let launcher = claude_sandbox_launcher(
         usagi,
         mode,
@@ -8894,7 +8908,7 @@ fn reclaim_generic_observations(
     while exits != expected_exits {
         match observations.recv_timeout(Duration::from_secs(5)).unwrap() {
             PtyObservation::Output(terminal, bytes) => {
-                assert!(!bytes.is_empty());
+                assert_ne!(bytes, [] as [u8; 0]);
                 output.insert(terminal.terminal_id.as_str().clone());
             }
             PtyObservation::Exited(terminal, 0, release) => {
@@ -8924,7 +8938,7 @@ fn reclaim_agent_observations(
     while exits != expected_exits {
         match observations.recv_timeout(Duration::from_secs(5)).unwrap() {
             AgentPtyObservation::Output(terminal, bytes) => {
-                assert!(!bytes.is_empty());
+                assert_ne!(bytes, [] as [u8; 0]);
                 output.insert(terminal.terminal_id.as_str().clone());
             }
             AgentPtyObservation::Exited(terminal, 0, release) => {
@@ -10230,7 +10244,7 @@ fn generic_terminal_restart_hydrates_inventory_and_preserves_records() {
         .terminals;
     assert_eq!(after_launch.records.len(), 2);
     // The old owner's shard still holds its record exactly as it left it.
-    assert!(!shard_bytes(dir.path(), first_generation).is_empty());
+    assert_ne!(shard_bytes(dir.path(), first_generation), [] as [u8; 0]);
     let retained = after_launch
         .records
         .iter()
@@ -11264,7 +11278,10 @@ fn established_response_writer_covers_frame_and_transport_boundaries() {
     let (mut writer, observation) = response_deadline_writer(100, 2, 0);
     assert_eq!(writer.write(&[]).unwrap(), 0);
     writer.flush().unwrap();
-    assert!(observation.lock().unwrap().deadlines.is_empty());
+    assert_eq!(
+        observation.lock().unwrap().deadlines,
+        [] as [std::time::Duration; 0]
+    );
     assert_eq!(writer.write(&[0]).unwrap(), 1);
     writer.flush().unwrap();
     assert_eq!(
@@ -11686,7 +11703,10 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
     assert_eq!(outcome, ResponseOutcome::Ok);
     let snapshot: WorkspaceAttention = serde_json::from_value(body).unwrap();
     assert_eq!(snapshot.workspace, workspace);
-    assert!(snapshot.items.is_empty());
+    assert_eq!(
+        snapshot.items,
+        [] as [usagi_core::domain::attention::AttentionItem; 0]
+    );
     assert_eq!(sessions.lock().unwrap().snapshot().unwrap(), before);
     sessions
         .lock()
@@ -11723,6 +11743,7 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
 #[test]
 #[allow(clippy::too_many_lines)] // A single adopted tenant proves human scope and read-only inspection together.
 fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
+    use usagi_core::infrastructure::ipc::ProtocolError;
     use usagi_core::usecase::terminal_search::{
         MATCHES_MAX, SearchTerminalKind, TERMINALS_MAX, WorkspaceOutputSearch,
     };
@@ -11847,6 +11868,12 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
         vec![(reference.clone(), SearchTerminalKind::Agent); TERMINALS_MAX + 2],
         |reference, _| {
             reads += 1;
+            if reads == 1 {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "terminal exited during search",
+                ));
+            }
             Ok(usagi_daemon::usecase::terminal::Snapshot {
                 terminal: reference.clone(),
                 revision: 1,
@@ -11859,15 +11886,41 @@ fn terminal_output_search_enforces_human_scope_and_bounded_partial_snapshots() {
             })
         },
     );
-    assert_eq!(reads, 1);
+    assert_eq!(reads, 2);
     assert_eq!(result.omitted_terminals, 2);
-    assert_eq!(result.terminals[0].matches.len(), MATCHES_MAX);
-    assert!(result.terminals[0].exited);
-    assert!(result.terminals[1].limited);
+    assert!(result.terminals[0].unavailable);
+    assert_eq!(result.terminals[1].matches.len(), MATCHES_MAX);
+    assert!(result.terminals[1].exited);
+    assert!(result.terminals[2].limited);
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _lock = terminal.lock().unwrap();
         panic!("poison fixture");
     }));
+    assert!(
+        matches!(call(workspace, "x", &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::Unavailable)
+    );
+    assert_eq!(
+        super::terminal_search::inspect(
+            &agent,
+            &terminal,
+            &reference,
+            SearchTerminalKind::Terminal
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Unavailable
+    );
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _lock = agent.lock().unwrap();
+        panic!("agent owner poison fixture");
+    }));
+    assert!(poisoned.is_err());
+    assert_eq!(
+        super::terminal_search::inspect(&agent, &terminal, &reference, SearchTerminalKind::Agent)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unavailable
+    );
     assert!(
         matches!(call(workspace, "x", &serde_json::json!({})).kind, EnvelopeKind::Response { outcome: ResponseOutcome::Error(error), .. } if error.code == ErrorCode::Unavailable)
     );
@@ -11939,5 +11992,37 @@ fn terminal_search_scope_wire_field_is_optional_and_roundtrips() {
             .unwrap()
             .session,
         None
+    );
+}
+
+#[test]
+fn session_lineage_requires_a_valid_available_session_and_parent_id() {
+    use serde_json::json;
+    let session = SessionId::new();
+    let parent = SessionId::new();
+    let available = json!({"name": "child", "lifecycle": "available", "session_id": session});
+    for snapshot in [
+        json!({}),
+        json!({"sessions": {}}),
+        json!({"sessions": []}),
+        json!({"sessions": [{"name": "child", "lifecycle": "removed", "session_id": session}]}),
+        json!({"sessions": [{"name": "child", "lifecycle": "available"}]}),
+        json!({"sessions": [{"name": "child", "lifecycle": "available", "session_id": "invalid"}]}),
+        json!({"sessions": [{"name": "child", "lifecycle": "available", "session_id": session, "parent_session_id": "invalid"}]}),
+    ] {
+        assert_eq!(available_worktree(&snapshot, session), None);
+        assert_eq!(dispatch::session_lineage_by_name(&snapshot, "child"), None);
+    }
+    for parent_value in [json!(null), json!(parent)] {
+        let mut row = available.clone();
+        row["parent_session_id"] = parent_value.clone();
+        assert_eq!(
+            dispatch::session_lineage_by_name(&json!({"sessions": [row]}), "child"),
+            Some((session, serde_json::from_value(parent_value).unwrap()))
+        );
+    }
+    assert_eq!(
+        dispatch::session_lineage_by_name(&json!({"sessions": [available]}), "child"),
+        Some((session, None))
     );
 }

@@ -645,7 +645,10 @@ mod tests {
             vec![],
         );
         retain_visible_interrupted(&mut last, &BTreeSet::from([closed.continuation]));
-        assert!(last.runtimes.is_empty());
+        assert_eq!(
+            last.runtimes,
+            [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
+        );
     }
 
     #[test]
@@ -834,11 +837,14 @@ mod tests {
             vec![lineage.available()],
         );
         // The live runtime and its interrupted source converge to one live tab.
-        assert!(projected(&live, workspace).tabs.is_empty());
+        assert_eq!(projected(&live, workspace).tabs, [] as [InterruptedTab; 0]);
 
         let mut reserved = live;
         reserved.runtimes[1].state = AgentRuntimeInventoryState::Reserved;
-        assert!(projected(&reserved, workspace).tabs.is_empty());
+        assert_eq!(
+            projected(&reserved, workspace).tabs,
+            [] as [InterruptedTab; 0]
+        );
     }
 
     #[test]
@@ -856,7 +862,10 @@ mod tests {
             vec![exited.available(), reclaimed.available()],
         );
         // Completed history is owned by the read-only completed-tab projection.
-        assert!(projected(&inventory, workspace).tabs.is_empty());
+        assert_eq!(
+            projected(&inventory, workspace).tabs,
+            [] as [InterruptedTab; 0]
+        );
 
         // A session this TUI did not refresh is out of scope.
         let interrupted = self::inventory(
@@ -864,7 +873,7 @@ mod tests {
             vec![exited.runtime(AgentRuntimeInventoryState::Interrupted)],
             vec![exited.available()],
         );
-        assert!(
+        assert_eq!(
             project(
                 &interrupted,
                 workspace,
@@ -873,11 +882,14 @@ mod tests {
                 &BTreeSet::new(),
                 &BTreeSet::new(),
             )
-            .tabs
-            .is_empty()
+            .tabs,
+            [] as [InterruptedTab; 0]
         );
         // So is an inventory for another workspace.
-        assert!(projected(&interrupted, WorkspaceId::new()).tabs.is_empty());
+        assert_eq!(
+            projected(&interrupted, WorkspaceId::new()).tabs,
+            [] as [InterruptedTab; 0]
+        );
     }
 
     #[test]
@@ -888,7 +900,7 @@ mod tests {
         let mut item = lineage.runtime(AgentRuntimeInventoryState::Interrupted);
         item.runtime.session_id = None;
         let inventory = inventory(workspace, vec![item], vec![lineage.available()]);
-        assert!(
+        assert_eq!(
             project(
                 &inventory,
                 workspace,
@@ -897,8 +909,8 @@ mod tests {
                 &BTreeSet::new(),
                 &BTreeSet::new(),
             )
-            .tabs
-            .is_empty()
+            .tabs,
+            [] as [InterruptedTab; 0]
         );
     }
 
@@ -914,7 +926,7 @@ mod tests {
         );
         let dismissed = BTreeSet::from([lineage.continuation]);
 
-        assert!(
+        assert_eq!(
             project(
                 &inventory,
                 workspace,
@@ -923,8 +935,8 @@ mod tests {
                 &dismissed,
                 &BTreeSet::new(),
             )
-            .tabs
-            .is_empty()
+            .tabs,
+            [] as [InterruptedTab; 0]
         );
         let reopened = project(
             &inventory,
@@ -1289,7 +1301,7 @@ mod tests {
         // The derives used by the pane owner stay exercised without leaking any
         // provider-native value into a rendered string.
         let debug = format!("{tab:?} {:?}", InterruptedProjection::default());
-        assert!(!debug.is_empty());
+        assert_ne!(debug, "");
         assert_eq!(tab.clone(), tab);
         assert_eq!(
             InterruptedProjection::default(),
@@ -1297,7 +1309,7 @@ mod tests {
         );
         let command = resume_command(&tab, None, OperationId::new()).unwrap();
         assert_eq!(command.clone(), command);
-        assert!(!format!("{command:?}").is_empty());
+        assert_ne!(format!("{command:?}"), "");
         let (relation, terminal) = lineage.replacement();
         let replacement = accept_replacement(
             &tab,
@@ -1309,6 +1321,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replacement.clone(), replacement);
-        assert!(!format!("{replacement:?}").is_empty());
+        assert_ne!(format!("{replacement:?}"), "");
     }
 }

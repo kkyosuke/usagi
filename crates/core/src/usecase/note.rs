@@ -353,8 +353,11 @@ mod tests {
         assert!(!remove_todo(&store, ghost, 0, ts(21)).unwrap());
         // Reads of an absent target are empty rather than an error.
         assert_eq!(note(&store, ghost).unwrap(), None);
-        assert!(todos(&store, ghost).unwrap().is_empty());
-        assert!(decisions(&store, ghost).unwrap().is_empty());
+        assert_eq!(todos(&store, ghost).unwrap(), [] as [super::SessionTodo; 0]);
+        assert_eq!(
+            decisions(&store, ghost).unwrap(),
+            [] as [super::SessionDecision; 0]
+        );
     }
 
     #[test]
@@ -386,7 +389,10 @@ mod tests {
     fn decisions_are_appended_with_the_supplied_time() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
-        assert!(decisions(&store, target).unwrap().is_empty());
+        assert_eq!(
+            decisions(&store, target).unwrap(),
+            [] as [super::SessionDecision; 0]
+        );
 
         assert!(log_decision(&store, target, "chose a trait", ts(21)).unwrap());
         assert!(log_decision(&store, target, "then a store", ts(22)).unwrap());
@@ -401,8 +407,14 @@ mod tests {
     fn reads_are_empty_without_a_state_file() {
         let (_tmp, store) = empty_store();
         assert_eq!(note(&store, Target::Root).unwrap(), None);
-        assert!(todos(&store, Target::Root).unwrap().is_empty());
-        assert!(decisions(&store, Target::Root).unwrap().is_empty());
+        assert_eq!(
+            todos(&store, Target::Root).unwrap(),
+            [] as [super::SessionTodo; 0]
+        );
+        assert_eq!(
+            decisions(&store, Target::Root).unwrap(),
+            [] as [super::SessionDecision; 0]
+        );
         // Target equality derive is exercised here too.
         assert_eq!(Target::Session("a"), Target::Session("a"));
         assert_ne!(Target::Root, Target::Session("a"));

@@ -121,7 +121,7 @@ fn commands_prepare_the_existing_editors_and_execute_only_on_next_enter() {
             .unwrap();
         assert_eq!(runtime.closeup_modal().unwrap().input(), name);
         assert!(runtime.palette_navigation_blocked());
-        assert!(runtime.panes().active_pane().tabs().is_empty());
+        assert_eq!(runtime.panes().active_pane().tabs(), []);
         let effects = runtime.handle_key(Key::Enter);
         assert!(
             effects.iter().any(|effect| match (name, effect) {
@@ -184,7 +184,7 @@ fn interrupted_tab_navigation_never_resumes_and_diff_is_not_searchable() {
     let operation = OperationId::new();
     runtime.request_pane(target, operation, PaneKind::Diff);
     runtime.inject_pane_event_for_test(target, PaneEvent::Resolved { operation });
-    assert!(runtime.palette_tabs().is_empty());
+    assert_eq!(runtime.palette_tabs(), [] as [CachedTab; 0]);
     let history = InterruptedTab {
         continuation: AgentContinuationRef::new(),
         session_id: Some(session),
@@ -273,13 +273,12 @@ fn unified_search_artifact_activation_emits_exact_open_effect_and_rejects_stale_
                 )
                 .is_err()
         );
-        assert!(
-            runtime
-                .apply_event(AppEvent::OpenArtifact {
-                    target: Target::Session(SessionId::new()),
-                    path: path.into()
-                })
-                .is_empty()
+        assert_eq!(
+            runtime.apply_event(AppEvent::OpenArtifact {
+                target: Target::Session(SessionId::new()),
+                path: path.into()
+            }),
+            [] as [Effect; 0]
         );
     }
 }

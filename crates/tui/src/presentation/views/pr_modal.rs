@@ -619,6 +619,22 @@ mod tests {
     }
 
     #[test]
+    fn tiny_terminal_preserves_status_tabs_before_adding_footer_rows() {
+        let prs = dummy_prs();
+        let modal = PrModal::with_selection(&prs, 0);
+        for height in 7..=9 {
+            let frame = render_over(height, 100, &[], &modal);
+            let text = strip_ansi(&frame.join("\n"));
+            assert_eq!(frame.len(), height);
+            assert!(frame.iter().all(|line| display_width(line) == 100));
+            assert!(text.contains("all"), "{height}: {text}");
+            assert_eq!(text.contains("←→: status"), height >= 8);
+            assert_eq!(text.contains("Enter: open"), height >= 9);
+            assert!(!text.contains("#812"));
+        }
+    }
+
+    #[test]
     fn minimal_body_prioritizes_tabs_and_footers_over_the_pr_list() {
         let lines = body(&PrModal::with_selection(&dummy_prs(), 0), 3)
             .into_iter()

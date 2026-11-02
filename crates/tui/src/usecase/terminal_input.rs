@@ -2050,7 +2050,7 @@ mod tests {
             Modifiers::default(),
             KeyEventKind::Release,
         );
-        assert!(encode_key(&release).is_empty());
+        assert_eq!(encode_key(&release), [] as [u8; 0]);
     }
 
     #[test]

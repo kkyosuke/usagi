@@ -159,7 +159,10 @@ mod tests {
         readable
             .save(SettingsScope::Workspace, &Settings::default())
             .unwrap();
-        assert!(readable.read_workspace_setup_commands().unwrap().is_empty());
+        assert_eq!(
+            readable.read_workspace_setup_commands().unwrap(),
+            [] as [String; 0]
+        );
         assert_eq!(
             readable
                 .save_workspace_setup_commands(&["cargo test".to_owned()])

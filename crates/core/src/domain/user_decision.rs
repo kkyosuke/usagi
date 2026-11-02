@@ -528,7 +528,7 @@ mod tests {
         wire.as_object_mut().unwrap().remove("context");
         let restored: UserDecision = serde_json::from_value(wire).unwrap();
         assert_eq!(restored.selection_mode, UserDecisionSelectionMode::Single);
-        assert!(restored.context.is_empty());
+        assert_eq!(restored.context, [] as [UserDecisionContext; 0]);
         assert!(restored.validate_request().is_ok());
     }
 

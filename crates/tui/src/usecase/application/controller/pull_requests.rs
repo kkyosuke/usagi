@@ -1,8 +1,8 @@
 //! Pull Request modal state and its snapshot reducer.
 //!
 //! The modal lists the daemon's canonical [`PrEntry`] rows for one [`Target`].
-//! Two surfaces share that inventory: this modal and the sidebar badge, both
-//! reading [`AppState::prs_for`]. The modal itself exists only while
+//! This modal and the sidebar badge share the same cached inventory exposed by
+//! [`AppState::prs_for`]. The modal itself exists only while
 //! [`Overlay::Prs`] is the foreground; an inventory request that has not
 //! produced a modal yet is a request, not an overlay.
 
@@ -50,8 +50,7 @@ impl AppState {
     /// Dismissed rows are never visible, whatever the active status tab is.
     fn visible_prs(&self, target: Target) -> Vec<PrEntry> {
         self.prs_for(target)
-            .map(|prs| filtered_prs(prs, PrFilter::All))
-            .unwrap_or_default()
+            .map_or_default(|prs| filtered_prs(prs, PrFilter::All))
     }
     /// Whether a PR modal may take the foreground without displacing something
     /// the user is already looking at.
@@ -66,15 +65,13 @@ impl AppState {
         self.pr_request = None;
         self.preview_overlay = None;
     }
-    /// Drop the PR modal and any request behind it, releasing the foreground
-    /// only when the modal actually owns it.
+    /// Close the foreground PR modal and discard its pending selection.
+    /// Modal reconciliation guarantees an existing PR modal owns the foreground.
     fn close_pr_modal(&mut self) {
         self.pr_overlay = None;
         self.pr_request = None;
         self.pr_focus = None;
-        if self.overlay == Some(Overlay::Prs) {
-            self.overlay = None;
-        }
+        self.overlay = None;
     }
 }
 
@@ -348,33 +345,33 @@ fn absorb_pr_snapshot(
 /// no matches keeps it open, so the user can move to another tab instead of
 /// reopening the inventory.
 fn refresh_pr_modal(state: &mut AppState, target: Target, detected: Option<&PrIdentity>) {
-    let Some((filter, previous)) = state
+    let Some(overlay) = state
         .pr_overlay
-        .as_ref()
+        .as_mut()
         .filter(|overlay| overlay.target == target)
-        .map(|overlay| (overlay.filter, overlay.selected))
     else {
         return;
     };
-    if let Some(identity) = focused_identity(state, target) {
+    if let Some(identity) = focused_identity(state.pr_focus.as_ref(), target) {
         show_focused(state, target, &identity);
         return;
     }
-    let inventory = state.prs_for(target).unwrap_or_default();
+    let inventory = state
+        .prs
+        .get(&target)
+        .map_or_default(|(_, prs)| prs.as_slice());
     if !inventory.iter().any(PrEntry::is_visible) {
         state.close_pr_modal();
         return;
     }
-    let rows = filtered_prs(inventory, filter);
+    let rows = filtered_prs(inventory, overlay.filter);
     let selected = detected
         .and_then(|identity| rows.iter().position(|pr| &pr.identity == identity))
-        .unwrap_or(previous)
+        .unwrap_or(overlay.selected)
         .min(rows.len().saturating_sub(1));
-    if let Some(overlay) = state.pr_overlay.as_mut() {
-        overlay.prs = rows;
-        overlay.selected = selected;
-        overlay.error = None;
-    }
+    overlay.prs = rows;
+    overlay.selected = selected;
+    overlay.error = None;
 }
 
 /// Answer the explicit `p` request for `target` with the snapshot it asked for.
@@ -387,12 +384,10 @@ fn settle_pr_request(state: &mut AppState, target: Target, detected: Option<&PrI
         return;
     }
     state.pr_request = None;
-    if let Some(identity) = focused_identity(state, target) {
+    if let Some(identity) = focused_identity(state.pr_focus.as_ref(), target) {
         // The explicit inbox choice may replace the drawer it came from.
         // A newer interaction would already have cancelled this request.
-        if state.overlay.is_none() {
-            show_focused(state, target, &identity);
-        }
+        show_focused(state, target, &identity);
         return;
     }
     let visible = state.visible_prs(target);
@@ -464,10 +459,8 @@ pub(super) fn open_identity(state: &mut AppState, identity: &PrIdentity) -> Vec<
     open_with_focus(state, target, Some(identity))
 }
 
-fn focused_identity(state: &AppState, target: Target) -> Option<PrIdentity> {
-    state
-        .pr_focus
-        .as_ref()
+fn focused_identity(focus: Option<&(Target, PrIdentity)>, target: Target) -> Option<PrIdentity> {
+    focus
         .filter(|(focused, _)| *focused == target)
         .map(|(_, identity)| identity.clone())
 }
@@ -526,22 +519,21 @@ pub(super) fn update_key(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
         state.pr_focus = None;
     }
     if matches!(key, AppKey::Left | AppKey::Right) {
-        let Some((target, filter)) = state.pr_overlay.as_ref().map(|overlay| {
-            let filter = if matches!(key, AppKey::Right) {
-                overlay.filter.next()
-            } else {
-                overlay.filter.previous()
-            };
-            (overlay.target, filter)
-        }) else {
+        let Some(overlay) = state.pr_overlay.as_mut() else {
             return Vec::new();
         };
-        let all = state.prs_for(target).unwrap_or_default().to_vec();
-        if let Some(overlay) = state.pr_overlay.as_mut() {
-            overlay.filter = filter;
-            overlay.prs = filtered_prs(&all, filter);
-            overlay.selected = 0;
-        }
+        let filter = if matches!(key, AppKey::Right) {
+            overlay.filter.next()
+        } else {
+            overlay.filter.previous()
+        };
+        let all = state
+            .prs
+            .get(&overlay.target)
+            .map_or_default(|(_, prs)| prs.as_slice());
+        overlay.filter = filter;
+        overlay.prs = filtered_prs(all, filter);
+        overlay.selected = 0;
         return Vec::new();
     }
     let Some(overlay) = state.pr_overlay.as_mut() else {

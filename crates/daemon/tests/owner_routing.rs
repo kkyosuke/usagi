@@ -642,7 +642,7 @@ fn closing_and_reopening_the_client_re_establishes_the_old_subscription_from_its
         vec![64],
         "the reopened stream resumes at the cursor instead of replaying"
     );
-    assert!(world.old.observed.inputs().is_empty());
+    assert_eq!(world.old.observed.inputs(), [] as [Vec<u8>; 0]);
     world.shutdown();
 }
 
@@ -731,7 +731,7 @@ fn a_forged_or_unknown_generation_cannot_name_an_endpoint() {
             }))
             .is_err()
     );
-    assert!(world.connects().is_empty());
+    assert_eq!(world.connects(), [] as [DaemonGeneration; 0]);
 
     // A record that names a socket outside its own generation directory is
     // refused by the transport, not connected to.

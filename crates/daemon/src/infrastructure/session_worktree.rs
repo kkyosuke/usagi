@@ -495,11 +495,11 @@ mod tests {
             SystemSessionWorktreeIo.session_entries(&container).unwrap(),
             ["alpha", "marker", "zeta"]
         );
-        assert!(
+        assert_eq!(
             SystemSessionWorktreeIo
                 .session_entries(&tmp.path().join("missing"))
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            [] as [std::string::String; 0]
         );
     }
 
@@ -547,13 +547,13 @@ mod tests {
                 .unwrap();
             assert!(session.join("artifacts/.gitignore").is_file());
             std::fs::write(session.join("artifacts/report.md"), "retained result").unwrap();
-            assert!(
+            assert_eq!(
                 SystemGit
                     .run(&session, &["status", "--porcelain"])
                     .unwrap()
                     .stdout
-                    .trim()
-                    .is_empty()
+                    .trim(),
+                ""
             );
             if force {
                 std::fs::write(session.join("untracked.txt"), "discard").unwrap();

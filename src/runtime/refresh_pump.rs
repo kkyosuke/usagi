@@ -368,9 +368,12 @@ impl<T> Drop for RefreshPump<T> {
         // Cut a pending wait short so quitting never waits out the cadence.
         lock(&self.shared.state).woken = true;
         self.shared.notify_all();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        // Construction installs the handle; only Drop takes ownership of it.
+        let handle = self
+            .handle
+            .take()
+            .expect("worker handle is present until drop");
+        let _ = handle.join();
     }
 }
 
@@ -519,29 +522,31 @@ mod tests {
         });
         pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut release = Some(release_tx);
-        loop {
-            if let Some(result) = pump.take() {
-                assert_eq!(result, Ok(1));
-                break;
-            }
-            // A zero-capacity channel makes the first empty observation
-            // deterministic: sending blocks until the resident worker is
-            // waiting in `recv`, then lets it publish for the next iteration.
-            if let Some(release) = release.take() {
-                release.send(()).unwrap();
-            }
+        // The worker cannot publish until released, so the empty observation
+        // is deterministic and does not depend on the polling schedule.
+        let mut result = pump.take();
+        assert_eq!(result, None);
+        release_tx.send(()).unwrap();
+        drop(release_tx);
+        while result.is_none() {
             assert!(Instant::now() < deadline, "the lane published no result");
             std::thread::sleep(Duration::from_millis(5));
+            result = pump.take();
         }
+        assert_eq!(result, Some(Ok(1)));
         assert_eq!(pump.metrics().fetches, 1);
     }
 
     #[test]
     fn an_active_lane_does_not_notify_the_worker_again() {
-        let pump = RefreshPump::spawn(cadence(), || Ok(1u32));
+        let (fetched_tx, fetched_rx) = std::sync::mpsc::channel();
+        let pump = RefreshPump::spawn(cadence(), move || {
+            fetched_tx.send(()).unwrap();
+            Ok(1u32)
+        });
 
         pump.activate();
+        fetched_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(pump.notifications(), 1);
 
         for _ in 0..100 {
@@ -561,22 +566,23 @@ mod tests {
         });
         pump.activate();
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut release = Some(&release_tx);
-        while pump.take().is_none() {
+        let mut result = pump.take();
+        assert_eq!(result, None);
+        release_tx.send(()).unwrap();
+        while result.is_none() {
             assert!(Instant::now() < deadline, "the lane published no result");
-            if let Some(release) = release.take() {
-                release.send(()).unwrap();
-            }
             std::thread::sleep(Duration::from_millis(5));
+            result = pump.take();
         }
         pump.wake();
-        let mut release = Some(release_tx);
-        while pump.take().is_none() {
+        result = pump.take();
+        assert_eq!(result, None);
+        release_tx.send(()).unwrap();
+        drop(release_tx);
+        while result.is_none() {
             assert!(Instant::now() < deadline, "the wake produced no fetch");
-            if let Some(release) = release.take() {
-                release.send(()).unwrap();
-            }
             std::thread::sleep(Duration::from_millis(5));
+            result = pump.take();
         }
         // The steady cadence is 500ms; the second fetch only happened because the
         // wake cut the wait short.

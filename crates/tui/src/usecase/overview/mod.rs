@@ -198,7 +198,6 @@ const SESSION_SUBCOMMANDS: &[&str] = &[
 ];
 
 /// Overview 固有コマンドの metadata を名前順に返す。
-#[must_use]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
 }
@@ -536,7 +535,10 @@ mod tests {
             help(&fake, "status --short").unwrap().long_description,
             "Summarize the current workspace state without changing it."
         );
-        assert!(complete(&DefaultRegistry, "zz").is_empty());
+        assert_eq!(
+            complete(&DefaultRegistry, "zz"),
+            [] as [super::CommandInfo; 0]
+        );
     }
 
     #[test]
@@ -581,15 +583,17 @@ mod tests {
             Err("session name must not contain whitespace")
         );
         assert_eq!(parse_session("sleep"), Err("session name is required"));
-        assert_eq!(
-            parse_session("remove feature-x --force"),
-            Ok(SessionCommand::Remove {
-                name: "feature-x".into(),
-                force: true,
-                force_delete_branch: true,
-                purge_orphan: false,
-            })
-        );
+        for input in ["remove feature-x --force", "remove --force feature-x"] {
+            assert_eq!(
+                parse_session(input),
+                Ok(SessionCommand::Remove {
+                    name: "feature-x".into(),
+                    force: true,
+                    force_delete_branch: true,
+                    purge_orphan: false,
+                })
+            );
+        }
         assert_eq!(
             parse_session("remove feature-x"),
             Ok(SessionCommand::Remove {

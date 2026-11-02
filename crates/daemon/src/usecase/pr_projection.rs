@@ -131,9 +131,8 @@ impl PrProjectionQueue {
 
     /// Runs `apply` against the queue state.
     ///
-    /// A poisoned lock reports "not accepted" instead of panicking, and does so
-    /// on the same line as the lock so this failure mode needs no branch of its
-    /// own to leave unexercised.
+    /// A poisoned lock reports "not accepted" instead of panicking; projection
+    /// cannot safely continue from queue state interrupted by a panic.
     fn with_state(&self, apply: impl FnOnce(&mut State) -> bool) -> bool {
         self.state.lock().is_ok_and(|mut state| apply(&mut state))
     }
@@ -494,5 +493,22 @@ mod tests {
     #[should_panic(expected = "a reset and its successor need two entries")]
     fn metadata_limit_reserves_room_for_the_reset() {
         let _ = PrProjectionQueue::with_limits(1, 0, 1);
+    }
+
+    #[test]
+    fn a_poisoned_queue_refuses_new_work_and_ends_the_consumer() {
+        let queue = PrProjectionQueue::new();
+        let terminal = TerminalId::new();
+        assert!(queue.submit_output(terminal, None, b"pending".to_vec()));
+        let result = std::panic::catch_unwind(|| {
+            let _state = queue.state.lock().unwrap();
+            panic!("queue update interrupted");
+        });
+        assert!(result.is_err());
+        assert!(!queue.submit_output(terminal, None, b"later".to_vec()));
+        queue.submit_gap(terminal);
+        queue.submit_closed(terminal, None);
+        queue.close();
+        assert_eq!(queue.recv(), None);
     }
 }

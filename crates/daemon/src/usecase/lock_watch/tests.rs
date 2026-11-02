@@ -61,7 +61,10 @@ fn a_stall_is_reported_once_and_its_recovery_once() {
     let stalled = probe("agent runtime", Some(start));
     let mut watch = LockWatch::new(Duration::from_secs(10), [Arc::clone(&stalled)]);
 
-    assert!(watch.observe(start + Duration::from_secs(9)).is_empty());
+    assert_eq!(
+        watch.observe(start + Duration::from_secs(9)),
+        [] as [crate::usecase::lock_watch::LockWatchEvent; 0]
+    );
     assert_eq!(
         watch.observe(start + Duration::from_secs(10)),
         vec![LockWatchEvent::Stalled {
@@ -69,7 +72,10 @@ fn a_stall_is_reported_once_and_its_recovery_once() {
             waited: Duration::from_secs(10),
         }]
     );
-    assert!(watch.observe(start + Duration::from_secs(30)).is_empty());
+    assert_eq!(
+        watch.observe(start + Duration::from_secs(30)),
+        [] as [crate::usecase::lock_watch::LockWatchEvent; 0]
+    );
 
     stalled.publish(None);
     assert_eq!(
@@ -79,7 +85,10 @@ fn a_stall_is_reported_once_and_its_recovery_once() {
             stalled_for: Duration::from_secs(40),
         }]
     );
-    assert!(watch.observe(start + Duration::from_secs(50)).is_empty());
+    assert_eq!(
+        watch.observe(start + Duration::from_secs(50)),
+        [] as [crate::usecase::lock_watch::LockWatchEvent; 0]
+    );
 }
 
 #[test]

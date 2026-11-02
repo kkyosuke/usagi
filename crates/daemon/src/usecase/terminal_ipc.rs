@@ -1365,7 +1365,10 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::StaleTarget, "forged {field}");
         }
-        assert!(runtime.pty.resized.is_empty());
+        assert_eq!(
+            runtime.pty.resized,
+            [] as [crate::usecase::terminal::Geometry; 0]
+        );
     }
 
     #[test]
@@ -1810,7 +1813,10 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
-        assert!(runtime.pty.spawned_directories.is_empty());
+        assert_eq!(
+            runtime.pty.spawned_directories,
+            [] as [std::path::PathBuf; 0]
+        );
 
         let invalid_scope = TerminalLaunchScope {
             workspace_id: workspace,
@@ -1997,7 +2003,10 @@ mod tests {
             })
             .is_ok()
         );
-        assert!(runtime.pty.resized.is_empty());
+        assert_eq!(
+            runtime.pty.resized,
+            [] as [crate::usecase::terminal::Geometry; 0]
+        );
     }
 
     #[test]
@@ -2467,10 +2476,12 @@ mod tests {
                 crate::usecase::terminal::TerminalRuntimeState::Running
             )]
         );
-        assert!(
-            runtime
-                .cache_cleanup_activity(WorkspaceId::new())
-                .is_empty()
+        assert_eq!(
+            runtime.cache_cleanup_activity(WorkspaceId::new()),
+            [] as [(
+                usagi_core::domain::id::TerminalRef,
+                crate::usecase::terminal::TerminalRuntimeState
+            ); 0]
         );
 
         // A different scope (foreign session) sees nothing.
@@ -2479,10 +2490,16 @@ mod tests {
             session_id: Some(SessionId::new()),
             worktree_id: worktree,
         };
-        assert!(TerminalOwner::inventory(&runtime, &foreign).is_empty());
+        assert_eq!(
+            TerminalOwner::inventory(&runtime, &foreign),
+            [] as [usagi_core::domain::terminal_launch::TerminalInventoryEntry; 0]
+        );
 
         // Before exit the terminal is not a completed tombstone.
-        assert!(TerminalOwner::completed_inventory(&runtime, &scope).is_empty());
+        assert_eq!(
+            TerminalOwner::completed_inventory(&runtime, &scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
 
         // After the terminal exits it is no longer attachable (`live == false`).
         runtime.exit(&terminal, 0).unwrap();
@@ -2508,7 +2525,10 @@ mod tests {
         assert!(completed[0].terminal.fences(&terminal));
         assert_eq!(completed[0].kind, TerminalKind::Terminal);
         assert_eq!(completed[0].exit_status, 0);
-        assert!(TerminalOwner::completed_inventory(&runtime, &foreign).is_empty());
+        assert_eq!(
+            TerminalOwner::completed_inventory(&runtime, &foreign),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
     }
 
     #[test]
@@ -2525,7 +2545,10 @@ mod tests {
             runtime.search_targets(terminal.workspace_id),
             vec![terminal.clone()]
         );
-        assert!(runtime.search_targets(WorkspaceId::new()).is_empty());
+        assert_eq!(
+            runtime.search_targets(WorkspaceId::new()),
+            [] as [usagi_core::domain::id::TerminalRef; 0]
+        );
         let snapshot = runtime.inspect(&terminal).unwrap();
 
         assert_eq!(snapshot.terminal, terminal);

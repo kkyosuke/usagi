@@ -419,9 +419,7 @@ impl AgentFixtures {
 
 /// fixture provider が今までに起動した child の数。
 fn spawn_count(provider: &Path) -> usize {
-    fs::read_to_string(provider)
-        .map(|text| text.lines().count())
-        .unwrap_or_default()
+    fs::read_to_string(provider).map_or_default(|text| text.lines().count())
 }
 
 /// fixture provider が記録した起動 argv（1 spawn 1 行、起動順）。
@@ -809,9 +807,7 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
 
     let deadline = Instant::now() + FIXTURE_SPAWN_TIMEOUT;
     loop {
-        let lines = fs::read_to_string(path)
-            .map(|text| text.lines().count())
-            .unwrap_or_default();
+        let lines = fs::read_to_string(path).map_or_default(|text| text.lines().count());
         if lines >= expected {
             return;
         }
@@ -1232,9 +1228,7 @@ fn wait_for_organization_conversations(
 /// 場合、到達を待つだけでは 2 個目の spawn を見逃す。到達後に settle 窓を置いて再確認する。
 fn assert_spawns_settle(count: &Path, expected: usize) {
     wait_for_file_lines(count, expected);
-    let observed = fs::read_to_string(count)
-        .map(|text| text.lines().count())
-        .unwrap_or_default();
+    let observed = fs::read_to_string(count).map_or_default(|text| text.lines().count());
     assert_eq!(
         observed,
         expected,
@@ -1242,9 +1236,7 @@ fn assert_spawns_settle(count: &Path, expected: usize) {
         count.display()
     );
     thread::sleep(Duration::from_millis(400));
-    let settled = fs::read_to_string(count)
-        .map(|text| text.lines().count())
-        .unwrap_or_default();
+    let settled = fs::read_to_string(count).map_or_default(|text| text.lines().count());
     assert_eq!(
         settled,
         expected,
@@ -2976,7 +2968,10 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     // Ctrl-O followed by the raw Ctrl-X byte is the exact chord users press.
     send(&mut master, b"\x0f\x18");
     wait_for_dead_processes(&[process]);
-    assert!(agent_processes(home.path(), 0).is_empty());
+    assert_eq!(
+        agent_processes(home.path(), 0),
+        [] as [(TerminalRef, u64); 0]
+    );
     assert!(read_agent_intent(home.path()).dismissed.is_empty());
     assert_eq!(
         fixtures.claude_spawns(),
@@ -3411,7 +3406,10 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     // installed providers it owns the empty state and remains non-launchable.
     send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
-    assert!(agent_processes(home.path(), 0).is_empty());
+    assert_eq!(
+        agent_processes(home.path(), 0),
+        [] as [(TerminalRef, u64); 0]
+    );
 
     // The drawer falls back to full width below its normal minimum and keeps
     // ownership of global input. Ctrl-Q therefore cannot leak through and open

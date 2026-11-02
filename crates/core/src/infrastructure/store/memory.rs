@@ -406,7 +406,7 @@ mod tests {
     fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
-        assert!(source_memories(&store).is_empty());
+        assert_eq!(source_memories(&store), [] as [Memory; 0]);
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [MemorySummary; 0]);
         assert!(!store.dir().exists());
     }
 
@@ -1034,10 +1034,10 @@ mod tests {
             let outcome = store.remove_with_outcome("doomed").unwrap();
             assert!(outcome.value);
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert!(source_memories(&store).is_empty());
+            assert_eq!(source_memories(&store), [] as [Memory; 0]);
 
             let reopened = MemoryStore::new(tmp.path());
-            assert!(reopened.summaries().unwrap().is_empty());
+            assert_eq!(reopened.summaries().unwrap(), [] as [MemorySummary; 0]);
             let retry = reopened.remove_with_outcome("doomed").unwrap();
             assert!(!retry.value);
             assert_eq!(retry.derived, DerivedState::Fresh);
@@ -1056,7 +1056,7 @@ mod tests {
             let source = store.dir().join("fact.md");
             fail_next_atomic_write(&source, stage);
             assert!(store.write(&memory("fact", "Created")).is_err());
-            assert!(source_memories(&store).is_empty());
+            assert_eq!(source_memories(&store), [] as [Memory; 0]);
 
             store.write(&memory("fact", "Old")).unwrap();
             fail_next_atomic_write(&source, stage);

@@ -1069,6 +1069,22 @@ not a process line
     }
 
     #[test]
+    fn malformed_or_unidentified_records_do_not_claim_process_ownership() {
+        let mut accounted = BTreeSet::new();
+        for name in [
+            "daemon.json",
+            "generations.json",
+            "bootstrap-broker-fixture.json",
+        ] {
+            collect_accounted_processes(name, "{invalid", &mut accounted);
+        }
+        for identity in [None, Some("")] {
+            AccountedProcess::insert(42, identity, &mut accounted);
+        }
+        assert_eq!(accounted, BTreeSet::new());
+    }
+
+    #[test]
     fn targeted_cleanup_requires_support_before_mutating_and_checks_completion() {
         use std::collections::VecDeque;
         use usagi_core::infrastructure::client::DaemonClient;

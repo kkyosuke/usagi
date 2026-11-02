@@ -174,10 +174,9 @@ mod tests {
 
     #[test]
     fn empty_inventory_is_a_complete_snapshot() {
-        assert!(
-            inbox_snapshot(&mut |_| Ok(page(Vec::new(), None)))
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            inbox_snapshot(&mut |_| Ok(page(Vec::new(), None))).unwrap(),
+            [] as [usagi_core::domain::user_decision::UserDecision; 0]
         );
     }
 

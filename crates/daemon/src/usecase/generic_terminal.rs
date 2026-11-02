@@ -1536,7 +1536,10 @@ mod tests {
             )
             .unwrap();
         // A running terminal is not a completed tombstone.
-        assert!(coordinator.completed_inventory(&request.scope).is_empty());
+        assert_eq!(
+            coordinator.completed_inventory(&request.scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
 
         coordinator
             .output(&terminal, b"final output".to_vec())
@@ -1560,7 +1563,10 @@ mod tests {
             session_id: None,
             worktree_id: WorktreeId::new(),
         };
-        assert!(coordinator.completed_inventory(&other_scope).is_empty());
+        assert_eq!(
+            coordinator.completed_inventory(&other_scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
     }
 
     #[test]
@@ -1977,8 +1983,14 @@ mod tests {
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
         // The durable record, the journal, and the inventory entry are gone.
-        assert!(coordinator.snapshot().records.is_empty());
-        assert!(coordinator.completed_inventory(&request().scope).is_empty());
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
+        assert_eq!(
+            coordinator.completed_inventory(&request().scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
         assert!(
             store
                 .0
@@ -2173,7 +2185,10 @@ mod tests {
         // The store write fails, but the runtime is not resurrected: the record
         // is gone from memory and the query stays typed.
         assert_eq!(coordinator.collect_garbage(&mut FailingStore), 1);
-        assert!(coordinator.snapshot().records.is_empty());
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
         assert_eq!(
             coordinator.terminal_snapshot(&terminal),
             Err(GenericTerminalError::FinalEvicted(
@@ -2182,6 +2197,9 @@ mod tests {
         );
         // A later successful write publishes the same converged snapshot.
         coordinator.persist(&mut store).unwrap();
-        assert!(store.0.last().unwrap().records.is_empty());
+        assert_eq!(
+            store.0.last().unwrap().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
     }
 }

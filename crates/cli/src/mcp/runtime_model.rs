@@ -320,10 +320,9 @@ mod tests {
             branches[1]["properties"]["model"]["enum"],
             json!(["sonnet", "opus"])
         );
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path())
-                .models("unknown")
-                .is_empty()
+        assert_eq!(
+            WorkspaceAgentConfig::read(workspace.path()).models("unknown"),
+            [] as [String; 0]
         );
 
         std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [valid").unwrap();

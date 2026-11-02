@@ -1230,7 +1230,10 @@ fn render_home_snapshot_draws_the_initial_home_surface() {
     assert!(frame.contains("demo-session"));
     assert!(frame.contains("+ new session"));
     // A zero size safely falls back to the default geometry.
-    assert!(!render_home_snapshot(0, 0, &snapshot("demo"), IconMode::NerdFont).is_empty());
+    assert_ne!(
+        render_home_snapshot(0, 0, &snapshot("demo"), IconMode::NerdFont),
+        [] as [String; 0]
+    );
 
     let text =
         strip_ansi(&render_home_snapshot(30, 100, &snapshot("demo"), IconMode::Text).join("\n"));

@@ -527,9 +527,10 @@ fn claude_sandbox(
 }
 
 fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut entries = std::fs::read_dir(home)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        entries.push(entry?.path());
+    }
     entries.sort();
     Ok(entries)
 }
@@ -1100,7 +1101,7 @@ mod tests {
 
             assert_eq!(status, std::process::ExitCode::FAILURE);
             assert_eq!(launches.get(), 0);
-            assert!(out.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
             assert_eq!(
                 String::from_utf8(err).unwrap(),
                 "self-update refused: embedded installer identity is invalid\n"
@@ -1118,7 +1119,7 @@ mod tests {
         let mut err = Vec::new();
         let status =
             execute_self_update_with(&request, &mut out, &mut err, &mut |script, selected| {
-                assert!(script.is_empty());
+                assert_eq!(script, [] as [u8; 0]);
                 assert!(selected);
                 Ok(process_output(0, b"installed\n", b"warning\n"))
             })
@@ -1289,7 +1290,7 @@ mod tests {
         .unwrap();
         assert_eq!(status, std::process::ExitCode::SUCCESS);
         assert_eq!(String::from_utf8(out).unwrap(), "{\"result\":\"done\"}\n");
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1300,7 +1301,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status, std::process::ExitCode::FAILURE);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "daemon request failed [unavailable]: daemon transport is unavailable\n"
@@ -1405,7 +1406,7 @@ mod tests {
     fn a_successful_outcome_keeps_its_exit_code_and_stays_quiet() {
         let mut err = Vec::new();
         let code = process_outcome(Ok(exit_code(3)), &mut err);
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
         assert_eq!(format!("{code:?}"), format!("{:?}", exit_code(3)));
     }
 

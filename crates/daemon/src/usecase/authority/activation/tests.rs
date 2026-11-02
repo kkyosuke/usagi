@@ -150,7 +150,10 @@ fn the_registry_names_the_generation_before_the_locator_does() {
     assert!(matches!(failure, ClaimFailure::Locator(_)));
     // W1 happened, W2 did not: the entry exists and nothing is discoverable.
     assert_eq!(world.document().current, Some(world.generation));
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }
 
 #[test]
@@ -269,7 +272,10 @@ fn an_unreadable_registry_refuses_the_claim_without_writing_anything() {
     assert!(failure.source().is_none());
     assert!(failure.to_string().contains("generation recovery failed"));
     assert_eq!(world.file.writes(), 0);
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }
 
 #[test]
@@ -281,7 +287,10 @@ fn a_registry_that_cannot_be_written_refuses_the_claim() {
 
     assert!(matches!(failure, ClaimFailure::Registry(_)));
     assert!(failure.to_string().contains("generation registry store"));
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }
 
 #[test]
@@ -423,7 +432,10 @@ fn a_live_standby_still_refuses_the_activation_beside_it() {
             if failure.refusal() == Some(RegistryError::AuthorityRetained)
     ));
     assert_eq!(world.file.contents(), before);
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }
 
 /// An identity that cannot be *compared* is not proof of life either, so a
@@ -474,5 +486,8 @@ fn a_reclamation_that_cannot_be_committed_refuses_the_claim() {
     let failure = claim(&world, Vec::new()).unwrap_err();
 
     assert!(matches!(failure, ClaimFailure::Registry(_)));
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }

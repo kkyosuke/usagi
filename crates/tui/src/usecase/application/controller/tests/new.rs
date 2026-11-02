@@ -45,8 +45,8 @@ fn new_validation_reports_every_required_clone_and_existing_field() {
     ];
     for (mode, form, expected) in cases {
         assert_eq!(validate_new_form(mode, &form), Err(expected));
-        assert!(!expected.message().is_empty());
-        assert!(!format!("{expected:?}").is_empty());
+        assert_ne!(expected.message(), "");
+        assert_ne!(format!("{expected:?}"), "");
     }
 }
 
@@ -60,7 +60,7 @@ fn agent_launch_failure_opens_a_dismissible_error_dialog() {
             AppEvent::AgentLaunchFailed(Notice::new("agent process could not be started")),
         );
 
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
         assert_eq!(state.overlay(), Some(Overlay::AgentLaunchError));
         assert_eq!(
             state
@@ -73,7 +73,10 @@ fn agent_launch_failure_opens_a_dismissible_error_dialog() {
             Some("agent process could not be started")
         );
 
-        assert!(update(&mut state, AppEvent::Key(dismiss)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(dismiss)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), None);
         assert!(state.agent_launch_error().is_none());
     }
@@ -85,25 +88,28 @@ fn overview_daemon_opens_the_status_surface_without_an_effect() {
     let mut state = AppState::home(workspace, Vec::new());
     state.overlay = Some(Overlay::Overview);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("daemon".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Daemon));
     assert!(state.notice().is_none());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Escape)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
     state.overlay = Some(Overlay::Overview);
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("daemon extra".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert!(
@@ -170,7 +176,7 @@ fn overview_env_opens_the_editor_and_rejects_an_unknown_scope() {
         &mut state,
         AppEvent::Key(AppKey::SubmitOverview("env extra".to_owned())),
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert!(state.environment_editor().is_none());
 }
@@ -183,7 +189,7 @@ fn environment_keys_are_inert_without_an_open_editor() {
     // With no overlay at all.
     let mut state = AppState::home(workspace, Vec::new());
     for key in environment_keys() {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert!(state.environment_editor().is_none());
     }
 
@@ -192,7 +198,7 @@ fn environment_keys_are_inert_without_an_open_editor() {
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
     for key in environment_keys() {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert!(state.environment_editor().is_none());
     }
     assert!(state.note_editor().is_some());
@@ -276,7 +282,8 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     assert_preview_load(&state, &effects, target, None, PreviewFileFilter::All);
     assert_eq!(state.overlay(), Some(Overlay::Preview));
     assert!(state.preview_overlay().unwrap().is_loading());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(effects, [] as [Effect; 0]);
 
     // A file list for another target is ignored; unsafe backend paths are
     // rejected when the matching result lands.
@@ -328,7 +335,7 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     // A late completion for another file cannot replace the requested one.
     let event = preview_loaded(&state, target, Some("src/lib.rs"), &[], &["stale"]);
     let _ = update(&mut state, event);
-    assert!(state.preview_overlay().unwrap().lines().is_empty());
+    assert_eq!(state.preview_overlay().unwrap().lines(), [] as [String; 0]);
     let event = preview_loaded(
         &state,
         target,
@@ -341,7 +348,10 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
         state.preview_overlay().unwrap().lines(),
         &["# Title", "�[31mred text"]
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::Home)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Home)),
+        [] as [Effect; 0]
+    );
 
     // Down scrolls; Up saturates at the top.
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));

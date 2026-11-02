@@ -363,8 +363,7 @@ impl AgentTerminalActor for SharedAgent {
         // A poisoned lock is a safe empty inventory, never a client fallback.
         self.runtime
             .lock()
-            .map(|agent| AgentTerminalActor::terminal_inventory(&*agent, scope))
-            .unwrap_or_default()
+            .map_or_default(|agent| AgentTerminalActor::terminal_inventory(&*agent, scope))
     }
     fn completed_inventory(
         &self,
@@ -373,8 +372,7 @@ impl AgentTerminalActor for SharedAgent {
         // A poisoned lock is a safe empty tombstone list, never a fallback.
         self.runtime
             .lock()
-            .map(|agent| AgentTerminalActor::completed_inventory(&*agent, scope))
-            .unwrap_or_default()
+            .map_or_default(|agent| AgentTerminalActor::completed_inventory(&*agent, scope))
     }
     fn disconnect(&mut self, _connection: usagi_core::domain::id::ConnectionId) {}
 }

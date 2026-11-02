@@ -21,7 +21,10 @@ fn sidebar_reserved_pr_cells_without_a_visible_pr_do_not_open_a_modal() {
         }),
     );
 
-    assert!(pointer_effects(&mut state, 35, 3, std::time::Duration::ZERO).is_empty());
+    assert_eq!(
+        pointer_effects(&mut state, 35, 3, std::time::Duration::ZERO),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 }
 
@@ -383,6 +386,42 @@ fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
 }
 
 #[test]
+fn delayed_pr_errors_preserve_drawers_opened_after_the_request() {
+    for (key, focus) in [
+        (AppKey::ToggleDirectorDrawer, WorkspaceDrawerFocus::Director),
+        (
+            AppKey::ToggleRootTerminalDrawer,
+            WorkspaceDrawerFocus::Terminal,
+        ),
+    ] {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPrs)),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        let _ = update(&mut state, AppEvent::Key(key));
+        assert_eq!(state.pr_request(), Some(target));
+        assert_eq!(state.workspace_drawer_focus(), Some(focus));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+
+        assert_eq!(state.pr_request(), None);
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+        assert!(state.workspace_drawer_open());
+        assert_eq!(state.workspace_drawer_focus(), Some(focus));
+        assert!(state.pr_focus.is_none());
+    }
+}
+
+#[test]
 fn newly_detected_pr_auto_opens_without_reopening_or_stealing_focus() {
     let (workspace, session, _) = ids();
     let target = Target::Session(session);
@@ -566,7 +605,10 @@ fn pr_reference_filter_copy_dismiss_and_safe_auto_open_modes() {
             url: "https://github.com/o/r/pull/1".into()
         }]
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('d'))).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('d'))),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::CtrlX)),
         vec![Effect::DismissPullRequest {
@@ -624,7 +666,7 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
-    assert!(state.pr_overlay().unwrap().prs().is_empty());
+    assert_eq!(state.pr_overlay().unwrap().prs(), []);
     let mut refreshed_merged = newly_detected;
     refreshed_merged.state = PrState::Merged;
     let _ = update(
@@ -637,7 +679,7 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     );
     assert_eq!(state.overlay(), Some(Overlay::Prs));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
-    assert!(state.pr_overlay().unwrap().prs().is_empty());
+    assert_eq!(state.pr_overlay().unwrap().prs(), []);
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
@@ -663,7 +705,10 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     );
 
     state.pr_overlay = None;
-    assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Left)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -808,7 +853,8 @@ fn inbox_pr_focus_survives_loading_and_targets_the_selected_number() {
     );
     assert!(state.pr_overlay().unwrap().error().is_some());
     assert!(state.pr_overlay().unwrap().selected_pr().is_none());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(effects, [] as [Effect; 0]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let _ = update(
         &mut state,
@@ -823,7 +869,10 @@ fn inbox_pr_focus_survives_loading_and_targets_the_selected_number() {
         }),
     );
     assert!(state.pr_overlay().unwrap().error().is_some());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -960,7 +1009,10 @@ fn inbox_pr_refreshes_never_replace_a_missing_exact_selection() {
             );
             assert!(state.pr_overlay().unwrap().selected_pr().is_none());
             assert!(state.pr_overlay().unwrap().error().is_some());
-            assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                [] as [Effect; 0]
+            );
         }
         let _ = update(&mut state, AppEvent::Key(AppKey::Right));
         assert_eq!(
@@ -1047,7 +1099,10 @@ fn inbox_pr_requests_can_replace_the_drawer_they_were_opened_from() {
             assert_eq!(state.overlay(), Some(Overlay::Prs));
             if failed {
                 assert!(state.pr_overlay().unwrap().error().is_some());
-                assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+                assert_eq!(
+                    update(&mut state, AppEvent::Key(AppKey::Enter)),
+                    [] as [Effect; 0]
+                );
             } else {
                 assert_eq!(
                     state.pr_overlay().unwrap().selected_pr().unwrap().identity,
@@ -1061,12 +1116,12 @@ fn inbox_pr_requests_can_replace_the_drawer_they_were_opened_from() {
 #[test]
 fn inbox_pr_load_errors_keep_focus_until_a_newer_interaction() {
     let mut empty = AppState::home(WorkspaceId::new(), Vec::new());
-    assert!(
+    assert_eq!(
         update(
             &mut empty,
             AppEvent::Key(AppKey::OpenPullRequest(pr_link(2).identity))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     let workspace = WorkspaceId::new();
     let session = SessionId::new();

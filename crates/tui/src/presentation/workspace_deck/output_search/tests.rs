@@ -121,7 +121,7 @@ fn output_search_fences_requeries_closure_and_workspace_identity() {
     assert!(frame.contains("3 limited/omitted"));
     assert!(frame.contains("target disappeared"));
     assert!(frame.contains("exited"));
-    assert!(!format!("{deck:?}").is_empty());
+    assert_ne!(format!("{deck:?}"), "");
     assert_eq!(deck.clone(), deck);
 }
 

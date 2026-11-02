@@ -1094,7 +1094,10 @@ mod tests {
                 .iter()
                 .all(|slot| !slot.terminal.fences(&old.terminal))
         }));
-        assert!(stale_projection.targets.is_empty());
+        assert_eq!(
+            stale_projection.targets,
+            [] as [usagi_tui::usecase::application::agent_tab_intent::AgentTabTargetProjection; 0]
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes_before);
 
         let replacement_runtime =

@@ -69,7 +69,7 @@ fn lost_creation_reply_recovers_the_answer_without_a_key_or_known_id() {
         "discovery is read only"
     );
     assert_eq!(store.events().unwrap().len(), 2);
-    assert!(
+    assert_eq!(
         store
             .pending_page(
                 UserDecisionScope::Owners(&[request.owner.clone()]),
@@ -78,10 +78,10 @@ fn lost_creation_reply_recovers_the_answer_without_a_key_or_known_id() {
             )
             .unwrap()
             .unwrap()
-            .decisions
-            .is_empty()
+            .decisions,
+        [] as [UserDecision; 0]
     );
-    assert!(
+    assert_eq!(
         store
             .inbox_page(
                 UserDecisionScope::Owners(&[]),
@@ -90,8 +90,8 @@ fn lost_creation_reply_recovers_the_answer_without_a_key_or_known_id() {
             )
             .unwrap()
             .unwrap()
-            .decisions
-            .is_empty()
+            .decisions,
+        [] as [UserDecision; 0]
     );
     assert!(store.ack_event(recovered.decision_id).unwrap());
     let remaining = store
@@ -147,7 +147,10 @@ fn discard_is_workspace_scoped_terminal_only_and_preserves_key_tombstones() {
         .unwrap();
     let store = UserDecisionStore::new(dir.path());
     assert!(store.get(workspace, request.decision_id).unwrap().is_none());
-    assert!(store.events().unwrap().is_empty());
+    assert_eq!(
+        store.events().unwrap(),
+        [] as [UserDecisionResolvedEvent; 0]
+    );
     assert_eq!(
         store.create(request.clone()).unwrap(),
         Err(UserDecisionError::IdempotencyExpired)
@@ -198,12 +201,12 @@ fn abandoned_answers_can_be_reviewed_and_discarded_to_recover_capacity() {
             }
         }
     }
-    assert!(store.pending_all().unwrap().is_empty());
-    assert!(
+    assert_eq!(store.pending_all().unwrap(), [] as [UserDecision; 0]);
+    assert_eq!(
         store
             .expire_due(Utc::now() + chrono::Duration::days(30))
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [UserDecisionId; 0]
     );
     let mut fresh = item();
     fresh.idempotency_key = None;
@@ -280,12 +283,12 @@ fn inbox_cursors_detect_ack_and_discard_but_ignore_foreign_owners() {
         .discard_answer(second.owner.workspace_id, second.decision_id)
         .unwrap()
         .unwrap();
-    assert!(
+    assert_eq!(
         store
             .inbox_page(scope, None, DEFAULT_MAX_FRAME_BYTES)
             .unwrap()
             .unwrap()
-            .decisions
-            .is_empty()
+            .decisions,
+        [] as [UserDecision; 0]
     );
 }

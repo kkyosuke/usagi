@@ -1174,7 +1174,10 @@ mod tests {
             }),
             Flow::Continue
         );
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(
+            backend.drain_events(),
+            [] as [crate::usecase::application::controller::AppEvent; 0]
+        );
     }
 
     #[test]
@@ -1264,7 +1267,10 @@ mod tests {
         );
         // Agent effects are synchronous against the pane state; they reflux no
         // completion in this stage.
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(
+            backend.drain_events(),
+            [] as [crate::usecase::application::controller::AppEvent; 0]
+        );
         assert!(matches!(
             launches.lock().unwrap().as_slice(),
             [LaunchAgentRequest { session: Some(_), .. }, LaunchAgentRequest {
@@ -1471,7 +1477,10 @@ mod tests {
                 ..
             })] if *loaded == session
         ));
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(
+            backend.drain_events(),
+            [] as [crate::usecase::application::controller::AppEvent; 0]
+        );
     }
 
     #[test]
@@ -1548,7 +1557,10 @@ mod tests {
     fn detach_leaves_the_loop() {
         let mut backend = backend();
         assert_eq!(backend.dispatch(Effect::Detach), Flow::Exit);
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(
+            backend.drain_events(),
+            [] as [crate::usecase::application::controller::AppEvent; 0]
+        );
     }
 
     #[test]
@@ -1569,7 +1581,10 @@ mod tests {
                 AppEvent::Backend(BackendEvent::NotesLoaded { .. }),
             ]
         ));
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(
+            backend.drain_events(),
+            [] as [crate::usecase::application::controller::AppEvent; 0]
+        );
     }
 
     #[test]

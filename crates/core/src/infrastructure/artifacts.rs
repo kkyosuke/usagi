@@ -75,9 +75,10 @@ fn walk(
     let path = root.join(relative);
     let metadata = fs::symlink_metadata(&path)?;
     if metadata.is_dir() {
-        let mut entries = fs::read_dir(path)?
-            .take(MAX_ENTRIES + 1)
-            .collect::<io::Result<Vec<_>>>()?;
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path)?.take(MAX_ENTRIES + 1) {
+            entries.push(entry?);
+        }
         if entries.len() > MAX_ENTRIES {
             return Err(invalid());
         }
@@ -556,7 +557,7 @@ mod tests {
             ["artifacts/assets/data.json"]
         );
         fs::write(output.join(ARTIFACT_INDEX), "[]").unwrap();
-        assert!(list(&session, false).unwrap().is_empty());
+        assert_eq!(list(&session, false).unwrap(), [] as [String; 0]);
         assert_eq!(files(&output).unwrap().len(), 6);
     }
 
@@ -615,6 +616,22 @@ mod tests {
     }
 
     #[test]
+    fn presentation_omits_unsafe_session_names_without_removing_their_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid = session(temp.path(), "safe");
+        fs::write(valid.join("artifacts/report.md"), "safe").unwrap();
+        let unsafe_session = session(temp.path(), "unsafe\u{1b}");
+        let unsafe_file = unsafe_session.join("artifacts/report.md");
+        fs::write(&unsafe_file, "retained").unwrap();
+
+        assert_eq!(
+            list(temp.path(), true).unwrap(),
+            [".usagi/sessions/safe/artifacts/report.md"]
+        );
+        assert_eq!(fs::read_to_string(unsafe_file).unwrap(), "retained");
+    }
+
+    #[test]
     fn artifacts_survive_removal_and_same_named_sessions_never_overwrite_archives() {
         let temp = tempfile::tempdir().unwrap();
         let first = session(temp.path(), "first");
@@ -659,8 +676,8 @@ mod tests {
     #[test]
     fn missing_artifacts_are_empty_and_non_directories_or_links_are_refused() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(list(temp.path(), false).unwrap().is_empty());
-        assert!(list(temp.path(), true).unwrap().is_empty());
+        assert_eq!(list(temp.path(), false).unwrap(), [] as [String; 0]);
+        assert_eq!(list(temp.path(), true).unwrap(), [] as [String; 0]);
         assert!(archive(temp.path()).unwrap().is_none());
         fs::write(temp.path().join("artifacts"), "occupied").unwrap();
         assert!(prepare(temp.path()).is_err());
@@ -722,7 +739,7 @@ mod tests {
         let (result, warnings) = archive_with_warnings(&session, false);
         let error = result.unwrap_err();
         assert!(error.to_string().contains("--force"));
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, [] as [String; 0]);
         let (result, warnings) = archive_with_warnings(&session, true);
         result.unwrap();
         assert_eq!(warnings.len(), 1);
@@ -743,7 +760,7 @@ mod tests {
             fs::write(session.join("artifacts/report.txt"), "report").unwrap();
             let (result, warnings) = archive_with_warnings(&session, force);
             result.unwrap();
-            assert!(warnings.is_empty());
+            assert_eq!(warnings, [] as [String; 0]);
             let snapshots = temp
                 .path()
                 .join(".usagi/artifacts")
@@ -857,7 +874,7 @@ mod tests {
         assert!(files(&many).is_err());
         let (result, warnings) = archive_with_warnings(&session, false);
         assert!(result.is_err());
-        assert!(warnings.is_empty());
+        assert_eq!(warnings, [] as [String; 0]);
         let (result, warnings) = archive_with_warnings(&session, true);
         result.unwrap();
         assert_eq!(warnings.len(), 1);

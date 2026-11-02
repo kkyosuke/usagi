@@ -372,7 +372,7 @@ mod tests {
             .code,
             ErrorCode::Unavailable
         );
-        assert!(
+        assert_eq!(
             project(
                 workspace,
                 &sessions[..1],
@@ -381,8 +381,8 @@ mod tests {
                 &[AgentPhase::Absent]
             )
             .unwrap()
-            .items
-            .is_empty()
+            .items,
+            [] as [usagi_core::domain::attention::AttentionItem; 0]
         );
     }
 }

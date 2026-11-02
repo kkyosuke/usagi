@@ -910,10 +910,9 @@ mod tests {
         assert!(!store.dir().exists());
 
         assert!(get(&store, 1).unwrap().is_none());
-        assert!(
-            search(&store, "", &IssueFilter::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            search(&store, "", &IssueFilter::default()).unwrap(),
+            [] as [super::ListedIssue; 0]
         );
 
         assert!(!store.dir().exists());
@@ -1065,6 +1064,42 @@ mod tests {
     }
 
     #[test]
+    fn a_source_without_a_filename_number_cannot_satisfy_dependencies() {
+        use crate::usecase::ports::{IssueSource, IssueSourceSnapshot};
+
+        let mut done = persisted_issue(1, "unidentified done source");
+        done.status = IssueStatus::Done;
+        let mut dependent = persisted_issue(2, "dependent");
+        dependent.dependson = vec![1];
+        let snapshot = IssueSourceSnapshot {
+            sources: vec![
+                IssueSource {
+                    issue: done,
+                    file: "manual.md".into(),
+                    filename_number: None,
+                },
+                IssueSource {
+                    issue: dependent,
+                    file: "002-dependent.md".into(),
+                    filename_number: Some(2),
+                },
+            ],
+            ..IssueSourceSnapshot::default()
+        };
+
+        let rows = search_snapshot(snapshot, "", &IssueFilter::default());
+        let dependent = rows.iter().find(|row| row.summary.number == 2).unwrap();
+        assert_eq!(dependent.unmet_deps, [1]);
+        assert!(!dependent.is_ready());
+        assert!(
+            rows.iter()
+                .find(|row| row.summary.number == 1)
+                .unwrap()
+                .ambiguous
+        );
+    }
+
+    #[test]
     fn duplicate_diagnostics_use_source_paths_and_count_unparseable_siblings() {
         let (_tmp, store) = store();
         let created = create(&store, spec("first"), ts(20)).unwrap();
@@ -1198,6 +1233,36 @@ mod tests {
     }
 
     #[test]
+    fn a_title_only_patch_preserves_the_existing_status_and_fields() {
+        let (_tmp, store) = store();
+        let mut original = persisted_issue(1, "original");
+        original.status = IssueStatus::Done;
+        store.write(&original).unwrap();
+
+        let updated = update(
+            &store,
+            1,
+            IssuePatch {
+                title: Some("renamed".into()),
+                ..IssuePatch::default()
+            },
+            ts(21),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            updated,
+            Issue {
+                title: "renamed".into(),
+                updated_at: ts(21),
+                ..original
+            }
+        );
+        assert_eq!(get(&store, 1).unwrap(), Some(updated));
+    }
+
+    #[test]
     fn update_applies_only_the_set_fields_and_stamps_the_time() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -1317,10 +1382,9 @@ mod tests {
         .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].summary.number, ready.number);
-        assert!(
-            search(&store, "absent", &IssueFilter::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            search(&store, "absent", &IssueFilter::default()).unwrap(),
+            [] as [super::ListedIssue; 0]
         );
     }
 
