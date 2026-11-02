@@ -144,12 +144,14 @@ pub fn sidebar_pointer_target(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        Feedback, PathBuf, ProjectedSession, SessionId, SessionRecord, WorkspaceId, render_home_at,
+        Feedback, PathBuf, ProjectedSession, SessionId, SessionRecord, WorkspaceId,
+        artifacts_summary, render_home_at,
     };
     use super::*;
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, SafeError, SafeMessage, update,
     };
+    use crate::usecase::application::metrics::ArtifactCount::{self, Ready};
     use usagi_core::domain::session::SessionOrigin;
     use usagi_core::domain::settings::IconMode;
 
@@ -258,11 +260,16 @@ mod tests {
         let now = DateTime::from_timestamp(0, 0).unwrap();
         for mode in [IconMode::NerdFont, IconMode::Text] {
             let (id, home) = action_home(SessionLifecycle::Available, false, mode);
-            for count in [0, 1, 12] {
+            for count in [
+                ArtifactCount::Ready(0),
+                ArtifactCount::Ready(1),
+                ArtifactCount::Ready(12),
+                ArtifactCount::Unavailable,
+            ] {
                 let home = home.clone().with_artifact_counts(std::sync::Arc::new(
                     std::collections::BTreeMap::from([(id, count)]),
                 ));
-                let label = super::super::artifacts_summary(count, mode);
+                let label = artifacts_summary(count, mode);
                 let start = label
                     .as_ref()
                     .map(|label| LEFT_WIDTH - widgets::display_width(label));
@@ -283,7 +290,7 @@ mod tests {
                     assert_eq!(
                         target,
                         Some(expected),
-                        "{mode:?}, count {count}, column {column}"
+                        "{mode:?}, count {count:?}, column {column}"
                     );
                 }
             }
@@ -346,7 +353,7 @@ mod tests {
                             let mut home = HomeProjection::from_state(&state, "test", &sessions)
                                 .with_icon_mode(mode)
                                 .with_artifact_counts(std::sync::Arc::new(
-                                    ids.iter().map(|id| (*id, 1)).collect(),
+                                    ids.iter().map(|id| (*id, Ready(1))).collect(),
                                 ));
                             if scenario == 5 {
                                 home = home.with_create_pending(Some("pending".into()));
@@ -354,7 +361,7 @@ mod tests {
                             let frame = render_home_at(height, width, &home, now);
                             let sidebar = panes::split(width, LEFT_WIDTH).left;
                             for row in 0..height {
-                                let label = super::super::artifacts_summary(1, mode).unwrap();
+                                let label = artifacts_summary(Ready(1), mode).unwrap();
                                 let visible = left(&frame[row], sidebar).ends_with(&label);
                                 let target = sidebar_pointer_target(
                                     height,

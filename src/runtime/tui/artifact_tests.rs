@@ -69,7 +69,8 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
     let updates = refresh_artifact_counts(&mut port);
     assert!(
         updates.contains(&MetricsUpdate::ArtifactCounts(BTreeMap::from([(
-            session, 0
+            session,
+            ArtifactCount::Ready(0)
         )])))
     );
 
@@ -96,7 +97,7 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
     fs::write(tmp.path().join("artifacts/empty/report.txt"), "report").unwrap();
     assert!(
         refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
-            BTreeMap::from([(session, 1)])
+            BTreeMap::from([(session, ArtifactCount::Ready(1))])
         ))
     );
 
@@ -107,7 +108,7 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
     .unwrap();
     assert!(
         refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
-            BTreeMap::from([(session, 2)])
+            BTreeMap::from([(session, ArtifactCount::Ready(2))])
         ))
     );
     fs::write(
@@ -117,14 +118,14 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
     .unwrap();
     assert!(
         refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
-            BTreeMap::from([(session, 1)])
+            BTreeMap::from([(session, ArtifactCount::Ready(1))])
         ))
     );
 
     fs::remove_file(tmp.path().join("artifacts/empty/report.txt")).unwrap();
     assert!(
         refresh_artifact_counts(&mut port).contains(&MetricsUpdate::ArtifactCounts(
-            BTreeMap::from([(session, 0)])
+            BTreeMap::from([(session, ArtifactCount::Ready(0))])
         ))
     );
 
@@ -134,7 +135,7 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
         .send(SessionSidebarObservation {
             session,
             git_diff: None,
-            artifact_count: 99,
+            artifact_count: ArtifactCount::Ready(99),
         })
         .unwrap();
     drop(sender);
@@ -144,6 +145,48 @@ fn sidebar_artifact_counts_follow_files_without_requiring_git_changes() {
             .contains(&MetricsUpdate::ArtifactCounts(BTreeMap::new()))
     );
     assert!(port.artifact_counts.is_empty());
+}
+
+#[test]
+fn sidebar_keeps_artifacts_accessible_when_the_index_cannot_be_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionId::new();
+    let row = record(tmp.path(), "reports");
+    fs::create_dir_all(row.root.join("artifacts")).unwrap();
+    initialize_git_repo(&row.root);
+    fs::write(row.root.join("artifacts/report.md"), "report").unwrap();
+    let mut port = DaemonMetricsPort {
+        metrics: RefreshPump::spawn(metrics_cadence(), || Ok(None)),
+        latest: None,
+        git_diffs: BTreeMap::new(),
+        artifact_counts: BTreeMap::new(),
+        git_sessions: vec![(session, row.root.clone())],
+        git_receiver: None,
+        last_git_refresh: None,
+    };
+    let mut projection = usagi_tui::usecase::application::metrics::MetricsProjection::default();
+    let state = AppState::home(WorkspaceId::new(), vec![session]);
+    let rows = [ProjectedSession::from_record(session, &row)];
+    for (index, label) in [
+        ("[", Some("Artifacts !")),
+        (r#"["report.md"]"#, Some("Artifacts 1")),
+        ("[]", None),
+        ("{", Some("Artifacts !")),
+    ] {
+        fs::write(row.root.join("artifacts/.index.json"), index).unwrap();
+        for update in refresh_artifact_counts(&mut port) {
+            projection.apply(update);
+        }
+        let home = HomeProjection::from_state(&state, "artifacts-test", &rows)
+            .with_icon_mode(usagi_core::domain::settings::IconMode::Text)
+            .with_artifact_counts(projection.shared_artifact_counts());
+        let frame = render_home(26, 100, &home).join("\n");
+        if let Some(label) = label {
+            assert!(frame.contains(label), "index {index}: {frame}");
+        } else {
+            assert!(!frame.contains("Artifacts"), "{frame}");
+        }
+    }
 }
 
 struct Browser {

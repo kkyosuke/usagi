@@ -53,7 +53,7 @@ use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, Overlay, PrOverlay,
     PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
-use crate::usecase::application::metrics::GitDiff;
+use crate::usecase::application::metrics::{ArtifactCount, GitDiff};
 use crate::usecase::application::pane::{
     PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab,
 };
@@ -315,8 +315,13 @@ fn pr_summary(visible: usize, mode: IconMode) -> Option<String> {
     })
 }
 
-fn artifacts_summary(count: usize, mode: IconMode) -> Option<String> {
-    (count > 0).then(|| format!("{} {count}", icon_set(mode).artifacts))
+fn artifacts_summary(count: ArtifactCount, mode: IconMode) -> Option<String> {
+    let count = match count {
+        ArtifactCount::Ready(0) => return None,
+        ArtifactCount::Ready(count) => count.to_string(),
+        ArtifactCount::Unavailable => "!".to_owned(),
+    };
+    Some(format!("{} {count}", icon_set(mode).artifacts))
 }
 
 fn short_id(id: &str) -> String {
@@ -373,8 +378,8 @@ pub struct HomeProjection {
     /// sidebar の git 差分列。stable `SessionId` で session 行に結合する非永続の描画素材で、
     /// controller state には持たせない。空なら差分列を描かず metrics 導入前の frame を保つ。
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
-    /// File counts refreshed off the frame thread, joined by stable session ID.
-    artifact_counts: Arc<BTreeMap<SessionId, usize>>,
+    /// Artifact counts and scan failures refreshed off the frame thread.
+    artifact_counts: Arc<BTreeMap<SessionId, ArtifactCount>>,
     /// 選択中 live terminal の viewport 素材。`None` は live terminal 非表示で、右ペインは
     /// 既存の pane strip をそのまま描く。
     terminal_view: Option<Arc<TerminalViewProjection>>,
@@ -1222,7 +1227,7 @@ impl HomeProjection {
 
     /// Attach background artifact counts without reading the filesystem in a frame.
     #[must_use]
-    pub fn with_artifact_counts(mut self, counts: Arc<BTreeMap<SessionId, usize>>) -> Self {
+    pub fn with_artifact_counts(mut self, counts: Arc<BTreeMap<SessionId, ArtifactCount>>) -> Self {
         self.artifact_counts = counts;
         self
     }
@@ -1231,11 +1236,8 @@ impl HomeProjection {
         if !session.lifecycle.capabilities().can_use || width < SIDEBAR_ARTIFACTS_MIN_WIDTH {
             return None;
         }
-        artifacts_summary(
-            self.artifact_counts.get(&session.id).copied().unwrap_or(0),
-            self.icon_mode,
-        )
-        .filter(|label| widgets::display_width(label) < width)
+        artifacts_summary(*self.artifact_counts.get(&session.id)?, self.icon_mode)
+            .filter(|label| widgets::display_width(label) < width)
     }
 
     /// Attach the focused live terminal's viewport rows, scroll offset and
@@ -3742,6 +3744,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{home_right_pane, home_right_pane_content, with_artifacts_action};
+    use crate::usecase::application::metrics::ArtifactCount;
     #[test]
     fn memo_preview_wraps_long_lines_and_editor_keeps_preview_geometry() {
         use super::{home_memo_preview, render_memo_editor_over};
@@ -4068,24 +4071,37 @@ mod tests {
     #[test]
     fn artifacts_action_is_flush_right_and_keeps_narrow_rows_unchanged() {
         for mode in [IconMode::NerdFont, IconMode::Text] {
-            let label = super::artifacts_summary(2, mode).unwrap();
-            for width in [16, 36] {
-                let line = with_artifacts_action("  Agents: running", width, &label);
-                assert_eq!(widgets::display_width(&line), width);
-                assert!(widgets::strip_ansi(&line).ends_with(&label));
+            for count in [ArtifactCount::Ready(2), ArtifactCount::Unavailable] {
+                let label = super::artifacts_summary(count, mode).unwrap();
+                for width in [16, 36] {
+                    let line = with_artifacts_action("  Agents: running", width, &label);
+                    assert_eq!(widgets::display_width(&line), width);
+                    assert!(widgets::strip_ansi(&line).ends_with(&label));
+                }
+                let padded = widgets::pad_to_width("  —", 36);
+                assert!(!with_artifacts_action(&padded, 36, &label).contains('…'));
             }
-            let padded = widgets::pad_to_width("  —", 36);
-            assert!(!with_artifacts_action(&padded, 36, &label).contains('…'));
         }
         assert_eq!(
-            super::artifacts_summary(2, IconMode::NerdFont),
+            super::artifacts_summary(ArtifactCount::Ready(2), IconMode::NerdFont),
             Some(format!("{} 2", super::ARTIFACT_ICON))
         );
         assert_eq!(
-            super::artifacts_summary(2, IconMode::Text).as_deref(),
+            super::artifacts_summary(ArtifactCount::Ready(2), IconMode::Text).as_deref(),
             Some("Artifacts 2")
         );
-        assert_eq!(super::artifacts_summary(0, IconMode::NerdFont), None);
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Unavailable, IconMode::NerdFont),
+            Some(format!("{} !", super::ARTIFACT_ICON))
+        );
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Unavailable, IconMode::Text).as_deref(),
+            Some("Artifacts !")
+        );
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Ready(0), IconMode::NerdFont),
+            None
+        );
     }
 
     #[test]
@@ -4100,7 +4116,14 @@ mod tests {
             for icon_mode in [IconMode::NerdFont, IconMode::Text] {
                 let home = home_with_session_states(&[(lifecycle, None)]).with_icon_mode(icon_mode);
                 let selection = Selection::Target(Target::Session(home.sessions[0].id));
-                for count in [None, Some(0), Some(1), Some(12), Some(usize::MAX)] {
+                for count in [
+                    None,
+                    Some(ArtifactCount::Ready(0)),
+                    Some(ArtifactCount::Ready(1)),
+                    Some(ArtifactCount::Ready(12)),
+                    Some(ArtifactCount::Ready(usize::MAX)),
+                    Some(ArtifactCount::Unavailable),
+                ] {
                     let counts = count.map(|count| (home.sessions[0].id, count));
                     let home = home
                         .clone()
@@ -4114,7 +4137,8 @@ mod tests {
                             0,
                             now(),
                         );
-                        let label = super::artifacts_summary(count.unwrap_or(0), icon_mode);
+                        let label =
+                            count.and_then(|count| super::artifacts_summary(count, icon_mode));
                         let visible = lifecycle.capabilities().can_use
                             && width >= super::SIDEBAR_ARTIFACTS_MIN_WIDTH
                             && label
