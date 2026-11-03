@@ -145,7 +145,8 @@ index のない既存 directory は `md` / `txt` / `html` / `htm` / `pdf` / `csv
 
 旧 session でディレクトリが無い場合は Agent が作成する。コードとして管理するファイルは従来どおり Git / PR に載せる。
 生成中の保存先は session 内の `artifacts/` であり、保管先の `.usagi/artifacts/` は workspace root を基準にする。
-Agent が生成するときに root 側へ直接書き込む必要はない。全 session の一覧は両方の保存先を表示する。
+Agent が生成するときに root 側へ直接書き込む必要はない。横断一覧は両方の保存先に加え、workspace 直下の `artifacts/` にある既存の成果物も同じ掲載規則で表示する。
+workspace 直下の成果物は session 削除の保管・削除対象に含めない。
 
 session の削除と orphan worktree の cleanup は、Git / filesystem の削除より前に生成物を
 `.usagi/artifacts/<name>/<snapshot-id>/` へコピーする。snapshot ID は毎回新しい UUID で、同名 session の再作成や

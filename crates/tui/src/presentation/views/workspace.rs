@@ -4073,6 +4073,11 @@ mod tests {
         for mode in [IconMode::NerdFont, IconMode::Text] {
             for count in [ArtifactCount::Ready(2), ArtifactCount::Unavailable] {
                 let label = super::artifacts_summary(count, mode).unwrap();
+                let expected_width = match mode {
+                    IconMode::NerdFont => 3,
+                    IconMode::Text => 11,
+                };
+                assert_eq!(widgets::display_width(&label), expected_width);
                 for width in [16, 36] {
                     let line = with_artifacts_action("  Agents: running", width, &label);
                     assert_eq!(widgets::display_width(&line), width);

@@ -343,7 +343,7 @@ fn artifact_open_view_with(
     ) {
         return Err(FilePreviewError::UnsupportedFormat);
     }
-    let prefix_len = if filter == PreviewFileFilter::Artifacts {
+    let prefix_len = if Path::new(path).starts_with("artifacts") {
         1
     } else {
         4
@@ -1187,6 +1187,47 @@ mod tests {
             ),
             Err(FilePreviewError::FileUnavailable)
         ));
+    }
+
+    #[test]
+    fn workspace_artifact_html_opens_with_nested_relative_assets() {
+        let root = tempfile::tempdir().unwrap();
+        let path = "artifacts/workspace-member-removal/index.html";
+        fs::create_dir_all(root.path().join("artifacts/workspace-member-removal")).unwrap();
+        fs::create_dir(root.path().join("artifacts/assets")).unwrap();
+        let html = "<img src=\"../assets/desktop.svg\"><a href=\"mobile.html\">Mobile</a>";
+        fs::write(root.path().join(path), html).unwrap();
+        fs::write(root.path().join("artifacts/assets/desktop.svg"), "desktop").unwrap();
+        fs::write(
+            root.path()
+                .join("artifacts/workspace-member-removal/mobile.html"),
+            "mobile",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("artifacts/.index.json"),
+            r#"["workspace-member-removal/index.html"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            list_files(root.path(), PreviewFileFilter::AllArtifacts).unwrap(),
+            [path]
+        );
+        let (_, _, lines) =
+            load_preview(root.path(), Some(path), PreviewFileFilter::AllArtifacts).unwrap();
+        assert_eq!(lines, [html]);
+        let view = artifact_open_view(root.path(), path, PreviewFileFilter::AllArtifacts).unwrap();
+        drop(root);
+        assert_eq!(fs::read_to_string(view.path()).unwrap(), html);
+        let parent = view.path().parent().unwrap();
+        assert_eq!(
+            fs::read_to_string(parent.join("../assets/desktop.svg")).unwrap(),
+            "desktop"
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("mobile.html")).unwrap(),
+            "mobile"
+        );
     }
 
     #[test]

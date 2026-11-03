@@ -1274,7 +1274,7 @@ Config の `Modal mode` は Overview と Closeup の command surface に共通�
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。Closeup の候補は選択位置に追従してスクロールし、footer を残す。`Prompt` は入力した command line を Enter で解釈・実行する。
 `config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Team / Issue / Memory の overlay modal で開く。
-`artifact` は [全 session の生成物一覧](#artifacts)を開く。
+`artifact` は [workspace と全 session の生成物一覧](#artifacts)を開く。
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
@@ -1846,14 +1846,14 @@ file scope、行番号 / 折り返し設定を保持した finder へ戻り、fi
 |---|---|
 | session 行の Artifacts アイコンと件数をクリック | クリックした session の生成物 |
 | Closeup の `artifact` | 選択中 session の生成物 |
-| Closeup の `artifact all` | workspace 内の全 session と保管済み生成物 |
-| Overview の `artifact` / `artifact all` | workspace 内の全 session と保管済み生成物 |
+| Closeup の `artifact all` | workspace 直下・全 session・保管済みの生成物 |
+| Overview の `artifact` / `artifact all` | workspace 直下・全 session・保管済みの生成物 |
 
 Artifacts はユーザー向けの成果物がある利用可能な session で、Agent 状態行の右端にアイコンと件数を下線付きで表示する。
 件数・一覧・統合検索は[成果物の掲載規則](05-daemon.md#session-artifacts-と削除前の保管)に従う。
 未取得・0件の場合は表示しない。取得に失敗した場合は件数の代わりに `!` を表示し、クリックして一覧内のエラーを確認できる。
 件数は背景で約1秒ごとに更新する。次の取得が成功すると件数表示へ戻り、0件なら表示を消す。
-表示は [Icons 設定](#settings-scope-と-workspace-entry)に従い、`text` では `Artifacts N` とする。クリックしても現在の pane と session 選択は保持する。
+表示は PR 件数などと同じ [Icons 設定](#settings-scope-と-workspace-entry)に従い、`nerd_font` では箱のアイコンと件数、`text` では `Artifacts N` とする。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は[統合検索](#統合検索)を開く。`Tab` で Artifact を選ぶと成果物を横断検索できる。
 sidebar が16桁未満の場合は label を省略し、`artifact` コマンドまたは統合検索から開く。
 TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。
@@ -1866,6 +1866,7 @@ sidebar のクリック対象は表示済み frame の配置から解決する�
 後続入力として扱い、session 作成や pane 起動の完了で閲覧中の一覧や入力先を切り替えない。
 
 一覧は Pull Request と同じ中央モーダルで、session 名・active / retained・ファイル名を行に表示する。
+workspace 直下の成果物は session 欄に `workspace` と表示する。
 選択中の相対 path も表示するため、同名のファイルや異なる保管 snapshot を区別できる。
 文字入力で session 名や path を絞り、↑↓ で選ぶ。Enter は選択ファイルを OS の関連付けアプリで開く。
 対象は txt / md / csv / json / html / htm / pdf /
@@ -1888,7 +1889,8 @@ HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory
 本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には調査結果・HTML・画像を `artifacts/` へ保存する案内を表示する。
 
 Git の tracked / changed / ignore 判定を使わず、`artifacts/` の掲載対象ファイルを列挙する。横断一覧は
-`.usagi/sessions/<name>/artifacts/` と `.usagi/artifacts/<name>/<snapshot-id>/` を対象とし、作成途中の保管先は表示しない。
+workspace 直下の `artifacts/`、`.usagi/sessions/<name>/artifacts/` と `.usagi/artifacts/<name>/<snapshot-id>/` を対象とし、作成途中の保管先は表示しない。
+たとえば `artifacts/workspace-member-removal/index.html` は `artifact` の一覧から Enter で開ける。
 ファイル一覧は開き直すと更新される。パス逸脱・symlink・特殊ファイルは拒否し、読み込み失敗は一覧内に表示する。
 テキストのサイズ上限・UTF-8 判定・制御文字の無害化は File Preview と共通である。
 

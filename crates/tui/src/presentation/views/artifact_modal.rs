@@ -2,13 +2,13 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
-use crate::usecase::application::controller::PreviewOverlay;
+use crate::usecase::application::controller::{PreviewFileFilter, PreviewOverlay};
 
 const INNER_WIDTH: usize = 88;
 const BODY_HEIGHT: usize = 15;
 
 /// Project the validated storage path into session, retention state, and name.
-fn columns(path: &str) -> (&str, &str, &str) {
+fn columns(path: &str, filter: PreviewFileFilter) -> (&str, &str, &str) {
     if let Some(relative) = path.strip_prefix(".usagi/sessions/")
         && let Some((session, name)) = relative.split_once("/artifacts/")
     {
@@ -21,14 +21,18 @@ fn columns(path: &str) -> (&str, &str, &str) {
         return (session, "retained", name);
     }
     (
-        "this session",
+        if filter == PreviewFileFilter::AllArtifacts {
+            "workspace"
+        } else {
+            "this session"
+        },
         "active",
         path.strip_prefix("artifacts/").unwrap_or(path),
     )
 }
 
-fn row(path: &str, selected: bool, inner: usize) -> String {
-    let (session, status, name) = columns(path);
+fn row(path: &str, filter: PreviewFileFilter, selected: bool, inner: usize) -> String {
+    let (session, status, name) = columns(path, filter);
     let session_width = 16.min(inner / 3);
     let session = widgets::pad_to_width(
         &widgets::clip_to_width(session, session_width),
@@ -115,6 +119,7 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
                 |index| {
                     row(
                         state.candidate_at(index).unwrap().path(),
+                        state.file_filter(),
                         index == state.selected(),
                         inner,
                     )
@@ -215,11 +220,22 @@ mod tests {
     #[test]
     fn storage_paths_show_session_retention_and_artifact_names() {
         assert_eq!(
-            columns("artifacts/design.md"),
+            columns("artifacts/design.md", PreviewFileFilter::Artifacts),
             ("this session", "active", "design.md")
         );
-        assert_eq!(columns("odd.md"), ("this session", "active", "odd.md"));
+        assert_eq!(
+            columns("odd.md", PreviewFileFilter::Artifacts),
+            ("this session", "active", "odd.md")
+        );
+        assert_eq!(
+            columns(
+                "artifacts/workspace-member-removal/index.html",
+                PreviewFileFilter::AllArtifacts
+            ),
+            ("workspace", "active", "workspace-member-removal/index.html")
+        );
         let state = loaded(vec![
+            "artifacts/workspace-member-removal/index.html".into(),
             ".usagi/sessions/alpha/artifacts/design.md".into(),
             ".usagi/artifacts/beta/00000000-0000-4000-8000-000000000000/chart.png".into(),
         ]);
@@ -232,9 +248,11 @@ mod tests {
             "retained",
             "design.md",
             "chart.png",
+            "workspace",
+            "workspace-member-removal/index.html",
             "Enter open",
             "Tab preview",
-            "2/2 artifacts",
+            "3/3 artifacts",
         ] {
             assert!(rendered.contains(expected), "{rendered}");
         }
