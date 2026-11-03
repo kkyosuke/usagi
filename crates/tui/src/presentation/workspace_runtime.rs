@@ -529,6 +529,13 @@ impl WorkspaceRuntime {
         }
         for target in targets {
             let entry = target.target;
+            let previous_selection = self.panes.pane(entry).and_then(|pane| {
+                if let PaneSelection::Tab(selection) = pane.selected() {
+                    Some(selection.clone())
+                } else {
+                    None
+                }
+            });
             let root = matches!(entry, Target::Root(_));
             let panes = if root {
                 target
@@ -587,6 +594,25 @@ impl WorkspaceRuntime {
                         },
                     );
                 }
+            }
+            // Repeated inventory observation must not replace a current tab
+            // selection with the saved selection or an inventory fallback.
+            // Check after both live and interrupted membership reconcile so a
+            // removed tab still gets their normal fallback. This also preserves
+            // Pending / Ready selections, which inventory cannot describe.
+            if let Some(selection) = previous_selection
+                && self
+                    .panes
+                    .pane(entry)
+                    .is_some_and(|pane| pane.tabs().iter().any(|tab| tab.selection() == selection))
+            {
+                let _ = reduce_registry(
+                    &mut self.panes,
+                    PaneRegistryEvent::Pane {
+                        target: entry,
+                        event: PaneEvent::Select(PaneSelection::Tab(selection)),
+                    },
+                );
             }
         }
         self.sync_live_pane();

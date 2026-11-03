@@ -2548,7 +2548,7 @@ resume を自動送信しない。利用者による interrupted tab の明示�
 `Ctrl-O r` でも再試行できる。managed session の CLI 操作には `session resume <name>` も使える。
 
 - **two-source reconciliation**: daemon の unified terminal / Agent inventory が membership・liveness・PTY ownership の正本、
-  `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの選択の
+  `<data-dir>/tui/workspaces/<workspace-id>/agent-tabs.json` の `AgentTabIntent` が Agent tab の表示順・target ごとの保存選択の
   正本である。local state は workspace identity、完全な last-known `TerminalRef`、
   provider-neutral な `AgentContinuationRef` だけを持ち、provider ID、argv、environment、transcript、terminal output を
   保存しない。generic Terminal tab は従来どおり inventory だけから復元する。
@@ -2572,6 +2572,9 @@ resume を自動送信しない。利用者による interrupted tab の明示�
   interrupted tab として root drawer または managed-session Closeup へ投影する。表示中 surface の selected foreground
   tab に加え、workspace drawer の背景にある selected managed tab だけを通常の Home geometry で attach / resync し、
   drawer に覆われても維持する。その他の background target と選択外 tab は detached のまま保持する。
+  再観測時は、各 target の選択 tab が復元後も存在する限り現在の選択を維持する。live Agent / generic Terminal・
+  interrupted・Pending・Diff のどれも再観測だけでは選択を奪われない。初回復元と選択 tab が消えた場合は保存選択・
+  inventory の fallback を使う。
 - **遅延応答 fence**: restore dispatch 時の UI interaction count と pane-registry revision を結果に持たせる。双方が一致する
   結果だけが durable Observe と pane projection を適用できる。遅延・順序外の結果は全体を拒否し、専用 port が戻り次第、
   fresh fence で一度だけ再観測する。後続の reorder・selection を上書きせず focus を奪わない。transport failure と

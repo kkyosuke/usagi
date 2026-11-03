@@ -5,6 +5,106 @@
 use super::*;
 
 #[test]
+#[allow(clippy::too_many_lines)] // Compare all tab identities and both target visibility states with the same inventory.
+fn periodic_restore_keeps_each_existing_tab_selection_and_falls_back_after_removal() {
+    use crate::usecase::application::pane::PaneEvent;
+
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let target = Target::Session(session);
+    let fallback = scoped_terminal_ref(workspace, Some(session));
+    let agent = scoped_terminal_ref(workspace, Some(session));
+    let generic = scoped_terminal_ref(workspace, Some(session));
+    let history = interrupted_history(workspace, Some(session), true);
+    let pending = OperationId::new();
+    let ready = OperationId::new();
+    let snapshot = PaneRestoreTarget {
+        target,
+        panes: vec![
+            LivePane {
+                terminal: fallback.clone(),
+                kind: PaneKind::Agent,
+            },
+            LivePane {
+                terminal: agent.clone(),
+                kind: PaneKind::Agent,
+            },
+            LivePane {
+                terminal: generic.clone(),
+                kind: PaneKind::Terminal,
+            },
+        ],
+        selected: Some(fallback.clone()),
+        selected_interrupted: None,
+        interrupted: vec![history.clone()],
+    };
+
+    for foreground in [false, true] {
+        for selection in [
+            TabSelection::Pending(pending),
+            TabSelection::Ready(ready),
+            TabSelection::Live(agent.clone()),
+            TabSelection::Live(generic.clone()),
+            TabSelection::Interrupted(history.continuation),
+        ] {
+            let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+            let fence = runtime.restore_fence();
+            assert!(runtime.restore_snapshot(fence.0, fence.1, vec![snapshot.clone()]));
+            let _ = runtime.request_pane(target, pending, PaneKind::Agent);
+            let _ = runtime.request_pane(target, ready, PaneKind::Diff);
+            runtime.inject_pane_event_for_test(target, PaneEvent::Resolved { operation: ready });
+            if foreground {
+                let _ = runtime.apply_event(AppEvent::VisitSession(session));
+            }
+            runtime.inject_pane_event_for_test(
+                target,
+                PaneEvent::Select(PaneSelection::Tab(selection.clone())),
+            );
+            let active = runtime.panes().active();
+            let focus = runtime.focused_terminal();
+
+            // A new, current snapshot may carry an older durable selection or
+            // an inventory fallback. Neither may replace a still-present tab.
+            for saved_history in [None, Some(history.continuation)] {
+                let mut repeated = snapshot.clone();
+                repeated.selected_interrupted = saved_history;
+                let fence = runtime.restore_fence();
+                assert!(runtime.restore_snapshot(fence.0, fence.1, vec![repeated]));
+                assert_eq!(
+                    runtime.panes().pane(target).unwrap().selected(),
+                    &PaneSelection::Tab(selection.clone()),
+                    "foreground={foreground}, saved_history={saved_history:?}"
+                );
+                assert_eq!(runtime.panes().active(), active);
+                assert_eq!(runtime.focused_terminal(), focus);
+            }
+
+            // Inventory-owned tabs can disappear; only then use the observed
+            // fallback. Local Pending and Ready tabs outlive inventory absence.
+            let mut removed = snapshot.clone();
+            match &selection {
+                TabSelection::Live(terminal) => {
+                    removed.panes.retain(|pane| !pane.terminal.fences(terminal));
+                }
+                TabSelection::Interrupted(continuation) => {
+                    removed
+                        .interrupted
+                        .retain(|tab| tab.continuation != *continuation);
+                }
+                TabSelection::Pending(_) | TabSelection::Ready(_) => continue,
+            }
+            let fence = runtime.restore_fence();
+            assert!(runtime.restore_snapshot(fence.0, fence.1, vec![removed]));
+            assert_eq!(
+                runtime.panes().pane(target).unwrap().selected(),
+                &PaneSelection::Tab(TabSelection::Live(fallback.clone()))
+            );
+            assert_eq!(runtime.panes().active(), active);
+        }
+    }
+}
+
+#[test]
 fn blocked_restore_inventory_never_blocks_render_or_quit() {
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
