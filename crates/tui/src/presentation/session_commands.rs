@@ -484,6 +484,11 @@ pub(super) fn adopt_session_snapshot(ui: &mut WorkspaceIoRuntime, result: Sessio
             result.session_lifecycles,
             result.session_roles,
         );
+        // An external Agent can start after its session was first observed
+        // without changing the lifecycle revision. Use accepted snapshots as
+        // the cadence for coherent inventory refresh, including equal revisions.
+        // Preserve the restore lane's in-flight follow-up and outage backoff.
+        ui.request_agent_inventory_change_observation();
     }
 }
 

@@ -76,6 +76,7 @@ logout 後も端末の OS ユーザー情報・DNS の参照先を保持しま�
 よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
 保存中も操作でき、登録・解除の結果は session 一覧のお気に入りマーカーへ反映されます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
+MCP で作成した session の Agent も、[背景観測](document/03-tui.md#home-frame-loop-と背景観測-lane)でワークスペースを切り替えずに表示へ反映されます。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
 質問は別のワークスペースを表示中でも届き、質問元のワークスペース・session を確認してその場で回答できます。
 回答確定後の質問が遅れた一覧更新で再び開かれることはなく、破棄した回答も一覧へ戻りません。

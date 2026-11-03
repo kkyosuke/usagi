@@ -1311,6 +1311,7 @@ fn a_failed_or_stale_lane_observation_never_rewrites_the_adopted_snapshot() {
 
     crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
     assert!(pending_refresh.is_none());
+    assert!(!ui.take_agent_inventory_change_observation_request());
     assert!(matches!(
         events.try_recv().unwrap(),
         AppEvent::Backend(BackendEvent::Notice(notice))
@@ -1321,6 +1322,7 @@ fn a_failed_or_stale_lane_observation_never_rewrites_the_adopted_snapshot() {
     crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut pending_refresh);
     assert_eq!(ui.workspace.session_ids(), &[session]);
     assert_eq!(ui.last_session_revision, 9);
+    assert!(!ui.take_agent_inventory_change_observation_request());
 
     // A lane error without a parked reducer completion is intentionally
     // consumed without synthesizing an event.
