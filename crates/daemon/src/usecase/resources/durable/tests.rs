@@ -1431,6 +1431,8 @@ fn a_retired_shard_is_collected_only_once_nothing_retains_it() {
         )]))
         .unwrap();
 
+    let own_shard = serde_json::to_string(&ShardDocument::empty(new)).unwrap();
+    world.archive.bytes(new).set(&own_shard);
     let active = world.state(new, ObservedChildren::new());
     let retained: BTreeSet<String> = std::iter::once(resource.terminal_id.as_str()).collect();
     // A live claim keeps it, and so does the active generation still retaining
@@ -1450,6 +1452,7 @@ fn a_retired_shard_is_collected_only_once_nothing_retains_it() {
     assert_eq!(world.archive.collected(), vec![old.as_str()]);
     // Its own shard is never a collection candidate.
     assert_eq!(active.collect_retired(&BTreeSet::new()).unwrap(), 0);
+    assert_eq!(world.archive.bytes(new).get(), Some(own_shard));
 }
 
 #[test]
