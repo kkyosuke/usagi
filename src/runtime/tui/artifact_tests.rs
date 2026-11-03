@@ -489,6 +489,43 @@ fn queued_native_requests_never_dispatch_a_replacement_session() {
 }
 
 #[test]
+fn workspace_artifacts_load_preview_and_dispatch_from_the_overview() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = WorkspaceId::new();
+    let path = "artifacts/workspace-member-removal/index.html";
+    let html = "<h1>PC / mobile verification</h1>";
+    fs::create_dir_all(root.path().join("artifacts/workspace-member-removal")).unwrap();
+    fs::write(root.path().join(path), html).unwrap();
+    let (mut port, opened) = port(root.path(), workspace, &[]);
+    let target = Target::Root(workspace);
+    let filter = PreviewFileFilter::AllArtifacts;
+    assert!(matches!(
+        load(&mut port, target, filter),
+        AppEvent::Backend(BackendEvent::PreviewLoaded { files, .. }) if files == [path]
+    ));
+    let (completion, _) = Completions::channel();
+    port.load_preview(
+        target,
+        RequestId::new(),
+        Some(path.into()),
+        filter,
+        completion,
+    );
+    assert!(matches!(
+        wait_preview(&mut port),
+        AppEvent::Backend(BackendEvent::PreviewLoaded { lines, .. }) if lines == [html]
+    ));
+    let (completion, events) = Completions::channel();
+    port.open_artifact(target, RequestId::new(), path.into(), filter, completion);
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(5)).unwrap(),
+        AppEvent::Backend(BackendEvent::ArtifactOpenFinished { result: Err(error), .. }) if error.error_id == "artifact-viewer-open"
+    ));
+    // The test viewer deliberately fails after reading the copied HTML.
+    assert_eq!(*opened.lock().unwrap(), [html.as_bytes().to_vec()]);
+}
+
+#[test]
 fn artifacts_for_new_and_recreated_sessions_use_current_roots_without_reopening() {
     let root = tempfile::tempdir().unwrap();
     let workspace = WorkspaceId::new();

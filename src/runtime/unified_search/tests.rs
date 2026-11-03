@@ -58,6 +58,9 @@ fn artifact_search_respects_curated_reports_and_legacy_work_file_exclusions() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     for path in [
+        "artifacts/workspace-member-removal/report.html",
+        "artifacts/assets/report.png",
+        "artifacts/report.log",
         ".usagi/sessions/one/artifacts/report.html",
         ".usagi/sessions/one/artifacts/report-draft.md",
         ".usagi/sessions/one/artifacts/assets/report.png",
@@ -83,7 +86,14 @@ fn artifact_search_respects_curated_reports_and_legacy_work_file_exclusions() {
         .iter()
         .map(|entry| entry.path.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(paths.len(), 2);
+    assert_eq!(paths.len(), 3);
+    assert!(paths.contains(&"artifacts/workspace-member-removal/report.html"));
+    assert!(
+        result
+            .artifacts
+            .iter()
+            .all(|entry| entry.target == Target::Root(query.projects[0].workspace))
+    );
     assert!(paths.contains(&".usagi/sessions/one/artifacts/report.html"));
     assert!(paths.contains(&".usagi/sessions/two/artifacts/report.md"));
 }

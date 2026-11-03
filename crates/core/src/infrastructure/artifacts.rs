@@ -342,6 +342,7 @@ fn sync_directories(root: &Path) -> io::Result<()> {
 /// Returns an error for unsafe entries, traversal limits, or inaccessible files.
 pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
     let mut paths = Vec::new();
+    append(root, &root.join(ARTIFACTS_DIR), &mut paths)?;
     if all {
         let state = root.join(STATE_DIR);
         match fs::symlink_metadata(&state) {
@@ -381,8 +382,6 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
                 }
             }
         }
-    } else {
-        append(root, &root.join(ARTIFACTS_DIR), &mut paths)?;
     }
     paths.sort();
     Ok(paths)
@@ -420,13 +419,15 @@ pub fn contains(relative: &str, all: bool) -> bool {
     if !relative.chars().all(presentation_character_is_safe) {
         return false;
     }
-    if all {
+    if matches!(parts.as_slice(), [ARTIFACTS_DIR, _, ..]) {
+        true
+    } else if all {
         matches!(
             parts.as_slice(),
             [STATE_DIR, SESSIONS_DIR, _, ARTIFACTS_DIR, _, ..]
         ) || matches!(parts.as_slice(), [STATE_DIR, ARTIFACTS_DIR, _, snapshot, _, ..] if uuid::Uuid::parse_str(snapshot).is_ok())
     } else {
-        matches!(parts.as_slice(), [ARTIFACTS_DIR, _, ..])
+        false
     }
 }
 
@@ -457,6 +458,35 @@ mod tests {
             warnings.borrow_mut().push(message.to_owned());
         });
         (result, warnings.into_inner())
+    }
+
+    #[test]
+    fn workspace_lists_include_nested_reports_before_any_session_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        prepare(temp.path()).unwrap();
+        let report = "artifacts/workspace-member-removal/index.html";
+        let destination = temp.path().join(report);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, "<h1>Verification</h1>").unwrap();
+        assert_eq!(list(temp.path(), true).unwrap(), [report]);
+        assert!(contains(report, true));
+        let session = session(temp.path(), "review");
+        fs::write(session.join("artifacts/summary.md"), "summary").unwrap();
+        let snapshot = archive(&session).unwrap().unwrap();
+        let listed = list(temp.path(), true).unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed.contains(&report.to_owned()));
+        assert!(listed.contains(&".usagi/sessions/review/artifacts/summary.md".to_owned()));
+        assert!(
+            listed.contains(
+                &snapshot
+                    .join("summary.md")
+                    .strip_prefix(temp.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
     }
 
     #[test]
@@ -688,6 +718,8 @@ mod tests {
         symlink(&outside, temp.path().join("artifacts")).unwrap();
         assert!(prepare(temp.path()).is_err());
         assert!(list(temp.path(), false).is_err());
+        assert!(list(temp.path(), true).is_err());
+        fs::remove_file(temp.path().join("artifacts")).unwrap();
         symlink(&outside, temp.path().join(STATE_DIR)).unwrap();
         assert!(list(temp.path(), true).is_err());
         fs::remove_file(temp.path().join(STATE_DIR)).unwrap();
@@ -799,7 +831,7 @@ mod tests {
             assert!(!contains(path, true), "{path}");
         }
         assert!(contains("artifacts/nested/a.txt", false));
-        assert!(!contains("artifacts/nested/a.txt", true));
+        assert!(contains("artifacts/nested/a.txt", true));
         assert!(contains(".usagi/sessions/one/artifacts/a.txt", true));
         assert!(!contains(".usagi/sessions/one/src/a.txt", true));
         assert!(!contains(".usagi/artifacts/one/.partial-123/a.txt", true));
