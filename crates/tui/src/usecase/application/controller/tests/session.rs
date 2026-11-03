@@ -126,8 +126,14 @@ fn artifacts_click_matches_the_visible_width_and_lifecycle() {
         SessionLifecycle::Failed,
     ] {
         for sidebar_width in [15_u16, 16, 36] {
-            let start = sidebar_width - 3; // package glyph, space, and one-digit count
-            for column in [start - 1, start, sidebar_width - 1, sidebar_width] {
+            let start = sidebar_width - 4; // two-cell emoji, space, and one-digit count
+            for column in [
+                start - 1,
+                start,
+                start + 1,
+                sidebar_width - 1,
+                sidebar_width,
+            ] {
                 let mut state = sized_home(workspace, vec![session], sidebar_width + 2, 30);
                 state.session_lifecycles.insert(session, lifecycle(phase));
                 let effects = pointer_effects(&mut state, column, 4, std::time::Duration::ZERO);
