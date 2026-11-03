@@ -126,7 +126,7 @@ fn artifacts_click_matches_the_visible_width_and_lifecycle() {
         SessionLifecycle::Failed,
     ] {
         for sidebar_width in [15_u16, 16, 36] {
-            let start = sidebar_width - 4; // two-cell emoji, space, and one-digit count
+            let start = sidebar_width - 3; // one-cell Nerd Font icon, space, and one-digit count
             for column in [
                 start - 1,
                 start,

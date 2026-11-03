@@ -87,8 +87,8 @@ const MEMORY_ICON: &str = "\u{f233}";
 const AGENT_ICON: &str = "\u{f085}";
 const DECISION_NOTICE_ICON: &str = "\u{f0f3}";
 const PR_ICON: &str = "\u{ea64}";
-/// Standard package emoji, available without a patched font in either icon mode.
-const ARTIFACT_ICON: &str = "📦";
+/// nf-md-package_variant: a box for generated artifacts.
+const ARTIFACT_ICON: &str = "\u{f03d6}";
 const SIDEBAR_ARTIFACTS_MIN_WIDTH: usize = 16;
 const SESSION_CURSOR_ICON: &str = "\u{f0907}";
 const SWITCH_ICON: &str = "\u{f0ec}";
@@ -125,7 +125,7 @@ const fn icon_set(mode: IconMode) -> IconSet {
             agents: "Agents",
             decision: "!",
             pull_request: "PR",
-            artifacts: ARTIFACT_ICON,
+            artifacts: "Artifacts",
             session_cursor: ">",
             note: "▤",
         },
@@ -4073,7 +4073,11 @@ mod tests {
         for mode in [IconMode::NerdFont, IconMode::Text] {
             for count in [ArtifactCount::Ready(2), ArtifactCount::Unavailable] {
                 let label = super::artifacts_summary(count, mode).unwrap();
-                assert_eq!(widgets::display_width(&label), 4);
+                let expected_width = match mode {
+                    IconMode::NerdFont => 3,
+                    IconMode::Text => 11,
+                };
+                assert_eq!(widgets::display_width(&label), expected_width);
                 for width in [16, 36] {
                     let line = with_artifacts_action("  Agents: running", width, &label);
                     assert_eq!(widgets::display_width(&line), width);
@@ -4089,7 +4093,7 @@ mod tests {
         );
         assert_eq!(
             super::artifacts_summary(ArtifactCount::Ready(2), IconMode::Text).as_deref(),
-            Some("📦 2")
+            Some("Artifacts 2")
         );
         assert_eq!(
             super::artifacts_summary(ArtifactCount::Unavailable, IconMode::NerdFont),
@@ -4097,7 +4101,7 @@ mod tests {
         );
         assert_eq!(
             super::artifacts_summary(ArtifactCount::Unavailable, IconMode::Text).as_deref(),
-            Some("📦 !")
+            Some("Artifacts !")
         );
         assert_eq!(
             super::artifacts_summary(ArtifactCount::Ready(0), IconMode::NerdFont),

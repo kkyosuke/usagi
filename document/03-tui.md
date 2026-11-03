@@ -440,7 +440,7 @@ Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の c
 | 表示面 | `nerd_font` | `text` fallback |
 |---|---|---|
 | PR 件数 | `U+EA64` | `PR` |
-| Artifacts 件数 | 📦（標準絵文字 `U+1F4E6`） | 📦 |
+| Artifacts 件数 | package variant `U+F03D6` | `Artifacts` |
 | session cursor | rabbit `U+F0907` | `>` |
 | Agents / Agent concurrency | `U+F085` | `Agents`（狭幅は `A`） |
 | CPU / resident memory | `U+F2DB` / `U+F233` | `CPU` / `MEM` |
@@ -1853,7 +1853,7 @@ Artifacts はユーザー向けの成果物がある利用可能な session で�
 件数・一覧・統合検索は[成果物の掲載規則](05-daemon.md#session-artifacts-と削除前の保管)に従う。
 未取得・0件の場合は表示しない。取得に失敗した場合は件数の代わりに `!` を表示し、クリックして一覧内のエラーを確認できる。
 件数は背景で約1秒ごとに更新する。次の取得が成功すると件数表示へ戻り、0件なら表示を消す。
-表示は [Icons 設定](#settings-scope-と-workspace-entry)にかかわらず、標準の絵文字を使った `📦 N` とする。クリックしても現在の pane と session 選択は保持する。
+表示は PR 件数などと同じ [Icons 設定](#settings-scope-と-workspace-entry)に従い、`nerd_font` では箱のアイコンと件数、`text` では `Artifacts N` とする。クリックしても現在の pane と session 選択は保持する。
 `Ctrl-O f` は[統合検索](#統合検索)を開く。`Tab` で Artifact を選ぶと成果物を横断検索できる。
 sidebar が16桁未満の場合は label を省略し、`artifact` コマンドまたは統合検索から開く。
 TUI を開いた後に作成した session や、別の client が追加した session の成果物も、開き直さずに閲覧する。

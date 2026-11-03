@@ -168,10 +168,10 @@ fn sidebar_keeps_artifacts_accessible_when_the_index_cannot_be_read() {
     let state = AppState::home(WorkspaceId::new(), vec![session]);
     let rows = [ProjectedSession::from_record(session, &row)];
     for (index, label) in [
-        ("[", Some("📦 !")),
-        (r#"["report.md"]"#, Some("📦 1")),
+        ("[", Some("Artifacts !")),
+        (r#"["report.md"]"#, Some("Artifacts 1")),
         ("[]", None),
-        ("{", Some("📦 !")),
+        ("{", Some("Artifacts !")),
     ] {
         fs::write(row.root.join("artifacts/.index.json"), index).unwrap();
         for update in refresh_artifact_counts(&mut port) {
@@ -184,7 +184,7 @@ fn sidebar_keeps_artifacts_accessible_when_the_index_cannot_be_read() {
         if let Some(label) = label {
             assert!(frame.contains(label), "index {index}: {frame}");
         } else {
-            assert!(!frame.contains('📦'), "{frame}");
+            assert!(!frame.contains("Artifacts"), "{frame}");
         }
     }
 }
