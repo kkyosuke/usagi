@@ -856,6 +856,7 @@ fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
         crate::presentation::RestoreJobOutcome::TransportFailed
     ));
     outage.request_observation(std::time::Duration::from_millis(10));
+    outage.request_changed_observation(std::time::Duration::from_millis(10));
     assert!(
         !outage.begin_if_due(std::time::Duration::from_millis(10)),
         "a local Reopen cannot bypass the outage epoch backoff"
@@ -883,6 +884,7 @@ fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
     let mut changed_in_flight = crate::presentation::RestoreRetryState::new();
     assert!(changed_in_flight.begin_if_due(std::time::Duration::ZERO));
     changed_in_flight.request_changed_observation(std::time::Duration::from_millis(1));
+    changed_in_flight.request_changed_observation(std::time::Duration::from_millis(1));
     assert!(!changed_in_flight.complete(
         std::time::Duration::from_millis(1),
         crate::presentation::RestoreJobOutcome::Applied
@@ -892,6 +894,14 @@ fn restore_retry_backoff_bounds_long_outage_and_reconnect_dispatches_once() {
         "an in-flight snapshot may predate an Agent exit and needs one follow-up"
     );
     assert!(!changed_in_flight.begin_if_due(std::time::Duration::from_millis(1)));
+    changed_in_flight.request_changed_observation(std::time::Duration::from_millis(2));
+    assert!(changed_in_flight.complete(
+        std::time::Duration::from_millis(2),
+        crate::presentation::RestoreJobOutcome::TransportFailed
+    ));
+    changed_in_flight.request_changed_observation(std::time::Duration::from_millis(3));
+    assert!(!changed_in_flight.begin_if_due(std::time::Duration::from_millis(251)));
+    assert!(changed_in_flight.begin_if_due(std::time::Duration::from_millis(252)));
 }
 
 #[test]

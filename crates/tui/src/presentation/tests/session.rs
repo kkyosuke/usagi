@@ -6,6 +6,138 @@ use super::*;
 use crate::presentation::session_commands::{adopt_session_snapshot, sync_overlay_session_roots};
 
 #[test]
+#[allow(clippy::too_many_lines)] // Exercise lifecycle refresh through coherent restore with one stable session revision.
+fn session_refresh_discovers_an_agent_started_after_its_session_was_observed() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let terminal = scoped_terminal_ref(workspace, Some(session));
+    let agent = AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
+        launch_provenance: None,
+        runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
+            .unwrap(),
+        continuation: AgentContinuationRef::new(),
+        state: AgentRuntimeInventoryState::Live,
+        resumed_from: None,
+    };
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::new(),
+        Box::new(MemoryIntentPort {
+            state: Arc::new(Mutex::new(AgentTabIntent::empty(workspace))),
+            mutations: Arc::default(),
+        }),
+    );
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let mut lane = FakeSessionRefreshPort::default();
+    let mut retry = crate::presentation::RestoreRetryState::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut worker = SequencedRestorePort {
+        terminals: VecDeque::new(),
+        agents: VecDeque::new(),
+    };
+    // MCP publishes the session before starting its Agent. Starting the Agent
+    // does not change the session lifecycle revision; later refreshes must still
+    // discover it, and a repeated observation must not duplicate its tab.
+    for present in [false, true, true] {
+        let entries = if present {
+            vec![TerminalInventoryEntry {
+                terminal: terminal.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            }]
+        } else {
+            Vec::new()
+        };
+        worker.terminals.extend([Ok(entries.clone()), Ok(entries)]);
+        worker.agents.push_back(Ok(AgentInventory {
+            workspace_id: workspace,
+            runtimes: if present {
+                vec![agent.clone()]
+            } else {
+                Vec::new()
+            },
+            resumable: Vec::new(),
+        }));
+    }
+    let mut port: Box<dyn AgentCommandPort> = Box::new(worker);
+    for (round, expected_agents) in [0, 1, 1].into_iter().enumerate() {
+        lane.queued
+            .lock()
+            .unwrap()
+            .push_back(Ok(SessionCommandResult {
+                message: "daemon snapshot refreshed".into(),
+                sessions: Some(state("demo").sessions),
+                session_ids: Some(vec![session]),
+                agent_resumes: None,
+                session_lifecycles: None,
+                session_roles: None,
+                revision: Some(7),
+                notes_updated_at: None,
+            }));
+        crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut None);
+        let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+        ui.set_allowed_agent_sessions([session]);
+        let at = std::time::Duration::from_secs(round as u64);
+        if ui.take_agent_observation_request() {
+            retry.request_observation(at);
+        }
+        if ui.take_agent_inventory_change_observation_request() {
+            retry.request_changed_observation(at);
+        }
+        assert!(
+            retry.begin_if_due(at),
+            "refresh {round} must observe external Agents even at the same lifecycle revision"
+        );
+        let (interaction, revision) = runtime.restore_fence();
+        crate::presentation::spawn_restore_job(
+            port,
+            workspace,
+            BTreeSet::from([session]),
+            interaction,
+            revision,
+            sender.clone(),
+        );
+        let completion = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("restore worker completes before the next refresh");
+        let applied = crate::presentation::apply_restore_completion(
+            completion,
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(
+            applied.outcome,
+            crate::presentation::RestoreJobOutcome::Applied
+        );
+        assert!(!retry.complete(at, applied.outcome));
+        port = applied.port;
+        assert_eq!(ui.last_session_revision, 7);
+        assert_eq!(
+            ui.agent_inventory().unwrap().runtimes.len(),
+            expected_agents
+        );
+        let pane = runtime.panes().pane(Target::Session(session)).unwrap();
+        assert_eq!(pane.tabs().len(), expected_agents);
+        if expected_agents == 1 {
+            assert!(matches!(&pane.tabs()[0], PaneTab::Live(live) if live.terminal == terminal));
+        }
+        assert_eq!(runtime.state().workspace(), workspace);
+        assert!(
+            ui.pane_launches.is_empty(),
+            "observation never starts an Agent"
+        );
+    }
+    // Frame drains without a newly published snapshot do not request more IO.
+    crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut None);
+    assert!(!ui.take_agent_inventory_change_observation_request());
+}
+
+#[test]
 fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_modal() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();

@@ -1057,6 +1057,10 @@ worker は workspace を開いたときに 1 本ずつ起動して閉じるま�
   結果で反映する。
 - **順序は daemon の lifecycle revision で調停する**。lane の観測が利用者の command より前に始まって後に届いた場合、
   revision が古いので破棄する。どの lane が観測したかに関わらず最新の daemon 状態が勝つ。
+- **session snapshot の受理は Agent inventory の再観測も要求する**。同じ lifecycle revision の snapshot でも、
+  MCP など別 client が session 作成後に起動した Agent を専用 restore worker で取得し、sidebar・Garden・pane tab へ反映する。
+  workspace の切り替えは不要である。観測中に届いた要求は追加 1 回に畳み、取得失敗中の backoff は維持する。
+  古い revision・失敗・未着の snapshot は再観測を要求せず、再観測だけでは Agent を起動・再開しない。
 - **cold-start の権限は session lane だけが持つ**。observation lane（decision / PR / metrics）は起動中の daemon へ attach
   するだけで、`bootstrap.lock` の取得も lifecycle subprocess の起動も readiness 待ちも行わない。session lane は attach に
   失敗したときだけ cold-start へ落ち、その回数は workspace あたり 3 回に bound する。いずれも背景 thread 上で起き、
