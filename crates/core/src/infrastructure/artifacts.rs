@@ -342,12 +342,11 @@ fn sync_directories(root: &Path) -> io::Result<()> {
 /// Returns an error for unsafe entries, traversal limits, or inaccessible files.
 pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
     let mut paths = Vec::new();
-    append(root, &root.join(ARTIFACTS_DIR), &mut paths)?;
     if all {
         let state = root.join(STATE_DIR);
         match fs::symlink_metadata(&state) {
             Ok(metadata) if !metadata.is_dir() => return Err(invalid()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(paths),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return list(root, false),
             Err(error) => return Err(error),
             Ok(_) => {}
         }
@@ -383,6 +382,7 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
             }
         }
     }
+    append(root, &root.join(ARTIFACTS_DIR), &mut paths)?;
     paths.sort();
     Ok(paths)
 }
