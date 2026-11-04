@@ -4,7 +4,9 @@
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
-use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory, validate_owned_path};
+use super::secure_path::{
+    InvalidOwnedDirectory, tighten_owned_directories, validate_owned_directory, validate_owned_path,
+};
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
     ClaudeProvisioner, CodexProvision, CodexProvisionFailure, CodexProvisioner, DefaultModel,
@@ -325,19 +327,14 @@ pub(super) fn root_memory_store_root(
 ) -> Result<PathBuf, ClaudeSandboxPolicyError> {
     let agent_memory = data_home.selected().join("agent-memory");
     let requested = agent_memory.join(workspace.to_string());
-    // Earlier releases created this chain with the umask and tightened only
-    // the workspace directory. Narrow those owned real directories in place so
-    // an upgraded data home still passes the exact-mode private-chain check;
-    // symlinks and foreign owners are left for that check to reject.
-    for directory in [
+    // Earlier releases left this chain at the umask; narrow it before the exact check.
+    tighten_owned_directories(&[
         agent_memory,
         requested.clone(),
         requested.join(".usagi"),
         requested.join(".usagi/memory"),
-    ] {
-        tighten_owned_directory(&directory)
-            .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-    }
+    ])
+    .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
     usagi_daemon::infrastructure::unix_transport::ensure_private_dir_all(
         &requested.join(".usagi/memory"),
     )
@@ -350,29 +347,6 @@ pub(super) fn root_memory_store_root(
         .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
     validate_owned_directory(&root)?;
     Ok(root)
-}
-
-/// Drops group and other permission bits from an existing directory owned by
-/// this user. Absent paths, symlinks, and foreign owners are left unchanged.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_memory_root_tightens_a_chain_left_by_an_earlier_release
-fn tighten_owned_directory(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if metadata.file_type().is_dir()
-        && metadata.uid() == unsafe { libc::geteuid() }
-        && metadata.mode() & 0o077 != 0
-    {
-        std::fs::set_permissions(
-            path,
-            std::fs::Permissions::from_mode(metadata.mode() & 0o700),
-        )?;
-    }
-    Ok(())
 }
 
 /// Codex's arg0 janitor cannot open the `.lock` inside a directory left with no
