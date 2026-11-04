@@ -2086,8 +2086,8 @@ Antigravity は server 単位の事前許可を指定する起動 flag がない
 daemon は専用 workspace configuration directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
 へだけ追加する。integration root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
 作成前に拒否し、sandbox でも read-only に戻す。managed launch は `~/.gemini` を writable root にせず、
-`~/.gemini/antigravity-cli/conversations/` と state 直下の conversation summary DB 3 ファイルだけを
-writable allowlist にする。認証は OS keyring を使い、動的 log は `--log-file /dev/null` へ送る。
+`~/.gemini/antigravity-cli/conversations/`・`brain/`、state 直下の conversation summary DB 3 ファイルと
+`bin/agentapi` ファイルだけを writable allowlist にする。認証は OS keyring を使い、動的 log は `--log-file /dev/null` へ送る。
 これにより `~/.gemini/GEMINI.md`、global config、plugin、skill、settings、status/title command script を含む
 既存/将来の customization は未作成 path も含めて read-only になり、実 workspace の `.agents/` も置換しない。
 

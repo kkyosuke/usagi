@@ -2127,6 +2127,8 @@ fn assert_private_agy_workspace(
 
 fn assert_agy_conversation_state(state: &Path) {
     assert!(state.join("conversations").is_dir());
+    assert!(state.join("brain").is_dir());
+    assert!(state.join("bin/agentapi").is_file());
     for database in [
         "conversation_summaries.db",
         "conversation_summaries.db-shm",

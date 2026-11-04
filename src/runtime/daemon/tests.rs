@@ -7355,6 +7355,42 @@ fn agent_memory_root_is_shared_by_workspace_and_outside_the_checkout() {
 }
 
 #[test]
+fn agent_memory_root_tightens_a_chain_left_by_an_earlier_release() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all("target").unwrap();
+    let fixture = tempfile::tempdir_in("target").unwrap();
+    let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
+    let workspace = WorkspaceId::new();
+    let agent_memory = fixture.path().join("agent-memory");
+    let requested = agent_memory.join(workspace.to_string());
+    let chain = [
+        agent_memory.clone(),
+        requested.clone(),
+        requested.join(".usagi"),
+        requested.join(".usagi/memory"),
+    ];
+    // Earlier releases left every directory but the workspace at the umask.
+    std::fs::create_dir_all(requested.join(".usagi/memory")).unwrap();
+    for directory in &chain {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::set_permissions(&requested, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let root = root_memory_store_root(&data_home, workspace).unwrap();
+
+    assert_eq!(root, requested.canonicalize().unwrap());
+    for directory in &chain {
+        assert_eq!(
+            std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "{}",
+            directory.display()
+        );
+    }
+}
+
+#[test]
 fn bootstrap_broker_accepts_only_ping_start_and_stop() {
     let launches = std::cell::Cell::new(0_u8);
     let count = |request| {

@@ -4,7 +4,9 @@
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
-use super::secure_path::{InvalidOwnedDirectory, validate_owned_directory, validate_owned_path};
+use super::secure_path::{
+    InvalidOwnedDirectory, tighten_owned_directories, validate_owned_directory, validate_owned_path,
+};
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
     ClaudeProvisioner, CodexProvision, CodexProvisionFailure, CodexProvisioner, DefaultModel,
@@ -323,16 +325,20 @@ pub(super) fn root_memory_store_root(
     data_home: &paths::DataHome,
     workspace: WorkspaceId,
 ) -> Result<PathBuf, ClaudeSandboxPolicyError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let requested = data_home
-        .selected()
-        .join("agent-memory")
-        .join(workspace.to_string());
-    std::fs::create_dir_all(requested.join(".usagi/memory"))
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-    std::fs::set_permissions(&requested, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    let agent_memory = data_home.selected().join("agent-memory");
+    let requested = agent_memory.join(workspace.to_string());
+    // Earlier releases left this chain at the umask; narrow it before the exact check.
+    tighten_owned_directories(&[
+        agent_memory,
+        requested.clone(),
+        requested.join(".usagi"),
+        requested.join(".usagi/memory"),
+    ])
+    .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    usagi_daemon::infrastructure::unix_transport::ensure_private_dir_all(
+        &requested.join(".usagi/memory"),
+    )
+    .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
     // The launcher re-validates exact canonical paths. In particular, macOS
     // exposes `/tmp` through `/private/tmp`; returning the lexical spelling
     // would make an otherwise valid Agent exit before its provider starts.

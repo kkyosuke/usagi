@@ -1,6 +1,6 @@
 //! Filesystem identity checks shared by daemon admission and Agent provisioning.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The path is not an absolute, canonical, caller-owned directory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11,6 +11,32 @@ pub(super) struct InvalidOwnedDirectory;
 /// and therefore remain admissible.
 pub(super) fn validate_owned_directory(path: &Path) -> Result<(), InvalidOwnedDirectory> {
     validate_owned_path(path, false)
+}
+
+/// Drops group and other permission bits from existing directories owned by this
+/// user. Absent paths, symlinks, and foreign owners are left unchanged so the
+/// caller's exact private-chain check still rejects them.
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_memory_root_tightens_a_chain_left_by_an_earlier_release
+pub(super) fn tighten_owned_directories(paths: &[PathBuf]) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    for path in paths {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 != 0
+        {
+            std::fs::set_permissions(
+                path,
+                std::fs::Permissions::from_mode(metadata.mode() & 0o700),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Applies the same identity checks to a directory or, when requested, a
