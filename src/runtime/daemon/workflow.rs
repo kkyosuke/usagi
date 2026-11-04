@@ -525,13 +525,15 @@ pub(super) fn reconcile_runtime(
             .bindings()
             .map_err(unavailable)?
             .iter()
-            .find(|binding| {
-                Some(binding.worker.agent_id) == run.reviewer
+            .rev()
+            .find_map(|binding| {
+                (Some(binding.worker.agent_id) == run.reviewer
                     && binding.worker.session_id == Some(session)
                     && binding.caller.agent_id == run.implementer
-                    && binding.caller.session_id == Some(session)
+                    && binding.caller.session_id == Some(session))
+                .then(|| owner.workflow_live_operation(binding.run_id))
+                .flatten()
             })
-            .and_then(|binding| owner.workflow_live_operation(binding.run_id))
     } else {
         implementation
     };
@@ -835,12 +837,15 @@ fn admission_error(error: &anyhow::Error) -> ProtocolError {
     let message = error.to_string();
     let code = match message.as_str() {
         "invalid workflow goal"
+        | "invalid workflow revision limit"
         | "workflow has not started"
+        | "workflow has already finished"
         | "workflow launch is not yet admitted"
         | "reviewer is not assigned yet"
         | "workflow capacity exhausted"
         | "instruction is empty, invalid, or the journal is full" => ErrorCode::InvalidArgument,
         "session already has another workflow"
+        | "workflow operation has already finished"
         | "instruction ID conflicts with workflow start"
         | "instruction ID conflicts with an existing instruction" => ErrorCode::IdempotencyConflict,
         _ => ErrorCode::Unavailable,
@@ -995,9 +1000,11 @@ fn deliver(
     if !record
         .authorized_operations
         .contains(&(instruction.recipient, run))
+        || owner.workflow_live_operation(run) != Some(run)
     {
         // Reusing a stopped Agent identity for a fresh launch is not an exact
-        // workflow resume. Keep the durable instruction queued for its lineage.
+        // workflow resume, and a sleeping or interrupted runtime cannot accept
+        // live PTY input yet. Keep the durable instruction queued for its lineage.
         return Ok(());
     }
     let prompt = format!(
@@ -1062,9 +1069,12 @@ mod tests {
         }
         for message in [
             "invalid workflow goal",
+            "invalid workflow revision limit",
             "workflow has not started",
+            "workflow has already finished",
             "workflow launch is not yet admitted",
             "reviewer is not assigned yet",
+            "workflow capacity exhausted",
             "instruction is empty, invalid, or the journal is full",
         ] {
             assert_eq!(
@@ -1074,6 +1084,7 @@ mod tests {
         }
         for message in [
             "session already has another workflow",
+            "workflow operation has already finished",
             "instruction ID conflicts with workflow start",
             "instruction ID conflicts with an existing instruction",
         ] {

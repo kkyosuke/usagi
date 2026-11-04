@@ -323,16 +323,14 @@ pub(super) fn root_memory_store_root(
     data_home: &paths::DataHome,
     workspace: WorkspaceId,
 ) -> Result<PathBuf, ClaudeSandboxPolicyError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let requested = data_home
         .selected()
         .join("agent-memory")
         .join(workspace.to_string());
-    std::fs::create_dir_all(requested.join(".usagi/memory"))
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-    std::fs::set_permissions(&requested, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
+    usagi_daemon::infrastructure::unix_transport::ensure_private_dir_all(
+        &requested.join(".usagi/memory"),
+    )
+    .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
     // The launcher re-validates exact canonical paths. In particular, macOS
     // exposes `/tmp` through `/private/tmp`; returning the lexical spelling
     // would make an otherwise valid Agent exit before its provider starts.

@@ -1087,8 +1087,8 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   `--add-dir` で managed launch にだけ追加する。`plugin.json`、`mcp_config.json`、`hooks.json` を atomic write し、
   plugin root は実効 writable root / prefix（worktree、provider state、`TMPDIR`、`/tmp`、`/var/tmp` を含む）との
   双方向 overlap を作成前に拒否し、sandbox でも明示 read-only に戻す。managed AGY は
-  `~/.gemini` 全体を writable にせず、`antigravity-cli/conversations/` と
-  `conversation_summaries.db{,-shm,-wal}` だけを writable allowlist にする。したがって
+  `~/.gemini` 全体を writable にせず、`antigravity-cli/conversations/`・`brain/`、
+  `conversation_summaries.db{,-shm,-wal}`、`bin/agentapi` ファイルだけを writable allowlist にする（`bin/` ディレクトリ自体は read-only）。したがって
   `~/.gemini/GEMINI.md`、`config/`、state 内の `plugins/`・`skills/`・`settings.json`・
   `import_manifest.json`・`statusline.sh`・`title.sh` を含む既存/将来の customization は、列挙漏れに
   依存せず read-only のままである。Agent 自身による hook / MCP / command / prompt の永続注入と、管理外の

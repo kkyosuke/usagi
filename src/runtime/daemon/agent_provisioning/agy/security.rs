@@ -9,10 +9,11 @@ use usagi_daemon::usecase::agy::AgyProvisionFailure;
 
 use super::super::validate_owned_directory;
 
-/// Creates the conversation database anchors AGY needs, without replacing user
-/// content, and returns only those canonical paths as writable. The parent
-/// `~/.gemini` tree stays outside the grant, so absent and future customization
-/// paths are protected without relying on a blacklist.
+/// Creates the conversation, subagent artifact, and `run_command` helper anchors
+/// AGY needs, without replacing user content, and returns only those canonical
+/// paths as writable. The parent `~/.gemini` tree and `bin/` itself stay outside
+/// the grant, so absent and future customization paths are protected without
+/// relying on a blacklist.
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agy_grants_only_conversation_state_in_the_shipping_sandbox
 pub(super) fn prepare_agy_writable_paths(
     home: Option<&Path>,
@@ -28,9 +29,11 @@ pub(super) fn prepare_agy_writable_paths(
     let gemini = home.join(".gemini");
     let state = gemini.join("antigravity-cli");
     let conversations = state.join("conversations");
+    let brain = state.join("brain");
+    let bin = state.join("bin");
     // Create and validate each ancestor before descending so an existing
     // symlink cannot redirect the first write outside the trusted home.
-    for directory in [&gemini, &state, &conversations] {
+    for directory in [&gemini, &state, &conversations, &brain, &bin] {
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -49,7 +52,8 @@ pub(super) fn prepare_agy_writable_paths(
     let summaries = state.join("conversation_summaries.db");
     let summaries_shm = state.join("conversation_summaries.db-shm");
     let summaries_wal = state.join("conversation_summaries.db-wal");
-    for path in [&summaries, &summaries_shm, &summaries_wal] {
+    let agentapi = bin.join("agentapi");
+    for path in [&summaries, &summaries_shm, &summaries_wal, &agentapi] {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -78,11 +82,18 @@ pub(super) fn prepare_agy_writable_paths(
         }
     }
 
-    [&conversations, &summaries, &summaries_shm, &summaries_wal]
-        .into_iter()
-        .map(|path| {
-            path.canonicalize()
-                .map_err(|_| AgyProvisionFailure::MaterializationFailed)
-        })
-        .collect()
+    [
+        &conversations,
+        &brain,
+        &summaries,
+        &summaries_shm,
+        &summaries_wal,
+        &agentapi,
+    ]
+    .into_iter()
+    .map(|path| {
+        path.canonicalize()
+            .map_err(|_| AgyProvisionFailure::MaterializationFailed)
+    })
+    .collect()
 }

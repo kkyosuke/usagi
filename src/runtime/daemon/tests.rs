@@ -12306,6 +12306,15 @@ mod workflow_composition {
             fixture.call(request.clone()).unwrap().run.unwrap().phase,
             Phase::Waiting
         );
+        // Simulate a sleeping or interrupted runtime whose DispatchStore worker
+        // still names the authorized operation while the PTY is not live.
+        store
+            .transition_agent(
+                reviewer,
+                usagi_core::domain::agent::AgentStatus::Running,
+                Some(review_operation),
+            )
+            .unwrap();
         let queued = fixture
             .control(
                 OperationId::new(),
@@ -12319,6 +12328,13 @@ mod workflow_composition {
             .unwrap();
         assert_eq!(queued.instructions[0].delivery, Delivery::Queued);
         assert!(fixture.writes.lock().unwrap().entries.is_empty());
+        store
+            .transition_agent(
+                reviewer,
+                usagi_core::domain::agent::AgentStatus::Exited,
+                None,
+            )
+            .unwrap();
         // A plain launch may reuse the mailbox identity, but is not a resume
         // of this Workflow's assigned conversation and must receive nothing.
         let unrelated_operation = OperationId::new();
@@ -12405,6 +12421,102 @@ mod workflow_composition {
             fixture.call(request).unwrap().run.unwrap().phase,
             Phase::Waiting
         );
+    }
+
+    #[test]
+    fn workflow_reconcile_finds_a_live_reviewer_behind_an_exited_earlier_binding() {
+        use usagi_core::domain::agent::{CallerRef, ModelSelector};
+        use usagi_core::domain::id::OperationId;
+        use usagi_core::domain::workflow::Phase;
+        use usagi_core::infrastructure::ipc::{DispatchAgentIntent, DispatchIntent};
+        let fixture = Fixture::new();
+        let run = fixture
+            .control(
+                OperationId::new(),
+                WorkflowCommand::Start {
+                    goal: "second review round".into(),
+                    agents: usagi_core::domain::workflow::WorkflowAgents::default(),
+                    revision_limit: usagi_core::domain::workflow::DEFAULT_REVISION_LIMIT,
+                },
+            )
+            .unwrap()
+            .run
+            .unwrap();
+        let store = fixture.agent.lock().unwrap().dispatch_store().clone();
+        let dispatch = |operation: OperationId, agent: DispatchAgentIntent| {
+            fixture
+                .agent
+                .lock()
+                .unwrap()
+                .dispatch(
+                    &operation.to_string(),
+                    &DispatchIntent {
+                        workspace: fixture.workspace,
+                        session_name: "workflow".into(),
+                        caller: CallerRef {
+                            agent_id: run.implementer,
+                            session_id: Some(fixture.session),
+                        },
+                        agent,
+                        prompt: "review".into(),
+                    },
+                    fixture.session,
+                    &fixture.bound.scope_resolver(),
+                )
+                .unwrap();
+        };
+        let first_review = OperationId::new();
+        dispatch(
+            first_review,
+            DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: ModelSelector::new("default").unwrap(),
+            },
+        );
+        let reviewer = store
+            .binding(first_review)
+            .unwrap()
+            .unwrap()
+            .worker
+            .agent_id;
+        // The first round exits without a provider session, so the next
+        // handoff is a fresh launch rather than a resume of its lineage.
+        {
+            let mut owner = fixture.agent.lock().unwrap();
+            let terminal = owner.runtime_for_operation(first_review).unwrap().terminal;
+            owner.exit(&terminal, 0).unwrap();
+        }
+        let second_review = OperationId::new();
+        dispatch(
+            second_review,
+            DispatchAgentIntent::Existing { agent_id: reviewer },
+        );
+        {
+            let owner = fixture.agent.lock().unwrap();
+            assert_eq!(owner.workflow_live_operation(first_review), None);
+            assert_eq!(
+                owner.workflow_live_operation(second_review),
+                Some(second_review)
+            );
+        }
+        store
+            .update_workflow(fixture.workspace, fixture.session, |record| {
+                let record = record.as_mut().unwrap();
+                record.suspended_phase = Some(Phase::Reviewing);
+                let run = record.run.as_mut().unwrap();
+                run.reviewer = Some(reviewer);
+                run.phase = Phase::Waiting;
+                run.waiting_reason = Some("interrupted".into());
+                Ok(())
+            })
+            .unwrap();
+        workflow::reconcile_runtime(&fixture.agent, fixture.workspace, fixture.session).unwrap();
+        let reconciled = store
+            .workflow(fixture.workspace, fixture.session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reconciled.suspended_phase, None);
+        assert_eq!(reconciled.run.unwrap().phase, Phase::Reviewing);
     }
 
     #[test]

@@ -381,8 +381,8 @@ daemon の selected data directory に
 `agent-integrations/<workspace-id>/agy/.agents/plugins/usagi-runtime/` を materialize し、その synthetic workspace を
 managed launch の private `--add-dir` にだけ渡す。plugin の `mcp_config.json` から同じ `usagi mcp` child を起動し、
 plugin root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
-`~/.gemini` 全体を writable にせず、`~/.gemini/antigravity-cli/conversations/` と state 直下の
-`conversation_summaries.db{,-shm,-wal}` だけを書き込める。認証は OS keyring を使う。この allowlist により、
+`~/.gemini` 全体を writable にせず、`~/.gemini/antigravity-cli/conversations/`・`brain/`（`invoke_subagent` と会話 artifact）、
+state 直下の `conversation_summaries.db{,-shm,-wal}`、`run_command` が使う `bin/agentapi` ファイルだけを書き込める。認証は OS keyring を使う。この allowlist により、
 `~/.gemini/GEMINI.md`、global config、state の plugin / skill / settings / import manifest / status・title script は
 未作成 path も含めて read-only のままとなり、既存 customization を読み取れる一方で新規作成・置換を防ぐ。
 
