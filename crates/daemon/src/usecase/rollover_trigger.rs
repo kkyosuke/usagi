@@ -224,7 +224,7 @@ mod tests {
             RolloverTriggerFailure::Handoff(HandoffFailure::from(RegistryError::StaleRevision)),
         ];
         for failure in failures {
-            assert!(!failure.to_string().is_empty());
+            assert_ne!(failure.to_string(), "");
         }
     }
 
@@ -244,7 +244,7 @@ mod tests {
             ),
             Err(RolloverTriggerFailure::Registry(_))
         ));
-        assert!(probe.calls().is_empty());
+        assert_eq!(probe.calls(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -293,7 +293,7 @@ mod tests {
             ),
             Err(RolloverTriggerFailure::NoVerifiedStandby)
         ));
-        assert!(probe.calls().is_empty());
+        assert_eq!(probe.calls(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
             ),
             Err(RolloverTriggerFailure::MultipleVerifiedStandbys)
         ));
-        assert!(probe.calls().is_empty());
+        assert_eq!(probe.calls(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -379,6 +379,7 @@ mod tests {
             ConnectionId::new(),
             &ClientHello {
                 client_id: ClientId("legacy".into()),
+                surface: None,
                 connection_nonce: "nonce".into(),
                 expected_daemon_generation: None,
                 supported_protocols: Vec::new(),

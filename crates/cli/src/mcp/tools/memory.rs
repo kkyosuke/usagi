@@ -4,34 +4,15 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use usagi_core::domain::memory::{Memory, MemorySummary};
+use usagi_core::domain::memory::Memory;
 use usagi_core::infrastructure::store::memory::MemoryStore;
 use usagi_core::usecase::memory::{self, MemoryFilter, MemoryPatch};
 
+use super::wire::{execution, output, parse};
 use crate::mcp::tool::{Tool, ToolDescriptor, ToolError};
 
 fn store(root: &Path) -> MemoryStore {
     MemoryStore::new(root)
-}
-
-fn parse<T: for<'de> Deserialize<'de>>(params: &str) -> Result<T, ToolError> {
-    serde_json::from_str(params).map_err(|error| invalid_params(&error))
-}
-
-fn invalid_params(error: &serde_json::Error) -> ToolError {
-    ToolError::InvalidParams(error.to_string())
-}
-
-fn output(value: &impl Serialize) -> String {
-    serde_json::to_string_pretty(value).expect("MCP wire views must serialize")
-}
-
-fn execution<T>(result: anyhow::Result<T>) -> Result<T, ToolError> {
-    result.map_err(|error| execution_error(&error))
-}
-
-fn execution_error(error: &anyhow::Error) -> ToolError {
-    ToolError::Execution(error.to_string())
 }
 
 #[derive(Serialize)]
@@ -58,12 +39,6 @@ impl<'a> From<&'a Memory> for MemoryView<'a> {
             body: &memory.body,
         }
     }
-}
-
-#[derive(Serialize)]
-struct MemorySummaryView<'a> {
-    #[serde(flatten)]
-    summary: &'a MemorySummary,
 }
 
 #[derive(Deserialize)]
@@ -138,10 +113,7 @@ impl Tool for MemoryGet {
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NameArgs = parse(params)?;
         let memory = execution(memory::get(&store(store_root), &args.name))?;
-        memory.as_ref().map_or_else(
-            || Ok("null".to_owned()),
-            |memory| Ok(output(&MemoryView::from(memory))),
-        )
+        Ok(output(&memory.as_ref().map(MemoryView::from)))
     }
 }
 
@@ -165,12 +137,7 @@ impl Tool for MemorySearch {
             args.query.as_deref().unwrap_or(""),
             &args.filter,
         ))?;
-        Ok(output(
-            &memories
-                .iter()
-                .map(|summary| MemorySummaryView { summary })
-                .collect::<Vec<_>>(),
-        ))
+        Ok(output(&memories))
     }
 }
 

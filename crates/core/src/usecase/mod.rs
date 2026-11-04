@@ -35,6 +35,7 @@ pub mod pr_inventory;
 pub mod session_state;
 pub mod settings;
 pub mod terminal_observation;
+pub mod terminal_search;
 pub mod vt_screen;
 pub mod workspace;
 pub mod workspace_guard;

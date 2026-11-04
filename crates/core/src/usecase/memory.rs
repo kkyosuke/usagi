@@ -278,8 +278,8 @@ mod tests {
         .unwrap();
         assert_eq!(saved.name, "new-fact");
         assert_eq!(saved.kind, MemoryType::Project);
-        assert!(saved.related.is_empty());
-        assert!(saved.body.is_empty());
+        assert_eq!(saved.related, [] as [String; 0]);
+        assert_eq!(saved.body, "");
 
         let error = save_partial(&store, "missing", MemoryPatch::default(), ts(20)).unwrap_err();
         assert!(error.to_string().contains("title"));
@@ -358,10 +358,9 @@ mod tests {
         .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "beta");
-        assert!(
-            search(&store, "absent", &MemoryFilter::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            search(&store, "absent", &MemoryFilter::default()).unwrap(),
+            [] as [super::MemorySummary; 0]
         );
     }
 }

@@ -7,7 +7,6 @@
 
 use std::time::Duration;
 
-use usagi_core::domain::settings::WorkMode;
 use usagi_core::usecase::vt_screen::MouseProtocolEncoding;
 
 /// The longest interval in which a `Ctrl-O` leader accepts its follow-up.
@@ -188,6 +187,16 @@ pub enum LiveTerminalAction {
     OpenWorkspace,
     /// Open the process-level project/session fuzzy finder (`Ctrl-O 0`).
     OpenWorkspaceSwitcher,
+    /// Find open sessions, observed tabs, and existing commands (`Ctrl-O k`).
+    OpenCommandPalette,
+    /// Search the active workspace Issue and Memory stores.
+    OpenKnowledgeSearch,
+    /// Search all sources with switchable scope.
+    OpenUnifiedSearch,
+    /// Search retained terminal output across open projects.
+    OpenOutputSearch,
+    /// Open attention across all open projects (`Ctrl-O i`).
+    OpenAttention,
     /// Activate project tab 1 through 9 (`Ctrl-O 1` … `Ctrl-O 9`).
     ActivateWorkspace(u8),
     /// Select the previous managed session (`Ctrl-Option-Up`).
@@ -210,7 +219,9 @@ pub enum LiveTerminalAction {
     OpenPullRequests,
     /// Open the active target's file preview (`Ctrl-O v`).
     OpenPreview,
-    /// Open the workspace's pending decisions (`Ctrl-O d`).
+    /// Open generated files (`Ctrl-O f`).
+    OpenArtifacts,
+    /// Open the daemon's pending decisions (`Ctrl-O d`).
     OpenDecisions,
     /// Open the active target's scratchpad (`Ctrl-O s`).
     OpenNotes,
@@ -231,10 +242,6 @@ pub enum LiveTerminalAction {
     /// Open the Home Director mode drawer and its explicit New CLI picker
     /// (`Ctrl-O n`). Plain `n` remains terminal input without the leader.
     DirectorNew,
-    /// Open the Goal-driven Director's Work Run control surface (`Ctrl-O w`).
-    /// It is reserved behind the leader so plain `w` and `Ctrl-W` still reach
-    /// an Agent terminal.
-    WorkRuns,
     /// Toggle the bottom workspace-root generic terminal drawer (`Ctrl-O Ctrl-T`,
     /// with `Ctrl-O t` retained for compatibility).
     RootTerminal,
@@ -366,6 +373,7 @@ impl LiveInputClassifier {
 
     /// Returns whether a leader is still waiting at `now`.
     #[must_use]
+    #[cfg(test)]
     pub fn leader_pending(&self, now: Duration) -> bool {
         self.leader_at
             .is_some_and(|started| now.saturating_sub(started) < LEADER_TIMEOUT)
@@ -537,13 +545,11 @@ pub(crate) struct PrefixHelpEntry {
     pub keys: &'static str,
     pub action: &'static str,
     scope: PrefixHelpScope,
-    goal_driven_only: bool,
 }
 
 const fn with_help(
     mut shortcut: PrefixShortcut,
     scope: PrefixHelpScope,
-    goal_driven_only: bool,
     keys: &'static str,
     action: &'static str,
 ) -> PrefixShortcut {
@@ -551,7 +557,6 @@ const fn with_help(
         keys,
         action,
         scope,
-        goal_driven_only,
     });
     shortcut
 }
@@ -602,25 +607,46 @@ macro_rules! prefix_shortcut {
 /// is optional for every entry so users may keep holding Control after
 /// pressing the leader on any workspace surface.
 const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
+    with_help(
+        prefix_shortcut!(KeyCode::Char('m'), legacy = 13 => LiveTerminalAction::OpenKnowledgeSearch),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O m",
+        "search Issue and Memory",
+    ),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('/') => LiveTerminalAction::OpenOutputSearch),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O /",
+        "search retained terminal output",
+    ),
+    with_help(
+        prefix_shortcut!(KeyCode::Char('k'), legacy = 11 => LiveTerminalAction::OpenCommandPalette),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O k",
+        "find sessions, tabs and commands",
+    ),
     prefix_shortcut!(KeyCode::Char('?'), shifted, legacy = 31 => LiveTerminalAction::KeyboardHelp),
     with_help(
         prefix_shortcut!(KeyCode::Char('+'), shifted => LiveTerminalAction::OpenWorkspace),
         PrefixHelpScope::Workspace,
-        false,
         "Ctrl-O +",
         "add workspace",
     ),
     with_help(
+        prefix_shortcut!(KeyCode::Char('i'), legacy = 9 => LiveTerminalAction::OpenAttention),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O i",
+        "all projects attention",
+    ),
+    with_help(
         prefix_shortcut!(KeyCode::Char('0') => LiveTerminalAction::OpenWorkspaceSwitcher),
         PrefixHelpScope::Workspace,
-        false,
         "Ctrl-O 0",
         "project / session finder",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('1') => LiveTerminalAction::ActivateWorkspace(1)),
         PrefixHelpScope::Workspace,
-        false,
         "Ctrl-O 1 … 9",
         "activate project",
     ),
@@ -636,7 +662,6 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char('a'), legacy = 1 => LiveTerminalAction::OpenCloseupModal),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O a / n",
         "actions / Director start",
     ),
@@ -648,15 +673,19 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char('p'), legacy = 16 => LiveTerminalAction::OpenPullRequests),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O p / v",
         "Pull Requests / Preview",
     ),
     prefix_shortcut!(KeyCode::Char('v'), legacy = 22 => LiveTerminalAction::OpenPreview),
     with_help(
+        prefix_shortcut!(KeyCode::Char('f'), legacy = 6 => LiveTerminalAction::OpenUnifiedSearch),
+        PrefixHelpScope::Workspace,
+        "Ctrl-O f / Ctrl-F",
+        "search all sources (Tab changes scope)",
+    ),
+    with_help(
         prefix_shortcut!(KeyCode::Char('d'), legacy = 4 => LiveTerminalAction::OpenDecisions),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O d / s",
         "Decisions / Scratchpad",
     ),
@@ -664,18 +693,10 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
     with_help(
         prefix_shortcut!(KeyCode::Char(',') => LiveTerminalAction::OpenGarden),
         PrefixHelpScope::WorkspaceBase,
-        false,
         "Ctrl-O , / g / t",
         "Garden / Director / Shell",
     ),
     prefix_shortcut!(KeyCode::Char('g'), legacy = 7 => LiveTerminalAction::Director),
-    with_help(
-        prefix_shortcut!(KeyCode::Char('w'), legacy = 23 => LiveTerminalAction::WorkRuns),
-        PrefixHelpScope::WorkspaceBase,
-        true,
-        "Ctrl-O w",
-        "Work Runs",
-    ),
     prefix_shortcut!(KeyCode::Char('t'), legacy = 20 => LiveTerminalAction::RootTerminal),
     prefix_shortcut!(KeyCode::Char('z'), legacy = 26 => LiveTerminalAction::RootTerminalFullHeight),
     prefix_shortcut!(KeyCode::Char('n'), legacy = 14 => LiveTerminalAction::DirectorNew),
@@ -687,16 +708,11 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
 ];
 
 /// Help rows projected from the executable leader-shortcut catalog.
-pub(crate) fn prefix_help_entries(
-    scope: PrefixHelpScope,
-    work_mode: WorkMode,
-) -> impl Iterator<Item = PrefixHelpEntry> {
+pub(crate) fn prefix_help_entries(scope: PrefixHelpScope) -> impl Iterator<Item = PrefixHelpEntry> {
     PREFIX_SHORTCUTS
         .iter()
         .filter_map(|shortcut| shortcut.help)
-        .filter(move |entry| {
-            entry.scope == scope && (!entry.goal_driven_only || work_mode == WorkMode::GoalDriven)
-        })
+        .filter(move |entry| entry.scope == scope)
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
@@ -1222,6 +1238,18 @@ mod tests {
                 action: LiveTerminalAction::OpenPreview,
             },
             Case {
+                follow_up: key(KeyCode::Char('f')),
+                action: LiveTerminalAction::OpenUnifiedSearch,
+            },
+            Case {
+                follow_up: ctrl('f'),
+                action: LiveTerminalAction::OpenUnifiedSearch,
+            },
+            Case {
+                follow_up: LiveInput::Raw(vec![6]),
+                action: LiveTerminalAction::OpenUnifiedSearch,
+            },
+            Case {
                 follow_up: ctrl('d'),
                 action: LiveTerminalAction::OpenDecisions,
             },
@@ -1304,14 +1332,6 @@ mod tests {
                 action: LiveTerminalAction::RootTerminalFullHeight,
             },
             Case {
-                follow_up: key(KeyCode::Char('w')),
-                action: LiveTerminalAction::WorkRuns,
-            },
-            Case {
-                follow_up: ctrl('w'),
-                action: LiveTerminalAction::WorkRuns,
-            },
-            Case {
                 follow_up: key(KeyCode::End),
                 action: LiveTerminalAction::ScrollBottom,
             },
@@ -1361,7 +1381,6 @@ mod tests {
                 KeyCode::Char('q') => LiveTerminalAction::CloseTab
             )),
             PrefixHelpScope::WorkspaceBase,
-            true,
             "Ctrl-O q",
             "example action",
         );
@@ -1373,7 +1392,6 @@ mod tests {
                 keys: "Ctrl-O q",
                 action: "example action",
                 scope: PrefixHelpScope::WorkspaceBase,
-                goal_driven_only: true,
             })
         );
     }
@@ -1472,16 +1490,22 @@ mod tests {
             );
         }
 
-        for obsolete in ['f', 'u'] {
+        for (character, expected) in [
+            (
+                'f',
+                LiveInputOutput::Action(LiveTerminalAction::OpenUnifiedSearch),
+            ),
+            ('u', LiveInputOutput::Swallowed),
+        ] {
             let mut classifier = LiveInputClassifier::default();
             assert_eq!(
                 classifier.classify(T0, ctrl('o')),
                 LiveInputOutput::Swallowed
             );
             assert_eq!(
-                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(obsolete)),),
-                LiveInputOutput::Swallowed,
-                "obsolete prefix must not remain as an alias: {obsolete}"
+                classifier.classify(Duration::from_millis(1), key(KeyCode::Char(character)),),
+                expected,
+                "prefix must not alias tab movement: {character}"
             );
         }
     }
@@ -2026,7 +2050,7 @@ mod tests {
             Modifiers::default(),
             KeyEventKind::Release,
         );
-        assert!(encode_key(&release).is_empty());
+        assert_eq!(encode_key(&release), [] as [u8; 0]);
     }
 
     #[test]

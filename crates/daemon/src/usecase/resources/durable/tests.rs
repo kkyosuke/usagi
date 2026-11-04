@@ -128,6 +128,9 @@ fn agent_record(
     };
     let plan = LaunchPlan::new(profile, 1, "codex", Vec::new(), [], PathBuf::from("/tmp")).unwrap();
     DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: AgentRuntimeRef {
             agent_runtime_id: AgentRuntimeId::new(),
             terminal: resource.clone(),
@@ -320,6 +323,65 @@ fn a_reservation_claims_capacity_before_the_shard_records_it() {
         serde_json::from_str::<DurableRuntimeRecord>(entry.payload.as_deref().unwrap()).unwrap(),
         reserved
     );
+}
+
+#[test]
+fn a_replayed_claim_cannot_authorize_another_terminal() {
+    for first_state in [
+        TerminalRuntimeState::Reserved,
+        TerminalRuntimeState::Running,
+    ] {
+        let world = World::new();
+        let old = DaemonGeneration::new();
+        let next = DaemonGeneration::new();
+        let original = terminal(old);
+        let operation = OperationId::new();
+        let identity = ObservedChildren::new().with(9, "start-9");
+        let initial = project_terminal(
+            &terminal_record(
+                &original,
+                operation,
+                first_state,
+                (first_state == TerminalRuntimeState::Running).then(|| process(9, "start-9")),
+            ),
+            &identity,
+        );
+        let old_state = world.state(old, identity);
+        // Stop the shipping transaction after the allocator CAS: a crash or
+        // shard write failure can leave this claim without its owning payload.
+        old_state.claim(&[&initial]).unwrap();
+        let before = world.allocator.get();
+        assert!(world.archive.bytes(old).get().is_none());
+
+        let proposed = TerminalRef {
+            daemon_generation: next,
+            terminal_id: TerminalId::new(),
+            ..original.clone()
+        };
+        let replacement = RuntimeProjection {
+            resource: proposed.clone(),
+            state: ProjectedState::Reserved,
+            ..initial.clone()
+        };
+        assert_eq!(
+            world
+                .state(next, ObservedChildren::new())
+                .commit(ResourceKind::Terminal, &[replacement])
+                .unwrap_err()
+                .refusal(),
+            Some(ResourceError::OwnershipUnknown)
+        );
+        assert_eq!(world.allocator.get(), before);
+        assert!(world.allocator().claim(&proposed).is_none());
+        assert!(world.archive.bytes(next).get().is_none());
+
+        // Saving the original identity still converges, including a sealed final.
+        old_state
+            .commit(ResourceKind::Terminal, &[initial])
+            .unwrap();
+        assert_eq!(world.allocator.get(), before);
+        assert!(world.shard(old).resource(&original).is_some());
+    }
 }
 
 #[test]
@@ -534,7 +596,10 @@ fn a_foreign_record_is_never_written_and_is_released_only_when_terminated() {
         world.allocator().claim(&old_resource).unwrap().state,
         ClaimState::Live
     );
-    assert!(world.shard(new).resources.is_empty());
+    assert_eq!(
+        world.shard(new).resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
     assert_eq!(world.shard(old).resources.len(), 1);
 
     let terminated = RuntimeProjection {
@@ -714,7 +779,10 @@ fn a_terminated_record_whose_ledger_entry_was_collected_still_saves() {
         )
         .unwrap();
     assert_eq!(report.owned, 1);
-    assert!(world.allocator().operations.is_empty());
+    assert_eq!(
+        world.allocator().operations,
+        [] as [crate::usecase::resources::allocator::OperationRecord; 0]
+    );
     assert_eq!(
         world.shard(owner).resource(&resource).unwrap().state,
         ResourceState::Exited { status: None }
@@ -1254,7 +1322,10 @@ fn a_legacy_store_is_adopted_once_and_only_where_it_can_prove_itself() {
             .iter()
             .all(|entry| entry.state == ResourceState::OwnershipUnknown)
     );
-    assert!(world.allocator().claims.is_empty());
+    assert_eq!(
+        world.allocator().claims,
+        [] as [crate::usecase::resources::allocator::ResourceClaim; 0]
+    );
     assert_eq!(hydrated.agents.records.len(), 1);
     assert_eq!(hydrated.terminals.records.len(), 1);
     assert!(world.archive.marker().is_some());
@@ -1360,6 +1431,8 @@ fn a_retired_shard_is_collected_only_once_nothing_retains_it() {
         )]))
         .unwrap();
 
+    let own_shard = serde_json::to_string(&ShardDocument::empty(new)).unwrap();
+    world.archive.bytes(new).set(&own_shard);
     let active = world.state(new, ObservedChildren::new());
     let retained: BTreeSet<String> = std::iter::once(resource.terminal_id.as_str()).collect();
     // A live claim keeps it, and so does the active generation still retaining
@@ -1379,6 +1452,7 @@ fn a_retired_shard_is_collected_only_once_nothing_retains_it() {
     assert_eq!(world.archive.collected(), vec![old.as_str()]);
     // Its own shard is never a collection candidate.
     assert_eq!(active.collect_retired(&BTreeSet::new()).unwrap(), 0);
+    assert_eq!(world.archive.bytes(new).get(), Some(own_shard));
 }
 
 #[test]
@@ -1397,9 +1471,13 @@ fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
         )]))
         .unwrap();
     let mut old_shard = world.shard(old);
+    // An older build may have persisted an unfinished command before dying.
     old_shard
-        .accept_command(&resource, &OperationId::new())
-        .unwrap();
+        .in_flight
+        .push(crate::usecase::resources::shard::InFlightCommand {
+            resource: resource.clone(),
+            command: OperationId::new(),
+        });
     world
         .archive
         .bytes(old)
@@ -1427,6 +1505,73 @@ fn a_dead_retired_child_cannot_pin_its_running_shard_forever() {
     assert_eq!(active.collect_retired(&retained).unwrap(), 0);
     assert_eq!(active.collect_retired(&BTreeSet::new()).unwrap(), 1);
     assert_eq!(world.archive.collected(), vec![old.as_str()]);
+}
+
+#[test]
+fn collecting_a_mixed_shard_keeps_the_child_without_proof_of_exit() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let gone = terminal(old);
+    let retained = terminal(old);
+    ShardedTerminalStore::new(
+        world.state(
+            old,
+            ObservedChildren::new()
+                .with(41, "gone")
+                .with(42, "retained"),
+        ),
+    )
+    .save(terminal_snapshot(vec![
+        terminal_record(
+            &gone,
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(41, "gone")),
+        ),
+        terminal_record(
+            &retained,
+            OperationId::new(),
+            TerminalRuntimeState::Running,
+            Some(process(42, "retained")),
+        ),
+    ]))
+    .unwrap();
+    let before = world.shard(old);
+    let active = world.state(
+        DaemonGeneration::new(),
+        ObservedChildren::new().with_gone(41),
+    );
+    assert_eq!(active.collect_retired(&BTreeSet::new()).unwrap(), 0);
+    assert_eq!(world.shard(old), before);
+    assert_eq!(world.archive.collected(), [] as [String; 0]);
+}
+
+#[test]
+fn hydration_rejects_a_terminal_payload_whose_launch_scope_disagrees() {
+    let world = World::new();
+    let owner = DaemonGeneration::new();
+    let resource = terminal(owner);
+    let mut record = terminal_record(
+        &resource,
+        OperationId::new(),
+        TerminalRuntimeState::Reserved,
+        None,
+    );
+    ShardedTerminalStore::new(world.state(owner, ObservedChildren::new()))
+        .save(terminal_snapshot(vec![record.clone()]))
+        .unwrap();
+    record.launch.request.scope.worktree_id = usagi_core::domain::id::WorktreeId::new();
+    let mut shard = world.shard(owner);
+    shard.resources[0].payload = Some(serde_json::to_string(&record).unwrap());
+    world
+        .archive
+        .bytes(owner)
+        .set(&serde_json::to_string(&shard).unwrap());
+    assert!(matches!(
+        world.state(owner, ObservedChildren::new()).hydrate().err(),
+        Some(ResourceFailure::Refused(ResourceError::Corrupt))
+    ));
+    assert_eq!(world.shard(owner), shard);
 }
 
 #[test]
@@ -1594,6 +1739,118 @@ fn a_store_failure_is_reported_as_a_refused_save() {
 }
 
 #[test]
+fn an_acknowledged_exit_remains_replayable_until_shard_cleanup_is_durable() {
+    let world = World::new();
+    let owner = DaemonGeneration::new();
+    let resource = terminal(owner);
+    let mut record = terminal_record(
+        &resource,
+        OperationId::new(),
+        TerminalRuntimeState::Running,
+        Some(process(81, "start-81")),
+    );
+    let mut draining = ShardedTerminalStore::new(world.role(
+        owner,
+        GenerationRole::Draining,
+        ObservedChildren::new().with(81, "start-81"),
+    ));
+    draining
+        .save(terminal_snapshot(vec![record.clone()]))
+        .unwrap();
+    record.state = TerminalRuntimeState::Exited;
+    draining
+        .save(terminal_snapshot(vec![record.clone()]))
+        .unwrap();
+    let before = world.shard(owner);
+    assert_eq!(before.unacked_outbox(), 1);
+
+    let mut failing = world.state(owner, ObservedChildren::new());
+    // The exit is already published. Only the owner-local cleanup CAS fails;
+    // the shared allocator remains writable for the active consumer's ACK.
+    failing.shard = OwnerShard::new(
+        MemoryFile::faulty(&world.archive.bytes(owner), FileFault::WriteFails),
+        owner,
+    );
+    let mut store = ShardedTerminalStore::new(failing);
+    assert_eq!(
+        store.save(terminal_snapshot(vec![record.clone()])),
+        Err(StoreError::Unavailable)
+    );
+    let acknowledged = world.allocator();
+    assert_eq!(
+        acknowledged.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    assert_eq!(world.shard(owner), before);
+    assert!(matches!(
+        store.state().self_collectable(),
+        Err(ResourceFailure::Io(_))
+    ));
+    assert_eq!(
+        world.shard(owner),
+        before,
+        "a failed sweep cannot claim collection readiness"
+    );
+
+    let mut retried = ShardedTerminalStore::new(world.state(owner, ObservedChildren::new()));
+    retried.save(terminal_snapshot(vec![record])).unwrap();
+    assert_eq!(
+        world.allocator(),
+        acknowledged,
+        "replaying an ACK must not release capacity twice"
+    );
+    assert_eq!(world.shard(owner).unacked_outbox(), 0);
+    assert_eq!(retried.state().self_collectable().unwrap(), None);
+}
+
+#[test]
+fn a_foreign_exit_releases_no_capacity_until_the_allocator_write_succeeds() {
+    let world = World::new();
+    let old = DaemonGeneration::new();
+    let active = DaemonGeneration::new();
+    let resource = terminal(old);
+    let mut record = agent_record(
+        &resource,
+        OperationId::new(),
+        RuntimeState::Running,
+        Some(process(82, "start-82")),
+    );
+    ShardedAgentStore::new(world.state(old, ObservedChildren::new().with(82, "start-82")))
+        .save(agent_snapshot(vec![record.clone()]))
+        .unwrap();
+    let allocator_before = world.allocator();
+    let shard_before = world.shard(old);
+    record.state = RuntimeState::Reclaimed;
+    record.process = None;
+    let mut failing = world.state(active, ObservedChildren::new());
+    failing.allocator = ResourceAllocator::new(
+        MemoryFile::faulty(&world.allocator, FileFault::WriteFails),
+        policy(2, 2),
+    );
+    assert_eq!(
+        ShardedAgentStore::new(failing).save(agent_snapshot(vec![record.clone()])),
+        Err(StoreError::Unavailable)
+    );
+    assert_eq!(world.allocator(), allocator_before);
+    assert_eq!(
+        world.shard(old),
+        shard_before,
+        "a successor never rewrites the retired owner's shard"
+    );
+
+    let mut retried = ShardedAgentStore::new(world.state(active, ObservedChildren::new()));
+    retried.save(agent_snapshot(vec![record.clone()])).unwrap();
+    let released = world.allocator();
+    assert_eq!(
+        released.claim(&resource).unwrap().state,
+        ClaimState::Released
+    );
+    retried.save(agent_snapshot(vec![record])).unwrap();
+    assert_eq!(world.allocator(), released);
+    assert_eq!(world.shard(old), shard_before);
+}
+
+#[test]
 fn a_census_counts_live_runtime_without_touching_anything() {
     let old = DaemonGeneration::new();
     let unmigrated = terminal(old);
@@ -1673,6 +1930,55 @@ fn a_census_counts_live_runtime_without_touching_anything() {
 }
 
 #[test]
+fn legacy_census_counts_only_states_that_still_hold_a_pty_master() {
+    let owner = DaemonGeneration::new();
+    for (state, expected) in [
+        (TerminalRuntimeState::Reserved, 1),
+        (TerminalRuntimeState::Running, 1),
+        (TerminalRuntimeState::Exited, 0),
+        (TerminalRuntimeState::Reclaimed, 0),
+        (TerminalRuntimeState::SpawnFailed, 0),
+        (
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            0,
+        ),
+        (
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
+            0,
+        ),
+    ] {
+        let world = World::with_legacy(
+            Some(&agents(vec![agent_record(
+                &terminal(owner),
+                OperationId::new(),
+                state,
+                None,
+            )])),
+            Some(&terminals(vec![terminal_record(
+                &terminal(owner),
+                OperationId::new(),
+                state,
+                None,
+            )])),
+        );
+        assert_eq!(
+            census(&world.archive).unwrap(),
+            LiveCensus {
+                agents: expected,
+                terminals: expected
+            },
+            "{state:?}"
+        );
+        assert!(world.archive.marker().is_none());
+        assert!(world.allocator.get().is_none());
+    }
+    assert_eq!(
+        census(&World::new().archive).unwrap(),
+        LiveCensus::default()
+    );
+}
+
+#[test]
 fn a_shard_resource_without_a_record_is_skipped_rather_than_guessed() {
     let world = World::new();
     let owner = DaemonGeneration::new();
@@ -1697,8 +2003,14 @@ fn a_shard_resource_without_a_record_is_skipped_rather_than_guessed() {
         .state(owner, ObservedChildren::new())
         .hydrate()
         .unwrap();
-    assert!(hydrated.terminals.records.is_empty());
-    assert!(hydrated.agents.records.is_empty());
+    assert_eq!(
+        hydrated.terminals.records,
+        [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+    );
+    assert_eq!(
+        hydrated.agents.records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1729,7 +2041,10 @@ fn a_shard_transition_that_contradicts_itself_refuses_the_save() {
             .refusal(),
         Some(ResourceError::DuplicateResource)
     );
-    assert!(world.shard(owner).resources.is_empty());
+    assert_eq!(
+        world.shard(owner).resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
 
     // A resource id that two records claim is a contradiction the shard refuses:
     // the terminated one takes no claim, so the refusal comes from the shard
@@ -1746,7 +2061,10 @@ fn a_shard_transition_that_contradicts_itself_refuses_the_save() {
             .refusal(),
         Some(ResourceError::DuplicateResource)
     );
-    assert!(world.shard(owner).resources.is_empty());
+    assert_eq!(
+        world.shard(owner).resources,
+        [] as [crate::usecase::resources::shard::ShardResource; 0]
+    );
 
     // A running record cannot be handed a different child either.
     let running = RuntimeProjection {
@@ -1796,7 +2114,10 @@ fn a_terminated_legacy_record_is_adopted_without_being_called_live() {
 
     assert_eq!(migration.marker.adopted, 1);
     assert_eq!(world.shard(old).live_resources(), 0);
-    assert!(world.allocator().claims.is_empty());
+    assert_eq!(
+        world.allocator().claims,
+        [] as [crate::usecase::resources::allocator::ResourceClaim; 0]
+    );
 }
 
 #[test]
@@ -2190,3 +2511,5 @@ fn a_reclaim_that_cannot_be_saved_leaves_the_leaked_claim_alone() {
         "a refused write must not publish capacity as released"
     );
 }
+
+mod retention;

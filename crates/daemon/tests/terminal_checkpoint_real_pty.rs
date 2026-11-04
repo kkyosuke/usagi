@@ -63,6 +63,7 @@ use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
+use usagi_daemon::usecase::resources::StoreError;
 use usagi_daemon::usecase::runtime::{
     AdapterError, AgentAdapter, OutputJournal, PtySpawner, ResolvedLaunch, RuntimeStore,
     RuntimeStoreSnapshot, SpawnProvision,
@@ -337,7 +338,7 @@ impl PtyWriter for RealPty {
 
 struct MemoryStore;
 impl RuntimeStore for MemoryStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         Ok(())
     }
 }
@@ -351,7 +352,7 @@ impl OutputJournal for MemoryJournal {
 
 struct MemoryTerminalStore;
 impl TerminalStore for MemoryTerminalStore {
-    fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), StoreError> {
         Ok(())
     }
 }

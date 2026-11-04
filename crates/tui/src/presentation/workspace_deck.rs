@@ -5,12 +5,21 @@
 //! Mutable session, pane, and Agent state remain owned by the active workspace
 //! controller.
 
+mod attention;
+mod knowledge_search;
+pub(crate) mod output_search;
+pub(crate) mod palette;
+mod search_input;
+mod unified_search;
+
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use usagi_core::domain::agent::{AgentStatus, AgentWorkspaceObservation};
-use usagi_core::domain::id::{AgentRuntimeId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeId, SessionId, UserDecisionId, WorkspaceId};
+use usagi_core::domain::pr_inventory::PrIdentity;
 use usagi_core::domain::session_lifecycle::SessionLifecycle;
 use usagi_core::domain::settings::IconMode;
 use usagi_core::domain::workspace::Workspace;
@@ -22,6 +31,7 @@ use crate::presentation::widgets::garden::{GardenAgent, GardenSession};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::Key;
 use crate::usecase::application::WorkspaceSnapshot;
+use crate::usecase::application::controller::DecisionSnapshot;
 use crate::usecase::fuzzy::fuzzy_score;
 
 const TAB_NAME_WIDTH: usize = 18;
@@ -38,11 +48,16 @@ pub struct WorkspaceSlot {
     /// controller. The controller is intentionally torn down on every project
     /// switch, so the process-level deck carries only this stable identity.
     focused_session: Option<SessionId>,
+    manual_session_order: Option<Vec<SessionId>>,
     /// Whether the Garden's cross-project observation lane has seen this
     /// project's daemon Agent inventory since the cache was last rebuilt. An
     /// unobserved slot keeps drawing the read-only `project inactive` plot
     /// instead of claiming that an empty cached list means "no Agents".
     agents_observed: bool,
+    attention: Option<usagi_core::domain::attention::WorkspaceAttention>,
+    attention_stale: bool,
+    attention_observed_at: Option<std::time::Instant>,
+    palette_tabs: Vec<palette::CachedTab>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,7 +147,12 @@ impl WorkspaceSlot {
             label: snapshot.workspace.name.clone(),
             sessions,
             focused_session: None,
+            manual_session_order: None,
             agents_observed: false,
+            attention: None,
+            attention_stale: false,
+            attention_observed_at: None,
+            palette_tabs: Vec::new(),
         }
     }
 
@@ -166,6 +186,11 @@ impl WorkspaceSlot {
 enum DeckOverlay {
     Add(AddWorkspace),
     Switcher(ProjectSwitcher),
+    Attention(attention::AttentionList),
+    Palette(palette::Palette),
+    Knowledge(knowledge_search::Search),
+    Unified(Box<unified_search::Search>),
+    OutputSearch(output_search::Search),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,8 +202,14 @@ enum AddWorkspaceMode {
 /// Result of reducing one key while a deck overlay is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayIntent {
+    OutputVisit(Box<output_search::Hit>),
     Stay,
     Cancel,
+    PaletteVisit {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        action: palette::Action,
+    },
     Add(Vec<PathBuf>),
     Activate(PathBuf),
     Visit {
@@ -187,6 +218,21 @@ pub enum OverlayIntent {
         session: SessionId,
     },
     Close(PathBuf),
+    AttentionVisit {
+        path: PathBuf,
+        workspace: WorkspaceId,
+        session: Option<SessionId>,
+        destination: AttentionDestination,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttentionDestination {
+    Decisions,
+    Decision(UserDecisionId),
+    PullRequests,
+    PullRequest(PrIdentity),
+    Session,
 }
 
 /// Ordered tabs and the active tab identity.
@@ -195,11 +241,21 @@ pub struct WorkspaceDeck {
     slots: Vec<WorkspaceSlot>,
     active: WorkspaceId,
     overlay: Option<DeckOverlay>,
+    knowledge_epoch: u64,
+    unified_epoch: u64,
     notice: Option<String>,
     pending_garden_visit: Option<(PathBuf, GardenVisit)>,
     pending_closeup_path: Option<PathBuf>,
     /// Global terminal icon preference used by cached transition frames.
     icon_mode: IconMode,
+    attention_cursor: usize,
+    pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
+    pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
+    pub(crate) pending_output_hit: Option<output_search::Hit>,
+    search_epoch: u64,
+    /// Parked only during controller replacement. Shared ownership keeps
+    /// loading-frame deck clones from copying question bodies every frame.
+    decisions: Option<Arc<DecisionSnapshot>>,
 }
 
 /// Stable Garden target carried while the process replaces one workspace
@@ -219,10 +275,18 @@ impl WorkspaceDeck {
             active: slot.workspace_id,
             slots: vec![slot],
             overlay: None,
+            knowledge_epoch: 0,
+            unified_epoch: 0,
             notice: None,
             pending_garden_visit: None,
             pending_closeup_path: None,
             icon_mode: IconMode::default(),
+            attention_cursor: 0,
+            pending_attention: None,
+            pending_palette: None,
+            pending_output_hit: None,
+            search_epoch: 0,
+            decisions: None,
         }
     }
 
@@ -237,8 +301,9 @@ impl WorkspaceDeck {
         self.icon_mode
     }
 
-    /// Start a deck from an ordered, non-empty group of prepared snapshots.
+    /// Build a multi-project fixture from ordered, non-empty snapshots.
     #[must_use]
+    #[cfg(test)]
     pub fn from_snapshots(snapshots: &[WorkspaceSnapshot]) -> Option<Self> {
         let first = snapshots.first()?;
         let mut deck = Self::new(first);
@@ -249,6 +314,32 @@ impl WorkspaceDeck {
     #[must_use]
     pub fn slots(&self) -> &[WorkspaceSlot] {
         &self.slots
+    }
+
+    pub(super) fn remember_decisions(&mut self, snapshot: DecisionSnapshot) {
+        self.decisions = Some(Arc::new(snapshot));
+    }
+
+    pub(super) fn take_decisions(&mut self) -> Option<DecisionSnapshot> {
+        self.decisions.take().map(Arc::unwrap_or_clone)
+    }
+
+    /// Source labels for questions displayed while another project is active.
+    #[must_use]
+    pub fn decision_owner_names(&self) -> crate::presentation::views::decision_modal::OwnerNames {
+        crate::presentation::views::decision_modal::OwnerNames {
+            workspaces: self
+                .slots
+                .iter()
+                .map(|slot| (slot.workspace_id, slot.label.clone()))
+                .collect(),
+            sessions: self
+                .slots
+                .iter()
+                .flat_map(|slot| slot.sessions.iter())
+                .map(|session| (session.projected.id, session.projected.label.clone()))
+                .collect(),
+        }
     }
 
     #[must_use]
@@ -310,13 +401,11 @@ impl WorkspaceDeck {
         self.slots.iter().find(|slot| slot.path == path)
     }
 
-    /// Select an existing slot in a presentation-only deck clone.
-    pub fn preview_path(&mut self, path: &Path) {
-        if let Some(slot) = self.slots.iter().find(|slot| slot.path == path) {
-            self.active = slot.workspace_id;
-            self.overlay = None;
-            self.notice = None;
-        }
+    /// Select the already-resolved slot in a presentation-only deck clone.
+    pub(super) fn preview_slot(&mut self, slot: &WorkspaceSlot) {
+        self.active = slot.workspace_id;
+        self.overlay = None;
+        self.notice = None;
     }
 
     /// Append prepared tabs in request order, ignoring duplicate paths.
@@ -337,6 +426,12 @@ impl WorkspaceDeck {
             .find(|slot| slot.path == snapshot.workspace.path)
         {
             let focused_session = slot.focused_session;
+            if slot.workspace_id != snapshot.workspace_id {
+                slot.palette_tabs.clear();
+                slot.attention = None;
+                slot.attention_observed_at = None;
+                slot.attention_stale = false;
+            }
             slot.workspace_id = snapshot.workspace_id;
             slot.label.clone_from(&snapshot.workspace.name);
             slot.sessions = WorkspaceSlot::from_snapshot(snapshot).sessions;
@@ -411,6 +506,38 @@ impl WorkspaceDeck {
         match overlay {
             DeckOverlay::Add(add) => add.handle(key),
             DeckOverlay::Switcher(switcher) => switcher.handle(key, &self.slots),
+            DeckOverlay::Attention(list) => list.handle(key, &self.slots),
+            DeckOverlay::Knowledge(search) => search.handle(key),
+            DeckOverlay::Unified(search) => search.handle(key, &self.slots),
+            DeckOverlay::Palette(palette) => palette.handle(key, &self.slots, 8),
+            DeckOverlay::OutputSearch(search) => search.handle(key),
+        }
+    }
+
+    /// Use the same geometry as the inbox frame for clicks and visible actions.
+    /// Other deck overlays retain their existing keyboard reducer.
+    pub fn handle_overlay_key_at(
+        &mut self,
+        key: &Key,
+        height: usize,
+        width: usize,
+    ) -> OverlayIntent {
+        if let Some(DeckOverlay::Palette(palette)) = self.overlay.as_mut() {
+            return palette.handle(key, &self.slots, palette::page_size(height));
+        }
+        if let Some(DeckOverlay::Attention(list)) = self.overlay.as_mut() {
+            let intent = attention::handle_input(
+                list,
+                &self.slots,
+                self.notice.as_deref(),
+                key,
+                height,
+                width,
+            );
+            self.notice = None;
+            intent
+        } else {
+            self.handle_overlay_key(key)
         }
     }
 
@@ -435,8 +562,22 @@ impl WorkspaceDeck {
         {
             self.pending_garden_visit = None;
         }
+        if self
+            .pending_attention
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == path)
+        {
+            self.pending_attention = None;
+        }
         if self.pending_closeup_path.as_deref() == Some(path) {
             self.pending_closeup_path = None;
+        }
+        if self
+            .pending_palette
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == path)
+        {
+            self.pending_palette = None;
         }
     }
 
@@ -511,6 +652,23 @@ impl WorkspaceDeck {
         }
     }
 
+    /// Carry a workspace-local manual order across controller teardown.
+    pub fn remember_session_order(&mut self, workspace: WorkspaceId, sessions: &[SessionId]) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.workspace_id == workspace)
+        {
+            slot.manual_session_order = Some(sessions.to_vec());
+        }
+    }
+
+    /// Manual order only; untouched projects continue following daemon order.
+    #[must_use]
+    pub fn session_order_for_path(&self, path: &Path) -> Option<&[SessionId]> {
+        self.slot_for_path(path)?.manual_session_order.as_deref()
+    }
+
     /// Last session row focused in an already-open project.
     #[must_use]
     pub fn focused_session_for_path(&self, path: &Path) -> Option<SessionId> {
@@ -539,20 +697,6 @@ impl WorkspaceDeck {
             // describes no observation until the lane makes one.
             slot.agents_observed = false;
         }
-    }
-
-    /// Every open project the Garden observes from the outside: the tabs whose
-    /// workspace controller is not resident in this process.
-    ///
-    /// The active project is excluded because its own controller already
-    /// projects richer, runtime-local Agent phases into the Garden.
-    #[must_use]
-    pub fn observable_workspaces(&self) -> Vec<WorkspaceId> {
-        self.slots
-            .iter()
-            .map(WorkspaceSlot::workspace_id)
-            .filter(|workspace| *workspace != self.active)
-            .collect()
     }
 
     /// Attach one inactive project's daemon Agent inventory to its cached plots.
@@ -954,6 +1098,7 @@ impl FinderRow {
 pub enum ProjectBarTarget {
     Workspace(PathBuf),
     Add,
+    Attention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -994,13 +1139,14 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         .slots
         .iter()
         .enumerate()
-        .map(|(index, slot)| {
-            let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
-            format!(" {} {name} ", index + 1)
-        })
+        .map(|(index, slot)| project_tab_label(index, active, slot))
         .collect::<Vec<_>>();
     let add_button = InlineButton::new(ADD_LABEL);
-    let add_width = add_button.width();
+    let (attention_label, attention_style) = attention::indicator(&deck.slots);
+    let attention_button = InlineButton::new(&attention_label);
+    // Reserve breathing room between project actions and the right-aligned
+    // notification, even when the bar has no spare cells.
+    let add_width = add_button.width() + 2 + attention_button.width();
 
     let mut best = (active, active + 1);
     let mut best_count = 1;
@@ -1021,7 +1167,7 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         let visible = widgets::clip_to_width(&labels[active], width);
         let span = widgets::display_width(&visible);
         return ProjectBar {
-            line: Role::Accent.style().bold().paint(&visible),
+            line: visible,
             hits: vec![ProjectBarHit {
                 columns: 0..span,
                 target: ProjectBarTarget::Workspace(deck.slots[active].path.clone()),
@@ -1040,12 +1186,7 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         let available = width.saturating_sub(column + add_width);
         let visible = widgets::clip_to_width(label, available);
         let span = widgets::display_width(&visible);
-        let styled = if index == active {
-            Role::Accent.style().bold().paint(&visible)
-        } else {
-            Style::new().dim().paint(&visible)
-        };
-        line.push_str(&styled);
+        line.push_str(&visible);
         hits.push(ProjectBarHit {
             columns: column..column + span,
             target: ProjectBarTarget::Workspace(deck.slots[index].path.clone()),
@@ -1058,19 +1199,48 @@ pub fn project_bar(deck: &WorkspaceDeck, width: usize) -> ProjectBar {
         column += widgets::display_width(&hidden);
         line.push_str(&Style::new().dim().paint(&hidden));
     }
-    if column < width {
-        let add = add_button.render(
-            width.saturating_sub(column),
-            Role::Accent.style().bold().reverse(),
-        );
-        let span = add.width;
-        line.push_str(&add.line);
-        hits.push(ProjectBarHit {
-            columns: column..column + span,
-            target: ProjectBarTarget::Add,
-        });
-    }
+    // The chosen window already reserves space for both action buttons.
+    let add = add_button.render(
+        width.saturating_sub(column),
+        Role::Accent.style().bold().reverse(),
+    );
+    let span = add.width;
+    line.push_str(&add.line);
+    hits.push(ProjectBarHit {
+        columns: column..column + span,
+        target: ProjectBarTarget::Add,
+    });
+    column += span;
+    let gap = width.saturating_sub(column + attention_button.width());
+    line.push_str(&" ".repeat(gap));
+    column += gap;
+    let attention = attention_button.render(width.saturating_sub(column), attention_style);
+    line.push_str(&attention.line);
+    hits.push(ProjectBarHit {
+        columns: column..column + attention.width,
+        target: ProjectBarTarget::Attention,
+    });
     ProjectBar { line, hits }
+}
+
+fn project_tab_label(index: usize, active: usize, slot: &WorkspaceSlot) -> String {
+    let name = widgets::clip_to_width(slot.label(), TAB_NAME_WIDTH);
+    let style = if index == active {
+        Role::Accent.style().bold()
+    } else {
+        Style::new().dim()
+    };
+    let badge = attention::badge(slot);
+    let badge_style = if badge.contains('!') {
+        Role::Warning.style().bold()
+    } else {
+        style
+    };
+    format!(
+        "{}{} ",
+        style.paint(&format!(" {} {name}", index + 1)),
+        badge_style.paint(&badge)
+    )
 }
 
 fn project_bar_window_width(
@@ -1106,6 +1276,17 @@ pub fn render_overlay(
 ) -> Vec<String> {
     match &deck.overlay {
         None => base.to_vec(),
+        Some(DeckOverlay::Attention(list)) => attention::render(deck, list, height, width, base),
+        Some(DeckOverlay::Knowledge(search)) => {
+            knowledge_search::render(deck, search, height, width, base)
+        }
+        Some(DeckOverlay::Unified(search)) => {
+            unified_search::render(deck, search, height, width, base)
+        }
+        Some(DeckOverlay::Palette(palette)) => palette::render(deck, palette, height, width, base),
+        Some(DeckOverlay::OutputSearch(search)) => {
+            output_search::render(deck, search, height, width, base)
+        }
         Some(DeckOverlay::Add(add)) => render_add(deck, add, height, width, base),
         Some(DeckOverlay::Switcher(switcher)) => {
             render_switcher(deck, switcher, height, width, base)
@@ -1264,7 +1445,11 @@ mod tests {
         snapshot_with_sessions(name, path, &[session])
     }
 
-    fn snapshot_with_sessions(name: &str, path: &str, sessions: &[&str]) -> WorkspaceSnapshot {
+    pub(super) fn snapshot_with_sessions(
+        name: &str,
+        path: &str,
+        sessions: &[&str],
+    ) -> WorkspaceSnapshot {
         let state = WorkspaceState {
             sessions: sessions
                 .iter()
@@ -1884,6 +2069,9 @@ mod tests {
                     .into_iter()
                     .map(
                         |(runtime, state)| usagi_core::domain::agent::AgentRuntimeInventoryItem {
+                            operation_id: None,
+                            agent_id: None,
+                            launch_provenance: None,
                             runtime,
                             continuation: usagi_core::domain::id::AgentContinuationRef::new(),
                             state,
@@ -1920,13 +2108,15 @@ mod tests {
         let alpha = snapshot_with_session("alpha", "/alpha", "build");
         let beta = snapshot_with_session("beta", "/beta", "review");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
-        assert_eq!(deck.observable_workspaces(), vec![beta.workspace_id]);
 
         // Before any observation the plot stays the read-only one: an empty
         // cached list is not evidence that the project owns no Agents.
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(!plot.agents_observed);
-        assert!(plot.agents.is_empty());
+        assert_eq!(
+            plot.agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
 
         let live = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
         let closed = runtime_ref(beta.workspace_id, Some(beta.session_ids[0]));
@@ -1966,7 +2156,10 @@ mod tests {
         assert!(deck.apply_garden_inventory(&inventory(beta.workspace_id, Vec::new())));
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(plot.agents_observed);
-        assert!(plot.agents.is_empty());
+        assert_eq!(
+            plot.agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
         assert_eq!(plot.agent_status, None);
     }
 
@@ -1996,7 +2189,10 @@ mod tests {
         )));
         let plot = plot_of(&deck, beta.workspace_id);
         assert!(!plot.agents_observed);
-        assert!(plot.agents.is_empty());
+        assert_eq!(
+            plot.agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
     }
 
     /// Rebuilding a slot's cache — the active tab's sessions changing, or a tab
@@ -2016,7 +2212,6 @@ mod tests {
         )));
 
         deck.activate_snapshot(&beta);
-        assert_eq!(deck.observable_workspaces(), vec![alpha.workspace_id]);
         assert!(!deck.slots[1].agents_observed);
 
         // The now-active project's cache is a fallback for when its tab goes
@@ -2045,6 +2240,9 @@ mod tests {
         let beta = snapshot_with_session("beta", "/beta", "review");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta]).unwrap();
         deck.open_switcher();
+        let initial = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
+        assert!(initial.iter().any(|line| line.contains("beta / review")));
+        assert!(!initial.iter().any(|line| line.contains("safe failure")));
         deck.set_notice("safe failure");
         let frame = render_overlay(&deck, 20, 80, &vec![String::new(); 20]);
         assert_eq!(frame.len(), 20);

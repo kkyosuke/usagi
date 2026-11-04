@@ -256,8 +256,8 @@ mod tests {
         let only_agy = AvailableModels::new([DefaultModel::Agy]);
         assert_eq!(completions("-m ", only_agy), ["-m agy"]);
         assert_eq!(completions("-m c", only_agy), Vec::<String>::new());
-        assert!(completions("-m codex ", all()).is_empty());
-        assert!(completions("-m codex extra", all()).is_empty());
+        assert_eq!(completions("-m codex ", all()), [] as [String; 0]);
+        assert_eq!(completions("-m codex extra", all()), [] as [String; 0]);
     }
 
     #[test]
@@ -271,7 +271,10 @@ mod tests {
             choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>(),
             ["-m claude", "-m codex", "-m agy"]
         );
-        assert!(model_choices(AvailableModels::default(), DefaultModel::OpenAi).is_empty());
+        assert_eq!(
+            model_choices(AvailableModels::default(), DefaultModel::OpenAi),
+            [] as [super::ModelChoice; 0]
+        );
         // Exercise the derived vocabulary used by the modal projection.
         let choice = choices[0].clone();
         assert_eq!(choice, choices[0]);

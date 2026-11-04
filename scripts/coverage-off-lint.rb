@@ -13,7 +13,9 @@ ALLOWED_REASONS = %w[real_io composition generic_monomorphization].freeze
 DEBT_REASON = "migration_debt"
 ATTRIBUTE = /^\s*#!?\[(?:coverage\(off\)|cfg_attr\(test,\s*coverage\(off\)\))\]/
 INLINE = /\/\/\s*coverage:\s*(.+)$/
-IGNORED_ROOTS = %w[.git target].freeze
+# Product sources, including new untracked files, rather than recursively
+# inspecting ignored build output, generated artifacts and dependency caches.
+SOURCE_GLOBS = ["build.rs", "{src,tests,examples,benches}/**/*.rs", "crates/*/{src,tests,examples,benches}/**/*.rs", "crates/*/build.rs"].freeze
 
 Options = Struct.new(
   :root,
@@ -52,10 +54,7 @@ rescue Date::Error => error
 end
 
 def source_files(root)
-  Dir.glob(File.join(root, "**", "*.rs")).reject do |file|
-    relative = Pathname(file).relative_path_from(Pathname(root)).to_s
-    IGNORED_ROOTS.include?(relative.split(File::SEPARATOR).first)
-  end.sort
+  SOURCE_GLOBS.flat_map { |pattern| Dir.glob(File.join(root, pattern)) }.uniq.sort
 end
 
 def symbol_after(lines, index, inner)

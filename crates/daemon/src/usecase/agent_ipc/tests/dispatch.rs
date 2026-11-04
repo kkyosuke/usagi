@@ -3,6 +3,68 @@
 use super::*;
 
 #[test]
+fn dispatch_provider_default_omits_model_flags_and_preserves_agent_identity() {
+    for (profile, mut runtime) in [
+        ("claude", structured_claude_runtime()),
+        ("codex", codex_runtime()),
+        ("agy", agy_runtime()),
+    ] {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join(profile), "fixture").unwrap();
+        runtime.locator = Box::new(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = tempfile::tempdir().unwrap();
+        let session = SessionId::new();
+        let intent = DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: Some(SessionId::new()),
+                agent_id: AgentId::new(),
+            },
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new(profile).unwrap(),
+                model: ModelSelector::new("default").unwrap(),
+            },
+            prompt: "finish the task".into(),
+        };
+        let admission = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &intent,
+                session,
+                &FakeScope(Ok(ResolvedAgentScope {
+                    worktree_id: WorktreeId::new(),
+                    working_directory: workspace.path().to_path_buf(),
+                })),
+            )
+            .unwrap();
+        let record = &runtime.coordinator.snapshot().records[0];
+        assert!(record.launch.request.model.is_none(), "{profile}");
+        assert!(
+            record
+                .launch
+                .plan
+                .argv
+                .iter()
+                .all(|argument| !matches!(argument.as_str(), "--model" | "-m")),
+            "{profile}"
+        );
+        let binding = runtime
+            .dispatch
+            .binding(OperationId::parse(&admission.operation_id).unwrap())
+            .unwrap()
+            .unwrap();
+        let agent = runtime
+            .dispatch
+            .agent(binding.worker.agent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.model.as_str(), "default");
+        assert_eq!(agent.runtime.as_str(), profile);
+    }
+}
+
+#[test]
 fn daemon_dispatch_store_requires_ownership_without_reparenting() {
     let directory = tempfile::tempdir().unwrap();
     let store = DispatchStore::new(directory.path());
@@ -583,91 +645,6 @@ fn missing_dispatch_binding_is_a_safe_noop_for_report_and_observer_exit() {
 }
 
 #[test]
-fn delegated_dispatch_requires_the_authenticated_callers_runtime() {
-    let runtime = runtime();
-    let workspace = WorkspaceId::new();
-    let caller_agent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(SessionId::new()),
-            AgentProfileId::new("claude").unwrap(),
-            ModelSelector::new("manager").unwrap(),
-        )
-        .unwrap();
-    let same_runtime_agent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(SessionId::new()),
-            AgentProfileId::new("claude").unwrap(),
-            ModelSelector::new("worker").unwrap(),
-        )
-        .unwrap();
-    let other_runtime_agent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(SessionId::new()),
-            AgentProfileId::new("codex").unwrap(),
-            ModelSelector::new("worker").unwrap(),
-        )
-        .unwrap();
-    let caller = CallerRef {
-        session_id: caller_agent.session_id,
-        agent_id: caller_agent.agent_id,
-    };
-
-    for selected in [
-        DispatchAgentIntent::New {
-            runtime: AgentProfileId::new("claude").unwrap(),
-            model: ModelSelector::new("different-model-is-allowed").unwrap(),
-        },
-        DispatchAgentIntent::Existing {
-            agent_id: same_runtime_agent.agent_id,
-        },
-    ] {
-        runtime
-            .require_same_dispatch_runtime(workspace, &caller, &selected)
-            .unwrap();
-    }
-    for selected in [
-        DispatchAgentIntent::New {
-            runtime: AgentProfileId::new("codex").unwrap(),
-            model: ModelSelector::new("worker").unwrap(),
-        },
-        DispatchAgentIntent::Existing {
-            agent_id: other_runtime_agent.agent_id,
-        },
-    ] {
-        assert_eq!(
-            runtime
-                .require_same_dispatch_runtime(workspace, &caller, &selected)
-                .unwrap_err()
-                .code,
-            ErrorCode::PermissionDenied
-        );
-    }
-    assert_eq!(
-        runtime
-            .require_same_dispatch_runtime(
-                workspace,
-                &CallerRef {
-                    session_id: None,
-                    agent_id: usagi_core::domain::id::AgentId::new(),
-                },
-                &DispatchAgentIntent::New {
-                    runtime: AgentProfileId::new("claude").unwrap(),
-                    model: ModelSelector::new("worker").unwrap(),
-                },
-            )
-            .unwrap_err()
-            .code,
-        ErrorCode::OwnershipUnknown
-    );
-}
-
-#[test]
 #[allow(clippy::too_many_lines)] // One dispatch lifetime exercises claim, reconnect, PID reuse, replay, and exit invalidation.
 fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
     let fixture = tempfile::tempdir().unwrap();
@@ -766,7 +743,7 @@ fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
             .claim_mcp_child(9001, "start-a", 4321, 9999, second_connection, &|_, _| true)
             .is_err()
     );
-    runtime.release_mcp_connection(first_connection);
+    runtime.retain_live_mcp_connections(&BTreeSet::from([second_connection]));
     assert_eq!(
         runtime.mcp_callers[&credential]
             .child
@@ -792,7 +769,7 @@ fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
     );
     let reconnect = ConnectionId::new();
     assert!(runtime.authenticate_mcp_child_connection(&credential, 9001, "start-a", reconnect));
-    runtime.release_mcp_connection(reconnect);
+    runtime.retain_live_mcp_connections(&BTreeSet::new());
     assert!(
         runtime
             .claim_mcp_child(9003, "start-c", 4321, 4321, reconnect, &|_, _| true)
@@ -893,13 +870,26 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         ErrorCode::OwnershipUnknown
     );
     assert_eq!(
-        runtime.mcp_dispatch_caller(&credential).unwrap().session_id,
+        runtime
+            .mcp_dispatch_context(&credential)
+            .unwrap()
+            .caller
+            .session_id,
         Some(session)
     );
     let authenticated = runtime.mcp_dispatch_context(&credential).unwrap();
     assert_eq!(authenticated.workspace_id, workspace);
     assert_eq!(authenticated.run_id.to_string(), operation);
     assert_eq!(authenticated.caller.session_id, Some(session));
+    assert_eq!(
+        authenticated.continuation,
+        runtime
+            .coordinator
+            .record_for(&authenticated.runtime)
+            .unwrap()
+            .continuation
+    );
+    assert!(authenticated.continuation.is_some());
     assert_eq!(
         authenticated.terminal_scope,
         TerminalLaunchScope {
@@ -908,7 +898,7 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             worktree_id: admission.terminal.worktree_id,
         }
     );
-    assert!(runtime.mcp_dispatch_caller("forged").is_none());
+    assert!(runtime.mcp_dispatch_context("forged").is_none());
     let runtime_ref = runtime
         .coordinator
         .runtime_for_terminal(&admission.terminal)
@@ -930,7 +920,10 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             None,
         )
         .unwrap();
-    assert!(runtime.dispatch_store().inbox(&caller).unwrap().is_empty());
+    assert_eq!(
+        runtime.dispatch_store().inbox(&caller).unwrap(),
+        [] as [usagi_core::domain::agent::InboxMessage; 0]
+    );
     assert_eq!(
         runtime
             .report_from_mcp(
@@ -949,6 +942,9 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         commits: vec!["abc".into()],
         ..Default::default()
     };
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
     let delivery = runtime
         .report_from_mcp(
             &credential,
@@ -961,6 +957,20 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
     assert_eq!(delivery.delivered_to, caller);
     assert_eq!(delivery.worker.session_id, Some(session));
     assert!(delivery.accepted);
+    assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Running,
+        "a completion MCP call does not finish the provider's active turn"
+    );
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Ended)
+        .unwrap();
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Idle,
+        "the lifecycle Stop clears its running activity"
+    );
     let wake = runtime
         .dispatch_store()
         .queued_prompt(workspace, Some(parent_session))
@@ -1021,6 +1031,9 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
             Some(completed_run),
         )
         .unwrap();
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
     let duplicate = runtime
         .report_from_mcp(
             &credential,
@@ -1031,6 +1044,11 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         )
         .unwrap();
     assert!(!duplicate.accepted);
+    assert_eq!(
+        runtime.workspace_agent_statuses(workspace).unwrap()[&session],
+        AgentStatus::Running,
+        "replaying an old completion must preserve a newer prompt's activity"
+    );
     assert_eq!(
         duplicate
             .committed
@@ -1098,6 +1116,10 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
                 &dispatch.prompt,
             ),
             &FakeScope(Ok(configured_scope(worktree.path()))),
+            AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Mcp,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
+            ),
         )
         .unwrap();
     runtime.remember_operation(
@@ -1329,8 +1351,14 @@ fn the_dispatch_preflight_refuses_before_anything_is_created() {
     assert_eq!(rejected.code, ErrorCode::InvalidArgument);
     assert!(rejected.message.contains("not allowed"));
     // Nothing above reserved anything: no agent, no run, no occupied slot.
-    assert!(runtime.dispatch_store().agents().unwrap().is_empty());
-    assert!(runtime.dispatch_store().runs().unwrap().is_empty());
+    assert_eq!(
+        runtime.dispatch_store().agents().unwrap(),
+        [] as [usagi_core::domain::agent::Agent; 0]
+    );
+    assert_eq!(
+        runtime.dispatch_store().runs().unwrap(),
+        [] as [usagi_core::domain::agent::DispatchRun; 0]
+    );
     assert_eq!(runtime.coordinator.occupied_slots(), 0);
 
     std::fs::remove_file(&executable).unwrap();
@@ -1488,7 +1516,10 @@ fn dispatch_rejects_invalid_unknown_and_foreign_requests_before_spawn() {
             .code,
         ErrorCode::InvalidArgument
     );
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1636,7 +1667,10 @@ fn clean_never_selects_a_live_runtime_even_if_its_dispatch_run_is_failed() {
         .unwrap();
     runtime.dispatch.fail_admission(operation).unwrap();
 
-    assert!(runtime.failed_reservation_ids().unwrap().is_empty());
+    assert_eq!(
+        runtime.failed_reservation_ids().unwrap(),
+        [] as [usagi_core::domain::id::AgentRuntimeId; 0]
+    );
     assert_eq!(runtime.clean_failed_reservations().unwrap(), 0);
     assert_eq!(
         runtime
@@ -1683,13 +1717,19 @@ fn clean_repairs_a_failed_dispatch_reservation_and_hides_ghost_ready() {
         AgentRuntimeInventoryState::Unavailable
     );
     assert_eq!(runtime.clean_failed_reservations().unwrap(), 1);
-    assert!(runtime.failed_reservation_ids().unwrap().is_empty());
+    assert_eq!(
+        runtime.failed_reservation_ids().unwrap(),
+        [] as [usagi_core::domain::id::AgentRuntimeId; 0]
+    );
     assert_eq!(
         runtime.coordinator.snapshot().records[0].state,
         crate::usecase::runtime::RuntimeState::SpawnFailed
     );
     assert_eq!(runtime.close_session(session).unwrap(), 1);
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]

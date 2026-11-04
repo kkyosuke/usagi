@@ -1,7 +1,9 @@
 //! agent ipc の振る舞いを固定するテスト。
 
 mod admission;
+mod decision_owner;
 mod dispatch;
+mod provenance;
 mod restart;
 mod resume;
 mod terminal;
@@ -13,13 +15,13 @@ use std::sync::{
 };
 
 use super::*;
+use crate::usecase::resources::StoreError;
 use crate::usecase::terminal::SnapshotWire;
 use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
 use serde_json::{Value, json};
 use usagi_core::domain::{
     agent::Agent,
     id::{AgentId, AgentResumeSourceId, ClientId, RequestId},
-    supervisor::{SupervisorRunId, TaskId},
 };
 use usagi_core::infrastructure::ipc::TerminalAction;
 
@@ -112,14 +114,14 @@ struct Store {
     snapshot_path: Option<PathBuf>,
 }
 impl RuntimeStore for Store {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.saves += 1;
         if self.fail_after.is_some_and(|limit| self.saves > limit) {
-            return Err(());
+            return Err(StoreError::Unavailable);
         }
         if let Some(path) = &self.snapshot_path {
-            let bytes = serde_json::to_vec(&snapshot).map_err(|_| ())?;
-            std::fs::write(path, bytes).map_err(|_| ())?;
+            let bytes = serde_json::to_vec(&snapshot).map_err(|_| StoreError::Unavailable)?;
+            std::fs::write(path, bytes).map_err(|_| StoreError::Unavailable)?;
         }
         Ok(())
     }
@@ -450,137 +452,6 @@ fn record_dispatch_status(
         .unwrap();
 }
 
-#[test]
-#[allow(clippy::too_many_lines)] // One fixture exercises every ownership fence and orphan retry outcome.
-fn supervisor_stop_validates_every_fence_and_retries_an_orphaned_process() {
-    let workspace = WorkspaceId::new();
-    let resolved = scope();
-    let mut agent = AgentRuntime::new(
-        DaemonGeneration::new(),
-        claude_registry(),
-        Store::default(),
-        Journal::default(),
-        Pty::default(),
-        AgentProfileId::new("claude").unwrap(),
-        Geometry { cols: 80, rows: 24 },
-    );
-    let admission = agent
-        .launch(
-            &OperationId::new().to_string(),
-            &AgentLaunchIntent {
-                workspace,
-                session: None,
-                profile: None,
-            },
-            &FakeScope(Ok(resolved)),
-        )
-        .unwrap();
-    let runtime = agent
-        .coordinator
-        .runtime_for_terminal(&admission.terminal)
-        .unwrap();
-    let provenance = RunProvenance {
-        supervisor_run_id: SupervisorRunId::new(),
-        task_id: TaskId::new("root").unwrap(),
-        parent_task_id: None,
-        parent_dispatch_run: None,
-        dispatch_run_id: OperationId::new(),
-        worker_session_id: runtime.session_id,
-        worker_agent_id: runtime.agent_runtime_id,
-        worker_worktree_id: runtime.terminal.worktree_id,
-        generation: 1,
-    };
-
-    let mut conflicting = provenance.clone();
-    conflicting.worker_session_id = Some(SessionId::new());
-    assert_eq!(
-        agent
-            .interrupt_supervisor_workers(workspace, &[provenance.clone(), conflicting],)
-            .unwrap_err()
-            .code,
-        ErrorCode::StaleTarget
-    );
-
-    let mut absent = provenance.clone();
-    absent.worker_agent_id = AgentRuntimeId::new();
-    assert_eq!(
-        agent.interrupt_supervisor_workers(workspace, &[absent]),
-        Ok(0)
-    );
-
-    let mut stale = provenance.clone();
-    stale.worker_worktree_id = WorktreeId::new();
-    assert_eq!(
-        agent
-            .interrupt_supervisor_workers(workspace, &[stale])
-            .unwrap_err()
-            .code,
-        ErrorCode::StaleTarget
-    );
-    assert_eq!(
-        agent.coordinator.snapshot().records[0].state,
-        super::super::runtime::RuntimeState::Running
-    );
-
-    assert_eq!(
-        agent
-            .interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance))
-            .unwrap_err()
-            .code,
-        ErrorCode::OwnershipUnknown
-    );
-    assert_eq!(
-        agent.coordinator.snapshot().records[0].state,
-        super::super::runtime::RuntimeState::ReconcileRequired(
-            super::super::runtime::ReconcileState::OrphanRunning
-        )
-    );
-
-    agent
-        .pty
-        .as_any_mut()
-        .downcast_mut::<Pty>()
-        .unwrap()
-        .terminate_success = true;
-    agent
-        .reported_phases
-        .insert(runtime.agent_runtime_id, AgentPhase::Running);
-    assert_eq!(
-        agent.interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance)),
-        Ok(1)
-    );
-    assert!(
-        !agent
-            .reported_phases
-            .contains_key(&runtime.agent_runtime_id)
-    );
-    assert_eq!(
-        agent.coordinator.snapshot().records[0].state,
-        super::super::runtime::RuntimeState::Exited
-    );
-    assert_eq!(
-        agent.interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance)),
-        Ok(0)
-    );
-
-    let mut ownership_unknown = agent.coordinator.snapshot();
-    ownership_unknown.records[0].state = super::super::runtime::RuntimeState::ReconcileRequired(
-        super::super::runtime::ReconcileState::IdentityUnknown,
-    );
-    ownership_unknown.records[0].process = None;
-    ownership_unknown.generation.terminals[0].process = None;
-    ownership_unknown.generation.terminals[0].state =
-        super::super::generation::TerminalState::IdentityUnknown;
-    agent.coordinator = RuntimeCoordinator::hydrate(ownership_unknown, 16, 64 * 1024, 64).unwrap();
-    assert_eq!(
-        agent
-            .interrupt_supervisor_workers(workspace, std::slice::from_ref(&provenance))
-            .unwrap_err()
-            .code,
-        ErrorCode::OwnershipUnknown
-    );
-}
-
 fn restart_runtime() -> AgentRuntime {
     AgentRuntime::with_dispatch_and_locator(
         DaemonGeneration::new(),
@@ -692,7 +563,7 @@ fn doctor_refuses_invalid_revision_catalog_and_running_agent_without_force() {
 }
 
 #[test]
-fn repair_source_diagnosis_covers_every_fail_closed_relation() {
+fn resume_source_diagnosis_is_shared_by_normal_and_repair_resume() {
     let workspace = WorkspaceId::new();
     let mut agent = runtime();
     agent
@@ -707,41 +578,71 @@ fn repair_source_diagnosis_covers_every_fail_closed_relation() {
         )
         .unwrap();
     let records = agent.coordinator.snapshot().records;
-    assert!(AgentRuntime::repair_source_availability(&records[0], &records).0);
-    let mut missing = records[0].clone();
-    missing.provider_resume = None;
-    assert_eq!(
+    let record_refs = records.iter().collect::<Vec<_>>();
+    let source = &records[0];
+    let revision = source.launch.plan.profile_revision;
+    assert!(AgentRuntime::resume_source_metadata_availability(source, &record_refs).0);
+    assert!(agent.resume_source_availability(source, &record_refs).0);
+    assert!(
         agent
-            .repair_resume_source_availability(&missing, &records, 2)
-            .1,
-        ProviderResumeReason::ProviderMetadataUnavailable
+            .resume_source_availability_at_revision(source, &record_refs, revision)
+            .0
+    );
+    assert_eq!(
+        agent.resume_source_availability_at_revision(source, &record_refs, revision + 1),
+        (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
 
-    let mut superseded = records[0].clone();
+    let mut missing = source.clone();
+    missing.provider_resume = None;
+    let mut superseded = source.clone();
     superseded.superseded_by = Some(AgentRuntimeId::new());
-    assert_eq!(
-        AgentRuntime::repair_source_availability(&superseded, &records).1,
-        ProviderResumeReason::SourceAlreadySuperseded
-    );
-
-    let mut duplicate = records[0].clone();
+    let mut duplicate = source.clone();
     duplicate.runtime.agent_runtime_id = AgentRuntimeId::new();
-    assert_eq!(
-        AgentRuntime::repair_source_availability(&records[0], &[records[0].clone(), duplicate],).1,
-        ProviderResumeReason::LiveOrOwnershipUnknown
-    );
-
-    let mut incompatible = records[0].clone();
+    let mut incompatible = source.clone();
     incompatible
         .provider_resume
         .as_mut()
         .unwrap()
         .scope
         .worktree_id = WorktreeId::new();
-    assert_eq!(
-        AgentRuntime::repair_source_availability(&incompatible, &records).1,
-        ProviderResumeReason::IncompatibleProviderMetadata
-    );
+    for (candidate, peers, reason) in [
+        (
+            missing,
+            records.clone(),
+            ProviderResumeReason::ProviderMetadataUnavailable,
+        ),
+        (
+            superseded,
+            records.clone(),
+            ProviderResumeReason::SourceAlreadySuperseded,
+        ),
+        (
+            source.clone(),
+            vec![source.clone(), duplicate],
+            ProviderResumeReason::LiveOrOwnershipUnknown,
+        ),
+        (
+            incompatible,
+            records.clone(),
+            ProviderResumeReason::IncompatibleProviderMetadata,
+        ),
+    ] {
+        let expected = (false, reason);
+        let peer_records = peers.iter().collect::<Vec<_>>();
+        assert_eq!(
+            AgentRuntime::resume_source_metadata_availability(&candidate, &peer_records),
+            expected
+        );
+        assert_eq!(
+            agent.resume_source_availability(&candidate, &peer_records),
+            expected
+        );
+        assert_eq!(
+            agent.resume_source_availability_at_revision(&candidate, &peer_records, revision + 1),
+            expected
+        );
+    }
 }
 
 fn hydrate_restart_runtime(snapshot: RuntimeStoreSnapshot) -> AgentRuntime {
@@ -923,6 +824,107 @@ fn workspace_observation_aggregates_session_status_independent_of_store_order() 
 }
 
 #[test]
+fn workspace_observation_promotes_reported_work_over_terminal_dispatch_history() {
+    for runtime_factory in [codex_runtime, structured_claude_runtime] {
+        for status in [AgentStatus::Idle, AgentStatus::Exited, AgentStatus::Failed] {
+            let mut runtime = runtime_factory();
+            let launch_intent = intent(None);
+            let workspace = launch_intent.workspace;
+            let session = launch_intent.session.unwrap();
+            let admission = runtime
+                .launch(
+                    &OperationId::new().to_string(),
+                    &launch_intent,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap();
+            let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+            for agent in runtime.dispatch.agents().unwrap() {
+                runtime
+                    .dispatch
+                    .transition_agent(agent.agent_id, status, None)
+                    .unwrap();
+            }
+            assert_eq!(
+                runtime
+                    .workspace_observation(workspace)
+                    .unwrap()
+                    .session_statuses[&session],
+                status
+            );
+            for phase in [AgentPhase::Running, AgentPhase::Waiting] {
+                runtime.report_agent_phase(&credential, phase).unwrap();
+                assert_eq!(runtime.session_phase(session), phase);
+                assert_eq!(
+                    runtime
+                        .workspace_observation(workspace)
+                        .unwrap()
+                        .session_statuses[&session],
+                    AgentStatus::Running,
+                    "live {phase:?} must outrank old {status:?} dispatch state"
+                );
+                assert!(
+                    runtime
+                        .workspace_observation(WorkspaceId::new())
+                        .unwrap()
+                        .session_statuses
+                        .is_empty()
+                );
+            }
+            for phase in [AgentPhase::Ready, AgentPhase::Ended, AgentPhase::Exited] {
+                runtime.report_agent_phase(&credential, phase).unwrap();
+                assert_eq!(
+                    runtime
+                        .workspace_observation(workspace)
+                        .unwrap()
+                        .session_statuses[&session],
+                    status
+                );
+            }
+            runtime
+                .report_agent_phase(&credential, AgentPhase::Running)
+                .unwrap();
+            let runtime_id = runtime.mcp_callers[&credential].runtime.agent_runtime_id;
+            runtime.exit(&admission.terminal, 0).unwrap();
+            // Even a stale report cannot make an observed exited process busy.
+            runtime
+                .reported_phases
+                .insert(runtime_id, AgentPhase::Running);
+            assert_ne!(
+                runtime
+                    .workspace_observation(workspace)
+                    .unwrap()
+                    .session_statuses[&session],
+                AgentStatus::Running
+            );
+        }
+    }
+}
+
+#[test]
+fn workspace_observation_does_not_turn_root_activity_into_a_session() {
+    let mut runtime = codex_runtime();
+    let launch_intent = root_intent(None);
+    runtime
+        .launch(
+            &OperationId::new().to_string(),
+            &launch_intent,
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+    runtime
+        .report_agent_phase(&credential, AgentPhase::Running)
+        .unwrap();
+    assert!(
+        runtime
+            .workspace_agent_statuses(launch_intent.workspace)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     let mut runtime = AgentRuntime::new(
         DaemonGeneration::new(),
@@ -938,6 +940,10 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     let launch_intent = intent(None);
     let workspace = launch_intent.workspace;
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     let admission = runtime
         .launch(
             &OperationId::new().to_string(),
@@ -947,6 +953,17 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
         .unwrap();
 
     assert_eq!(runtime.retirement_blocker_count(workspace), 1);
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        vec![(
+            admission.terminal.clone(),
+            super::super::runtime::RuntimeState::Running
+        )]
+    );
+    assert_eq!(
+        runtime.cache_cleanup_activity(WorkspaceId::new()),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     let running_snapshot = runtime.coordinator.snapshot();
     for (state, ownership_state, expected) in [
         (
@@ -983,6 +1000,12 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
         snapshot.generation.terminals[0].state = ownership_state;
         runtime.coordinator = RuntimeCoordinator::hydrate(snapshot, 16, 64 * 1024, 64).unwrap();
         assert_eq!(runtime.retirement_blocker_count(workspace), expected);
+        // Cache revalidation must retain unknown ownership even if no proven
+        // live process contributes to the retirement count.
+        assert_eq!(
+            runtime.cache_cleanup_activity(workspace),
+            vec![(admission.terminal.clone(), state)]
+        );
     }
     runtime.coordinator = RuntimeCoordinator::hydrate(running_snapshot, 16, 64 * 1024, 64).unwrap();
     runtime.reported_phases.insert(
@@ -993,11 +1016,40 @@ fn workspace_runtime_count_and_close_share_the_same_workspace_selector() {
     );
     assert_eq!(runtime.close_workspace(workspace).unwrap(), 1);
     assert_eq!(runtime.retirement_blocker_count(workspace), 0);
+    assert_eq!(
+        runtime.cache_cleanup_activity(workspace),
+        [] as [(TerminalRef, super::super::runtime::RuntimeState); 0]
+    );
     assert!(runtime.reported_phases.is_empty());
     assert!(
         !runtime
             .retained_resources()
             .contains(&admission.terminal.terminal_id.as_str())
+    );
+}
+
+#[test]
+fn cache_activity_detects_a_runtime_that_starts_and_exits_during_measurement() {
+    let mut runtime = runtime();
+    let launch_intent = intent(None);
+    let workspace = launch_intent.workspace;
+    let before = runtime.cache_cleanup_activity(workspace);
+    let admission = runtime
+        .launch(
+            &OperationId::new().to_string(),
+            &launch_intent,
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    runtime.exit(&admission.terminal, 0).unwrap();
+    let after = runtime.cache_cleanup_activity(workspace);
+    assert_ne!(after, before);
+    assert_eq!(
+        after,
+        vec![(
+            admission.terminal,
+            super::super::runtime::RuntimeState::Exited
+        )]
     );
 }
 
@@ -1038,8 +1090,8 @@ fn agent_admissions_and_finals_carry_their_operation_and_semantic_digest() {
     assert_eq!(completed.semantic_digest, admitted.semantic_digest);
     assert_eq!(completed.terminal, admitted.terminal);
     assert_eq!(
-        runtime.operation_outcome(&operation),
-        Some(Ok(completed)),
+        runtime.launch(&operation, &launch_intent, &fake_scope),
+        Ok(completed),
         "a reconnecting client reads exactly the same final"
     );
 
@@ -1088,9 +1140,9 @@ fn process_local_operation_replay_is_bounded_without_retaining_intent_text() {
         }
     }
     assert_eq!(runtime.operations.len(), 2);
-    assert!(runtime.operation_outcome(&operations[0]).is_none());
-    assert!(runtime.operation_outcome(&operations[1]).is_some());
-    assert!(runtime.operation_outcome(&operations[2]).is_some());
+    assert!(!runtime.operations.contains_key(&operations[0]));
+    assert!(runtime.operations.contains_key(&operations[1]));
+    assert!(runtime.operations.contains_key(&operations[2]));
 
     let long_intent = "private prompt ".repeat(1_000);
     let digested = OperationId::new().to_string();
@@ -1237,14 +1289,12 @@ fn session_close_removes_the_agent_from_runtime_inventory_and_replay() {
         [session].into_iter().collect()
     );
     assert_eq!(runtime.close_session(session).unwrap(), 1);
-    assert!(
-        runtime
-            .inventory(launch_intent.workspace)
-            .runtimes
-            .is_empty()
+    assert_eq!(
+        runtime.inventory(launch_intent.workspace).runtimes,
+        [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
     );
     assert!(runtime.managed_session_ids().is_empty());
-    assert_eq!(runtime.operation_outcome(&operation), None);
+    assert!(!runtime.operations.contains_key(&operation));
     assert!(runtime.mcp_callers.is_empty());
     assert!(runtime.reported_phases.is_empty());
 }
@@ -1425,7 +1475,7 @@ fn session_start_capture_replaces_the_current_conversation_for_both_providers() 
                 )
                 .unwrap_err()
                 .code,
-            ErrorCode::InvalidArgument
+            ErrorCode::StaleTarget
         );
         assert_eq!(
             runtime.coordinator.snapshot().records[0]
@@ -1435,6 +1485,68 @@ fn session_start_capture_replaces_the_current_conversation_for_both_providers() 
                 .native_session_id
                 .expose_sensitive(),
             "after-clear"
+        );
+    }
+}
+
+#[test]
+fn later_lifecycle_hooks_repair_a_missed_session_start_without_replacing_a_known_conversation() {
+    for (mut runtime, profile, provider) in [
+        (structured_claude_runtime(), "claude", ProviderKind::Claude),
+        (codex_runtime(), "codex", ProviderKind::Codex),
+    ] {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(session),
+                    profile: Some(AgentProfileId::new(profile).unwrap()),
+                },
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = runtime.mcp_callers.keys().next().cloned().unwrap();
+        assert!(
+            runtime.coordinator.snapshot().records[0]
+                .provider_resume
+                .is_none()
+        );
+        let native_id = ProviderSessionId::new("recovered-conversation").unwrap();
+        for phase in [AgentPhase::Running, AgentPhase::Waiting, AgentPhase::Ended] {
+            runtime
+                .report_agent_phase_with_session(&credential, phase, Some(native_id.clone()))
+                .unwrap();
+            let snapshot = runtime.coordinator.snapshot();
+            let reference = snapshot.records[0].provider_resume.as_ref().unwrap();
+            assert_eq!(reference.provider, provider);
+            assert_eq!(reference.native_session_id, native_id);
+            assert_eq!(
+                reference.provenance,
+                ProviderCaptureProvenance::ProviderStructured
+            );
+            assert_eq!(
+                reference.last_known_phase,
+                Some(ProviderResumePhase::Running)
+            );
+            assert_eq!(runtime.session_phase(session), phase);
+        }
+        let expected = [AgentIntegrationRevision {
+            profile_id: AgentProfileId::new(profile).unwrap(),
+            revision: runtime.coordinator.snapshot().records[0]
+                .launch
+                .plan
+                .profile_revision,
+        }];
+        assert_eq!(
+            runtime
+                .plan_daemon_restart_agents(&expected, true)
+                .unwrap()
+                .agents
+                .len(),
+            1
         );
     }
 }
@@ -1476,6 +1588,25 @@ fn antigravity_pre_invocation_captures_conversation_and_running_phase() {
         Some(ProviderResumePhase::Running)
     );
     assert_eq!(runtime.session_phase(session), AgentPhase::Running);
+
+    // A new AGY invocation can start another conversation in the same live
+    // process; only PreInvocation carries an ID for its Running phase.
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("next-agy-conversation").unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.coordinator.snapshot().records[0]
+            .provider_resume
+            .as_ref()
+            .unwrap()
+            .native_session_id
+            .expose_sensitive(),
+        "next-agy-conversation"
+    );
 }
 
 #[test]
@@ -1705,6 +1836,14 @@ fn exact_inventory_separates_root_sessions_and_same_scope_histories() {
     let inventory = runtime.inventory(workspace);
     assert_eq!(inventory, runtime.inventory(workspace));
     assert_eq!(inventory.runtimes.len(), 5);
+    assert_eq!(
+        runtime.search_targets(workspace),
+        inventory
+            .runtimes
+            .iter()
+            .map(|item| item.runtime.terminal.clone())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(inventory.resumable.len(), 5);
     assert_eq!(
         inventory
@@ -2124,111 +2263,6 @@ fn queued_prompt_is_explicitly_consumed_by_launch_and_live_only_delivers_live() 
 }
 
 #[test]
-fn goal_launch_is_root_scoped_idempotent_and_carries_the_work_contract() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let workspace = WorkspaceId::new();
-    let operation = OperationId::new().to_string();
-    let mut intent = AgentGoalIntent {
-        workspace,
-        profile: Some(AgentProfileId::new("claude").unwrap()),
-        goal: "update the docs and open a PR".into(),
-    };
-
-    let mut invalid = intent.clone();
-    invalid.goal = "  ".into();
-    assert_eq!(
-        runtime
-            .prepare_goal_launch_readiness(&OperationId::new().to_string(), &invalid)
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidArgument
-    );
-    invalid.goal = "x".repeat(MAX_AGENT_GOAL_BYTES + 1);
-    assert_eq!(
-        runtime
-            .launch_goal(
-                &OperationId::new().to_string(),
-                &invalid,
-                &FakeScope(Ok(scope()))
-            )
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidArgument
-    );
-    assert_eq!(
-        runtime
-            .prepare_goal_launch_readiness("invalid", &intent)
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidArgument
-    );
-
-    let readiness = runtime
-        .prepare_goal_launch_readiness(&operation, &intent)
-        .unwrap()
-        .unwrap();
-
-    let first = runtime
-        .launch_goal_after_readiness(
-            &operation,
-            &intent,
-            &FakeScope(Ok(scope())),
-            Some(&readiness),
-        )
-        .unwrap();
-    assert!(
-        runtime
-            .prepare_goal_launch_readiness(&operation, &intent)
-            .unwrap()
-            .is_none()
-    );
-    let replay = runtime
-        .launch_goal(&operation, &intent, &FakeScope(Ok(scope())))
-        .unwrap();
-    assert!(first.terminal.fences(&replay.terminal));
-    assert_eq!(first.terminal.session_id, None);
-
-    let record = &runtime.coordinator.snapshot().records[0];
-    let prompt = record.launch.request.initial_prompt.as_deref().unwrap();
-    assert!(prompt.contains("update the docs and open a PR"));
-    assert!(prompt.contains("open, non-draft pull request"));
-    assert!(prompt.contains("same `claude` Agent runtime"));
-    assert!(prompt.contains("capability the task actually needs"));
-    assert!(prompt.contains("do not default to the strongest available model"));
-    assert!(prompt.contains("user-decision tool"));
-    assert!(prompt.contains("Do not merge"));
-
-    let mut changed = intent.clone();
-    changed.goal = "a different goal".into();
-    assert_eq!(
-        runtime
-            .launch_goal(&operation, &changed, &FakeScope(Ok(scope())))
-            .unwrap_err()
-            .code,
-        ErrorCode::IdempotencyConflict
-    );
-
-    let mut queued = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    queued
-        .prompt(workspace, None, "already queued", PromptMode::Queue)
-        .unwrap();
-    intent.goal = "do not replace the queue".into();
-    assert_eq!(
-        queued
-            .launch_goal(
-                &OperationId::new().to_string(),
-                &intent,
-                &FakeScope(Ok(scope()))
-            )
-            .unwrap_err()
-            .message,
-        "workspace root already has a queued prompt"
-    );
-}
-
-#[test]
 fn root_prompt_selects_the_agent_in_its_exact_workspace() {
     let mut runtime = runtime();
     let first = root_intent(None);
@@ -2379,10 +2413,6 @@ fn resend_replays_and_conflicting_intent_is_rejected_without_second_spawn() {
         .launch(&operation, &launch_intent, &fake_scope)
         .unwrap();
     assert_eq!(first, second);
-    assert_eq!(
-        runtime.operation_outcome(&operation).unwrap().unwrap(),
-        first
-    );
 
     let mut conflict = launch_intent.clone();
     conflict.profile = Some(AgentProfileId::new("codex").unwrap());
@@ -2784,86 +2814,95 @@ fn peer_handoff_preserves_identity_and_targets_only_the_named_runtime() {
 }
 
 #[test]
-fn completion_wake_queues_after_live_prompt_write_failure() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let worktree = tempfile::tempdir().unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let workspace = WorkspaceId::new();
-    let parent_session = SessionId::new();
-    let parent = runtime
-        .dispatch
-        .upsert_agent_by_runtime_model(
-            workspace,
-            Some(parent_session),
-            AgentProfileId::new("claude").unwrap(),
-            ModelSelector::new("manager").unwrap(),
-        )
-        .unwrap();
-    let caller = CallerRef {
-        session_id: Some(parent_session),
-        agent_id: parent.agent_id,
-    };
-    let operation = OperationId::new();
-    let worker_session = SessionId::new();
-    runtime
-        .dispatch(
-            &operation.to_string(),
-            &DispatchIntent {
-                workspace,
-                session_name: "worker".into(),
-                caller,
-                agent: DispatchAgentIntent::New {
-                    runtime: AgentProfileId::new("claude").unwrap(),
-                    model: ModelSelector::new("test").unwrap(),
-                },
-                prompt: "finish".into(),
-            },
-            worker_session,
-            &FakeScope(Ok(configured_scope(worktree.path()))),
-        )
-        .unwrap();
-    let credential = runtime
-        .mcp_callers
-        .iter()
-        .find(|(_, caller)| caller.operation == operation)
-        .map(|(credential, _)| credential.clone())
-        .unwrap();
-    runtime
-        .launch(
-            &OperationId::new().to_string(),
-            &AgentLaunchIntent {
-                workspace,
-                session: Some(parent_session),
-                profile: None,
-            },
-            &FakeScope(Ok(configured_scope(worktree.path()))),
-        )
-        .unwrap();
-    assert!(
-        runtime
-            .prompt(
+fn completion_wake_delivers_live_or_queues_after_write_failure() {
+    for write_failure in [false, true] {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let workspace = WorkspaceId::new();
+        let parent_session = SessionId::new();
+        let parent = runtime
+            .dispatch
+            .upsert_agent_by_runtime_model(
                 workspace,
                 Some(parent_session),
-                "public queue",
-                PromptMode::Queue,
+                AgentProfileId::new("claude").unwrap(),
+                ModelSelector::new("manager").unwrap(),
             )
-            .is_err(),
-        "public queue mode must still reject a live target"
-    );
+            .unwrap();
+        let caller = CallerRef {
+            session_id: Some(parent_session),
+            agent_id: parent.agent_id,
+        };
+        let operation = OperationId::new();
+        let worker_session = SessionId::new();
+        runtime
+            .dispatch(
+                &operation.to_string(),
+                &DispatchIntent {
+                    workspace,
+                    session_name: "worker".into(),
+                    caller,
+                    agent: DispatchAgentIntent::New {
+                        runtime: AgentProfileId::new("claude").unwrap(),
+                        model: ModelSelector::new("test").unwrap(),
+                    },
+                    prompt: "finish".into(),
+                },
+                worker_session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        let credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, caller)| caller.operation == operation)
+            .map(|(credential, _)| credential.clone())
+            .unwrap();
+        runtime
+            .launch(
+                &OperationId::new().to_string(),
+                &AgentLaunchIntent {
+                    workspace,
+                    session: Some(parent_session),
+                    profile: None,
+                },
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .prompt(
+                    workspace,
+                    Some(parent_session),
+                    "public queue",
+                    PromptMode::Queue,
+                )
+                .is_err(),
+            "public queue mode must still reject a live target"
+        );
 
-    pty_mut(&mut runtime).write_failure = true;
-    runtime
-        .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
-        .unwrap();
+        pty_mut(&mut runtime).write_failure = write_failure;
+        runtime
+            .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
+            .unwrap();
 
-    let wake = runtime
-        .dispatch_store()
-        .queued_prompt(workspace, Some(parent_session))
-        .unwrap()
-        .expect("failed live wake must remain durable for the next launch");
-    assert!(wake.prompt.contains("A child report is ready"));
-    assert!(wake.prompt.contains("done"));
+        let queued = runtime
+            .dispatch_store()
+            .queued_prompt(workspace, Some(parent_session))
+            .unwrap();
+        if write_failure {
+            let wake = queued.expect("failed live wake must remain durable for the next launch");
+            assert!(wake.prompt.contains("A child report is ready"));
+            assert!(wake.prompt.contains("done"));
+        } else {
+            assert!(queued.is_none(), "a delivered wake must not also be queued");
+            let written = String::from_utf8_lossy(&pty(&runtime).writes);
+            assert!(written.contains("A child report is ready"));
+            assert!(written.contains("done"));
+        }
+    }
 }
 
 #[test]
@@ -2980,6 +3019,46 @@ fn an_agent_runtime_refuses_a_snapshot_schema_it_cannot_read() {
             99
         ))
     );
+}
+
+#[test]
+fn hydration_requires_ownership_persistence_before_dispatch_reconciliation() {
+    use crate::usecase::runtime::RuntimeSnapshotError;
+    for ownership_fails in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let dispatch = DispatchStore::new(temp.path());
+        std::fs::write(temp.path().join("dispatch.json"), "corrupt dispatch state").unwrap();
+        let error = AgentRuntime::hydrate_with_retention(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store {
+                fail_after: ownership_fails.then_some(0),
+                ..Store::default()
+            },
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            dispatch,
+            PathExecutableLocator,
+            RuntimeStoreSnapshot::default(),
+            SharedTerminalRetention::new(),
+        )
+        .err()
+        .expect("hydration must fail closed before accepting work");
+        assert_eq!(
+            error,
+            if ownership_fails {
+                RuntimeSnapshotError::OwnershipPersist
+            } else {
+                RuntimeSnapshotError::DispatchReconcile
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("dispatch.json")).unwrap(),
+            "corrupt dispatch state"
+        );
+    }
 }
 
 #[test]
@@ -3283,7 +3362,6 @@ fn helper_error_routes_and_durable_replay_outcomes_are_total() {
             OrchestrationError::UnknownProfile,
             ErrorCode::InvalidArgument,
         ),
-        (OrchestrationError::UnknownRuntime, ErrorCode::StaleTarget),
     ] {
         assert_eq!(map_orchestration_error(error).code, code);
     }
@@ -3335,6 +3413,10 @@ fn helper_error_routes_and_durable_replay_outcomes_are_total() {
             ErrorCode::StaleTarget,
         ),
         (RuntimeError::Store, ErrorCode::OwnershipUnknown),
+        (
+            RuntimeError::RetentionBackpressure,
+            ErrorCode::ResourceExhausted,
+        ),
         (RuntimeError::Journal, ErrorCode::OwnershipUnknown),
         (
             RuntimeError::ReconcileRequired(ReconcileState::IdentityUnknown),
@@ -3468,4 +3550,134 @@ fn handled_result(outcome: TerminalOutcome<Value>) -> Result<Value, ProtocolErro
         TerminalOutcome::Handled(result) => result,
         TerminalOutcome::NotOwned => Err(stale_terminal()),
     }
+}
+
+fn session_resume_status(
+    runtime: &AgentRuntime,
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> (bool, ProviderResumeReason) {
+    let observation = runtime
+        .session_observations(workspace)
+        .unwrap()
+        .get(&session)
+        .copied()
+        .unwrap_or_default();
+    (observation.resumable, observation.resume_reason)
+}
+
+#[test]
+fn session_observations_capture_each_session_and_exclude_other_workspaces() {
+    let mut runtime = codex_runtime();
+    let first = intent(Some("codex"));
+    let second = AgentLaunchIntent {
+        session: Some(SessionId::new()),
+        ..first.clone()
+    };
+    let foreign = intent(Some("codex"));
+    let mut admissions = Vec::new();
+    for launch in [&first, &second, &foreign] {
+        admissions.push(
+            runtime
+                .launch(
+                    &OperationId::new().to_string(),
+                    launch,
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap(),
+        );
+    }
+    for (admission, phase) in
+        admissions
+            .iter()
+            .zip([AgentPhase::Waiting, AgentPhase::Running, AgentPhase::Ready])
+    {
+        let credential = runtime
+            .mcp_callers
+            .iter()
+            .find(|(_, caller)| caller.runtime == admission.runtime)
+            .unwrap()
+            .0
+            .clone();
+        runtime.report_agent_phase(&credential, phase).unwrap();
+    }
+    let observations = runtime.session_observations(first.workspace).unwrap();
+    assert_eq!(observations.len(), 2);
+    for (launch, phase) in [
+        (&first, AgentPhase::Waiting),
+        (&second, AgentPhase::Running),
+    ] {
+        let session = launch.session.unwrap();
+        let observation = observations[&session];
+        assert_eq!(observation.phase, phase);
+        assert_eq!(observation.status, Some(AgentStatus::Running));
+        assert!(!observation.resumable);
+        assert_eq!(
+            observation.resume_reason,
+            ProviderResumeReason::LiveOrOwnershipUnknown
+        );
+    }
+    assert!(
+        runtime
+            .session_observations(WorkspaceId::new())
+            .unwrap()
+            .is_empty()
+    );
+    runtime.exit(&admissions[0].terminal, 0).unwrap();
+    assert_eq!(
+        observations[&first.session.unwrap()].phase,
+        AgentPhase::Waiting
+    );
+    assert_eq!(
+        runtime.session_observations(first.workspace).unwrap()[&first.session.unwrap()].phase,
+        AgentPhase::Ended
+    );
+    assert_eq!(
+        session_resume_status(&runtime, first.workspace, SessionId::new()),
+        (false, ProviderResumeReason::ProviderMetadataUnavailable)
+    );
+}
+
+impl AgentRuntime {
+    /// Existing lifecycle assertions use the same workspace projection as IPC.
+    fn session_phase(&self, session: SessionId) -> AgentPhase {
+        self.coordinator
+            .records()
+            .find(|record| record.runtime.session_id == Some(session))
+            .and_then(|record| {
+                self.session_observations(record.runtime.terminal.workspace_id)
+                    .unwrap()
+                    .get(&session)
+                    .copied()
+            })
+            .unwrap_or_default()
+            .phase
+    }
+}
+
+#[test]
+fn session_observations_include_dispatch_only_sessions_and_propagate_storage_errors() {
+    let mut runtime = codex_runtime();
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let worker = runtime
+        .dispatch
+        .upsert_agent_by_runtime_model(
+            workspace,
+            Some(session),
+            AgentProfileId::new("codex").unwrap(),
+            ModelSelector::new("fixture").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.session_observations(workspace).unwrap()[&session],
+        AgentSessionObservation {
+            status: Some(worker.status),
+            ..AgentSessionObservation::default()
+        }
+    );
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("dispatch.json"), "invalid").unwrap();
+    runtime.dispatch = DispatchStore::new(directory.path());
+    assert!(runtime.session_observations(workspace).is_err());
 }

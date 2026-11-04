@@ -21,11 +21,11 @@ fn session(name: &str) -> SessionRecord {
 #[test]
 fn new_and_default_are_empty() {
     let state = WorkspaceState::new();
-    assert!(state.sessions.is_empty());
+    assert_eq!(state.sessions, [] as [SessionRecord; 0]);
     assert!(state.root_notes.is_empty());
     // Default defers to new(); both start empty.
     let def = WorkspaceState::default();
-    assert!(def.sessions.is_empty());
+    assert_eq!(def.sessions, [] as [SessionRecord; 0]);
     assert!(def.root_notes.is_empty());
 }
 
@@ -43,6 +43,7 @@ fn populated_state_round_trips_through_json() {
     let ts = Utc.with_ymd_and_hms(2026, 6, 20, 1, 0, 0).unwrap();
     let state = WorkspaceState {
         sessions: vec![session("alpha"), session("beta")],
+        session_notes: std::collections::BTreeMap::new(),
         root_notes: Scratchpad {
             note: Some("root memo".to_string()),
             todos: vec![SessionTodo::new("triage")],
@@ -68,6 +69,6 @@ fn an_older_file_without_optional_keys_loads() {
     // sessions and an empty root scratchpad.
     let restored: WorkspaceState =
         serde_json::from_str(r#"{"updated_at":"2026-06-13T05:01:18.659149Z"}"#).unwrap();
-    assert!(restored.sessions.is_empty());
+    assert_eq!(restored.sessions, [] as [SessionRecord; 0]);
     assert!(restored.root_notes.is_empty());
 }

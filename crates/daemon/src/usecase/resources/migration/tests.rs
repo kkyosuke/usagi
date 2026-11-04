@@ -2,10 +2,7 @@
 
 use usagi_core::domain::id::{DaemonGeneration, OperationId};
 
-use super::{
-    AdoptionRefusal, LegacyRuntimeRecord, REAL_CHILD_IDENTITY_CAPABILITY, RolloverAdmission,
-    RolloverRefusal, SHARDED_STORE_CAPABILITY, adopt_legacy, planned_rollover_admission,
-};
+use super::{AdoptionRefusal, LegacyRuntimeRecord, adopt_legacy};
 use crate::usecase::resources::CasDocument;
 use crate::usecase::resources::allocator::ResourceKind;
 use crate::usecase::resources::fixture::{terminal, verified};
@@ -28,7 +25,10 @@ fn a_provable_live_record_becomes_a_running_shard_resource() {
     let owner = DaemonGeneration::new();
     let adoptable = record(owner, true);
     let report = adopt_legacy(owner, std::slice::from_ref(&adoptable));
-    assert!(report.unknown.is_empty());
+    assert_eq!(
+        report.unknown,
+        [] as [crate::usecase::resources::migration::UnknownRecord; 0]
+    );
     assert_eq!(report.adopted(), 1);
     assert_eq!(
         report.shard.resource(&adoptable.resource).unwrap().state,
@@ -113,28 +113,4 @@ fn foreign_and_duplicated_records_are_left_out_of_the_shard_entirely() {
     );
     assert_eq!(report.unknown[0].resource, foreign.resource);
     report.shard.validate().unwrap();
-}
-
-#[test]
-fn a_predecessor_without_both_capabilities_cannot_hand_over_while_it_lives() {
-    let both = vec![
-        REAL_CHILD_IDENTITY_CAPABILITY.to_owned(),
-        SHARDED_STORE_CAPABILITY.to_owned(),
-    ];
-    assert_eq!(
-        planned_rollover_admission(&both),
-        RolloverAdmission::Allowed
-    );
-    assert_eq!(
-        planned_rollover_admission(&[SHARDED_STORE_CAPABILITY.to_owned()]),
-        RolloverAdmission::ColdTransitionRequired(RolloverRefusal::NoRealChildIdentity)
-    );
-    assert_eq!(
-        planned_rollover_admission(&[REAL_CHILD_IDENTITY_CAPABILITY.to_owned()]),
-        RolloverAdmission::ColdTransitionRequired(RolloverRefusal::NoShardedStore)
-    );
-    assert_eq!(
-        planned_rollover_admission(&[]),
-        RolloverAdmission::ColdTransitionRequired(RolloverRefusal::NoRealChildIdentity)
-    );
 }

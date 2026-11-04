@@ -13,7 +13,7 @@
 //!   changes nothing.
 //!
 //! A claim is created *before* the owner reserves and *before* anything is
-//! spawned, so the authority always leads the effect ([`super::launch`]).
+//! spawned, so the authority always leads the effect ([`super::durable::ShardedRuntimeState::commit`]).
 //! Capacity is released exactly once, and only against evidence: a definite
 //! failure, or an exit event consumed from the owning generation's outbox
 //! ([`super::drain`]).

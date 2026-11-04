@@ -815,7 +815,7 @@ mod tests {
         let mut renderer = FrameRenderer::new();
         let first = frame(4, 1, &["same"]);
         assert!(renderer.render(first.clone()).clear_surface);
-        assert!(renderer.render(first).spans.is_empty());
+        assert_eq!(renderer.render(first).spans, [] as [Span; 0]);
     }
 
     #[test]
@@ -901,16 +901,16 @@ mod tests {
     fn sgr_style_state_ignores_non_sgr_sequences_accumulates_and_resets() {
         let mut style = String::new();
         assert!(!update_active_style(&mut style, "\u{1b}[2J"));
-        assert!(style.is_empty());
+        assert_eq!(style, "");
 
         assert!(update_active_style(&mut style, "\u{1b}[1;36m"));
         assert!(update_active_style(&mut style, "\u{1b}[4m"));
         assert_eq!(style, "\u{1b}[1;36m\u{1b}[4m");
 
         assert!(update_active_style(&mut style, "\u{1b}[0m"));
-        assert!(style.is_empty());
+        assert_eq!(style, "");
         assert!(update_active_style(&mut style, "\u{1b}[m"));
-        assert!(style.is_empty());
+        assert_eq!(style, "");
     }
 
     #[test]

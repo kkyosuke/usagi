@@ -7,20 +7,88 @@
 mod composition;
 
 use super::{
-    AppKey, AppState, DecisionEditor, DecisionOverlayState, Effect, Overlay, SafeError,
-    SafeMessage, UserDecision, UserDecisionAnswer, UserDecisionId, UserDecisionSelectionMode,
-    UserDecisionStatus, WorkspaceId, reconcile_decision_overlay,
+    AppKey, AppState, DecisionCompletion, DecisionEditor, DecisionOverlayState, DecisionSnapshot,
+    Effect, Overlay, SafeError, SafeMessage, SavedAnswerMode, UserDecision, UserDecisionAnswer,
+    UserDecisionId, UserDecisionSelectionMode, UserDecisionStatus, WorkspaceId,
+    reconcile_decision_overlay,
 };
 use std::collections::BTreeSet;
+
+pub(super) fn restore(state: &mut AppState, snapshot: DecisionSnapshot) -> Vec<Effect> {
+    state.decisions = snapshot.decisions;
+    state.decision_answers = snapshot.answers;
+    state.unread_decisions = snapshot.unread;
+    state.decision_completions = snapshot.completions;
+    Vec::new()
+}
+
+pub(super) fn unavailable(state: &mut AppState, workspace: WorkspaceId) -> Vec<Effect> {
+    if workspace != state.workspace {
+        return Vec::new();
+    }
+    if state.overlay == Some(Overlay::Decisions)
+        && let Some(overlay) = state.decision_overlay.as_mut()
+        && overlay.requested.take().is_some()
+    {
+        overlay.error = Some("This question could not be loaded. Close and try again.");
+    }
+    state.notice = Some(super::Notice::new("User decisions are unavailable."));
+    Vec::new()
+}
+
+fn open_requested(state: &mut AppState) -> bool {
+    let visible = state.overlay == Some(Overlay::Decisions);
+    let requested = state.decision_overlay.as_mut().and_then(|overlay| {
+        // A resident observer may deliver an old inventory before the
+        // explicitly woken read. Recover only the originally chosen ID.
+        let retry = if overlay.error.is_some() {
+            overlay.exact
+        } else {
+            None
+        };
+        overlay.requested.take().or(retry)
+    });
+    let Some(decision_id) = requested else {
+        return false;
+    };
+    if visible {
+        let overlay = state
+            .decision_overlay
+            .as_mut()
+            .expect("requested decision overlay");
+        if let Some(decision) = state
+            .decisions
+            .iter()
+            .chain(&state.decision_answers)
+            .find(|decision| decision.decision_id == decision_id)
+        {
+            overlay.show_answers = decision.status == UserDecisionStatus::Resolved;
+            let rows = if overlay.show_answers {
+                &state.decision_answers
+            } else {
+                &state.decisions
+            };
+            overlay.selected = rows
+                .iter()
+                .position(|row| row.decision_id == decision_id)
+                .unwrap_or(0);
+            overlay.editor = Some(DecisionEditor::new(decision.clone()));
+            overlay.error = None;
+            state.unread_decisions.remove(&decision_id);
+        } else {
+            overlay.error =
+                Some("This question is no longer available. Close and refresh the inbox.");
+        }
+    } else {
+        state.decision_overlay = None;
+    }
+    true
+}
 
 pub(super) enum Event {
     Snapshot {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
-    },
-    Resolved {
-        workspace: WorkspaceId,
-        decision_id: UserDecisionId,
     },
     Error {
         workspace: WorkspaceId,
@@ -29,94 +97,152 @@ pub(super) enum Event {
     },
 }
 
+fn observe(
+    state: &mut AppState,
+    workspace: WorkspaceId,
+    mut decisions: Vec<UserDecision>,
+) -> Vec<Effect> {
+    if workspace != state.workspace {
+        return Vec::new();
+    }
+    suppress_stale_completions(state, &mut decisions);
+    let previously_known = state
+        .decisions
+        .iter()
+        .map(|decision| decision.decision_id)
+        .collect::<BTreeSet<_>>();
+    (state.decisions, state.decision_answers) = decisions
+        .into_iter()
+        .filter(|decision| {
+            matches!(
+                decision.status,
+                UserDecisionStatus::Pending | UserDecisionStatus::Resolved
+            )
+        })
+        .partition(|decision| decision.status == UserDecisionStatus::Pending);
+    state.unread_decisions.retain(|id| {
+        state
+            .decisions
+            .iter()
+            .any(|decision| decision.decision_id == *id)
+    });
+    state.unread_decisions.extend(
+        state
+            .decisions
+            .iter()
+            .filter(|decision| !previously_known.contains(&decision.decision_id))
+            .map(|decision| decision.decision_id),
+    );
+    reconcile_decision_overlay(state);
+    if open_requested(state) {
+        return Vec::new();
+    }
+    // A newly created decision is actionable immediately. Open its
+    // answer editor rather than making the user traverse the list.
+    // Reconnect snapshots contain only known rows, so they preserve a
+    // deliberate dismiss and never steal focus.
+    if state.overlay.is_none()
+        && !state.workspace_drawer_open()
+        && let Some(decision) = state
+            .decisions
+            .iter()
+            .find(|decision| !previously_known.contains(&decision.decision_id))
+            .cloned()
+    {
+        state.overlay = Some(Overlay::Decisions);
+        state.decision_overlay = Some(DecisionOverlayState {
+            show_answers: false,
+            selected: 0,
+            editor: Some(DecisionEditor::new(decision)),
+            requested: None,
+            error: None,
+            exact: None,
+        });
+    }
+    Vec::new()
+}
+
+/// The resident lane publishes complete inbox reads in order, but a read may
+/// have started before a command completed. Keep that completion until a later
+/// observation confirms it: an answer leaves pending, a discard leaves the
+/// inbox. Markers are then released rather than growing for the TUI's lifetime.
+/// Between observations they can only cover IDs from the last bounded inbox.
+fn suppress_stale_completions(state: &mut AppState, decisions: &mut Vec<UserDecision>) {
+    let mut awaiting_observation = BTreeSet::new();
+    decisions.retain(|decision| {
+        let Some(completion) = state.decision_completions.get(&decision.decision_id) else {
+            return true;
+        };
+        if *completion == DecisionCompletion::Discarded
+            || decision.status == UserDecisionStatus::Pending
+        {
+            awaiting_observation.insert(decision.decision_id);
+            return false;
+        }
+        true
+    });
+    state
+        .decision_completions
+        .retain(|id, _| awaiting_observation.contains(id));
+}
+
+pub(super) fn complete(
+    state: &mut AppState,
+    workspace: WorkspaceId,
+    decision_id: UserDecisionId,
+    completion: DecisionCompletion,
+) -> Vec<Effect> {
+    if !state
+        .decisions
+        .iter()
+        .chain(&state.decision_answers)
+        .any(|decision| {
+            decision.decision_id == decision_id && decision.owner.workspace_id == workspace
+        })
+    {
+        return Vec::new();
+    }
+    state.decision_completions.insert(decision_id, completion);
+    let closes_active_modal = state
+        .decision_overlay
+        .as_ref()
+        .and_then(|overlay| overlay.editor.as_ref())
+        .is_some_and(|editor| editor.decision.decision_id == decision_id);
+    state
+        .decisions
+        .retain(|decision| decision.decision_id != decision_id);
+    state
+        .decision_answers
+        .retain(|decision| decision.decision_id != decision_id);
+    state.unread_decisions.remove(&decision_id);
+    if closes_active_modal {
+        state.overlay = None;
+        state.decision_overlay = None;
+    } else {
+        reconcile_decision_overlay(state);
+    }
+    Vec::new()
+}
+
 pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
     match event {
         Event::Snapshot {
             workspace,
             decisions,
-        } => {
-            if workspace != state.workspace {
-                return Vec::new();
-            }
-            let previously_known = state
-                .decisions
-                .iter()
-                .map(|decision| decision.decision_id)
-                .collect::<BTreeSet<_>>();
-            state.decisions = decisions
-                .into_iter()
-                .filter(|decision| {
-                    decision.owner.workspace_id == workspace
-                        && decision.status == UserDecisionStatus::Pending
-                })
-                .collect();
-            state.unread_decisions.retain(|id| {
-                state
-                    .decisions
-                    .iter()
-                    .any(|decision| decision.decision_id == *id)
-            });
-            state.unread_decisions.extend(
-                state
-                    .decisions
-                    .iter()
-                    .filter(|decision| !previously_known.contains(&decision.decision_id))
-                    .map(|decision| decision.decision_id),
-            );
-            reconcile_decision_overlay(state);
-            // A newly created decision is actionable immediately. Open its
-            // answer editor rather than making the user traverse the list.
-            // Reconnect snapshots contain only known rows, so they preserve a
-            // deliberate dismiss and never steal focus.
-            if state.overlay.is_none()
-                && !state.workspace_drawer_open()
-                && let Some(decision) = state
-                    .decisions
-                    .iter()
-                    .find(|decision| !previously_known.contains(&decision.decision_id))
-                    .cloned()
-            {
-                state.overlay = Some(Overlay::Decisions);
-                state.decision_overlay = Some(DecisionOverlayState {
-                    selected: 0,
-                    editor: Some(DecisionEditor::new(decision)),
-                });
-            }
-        }
-        Event::Resolved {
-            workspace,
-            decision_id,
-        } => {
-            if workspace != state.workspace {
-                return Vec::new();
-            }
-            let closes_active_modal = state
-                .decision_overlay
-                .as_ref()
-                .and_then(|overlay| overlay.editor.as_ref())
-                .is_some_and(|editor| editor.decision.decision_id == decision_id);
-            state
-                .decisions
-                .retain(|decision| decision.decision_id != decision_id);
-            state.unread_decisions.remove(&decision_id);
-            if closes_active_modal {
-                state.overlay = None;
-                state.decision_overlay = None;
-            } else {
-                reconcile_decision_overlay(state);
-            }
-        }
+        } => return observe(state, workspace, decisions),
         Event::Error {
             workspace,
             decision_id,
             error,
         } => {
-            if workspace == state.workspace
-                && let Some(editor) = state
-                    .decision_overlay
-                    .as_mut()
-                    .and_then(|overlay| overlay.editor.as_mut())
-                    .filter(|editor| editor.decision.decision_id == decision_id)
+            if let Some(editor) = state
+                .decision_overlay
+                .as_mut()
+                .and_then(|overlay| overlay.editor.as_mut())
+                .filter(|editor| {
+                    editor.decision.decision_id == decision_id
+                        && editor.decision.owner.workspace_id == workspace
+                })
             {
                 editor.error = Some(error);
                 editor.scroll_offset = None;
@@ -126,11 +252,34 @@ pub(super) fn update(state: &mut AppState, event: Event) -> Vec<Effect> {
     Vec::new()
 }
 
+pub(super) fn scroll(
+    state: &mut AppState,
+    decision_id: UserDecisionId,
+    offset: usize,
+) -> Vec<Effect> {
+    if state.overlay == Some(Overlay::Decisions)
+        && let Some(editor) = state
+            .decision_overlay
+            .as_mut()
+            .and_then(|overlay| overlay.editor.as_mut())
+        && editor.decision.decision_id == decision_id
+    {
+        editor.scroll_offset = Some(offset);
+        editor.follow_freeform = false;
+        state.pending_session_click = None;
+        state.interaction_count = state.interaction_count.saturating_add(1);
+    }
+    Vec::new()
+}
+
 pub(super) fn update_decision_editor(
     workspace: WorkspaceId,
     editor: &mut DecisionEditor,
     key: AppKey,
 ) -> Vec<Effect> {
+    if editor.decision.status == UserDecisionStatus::Resolved {
+        return update_saved_answer(workspace, editor, &key);
+    }
     if editor.confirmation.is_some() {
         return composition::update_confirmation(workspace, editor, &key);
     }
@@ -148,42 +297,20 @@ pub(super) fn update_decision_editor(
                 .saturating_add(8)
                 .min(usagi_core::domain::user_decision::UserDecisionPolicy::DIAGRAM_MAX_BYTES);
         }
-        AppKey::Tab if editor.decision.allow_comment => {
+        AppKey::Tab
+            if !editor.decision.options.is_empty()
+                && (editor.decision.allow_comment || editor.decision.allow_freeform) =>
+        {
             composition::cycle_input(editor);
-        }
-        AppKey::Tab if multiple && editor.decision.allow_freeform => {
-            editor.input_freeform = !editor.input_freeform;
-            editor.follow_freeform = editor.input_freeform;
-            editor.scroll_offset = None;
-            editor.error = None;
         }
         AppKey::Char(' ') if multiple && !editor.input_freeform && !editor.input_comment => {
             toggle_decision_option(editor);
         }
-        AppKey::DecisionPrevious | AppKey::Up => {
-            editor.selected_option = editor.selected_option.saturating_sub(1);
-            editor.scroll_offset = None;
-            editor.follow_freeform = false;
-            editor.input_freeform = false;
-            editor.input_comment = false;
-            editor.error = None;
+        AppKey::DecisionPrevious | AppKey::Up if !editor.decision.options.is_empty() => {
+            composition::move_input(editor, false);
         }
-        AppKey::DecisionNext | AppKey::Down => {
-            editor.selected_option =
-                (editor.selected_option + 1).min(editor.decision.options.len().saturating_sub(1));
-            editor.scroll_offset = None;
-            editor.follow_freeform = false;
-            editor.input_freeform = false;
-            editor.input_comment = false;
-            editor.error = None;
-        }
-        AppKey::PageUp => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
-            editor.follow_freeform = false;
-        }
-        AppKey::PageDown => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
-            editor.follow_freeform = false;
+        AppKey::DecisionNext | AppKey::Down if !editor.decision.options.is_empty() => {
+            composition::move_input(editor, true);
         }
         AppKey::SetDecisionFreeform(text) => {
             if editor.decision.allow_freeform {
@@ -191,28 +318,45 @@ pub(super) fn update_decision_editor(
                 follow_decision_freeform(editor);
             }
         }
-        AppKey::Char(ch)
-            if editor.decision.allow_freeform
-                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
-        {
+        AppKey::Char(ch) if editor.decision.allow_freeform && editor.input_freeform => {
             editor.freeform.push(ch);
             follow_decision_freeform(editor);
         }
-        AppKey::Backspace
-            if editor.decision.allow_freeform
-                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
-        {
+        AppKey::Backspace if editor.decision.allow_freeform && editor.input_freeform => {
             editor.freeform.pop();
             follow_decision_freeform(editor);
         }
-        AppKey::Paste(text)
-            if editor.decision.allow_freeform
-                && ((!multiple && !editor.decision.allow_comment) || editor.input_freeform) =>
-        {
+        AppKey::Paste(text) if editor.decision.allow_freeform && editor.input_freeform => {
             paste_decision_freeform(editor, &text);
         }
         AppKey::SubmitDecision | AppKey::Enter => {
             return submit_decision(workspace, editor, multiple);
+        }
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn update_saved_answer(
+    workspace: WorkspaceId,
+    editor: &mut DecisionEditor,
+    key: &AppKey,
+) -> Vec<Effect> {
+    match key {
+        AppKey::Escape => {
+            editor.saved_answer_mode = SavedAnswerMode::View;
+            editor.error = None;
+        }
+        AppKey::Char('d') if !editor.discard_confirmation() => {
+            editor.saved_answer_mode = SavedAnswerMode::ConfirmDiscard;
+            editor.scroll_offset = Some(0);
+            editor.error = None;
+        }
+        AppKey::Enter if editor.discard_confirmation() => {
+            return vec![Effect::DiscardDecision {
+                workspace,
+                decision_id: editor.decision.decision_id,
+            }];
         }
         _ => {}
     }
@@ -224,6 +368,7 @@ fn follow_decision_freeform(editor: &mut DecisionEditor) {
     editor.scroll_offset = None;
     editor.follow_freeform = true;
     editor.input_freeform = true;
+    editor.input_comment = false;
     editor.error = None;
 }
 
@@ -239,12 +384,7 @@ fn submit_decision(
 ) -> Vec<Effect> {
     editor.scroll_offset = None;
     editor.error = None;
-    let answer = if editor.decision.allow_freeform
-        && (if multiple || editor.decision.allow_comment {
-            editor.input_freeform
-        } else {
-            !editor.freeform.trim().is_empty()
-        }) {
+    let answer = if editor.decision.allow_freeform && editor.input_freeform {
         UserDecisionAnswer::Freeform {
             text: editor.freeform.trim().to_owned(),
         }
@@ -271,9 +411,7 @@ fn submit_decision(
         });
         return Vec::new();
     };
-    if editor.decision.selection_limits.is_some()
-        && let UserDecisionAnswer::Options { option_ids, .. } = &answer
-    {
+    if let UserDecisionAnswer::Options { option_ids, .. } = &answer {
         let (min, max) = editor.decision.selection_bounds();
         if !(min..=max).contains(&option_ids.len()) {
             editor.error = Some(SafeError {

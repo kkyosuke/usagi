@@ -4,7 +4,7 @@
 //! 中央に浮かぶ枠付きダイアログとして描く（枠・配置は共通の [`modal`]
 //! widget に委譲）。
 //!
-//! 状態 [`CloseupModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
+//! 状態 [`CloseupModal`] は端末 IO を持たない純粋な値で、[`render_over`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。キー入力の解釈は入力層が整うときに載せ、ここでは
 //! カーソル移動と選択の純粋操作だけを公開する。
 
@@ -291,33 +291,27 @@ impl CloseupModal {
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
     pub fn select_next(&mut self) {
-        self.completion_cycle = None;
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
-        if len > 0 {
-            self.selected = (self.selected + 1) % len;
-        }
+        self.move_selection(true);
     }
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
     pub fn select_prev(&mut self) {
+        self.move_selection(false);
+    }
+
+    fn move_selection(&mut self, forward: bool) {
         self.completion_cycle = None;
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + len - 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
+        let (len, selected) = if self.expanded {
+            (self.subcommands().len(), &mut self.selected_subcommand)
+        } else {
+            (self.matches().len(), &mut self.selected)
+        };
         if len > 0 {
-            self.selected = (self.selected + len - 1) % len;
+            *selected = if forward {
+                (*selected + 1) % len
+            } else {
+                (*selected + len - 1) % len
+            };
         }
     }
 
@@ -477,17 +471,25 @@ fn body(state: &CloseupModal) -> Vec<String> {
     if state.error.is_some() {
         lines.push(error_row(state));
     }
+    let mut rows = Vec::new();
+    let mut cursor = 0;
     for (i, action) in state.matches().iter().enumerate() {
-        lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
+        if i == state.selected {
+            cursor = rows.len();
+        }
+        rows.push(action_row(*action, i == state.selected, INNER_WIDTH));
         if state.expanded && i == state.selected {
+            cursor += 1 + state.selected_subcommand;
             for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                lines.push(modal::subcommand_row(
+                rows.push(modal::subcommand_row(
                     &subcommand.label,
                     sub_index == state.selected_subcommand,
                 ));
             }
         }
     }
+    let capacity = BODY_HEIGHT.saturating_sub(lines.len() + 1 + usize::from(state.error.is_none()));
+    lines.extend(modal::bounded_list_rows(&rows, cursor, capacity));
     if state.error.is_none() {
         lines.push(String::new());
     }
@@ -502,19 +504,6 @@ fn error_row(state: &CloseupModal) -> String {
     state.error.as_deref().map_or_else(String::new, |message| {
         modal::error_line(message, INNER_WIDTH)
     })
-}
-
-/// 生の端末サイズに対する closeup modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<String> {
-    modal::render_modal(
-        raw_height,
-        raw_width,
-        &format!("Closeup: {}", state.session()),
-        INNER_WIDTH,
-        &body(state),
-    )
 }
 
 /// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
@@ -539,9 +528,13 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{CloseupModal, render, render_over};
+    use super::{CloseupModal, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::{AvailableModels, DefaultModel, ModalSelectionMode};
+
+    fn render(height: usize, width: usize, state: &CloseupModal) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
 
     #[test]
     fn action_selection_keeps_the_closeup_box_height_stable() {
@@ -626,7 +619,10 @@ mod tests {
             modal.insert_char(character);
         }
 
-        assert!(modal.matches().is_empty());
+        assert_eq!(
+            modal.matches(),
+            [] as [crate::usecase::closeup::CommandInfo; 0]
+        );
         assert_eq!(modal.submission(), "agent -m codex");
 
         // A trailing separator is also meaningful: it submits the command and
@@ -754,6 +750,7 @@ mod tests {
         // Command-name completion still honours ↑↓: Tab completes the row the
         // user moved to, then advances from there.
         let mut modal = CloseupModal::new("s");
+        modal.select_next(); // artifact
         modal.select_next(); // close
         modal.complete_selected();
         assert_eq!(modal.submission(), "close");
@@ -837,7 +834,7 @@ mod tests {
         assert_eq!(modal.actions().len(), 6);
         assert_eq!(modal.selected_action().name, "agent");
         assert!(joined(&modal).contains("env"));
-        assert!(joined(&modal).contains("workflow"));
+        assert!(joined(&modal).contains("artifact"));
         assert!(joined(&modal).contains("↑↓: select"));
         // derive された Clone / Debug も触れる。
         assert!(format!("{modal:?}").contains("tui"));
@@ -849,13 +846,15 @@ mod tests {
     #[test]
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
-        modal.select_prev(); // wrap to last (workflow)
+        modal.select_prev(); // wrap to last (terminal)
         assert_eq!(modal.selected(), 5);
-        assert_eq!(modal.selected_action().name, "workflow");
+        assert_eq!(modal.selected_action().name, "terminal");
+        assert!(joined(&modal).contains("terminal"));
+        assert!(joined(&modal).contains("Enter: run"));
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();
-        assert_eq!(modal.selected_action().name, "close");
+        assert_eq!(modal.selected_action().name, "artifact");
     }
 
     #[test]
@@ -876,6 +875,8 @@ mod tests {
         let mut modal = CloseupModal::new("s");
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
+        assert_eq!(modal.submission(), "artifact");
+        modal.select_next();
         assert_eq!(modal.submission(), "close");
     }
 
@@ -883,12 +884,13 @@ mod tests {
     fn an_out_of_range_selection_has_no_subcommands() {
         let mut modal = CloseupModal::new("s");
         modal.selected = usize::MAX;
-        assert!(modal.subcommands().is_empty());
+        assert_eq!(modal.subcommands(), [] as [super::ModalSubcommand; 0]);
     }
 
     #[test]
     fn expanded_action_cycles_subcommands_and_renders_them() {
         let mut modal = CloseupModal::new("s");
+        modal.select_next(); // artifact
         modal.select_next(); // close
         modal.expand_selected();
         assert_eq!(modal.submission(), "close --force");
@@ -1005,7 +1007,7 @@ mod tests {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Closeup: daemon")); // タイトル
         assert!(text.contains("Run a command:"));
-        assert!(text.contains("terminal"));
+        assert!(text.contains("artifact"));
         assert!(text.contains("Launch or attach"));
         assert!(text.contains("close"));
         assert!(text.contains("Enter: run"));

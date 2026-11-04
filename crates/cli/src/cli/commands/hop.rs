@@ -22,6 +22,6 @@ mod tests {
     fn requests_welcome_without_output() {
         let (outcome, output) = execute(Command::Hop);
         assert_eq!(outcome, RunOutcome::LaunchTui(TuiRequest::Welcome));
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 }

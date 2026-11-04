@@ -17,6 +17,7 @@ use super::{
     SessionLifecycleProjection, SessionRefreshPort, SessionRoleProjection, WorkspaceIoRuntime,
     WorkspaceRuntime, runtime_identities_are_valid,
 };
+use crate::usecase::application::daemon_backend::DaemonBackend;
 
 #[cfg(test)]
 pub(super) struct UnavailableSessionCommandPort;
@@ -472,6 +473,9 @@ pub(super) fn adopt_session_snapshot(ui: &mut WorkspaceIoRuntime, result: Sessio
         ui.last_session_revision = revision;
     }
     if is_current {
+        if let Some(updated_at) = result.notes_updated_at {
+            ui.notes_updated_at = Some(updated_at);
+        }
         apply_session_projection(
             ui,
             result.sessions,
@@ -480,6 +484,11 @@ pub(super) fn adopt_session_snapshot(ui: &mut WorkspaceIoRuntime, result: Sessio
             result.session_lifecycles,
             result.session_roles,
         );
+        // An external Agent can start after its session was first observed
+        // without changing the lifecycle revision. Use accepted snapshots as
+        // the cadence for coherent inventory refresh, including equal revisions.
+        // Preserve the restore lane's in-flight follow-up and outage backoff.
+        ui.request_agent_inventory_change_observation();
     }
 }
 
@@ -673,7 +682,30 @@ pub(super) fn sync_runtime_sessions(
     worktree_names: &[String],
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
-    let ids = ui.workspace.session_ids().to_vec();
+    // Retain a save acknowledgement while an older snapshot is in flight. Once
+    // persistence has been observed, subsequent MCP edits use the normal rows.
+    if let Some((saved_id, notes)) = runtime.state().saved_notes()
+        && (runtime
+            .state()
+            .saved_note_at()
+            .zip(ui.notes_updated_at)
+            .is_some_and(|(saved, observed)| observed >= saved)
+            || ui
+                .workspace
+                .sessions()
+                .iter()
+                .zip(ui.workspace.session_ids())
+                .any(|(record, id)| id == saved_id && record.notes.note == notes.note))
+    {
+        let observed = BackendEvent::SessionNoteObserved {
+            session: *saved_id,
+            note: notes.note.clone(),
+            updated_at: ui.notes_updated_at,
+        };
+        effects.extend(runtime.apply_event(AppEvent::Backend(observed)));
+    }
+    let mut ids = ui.workspace.session_ids().to_vec();
+    runtime.state().order_session_snapshot(&mut ids);
     if runtime.state().sessions() != ids.as_slice() {
         // The reducer answers a changed session set with the effects that keep
         // daemon-backed observation aimed at it — the resident PR lane above
@@ -714,4 +746,26 @@ pub(super) fn sync_runtime_sessions(
         );
     }
     effects
+}
+
+/// Publish roots only when the revision-fenced workspace projection changes.
+/// Run before input so a newly rendered session is already readable by its ID.
+pub(super) fn sync_overlay_session_roots(
+    backend: &mut DaemonBackend,
+    ui: &WorkspaceIoRuntime,
+    observed_revision: &mut Option<u64>,
+) {
+    let revision = ui.workspace.material_revision();
+    if *observed_revision == Some(revision) {
+        return;
+    }
+    let sessions = ui
+        .workspace
+        .session_ids()
+        .iter()
+        .zip(ui.workspace.sessions())
+        .map(|(id, record)| (*id, record.root.clone()))
+        .collect();
+    backend.sync_session_roots(sessions);
+    *observed_revision = Some(revision);
 }

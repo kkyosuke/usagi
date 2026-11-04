@@ -306,15 +306,6 @@ pub enum CheckpointError {
     SynchronizedOutputTooLong(usize),
     /// `active` and the presence of `alternate` disagree.
     ActiveBufferMismatch,
-    /// A serialized checkpoint exceeds [`CHECKPOINT_BYTES_MAX`].
-    TooLarge {
-        /// The serialized size.
-        size: usize,
-        /// The byte limit.
-        limit: usize,
-    },
-    /// The serialized bytes are not a valid checkpoint encoding.
-    Malformed(String),
 }
 
 impl std::fmt::Display for CheckpointError {
@@ -374,10 +365,6 @@ impl std::fmt::Display for CheckpointError {
                     "active buffer disagrees with the presence of an alternate buffer"
                 )
             }
-            Self::TooLarge { size, limit } => {
-                write!(f, "serialized checkpoint {size} bytes exceeds {limit}")
-            }
-            Self::Malformed(reason) => write!(f, "malformed checkpoint: {reason}"),
         }
     }
 }
@@ -467,51 +454,6 @@ impl ScreenCheckpoint {
             rows: rows as usize,
             cols: cols as usize,
         })
-    }
-
-    /// Serializes to bytes, rejecting a checkpoint that would exceed
-    /// [`CHECKPOINT_BYTES_MAX`] so a single checkpoint always fits one frame.
-    ///
-    /// # Errors
-    ///
-    /// Returns a top-level semantic bound error before serialization, or
-    /// [`CheckpointError::TooLarge`] when the serialized form exceeds the byte
-    /// budget.
-    pub fn to_json_bytes(&self) -> Result<Vec<u8>, CheckpointError> {
-        // Apply top-level bounds before serialization creates a second
-        // allocation proportional to hostile table/string input.
-        self.validated_geometry()?;
-        // `serde_json` serialization of a well-formed struct does not fail.
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
-        if bytes.len() > CHECKPOINT_BYTES_MAX {
-            return Err(CheckpointError::TooLarge {
-                size: bytes.len(),
-                limit: CHECKPOINT_BYTES_MAX,
-            });
-        }
-        Ok(bytes)
-    }
-
-    /// Parses bytes into a checkpoint, rejecting oversized input *before*
-    /// deserialization so a hostile payload cannot drive an unbounded parse.
-    ///
-    /// This checks only the byte budget and encoding; call
-    /// [`from_checkpoint`](super::VtScreen::from_checkpoint) to validate the
-    /// semantic bounds and reconstruct a screen.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CheckpointError::TooLarge`] when the input exceeds the byte
-    /// budget, or [`CheckpointError::Malformed`] when it is not a valid
-    /// checkpoint encoding.
-    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, CheckpointError> {
-        if bytes.len() > CHECKPOINT_BYTES_MAX {
-            return Err(CheckpointError::TooLarge {
-                size: bytes.len(),
-                limit: CHECKPOINT_BYTES_MAX,
-            });
-        }
-        serde_json::from_slice(bytes).map_err(|error| CheckpointError::Malformed(error.to_string()))
     }
 }
 

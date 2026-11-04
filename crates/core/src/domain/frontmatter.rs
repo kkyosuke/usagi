@@ -58,8 +58,8 @@ impl From<ParseFrontmatterError> for ParseError {
 /// Implementors serialise their field set into the shared `---` envelope via
 /// [`FrontmatterDoc::to_markdown`] and reconstruct it via
 /// [`FrontmatterDoc::from_markdown`]. Both share the single [`ParseError`] type,
-/// so a generic caller — e.g. a future markdown-backed store — can load and save
-/// any implementor without naming the concrete entity.
+/// so markdown-backed stores can load and save any implementor without
+/// duplicating the entity's parsing and rendering interface.
 ///
 /// [`Issue`]: crate::domain::issue::Issue
 /// [`Memory`]: crate::domain::memory::Memory

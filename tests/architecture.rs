@@ -504,7 +504,6 @@ fn tui_application_runtime_ports_are_not_declared_by_presentation() {
         "ExternalTerminalPort",
         "GardenInventoryPort",
         "MetricsPort",
-        "MetricsPortFactory",
         "PaneLaunchCommandPort",
         "RestoreConnectionPort",
         "SessionBranchCatalogPort",
@@ -639,7 +638,6 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         "mod restore;",
         "mod session_commands;",
         "mod terminal_io;",
-        "mod work_run;",
         "mod workspace_io;",
     ] {
         assert!(composition.contains(module));
@@ -655,7 +653,6 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
         ("restore.rs", "fn spawn_restore_job"),
         ("session_commands.rs", "fn begin_session_command"),
         ("terminal_io.rs", "fn forward_live_terminal_input"),
-        ("work_run.rs", "fn handle_work_run_list_input"),
         ("workspace_io.rs", "struct WorkspaceIoRuntime"),
     ] {
         let source = fs::read_to_string(root.join("crates/tui/src/presentation").join(module))
@@ -680,7 +677,6 @@ fn tui_presentation_keeps_tests_and_observation_policy_out_of_its_composition_mo
     }
     assert!(observation.contains("struct ObservationLane"));
     assert!(!composition.contains("struct GardenObservation {"));
-    assert!(!composition.contains("struct WorkRunObservation {"));
     assert!(
         composition.lines().count() <= 10_000,
         "TUI presentation composition grew beyond its reviewable boundary"
@@ -693,11 +689,8 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
     let controller =
         fs::read_to_string(root.join("crates/tui/src/usecase/application/controller.rs"))
             .expect("TUI Home controller is readable");
-    let entry =
-        fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/entry.rs"))
-            .expect("TUI entry controller is readable");
     let new = fs::read_to_string(root.join("crates/tui/src/usecase/application/controller/new.rs"))
-        .expect("TUI new-workspace controller is readable");
+        .expect("TUI new-workspace validation is readable");
     let mut controller_test_sources = Vec::new();
     rust_sources(
         &root.join("crates/tui/src/usecase/application/controller/tests"),
@@ -713,7 +706,6 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
     .expect("TUI pull request controller is readable");
 
     for module in [
-        "mod entry;",
         "mod new;",
         "mod preview;",
         "mod pull_requests;",
@@ -722,13 +714,10 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
         assert!(controller.contains(module));
     }
     assert!(!controller.contains("mod tests {"));
-    assert!(!controller.contains("pub struct EntryState"));
-    assert!(!controller.contains("pub struct NewState"));
     assert!(!controller.contains("pub struct PrOverlay"));
     assert!(!controller.contains("pub struct PreviewOverlay"));
     assert!(pull_requests.contains("pub struct PrOverlay"));
-    assert!(entry.contains("pub fn update_entry("));
-    assert!(new.contains("pub fn update_new("));
+    assert!(new.contains("pub fn validate_new_form("));
     for path in &controller_test_sources {
         let source = fs::read_to_string(path).expect("TUI controller tests are readable");
         assert!(
@@ -744,19 +733,37 @@ fn tui_controller_keeps_its_bounded_contexts_and_tests_out_of_the_home_reducer()
 }
 
 #[test]
-fn clipboard_platform_variants_are_compiled_only_for_their_targets_or_tests() {
-    let root = workspace_root();
-    let source = fs::read_to_string(root.join("src/runtime/clipboard.rs"))
+fn clipboard_keeps_one_shared_platform_and_command_policy() {
+    struct SharedPolicy;
+    impl<'ast> Visit<'ast> for SharedPolicy {
+        fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+            assert!(
+                !attribute.path().is_ident("cfg") && !attribute.path().is_ident("cfg_attr"),
+                "clipboard vocabulary and command policy must be shared by all targets and tests"
+            );
+        }
+    }
+
+    let source = fs::read_to_string(workspace_root().join("src/runtime/clipboard.rs"))
         .expect("clipboard adapter is readable");
+    let syntax: File = syn::parse_file(&source).expect("clipboard adapter parses");
+    let declarations = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Enum(declaration) => Some((declaration.ident.to_string(), item)),
+            Item::Fn(declaration) => Some((declaration.sig.ident.to_string(), item)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
 
     assert!(!source.contains("allow(dead_code)"));
-    assert!(source.contains("#[cfg(any(test, target_os = \"macos\"))]"));
-    assert!(source.contains("#[cfg(any(test, target_os = \"windows\"))]"));
-    assert!(
-        source.contains(
-            "#[cfg(any(test, not(any(target_os = \"macos\", target_os = \"windows\"))))]"
-        )
-    );
+    // Native selection is checked by the adapter's behavioral unit test.
+    // Visit nested variants and match arms too, so an inner cfg cannot split
+    // the shared vocabulary or command policy across compilation targets.
+    for name in ["Platform", "commands_for", "unix_commands"] {
+        SharedPolicy.visit_item(declarations[name]);
+    }
 }
 
 /// The daemon composition root grew to twenty-five thousand lines because every
@@ -774,6 +781,7 @@ fn daemon_composition_root_keeps_its_concerns_in_their_modules() {
         ("broker.rs", "fn spawn_bootstrap_broker"),
         ("instance_lock.rs", "fn open_private_lock"),
         ("ipc_accept.rs", "fn start_ipc_accept_loop"),
+        ("managed_update.rs", "fn sync_after_update"),
         ("pty.rs", "fn new_terminal_runtime"),
         ("standby.rs", "fn promote_standby_generation"),
         ("workers.rs", "fn spawn_critical_worker"),
@@ -844,13 +852,9 @@ fn daemon_request_dispatch_stays_out_of_the_socket_and_lifecycle_composition_mod
         !composition.contains("use dispatch::*;"),
         "daemon dispatch must expose an explicit composition surface"
     );
-    assert!(composition.contains("fn start_supervisor_recovery("));
-    assert!(!dispatch.contains("fn start_supervisor_recovery("));
-    assert!(!dispatch.contains("usagi-supervisor-recovery"));
     for symbol in [
         "fn dispatch_agent(",
         "fn dispatch_session(",
-        "fn dispatch_supervisor_tool(",
         "fn dispatch_user_decision(",
         "fn dispatch_metrics(",
     ] {

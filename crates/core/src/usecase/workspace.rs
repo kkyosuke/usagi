@@ -154,11 +154,7 @@ pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
         .into_iter()
         .map(|workspace| overview_for(storage, workspace))
         .collect::<Vec<_>>();
-    let mut recent = overviews
-        .iter()
-        .cloned()
-        .map(Recent::Workspace)
-        .collect::<Vec<_>>();
+    let mut unites = Vec::new();
     // Unite storage is an optional enhancement to the workspace registry. A
     // hand-edited, corrupt, or future-version file must not hide healthy single
     // workspace recents.
@@ -174,12 +170,17 @@ pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
             })
             .collect::<Vec<_>>();
         if !members.is_empty() {
-            recent.push(Recent::Unite(UniteOverview::with_updated_at(
+            unites.push(Recent::Unite(UniteOverview::with_updated_at(
                 members,
                 unite.updated_at,
             )));
         }
     }
+    let mut recent = overviews
+        .into_iter()
+        .map(Recent::Workspace)
+        .chain(unites)
+        .collect::<Vec<_>>();
     recent.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
     Ok(recent)
 }
@@ -201,7 +202,7 @@ pub fn touch_unite(
     let mut seen = HashSet::new();
     let paths = paths
         .iter()
-        .filter(|path| seen.insert((*path).clone()))
+        .filter(|path| seen.insert(*path))
         .cloned()
         .collect::<Vec<_>>();
     if paths.len() < 2 {
@@ -524,7 +525,7 @@ mod tests {
             .is_err()
         );
         assert!(open(&storage, &tmp.path().join("line\nbreak"), ts(10)).is_err());
-        assert!(storage.load_workspaces().unwrap().is_empty());
+        assert_eq!(storage.load_workspaces().unwrap(), [] as [Workspace; 0]);
     }
 
     #[test]
@@ -623,10 +624,9 @@ mod tests {
             vec![alpha]
         );
         assert_eq!(storage.load_workspaces().unwrap(), vec![beta]);
-        assert!(
-            remove(&storage, &[PathBuf::from("/tmp/unknown")])
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            remove(&storage, &[PathBuf::from("/tmp/unknown")]).unwrap(),
+            [] as [Workspace; 0]
         );
     }
 
@@ -645,14 +645,14 @@ mod tests {
             opened.path.as_os_str().as_bytes(),
             path.as_os_str().as_bytes()
         );
-        assert!(storage.load_workspaces().unwrap().is_empty());
-        assert!(recent(&storage).unwrap().is_empty());
+        assert_eq!(storage.load_workspaces().unwrap(), [] as [Workspace; 0]);
+        assert_eq!(recent(&storage).unwrap(), [] as [Recent; 0]);
     }
 
     #[test]
     fn recent_is_empty_for_an_empty_registry() {
         let (_tmp, storage) = storage();
-        assert!(recent(&storage).unwrap().is_empty());
+        assert_eq!(recent(&storage).unwrap(), [] as [Recent; 0]);
     }
 
     #[test]
@@ -676,6 +676,7 @@ mod tests {
                     session("one", &beta_root, vec![shared, other]),
                     session("two", &beta_root, vec![shared_files]),
                 ],
+                session_notes: std::collections::BTreeMap::new(),
                 root_notes: Scratchpad::default(),
                 updated_at: ts(9),
             })
@@ -757,7 +758,7 @@ mod tests {
     fn a_single_workspace_is_not_persisted_as_a_unite() {
         let (_tmp, storage) = storage();
         touch_unite(&storage, &[PathBuf::from("/alpha")], ts(10)).unwrap();
-        assert!(storage.load_unites().unwrap().is_empty());
+        assert_eq!(storage.load_unites().unwrap(), [] as [Unite; 0]);
     }
 
     #[test]
@@ -959,7 +960,7 @@ mod tests {
             NewWorkspaceError::AlreadyRegistered,
         ] {
             let message = error.message();
-            assert!(!message.is_empty());
+            assert_ne!(message, "");
             assert!(!message.contains('\n'));
         }
     }
@@ -967,7 +968,7 @@ mod tests {
     #[test]
     fn remove_with_no_paths_is_a_storage_free_noop() {
         let (_tmp, storage) = storage();
-        assert!(remove(&storage, &[]).unwrap().is_empty());
+        assert_eq!(remove(&storage, &[]).unwrap(), [] as [Workspace; 0]);
         assert!(!storage.dir().exists());
     }
 }

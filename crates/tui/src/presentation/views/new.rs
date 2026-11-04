@@ -227,9 +227,8 @@ impl New {
 
     /// フォームを検証し、必須項目が揃っていれば workspace を作る backend request を返す。
     ///
-    /// 検証は controller reducer の [`validate_new_form`] を通し、実端末経路（この view）と
-    /// controller runtime が同じ規則を共有する（SSoT）。フィールドは controller の [`NewForm`]
-    /// へ写して渡す。
+    /// 入力検証の正本 [`validate_new_form`] に、編集フィールドを TUI-local な [`NewForm`]
+    /// へ写して渡す。画面グラフは検証済み request を workspace loader に渡す。
     ///
     /// # Errors
     ///
@@ -368,9 +367,9 @@ impl New {
         else {
             return;
         };
-        if let Some(input) = self.field_mut(field) {
-            input.set_value(format!("{candidate}/"));
-        }
+        self.field_mut(field)
+            .expect("directory completion targets a path input")
+            .set_value(format!("{candidate}/"));
         if field == Field::Path {
             self.sync_name();
         }
@@ -510,8 +509,7 @@ fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
     };
     let prefix = path
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().into_owned());
     (parent.to_path_buf(), prefix)
 }
 
@@ -539,8 +537,7 @@ fn suggest_directory(url: &str) -> String {
 fn suggest_name(path: &str) -> String {
     std::path::Path::new(path.trim())
         .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default()
+        .map_or_default(|s| s.to_string_lossy().into_owned())
 }
 
 /// フォーカス中の入力欄のテキスト。共通 block cursor を使い、編集位置の 1 文字を
@@ -830,6 +827,9 @@ mod tests {
         assert!(!state.is_creating());
         assert_eq!(state.url(), "https://example.com/acme/app.git");
         assert!(!joined(&state).contains("creating workspace"));
+        let settled = state.clone();
+        state.advance_create_animation();
+        assert_eq!(state, settled, "an idle wake-up must not restart creation");
     }
 
     #[test]
@@ -911,7 +911,7 @@ mod tests {
         for _ in 0.."projx".len() {
             state.backspace();
         }
-        assert!(state.directory().is_empty());
+        assert_eq!(state.directory(), "");
         state.focus_prev(); // Location
         state.focus_prev(); // Url
         state.insert_char('/');
@@ -1178,6 +1178,20 @@ mod tests {
         type_str(&mut state, "/tmp/");
         complete_with(&mut state, &["child"]);
         assert_eq!(state.path(), "/tmp/child/");
+    }
+
+    #[test]
+    fn clone_location_completion_preserves_the_repository_directory() {
+        let mut state = New::default();
+        state.focus_next();
+        type_str(&mut state, "https://example.com/acme/repository.git");
+        state.focus_next();
+        assert_eq!(state.focus(), Field::Location);
+        type_str(&mut state, "/projects/pr");
+        complete_with(&mut state, &["private", "public"]);
+        assert_eq!(state.location(), "/projects/private/");
+        assert_eq!(state.directory(), "repository");
+        assert_eq!(state.name(), "");
     }
 
     #[test]

@@ -849,7 +849,10 @@ fn a_rollover_onto_an_unknown_successor_is_refused_before_any_write() {
             if registry.refusal() == Some(RegistryError::UnknownGeneration)
     ));
     assert_eq!(world.gate.role(), GenerationRole::Active);
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
 }
 
 #[test]
@@ -864,12 +867,13 @@ fn a_gated_rollover_hands_authority_over_when_every_participant_can_route_by_own
         from: Some(world.old),
         to: world.next,
     };
-    let outcome = execute_gated_rollover(
+    let outcome = execute_gated_rollover_with_guard(
         &world.store,
         &world.locator,
-        Some(&world.gate),
+        &world.gate,
         &plan,
         &operation("a"),
+        &mut || Ok(()),
     )
     .unwrap();
     assert_eq!(outcome, RolloverOutcome::Advanced);
@@ -894,12 +898,13 @@ fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write(
         from: Some(world.old),
         to: world.next,
     };
-    let failure = execute_gated_rollover(
+    let failure = execute_gated_rollover_with_guard(
         &world.store,
         &world.locator,
-        Some(&world.gate),
+        &world.gate,
         &plan,
         &operation("a"),
+        &mut || Ok(()),
     )
     .unwrap_err();
 
@@ -910,7 +915,10 @@ fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write(
     // Nothing observable moved: the old generation still admits control work,
     // the locator still names it, and the registry was not rewritten.
     assert_eq!(world.gate.role(), GenerationRole::Active);
-    assert!(world.locator.publishes().is_empty());
+    assert_eq!(
+        world.locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
     assert_eq!(world.file.contents(), before);
     assert_eq!(world.file.writes(), writes);
 }
@@ -919,6 +927,7 @@ fn a_participant_that_cannot_route_by_owner_stops_the_rollover_before_any_write(
 fn legacy_client_hello() -> usagi_core::infrastructure::ipc::ClientHello {
     usagi_core::infrastructure::ipc::ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId("legacy".into()),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: Vec::new(),

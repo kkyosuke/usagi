@@ -9,11 +9,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::issue::IssueSummary;
-use crate::domain::recent::Unite;
+use crate::domain::recent::{LastProjectSet, Unite};
 use crate::domain::settings::Settings;
 use crate::domain::workspace::{Workspace, validate_workspace_name};
 use crate::domain::workspace_state::WorkspaceState;
@@ -106,7 +105,7 @@ impl Storage {
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
         let file: Option<WorkspacesOwned> =
             json_file::read_versioned(&self.dir.join(WORKSPACES_FILE))?;
-        let workspaces = file.map(|file| file.workspaces).unwrap_or_default();
+        let workspaces = file.map_or_default(|file| file.workspaces);
         for workspace in &workspaces {
             validate_workspace_name(&workspace.name)?;
         }
@@ -138,7 +137,7 @@ impl Storage {
     pub fn load_unites(&self) -> Result<Vec<Unite>> {
         let file: Option<UnitesOwned> =
             json_file::read_supported_version(&self.dir.join(UNITES_FILE))?;
-        Ok(file.map(|file| file.unites).unwrap_or_default())
+        Ok(file.map_or_default(|file| file.unites))
     }
 
     /// Atomically persist the complete Unite recent list.
@@ -152,6 +151,30 @@ impl Storage {
             &self.dir.join(UNITES_FILE),
             &UnitesRef { unites },
         )
+    }
+
+    /// Load the last committed project deck. Missing storage has no resume target.
+    ///
+    /// # Errors
+    /// Returns an error for unreadable, unsupported, or invalid data.
+    pub fn load_last_projects(&self) -> Result<Option<LastProjectSet>> {
+        let saved: Option<LastProjectSet> =
+            json_file::read_supported_version(&self.dir.join("last-projects.json"))?;
+        anyhow::ensure!(
+            saved.as_ref().is_none_or(LastProjectSet::is_valid),
+            "invalid last project set"
+        );
+        Ok(saved)
+    }
+
+    /// Atomically save the last committed deck under the shared store lock.
+    ///
+    /// # Errors
+    /// Returns an error for invalid data or a failed write.
+    pub fn save_last_projects(&self, projects: &LastProjectSet) -> Result<()> {
+        anyhow::ensure!(projects.is_valid(), "invalid last project set");
+        let _lock = self.lock()?;
+        json_file::write_versioned(&self.dir, &self.dir.join("last-projects.json"), projects)
     }
 
     /// Load the per-user settings used by the TUI Config screen. Missing files
@@ -179,27 +202,6 @@ impl Storage {
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
         crate::domain::settings::validate_env_limits(&settings.env)?;
         json_file::write_atomic(&self.dir, &self.dir.join(SETTINGS_FILE), settings)
-    }
-
-    /// Stamp `updated_at` onto the workspace named `name` and persist the change,
-    /// returning the touched workspace, or `None` when no workspace has that name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the registry cannot be read or written.
-    pub fn touch_workspace(
-        &self,
-        name: &str,
-        updated_at: DateTime<Utc>,
-    ) -> Result<Option<Workspace>> {
-        let mut workspaces = self.load_workspaces()?;
-        let Some(workspace) = workspaces.iter_mut().find(|w| w.name == name) else {
-            return Ok(None);
-        };
-        workspace.updated_at = updated_at;
-        let touched = workspace.clone();
-        self.save_workspaces(&workspaces)?;
-        Ok(Some(touched))
     }
 }
 
@@ -258,6 +260,7 @@ impl WorkspaceRepository for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::fs;
 
     fn temp_storage() -> (tempfile::TempDir, Storage) {
@@ -267,9 +270,48 @@ mod tests {
     }
 
     #[test]
+    fn last_projects_round_trip_and_reject_invalid_or_future_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temp.path());
+        assert_eq!(storage.load_last_projects().unwrap(), None);
+        let projects = crate::domain::recent::LastProjectSet {
+            paths: vec!["/alpha".into(), "/beta".into()],
+            active: "/beta".into(),
+        };
+        storage.save_last_projects(&projects).unwrap();
+        assert_eq!(
+            storage.load_last_projects().unwrap(),
+            Some(projects.clone())
+        );
+        let mut invalid = projects.clone();
+        invalid.active = "/gone".into();
+        assert!(storage.save_last_projects(&invalid).is_err());
+        invalid.active = "/alpha".into();
+        invalid.paths.push("/alpha".into());
+        assert!(storage.save_last_projects(&invalid).is_err());
+        invalid.paths = vec!["relative".into()];
+        invalid.active = "relative".into();
+        assert!(storage.save_last_projects(&invalid).is_err());
+        invalid.paths.clear();
+        assert!(storage.save_last_projects(&invalid).is_err());
+        assert_eq!(storage.load_last_projects().unwrap(), Some(projects));
+        let file = temp.path().join("last-projects.json");
+        std::fs::write(&file, r#"{"version":1,"paths":[],"active":"/alpha"}"#).unwrap();
+        assert!(storage.load_last_projects().is_err());
+        std::fs::write(
+            &file,
+            r#"{"version":999,"paths":["/alpha"],"active":"/alpha"}"#,
+        )
+        .unwrap();
+        assert!(storage.load_last_projects().is_err());
+        std::fs::write(temp.path().join("last-projects.json"), "broken").unwrap();
+        assert!(storage.load_last_projects().is_err());
+    }
+
+    #[test]
     fn workspaces_round_trip_through_disk() {
         let (_dir, storage) = temp_storage();
-        assert!(storage.load_workspaces().unwrap().is_empty());
+        assert_eq!(storage.load_workspaces().unwrap(), [] as [Workspace; 0]);
 
         let workspaces = vec![Workspace::new("alpha", "/tmp/alpha")];
         storage.save_workspaces(&workspaces).unwrap();
@@ -283,7 +325,7 @@ mod tests {
     #[test]
     fn unites_round_trip_through_disk_in_tab_order() {
         let (_dir, storage) = temp_storage();
-        assert!(storage.load_unites().unwrap().is_empty());
+        assert_eq!(storage.load_unites().unwrap(), [] as [Unite; 0]);
         let now = Utc::now();
         let unites = vec![Unite::new(
             vec![PathBuf::from("/beta"), PathBuf::from("/alpha")],
@@ -308,7 +350,6 @@ mod tests {
             issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
-            work_mode: crate::domain::settings::WorkMode::GoalDriven,
             env: [(
                 "GH_TOKEN".to_owned(),
                 "op://Private/GitHub/token".to_owned(),
@@ -320,6 +361,35 @@ mod tests {
         storage.save_settings(&settings).unwrap();
         assert_eq!(storage.load_settings().unwrap(), settings);
         assert!(storage.dir().join(SETTINGS_FILE).is_file());
+    }
+
+    #[test]
+    fn old_workflow_setting_preserves_global_defaults_and_is_not_saved() {
+        let (_dir, storage) = temp_storage();
+        let expected = Settings {
+            default_model: crate::domain::settings::DefaultModel::Claude,
+            default_branch: Some("refs/heads/main".to_owned()),
+            team_template: crate::domain::settings::TeamTemplate::Flat,
+            env: [("PROJECT".to_owned(), "usagi".to_owned())]
+                .into_iter()
+                .collect(),
+            ..Settings::default()
+        };
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy["work_mode"] = serde_json::json!("goal-driven");
+        fs::create_dir_all(storage.dir()).unwrap();
+        fs::write(
+            storage.dir().join(SETTINGS_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert_eq!(loaded, expected);
+        storage.save_settings(&loaded).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(storage.dir().join(SETTINGS_FILE)).unwrap()).unwrap();
+        assert!(saved.get("work_mode").is_none());
+        assert_eq!(storage.load_settings().unwrap(), expected);
     }
 
     #[test]
@@ -365,20 +435,20 @@ mod tests {
     }
 
     #[test]
-    fn touch_workspace_stamps_the_named_entry_and_ignores_others() {
-        let (_dir, storage) = temp_storage();
-        let base = Workspace::new("alpha", "/tmp/alpha");
+    fn opening_a_registered_workspace_updates_only_its_timestamp() {
+        let (dir, storage) = temp_storage();
+        let base = Workspace::new("alpha", dir.path().join("alpha"));
+        let sibling = Workspace::new("beta", dir.path().join("beta"));
         storage
-            .save_workspaces(std::slice::from_ref(&base))
+            .save_workspaces(&[base.clone(), sibling.clone()])
             .unwrap();
 
         let later = base.updated_at + chrono::Duration::seconds(60);
-        let touched = storage.touch_workspace("alpha", later).unwrap();
-        assert_eq!(touched.unwrap().updated_at, later);
-        assert_eq!(storage.load_workspaces().unwrap()[0].updated_at, later);
-
-        // An unknown name touches nothing and reports it.
-        assert!(storage.touch_workspace("missing", later).unwrap().is_none());
+        let opened = crate::usecase::workspace::open(&storage, &base.path, later).unwrap();
+        let mut expected = base;
+        expected.updated_at = later;
+        assert_eq!(opened, expected);
+        assert_eq!(storage.load_workspaces().unwrap(), vec![expected, sibling]);
     }
 
     #[test]

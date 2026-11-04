@@ -5,19 +5,175 @@
 use super::*;
 
 #[test]
-fn workflow_panels_follow_authoritative_session_removal() {
+fn artifacts_opened_after_create_accept_keep_the_foreground_on_completion() {
+    for keyboard in [false, true] {
+        let (workspace, session, _) = ids();
+        let created = SessionId::new();
+        let mut state = sized_home(workspace, vec![session], 100, 30);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session create other".into())),
+        );
+        let token = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::CreateSession { token, .. } => Some(*token),
+                _ => None,
+            })
+            .unwrap();
+        let before = state.interaction_count();
+        if keyboard {
+            let _ = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        } else {
+            let _ = pointer_effects(&mut state, 35, 4, std::time::Duration::ZERO);
+        }
+        assert!(state.interaction_count() > before);
+        let overlay = state.preview_overlay().cloned().unwrap();
+        let effects = update(
+            &mut state,
+            AppEvent::OperationResult(OperationResult {
+                token,
+                succeeded: true,
+                created: Some(created),
+                notice: None,
+            }),
+        );
+        assert_ne!(state.active(), Some(created));
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert_eq!(state.preview_overlay(), Some(&overlay));
+        assert!(!effects.contains(&Effect::CancelPreview));
+    }
+}
+
+#[test]
+fn a_pointer_from_an_old_frame_cannot_retarget_a_removed_session() {
+    let (workspace, current, removed) = ids();
+    let mut state = AppState::home(workspace, vec![current]);
+    let before = state.interaction_count();
+    for target in [
+        SidebarPointerTarget::Row(Selection::Target(Target::Session(removed))),
+        SidebarPointerTarget::Artifacts(removed),
+        SidebarPointerTarget::PullRequests(removed),
+    ] {
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Pointer {
+                    target: Some(target),
+                    at: std::time::Duration::ZERO
+                }
+            ),
+            [] as [Effect; 0]
+        );
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(current))
+        );
+        assert_eq!(state.interaction_count(), before);
+    }
+}
+
+#[test]
+fn a_session_that_becomes_unavailable_cannot_open_from_an_old_artifacts_action() {
+    let (workspace, session, _) = ids();
+    let mut state = AppState::home(workspace, vec![session]);
+    let event = AppEvent::Pointer {
+        target: Some(SidebarPointerTarget::Artifacts(session)),
+        at: std::time::Duration::ZERO,
+    };
+    state
+        .session_lifecycles
+        .insert(session, lifecycle(SessionLifecycle::Deleting));
+    assert_eq!(update(&mut state, event), [] as [Effect; 0]);
+    assert_eq!(state.overlay(), None);
+    assert!(state.preview_overlay().is_none());
+}
+
+#[test]
+fn artifacts_click_opens_the_clicked_session_and_preserves_the_active_pane() {
     let workspace = WorkspaceId::new();
-    let first = SessionId::new();
-    let second = SessionId::new();
-    let mut state = AppState::home(workspace, vec![first, second]);
-    state.workflows.entry(first).or_default();
-    state.workflows.entry(second).or_default();
+    let active = SessionId::new();
+    let clicked = SessionId::new();
+    let mut state = sized_home(workspace, vec![active, clicked], 100, 30);
     let _ = update(
         &mut state,
-        AppEvent::Backend(BackendEvent::Sessions(vec![second])),
+        AppEvent::PaneTabAvailability {
+            available: true,
+            error: None,
+        },
     );
-    assert!(state.workflow_panel(first).is_none());
-    assert!(state.workflow_panel(second).is_some());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(state.overlay(), None);
+    let effects = pointer_effects(&mut state, 35, 7, std::time::Duration::ZERO);
+    assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+        target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
+    }] if *target == clicked));
+    assert_eq!(state.active(), Some(active));
+    assert_eq!(state.selected(), Selection::Target(Target::Session(active)));
+    assert!(state.pending_session_click.is_none());
+}
+
+#[test]
+fn artifacts_click_matches_the_visible_width_and_lifecycle() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    for phase in [
+        SessionLifecycle::Creating,
+        SessionLifecycle::Initializing,
+        SessionLifecycle::Available,
+        SessionLifecycle::Deleting,
+        SessionLifecycle::Failed,
+    ] {
+        for sidebar_width in [15_u16, 16, 36] {
+            let start = sidebar_width - 3; // one-cell Nerd Font icon, space, and one-digit count
+            for column in [
+                start - 1,
+                start,
+                start + 1,
+                sidebar_width - 1,
+                sidebar_width,
+            ] {
+                let mut state = sized_home(workspace, vec![session], sidebar_width + 2, 30);
+                state.session_lifecycles.insert(session, lifecycle(phase));
+                let effects = pointer_effects(&mut state, column, 4, std::time::Duration::ZERO);
+                let visible = phase.capabilities().can_use && sidebar_width >= 16;
+                let opens_artifacts = visible && (start..sidebar_width).contains(&column);
+                assert_eq!(
+                    matches!(effects.as_slice(), [Effect::LoadPreview {
+                        target: Target::Session(target), filter: PreviewFileFilter::Artifacts,
+                        path: None, ..
+                    }] if *target == session),
+                    opens_artifacts,
+                    "{phase:?}, width {sidebar_width}, column {column}"
+                );
+                if !opens_artifacts {
+                    assert_eq!(effects, [] as [Effect; 0]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn artifacts_shortcut_follows_switch_cursor_closeup_active_and_workspace_fallback() {
+    let workspace = WorkspaceId::new();
+    let active = SessionId::new();
+    let selected = SessionId::new();
+    for (mode, expected) in [(HomeMode::Switch, selected), (HomeMode::Closeup, active)] {
+        let mut state = AppState::home(workspace, vec![active, selected]);
+        state.selected = Selection::Target(Target::Session(selected));
+        state.route = Route::Home(mode);
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+        assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+            target: Target::Session(target), filter: PreviewFileFilter::Artifacts, path: None, ..
+        }] if *target == expected));
+    }
+    let mut state = AppState::home(workspace, vec![]);
+    let effects = update(&mut state, AppEvent::Key(AppKey::OpenArtifacts));
+    assert!(matches!(effects.as_slice(), [Effect::LoadPreview {
+        target: Target::Root(target), filter: PreviewFileFilter::AllArtifacts, path: None, ..
+    }] if *target == workspace));
 }
 
 #[test]
@@ -54,14 +210,7 @@ fn closeup_sidebar_pr_badge_click_opens_the_clicked_background_sessions_modal() 
     // cell must open that session's PRs without changing the active sidebar
     // selection or contributing to a double-click.
     assert_eq!(
-        update(
-            &mut state,
-            AppEvent::Pointer {
-                column: 35,
-                row: 6,
-                at: std::time::Duration::ZERO,
-            },
-        ),
+        pointer_effects(&mut state, 35, 6, std::time::Duration::ZERO),
         vec![Effect::LoadPullRequests { target }]
     );
     assert_eq!(state.overlay(), Some(Overlay::Prs));
@@ -399,14 +548,23 @@ fn home_starts_with_first_session_or_neutral_selection_when_empty() {
     assert_eq!(empty.active(), None);
 
     let mut empty = empty;
-    assert!(update(&mut empty, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut empty, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(empty.overlay(), None);
-    assert!(update(&mut empty, AppEvent::Key(AppKey::Char('t'))).is_empty());
+    assert_eq!(
+        update(&mut empty, AppEvent::Key(AppKey::Char('t'))),
+        [] as [Effect; 0]
+    );
     assert_eq!(empty.selected(), Selection::Idle);
     assert_eq!(empty.overlay(), None);
     let _ = update(&mut empty, AppEvent::Key(AppKey::Down));
     assert_eq!(empty.selected(), Selection::NewSession);
-    assert!(update(&mut empty, AppEvent::Key(AppKey::Char('t'))).is_empty());
+    assert_eq!(
+        update(&mut empty, AppEvent::Key(AppKey::Char('t'))),
+        [] as [Effect; 0]
+    );
     assert_eq!(empty.overlay(), Some(Overlay::CreateSession));
 }
 
@@ -495,7 +653,10 @@ fn session_navigation_uses_directional_edges_without_an_anchor() {
 
     let mut empty = AppState::home(workspace, Vec::new());
     let before = (empty.selected(), empty.active(), empty.route());
-    assert!(update(&mut empty, AppEvent::Key(AppKey::NextSession)).is_empty());
+    assert_eq!(
+        update(&mut empty, AppEvent::Key(AppKey::NextSession)),
+        [] as [Effect; 0]
+    );
     assert_eq!((empty.selected(), empty.active(), empty.route()), before);
 }
 
@@ -534,7 +695,7 @@ fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
     let token = state.pending()[0].token;
 
     let created = SessionId::new();
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::OperationResult(OperationResult {
@@ -543,10 +704,10 @@ fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
                 created: Some(created),
                 notice: Some(Notice::new("created")),
             }),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
-    assert!(state.pending().is_empty());
+    assert_eq!(state.pending(), []);
     assert_eq!(
         state.notice().map(|notice| notice.message.as_str()),
         Some("created")
@@ -567,7 +728,7 @@ fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
             notice: Some(Notice::new("safe failure")),
         }),
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(
         state.notice().map(|notice| notice.message.as_str()),
         Some("safe failure")
@@ -589,7 +750,7 @@ fn a_create_carried_back_from_another_project_reports_without_a_pending_row() {
             error: None,
         },
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(succeeded.overlay(), None);
     assert_eq!(
         succeeded.notice().map(|notice| notice.message.as_str()),
@@ -604,7 +765,7 @@ fn a_create_carried_back_from_another_project_reports_without_a_pending_row() {
             error: Some("worktree path already exists".to_owned()),
         },
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(failed.overlay(), Some(Overlay::CreateSessionError));
     assert_eq!(
         failed
@@ -617,7 +778,7 @@ fn a_create_carried_back_from_another_project_reports_without_a_pending_row() {
         failed.notice().map(|notice| notice.message.as_str()),
         Some("worktree path already exists")
     );
-    assert!(failed.sessions().is_empty());
+    assert_eq!(failed.sessions(), []);
     assert_eq!(failed.active(), None);
 }
 
@@ -681,9 +842,9 @@ fn a_failed_create_opens_the_error_dialog_with_only_the_safe_message() {
             notice: Some(Notice::new("worktree path already exists")),
         }),
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     // The pending row is cleared and the dialog carries the safe message.
-    assert!(state.pending().is_empty());
+    assert_eq!(state.pending(), []);
     assert_eq!(state.overlay(), Some(Overlay::CreateSessionError));
     assert_eq!(
         state
@@ -692,7 +853,7 @@ fn a_failed_create_opens_the_error_dialog_with_only_the_safe_message() {
         Some("worktree path already exists")
     );
     // No half-created state leaks: sidebar rows and active target are unchanged.
-    assert!(state.sessions().is_empty());
+    assert_eq!(state.sessions(), []);
     assert_eq!(state.active(), None);
 }
 
@@ -714,7 +875,7 @@ fn dismissing_the_create_error_dialog_returns_to_home_without_residue() {
         assert_eq!(state.overlay(), Some(Overlay::CreateSessionError));
 
         let effects = update(&mut state, AppEvent::Key(dismiss));
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
         assert_eq!(state.overlay(), None);
         assert!(state.create_session_error().is_none());
         assert!(state.create_session_form().is_none());
@@ -756,7 +917,10 @@ fn closeup_pane_navigation_chords_keep_create_and_action_scopes_separate() {
     let mut state = AppState::home(workspace, vec![session]);
 
     // Switch keeps Ctrl-A as the IME-safe create shortcut and ignores Ctrl-O.
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlO)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
     let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
     assert_eq!(state.overlay(), Some(Overlay::CreateSession));
@@ -774,7 +938,10 @@ fn closeup_pane_navigation_chords_keep_create_and_action_scopes_separate() {
 
     // Ctrl-O is the Closeup-to-Switch pane-navigation transition, and it
     // clears the forced action overlay on the way out.
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlO)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
     assert_eq!(state.overlay(), None);
 }
@@ -784,7 +951,10 @@ fn invalid_create_stays_open_and_late_success_does_not_move_after_interaction() 
     let (workspace, _, _) = ids();
     let mut state = AppState::home(workspace, Vec::new());
     let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::CreateSession));
     assert_eq!(
         state
@@ -848,7 +1018,7 @@ fn phase_projection_rejects_other_workspaces_and_removed_sessions() {
             phase: AgentPhase::Running,
         }),
     );
-    assert!(state.runtimes().is_empty());
+    assert_eq!(state.runtimes(), []);
 
     let known = runtime(workspace, session);
     let _ = update(
@@ -862,7 +1032,7 @@ fn phase_projection_rejects_other_workspaces_and_removed_sessions() {
         &mut state,
         AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
     );
-    assert!(state.runtimes().is_empty());
+    assert_eq!(state.runtimes(), []);
 }
 
 #[test]
@@ -903,7 +1073,7 @@ fn switch_ctrl_x_force_removes_and_plain_x_is_inert() {
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     for key in [AppKey::Char('x'), AppKey::Char('X')] {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
     }
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::CtrlX)),
@@ -1030,7 +1200,7 @@ fn deleting_session_keeps_the_cursor_without_accepting_another_remove() {
         Selection::Target(Target::Session(session))
     );
     for key in [AppKey::CtrlX, AppKey::Char('x'), AppKey::Char('X')] {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert_eq!(
             state.selected(),
             Selection::Target(Target::Session(session))
@@ -1042,12 +1212,12 @@ fn deleting_session_keeps_the_cursor_without_accepting_another_remove() {
 fn failed_session_is_not_normally_attachable_but_retained_panes_are_reachable() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::RetainedPaneActivated(Target::Root(workspace)),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert!(
         update(
@@ -1072,19 +1242,22 @@ fn failed_session_is_not_normally_attachable_but_retained_panes_are_reachable() 
 
     // Activation does not attach a Failed row (`can_use=false`): no effect,
     // no active managed target remains, and the route never enters Closeup.
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.active(), None);
     assert!(matches!(state.route(), Route::Home(HomeMode::Switch)));
 
     // The presentation runtime emits this only after finding an existing
     // pane tab for this exact failed target. It opens the retained terminal
     // surface without making the failed checkout usable for new launches.
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::RetainedPaneActivated(Target::Session(session)),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.active(), Some(session));
     assert!(matches!(state.route(), Route::Home(HomeMode::Closeup)));
@@ -1120,7 +1293,10 @@ fn force_remove_confirmation_handles_no_and_unsupported_keys_and_a_missing_targe
     );
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Home)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Home)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.force_remove_confirmation(), Some((session, true)));
     assert!(
         update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty(),
@@ -1130,7 +1306,15 @@ fn force_remove_confirmation_handles_no_and_unsupported_keys_and_a_missing_targe
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     state.force_remove_confirmation = None;
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Right)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.force_remove_confirmation(), None);
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 }
 
@@ -1252,12 +1436,12 @@ fn overview_session_commands_use_typed_lifecycle_effects() {
     );
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("session sleep missing".into())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(
         state.notice().map(|notice| notice.message.as_str()),
@@ -1265,12 +1449,12 @@ fn overview_session_commands_use_typed_lifecycle_effects() {
     );
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("session resume missing".into())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(
         state.notice().map(|notice| notice.message.as_str()),
@@ -1333,12 +1517,12 @@ fn closeup_registry_dispatches_agent_and_validated_session_remove() {
     );
 
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitCloseup("chat".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Closeup));
     assert_eq!(
@@ -1355,7 +1539,7 @@ fn clicking_a_usagi_visits_its_session_in_one_press() {
     let mut state = sized_home(workspace, vec![first, second], 100, 30);
     state.overlay = Some(Overlay::Garden);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::GardenClick(GardenClick::Visit {
@@ -1363,8 +1547,8 @@ fn clicking_a_usagi_visits_its_session_in_one_press() {
                 session: second,
                 agent: None,
             })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
     assert_eq!(state.active(), Some(second));
@@ -1380,7 +1564,7 @@ fn another_projects_garden_plot_closes_without_targeting_a_local_session() {
     let (selected, active) = (state.selected(), state.active());
     state.overlay = Some(Overlay::Garden);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::GardenClick(GardenClick::Visit {
@@ -1388,8 +1572,8 @@ fn another_projects_garden_plot_closes_without_targeting_a_local_session() {
                 session: second,
                 agent: None,
             })
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), None);
     assert_eq!(state.selected(), selected);
@@ -1401,7 +1585,10 @@ fn a_deck_visit_opens_a_fresh_workspaces_stable_session() {
     let (workspace, first, second) = ids();
     let mut state = sized_home(workspace, vec![first, second], 100, 30);
 
-    assert!(update(&mut state, AppEvent::VisitSession(second)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::VisitSession(second)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
     assert_eq!(state.active(), Some(second));
     assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
@@ -1412,13 +1599,106 @@ fn a_project_return_focuses_the_stable_session_without_opening_closeup() {
     let (workspace, first, second) = ids();
     let mut state = sized_home(workspace, vec![first, second], 100, 30);
 
-    assert!(update(&mut state, AppEvent::FocusSession(second)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::FocusSession(second)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
     assert_eq!(state.active(), Some(first));
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
 
-    assert!(update(&mut state, AppEvent::FocusSession(SessionId::new())).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::FocusSession(SessionId::new())),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+}
+
+#[test]
+fn cross_workspace_decisions_send_and_confirm_against_the_question_owner() {
+    let workspace = WorkspaceId::new();
+    let owner = WorkspaceId::new();
+    let mut decision = pending_decision(owner);
+    decision.require_confirmation = true;
+    let mut state = AppState::home(workspace, Vec::new());
+    let snapshot = BackendEvent::Decisions {
+        workspace,
+        decisions: vec![decision.clone()],
+    };
+    let _ = update(&mut state, AppEvent::Backend(snapshot.clone()));
+    assert_eq!(state.overlay(), Some(Overlay::Decisions));
+    assert_eq!(state.decisions(), std::slice::from_ref(&decision));
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    let answer = UserDecisionAnswer::Option {
+        comment: None,
+        option_id: "safe".into(),
+    };
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        vec![Effect::ResolveDecision {
+            workspace: owner,
+            decision_id: decision.decision_id,
+            answer,
+        }]
+    );
+    let error = |workspace| BackendEvent::DecisionError {
+        workspace,
+        decision_id: decision.decision_id,
+        error: SafeError {
+            message: SafeMessage::new("retry"),
+            error_id: "resolve".into(),
+        },
+    };
+    let _ = update(&mut state, AppEvent::Backend(error(workspace)));
+    assert!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .error()
+            .is_none()
+    );
+    let _ = update(&mut state, AppEvent::Backend(error(owner)));
+    assert!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .error()
+            .is_some()
+    );
+    let _ = update(&mut state, AppEvent::Backend(snapshot));
+    assert!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .confirmation()
+            .is_some()
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionResolved {
+            workspace,
+            decision_id: decision.decision_id,
+        }),
+    );
+    assert_eq!(state.decisions().len(), 1);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionResolved {
+            workspace: owner,
+            decision_id: decision.decision_id,
+        }),
+    );
+    assert_eq!(state.decisions(), []);
+    assert_eq!(state.overlay(), None);
 }
 
 #[test]
@@ -1438,7 +1718,7 @@ fn decisions_are_workspace_fenced_retryable_and_removed_only_on_confirmation() {
             decisions: vec![pending_decision(foreign)],
         }),
     );
-    assert!(state.decisions().is_empty());
+    assert_eq!(state.decisions(), []);
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::Decisions {
@@ -1482,7 +1762,7 @@ fn decisions_are_workspace_fenced_retryable_and_removed_only_on_confirmation() {
             decision_id: decision.decision_id,
         }),
     );
-    assert!(state.decisions().is_empty());
+    assert_eq!(state.decisions(), []);
 }
 
 #[test]
@@ -1512,7 +1792,7 @@ fn cleanup_queue_admits_only_idle_sessions_whose_visible_prs_are_all_merged() {
             phase: AgentPhase::Running,
         }),
     );
-    assert!(state.cleanup_queue().unwrap().candidates().is_empty());
+    assert_eq!(state.cleanup_queue().unwrap().candidates(), []);
 }
 
 #[test]
@@ -1528,8 +1808,11 @@ fn cleanup_queue_revalidates_pr_state_and_pauses_on_a_remove_error() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
 
     observe_prs(&mut state, session, 2, vec![pr_link(1)]);
-    assert!(state.cleanup_queue().unwrap().candidates().is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(state.cleanup_queue().unwrap().candidates(), []);
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
 
     observe_prs(&mut state, session, 3, vec![merged_pr_link(1)]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Char(' ')));
@@ -1554,14 +1837,14 @@ fn remove_selector_starts_at_the_current_row_and_serializes_forced_removals() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview(
                 "session remove --select --force".to_owned()
             ))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::RemoveSessions));
     let queue = state.remove_queue().unwrap();
@@ -1617,7 +1900,7 @@ fn remove_selector_starts_at_the_current_row_and_serializes_forced_removals() {
         }]
     );
     let queue = state.remove_queue().unwrap();
-    assert!(queue.candidates().is_empty());
+    assert_eq!(queue.candidates(), []);
     assert_eq!(queue.in_flight(), None);
     assert_eq!(queue.feedback().unwrap().message, "removal complete");
 }
@@ -1632,7 +1915,10 @@ fn remove_selector_revalidates_lifecycle_and_pauses_after_failure() {
         AppEvent::Key(AppKey::SubmitOverview("session remove -s".to_owned())),
     );
 
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state.remove_queue().unwrap().feedback().unwrap().message,
         "select sessions with Space"
@@ -1651,7 +1937,10 @@ fn remove_selector_revalidates_lifecycle_and_pauses_after_failure() {
             ..
         }] if *session == first
     ));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state.remove_queue().unwrap().feedback().unwrap().message,
         "waiting for the current removal"
@@ -1685,7 +1974,10 @@ fn remove_selector_revalidates_lifecycle_and_pauses_after_failure() {
     assert_eq!(state.remove_queue(), None);
 
     state.overlay = Some(Overlay::RemoveSessions);
-    assert!(update_remove_queue(&mut state, &AppKey::Down).is_empty());
+    assert_eq!(
+        update_remove_queue(&mut state, &AppKey::Down),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 }
 
@@ -1707,9 +1999,12 @@ fn remove_selector_covers_empty_toggle_notice_and_deleting_refresh_paths() {
         AppKey::Char(' '),
         AppKey::Home,
     ] {
-        assert!(update(&mut empty, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut empty, AppEvent::Key(key)), [] as [Effect; 0]);
     }
-    assert!(update(&mut empty, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut empty, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         empty.remove_queue().unwrap().feedback().unwrap().message,
         "no sessions can be removed"
@@ -1755,7 +2050,7 @@ fn remove_selector_covers_empty_toggle_notice_and_deleting_refresh_paths() {
     assert_eq!(queue.feedback().unwrap().message, "remove refused");
 
     state.remove_queue = None;
-    assert!(begin_next_remove(&mut state, false).is_empty());
+    assert_eq!(begin_next_remove(&mut state, false), [] as [Effect; 0]);
 }
 
 #[test]
@@ -1779,12 +2074,12 @@ fn named_remove_rejects_missing_and_non_removable_sessions() {
         ("session remove kept", "session cannot be removed"),
     ] {
         state.overlay = Some(Overlay::Overview);
-        assert!(
+        assert_eq!(
             update(
                 &mut state,
                 AppEvent::Key(AppKey::SubmitOverview(command.to_owned()))
-            )
-            .is_empty()
+            ),
+            [] as [Effect; 0]
         );
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
@@ -1843,12 +2138,21 @@ fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
     // overlays. Ctrl-A returns to Switch, where Preview deliberately follows
     // the still-valid sidebar cursor even though there is no active target.
     state.route = Route::Home(HomeMode::Closeup);
-    assert!(update_management_key(&mut state, AppKey::CtrlA).is_empty());
+    assert_eq!(
+        update_management_key(&mut state, AppKey::CtrlA),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-    for key in [AppKey::OpenNotes, AppKey::OpenPrs] {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
-        assert_eq!(state.overlay(), None);
-    }
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenPrs)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.overlay(), None);
+    // Switch's memo uses the surviving cursor even without an active pane.
+    assert!(
+        matches!(update(&mut state, AppEvent::Key(AppKey::OpenNotes)).as_slice(), [Effect::LoadNotes { target: Target::Session(id), .. }] if *id == session)
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let effects = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
     let request_id = state.preview_overlay().unwrap().request_id();
     assert_eq!(
@@ -1866,7 +2170,474 @@ fn managed_navigation_defensive_boundaries_never_create_a_root_target() {
         Selection::Target(Target::Session(dropped)),
     ] {
         state.selected = selection;
-        assert!(activate_selected(&mut state).is_empty());
+        assert_eq!(activate_selected(&mut state), [] as [Effect; 0]);
         assert_eq!(state.active(), None);
     }
+}
+
+#[test]
+fn session_favorites_follow_hover_and_change_only_after_successful_save() {
+    let workspace = WorkspaceId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let mut state = AppState::home(workspace, vec![first, second]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    assert_eq!(state.active(), Some(first));
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('f'))),
+        vec![Effect::ToggleSessionFavorite { session: second }]
+    );
+    assert!(!state.is_favorite(second));
+    assert_eq!(state.session_favorites_revision(), 0);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([second]),
+        )),
+    );
+    assert!(state.is_favorite(second));
+    assert_eq!(state.session_favorites_revision(), 1);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([second]),
+        )),
+    );
+    assert_eq!(state.session_favorites_revision(), 1);
+    assert!(!state.is_favorite(first));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Notice(Notice::new("save failed"))),
+    );
+    assert!(state.is_favorite(second));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::new(),
+        )),
+    );
+    assert!(!state.is_favorite(second));
+    assert_eq!(state.session_favorites_revision(), 2);
+    assert_eq!(state.sessions(), &[first, second]);
+}
+
+#[test]
+fn session_favorite_shortcut_is_owned_only_by_switch_session_rows() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+    for selected in [
+        Selection::Idle,
+        Selection::NewSession,
+        Selection::Target(Target::Root(workspace)),
+        Selection::Target(Target::Session(SessionId::new())),
+    ] {
+        state.selected = selected;
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('f'))),
+            [] as [Effect; 0]
+        );
+    }
+    state.selected = Selection::Target(Target::Session(session));
+    state.route = Route::Home(HomeMode::Closeup);
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('f'))),
+        [] as [Effect; 0]
+    );
+    state.route = Route::Home(HomeMode::Switch);
+    state.overlay = Some(Overlay::Overview);
+    assert!(
+        !update(&mut state, AppEvent::Key(AppKey::Char('f')))
+            .iter()
+            .any(|effect| matches!(effect, Effect::ToggleSessionFavorite { .. }))
+    );
+}
+
+#[test]
+fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
+    let workspace = WorkspaceId::new();
+    let [a, b, c, new] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(workspace, vec![a, b, c]);
+    assert_eq!(state.session_order_revision(), 0);
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('P'))),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.session_order_revision(), 0);
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('N'))),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.sessions(), &[b, a, c]);
+    assert_eq!(state.selected(), Selection::Target(Target::Session(a)));
+    assert_eq!(state.active(), Some(a));
+    assert_eq!(state.session_order_revision(), 1);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(state.sessions(), &[b, c, a]);
+    assert_eq!(state.session_order_revision(), 2);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('P')));
+    assert_eq!(state.sessions(), &[b, a, c]);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![new, c, a, b])),
+    );
+    assert_eq!(state.sessions(), &[b, a, c, new]);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![new, c, b])),
+    );
+    assert_eq!(state.sessions(), &[b, c, new]);
+    assert_eq!(state.selected(), Selection::Target(Target::Session(c)));
+    assert_eq!(state.active(), Some(c));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![])),
+    );
+    assert_eq!(state.sessions(), []);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(state.sessions(), []);
+}
+
+#[test]
+fn session_reorder_is_inert_outside_switch_session_rows() {
+    let workspace = WorkspaceId::new();
+    let [a, b] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(workspace, vec![a, b]);
+    for selection in [
+        Selection::NewSession,
+        Selection::Idle,
+        Selection::Target(Target::Root(workspace)),
+        Selection::Target(Target::Session(SessionId::new())),
+    ] {
+        state.selected = selection;
+        for key in ['P', 'N'] {
+            let _ = update(&mut state, AppEvent::Key(AppKey::Char(key)));
+            assert_eq!(state.sessions(), &[a, b]);
+        }
+    }
+    state.selected = Selection::Target(Target::Session(a));
+    state.route = Route::Home(HomeMode::Closeup);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(state.sessions(), &[a, b]);
+    state.route = Route::Home(HomeMode::Switch);
+    state.overlay = Some(Overlay::Overview);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(state.sessions(), &[a, b]);
+    state.overlay = None;
+    let _ = update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(state.sessions(), &[a, b]);
+    assert_eq!(state.session_order_revision(), 0);
+}
+
+#[test]
+fn session_reorder_clears_pointer_pair_and_handles_single_row() {
+    let workspace = WorkspaceId::new();
+    let [a, b] = std::array::from_fn(|_| SessionId::new());
+    let mut state = sized_home(workspace, vec![a, b], 100, 30);
+    let _ = click_at(&mut state, 5, 2, 1_000);
+    assert!(state.pending_session_click.is_some());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert!(state.pending_session_click.is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![a])),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('P')));
+    assert_eq!(state.sessions(), &[a]);
+    assert_eq!(state.session_order_revision(), 1);
+}
+
+#[test]
+fn session_favorites_stay_with_identity_after_reordering_and_refresh() {
+    let workspace = WorkspaceId::new();
+    let [first, second] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(workspace, vec![first, second]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::from([second]),
+        )),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('P')));
+    assert_eq!(state.sessions(), &[second, first]);
+    assert_eq!(state.selected(), Selection::Target(Target::Session(second)));
+    assert_eq!(state.active(), Some(first));
+    assert!(state.is_favorite(second));
+    assert!(!state.is_favorite(first));
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('f'))),
+        vec![Effect::ToggleSessionFavorite { session: second }],
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![first, second])),
+    );
+    assert_eq!(state.sessions(), &[second, first]);
+    assert!(state.is_favorite(second));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::SessionFavorites(
+            std::collections::BTreeSet::new(),
+        )),
+    );
+    assert!(!state.is_favorite(second));
+    assert_eq!(state.sessions(), &[second, first]);
+    assert_eq!(state.session_order_revision(), 1);
+}
+
+#[test]
+fn inbox_question_opens_the_exact_refreshed_editor_and_never_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    state.unread_decisions = [first.decision_id, second.decision_id].into();
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    assert_eq!(effects, vec![Effect::RefreshDecisions { workspace }]);
+    assert!(state.decision_overlay().unwrap().is_loading());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace: WorkspaceId::new(),
+            decisions: vec![],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().is_loading());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    let overlay = state.decision_overlay().unwrap();
+    assert_eq!(overlay.selected(), 1);
+    assert_eq!(
+        overlay.editor().unwrap().decision().decision_id,
+        second.decision_id
+    );
+    assert!(!overlay.is_loading());
+    assert!(state.unread_decision_ids().contains(&first.decision_id));
+    assert!(!state.unread_decision_ids().contains(&second.decision_id));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(state.overlay(), None);
+}
+
+#[test]
+fn inbox_question_disappearing_after_loading_never_opens_a_replacement() {
+    let workspace = WorkspaceId::new();
+    let first = pending_decision(workspace);
+    let second = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    state.decisions = vec![first.clone(), second.clone()];
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone(), second.clone()],
+        }),
+    );
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        second.decision_id
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    assert!(state.decision_overlay().unwrap().editor().is_none());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![first.clone()],
+        }),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(
+        state
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .decision()
+            .decision_id,
+        first.decision_id
+    );
+}
+
+#[test]
+fn inbox_question_recovers_its_identity_when_a_newer_observation_finds_it() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    for close in [
+        AppEvent::Key(AppKey::Escape),
+        AppEvent::VisitSession(session),
+    ] {
+        let origin = SessionId::new();
+        let first = pending_decision(workspace);
+        let second = pending_decision(workspace);
+        let mut state = AppState::home(workspace, vec![origin, session]);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::OpenDecision(second.decision_id)),
+        );
+        // The resident observer can hand over an older inventory before the wake's
+        // fresh answer. Neither that reply nor a later disappearance may select A.
+        for available in [false, true, false, true] {
+            let decisions = if available {
+                vec![first.clone(), second.clone()]
+            } else {
+                vec![first.clone()]
+            };
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::Decisions {
+                    workspace,
+                    decisions,
+                }),
+            );
+            let overlay = state.decision_overlay().unwrap();
+            assert_eq!(overlay.request_error().is_none(), available);
+            assert_eq!(
+                overlay.editor().map(|editor| editor.decision().decision_id),
+                available.then_some(second.decision_id)
+            );
+            if !available {
+                assert_eq!(
+                    update(&mut state, AppEvent::Key(AppKey::Enter)),
+                    [] as [Effect; 0]
+                );
+            }
+            assert!(state.unread_decisions.contains(&first.decision_id));
+        }
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first.clone()],
+            }),
+        );
+        let visiting = matches!(&close, AppEvent::VisitSession(_));
+        let _ = update(&mut state, close);
+        assert_eq!(
+            state.active(),
+            Some(if visiting { session } else { origin })
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![first, second],
+            }),
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(state.decision_overlay().is_none());
+    }
+}
+
+#[test]
+fn inbox_question_failures_and_cancellation_do_not_open_other_questions() {
+    let workspace = WorkspaceId::new();
+    let decision = pending_decision(workspace);
+    let mut state = AppState::home(workspace, Vec::new());
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(decision.decision_id)),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable {
+            workspace: WorkspaceId::new(),
+        }),
+    );
+    assert!(state.decision_overlay().unwrap().is_loading());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    assert!(state.decision_overlay().unwrap().request_error().is_some());
+    assert!(!state.decision_overlay().unwrap().is_loading());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenDecision(decision.decision_id)),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Decisions {
+            workspace,
+            decisions: vec![decision],
+        }),
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.decision_overlay().is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::DecisionsUnavailable { workspace }),
+    );
+    assert!(state.notice().is_some());
 }

@@ -12,11 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
@@ -120,14 +120,6 @@ impl MarkdownEntry for IssueEntry {
         is_issue_file(path)
     }
 
-    fn parse_markdown(text: &str) -> Result<Issue> {
-        Ok(Issue::from_markdown(text)?)
-    }
-
-    fn to_markdown(entry: &Issue) -> String {
-        entry.to_markdown()
-    }
-
     fn file_name(entry: &Issue) -> Result<String> {
         Ok(entry.file_name())
     }
@@ -216,6 +208,13 @@ impl IssueStore {
         }
     }
 
+    /// Allow a background reader to cancel waits for the store lock.
+    #[must_use]
+    pub fn with_lock_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.inner = self.inner.with_lock_cancellation(cancelled);
+        self
+    }
+
     #[must_use]
     pub fn dir(&self) -> &Path {
         self.inner.dir()
@@ -234,17 +233,7 @@ impl IssueStore {
     ///
     /// Returns an error when the lock cannot be acquired.
     pub fn lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire(self.dir())
-    }
-
-    /// Read and parse every issue markdown file, sorted by number.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be read or any file fails to
-    /// parse.
-    pub fn scan(&self) -> Result<Vec<Issue>> {
-        self.inner.scan()
+        self.inner.lock()
     }
 
     /// Validate every Markdown source as one unambiguous issue identity.
@@ -280,20 +269,6 @@ impl IssueStore {
             return Err(AmbiguousIssueNumber { number, files }.into());
         }
         Ok(())
-    }
-
-    /// Like [`scan`](Self::scan), but logs unreadable/unparseable issue files and
-    /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory itself cannot be read.
-    pub fn scan_lenient(&self) -> Result<Vec<Issue>> {
-        Ok(self
-            .scan_sources_lenient()?
-            .into_iter()
-            .map(|source| source.issue)
-            .collect())
     }
 
     /// Paths of every issue markdown file. Empty when the directory is missing.
@@ -332,7 +307,7 @@ impl IssueStore {
         }
         let lock = self.lock()?;
         observe(SourceSnapshotLockPhase::LockAcquired);
-        self.repair_derived_best_effort_locked(&lock);
+        self.inner.repair_derived_best_effort_locked(&lock);
         observe(SourceSnapshotLockPhase::DerivedRepaired);
         let snapshot = self.source_snapshot_locked(&lock)?;
         observe(SourceSnapshotLockPhase::SnapshotCaptured);
@@ -384,20 +359,6 @@ impl IssueStore {
                 .then_with(|| left.path.cmp(&right.path))
         });
         Ok(IssueSourceSnapshot { sources, claims })
-    }
-
-    /// The highest issue number currently stored, or 0 if there are none.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be read.
-    pub fn max_number(&self) -> Result<u32> {
-        Ok(self
-            .issue_files()?
-            .iter()
-            .filter_map(|path| number_from_filename(path))
-            .max()
-            .unwrap_or(0))
     }
 
     /// Highest identity claim in either a filename or parseable frontmatter.
@@ -467,7 +428,7 @@ impl IssueStore {
         let lock = self.lock()?;
         let path = self.point_path_for(number)?;
         observe(ReadLockPhase::UniqueChecked);
-        self.repair_derived_best_effort_locked(&lock);
+        self.inner.repair_derived_best_effort_locked(&lock);
         observe(ReadLockPhase::DerivedRepaired);
         let issue = path
             .map(|path| self.read_numbered_path(number, &path))
@@ -511,20 +472,13 @@ impl IssueStore {
     /// written, the stale name cannot be removed, or the dirty marker cannot be
     /// scheduled. Ambiguity is detected before any source or derived mutation.
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<MutationOutcome<()>> {
-        let existing: Vec<_> = self.point_path_for(issue.number)?.into_iter().collect();
-        let rebuild_required = self.inner.derived_is_dirty();
+        let existing = self.point_path_for(issue.number)?;
         self.inner.mark_derived_dirty()?;
         let target = self.inner.write_markdown(issue)?;
-        for stale in existing {
-            if stale != target {
-                fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
-            }
+        if let Some(stale) = existing.filter(|path| *path != target) {
+            fs::remove_file(&stale).context(format!("failed to remove {}", stale.display()))?;
         }
-        let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
-        } else {
-            self.inner.reindex_after_write(issue)
-        };
+        let refresh = self.inner.rebuild_derived().map(|_| ());
         Ok(self.inner.finish_committed((), refresh))
     }
 
@@ -549,21 +503,13 @@ impl IssueStore {
     /// more than one source file claims `number`.
     pub fn remove_with_outcome(&self, number: u32) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
-        let files: Vec<_> = self.point_path_for(number)?.into_iter().collect();
-        if files.is_empty() {
+        let Some(file) = self.point_path_for(number)? else {
             let repair = self.inner.repair_derived_locked();
             return Ok(self.inner.finish_committed(false, repair));
-        }
-        let rebuild_required = self.inner.derived_is_dirty();
-        self.inner.mark_derived_dirty()?;
-        for file in files {
-            fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
-        }
-        let refresh = if rebuild_required {
-            self.inner.rebuild_derived().map(|_| ())
-        } else {
-            self.inner.reindex_after_remove()
         };
+        self.inner.mark_derived_dirty()?;
+        fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
+        let refresh = self.inner.rebuild_derived().map(|_| ());
         Ok(self.inner.finish_committed(true, refresh))
     }
 
@@ -574,7 +520,7 @@ impl IssueStore {
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
-        self.repair_derived_best_effort();
+        self.inner.repair_derived_best_effort();
         if self.inner.derived_is_dirty() {
             return self.source_summaries();
         }
@@ -587,31 +533,6 @@ impl IssueStore {
             .into_iter()
             .map(IssueSource::summary)
             .collect())
-    }
-
-    fn repair_derived_best_effort(&self) {
-        if !self.inner.derived_is_dirty() {
-            return;
-        }
-        let repair = self.lock().map(|lock| {
-            self.repair_derived_best_effort_locked(&lock);
-        });
-        if let Err(error) = repair {
-            ErrorLog::record(&format!(
-                "issue derived rebuild remains scheduled after read: {error:#}"
-            ));
-        }
-    }
-
-    fn repair_derived_best_effort_locked(&self, _lock: &StoreLock) {
-        if !self.inner.derived_is_dirty() {
-            return;
-        }
-        if let Err(error) = self.inner.repair_derived_locked() {
-            ErrorLog::record(&format!(
-                "issue derived rebuild remains scheduled after read: {error:#}"
-            ));
-        }
     }
 
     /// Write the number-sorted `summaries` to `index.json` as the derived cache.
@@ -899,6 +820,7 @@ pub(crate) fn number_from_filename(path: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::frontmatter::FrontmatterDoc;
     use crate::domain::issue::{IssuePriority, IssueStatus};
     use crate::infrastructure::persistence::json_file::{AtomicWriteStage, fail_next_atomic_write};
     use crate::infrastructure::store::DerivedState;
@@ -909,6 +831,18 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
     use std::thread;
+
+    fn source_issues(store: &IssueStore) -> Vec<Issue> {
+        let sources = store
+            .scan_sources_lenient()
+            .expect("source entries remain readable");
+        assert_eq!(
+            sources.len(),
+            store.issue_files().unwrap().len(),
+            "a durability assertion must not hide an unreadable source"
+        );
+        sources.into_iter().map(|source| source.issue).collect()
+    }
 
     fn issue(number: u32, title: &str) -> Issue {
         let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
@@ -989,11 +923,50 @@ mod tests {
     }
 
     #[test]
-    fn scan_is_empty_when_directory_is_missing() {
+    fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(store.scan().unwrap().is_empty());
-        assert_eq!(store.max_number().unwrap(), 0);
+        assert_eq!(source_issues(&store), [] as [Issue; 0]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lenient_source_scan_rejects_dangling_directory_and_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        for dangling_ancestor in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            // This read goes directly through MarkdownStore::entry_files,
+            // without reserving issue numbers, locking, or repository discovery.
+            assert!(store.scan_sources_lenient().unwrap().is_empty());
+            let state = tmp.path().join(STATE_DIR);
+            assert!(!state.exists());
+            let link = if dangling_ancestor {
+                state
+            } else {
+                fs::create_dir(&state).unwrap();
+                store.dir().to_path_buf()
+            };
+            let target = PathBuf::from("missing-source-target");
+            symlink(&target, &link).unwrap();
+
+            let error = store
+                .scan_sources_lenient()
+                .err()
+                .expect("a dangling source path must not look like an empty store");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("failed to read {}", store.dir().display())
+            );
+            assert_eq!(fs::read_link(&link).unwrap(), target);
+            assert!(!link.parent().unwrap().join(&target).exists());
+            assert!(!store.index_path().exists());
+        }
     }
 
     #[test]
@@ -1057,7 +1030,6 @@ mod tests {
         );
         assert!(store.index_path().is_file());
         assert_eq!(store.read(1).unwrap().unwrap(), i);
-        assert_eq!(store.max_number().unwrap(), 1);
     }
 
     #[test]
@@ -1161,7 +1133,7 @@ mod tests {
         fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
         fs::create_dir(store.dir().join(".lock")).unwrap();
 
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [IssueSummary; 0]);
         assert!(dirty.exists());
 
         unsafe {
@@ -1585,18 +1557,70 @@ mod tests {
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
-        assert!(store.summaries().unwrap().is_empty());
+        assert_eq!(store.summaries().unwrap(), [] as [IssueSummary; 0]);
         assert!(!store.dir().exists());
     }
 
     #[test]
-    fn scan_propagates_parse_errors() {
+    fn point_read_refuses_a_source_changed_after_identity_validation() {
+        for (exists, replace_source) in [(false, false), (true, false), (true, true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = IssueStore::new(tmp.path());
+            let original = issue(7, "First");
+            let source = store.dir().join(original.file_name());
+            if exists {
+                fs::create_dir_all(store.dir()).unwrap();
+                fs::write(&source, original.to_markdown()).unwrap();
+            }
+            let mut observed = Vec::new();
+            let result = store.read_observing_lock(7, |phase| {
+                observed.push(phase);
+                if replace_source && phase == ReadLockPhase::DerivedRepaired {
+                    // A non-cooperative writer, such as Git, can replace source
+                    // bytes despite the store lock held by this read.
+                    fs::write(&source, "no longer valid frontmatter").unwrap();
+                }
+            });
+            if replace_source {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("failed to parse"));
+                assert_eq!(
+                    fs::read_to_string(&source).unwrap(),
+                    "no longer valid frontmatter"
+                );
+                assert_eq!(
+                    observed,
+                    [ReadLockPhase::UniqueChecked, ReadLockPhase::DerivedRepaired]
+                );
+            } else if exists {
+                assert_eq!(result.unwrap(), Some(original));
+                assert_eq!(
+                    observed,
+                    [
+                        ReadLockPhase::UniqueChecked,
+                        ReadLockPhase::DerivedRepaired,
+                        ReadLockPhase::ExactRead
+                    ]
+                );
+            } else {
+                assert_eq!(result.unwrap(), None);
+                assert_eq!(observed, [] as [ReadLockPhase; 0]);
+                assert!(
+                    !store.dir().exists(),
+                    "an absent store is not materialized by reading"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn point_read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(store.dir().join("003-broken.md"), "not an issue").unwrap();
 
-        let err = store.scan().unwrap_err();
+        let err = store.read(3).unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
     }
 
@@ -1630,7 +1654,7 @@ mod tests {
             .map(|s| s.number)
             .collect();
         assert_eq!(rebuilt, vec![1, 3]);
-        assert!(store.scan().is_err());
+        assert!(store.read(2).is_err());
 
         let entry = fs::read_dir(
             crate::infrastructure::paths::data_dir()
@@ -1653,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_errors_when_the_issues_path_is_not_a_directory() {
+    fn sources_error_when_the_issues_path_is_not_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
         fs::write(tmp.path().join(".usagi/issues"), "not a dir").unwrap();
@@ -1661,8 +1685,9 @@ mod tests {
 
         assert!(
             store
-                .scan()
-                .unwrap_err()
+                .scan_sources_lenient()
+                .err()
+                .expect("a file cannot serve as the source directory")
                 .to_string()
                 .contains("failed to read")
         );
@@ -1720,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn max_number_reflects_files_added_outside_usagi() {
+    fn number_reservation_reflects_files_added_outside_usagi() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
@@ -1730,7 +1755,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(store.max_number().unwrap(), 2);
+        assert_eq!(store.reserve_next_number().unwrap(), 3);
     }
 
     #[test]
@@ -1744,12 +1769,12 @@ mod tests {
         )
         .unwrap();
 
-        let next = store.max_number().unwrap() + 1;
+        let next = store.reserve_next_number().unwrap();
         store.write(&issue(next, "Three")).unwrap();
 
         assert_eq!(next, 3);
         assert!(store.dir().join("002-two.md").exists());
-        assert_eq!(store.scan().unwrap().len(), 3);
+        assert_eq!(source_issues(&store).len(), 3);
     }
 
     #[test]
@@ -1786,7 +1811,7 @@ mod tests {
         store.write(&issue(1, "One")).unwrap();
         let _guard = store.lock().unwrap();
         assert!(store.dir().join(".lock").is_file());
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_issues(&store).len(), 1);
     }
 
     #[test]
@@ -1954,21 +1979,24 @@ mod tests {
     }
 
     #[test]
-    fn non_markdown_files_are_ignored_by_scan() {
+    fn sources_ignore_non_markdown_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
         fs::write(store.dir().join("README.txt"), "ignore me").unwrap();
 
-        assert_eq!(store.scan().unwrap().len(), 1);
+        assert_eq!(source_issues(&store).len(), 1);
     }
 
     #[test]
-    fn scan_lenient_returns_the_parseable_issues() {
+    fn sources_retain_the_parseable_issue_and_its_filename() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
-        assert_eq!(store.scan_lenient().unwrap().len(), 1);
+        let sources = store.scan_sources_lenient().unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].issue, issue(1, "One"));
+        assert_eq!(sources[0].file, "001-one.md");
     }
 
     #[test]
@@ -2397,6 +2425,20 @@ mod tests {
     }
 
     #[test]
+    fn session_root_discovery_ignores_regular_notes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join(".usagi/sessions");
+        let session = sessions.join("work");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(sessions.join("README"), "operator notes").unwrap();
+        let mut roots = BTreeSet::new();
+
+        insert_session_roots(&mut roots, tmp.path()).unwrap();
+
+        assert_eq!(roots, BTreeSet::from([session]));
+    }
+
+    #[test]
     fn unreadable_workspace_session_listing_fails_before_reservation() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir(tmp.path().join(".usagi")).unwrap();
@@ -2582,7 +2624,6 @@ mod tests {
         let issues = tmp.path().join(".usagi/issues");
         symlink("missing-issues", &issues).unwrap();
         let dangling_store = IssueStore::new(tmp.path());
-        assert!(dangling_store.max_number().is_err());
         assert!(dangling_store.read(1).is_err());
         assert!(dangling_store.source_snapshot().is_err());
         assert_eq!(
@@ -2596,7 +2637,6 @@ mod tests {
         let state = session.join(".usagi");
         symlink("missing-state", &state).unwrap();
         let dangling_store = IssueStore::new(&session);
-        assert!(dangling_store.max_number().is_err());
         assert!(dangling_store.read(1).is_err());
         assert!(dangling_store.source_snapshot().is_err());
         assert_eq!(
@@ -2641,14 +2681,14 @@ mod tests {
 
             let outcome = store.write(&created).unwrap();
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert_eq!(store.scan().unwrap(), vec![created.clone()]);
+            assert_eq!(source_issues(&store), vec![created.clone()]);
 
             let reopened = IssueStore::new(tmp.path());
             assert_eq!(reopened.read(1).unwrap(), Some(created.clone()));
             assert!(reopened.index_path().is_file());
             let retry = reopened.write(&created).unwrap();
             assert_eq!(retry.derived, DerivedState::Fresh);
-            assert_eq!(reopened.scan().unwrap(), vec![created]);
+            assert_eq!(source_issues(&reopened), vec![created]);
         }
 
         unsafe {
@@ -2673,7 +2713,7 @@ mod tests {
 
             let outcome = store.write(&updated).unwrap();
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert_eq!(store.scan().unwrap(), vec![updated.clone()]);
+            assert_eq!(source_issues(&store), vec![updated.clone()]);
 
             let reopened = IssueStore::new(tmp.path());
             assert_eq!(reopened.read(1).unwrap(), Some(updated.clone()));
@@ -2681,7 +2721,7 @@ mod tests {
                 reopened.write(&updated).unwrap().derived,
                 DerivedState::Fresh
             );
-            assert_eq!(reopened.scan().unwrap(), vec![updated]);
+            assert_eq!(source_issues(&reopened), vec![updated]);
         }
 
         unsafe {
@@ -2706,10 +2746,10 @@ mod tests {
             let outcome = store.remove_with_outcome(1).unwrap();
             assert!(outcome.value);
             assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-            assert!(store.scan().unwrap().is_empty());
+            assert_eq!(source_issues(&store), [] as [Issue; 0]);
 
             let reopened = IssueStore::new(tmp.path());
-            assert!(reopened.summaries().unwrap().is_empty());
+            assert_eq!(reopened.summaries().unwrap(), [] as [IssueSummary; 0]);
             let retry = reopened.remove_with_outcome(1).unwrap();
             assert!(!retry.value);
             assert_eq!(retry.derived, DerivedState::Fresh);
@@ -2728,7 +2768,7 @@ mod tests {
             let source = store.dir().join("001-created.md");
             fail_next_atomic_write(&source, stage);
             assert!(store.write(&issue(1, "Created")).is_err());
-            assert!(store.scan().unwrap().is_empty());
+            assert_eq!(source_issues(&store), [] as [Issue; 0]);
 
             store.write(&issue(1, "Old")).unwrap();
             let updated_source = store.dir().join("001-updated.md");

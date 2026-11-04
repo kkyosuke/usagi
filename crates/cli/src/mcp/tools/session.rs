@@ -31,10 +31,6 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::session(SessionDecisionLog, SessionAction::DecisionLog),
         ToolDescriptor::session(SessionDelegateIssue, SessionAction::DelegateIssue),
         ToolDescriptor::session(SessionDelegateBrief, SessionAction::DelegateBrief),
-        ToolDescriptor::session(WorkflowStart, SessionAction::WorkflowStart),
-        ToolDescriptor::session(WorkflowStatus, SessionAction::WorkflowStatus),
-        ToolDescriptor::session(WorkflowInstruct, SessionAction::WorkflowInstruct),
-        ToolDescriptor::session(WorkflowFinish, SessionAction::WorkflowFinish),
         ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
         ToolDescriptor::dispatch(AgentHandoff, DispatchToolAction::AgentHandoff),
         ToolDescriptor::dispatch(AgentPeers, DispatchToolAction::AgentPeers),
@@ -50,6 +46,7 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::dispatch(AgentInboxAck, DispatchToolAction::AgentInboxAck),
         ToolDescriptor::dispatch(UserDecisionRequest, DispatchToolAction::UserDecisionRequest),
         ToolDescriptor::dispatch(UserDecisionGet, DispatchToolAction::UserDecisionGet),
+        ToolDescriptor::dispatch(UserDecisionAck, DispatchToolAction::UserDecisionAck),
         ToolDescriptor::dispatch(UserDecisionList, DispatchToolAction::UserDecisionList),
         ToolDescriptor::dispatch(UserDecisionResolve, DispatchToolAction::UserDecisionResolve),
         ToolDescriptor::dispatch(UserDecisionCancel, DispatchToolAction::UserDecisionCancel),
@@ -126,7 +123,7 @@ impl Tool for UserDecisionRequest {
         "user_decision_request"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。options の pros / cons で案ごとのメリット・注意点を表示できる。allow_comment で選択に補足コメント、require_confirmation で TUI の送信前確認を有効化できる。回答は user_decision_get で取得する"
+        "現在の agent run に人間の判断を durable に要求し、pending decision を即時返す。context に比較表・テキスト図、selection_mode に multiple を指定できる。recommendation で推奨案と理由、selection_limits で選択件数を指定できる。options の pros / cons で案ごとのメリット・注意点を表示できる。allow_comment で選択に補足コメント、require_confirmation で TUI の送信前確認を有効化できる。回答は user_decision_get で取得し受信後 user_decision_ack で確認する。質問と最大回答の JSON 合計は512KiBまで"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -223,7 +220,19 @@ impl Tool for UserDecisionGet {
         "user_decision_get"
     }
     fn description(&self) -> &'static str {
-        "現在の agent が所有する decision を取得する。pending の間は同じ decision_id を polling し、terminal 応答を受け取る"
+        "現在の agent が所有する decision を取得する。pending の間は同じ decision_id を polling し、terminal 応答を受け取る。取得は既読にしない。resolved の回答を受信した後 user_decision_ack を呼ぶ。巨大な旧質問は data と next_cursor を返すので cursor を渡して全断片を連結・JSON 解析する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"decision_id":{"type":"string"},"cursor":{"type":"object","properties":{"revision":{"type":"string","minLength":1,"maxLength":64},"offset":{"type":"integer","minimum":0}},"required":["revision","offset"],"additionalProperties":false}},"required":["decision_id"],"additionalProperties":false}"#
+    }
+}
+pub struct UserDecisionAck;
+impl Tool for UserDecisionAck {
+    fn name(&self) -> &'static str {
+        "user_decision_ack"
+    }
+    fn description(&self) -> &'static str {
+        "user_decision_get で resolved の回答を受信・保存した後、所有者として受信確認する。再送は安全。回答を取得する前には呼ばない"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"decision_id":{"type":"string"}},"required":["decision_id"],"additionalProperties":false}"#
@@ -235,10 +244,10 @@ impl Tool for UserDecisionList {
         "user_decision_list"
     }
     fn description(&self) -> &'static str {
-        "現在の agent run が所有する pending decision を返す。TUI は workspace の pending decision を表示する"
+        "現在の agent が所有・exact resume で継承した pending と未 ACK の resolved をページで返す。作成応答を失い ID が不明でも再 request の前にここから回収する。next_cursor が null になるまで cursor に渡し、RevisionConflict 時は先頭から取り直す。deferred は decision_id と revision / offset:0 を user_decision_get に渡して全断片を取得する。完全な resolved の回答を受信・保存してから user_decision_ack を呼ぶ"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{},"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"cursor":{"type":"object","properties":{"revision":{"type":"string","minLength":1,"maxLength":64},"offset":{"type":"integer","minimum":1}},"required":["revision","offset"],"additionalProperties":false}},"additionalProperties":false}"#
     }
 }
 pub struct UserDecisionResolve;
@@ -303,22 +312,6 @@ impl Tool for UserDecisionResolve {
             .to_string()
         })
     }
-}
-
-/// Goal and instruction text share the daemon's bound for durable workflow text.
-const WORKFLOW_TEXT_MAX_BYTES: usize = 16 * 1024;
-
-/// The participants a workflow can be started with, spelled the way the rest of
-/// the product spells them. Publishing the closed set lets a caller discover the
-/// vocabulary from `tools/list` instead of guessing and being refused.
-fn participant_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "string",
-        "enum": usagi_core::domain::settings::DefaultModel::ALL
-            .iter()
-            .map(|model| model.selector())
-            .collect::<Vec<_>>(),
-    })
 }
 
 fn bounded_string_schema(maximum: usize, nonempty: bool) -> serde_json::Value {
@@ -478,10 +471,10 @@ impl Tool for SessionResume {
         "session_resume"
     }
     fn description(&self) -> &'static str {
-        "agent_resume_inventory が返した exact target を指定し、認証済み caller が作成した session の中断 runtime を再開する。"
+        "agent_resume_inventory が返した exact target を指定し、認証済み caller が作成した session の中断 runtime を再開する。AGY は任意の headless_prompt で新しい turn を非対話実行できる。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false}},"required":["target"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"target":{"type":"object","properties":{"continuation":{"type":"string"},"source":{"type":"string"},"workspace_id":{"type":"string"},"session_id":{"type":["string","null"]},"worktree_id":{"type":"string"},"runtime_id":{"type":"string"},"adapter_revision":{"type":"integer","minimum":1}},"required":["continuation","source","workspace_id","session_id","worktree_id","runtime_id","adapter_revision"],"additionalProperties":false},"headless_prompt":{"type":"string","minLength":1}},"required":["target"],"additionalProperties":false}"#
     }
 }
 
@@ -560,107 +553,6 @@ impl Tool for SessionComplete {
     }
 }
 
-/// `workflow_start` — セッションの実装＋レビュー workflow を開始する。
-pub struct WorkflowStart;
-
-impl Tool for WorkflowStart {
-    fn name(&self) -> &'static str {
-        "workflow_start"
-    }
-    fn description(&self) -> &'static str {
-        "認証済み caller が作成したセッションで、実装＋レビューの workflow を開始するときに使う。name は必須で、goal か issue のどちらかを指定する。issue を指定すると backlog の内容が goal になり、その PR は `Internal-Issue: #<番号>` を書き、同じ PR で issue を done にすることが完了の条件になる。実装担当が計画担当とレビュー担当を同じセッション内で起動し、レビュー承認と PR の独立検証まで daemon が進行を所有する。進行状況は workflow_status で観測する。自分自身が動いているセッションに対しては呼べない。planner / implementer / reviewer と revision_limit は省略時に workspace が最後に開始できた値を使い、未知の綴りと範囲外の回数は拒否する。revision_limit は実装担当が人へ判断を戻すまでの修正往復の上限で、1〜10 の範囲で指定する。"
-    }
-    fn input_schema(&self) -> &'static str {
-        static SCHEMA: OnceLock<String> = OnceLock::new();
-        SCHEMA
-            .get_or_init(|| {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "goal": bounded_string_schema(WORKFLOW_TEXT_MAX_BYTES, true),
-                        "issue": {"type": "integer", "minimum": 1},
-                        "planner": participant_schema(),
-                        "implementer": participant_schema(),
-                        "reviewer": participant_schema(),
-                        "revision_limit": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": usagi_core::domain::workflow::MAX_REVISION_LIMIT,
-                        },
-                    },
-                    "required": ["name"],
-                    "additionalProperties": false,
-                })
-                .to_string()
-            })
-            .as_str()
-    }
-}
-
-/// `workflow_status` — セッションの workflow の進捗を取得する。
-pub struct WorkflowStatus;
-
-impl Tool for WorkflowStatus {
-    fn name(&self) -> &'static str {
-        "workflow_status"
-    }
-    fn description(&self) -> &'static str {
-        "認証済み caller が作成したセッションの workflow の進捗（工程・担当・修正回数・待ち理由・PR）を観測するときに使う。name 必須。工程が Needs attention（判断待ち）か PR ready（完了）なら人の判断が要る。1 回ごとに PR の実検証（git と gh）を伴うため、密なポーリングはしない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
-    }
-}
-
-/// `workflow_instruct` — 進行中の workflow へ追加指示を送る。
-pub struct WorkflowInstruct;
-
-impl Tool for WorkflowInstruct {
-    fn name(&self) -> &'static str {
-        "workflow_instruct"
-    }
-    fn description(&self) -> &'static str {
-        "進行中の workflow へ追加指示を送るときに使う。name と body は必須。recipient は automatic（既定、現在の担当）/ implementer / reviewer。指示は受理時点の担当に固定され、工程が変わっても付け替えない。応答を得られなかった場合に呼び直すと別の指示として積まれるため、同じ内容を繰り返さない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        static SCHEMA: OnceLock<String> = OnceLock::new();
-        SCHEMA
-            .get_or_init(|| {
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "body": bounded_string_schema(WORKFLOW_TEXT_MAX_BYTES, true),
-                        "recipient": {
-                            "type": "string",
-                            "enum": ["automatic", "implementer", "reviewer"],
-                        },
-                    },
-                    "required": ["name", "body"],
-                    "additionalProperties": false,
-                })
-                .to_string()
-            })
-            .as_str()
-    }
-}
-
-/// `workflow_finish` — run を終了し、そのセッションで次の開始を受け付ける。
-pub struct WorkflowFinish;
-
-impl Tool for WorkflowFinish {
-    fn name(&self) -> &'static str {
-        "workflow_finish"
-    }
-    fn description(&self) -> &'static str {
-        "認証済み caller が作成したセッションの workflow を終了するときに使う。name 必須。PR ready で終了すれば完了、それ以外の工程で終了すれば中止として履歴に残す。起動できないまま開始待ちの intent も同じ操作で畳める。Agent は終了させず、worktree も削除しない（不要になった Agent は人が閉じる）。終了後は同じセッションで workflow_start を受け付ける。同じ operation で呼び直しても二度終了しない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
-    }
-}
-
 /// `session_pr` — セッションに紐づく PR を取得する。
 pub struct SessionPr;
 
@@ -684,7 +576,7 @@ impl Tool for SessionRemove {
         "session_remove"
     }
     fn description(&self) -> &'static str {
-        "認証済み caller が作成した不要なセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
+        "認証済み caller が作成した不要なセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。force は成果物の保管失敗時も削除を続け、未保管の成果物を破棄する。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"},"purge_orphan":{"type":"boolean"}},"required":["name"]}"#
@@ -714,7 +606,7 @@ impl Tool for SessionNoteUpdate {
         "session_note_update"
     }
     fn description(&self) -> &'static str {
-        "現在のセッションの作業メモを書き換えるときに使う。空文字を渡すとクリアする。自セッション内限定。"
+        "現在のセッションの作業メモを書き換えるときに使う。TUI に表示される人と agent の共有メモなので、ログ全文ではなく要点を1項目1行で記載し、日本語で40文字程度を目安に意味の区切りで改行する。既存の人のメモを意図せず消さないよう、先に session_note_get で内容を確認する。空文字を渡すとクリアする。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"note":{"type":"string"}},"required":["note"]}"#

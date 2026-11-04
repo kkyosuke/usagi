@@ -5,121 +5,6 @@
 use super::*;
 
 #[test]
-fn new_clone_validates_dispatches_progress_and_attaches_home_on_success() {
-    let (workspace, session, _) = ids();
-    let mut state = NewState::new(NewMode::Clone, clone_form());
-    let mut backend = FakeNewBackend::default();
-    let effects = update_new(&mut state, NewEvent::Submit);
-    assert_eq!(state.pending(), Some(PendingToken(1)));
-    assert_eq!(
-        state.progress().map(SafeMessage::as_str),
-        Some("Cloning repository…")
-    );
-    assert_eq!(
-        effects,
-        vec![Effect::CloneProject {
-            repository: "https://example.com/acme/app.git".to_owned(),
-            destination: PathBuf::from("/work/app"),
-            branch: Some("main".to_owned()),
-            token: PendingToken(1),
-        }]
-    );
-    backend.push_event(NewEvent::Result {
-        token: PendingToken(1),
-        result: Ok(HomeSnapshot::new(workspace, vec![session])),
-    });
-    run_new_fake_cycle(&mut state, &mut backend, effects);
-    assert_eq!(backend.effects().len(), 1);
-    assert_eq!(state.pending(), None);
-    assert_eq!(state.progress(), None);
-    assert!(matches!(
-        state.route(),
-        NewRoute::Home(home) if home.workspace() == workspace && home.sessions() == [session]
-    ));
-}
-
-#[test]
-fn new_submit_while_pending_ignores_the_duplicate_operation() {
-    let mut state = NewState::new(NewMode::Clone, clone_form());
-    let first = update_new(&mut state, NewEvent::Submit);
-    assert_eq!(first.len(), 1);
-    assert_eq!(state.pending(), Some(PendingToken(1)));
-
-    // A second Submit before the backend completes is a no-op: it produces
-    // no new effect and does not advance the pending token, so a fast double
-    // Enter cannot start two clones.
-    let second = update_new(&mut state, NewEvent::Submit);
-    assert!(second.is_empty());
-    assert_eq!(state.pending(), Some(PendingToken(1)));
-
-    // Retry is guarded the same way while an operation is in flight.
-    assert!(update_new(&mut state, NewEvent::Retry).is_empty());
-    assert_eq!(state.pending(), Some(PendingToken(1)));
-}
-
-#[test]
-fn new_existing_failure_retains_form_and_retry_reuses_the_request() {
-    let mut state = NewState::new(NewMode::Existing, existing_form());
-    let effects = update_new(&mut state, NewEvent::Submit);
-    let expected = Effect::RegisterWorkspace {
-        path: PathBuf::from("/work/existing"),
-        name: "existing".to_owned(),
-        token: PendingToken(1),
-    };
-    assert_eq!(effects, vec![expected]);
-    let _ = update_new(
-        &mut state,
-        NewEvent::Result {
-            token: PendingToken(1),
-            result: Err(Notice::new("directory is not a project")),
-        },
-    );
-    assert!(matches!(state.route(), NewRoute::Form));
-    assert_eq!(state.form(), &existing_form());
-    assert_eq!(
-        state.error().map(|notice| notice.message.as_str()),
-        Some("directory is not a project")
-    );
-    assert_eq!(state.progress(), None);
-
-    assert_eq!(
-        update_new(&mut state, NewEvent::Retry),
-        vec![Effect::RegisterWorkspace {
-            path: PathBuf::from("/work/existing"),
-            name: "existing".to_owned(),
-            token: PendingToken(2),
-        }]
-    );
-    assert_eq!(
-        state.progress().map(SafeMessage::as_str),
-        Some("Registering workspace…")
-    );
-}
-
-#[test]
-fn new_validation_and_late_completion_keep_the_form_route() {
-    let mut invalid = NewState::new(NewMode::Clone, NewForm::default());
-    assert!(update_new(&mut invalid, NewEvent::Submit).is_empty());
-    assert_eq!(
-        invalid.error().map(|notice| notice.message.as_str()),
-        Some("repository URL is required")
-    );
-
-    let mut state = NewState::new(NewMode::Existing, existing_form());
-    let _ = update_new(&mut state, NewEvent::Submit);
-    let _ = update_new(
-        &mut state,
-        NewEvent::Result {
-            token: PendingToken(99),
-            result: Err(Notice::new("late failure")),
-        },
-    );
-    assert_eq!(state.pending(), Some(PendingToken(1)));
-    assert!(matches!(state.route(), NewRoute::Form));
-    assert_eq!(state.error(), None);
-}
-
-#[test]
 fn new_validation_reports_every_required_clone_and_existing_field() {
     let cases = [
         (
@@ -160,54 +45,9 @@ fn new_validation_reports_every_required_clone_and_existing_field() {
     ];
     for (mode, form, expected) in cases {
         assert_eq!(validate_new_form(mode, &form), Err(expected));
-        assert!(!expected.message().is_empty());
-        assert!(!format!("{expected:?}").is_empty());
+        assert_ne!(expected.message(), "");
+        assert_ne!(format!("{expected:?}"), "");
     }
-}
-
-#[test]
-fn goal_driven_new_requires_one_goal_and_emits_only_the_goal_launch() {
-    let workspace = WorkspaceId::new();
-    let mut state = sized_home(workspace, Vec::new(), 100, 30);
-    state.set_agent_models(
-        AvailableModels::new([DefaultModel::OpenAi]),
-        DefaultModel::OpenAi,
-    );
-    state.set_work_mode(WorkMode::GoalDriven);
-
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-    assert_eq!(state.director_goal(), "");
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-    for character in "目的を実装する".chars() {
-        let _ = update(&mut state, AppEvent::Key(AppKey::Char(character)));
-    }
-    let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
-    let [
-        Effect::LaunchGoal {
-            workspace: actual,
-            operation_id,
-            profile: Some(profile),
-            goal,
-        },
-    ] = effects.as_slice()
-    else {
-        panic!("goal confirmation must emit one launch: {effects:?}");
-    };
-    assert_eq!(*actual, workspace);
-    assert_eq!(profile.as_str(), "codex");
-    assert_eq!(goal, "目的を実装する");
-    assert_eq!(state.director_goal(), "");
-    assert!(state.director_launching().is_some());
-    let run = SupervisorRunId::new();
-    let _ = update(
-        &mut state,
-        AppEvent::DirectorLaunchFinished {
-            operation: *operation_id,
-            supervisor_run_id: Some(run),
-            succeeded: true,
-        },
-    );
-    assert_eq!(state.director_route(), DirectorRoute::RunOverview(run));
 }
 
 #[test]
@@ -220,7 +60,7 @@ fn agent_launch_failure_opens_a_dismissible_error_dialog() {
             AppEvent::AgentLaunchFailed(Notice::new("agent process could not be started")),
         );
 
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
         assert_eq!(state.overlay(), Some(Overlay::AgentLaunchError));
         assert_eq!(
             state
@@ -233,183 +73,13 @@ fn agent_launch_failure_opens_a_dismissible_error_dialog() {
             Some("agent process could not be started")
         );
 
-        assert!(update(&mut state, AppEvent::Key(dismiss)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(dismiss)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), None);
         assert!(state.agent_launch_error().is_none());
     }
-}
-
-#[test]
-fn entry_open_single_preserves_the_selected_identity_into_home() {
-    let first = WorkspaceId::new();
-    let chosen = WorkspaceId::new();
-    let session = SessionId::new();
-    let mut state = EntryState::new(
-        vec![
-            EntryWorkspace::new(first, "renamed later"),
-            EntryWorkspace::new(chosen, "selected"),
-        ],
-        Vec::new(),
-    );
-
-    assert!(update_entry(&mut state, EntryEvent::ShowOpen).is_empty());
-    assert_eq!(
-        update_entry(&mut state, EntryEvent::OpenSingle(chosen)),
-        vec![Effect::AttachWorkspace { workspace: chosen }]
-    );
-    let _ = update_entry(
-        &mut state,
-        EntryEvent::AttachResult {
-            workspace: chosen,
-            result: Ok(HomeSnapshot::new(chosen, vec![session])),
-        },
-    );
-
-    let EntryRoute::Home(home) = state.route() else {
-        panic!("selected workspace should enter Home");
-    };
-    assert_eq!(home.workspace(), chosen);
-    assert_eq!(home.sessions(), &[session]);
-    assert_eq!(home.selected(), Selection::Target(Target::Session(session)));
-}
-
-#[test]
-fn entry_recent_uses_its_identity_and_ignores_stale_completion() {
-    let recent = WorkspaceId::new();
-    let delayed_workspace = WorkspaceId::new();
-    let mut state = EntryState::new(Vec::new(), vec![recent]);
-
-    assert_eq!(
-        update_entry(&mut state, EntryEvent::OpenRecent(recent)),
-        vec![Effect::AttachWorkspace { workspace: recent }]
-    );
-    let _ = update_entry(
-        &mut state,
-        EntryEvent::AttachResult {
-            workspace: delayed_workspace,
-            result: Ok(HomeSnapshot::new(delayed_workspace, Vec::new())),
-        },
-    );
-    assert_eq!(state.route(), &EntryRoute::Welcome);
-    assert_eq!(state.opening(), Some(recent));
-    assert!(state.error().is_none());
-
-    let _ = update_entry(
-        &mut state,
-        EntryEvent::AttachResult {
-            workspace: recent,
-            result: Ok(HomeSnapshot::new(recent, Vec::new())),
-        },
-    );
-    assert!(matches!(state.route(), EntryRoute::Home(home) if home.workspace() == recent));
-}
-
-#[test]
-fn fake_entry_backend_replays_error_then_retry_without_opening_another_workspace() {
-    let requested = WorkspaceId::new();
-    let other = WorkspaceId::new();
-    let mut state = EntryState::new(Vec::new(), vec![requested]);
-    let mut backend = FakeEntryBackend::default();
-    backend.push_event(EntryEvent::AttachResult {
-        workspace: other,
-        result: Ok(HomeSnapshot::new(other, Vec::new())),
-    });
-    backend.push_event(EntryEvent::AttachResult {
-        workspace: requested,
-        result: Err(Notice::new("temporary attach failure")),
-    });
-
-    let effects = update_entry(&mut state, EntryEvent::OpenRecent(requested));
-    run_entry_fake_cycle(&mut state, &mut backend, effects);
-    assert_eq!(state.route(), &EntryRoute::Welcome);
-    assert_eq!(
-        state.error().map(|notice| notice.message.as_str()),
-        Some("temporary attach failure")
-    );
-
-    let retry = update_entry(&mut state, EntryEvent::Retry);
-    run_entry_fake_cycle(&mut state, &mut backend, retry);
-    assert_eq!(
-        backend.effects(),
-        &[
-            Effect::AttachWorkspace {
-                workspace: requested
-            },
-            Effect::AttachWorkspace {
-                workspace: requested
-            }
-        ]
-    );
-    assert_eq!(state.opening(), Some(requested));
-    assert_eq!(state.route(), &EntryRoute::Welcome);
-}
-
-#[test]
-fn entry_empty_open_and_unknown_recent_are_noops() {
-    let unknown = WorkspaceId::new();
-    let mut state = EntryState::new(Vec::new(), Vec::new());
-    let _ = update_entry(&mut state, EntryEvent::ShowOpen);
-
-    assert!(update_entry(&mut state, EntryEvent::OpenSingle(unknown)).is_empty());
-    assert!(update_entry(&mut state, EntryEvent::Back).is_empty());
-    assert_eq!(state.route(), &EntryRoute::Welcome);
-    assert!(update_entry(&mut state, EntryEvent::OpenRecent(unknown)).is_empty());
-}
-
-#[test]
-fn entry_open_error_stays_on_its_screen_and_retries_the_same_identity() {
-    let workspace = WorkspaceId::new();
-    let mut state = EntryState::new(
-        vec![EntryWorkspace::new(workspace, "broken registration")],
-        Vec::new(),
-    );
-    let _ = update_entry(&mut state, EntryEvent::ShowOpen);
-    let _ = update_entry(&mut state, EntryEvent::OpenSingle(workspace));
-    let _ = update_entry(
-        &mut state,
-        EntryEvent::AttachResult {
-            workspace,
-            result: Err(Notice::new("workspace is unavailable")),
-        },
-    );
-
-    assert_eq!(state.route(), &EntryRoute::Open);
-    assert_eq!(
-        state.error().map(|notice| notice.message.as_str()),
-        Some("workspace is unavailable")
-    );
-    assert_eq!(
-        update_entry(&mut state, EntryEvent::Retry),
-        vec![Effect::AttachWorkspace { workspace }]
-    );
-    assert_eq!(state.opening(), Some(workspace));
-}
-
-#[test]
-fn entry_rejects_a_snapshot_for_another_workspace_and_allows_retry() {
-    let requested = WorkspaceId::new();
-    let returned = WorkspaceId::new();
-    let mut state = EntryState::new(Vec::new(), vec![requested]);
-    let _ = update_entry(&mut state, EntryEvent::OpenRecent(requested));
-    let _ = update_entry(
-        &mut state,
-        EntryEvent::AttachResult {
-            workspace: requested,
-            result: Ok(HomeSnapshot::new(returned, Vec::new())),
-        },
-    );
-
-    assert_eq!(state.route(), &EntryRoute::Welcome);
-    assert_eq!(
-        state.error().map(|notice| notice.message.as_str()),
-        Some("workspace changed while opening; retry")
-    );
-    assert_eq!(
-        update_entry(&mut state, EntryEvent::Retry),
-        vec![Effect::AttachWorkspace {
-            workspace: requested
-        }]
-    );
 }
 
 #[test]
@@ -418,25 +88,28 @@ fn overview_daemon_opens_the_status_surface_without_an_effect() {
     let mut state = AppState::home(workspace, Vec::new());
     state.overlay = Some(Overlay::Overview);
 
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("daemon".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Daemon));
     assert!(state.notice().is_none());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Escape)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Escape)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), None);
 
     state.overlay = Some(Overlay::Overview);
-    assert!(
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::SubmitOverview("daemon extra".into()))
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert!(
@@ -503,7 +176,7 @@ fn overview_env_opens_the_editor_and_rejects_an_unknown_scope() {
         &mut state,
         AppEvent::Key(AppKey::SubmitOverview("env extra".to_owned())),
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, [] as [Effect; 0]);
     assert_eq!(state.overlay(), Some(Overlay::Overview));
     assert!(state.environment_editor().is_none());
 }
@@ -516,7 +189,7 @@ fn environment_keys_are_inert_without_an_open_editor() {
     // With no overlay at all.
     let mut state = AppState::home(workspace, Vec::new());
     for key in environment_keys() {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert!(state.environment_editor().is_none());
     }
 
@@ -525,7 +198,7 @@ fn environment_keys_are_inert_without_an_open_editor() {
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
     for key in environment_keys() {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert!(state.environment_editor().is_none());
     }
     assert!(state.note_editor().is_some());
@@ -609,7 +282,8 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     assert_preview_load(&state, &effects, target, None, PreviewFileFilter::All);
     assert_eq!(state.overlay(), Some(Overlay::Preview));
     assert!(state.preview_overlay().unwrap().is_loading());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(effects, [] as [Effect; 0]);
 
     // A file list for another target is ignored; unsafe backend paths are
     // rejected when the matching result lands.
@@ -661,7 +335,7 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
     // A late completion for another file cannot replace the requested one.
     let event = preview_loaded(&state, target, Some("src/lib.rs"), &[], &["stale"]);
     let _ = update(&mut state, event);
-    assert!(state.preview_overlay().unwrap().lines().is_empty());
+    assert_eq!(state.preview_overlay().unwrap().lines(), [] as [String; 0]);
     let event = preview_loaded(
         &state,
         target,
@@ -674,7 +348,10 @@ fn preview_overlay_finds_opens_scrolls_and_returns_to_the_file_list() {
         state.preview_overlay().unwrap().lines(),
         &["# Title", "�[31mred text"]
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::Home)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Home)),
+        [] as [Effect; 0]
+    );
 
     // Down scrolls; Up saturates at the top.
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
@@ -741,7 +418,7 @@ fn opening_one_overlay_discards_the_other_state() {
 }
 
 #[test]
-fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
+fn typed_overlay_accessors_keep_their_target_and_editor_state() {
     let (workspace, session, _) = ids();
     let root = Target::Root(workspace);
 
@@ -755,8 +432,12 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
     assert_eq!(editor.freeform(), "");
     assert!(editor.error().is_none());
     let overlay = DecisionOverlayState {
+        show_answers: false,
         selected: 0,
         editor: Some(editor),
+        requested: None,
+        error: None,
+        exact: None,
     };
     assert_eq!(overlay.selected(), 0);
 
@@ -768,13 +449,6 @@ fn coverage_contract_exposes_every_typed_overlay_and_entry_accessor() {
     assert_eq!(environment.scope(), EnvScope::Global);
 
     assert_eq!(PendingToken::from_raw(7).get(), 7);
-    let entry_workspace = EntryWorkspace::new(workspace, "repo");
-    let entry = EntryState::new(vec![entry_workspace.clone()], vec![workspace]);
-    assert_eq!(entry.workspaces(), std::slice::from_ref(&entry_workspace));
-    assert_eq!(entry.recents(), &[workspace]);
-
-    let new = NewState::new(NewMode::Existing, existing_form());
-    assert_eq!(new.mode(), NewMode::Existing);
     assert_eq!(root.session_id(), None);
     assert_eq!(Target::Session(session).session_id(), Some(session));
 }

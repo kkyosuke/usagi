@@ -255,20 +255,6 @@ impl AgentTabIntent {
         }
     }
 
-    /// Project the current state against inventories without changing the
-    /// caller's value. Useful after a close/reopen mutation with a cached daemon
-    /// snapshot.
-    #[must_use]
-    pub fn projected(
-        &self,
-        terminals: &[TerminalInventoryEntry],
-        agents: &AgentInventory,
-        allowed_sessions: &BTreeSet<SessionId>,
-    ) -> AgentTabProjection {
-        let mut copy = self.clone();
-        copy.reconcile(terminals, agents, allowed_sessions)
-    }
-
     /// Project a stale observation after a compare-and-swap conflict without
     /// substituting any saved exact terminal fence or discovering a new slot.
     /// A saved lineage absent from the observation is omitted until a fresh
@@ -1028,6 +1014,9 @@ mod tests {
         state: AgentRuntimeInventoryState,
     ) -> AgentRuntimeInventoryItem {
         AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime: AgentRuntimeRef::new(
                 AgentRuntimeId::new(),
                 terminal.clone(),
@@ -1142,7 +1131,7 @@ mod tests {
                 allowed_sessions: BTreeSet::from([session]),
             })
             .expect("observation projects live Agents");
-        assert!(projection.targets.is_empty());
+        assert_eq!(projection.targets, [] as [AgentTabTargetProjection; 0]);
         assert_eq!(intent.dismissed, BTreeSet::from([continuation]));
 
         // A stale close still wins on visibility, but it must not replace a
@@ -1198,7 +1187,13 @@ mod tests {
         intent.apply(AgentTabIntentMutation::Reopen {
             continuation: closed,
         });
-        let reopened = intent.projected(&terminals, &inventory, &BTreeSet::from([session]));
+        let reopened = intent
+            .apply(AgentTabIntentMutation::Observe {
+                terminals,
+                agents: inventory,
+                allowed_sessions: BTreeSet::from([session]),
+            })
+            .unwrap();
         assert_eq!(reopened.targets[0].tabs.len(), 2);
         assert!(!intent.dismissed.contains(&closed));
         assert_eq!(AgentTabIntent::safe_label(closed).len(), "Agent ".len() + 8);
@@ -1278,18 +1273,23 @@ mod tests {
             )],
             resumable: Vec::new(),
         };
-        assert!(
+        assert_eq!(
             intent
                 .reconcile(&[live_entry(replacement.clone())], &replaced, &allowed)
-                .targets
-                .is_empty()
+                .targets,
+            [] as [AgentTabTargetProjection; 0]
         );
         intent.apply(AgentTabIntentMutation::Reopen {
             continuation: closed,
         });
         assert_eq!(
             intent
-                .projected(&[live_entry(replacement)], &replaced, &allowed)
+                .apply(AgentTabIntentMutation::Observe {
+                    terminals: vec![live_entry(replacement)],
+                    agents: replaced,
+                    allowed_sessions: allowed,
+                })
+                .unwrap()
                 .targets[0]
                 .tabs
                 .len(),
@@ -1408,11 +1408,11 @@ mod tests {
         };
 
         let before = intent.clone();
-        assert!(
+        assert_eq!(
             intent
                 .projected_exact(&[live_entry(saved)], &inventory, &BTreeSet::new())
-                .targets
-                .is_empty()
+                .targets,
+            [] as [AgentTabTargetProjection; 0]
         );
         assert_eq!(intent, before);
     }
@@ -1448,15 +1448,16 @@ mod tests {
             )],
             resumable: Vec::new(),
         };
-        assert!(
+        assert_eq!(
             intent
-                .projected(
-                    &[live_entry(replacement)],
-                    &inventory,
-                    &BTreeSet::from([session]),
-                )
-                .targets
-                .is_empty()
+                .apply(AgentTabIntentMutation::Observe {
+                    terminals: vec![live_entry(replacement)],
+                    agents: inventory,
+                    allowed_sessions: BTreeSet::from([session]),
+                })
+                .unwrap()
+                .targets,
+            [] as [AgentTabTargetProjection; 0]
         );
         intent.apply(AgentTabIntentMutation::Reopen { continuation });
         assert!(!intent.dismissed.contains(&continuation));
@@ -1485,6 +1486,9 @@ mod tests {
         let interrupted = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
+                launch_provenance: None,
                 runtime: AgentRuntimeRef::new(runtime_id, old, Some(session)).unwrap(),
                 continuation,
                 state: AgentRuntimeInventoryState::Interrupted,
@@ -1499,11 +1503,11 @@ mod tests {
                 last_known_phase: None,
             }],
         };
-        assert!(
+        assert_eq!(
             intent
                 .reconcile(&[], &interrupted, &BTreeSet::from([session]))
-                .targets
-                .is_empty()
+                .targets,
+            [] as [AgentTabTargetProjection; 0]
         );
         assert_eq!(intent.targets[0].tabs.len(), 1);
         assert!(intent.dismissed.contains(&continuation));
@@ -1533,11 +1537,11 @@ mod tests {
             runtimes: Vec::new(),
             resumable: Vec::new(),
         };
-        assert!(
+        assert_eq!(
             intent
                 .reconcile(&[], &absent, &BTreeSet::from([session]))
-                .targets
-                .is_empty()
+                .targets,
+            [] as [AgentTabTargetProjection; 0]
         );
         assert_eq!(intent.targets[0].selected, Some(continuation));
     }
@@ -1745,7 +1749,7 @@ mod tests {
             session_id: Some(SessionId::new()),
             continuations: vec![AgentContinuationRef::new()],
         });
-        assert!(intent.targets.is_empty());
+        assert_eq!(intent.targets, [] as [AgentTabTargetIntent; 0]);
         assert_eq!(intent.validate(workspace), Ok(()));
     }
 
@@ -1779,7 +1783,7 @@ mod tests {
         intent.apply(AgentTabIntentMutation::Dismiss {
             continuation: AgentContinuationRef::new(),
         });
-        assert!(intent.targets.is_empty());
+        assert_eq!(intent.targets, [] as [AgentTabTargetIntent; 0]);
         assert!(intent.dismissed.is_empty());
         assert_eq!(intent.validate(workspace), Ok(()));
 
@@ -1790,7 +1794,7 @@ mod tests {
             AgentTabIntentError::ConcurrentChange,
             AgentTabIntentError::InvalidMutation,
         ] {
-            assert!(!error.safe_message().is_empty());
+            assert_ne!(error.safe_message(), "");
             assert!(!error.safe_message().contains(&workspace_text));
         }
         assert_eq!(
@@ -1902,11 +1906,11 @@ mod tests {
             ..inventory
         };
         let before = intent.clone();
-        assert!(
+        assert_eq!(
             intent
                 .reconcile(&[], &wrong, &BTreeSet::from([session]))
-                .targets
-                .is_empty()
+                .targets,
+            [] as [AgentTabTargetProjection; 0]
         );
         assert_eq!(intent, before);
     }

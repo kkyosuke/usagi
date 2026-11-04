@@ -552,6 +552,12 @@ impl<P: PrInventoryPort> OutputPrProjector<P> {
         self.carries.remove(&terminal);
     }
 
+    /// Discards partial URLs when the projection queue loses pending work.
+    /// Already discovered PRs remain in the durable inventory.
+    pub fn reset_carries(&mut self) {
+        self.carries.clear();
+    }
+
     /// Reclaims the carry for an exited terminal, crediting a candidate that the
     /// output never terminated.
     ///
@@ -1035,6 +1041,40 @@ mod tests {
         assert!(projector.into_store().values.borrow().is_empty());
     }
     #[test]
+    fn resetting_carries_preserves_discoveries_and_never_flushes_truncated_urls() {
+        let mut projector = OutputPrProjector::new(Store::default());
+        let session = SessionId::new();
+        let first = TerminalId::new();
+        let second = TerminalId::new();
+        projector
+            .observe_committed(first, Some(session), b"https://github.com/o/r/pull/7\n")
+            .unwrap();
+        projector
+            .observe_committed(first, Some(session), b"https://github.com/o/r/pu")
+            .unwrap();
+        projector
+            .observe_committed(second, Some(session), b"https://github.com/o/r/pull/1")
+            .unwrap();
+        assert_eq!(projector.carried_terminals(), 2);
+        projector.reset_carries();
+        assert_eq!(projector.carried_terminals(), 0);
+        assert!(
+            !projector
+                .observe_committed(first, Some(session), b"ll/42\n")
+                .unwrap()
+        );
+        assert!(!projector.release_terminal(second, Some(session)).unwrap());
+        let store = projector.into_store();
+        let values = store.values.borrow();
+        let urls = values[&session]
+            .entries
+            .keys()
+            .map(PrIdentity::as_url)
+            .collect::<Vec<_>>();
+        assert_eq!(urls, ["https://github.com/o/r/pull/7"]);
+    }
+
+    #[test]
     fn exit_reclaims_the_carry_and_credits_an_unterminated_candidate() {
         let mut projector = OutputPrProjector::new(Store::default());
         let terminal = TerminalId::new();
@@ -1277,7 +1317,10 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert!(projector.refresh_candidates().unwrap().is_empty());
+        assert_eq!(
+            projector.refresh_candidates().unwrap(),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
     }
 
     #[test]
@@ -1291,7 +1334,10 @@ mod tests {
         scheduler.schedule(a.clone(), 10, 0);
         scheduler.schedule(b.clone(), 0, 0);
         assert_eq!(scheduler.claim_due(12).len(), 1);
-        assert!(scheduler.claim_due(12).is_empty());
+        assert_eq!(
+            scheduler.claim_due(12),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
         scheduler.succeeded(&b, 12, 100);
         let next = scheduler.failed(&a, 12, 3);
         assert_eq!(next, 2_015);
@@ -1383,13 +1429,19 @@ mod tests {
             .unwrap();
         let mut scheduler = RefreshScheduler::default();
         scheduler.schedule(id.clone(), u64::MAX, 1);
-        assert!(scheduler.due(u64::MAX - 1).is_empty());
+        assert_eq!(
+            scheduler.due(u64::MAX - 1),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
         for _ in 0..8 {
             scheduler.failed(&id, 0, 0);
         }
         assert_eq!(scheduler.failed(&id, 0, 0), 60_000);
         scheduler.succeeded(&id, 0, 10);
-        assert!(scheduler.due(9).is_empty());
+        assert_eq!(
+            scheduler.due(9),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
     }
 
     #[test]
@@ -1420,7 +1472,10 @@ mod tests {
         );
         assert!(!projector.publish_failure(&id).unwrap());
         clock.set(1_999);
-        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
+        assert_eq!(
+            worker.claim_due(&mut projector).unwrap(),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
         clock.set(2_000);
         let due = worker.claim_due(&mut projector).unwrap();
         let result = worker.fetch(&due[0]);
@@ -1440,7 +1495,10 @@ mod tests {
                 )
                 .unwrap()
         );
-        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
+        assert_eq!(
+            worker.claim_due(&mut projector).unwrap(),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
         clock.set(12_000);
         assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id]);
     }
@@ -1472,7 +1530,10 @@ mod tests {
                 .unwrap()
         );
         clock.set(149_999);
-        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
+        assert_eq!(
+            worker.claim_due(&mut projector).unwrap(),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
         clock.set(150_000);
         assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id]);
     }
@@ -1522,7 +1583,10 @@ mod tests {
         projector.store.fail_save.set(true);
         assert!(worker.complete(&mut projector, &id, result).is_err());
         clock.set(1_999);
-        assert!(worker.claim_due(&mut projector).unwrap().is_empty());
+        assert_eq!(
+            worker.claim_due(&mut projector).unwrap(),
+            [] as [usagi_core::domain::pr_inventory::PrIdentity; 0]
+        );
         clock.set(2_000);
         assert_eq!(worker.claim_due(&mut projector).unwrap(), vec![id.clone()]);
 

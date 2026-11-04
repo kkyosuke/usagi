@@ -4,6 +4,13 @@ use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use usagi_core::infrastructure::bounded_process::{
+    ChildCommandOutput, ChildOutputError, ChildPolicy, execute_command_output,
+    execute_command_output_without_timeout,
+};
+use usagi_core::infrastructure::error_log::ErrorLog;
 
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, add_worktree, confined_git_command, delete_branch, remove_worktree,
@@ -23,13 +30,63 @@ impl GitRunner for SystemGit {
     /// namespace) outranks the `-C <repo>` this passes.
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_git_contract,git_environment_confinement
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        let output = confined_git_command(repo).args(args).output()?;
-        Ok(GitOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        execute_git_command(git_command(repo, args), git_timeout(args))
     }
+}
+
+fn git_command(repo: &Path, args: &[&str]) -> Command {
+    let mut command = confined_git_command(repo);
+    command.args(args);
+    if args.starts_with(&["--no-replace-objects"]) {
+        // The immutable graph also excludes local grafts and shallow boundaries. This
+        // trusted setting must follow confinement, which strips inherited GIT_*.
+        command.env("GIT_GRAFT_FILE", "/dev/null");
+        command.env("GIT_SHALLOW_FILE", "/dev/null");
+    }
+    command
+}
+
+fn git_timeout(args: &[&str]) -> Option<Duration> {
+    let args = args.strip_prefix(&["--no-replace-objects"]).unwrap_or(args);
+    // Teardown runs outside the session lock in a daemon-owned worker. A large
+    // target/ tree legitimately takes minutes, so removal must await completion.
+    if args.starts_with(&["worktree", "remove"]) {
+        return None;
+    }
+    let observation = args.first().is_some_and(|argument| {
+        matches!(
+            *argument,
+            "status" | "rev-parse" | "merge-base" | "symbolic-ref" | "rev-list"
+        )
+    }) || args.starts_with(&["worktree", "list"]);
+    Some(Duration::from_secs(if observation { 2 } else { 30 }))
+}
+
+fn execute_git_command(command: Command, timeout: Option<Duration>) -> anyhow::Result<GitOutput> {
+    let terminate_grace = Duration::from_millis(100);
+    let output_limit = 8 * 1024 * 1024;
+    bounded_git_output(match timeout {
+        Some(timeout) => execute_command_output(
+            command,
+            ChildPolicy {
+                timeout,
+                terminate_grace,
+                output_limit,
+            },
+        ),
+        None => execute_command_output_without_timeout(command, terminate_grace, output_limit),
+    })
+}
+
+fn bounded_git_output(
+    result: Result<ChildCommandOutput, ChildOutputError>,
+) -> anyhow::Result<GitOutput> {
+    let output = result?;
+    Ok(GitOutput {
+        success: output.success,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 /// Filesystem boundary used by the daemon composition root.
@@ -84,23 +141,29 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         branch: &str,
         base_ref: Option<&str>,
     ) -> anyhow::Result<()> {
-        if self.is_repo_root(workspace_root) {
+        let mut created = Vec::new();
+        let result = if self.is_repo_root(workspace_root) {
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            return add_worktree(git, workspace_root, destination, branch, base_ref);
+            add_worktree(git, workspace_root, destination, branch, base_ref)?;
+            created.push((workspace_root.to_path_buf(), destination.to_path_buf()));
+            Ok(())
+        } else {
+            std::fs::create_dir_all(destination)?;
+            mirror_directory(
+                self,
+                git,
+                workspace_root,
+                destination,
+                branch,
+                base_ref,
+                &mut created,
+            )
         }
-        std::fs::create_dir_all(destination)?;
-        let mut created = Vec::new();
-        let result = mirror_directory(
-            self,
-            git,
-            workspace_root,
-            destination,
-            branch,
-            base_ref,
-            &mut created,
-        );
+        .and_then(|()| {
+            usagi_core::infrastructure::artifacts::prepare(destination).map_err(Into::into)
+        });
         if let Err(error) = result {
             let mut cleanup = Vec::new();
             for (repository, worktree) in created.into_iter().rev() {
@@ -149,6 +212,11 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         session_root: &Path,
         force: bool,
     ) -> anyhow::Result<()> {
+        usagi_core::infrastructure::artifacts::archive_before_removal(
+            session_root,
+            force,
+            &ErrorLog::record,
+        )?;
         let mut worktrees = Vec::new();
         collect_session_worktrees(self, session_root, &mut worktrees)?;
         worktrees.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
@@ -427,11 +495,11 @@ mod tests {
             SystemSessionWorktreeIo.session_entries(&container).unwrap(),
             ["alpha", "marker", "zeta"]
         );
-        assert!(
+        assert_eq!(
             SystemSessionWorktreeIo
                 .session_entries(&tmp.path().join("missing"))
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            [] as [std::string::String; 0]
         );
     }
 
@@ -452,5 +520,356 @@ mod tests {
                 .to_string()
                 .contains("exit status: 7")
         );
+    }
+    #[test]
+    fn artifacts_are_created_ignored_and_preserved_before_real_worktree_removal() {
+        for force in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            for args in [
+                vec!["init", "-b", "main"],
+                vec![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            ] {
+                assert!(SystemGit.run(root, &args).unwrap().success);
+            }
+            let session = root.join(".usagi/sessions/test");
+            SystemSessionWorktreeIo
+                .build_session_tree(&SystemGit, root, &session, "usagi/test", None)
+                .unwrap();
+            assert!(session.join("artifacts/.gitignore").is_file());
+            std::fs::write(session.join("artifacts/report.md"), "retained result").unwrap();
+            assert_eq!(
+                SystemGit
+                    .run(&session, &["status", "--porcelain"])
+                    .unwrap()
+                    .stdout
+                    .trim(),
+                ""
+            );
+            if force {
+                std::fs::write(session.join("untracked.txt"), "discard").unwrap();
+            }
+            SystemSessionWorktreeIo
+                .remove_session_tree(&SystemGit, &session, force)
+                .unwrap();
+            assert!(!session.exists());
+            let files = usagi_core::infrastructure::artifacts::list(root, true).unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(root.join(&files[0])).unwrap(),
+                "retained result"
+            );
+            // Idempotent teardown after the worktree has already gone.
+            SystemSessionWorktreeIo
+                .remove_session_tree(&SystemGit, &session, force)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn mirrored_workspace_preserves_nested_artifacts_directories_and_repositories() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let directory = root.join("data/outputs");
+        let repository = root.join("repositories/outputs");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(&repository).unwrap();
+        std::fs::write(directory.join("input.txt"), "existing input").unwrap();
+        std::fs::write(repository.join("source.txt"), "existing repository").unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["add", "source.txt"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        ] {
+            assert!(SystemGit.run(&repository, &args).unwrap().success);
+        }
+        let session = root.join(".usagi/sessions/mirror");
+        SystemSessionWorktreeIo
+            .build_session_tree(&SystemGit, root, &session, "usagi/mirror", None)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(session.join("data/outputs/input.txt")).unwrap(),
+            "existing input"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.join("repositories/outputs/source.txt")).unwrap(),
+            "existing repository"
+        );
+        assert!(session.join("repositories/outputs/.git").is_file());
+        assert!(session.join("artifacts/.gitignore").is_file());
+        SystemSessionWorktreeIo
+            .remove_session_tree(&SystemGit, &session, false)
+            .unwrap();
+        assert!(!session.exists());
+        assert_eq!(
+            std::fs::read_to_string(repository.join("source.txt")).unwrap(),
+            "existing repository"
+        );
+    }
+
+    #[test]
+    fn artifacts_archive_failure_only_stops_unforced_worktree_removal() {
+        for force in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let session = temp.path().join(".usagi/sessions/test");
+            std::fs::create_dir_all(&session).unwrap();
+            usagi_core::infrastructure::artifacts::prepare(&session).unwrap();
+            std::fs::write(session.join("artifacts/report.md"), "keep").unwrap();
+            let outside = temp.path().join("sentinel");
+            std::fs::write(&outside, "keep outside").unwrap();
+            std::os::unix::fs::symlink(&outside, session.join("artifacts/link")).unwrap();
+            let result = SystemSessionWorktreeIo.remove_session_tree(&SystemGit, &session, force);
+            assert_eq!(result.is_ok(), force);
+            assert_eq!(session.join("artifacts/report.md").exists(), !force);
+            assert_eq!(session.exists(), !force);
+            assert_eq!(std::fs::read_to_string(outside).unwrap(), "keep outside");
+        }
+    }
+
+    #[test]
+    fn artifact_preparation_failure_compensates_real_and_mirrored_worktrees() {
+        for mirror in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            let repository = if mirror {
+                root.join("repository")
+            } else {
+                root.to_path_buf()
+            };
+            std::fs::create_dir_all(&repository).unwrap();
+            std::fs::write(root.join("artifacts"), "project input").unwrap();
+            for args in [
+                vec!["init", "-b", "main"],
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ],
+            ] {
+                assert!(SystemGit.run(&repository, &args).unwrap().success);
+            }
+            let session = root.join(".usagi/sessions/blocked");
+            assert!(
+                SystemSessionWorktreeIo
+                    .build_session_tree(&SystemGit, root, &session, "usagi/blocked", None)
+                    .is_err()
+            );
+            assert!(
+                !session.exists(),
+                "failed {mirror:?} checkout must be rolled back"
+            );
+            assert_eq!(
+                usagi_core::infrastructure::git::list_worktrees(&SystemGit, &repository)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                !SystemGit
+                    .run(
+                        &repository,
+                        &["show-ref", "--verify", "refs/heads/usagi/blocked"]
+                    )
+                    .unwrap()
+                    .success
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("artifacts")).unwrap(),
+                "project input"
+            );
+
+            // Removing the naming collision allows reuse of the same branch/name.
+            std::fs::remove_file(root.join("artifacts")).unwrap();
+            if !mirror {
+                assert!(SystemGit.run(&repository, &["add", "-u"]).unwrap().success);
+                assert!(
+                    SystemGit
+                        .run(
+                            &repository,
+                            &[
+                                "-c",
+                                "user.name=Test",
+                                "-c",
+                                "user.email=test@example.com",
+                                "commit",
+                                "-m",
+                                "remove collision"
+                            ]
+                        )
+                        .unwrap()
+                        .success
+                );
+            }
+            SystemSessionWorktreeIo
+                .build_session_tree(&SystemGit, root, &session, "usagi/blocked", None)
+                .unwrap();
+            SystemSessionWorktreeIo
+                .remove_session_tree(&SystemGit, &session, false)
+                .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounded_git_tests {
+    use super::*;
+
+    #[test]
+    fn immutable_git_graph_disables_local_overrides_after_environment_confinement() {
+        for (args, expected) in [
+            (
+                &["--no-replace-objects", "merge-base", "base", "head"][..],
+                Some(OsStr::new("/dev/null")),
+            ),
+            (&["merge-base", "base", "head"][..], None),
+        ] {
+            let command = git_command(Path::new("/repo"), args);
+            for name in ["GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"] {
+                let configured = command
+                    .get_envs()
+                    .find(|(key, _)| *key == name)
+                    .and_then(|(_, value)| value);
+                assert_eq!(configured, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn git_budget_bounds_observations_and_retains_nonzero_diagnostics() {
+        assert_eq!(
+            git_timeout(&["status", "--porcelain"]),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            git_timeout(&["worktree", "list"]),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            git_timeout(&[
+                "--no-replace-objects",
+                "merge-base",
+                "--all",
+                "base",
+                "head"
+            ]),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            git_timeout(&["worktree", "add"]),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(git_timeout(&[]), Some(Duration::from_secs(30)));
+        for args in [
+            &["worktree", "remove", "--", "/session"][..],
+            &["worktree", "remove", "--force", "--", "/session"][..],
+            &["--no-replace-objects", "worktree", "remove", "/session"][..],
+        ] {
+            assert_eq!(git_timeout(args), None);
+        }
+        let result = bounded_git_output(Ok(ChildCommandOutput {
+            success: false,
+            stdout: vec![0xff],
+            stderr: b"branch already exists".to_vec(),
+        }))
+        .unwrap();
+        assert!(!result.success);
+        assert_eq!(result.stdout, "\u{fffd}");
+        assert_eq!(result.stderr, "branch already exists");
+        for failure in [
+            ChildOutputError::SpawnFailed,
+            ChildOutputError::TimedOut,
+            ChildOutputError::IncompleteOutput,
+            ChildOutputError::OutputTooLarge,
+            ChildOutputError::ObservationFailed,
+        ] {
+            assert!(bounded_git_output(Err(failure)).is_err());
+        }
+    }
+
+    #[test]
+    fn worktree_removal_waits_past_an_effect_deadline() {
+        use std::time::Instant;
+
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, b"release");
+            }
+        }
+        fn held_command(ready: &Path, release: &Path) -> Command {
+            let mut command = Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    "printf ready > \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.01; done; printf removed; printf diagnostic >&2; exit 7",
+                    "worktree-removal-fixture",
+                ])
+                .arg(ready)
+                .arg(release);
+            command
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let former_budget = Duration::from_millis(20);
+        let error = execute_git_command(
+            held_command(
+                &temp.path().join("bounded-ready"),
+                &temp.path().join("bounded-release"),
+            ),
+            Some(former_budget),
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ChildOutputError::TimedOut));
+
+        std::thread::scope(|scope| {
+            let ready = temp.path().join("removal-ready");
+            let release = temp.path().join("removal-release");
+            let command = held_command(&ready, &release);
+            let worker = scope
+                .spawn(move || execute_git_command(command, git_timeout(&["worktree", "remove"])));
+            // Release before the scope joins, including when an assertion fails.
+            let release = ReleaseOnDrop(release);
+            let ready_deadline = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() && Instant::now() < ready_deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(ready.exists(), "the removal command must have started");
+            let deadline = Instant::now() + former_budget * 2;
+            while Instant::now() < deadline {
+                assert!(
+                    !worker.is_finished(),
+                    "removal ended before it was released"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(release);
+            let output = worker.join().unwrap().unwrap();
+            assert!(!output.success);
+            assert_eq!(output.stdout, "removed");
+            assert_eq!(output.stderr, "diagnostic");
+        });
     }
 }

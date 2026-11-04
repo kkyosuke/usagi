@@ -20,6 +20,7 @@
 //! - [`ipc`] — daemon とクライアントが Unix domain socket で交わす IPC プロトコル型と
 //!   フレーミング（transport は注入）。
 
+pub mod artifacts;
 pub mod bounded_process;
 pub mod client;
 pub mod daemon;
@@ -33,6 +34,7 @@ pub mod paths;
 pub mod persistence;
 pub mod role_catalog;
 pub mod runtime_model;
+pub mod session_notes;
 pub mod session_snapshot;
 pub mod store;
 pub mod workspace_state;

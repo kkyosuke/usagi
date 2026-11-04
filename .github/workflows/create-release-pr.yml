@@ -35,7 +35,9 @@ jobs:
       # ビルドは rust-toolchain.toml が pin した nightly で走るため、component も
       # そちらへ届く前提で入れる（正本は document/06-conventions.md）。
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: nightly
 
       - name: Update version in Cargo.toml
         id: version

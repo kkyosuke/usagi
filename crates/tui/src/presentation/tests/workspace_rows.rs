@@ -3,6 +3,9 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::{
+    ControllerBackendComposition, ControllerBackendFactory, WorkspaceEntryPolicy, WorkspaceStep,
+};
 
 #[test]
 fn project_bar_click_closes_the_pr_modal_without_reaching_the_bar() {
@@ -53,7 +56,10 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
     ui.set_allowed_agent_sessions(allowed_sessions.iter().copied());
     ui.resize_terminals(Geometry { cols: 20, rows: 5 });
     assert!(ui.send_terminal_bytes(&terminal, b"x").is_err());
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(
         crate::presentation::session_name_for(&ui, session).as_deref(),
         Some("demo-session")
@@ -73,8 +79,8 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
         None,
         None,
     );
-    assert!(ui.workspace.sessions().is_empty());
-    assert!(ui.workspace.session_ids().is_empty());
+    assert_eq!(ui.workspace.sessions(), []);
+    assert_eq!(ui.workspace.session_ids(), []);
     crate::presentation::apply_session_projection(
         &mut ui,
         Some(records),
@@ -132,7 +138,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
                 workspace,
                 session,
                 profile: None,
-                goal: None,
                 resume: true,
             });
         crate::presentation::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
@@ -157,7 +162,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
             workspace,
             session: Some(session),
             profile: None,
-            goal: None,
             resume: false,
         });
     let mut pending = std::collections::HashMap::from([(operation, target)]);
@@ -231,7 +235,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
                 result: Ok(AgentPaneAdmission {
                     terminal: terminal.clone(),
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -355,7 +358,10 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
 
     // Two more requests: admission takes exactly one worker and leaves the
     // rest visibly pending, without ever touching the stream port.
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     let queued_before = ui.pane_launches.len();
     ui.pane_launches
         .push(crate::presentation::PaneLaunch::Agent {
@@ -363,7 +369,6 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
             workspace,
             session: Some(session),
             profile: None,
-            goal: None,
             resume: false,
         });
     ui.pane_launches
@@ -376,7 +381,10 @@ fn workspace_shell_harness_covers_port_absence_projection_and_async_launch_compl
     crate::presentation::drain_pane_launches(&mut ui, Geometry { cols: 20, rows: 5 });
     assert_eq!(ui.pane_launches.len(), queued_before + 1);
     assert!(ui.active_pane_launch.is_some());
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
 }
 
 #[test]
@@ -453,7 +461,6 @@ fn drawer_root_final_without_conversation_identity_fails_closed() {
                 result: Ok(AgentPaneAdmission {
                     terminal: scoped_terminal_ref(workspace, None),
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -466,8 +473,14 @@ fn drawer_root_final_without_conversation_identity_fails_closed() {
     );
 
     assert!(pending.is_empty());
-    assert!(live_tab_terminals(&runtime, target).is_empty());
-    assert!(durable.lock().unwrap().targets.is_empty());
+    assert_eq!(
+        live_tab_terminals(&runtime, target),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
+    assert_eq!(
+        durable.lock().unwrap().targets,
+        [] as [crate::usecase::application::agent_tab_intent::AgentTabTargetIntent; 0]
+    );
     assert!(mutations.lock().unwrap().is_empty());
 }
 
@@ -609,7 +622,7 @@ fn production_input_order_reserves_drawer_picker_before_root_agent_pty() {
         route_workspace_input_before_reducer(&mut ui, &mut runtime, &mut controls, &mut term, &new,),
         WorkspaceInputRoute::Unhandled
     );
-    assert!(runtime.handle_key(new).is_empty());
+    assert_eq!(runtime.handle_key(new), [] as [Effect; 0]);
     assert!(runtime.state().director_drawer_open());
     assert!(matches!(
         runtime.state().director_new(),
@@ -649,7 +662,7 @@ fn production_input_order_reserves_drawer_picker_before_root_agent_pty() {
         ),
         WorkspaceInputRoute::Unhandled
     );
-    assert!(runtime.handle_key(reopen).is_empty());
+    assert_eq!(runtime.handle_key(reopen), [] as [Effect; 0]);
     for key in [Key::Down, Key::Up] {
         assert_eq!(
             route_workspace_input_before_reducer(
@@ -786,14 +799,14 @@ fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
     let mut term = FakeTerminal::default();
 
     let open = Key::Live(LiveTerminalAction::Director);
-    assert!(runtime.handle_key(open).is_empty());
+    assert_eq!(runtime.handle_key(open), [] as [Effect; 0]);
     assert!(runtime.state().director_drawer_open());
     assert_eq!(runtime.focused_terminal(), Some(root_agent.clone()));
     assert_eq!(
         runtime.state().director_route(),
         DirectorRoute::Organization
     );
-    assert!(runtime.handle_key(Key::Enter).is_empty());
+    assert_eq!(runtime.handle_key(Key::Enter), [] as [Effect; 0]);
 
     // The live conversation owns Esc: it reaches the PTY once and the drawer
     // stays open.
@@ -831,10 +844,9 @@ fn drawer_escape_reaches_the_selected_root_agent_and_closes_only_without_one() {
     let empty_view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
     let mut empty_ui = io_runtime(empty_view, Box::new(UnavailableSessionCommandPort));
     let mut empty_runtime = WorkspaceRuntime::new(workspace, vec![session]);
-    assert!(
-        empty_runtime
-            .handle_key(Key::Live(LiveTerminalAction::Director))
-            .is_empty()
+    assert_eq!(
+        empty_runtime.handle_key(Key::Live(LiveTerminalAction::Director)),
+        [] as [Effect; 0]
     );
     assert!(empty_runtime.state().director_drawer_open());
     assert_eq!(empty_runtime.focused_terminal(), None);
@@ -1048,7 +1060,7 @@ fn missing_workspace_prompt_keyboard_controls_are_complete() {
 
 #[test]
 fn quitting_from_a_recent_workspace_exits_the_runtime() {
-    let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::CtrlQ, Key::Char('y')]);
+    let mut term = FakeTerminal::with_keys(&[Key::Char('r'), Key::CtrlQ, Key::Char('y')]);
     run(
         &mut term,
         Vec::new(),
@@ -1073,7 +1085,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         deck: WorkspaceDeckHelp::None,
         overlay: None,
         decision_answer_open: false,
-        work_run_mode: crate::presentation::WorkRunControlMode::Closed,
+        artifacts_open: false,
         director_new_open: false,
         director_route: DirectorRoute::Organization,
         drawer_focus: None,
@@ -1156,73 +1168,19 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
     }
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
+            overlay: Some(Overlay::Preview),
+            artifacts_open: true,
+            ..base
+        }),
+        HelpContext::Artifacts
+    );
+    assert_eq!(
+        resolve_workspace_help_context(WorkspaceHelpState {
             overlay: Some(Overlay::Decisions),
             decision_answer_open: true,
             ..base
         }),
         HelpContext::DecisionAnswer
-    );
-
-    for (mode, expected) in [
-        (
-            crate::presentation::WorkRunControlMode::List,
-            HelpContext::WorkRuns,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::ResolveEscalation,
-            HelpContext::WorkRunEscalation,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::ConfirmCancel,
-            HelpContext::WorkRunConfirmation,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::Submitting,
-            HelpContext::WorkRunSubmitting,
-        ),
-        (
-            crate::presentation::WorkRunControlMode::Retry,
-            HelpContext::WorkRunConfirmation,
-        ),
-    ] {
-        assert_eq!(
-            resolve_workspace_help_context(WorkspaceHelpState {
-                work_run_mode: mode,
-                director_route: DirectorRoute::WorkRuns,
-                drawer_focus: Some(WorkspaceDrawerFocus::Director),
-                ..base
-            }),
-            expected,
-            "{mode:?}"
-        );
-    }
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::List,
-            director_route: DirectorRoute::RunOverview(SupervisorRunId::new()),
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::RunOverview
-    );
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::ConfirmDelete,
-            director_route: DirectorRoute::WorkRuns,
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::WorkRunConfirmation
-    );
-    assert_eq!(
-        resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::Submitting,
-            director_route: DirectorRoute::Organization,
-            drawer_focus: Some(WorkspaceDrawerFocus::Director),
-            ..base
-        }),
-        HelpContext::WorkRunSubmitting,
-        "an in-flight action outranks the normalized Organization route"
     );
 
     assert_eq!(
@@ -1235,9 +1193,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
     );
     assert_eq!(
         resolve_workspace_help_context(WorkspaceHelpState {
-            work_run_mode: crate::presentation::WorkRunControlMode::Submitting,
             director_new_open: true,
-            director_route: DirectorRoute::WorkRuns,
             drawer_focus: Some(WorkspaceDrawerFocus::Terminal),
             ..base
         }),
@@ -1257,19 +1213,8 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         );
     }
     for (director_route, expected) in [
-        (
-            DirectorRoute::Console(DirectorConsoleParent::Organization),
-            HelpContext::DirectorConsole,
-        ),
-        (
-            DirectorRoute::Console(DirectorConsoleParent::RunOverview(SupervisorRunId::new())),
-            HelpContext::WorkRunConsole,
-        ),
-        (
-            DirectorRoute::RunOverview(SupervisorRunId::new()),
-            HelpContext::RunOverview,
-        ),
-        (DirectorRoute::WorkRuns, HelpContext::WorkRuns),
+        (DirectorRoute::Console, HelpContext::DirectorConsole),
+        (DirectorRoute::Organization, HelpContext::Organization),
     ] {
         assert_eq!(
             resolve_workspace_help_context(WorkspaceHelpState {
@@ -1297,6 +1242,27 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
 }
 
 #[test]
+fn workspace_help_follows_artifact_and_repository_preview_surfaces() {
+    use crate::presentation::{KeyHelpContext, workspace_help_context};
+
+    let snapshot = snapshot("artifacts");
+    let deck = WorkspaceDeck::new(&snapshot);
+    let mut runtime = WorkspaceRuntime::new(snapshot.workspace_id, snapshot.session_ids);
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenPreview));
+    assert_eq!(
+        workspace_help_context(&deck, &runtime),
+        KeyHelpContext::Preview
+    );
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenOverview));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::SubmitOverview("artifact".into())));
+    assert_eq!(
+        workspace_help_context(&deck, &runtime),
+        KeyHelpContext::Artifacts
+    );
+}
+
+#[test]
 fn workspace_help_describes_switch_and_swallows_background_commands() {
     use crate::presentation::{KeyHelpContext, closes_workspace_help};
 
@@ -1310,7 +1276,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
     ));
 
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::Char('?'),
         // Ctrl-X would remove the selected session outside Help.
         Key::CtrlX,
@@ -1348,7 +1314,7 @@ fn workspace_help_describes_switch_and_swallows_background_commands() {
 fn workspace_loader_failure_is_propagated() {
     for (keys, recent) in [
         (vec![Key::Char('o'), Key::Enter], Vec::new()),
-        (vec![Key::Char('1')], vec![recent("alpha")]),
+        (vec![Key::Char('r')], vec![recent("alpha")]),
     ] {
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
@@ -1367,15 +1333,22 @@ fn workspace_loader_failure_is_propagated() {
 #[test]
 fn leaving_a_workspace_drops_every_port_before_the_next_one_is_created() {
     let mut term = FakeTerminal::with_keys(&[
-        Key::Char('1'),
+        Key::Char('r'),
         Key::CtrlQ,
         Key::Char('w'),
-        Key::Char('2'),
+        Key::Char('o'),
+        Key::Tab,
+        Key::Down,
+        Key::Enter,
         Key::CtrlQ,
         Key::Char('q'),
     ]);
     let mut loader = FakeLoader {
         opened_at: Some(now() + Duration::hours(1)),
+        recent_projects: vec![
+            recent_at("first", now() + Duration::hours(1)),
+            recent_at("second", now() - Duration::hours(1)),
+        ],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();
@@ -1492,7 +1465,13 @@ fn add_workspace_overlay_can_close_its_checked_active_project() {
 
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
     assert_eq!(factory.drops_at_create, vec![0]);
-    assert!(term.frames.last().unwrap().join("\n").contains("Recent"));
+    assert!(
+        term.frames
+            .last()
+            .unwrap()
+            .join("\n")
+            .contains("Clone repository")
+    );
 }
 
 #[test]
@@ -1635,7 +1614,7 @@ fn project_bar_click_adds_and_activates_the_project_identity_it_rendered() {
     let mut term = FakeTerminal::with_keys(&[
         Key::Char('o'),
         Key::Enter,
-        Key::Click { column: 10, row: 0 },
+        Key::Click { column: 13, row: 0 },
         Key::Down,
         Key::Char(' '),
         Key::Enter,
@@ -1766,20 +1745,15 @@ fn project_batch_settings_failure_is_all_or_nothing() {
 }
 
 #[test]
-fn project_registry_path_fence_covers_empty_match_and_mismatch() {
+fn project_registry_records_each_path_once_and_removes_only_matching_paths() {
     let alpha = snapshot("alpha");
-    assert!(!registry_contains_path(&[], &alpha.workspace.path));
-    assert!(registry_contains_path(
-        std::slice::from_ref(&alpha.workspace),
-        &alpha.workspace.path,
-    ));
-    assert!(!registry_contains_path(
-        std::slice::from_ref(&alpha.workspace),
-        Path::new("/tmp/beta"),
-    ));
-
     let beta = snapshot("beta");
-    let mut registry = vec![alpha.workspace, beta.workspace.clone()];
+    let mut registry = Vec::new();
+    remember_registry_workspace(&mut registry, &alpha.workspace);
+    remember_registry_workspace(&mut registry, &alpha.workspace);
+    remember_registry_workspace(&mut registry, &beta.workspace);
+    assert_eq!(registry, [alpha.workspace, beta.workspace.clone()]);
+
     remove_registry_paths(&mut registry, &[]);
     remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/missing")]);
     remove_registry_paths(&mut registry, &[PathBuf::from("/tmp/alpha")]);
@@ -1916,7 +1890,10 @@ fn project_deck_composition_helpers_cover_safe_fallbacks() {
         ))),
         vec![PathBuf::from("/tmp/alpha")]
     );
-    assert!(recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))).is_empty());
+    assert_eq!(
+        recent_paths(&Recent::Unite(UniteOverview::new(Vec::new()))),
+        [] as [std::path::PathBuf; 0]
+    );
 }
 
 /// A workspace opened directly (`usagi open <path>`) has no Welcome behind it, so
@@ -1948,4 +1925,1364 @@ fn a_direct_workspace_reports_leaving_and_quitting_as_different_exits() {
             "{key:?}"
         );
     }
+}
+
+mod attention {
+    use super::*;
+    use crate::presentation::WorkspaceStep;
+    use crate::presentation::widgets;
+    use usagi_core::domain::attention::{AttentionItem, AttentionKind, WorkspaceAttention};
+
+    struct AttentionFactory {
+        inner: CountingBackendFactory,
+        attention: WorkspaceAttention,
+        pr_requests: Arc<Mutex<Vec<Target>>>,
+        decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    }
+
+    struct AttentionDecisions(Vec<usagi_core::domain::user_decision::UserDecision>);
+    impl BackendDecisionPort for AttentionDecisions {
+        fn poll(&mut self, _: &Completions) {}
+        fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+            completions.emit(AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: self.0.clone(),
+            }));
+        }
+        fn resolve(
+            &mut self,
+            _: WorkspaceId,
+            _: UserDecisionId,
+            _: UserDecisionAnswer,
+            _: Completions,
+        ) {
+        }
+    }
+
+    struct AttentionPort(WorkspaceAttention);
+    impl GardenInventoryPort for AttentionPort {
+        fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
+            Err("unused".into())
+        }
+        fn attention(&mut self, _: WorkspaceId) -> Result<WorkspaceAttention, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    impl crate::presentation::ControllerBackendFactory for AttentionFactory {
+        fn create(
+            &mut self,
+            snapshot: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> crate::presentation::ControllerBackendComposition {
+            let mut composition = self.inner.create(snapshot, host);
+            composition.garden_inventory = Box::new(AttentionPort(self.attention.clone()));
+            composition.backend = composition
+                .backend
+                .with_decisions(Box::new(AttentionDecisions(self.decisions.clone())))
+                .with_overlay(Box::new(AttentionPrRequests(Arc::clone(&self.pr_requests))));
+            composition
+        }
+    }
+
+    #[test]
+    fn attention_shortcut_and_enter_open_the_selected_session_decisions() {
+        let snapshot = snapshot("attention-project");
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items: vec![AttentionItem {
+                key: "decision:one".into(),
+                session: Some(snapshot.session_ids[0]),
+                label: "selected-session".into(),
+                kind: AttentionKind::Decision,
+                reason: "Choose deployment target".into(),
+                target: None,
+                status_unknown: false,
+            }],
+        };
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::default(),
+            decisions: Vec::new(),
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Enter,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        let frames = term.frames.iter().map(|f| f.join("\n")).collect::<Vec<_>>();
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("All projects") && f.contains("Choose deployment target")),
+            "{frames:#?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|f| f.contains("Questions awaiting reply"))
+        );
+    }
+
+    #[test]
+    fn inbox_question_b_reaches_its_answer_editor_through_the_real_frame_loop() {
+        use usagi_core::domain::attention::AttentionTarget;
+        let snapshot = snapshot("exact-question");
+        let session = snapshot.session_ids[0];
+        let template =
+            super::super::terminal::decision_selection_runtime_with_title("First question A");
+        let mut first = template.state().decisions()[0].clone();
+        first.owner.workspace_id = snapshot.workspace_id;
+        first.owner.session_id = Some(session);
+        first.owner.caller.session_id = Some(session);
+        let mut second = first.clone();
+        second.decision_id = UserDecisionId::new();
+        second.title = "Chosen question B".into();
+        let items = [first.clone(), second.clone()]
+            .iter()
+            .enumerate()
+            .map(|(index, question)| AttentionItem {
+                key: format!("decision:{index}"),
+                session: Some(session),
+                label: "questions".into(),
+                kind: AttentionKind::Decision,
+                reason: question.title.clone(),
+                target: Some(AttentionTarget::Decision {
+                    decision_id: question.decision_id,
+                }),
+                status_unknown: false,
+            })
+            .collect();
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items,
+        };
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::default(),
+            decisions: vec![first, second],
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Escape,
+            Key::Escape,
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Down,
+            Key::Enter,
+            Key::Other,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        let frames = term
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            frames.iter().any(|frame| frame.contains("User decision")
+                && frame.contains("Chosen question B")
+                && !frame.contains("First question A")),
+            "{frames:#?}"
+        );
+    }
+
+    struct AttentionPrRequests(Arc<Mutex<Vec<Target>>>);
+    impl crate::presentation::BackendOverlayPort for AttentionPrRequests {
+        fn load_pull_requests(&mut self, target: Target, _: Completions) {
+            self.0.lock().unwrap().push(target);
+        }
+        fn load_preview(
+            &mut self,
+            _: Target,
+            _: RequestId,
+            _: Option<String>,
+            _: PreviewFileFilter,
+            _: Completions,
+        ) {
+        }
+        fn open_pull_request(&mut self, _: String, _: Completions) {}
+    }
+
+    #[test]
+    fn inbox_updates_tab_click_uses_the_drawn_home_coordinates() {
+        let snapshot = snapshot("inbox-click");
+        let session = snapshot.session_ids[0];
+        let attention = WorkspaceAttention {
+            workspace: snapshot.workspace_id,
+            items: vec![AttentionItem {
+                key: "session:creating".into(),
+                session: Some(session),
+                label: "setup".into(),
+                kind: AttentionKind::System,
+                reason: "Session is being created".into(),
+                target: None,
+                status_unknown: false,
+            }],
+        };
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+        deck.open_attention();
+        let frame = crate::presentation::workspace_deck::render_overlay(
+            &deck,
+            29,
+            140,
+            &vec![String::new(); 29],
+        );
+        let (row, column) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let line = widgets::strip_ansi(line);
+                let index = line.find("Updates (1)")?;
+                Some((row + 1, widgets::display_width(&line[..index])))
+            })
+            .unwrap();
+        deck.close_overlay();
+        let requests = Arc::default();
+        let mut factory = AttentionFactory {
+            inner: CountingBackendFactory::new(),
+            attention,
+            pr_requests: Arc::clone(&requests),
+            decisions: Vec::new(),
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenAttention),
+            Key::Click {
+                column: column.try_into().unwrap(),
+                row: row.try_into().unwrap(),
+            },
+            Key::Enter,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((30, 140));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            crate::presentation::WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| { frame.iter().any(|line| line.contains("Progress updates")) })
+        );
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn inbox_ignores_legacy_pr_rows_for_every_session_lifecycle() {
+        use usagi_core::domain::session_lifecycle::{SessionLifecycle, SessionLifecycleProjection};
+        for lifecycle in [
+            SessionLifecycle::Available,
+            SessionLifecycle::Creating,
+            SessionLifecycle::Failed,
+        ] {
+            let mut snapshot = snapshot_with_sessions("attention-pr", &["active", "target"]);
+            let target = snapshot.session_ids[1];
+            snapshot.session_lifecycles.insert(
+                target,
+                SessionLifecycleProjection {
+                    lifecycle,
+                    failure_stage: None,
+                    failure_summary: None,
+                },
+            );
+            let mut deck = WorkspaceDeck::new(&snapshot);
+            let attention = WorkspaceAttention {
+                workspace: snapshot.workspace_id,
+                items: vec![AttentionItem {
+                    key: "pr:target".into(),
+                    session: Some(target),
+                    label: "target".into(),
+                    kind: AttentionKind::Review,
+                    reason: "Review target PR".into(),
+                    target: None,
+                    status_unknown: false,
+                }],
+            };
+            deck.apply_attention(snapshot.workspace_id, Ok(attention.clone()));
+            let pr_requests = Arc::default();
+            let mut factory = AttentionFactory {
+                inner: CountingBackendFactory::new(),
+                attention,
+                pr_requests: Arc::clone(&pr_requests),
+                decisions: Vec::new(),
+            };
+            let mut term = FakeTerminal::with_keys(&[
+                Key::Enter,
+                Key::Live(LiveTerminalAction::OpenAttention),
+                Key::Enter,
+                Key::Escape,
+                Key::CtrlQ,
+                Key::Char('y'),
+            ]);
+            term.size = Some((30, 140));
+            let result = crate::presentation::frame_loop::drive_workspace_controller(
+                &mut term,
+                snapshot,
+                &mut deck,
+                &mut SessionCommandLane::new(),
+                &[],
+                None,
+                &mut factory,
+                usagi_core::domain::settings::ModalSelectionMode::Action,
+                usagi_core::domain::settings::PrAutoOpen::default(),
+                crate::presentation::WorkspaceEntryPolicy::default(),
+                None,
+            )
+            .unwrap();
+            assert!(matches!(result, WorkspaceStep::Quit));
+            assert!(pr_requests.lock().unwrap().is_empty(), "{lifecycle:?}");
+            assert!(
+                term.frames
+                    .iter()
+                    .any(|frame| { frame.iter().any(|line| line.contains("Action needed (0)")) })
+            );
+            assert!(
+                !term
+                    .frames
+                    .iter()
+                    .any(|frame| { frame.iter().any(|line| line.contains("Review target PR")) })
+            );
+        }
+    }
+}
+
+#[test]
+fn command_palette_prepares_commands_and_preserves_existing_input_in_the_frame_loop() {
+    let snapshot = snapshot("palette-project");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Help,
+        Key::Escape,
+        Key::Paste("Command terminal palette-project-session".into()),
+        Key::Enter,
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Enter,
+        Key::Escape,
+        Key::Escape,
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Paste("Session palette-project-session".into()),
+        Key::Enter,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    let frames = term
+        .frames
+        .iter()
+        .map(|frame| frame.join("\n"))
+        .collect::<Vec<_>>();
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("finish the current dialog or draft"))
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("Command · terminal"))
+    );
+}
+
+struct PaletteStreamFactory {
+    inner: CountingBackendFactory,
+    terminal: TerminalRef,
+    calls: Arc<Mutex<StreamCalls>>,
+}
+
+impl ControllerBackendFactory for PaletteStreamFactory {
+    fn create(
+        &mut self,
+        snapshot: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        let mut composition = self.inner.create(snapshot, host);
+        composition.agent_commands = Box::new(RecordingStreamPort(Arc::clone(&self.calls)));
+        composition.restore_commands = Box::new(RetryRestorePort {
+            workspace: snapshot.workspace_id,
+            entries: vec![TerminalInventoryEntry {
+                terminal: self.terminal.clone(),
+                kind: TerminalKind::Terminal,
+                live: true,
+            }],
+            runtimes: vec![],
+            fail_attempts: 0,
+            terminal_attempts: Arc::default(),
+            agent_attempts: Arc::default(),
+        });
+        composition
+    }
+}
+
+struct PaletteRestoreTerminal {
+    inner: FakeTerminal,
+    wait_for: &'static str,
+    deadline: std::time::Instant,
+}
+
+impl Terminal for PaletteRestoreTerminal {
+    fn size(&mut self) -> io::Result<(usize, usize)> {
+        self.inner.size()
+    }
+    fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+        self.inner.draw(frame)
+    }
+    fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+        self.inner.wait(duration)
+    }
+    fn read_key(&mut self) -> io::Result<Key> {
+        if self.inner.keys.front() == Some(&Key::Other) {
+            if !self
+                .inner
+                .frames
+                .last()
+                .is_some_and(|frame| frame.join("\n").contains(self.wait_for))
+            {
+                assert!(
+                    std::time::Instant::now() < self.deadline,
+                    "restored tab must become searchable"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Ok(Key::Other);
+            }
+            self.inner.keys.pop_front();
+        }
+        self.inner.read_key()
+    }
+}
+
+#[test]
+fn command_palette_owns_text_paste_and_control_input_over_a_live_terminal() {
+    let snapshot = snapshot("palette-terminal");
+    let calls = Arc::new(Mutex::new(StreamCalls::default()));
+    let terminal = live_terminal_ref(snapshot.workspace_id, snapshot.session_ids[0]);
+    let mut factory = PaletteStreamFactory {
+        inner: CountingBackendFactory::new(),
+        terminal,
+        calls: Arc::clone(&calls),
+    };
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        // The ordinal excludes fuzzy command matches before the tab is observed.
+        Key::Paste("Tab Terminal 1".into()),
+        Key::Other,
+        Key::Enter,
+        Key::Live(LiveTerminalAction::OpenCommandPalette),
+        Key::Char('s'),
+        Key::Paste("private query".into()),
+        Key::Passthrough(vec![4]),
+        Key::Enter,
+        Key::Escape,
+        Key::Char('x'),
+        Key::Live(LiveTerminalAction::Switch),
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        wait_for: "Tab · Terminal",
+        inner,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    let calls = calls.lock().unwrap();
+    assert!(calls.attaches > 0);
+    assert_eq!(calls.inputs, vec![b"x".to_vec()]);
+    assert_eq!(calls.launches, 0);
+}
+
+#[test]
+fn command_palette_revalidates_workspace_identity_and_carries_command_to_target() {
+    for replaced in [false, true] {
+        let alpha = snapshot("alpha");
+        let beta = snapshot("beta");
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha.clone(), beta.clone()]).unwrap();
+        let mut loader = FakeLoader {
+            prepared_snapshots: vec![if replaced {
+                snapshot("beta")
+            } else {
+                beta.clone()
+            }],
+            ..FakeLoader::default()
+        };
+        let mut factory = CountingBackendFactory::new();
+        let mut keys = vec![
+            Key::Live(LiveTerminalAction::OpenCommandPalette),
+            Key::Paste("Command terminal beta-session".into()),
+            Key::Enter,
+        ];
+        if replaced {
+            keys.extend([Key::Escape, Key::CtrlQ, Key::Char('y')]);
+        }
+        let mut term = FakeTerminal::with_keys(&keys);
+        term.size = Some((28, 120));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            alpha,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            Some(&mut loader),
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        if replaced {
+            assert!(matches!(result, WorkspaceStep::Quit));
+            assert!(
+                term.frames
+                    .iter()
+                    .any(|frame| frame.join("\n").contains("Target is unavailable"))
+            );
+            continue;
+        }
+        let WorkspaceStep::Activate(prepared) = result else {
+            panic!("expected target activation")
+        };
+        assert_eq!(prepared.workspace_id, beta.workspace_id);
+        deck.activate_snapshot(&prepared);
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenCommandPalette),
+            Key::Enter,
+            Key::Escape,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        term.size = Some((28, 120));
+        let result = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            *prepared,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, WorkspaceStep::Quit));
+        assert!(term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("finish the current dialog or draft")
+        }));
+    }
+}
+
+#[test]
+fn command_palette_pending_tab_visit_survives_idle_ticks_until_restore_completes() {
+    use crate::presentation::workspace_deck::palette::Action;
+    use crate::usecase::application::pane::TabSelection;
+    let snapshot = snapshot("pending-palette");
+    let terminal = scoped_terminal_ref(snapshot.workspace_id, None);
+    let calls = Arc::new(Mutex::new(StreamCalls::default()));
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    deck.schedule_palette_visit(
+        snapshot.workspace.path.clone(),
+        snapshot.workspace_id,
+        Action::Tab {
+            target: Target::Root(snapshot.workspace_id),
+            selection: TabSelection::Live(terminal.clone()),
+            kind: PaneKind::Terminal,
+        },
+    );
+    let mut factory = PaletteStreamFactory {
+        inner: CountingBackendFactory::new(),
+        terminal,
+        calls: Arc::clone(&calls),
+    };
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Other,
+        Key::Char('x'),
+        Key::Live(LiveTerminalAction::RootTerminal),
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        inner,
+        wait_for: "Workspace Terminal",
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    assert_eq!(calls.lock().unwrap().inputs, vec![b"x".to_vec()]);
+}
+
+#[test]
+fn knowledge_search_frame_owns_queries_and_refresh_preserves_query_and_filter() {
+    let snapshot = snapshot("knowledge-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenKnowledgeSearch),
+        Key::Paste("search body".into()),
+        Key::Passthrough(vec![3]),
+        Key::Enter,
+        Key::Tab,
+        Key::Live(LiveTerminalAction::OpenKnowledgeSearch),
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    let refreshed = term
+        .frames
+        .iter()
+        .rev()
+        .map(|frame| frame.join("\n"))
+        .find(|frame| frame.contains("Search Issue / Memory"))
+        .expect("search was drawn after refresh");
+    assert!(refreshed.contains("search body"), "{refreshed}");
+    assert!(refreshed.contains("Issues · Tab filter"), "{refreshed}");
+}
+
+mod knowledge_cancellation {
+    use super::*;
+    use crate::usecase::application::knowledge_search::{KnowledgeSearchPort, Results};
+    use std::sync::{atomic::AtomicBool, mpsc};
+    use std::time::{Duration, Instant};
+    struct Port(mpsc::Sender<String>);
+    impl KnowledgeSearchPort for Port {
+        fn search(&mut self, query: &str, cancelled: Arc<AtomicBool>) -> Results {
+            self.0.send(format!("started:{query}")).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                cancelled.load(Ordering::Acquire),
+                "frame did not cancel stale search"
+            );
+            self.0.send(format!("cancelled:{query}")).unwrap();
+            Results {
+                errors: vec!["stale search result".into()],
+                ..Results::default()
+            }
+        }
+        fn read(&mut self, _: &str) -> Result<Vec<String>, String> {
+            unreachable!("no document is selected")
+        }
+    }
+    struct Factory(CountingBackendFactory, mpsc::Sender<String>);
+    impl ControllerBackendFactory for Factory {
+        fn create(
+            &mut self,
+            snapshot: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> ControllerBackendComposition {
+            self.0.create(snapshot, host)
+        }
+        fn knowledge_search(&self, _: &std::path::Path) -> Box<dyn KnowledgeSearchPort> {
+            Box::new(Port(self.1.clone()))
+        }
+    }
+    struct SearchTerminal {
+        inner: FakeTerminal,
+        events: mpsc::Receiver<String>,
+        expected: std::collections::VecDeque<&'static str>,
+        deadline: Instant,
+    }
+    impl Terminal for SearchTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            self.inner.size()
+        }
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.inner.draw(frame)
+        }
+        fn wait(&mut self, duration: Duration) -> io::Result<()> {
+            self.inner.wait(duration)
+        }
+        fn read_key(&mut self) -> io::Result<Key> {
+            if self.inner.keys.front() == Some(&Key::Other) {
+                if let Ok(event) = self.events.try_recv() {
+                    assert_eq!(event, self.expected.pop_front().unwrap());
+                    self.inner.keys.pop_front();
+                } else {
+                    assert!(
+                        Instant::now() < self.deadline,
+                        "search lifecycle event did not arrive"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                    return Ok(Key::Other);
+                }
+                return Ok(Key::Other);
+            }
+            self.inner.read_key()
+        }
+    }
+    #[test]
+    fn knowledge_search_frame_cancels_query_changes_overlay_switches_and_close() {
+        let snapshot = snapshot("knowledge-search-cancel");
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        let (sender, receiver) = mpsc::channel();
+        let mut factory = Factory(CountingBackendFactory::new(), sender);
+        let mut inner = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenKnowledgeSearch),
+            Key::Other,
+            Key::Paste("new".into()),
+            Key::Other,
+            Key::Other,
+            Key::Live(LiveTerminalAction::OpenOutputSearch),
+            Key::Other,
+            Key::Live(LiveTerminalAction::OpenKnowledgeSearch),
+            Key::Other,
+            Key::Escape,
+            Key::Other,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        inner.size = Some((28, 120));
+        let mut term = SearchTerminal {
+            inner,
+            events: receiver,
+            expected: [
+                "started:",
+                "cancelled:",
+                "started:new",
+                "cancelled:new",
+                "started:",
+                "cancelled:",
+            ]
+            .into(),
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        let step = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(step, WorkspaceStep::Quit));
+        assert!(term.expected.is_empty());
+        assert!(
+            term.inner
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Search terminal output"))
+        );
+        assert!(
+            !term
+                .inner
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("stale search result"))
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Keep the queued-hit lifetime and each navigation fence in one fixture.
+fn output_search_reveals_only_the_exact_terminal_snapshot_and_consumes_the_hit() {
+    use crate::presentation::workspace_deck::output_search::Hit;
+    use usagi_core::usecase::terminal_search::{
+        SearchBudget, SearchTerminalKind, TerminalSearchResult, WorkspaceOutputSearch,
+    };
+    let snapshot = snapshot("output-search");
+    let workspace = snapshot.workspace_id;
+    let session = snapshot.session_ids[0];
+    let terminal = live_terminal_ref(workspace, session);
+    let geometry = Geometry { cols: 20, rows: 3 };
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_context(
+        workspace,
+        vec![session],
+        Box::new(RecordingStreamPort(Arc::default())),
+    );
+    let mut screen = usagi_core::usecase::vt_screen::VtScreen::new(3, 20);
+    screen.advance(b"one\r\ntwo\r\nthree");
+    let mut source =
+        TerminalSearchResult::unavailable(terminal.clone(), SearchTerminalKind::Terminal);
+    source.output_offset = b"one\r\ntwo\r\nthree".len() as u64;
+    source.search(&screen.checkpoint(), "two", &mut SearchBudget::default());
+    deck.open_output_search();
+    deck.handle_overlay_key(&Key::Paste("two".into()));
+    let (token, _, _) = deck.take_output_search().unwrap();
+    deck.apply_output_search(
+        token,
+        vec![(
+            workspace,
+            Ok(WorkspaceOutputSearch {
+                workspace,
+                session: None,
+                query: "two".into(),
+                terminals: vec![source],
+                omitted_terminals: 0,
+            }),
+        )],
+    );
+    let crate::presentation::OverlayIntent::OutputVisit(hit) = deck.handle_overlay_key(&Key::Enter)
+    else {
+        panic!()
+    };
+    let hit: Hit = *hit;
+    let mut controls = LiveTerminalControls::default();
+    deck.pending_output_hit = Some(hit.clone());
+    assert_eq!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        ),
+        None
+    );
+    assert!(deck.pending_output_hit.is_some());
+    deck.close_overlay();
+    assert!(
+        crate::presentation::output_search::focus_match(&mut deck, &ui, &mut controls, None, 1)
+            .unwrap()
+            .contains("no longer")
+    );
+    deck.pending_output_hit = Some(hit.clone());
+    assert!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        )
+        .unwrap()
+        .contains("unavailable")
+    );
+    ui.start_terminal_session(terminal.clone(), geometry);
+    controls.sync_focus(Some(&terminal));
+    deck.pending_output_hit = Some(hit.clone());
+    assert_eq!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        ),
+        None
+    );
+    assert_eq!(controls.scroll(), 1);
+    assert!(controls.has_selection());
+    assert!(deck.pending_output_hit.is_none());
+    let mut stale = hit;
+    stale.query = "other".into();
+    deck.pending_output_hit = Some(stale);
+    assert!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        )
+        .unwrap()
+        .contains("Output changed")
+    );
+    assert_eq!(
+        crate::presentation::output_search::focus_match(
+            &mut deck,
+            &ui,
+            &mut controls,
+            Some(&terminal),
+            1
+        ),
+        None
+    );
+}
+
+#[test]
+fn output_search_frame_owns_queries_and_control_keys() {
+    let snapshot = snapshot("output-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenOutputSearch),
+        Key::Paste("error".into()),
+        Key::Passthrough(vec![3]),
+        Key::Enter,
+        Key::Tab,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    assert!(
+        term.frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("Search terminal output"))
+    );
+}
+
+struct OutputSearchFactory(CountingBackendFactory);
+struct OutputSearchPort(WorkspaceId);
+impl crate::usecase::application::runtime_ports::GardenInventoryPort for OutputSearchPort {
+    fn inventory(
+        &mut self,
+        _: WorkspaceId,
+    ) -> Result<usagi_core::domain::agent::AgentWorkspaceObservation, String> {
+        Err("unavailable".into())
+    }
+    fn search_terminal_output(
+        &mut self,
+        workspace: WorkspaceId,
+        query: &str,
+        _session: Option<usagi_core::domain::id::SessionId>,
+    ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
+        use usagi_core::usecase::terminal_search::{
+            SearchBudget, SearchTerminalKind, TerminalSearchResult, WorkspaceOutputSearch,
+        };
+        assert_eq!(workspace, self.0);
+        let mut source = TerminalSearchResult::unavailable(
+            live_terminal_ref(workspace, SessionId::new()),
+            SearchTerminalKind::Terminal,
+        );
+        let mut screen = usagi_core::usecase::vt_screen::VtScreen::new(3, 30);
+        screen.advance(b"before\r\nerror\r\nafter");
+        source.search(&screen.checkpoint(), query, &mut SearchBudget::default());
+        Ok(WorkspaceOutputSearch {
+            workspace,
+            session: None,
+            query: query.into(),
+            terminals: vec![source],
+            omitted_terminals: 0,
+        })
+    }
+}
+impl ControllerBackendFactory for OutputSearchFactory {
+    fn create(
+        &mut self,
+        snapshot: &WorkspaceSnapshot,
+        host: ControllerHost,
+    ) -> ControllerBackendComposition {
+        let mut composition = self.0.create(snapshot, host);
+        composition.garden_inventory = Box::new(OutputSearchPort(snapshot.workspace_id));
+        composition
+    }
+}
+
+#[test]
+fn output_search_frame_applies_async_results_and_refuses_a_disappeared_target() {
+    let snapshot = snapshot("output-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = OutputSearchFactory(CountingBackendFactory::new());
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenOutputSearch),
+        Key::Paste("error".into()),
+        Key::Other,
+        Key::Enter,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        inner,
+        wait_for: "1 hits",
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    assert!(
+        term.inner
+            .frames
+            .iter()
+            .any(|frame| frame.join("\n").contains("no longer available"))
+    );
+    assert!(deck.pending_output_hit.is_none());
+}
+
+mod unified_cancellation {
+    use super::*;
+    use crate::usecase::application::unified_search::{Query, Results, UnifiedSearchPort};
+    use std::sync::{atomic::AtomicBool, mpsc};
+    use std::time::{Duration, Instant};
+    struct Port(mpsc::Sender<String>);
+    impl UnifiedSearchPort for Port {
+        fn search(&mut self, query: &Query, cancelled: Arc<AtomicBool>) -> Results {
+            self.0.send(format!("started:{}", query.text)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                cancelled.load(Ordering::Acquire),
+                "frame did not cancel stale search"
+            );
+            self.0.send(format!("cancelled:{}", query.text)).unwrap();
+            Results {
+                errors: vec!["stale search result".into()],
+                ..Results::default()
+            }
+        }
+        fn read(&mut self, _: &str) -> Result<Vec<String>, String> {
+            unreachable!("no document is selected")
+        }
+    }
+    struct Factory(CountingBackendFactory, mpsc::Sender<String>);
+    impl ControllerBackendFactory for Factory {
+        fn create(
+            &mut self,
+            snapshot: &WorkspaceSnapshot,
+            host: ControllerHost,
+        ) -> ControllerBackendComposition {
+            self.0.create(snapshot, host)
+        }
+        fn unified_search(&self, _: &std::path::Path) -> Box<dyn UnifiedSearchPort> {
+            Box::new(Port(self.1.clone()))
+        }
+    }
+    struct SearchTerminal {
+        inner: FakeTerminal,
+        events: mpsc::Receiver<String>,
+        expected: std::collections::VecDeque<&'static str>,
+        deadline: Instant,
+    }
+    impl Terminal for SearchTerminal {
+        fn size(&mut self) -> io::Result<(usize, usize)> {
+            self.inner.size()
+        }
+        fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+            self.inner.draw(frame)
+        }
+        fn wait(&mut self, duration: Duration) -> io::Result<()> {
+            self.inner.wait(duration)
+        }
+        fn read_key(&mut self) -> io::Result<Key> {
+            if self.inner.keys.front() == Some(&Key::Other) {
+                if let Ok(event) = self.events.try_recv() {
+                    assert_eq!(event, self.expected.pop_front().unwrap());
+                    self.inner.keys.pop_front();
+                } else {
+                    assert!(
+                        Instant::now() < self.deadline,
+                        "search lifecycle event did not arrive"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                    return Ok(Key::Other);
+                }
+                return Ok(Key::Other);
+            }
+            self.inner.read_key()
+        }
+    }
+    #[test]
+    fn unified_search_frame_cancels_query_changes_overlay_switches_and_close() {
+        let snapshot = snapshot("knowledge-search-cancel");
+        let mut deck = WorkspaceDeck::new(&snapshot);
+        let (sender, receiver) = mpsc::channel();
+        let mut factory = Factory(CountingBackendFactory::new(), sender);
+        let mut inner = FakeTerminal::with_keys(&[
+            Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+            Key::Other,
+            Key::Paste("new".into()),
+            Key::Other,
+            Key::Other,
+            Key::Live(LiveTerminalAction::OpenOutputSearch),
+            Key::Other,
+            Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+            Key::Other,
+            Key::Escape,
+            Key::Other,
+            Key::CtrlQ,
+            Key::Char('y'),
+        ]);
+        inner.size = Some((28, 120));
+        let mut term = SearchTerminal {
+            inner,
+            events: receiver,
+            expected: [
+                "started:",
+                "cancelled:",
+                "started:new",
+                "cancelled:new",
+                "started:",
+                "cancelled:",
+            ]
+            .into(),
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        let step = crate::presentation::frame_loop::drive_workspace_controller(
+            &mut term,
+            snapshot,
+            &mut deck,
+            &mut SessionCommandLane::new(),
+            &[],
+            None,
+            &mut factory,
+            usagi_core::domain::settings::ModalSelectionMode::Action,
+            usagi_core::domain::settings::PrAutoOpen::default(),
+            WorkspaceEntryPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(step, WorkspaceStep::Quit));
+        assert!(term.expected.is_empty());
+        assert!(
+            term.inner
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Search terminal output"))
+        );
+        assert!(
+            !term
+                .inner
+                .frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("stale search result"))
+        );
+    }
+}
+
+#[test]
+fn unified_search_frame_owns_queries_and_refresh_preserves_query_and_filter() {
+    let snapshot = snapshot("knowledge-search");
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut factory = CountingBackendFactory::new();
+    let mut term = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        Key::Paste("search body".into()),
+        Key::Passthrough(vec![3]),
+        Key::Enter,
+        Key::Tab,
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    term.size = Some((28, 120));
+    let step = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(step, WorkspaceStep::Quit));
+    let refreshed = term
+        .frames
+        .iter()
+        .rev()
+        .map(|frame| frame.join("\n"))
+        .find(|frame| frame.contains("Search"))
+        .expect("search was drawn after refresh");
+    assert!(refreshed.contains("search body"), "{refreshed}");
+    assert!(refreshed.contains("[Terminal]"), "{refreshed}");
+}
+
+#[test]
+fn unified_search_owns_text_paste_and_control_input_over_a_live_terminal() {
+    let snapshot = snapshot("palette-terminal");
+    let calls = Arc::new(Mutex::new(StreamCalls::default()));
+    let terminal = live_terminal_ref(snapshot.workspace_id, snapshot.session_ids[0]);
+    let mut factory = PaletteStreamFactory {
+        inner: CountingBackendFactory::new(),
+        terminal,
+        calls: Arc::clone(&calls),
+    };
+    let mut deck = WorkspaceDeck::new(&snapshot);
+    let mut inner = FakeTerminal::with_keys(&[
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        // The ordinal excludes fuzzy command matches before the tab is observed.
+        Key::Paste("Tab Terminal 1".into()),
+        Key::Other,
+        Key::Enter,
+        Key::Live(LiveTerminalAction::OpenUnifiedSearch),
+        Key::Char('s'),
+        Key::Paste("private query".into()),
+        Key::Passthrough(vec![4]),
+        Key::Enter,
+        Key::Escape,
+        Key::Char('x'),
+        Key::Live(LiveTerminalAction::Switch),
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    inner.size = Some((28, 120));
+    let mut term = PaletteRestoreTerminal {
+        wait_for: "Tab · Terminal",
+        inner,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    };
+    let result = crate::presentation::frame_loop::drive_workspace_controller(
+        &mut term,
+        snapshot,
+        &mut deck,
+        &mut SessionCommandLane::new(),
+        &[],
+        None,
+        &mut factory,
+        usagi_core::domain::settings::ModalSelectionMode::Action,
+        usagi_core::domain::settings::PrAutoOpen::default(),
+        WorkspaceEntryPolicy::default(),
+        None,
+    )
+    .unwrap();
+    assert!(matches!(result, WorkspaceStep::Quit));
+    let calls = calls.lock().unwrap();
+    assert!(calls.attaches > 0);
+    assert_eq!(calls.inputs, vec![b"x".to_vec()]);
+    assert_eq!(calls.launches, 0);
 }

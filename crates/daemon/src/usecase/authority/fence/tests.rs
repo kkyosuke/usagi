@@ -121,6 +121,10 @@ fn the_non_terminal_surface_names_spawns_reads_and_inventories() {
             (RequestClass::Spawn, ResourceOwner::Unscoped),
         ),
         (
+            "resume_agent_headless",
+            (RequestClass::Spawn, ResourceOwner::Unscoped),
+        ),
+        (
             "resume_agent_with_current_integration",
             (RequestClass::Spawn, ResourceOwner::Unscoped),
         ),

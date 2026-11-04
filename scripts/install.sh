@@ -7,14 +7,42 @@ readonly USAGI_DIR="${USAGI_HOME:-$HOME/.usagi}"
 readonly BIN_DIR="$USAGI_DIR/bin"
 readonly TARGET="$BIN_DIR/usagi"
 readonly LOCK_DIR="$USAGI_DIR/update.lock"
+readonly LEGACY_RELEASED_PID=2147483647
 
 STAGE_DIR=""
 LOCK_HELD=0
+LOCK_NODE=""
+LOCK_ATTEMPTS=0
 SELECTOR_ACTIVE=0
 SELECT_VERSION=0
+SYNC_DAEMON_ONLY=0
+RESTART_AGENTS=0
+
+progress() {
+    local done=$1 total=$2 label=$3 bar="" i
+    for ((i=0; i<total; i++)); do
+        if [ "$i" -lt "$done" ]; then bar+="#"; else bar+="-"; fi
+    done
+    if [ -t 2 ]; then
+        printf '\r\033[2K[%s] %s/%s %s\n' "$bar" "$done" "$total" "$label" >&2
+    else
+        printf '[%s] %s/%s %s\n' "$bar" "$done" "$total" "$label" >&2
+    fi
+}
+
+download() {
+    if [ -t 2 ]; then
+        curl -fL --progress-bar "$1" -o "$2"
+    else
+        curl -fsSL "$1" -o "$2"
+    fi
+}
 
 cleanup() {
-    local status=$?
+    local status=$? retired node alone=1 legacy_owner
+    trap - EXIT
+    trap '' HUP INT TERM
+    set +e
     if [ "$SELECTOR_ACTIVE" -eq 1 ]; then
         printf '\033[?25h' > /dev/tty 2>/dev/null || true
         SELECTOR_ACTIVE=0
@@ -22,12 +50,40 @@ cleanup() {
     if [ -n "$STAGE_DIR" ] && [ -d "$STAGE_DIR" ]; then
         rm -rf -- "$STAGE_DIR"
     fi
-    if [ "$LOCK_HELD" -eq 1 ] && [ -d "$LOCK_DIR" ]; then
-        rm -rf -- "$LOCK_DIR"
+    if [ -n "$LOCK_NODE" ] && [ -d "$LOCK_NODE" ]; then
+        # Publish compatibility metadata while the held node still fences late
+        # participants. A waiter must never overwrite another holder's PID.
+        if [ "$LOCK_HELD" -eq 1 ]; then
+            for node in "$LOCK_DIR"/owner.*; do
+                [ -d "$node" ] && [ "$node" != "$LOCK_NODE" ] || continue
+                [ ! -L "$node" ] || { alone=0; break; }
+                if lock_owner_alive "$node"; then alone=0; break; fi
+            done
+            if [ "$alone" -eq 1 ]; then
+                # This exceeds supported Linux/macOS PID limits. A completed
+                # update must not become busy when its actual PID is reused.
+                printf '%s\n' "$LEGACY_RELEASED_PID" > "$LOCK_NODE/legacy.pid"
+                publish_legacy_pid
+            elif legacy_owner="$(read_lock_pid "$LOCK_DIR")" &&
+                [ "$legacy_owner" = "$$" ]; then
+                # Retire our compatibility PID before handing off the node,
+                # so legacy recovery cannot delete a queued new participant.
+                rm -f -- "$LOCK_DIR/pid"
+            fi
+        fi
+        # Retire atomically before removing metadata so another participant
+        # cannot mistake a partially removed live node for a malformed owner.
+        retired="$LOCK_DIR/.retired.${LOCK_NODE##*/}"
+        if mv -- "$LOCK_NODE" "$retired" 2>/dev/null; then
+            rm -rf -- "$retired"
+        fi
     fi
     exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
     echo "Error: $*" >&2
@@ -185,49 +241,209 @@ render_release_selector() {
     printf '%s╰───────────────────────────────────────────╯%s\n' "$c_pink" "$c_reset" > /dev/tty
 }
 
-case "${1:-}" in
-    --select-version)
-        SELECT_VERSION=1
-        ;;
-    '')
-        ;;
-    *)
-        fail "unknown option: $1"
-        ;;
-esac
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --select-version) SELECT_VERSION=1 ;;
+        --sync-daemon-only) SYNC_DAEMON_ONLY=1 ;;
+        --restart-agents) RESTART_AGENTS=1 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+    shift
+done
+if [ "$SYNC_DAEMON_ONLY" -eq 1 ] && [ "$RESTART_AGENTS" -eq 1 ]; then
+    fail "automatic synchronization cannot interrupt Agents"
+fi
+if [ "$RESTART_AGENTS" -eq 1 ] && [ "${USAGI_MANAGED_UPDATE:-}" != "1" ]; then
+    fail "Agent restart must be requested with usagi update --restart-agents"
+fi
 
 read_version() {
     local bin=$1 output
     [ -x "$bin" ] || return 0
-    output="$($bin --version 2>/dev/null)" || return 0
+    output="$("$bin" --version 2>/dev/null)" || return 0
     printf '%s\n' "$output" | awk 'NF == 2 && $1 == "usagi" { print $2 }'
 }
 
+# Immutable owner nodes let stale recovery and cleanup remove only the exact
+# observed incarnation. The shared directory is never replaced or removed.
+process_is_live() {
+    local error
+    if error="$(LC_ALL=C kill -0 "$1" 2>&1)"; then return 0; fi
+    # EPERM (including sandbox restrictions) is not proof of death. Only the
+    # supported platforms' C-locale ESRCH message permits stale reclamation.
+    case "$error" in
+        *'No such process'*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+read_lock_metadata() {
+    # Published PID/ticket files are immutable regular files. Refuse special
+    # files before sed so an unknown owner cannot block a liveness probe.
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    sed -n '1p' "$1" 2>/dev/null
+}
+
+read_lock_pid() {
+    local owner
+    owner="$(read_lock_metadata "$1/pid")" || return 1
+    case "$owner" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#owner}" -le 10 ] || return 1
+    owner=$((10#$owner))
+    [ "$owner" -gt 0 ] && [ "$owner" -le 2147483647 ] || return 1
+    printf '%s\n' "$owner"
+}
+
+lock_owner_alive() {
+    local owner
+    # Missing, unreadable or malformed identity is unknown, not proof of death.
+    owner="$(read_lock_pid "$1")" || return 0
+    # A reused PID conservatively remains busy. Clock or locale-sensitive
+    # process timestamps must never cause a live participant to be reclaimed.
+    process_is_live "$owner"
+}
+
+read_lock_ticket() {
+    local ticket
+    ticket="$(read_lock_metadata "$1/ticket")" || return 1
+    case "$ticket" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#ticket}" -le 10 ] || return 1
+    ticket=$((10#$ticket))
+    [ "$ticket" -gt 0 ] && [ "$ticket" -le 2147483646 ] || return 1
+    printf '%s\n' "$ticket"
+}
+
+wait_for_update_lock() {
+    LOCK_ATTEMPTS=$((LOCK_ATTEMPTS + 1))
+    [ "$LOCK_ATTEMPTS" -lt 600 ] || fail "another usagi update is still running"
+    sleep 0.1
+}
+
+publish_legacy_pid() {
+    mv -f -- "$LOCK_NODE/legacy.pid" "$LOCK_DIR/pid"
+}
+
+wait_for_legacy_lock() {
+    local legacy_owner
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
+    # Respect an existing legacy owner. Empty or invalid legacy roots are
+    # recovered without deleting the directory or any newer participant.
+    while true; do
+        if [ ! -e "$LOCK_DIR/pid" ] && [ ! -L "$LOCK_DIR/pid" ]; then break; fi
+        if ! legacy_owner="$(read_lock_metadata "$LOCK_DIR/pid")"; then
+            wait_for_update_lock
+            continue
+        fi
+        case "$legacy_owner" in
+            ''|0|*[!0-9]*|"$LEGACY_RELEASED_PID") break ;;
+        esac
+        process_is_live "$legacy_owner" || break
+        # Keep the observed PID until it exits: legacy cleanup removes pid
+        # before the directory, and must finish before this directory is reused.
+        while process_is_live "$legacy_owner"; do
+            wait_for_update_lock
+        done
+    done
+    # Only the admitted bakery owner removes metadata. An earlier observer
+    # must not delete a newer holder's PID after its cached owner has exited.
+}
+
 acquire_lock() {
-    local attempt=0 owner=""
+    local node candidate name maximum=0 ticket owner blocked owner_pid
+    LOCK_ATTEMPTS=0
     mkdir -p -- "$USAGI_DIR"
     chmod 700 "$USAGI_DIR"
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
+    mkdir -p -m 700 -- "$LOCK_DIR"
+    chmod 700 "$LOCK_DIR"
 
-    while ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; do
-        if [ -f "$LOCK_DIR/pid" ]; then
-            owner="$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)"
+    wait_for_legacy_lock
+    [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
+    mkdir -p -m 700 -- "$LOCK_DIR"
+    chmod 700 "$LOCK_DIR"
+
+    LOCK_NODE="$(mktemp -d "$LOCK_DIR/.prepare.$$.XXXXXXXX")"
+    printf '%s\n' "$$" > "$LOCK_NODE/pid"
+    printf '%s\n' "$$" > "$LOCK_NODE/legacy.pid"
+    : > "$LOCK_NODE/choosing"
+    name=${LOCK_NODE##*/}
+    candidate="$LOCK_DIR/owner.${name#.prepare.}"
+    mv -- "$LOCK_NODE" "$candidate"
+    LOCK_NODE=$candidate
+    wait_for_legacy_lock
+
+    # Publish choosing before reading tickets. An earlier participant waits
+    # for this doorway to close, including when concurrent tickets are equal.
+    for node in "$LOCK_DIR"/owner.*; do
+        [ -d "$node" ] || continue
+        [ ! -L "$node" ] || fail "update owner node must not be a symlink"
+        [ "$node" != "$LOCK_NODE" ] || continue
+        if ! lock_owner_alive "$node"; then
+            rm -rf -- "$node"
+            continue
         fi
-        case "$owner" in
-            ''|*[!0-9]*) ;;
-            *)
-                if ! kill -0 "$owner" 2>/dev/null; then
-                    rm -rf -- "$LOCK_DIR"
-                    owner=""
-                    continue
-                fi
-                ;;
-        esac
-        attempt=$((attempt + 1))
-        [ "$attempt" -lt 600 ] || fail "another usagi update is still running"
-        sleep 0.1
+        if ! ticket="$(read_lock_ticket "$node")"; then
+            [ ! -f "$node/choosing" ] || continue
+            # The other doorway may have closed after the failed read. Reread
+            # its published ticket before diagnosing malformed metadata.
+            if ! ticket="$(read_lock_ticket "$node")"; then
+                [ -d "$node" ] || continue
+                fail "invalid update lock ticket"
+            fi
+        fi
+        [ "$ticket" -le "$maximum" ] || maximum=$ticket
     done
+    [ "$maximum" -lt 2147483646 ] || fail "update lock ticket limit reached"
+    ticket=$((maximum + 1))
+    printf '%s\n' "$ticket" > "$LOCK_NODE/ticket.next"
+    mv -- "$LOCK_NODE/ticket.next" "$LOCK_NODE/ticket"
+    rm -- "$LOCK_NODE/choosing"
+
+    while true; do
+        blocked=0
+        for node in "$LOCK_DIR"/owner.*; do
+            [ -d "$node" ] || continue
+            [ ! -L "$node" ] || fail "update owner node must not be a symlink"
+            [ "$node" != "$LOCK_NODE" ] || continue
+            if ! lock_owner_alive "$node"; then
+                rm -rf -- "$node"
+                continue
+            fi
+            if [ -f "$node/choosing" ]; then
+                blocked=1
+                break
+            fi
+            if ! owner="$(read_lock_ticket "$node")"; then
+                [ -d "$node" ] || continue
+                fail "invalid update lock ticket"
+            fi
+            if [ "$owner" -lt "$ticket" ]; then
+                blocked=1
+                break
+            fi
+            if [ "$owner" -eq "$ticket" ]; then
+                if ! owner_pid="$(read_lock_pid "$node")"; then
+                    [ -d "$node" ] || continue
+                    blocked=1
+                    break
+                fi
+                if [ "$owner_pid" -lt "$$" ]; then
+                    blocked=1
+                    break
+                fi
+            fi
+        done
+        [ "$blocked" -ne 0 ] || break
+        wait_for_update_lock
+    done
+    wait_for_legacy_lock
+    rm -f -- "$LOCK_DIR/pid"
+    [ -d "$LOCK_NODE" ] || fail "update lock owner disappeared"
     LOCK_HELD=1
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
 }
 
 platform_asset() {
@@ -302,6 +518,16 @@ verify_expected_version() {
     printf '%s\n' "$actual"
 }
 
+if [ "$SYNC_DAEMON_ONLY" -eq 1 ]; then
+    # Reuse the publication lock so a queued worker always invokes the currently
+    # installed binary, never an artifact superseded by a concurrent update.
+    # This path performs no download and does not replace any binary.
+    acquire_lock
+    publish_legacy_pid
+    USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_SYNC_RETRY=1 "$TARGET" daemon sync-after-update
+    exit 0
+fi
+
 ASSET_NAME="$(platform_asset)"
 if [ "$SELECT_VERSION" -eq 1 ]; then
     select_release
@@ -325,10 +551,14 @@ CHECKSUM="$STAGE_DIR/$ASSET_NAME.sha256"
 VERSION_FILE="$STAGE_DIR/$ASSET_NAME.version"
 
 echo "$ASSET_NAME をダウンロードして検証中だよ！ぴょん"
-curl -fsSL "$BASE_URL/$ASSET_NAME" -o "$ARCHIVE"
-curl -fsSL "$BASE_URL/$ASSET_NAME.sha256" -o "$CHECKSUM"
-curl -fsSL "$BASE_URL/$ASSET_NAME.version" -o "$VERSION_FILE"
+PROGRESS_TOTAL=4
+if [ "$RESTART_AGENTS" -eq 1 ]; then PROGRESS_TOTAL=6; fi
+progress 0 "$PROGRESS_TOTAL" "配布物をダウンロードしています"
+download "$BASE_URL/$ASSET_NAME" "$ARCHIVE"
+download "$BASE_URL/$ASSET_NAME.sha256" "$CHECKSUM"
+download "$BASE_URL/$ASSET_NAME.version" "$VERSION_FILE"
 
+progress 1 "$PROGRESS_TOTAL" "配布物を検証しています"
 verify_checksum "$CHECKSUM" "$ARCHIVE" "$ASSET_NAME"
 verify_archive "$ARCHIVE"
 tar -xzf "$ARCHIVE" -C "$STAGE_DIR" -- usagi
@@ -336,9 +566,13 @@ CANDIDATE="$STAGE_DIR/usagi"
 chmod 755 "$CANDIDATE"
 NEW_VERSION="$(verify_expected_version "$VERSION_FILE" "$CANDIDATE" "$USAGI_VERSION")"
 OLD_VERSION="$(read_version "$TARGET")"
+progress 2 "$PROGRESS_TOTAL" "usagi 本体を置き換えています"
 
 # STAGE_DIR is below BIN_DIR, so this rename stays on one filesystem. POSIX
 # rename either replaces TARGET atomically or leaves its bytes and mode intact.
+# Publish the held PID before commit so even SIGKILL after a downgrade leaves
+# metadata that the older embedded installer can recover on its next update.
+publish_legacy_pid
 mv -f -- "$CANDIDATE" "$TARGET"
 
 # A managed self-update holds update.lock until the exact installed artifact
@@ -346,13 +580,21 @@ mv -f -- "$CANDIDATE" "$TARGET"
 # authority. The hidden daemon verb is the capability boundary: older selected
 # releases reject it before any weaker replacement can run.
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
+    progress 3 "$PROGRESS_TOTAL" "daemon の更新を準備しています"
     printf "daemon の状態を安全に同期中だよ！ぴょん\n"
+    SYNC_ARGS=(daemon sync-after-update)
+    if [ "$RESTART_AGENTS" -eq 1 ]; then SYNC_ARGS+=(--restart-agents); fi
     set +e
-    "$TARGET" daemon sync-after-update
+    USAGI_UPDATE_PROGRESS=1 USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_AUTO_SYNC=1 "$TARGET" "${SYNC_ARGS[@]}"
     SYNC_STATUS=$?
     set -e
+    if [ "$SYNC_STATUS" -ne 0 ] && [ "$SYNC_STATUS" -ne 3 ] && [ "$SYNC_STATUS" -ne 4 ]; then
+        progress 3 "$PROGRESS_TOTAL" "本体更新済み・daemon の同期は未完了です"
+    fi
     case "$SYNC_STATUS" in
         0) ;;
+        3) ;; # Binary installed; live connections defer daemon replacement.
+        4) ;; # Binary installed; the selected binary queued an automatic retry.
         2)
             fail "selected usagi does not support safe managed daemon synchronization; the existing daemon was left unchanged"
             ;;
@@ -360,6 +602,13 @@ if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
             fail "installed usagi could not complete daemon synchronization; inspect 'usagi daemon status' before retrying"
             ;;
     esac
+    if [ "$SYNC_STATUS" -eq 3 ] || [ "$SYNC_STATUS" -eq 4 ]; then
+        progress 3 "$PROGRESS_TOTAL" "本体更新済み・daemon の切替は保留中です"
+    else
+        progress "$PROGRESS_TOTAL" "$PROGRESS_TOTAL" "更新が完了しました"
+    fi
+else
+    progress "$PROGRESS_TOTAL" "$PROGRESS_TOTAL" "本体の更新が完了しました"
 fi
 
 if [ -z "$OLD_VERSION" ]; then
@@ -396,7 +645,13 @@ printf '   %so_(")(")%s  %s→%s  %s%s/usagi%s\n' "$C_PINK" "$C_RST" "$C_DIM" "$
 printf "\n"
 printf "次回の起動から新しい CLI を使えるよ。起動中の TUI は開き直してね。\n"
 if [ "${USAGI_MANAGED_UPDATE:-}" = "1" ]; then
-    printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
+    if [ "$SYNC_STATUS" -eq 4 ]; then
+        printf "daemon の切り替えを予約したよ。Agent・terminal の終了後に自動で再試行するよ。\n"
+    elif [ "$SYNC_STATUS" -eq 3 ]; then
+        printf "現在の接続を維持するため、daemon の切り替えは保留しているよ。\n"
+    else
+        printf "daemon の build を同期したよ（停止中なら起動していないよ）。\n"
+    fi
 else
     printf "daemon の build が古い場合は 'usagi daemon restart' で入れ替えてね。\n"
 fi

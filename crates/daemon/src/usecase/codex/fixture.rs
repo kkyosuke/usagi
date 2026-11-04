@@ -15,6 +15,7 @@ use usagi_core::domain::{
 use super::{
     CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner, PROFILE_REVISION,
 };
+use crate::usecase::resources::StoreError;
 use crate::usecase::{
     generation::ProcessIdentity,
     runtime::{
@@ -324,7 +325,7 @@ fn headless_requires_a_prompt_and_does_not_accept_resume() {
         adapter.resolve(&resume),
         Err(AdapterError::Validation(
             LaunchValidationError::UnsupportedCapability {
-                capability: AgentCapability::Resume
+                capability: AgentCapability::HeadlessResume
             }
         ))
     ));
@@ -363,7 +364,10 @@ fn rejects_unknown_profiles_before_provisioning() {
             LaunchValidationError::UnknownProfile { profile_id: _ }
         ))
     ));
-    assert!(adapter.provisioner.calls.is_empty());
+    assert_eq!(
+        adapter.provisioner.calls,
+        [] as [crate::usecase::runtime::ProvisionContext; 0]
+    );
 }
 
 #[test]
@@ -423,7 +427,7 @@ fn provisioned_environment_is_an_allowlist_not_an_environment_value_map() {
 struct Store(Vec<RuntimeStoreSnapshot>);
 
 impl RuntimeStore for Store {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0.push(snapshot);
         Ok(())
     }

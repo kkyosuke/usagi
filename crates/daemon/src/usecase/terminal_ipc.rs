@@ -21,7 +21,9 @@ use usagi_core::{
             TerminalLaunchScope, TerminalLaunchValidationError,
         },
     },
-    infrastructure::ipc::{ErrorCode, ProtocolError, TerminalGeometry, TerminalRequest},
+    infrastructure::ipc::{
+        ErrorCode, ProtocolError, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    },
     usecase::vt_screen::{COLS_MAX, ROWS_MAX},
 };
 
@@ -112,6 +114,33 @@ pub const GENERIC_TERMINAL_LIMIT: usize =
     usagi_core::domain::settings::DEFAULT_TERMINAL_MAX_CONCURRENT as usize;
 
 impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
+    /// Whether a launch needs fresh profile/environment resolution. A known
+    /// producer is answered by the normal replay/conflict path, which does not
+    /// resolve a profile. New launches check pure admission constraints before
+    /// any external preparation; admission checks them again before spawn.
+    pub fn launch_needs_profile_resolution(
+        &self,
+        intent: &TerminalLaunchIntent,
+    ) -> Result<bool, ProtocolError>
+    where
+        R: TerminalProfileResolver,
+    {
+        if intent
+            .launch_operation
+            .is_some_and(|producer| self.coordinator.launch_by_operation(&producer).is_some())
+        {
+            return Ok(false);
+        }
+        geometry(intent.geometry)?;
+        self.coordinator
+            .ensure_launch_capacity()
+            .map_err(map_error)?;
+        self.resolver
+            .validate_request(&intent.request)
+            .map_err(|error| map_error(GenericTerminalError::Launch(error)))?;
+        Ok(true)
+    }
+
     pub fn new(generation: DaemonGeneration, resolver: R, store: S, pty: P, scope: Q) -> Self {
         Self::new_with_limit(
             generation,
@@ -213,23 +242,16 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         })
     }
 
-    /// Runs one bounded retention collection pass and applies its decisions to
-    /// this owner's records and journals. The composition root drives it
-    /// periodically so a daemon whose terminals are idle still ages its finals
-    /// out of the budget.
-    /// Whether this workspace still has a generic terminal that is running.
+    /// Runtime scopes and states used to fence automatic cache detachment.
     #[must_use]
-    pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
-        self.coordinator.has_running_in_workspace(workspace)
-    }
-
-    /// Number of live generic terminal PTYs owned by one workspace.
-    #[must_use]
-    pub fn running_count_in_workspace(
+    pub fn cache_cleanup_activity(
         &self,
         workspace: usagi_core::domain::id::WorkspaceId,
-    ) -> usize {
-        self.coordinator.running_count_in_workspace(workspace)
+    ) -> Vec<(
+        usagi_core::domain::id::TerminalRef,
+        super::terminal::TerminalRuntimeState,
+    )> {
+        self.coordinator.cache_cleanup_activity(workspace)
     }
 
     /// Number of generic terminal records which may still own a process.
@@ -270,6 +292,10 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
             .map_err(map_error)
     }
 
+    /// Runs one bounded retention collection pass and applies its decisions to
+    /// this owner's records and journals. The composition root drives it
+    /// periodically so a daemon whose terminals are idle still ages its finals
+    /// out of the budget.
     pub fn collect_retention_garbage(&mut self) -> usize
     where
         S: TerminalStore,
@@ -296,9 +322,7 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
     #[must_use]
     pub fn retained_resources(&self) -> std::collections::BTreeSet<String> {
         self.coordinator
-            .snapshot()
-            .records
-            .iter()
+            .records()
             .map(|record| record.terminal.terminal_id.as_str())
             .collect()
     }
@@ -310,6 +334,19 @@ impl<R, S, P, Q> GenericTerminalRuntime<R, S, P, Q> {
         scope: &TerminalLaunchScope,
     ) -> Vec<usagi_core::domain::terminal_launch::TerminalInventoryEntry> {
         self.coordinator.inventory(scope)
+    }
+
+    /// All retained generic terminal identities in an adopted workspace.
+    #[must_use]
+    pub fn search_targets(
+        &self,
+        workspace: usagi_core::domain::id::WorkspaceId,
+    ) -> Vec<TerminalRef> {
+        self.coordinator
+            .cache_cleanup_activity(workspace)
+            .into_iter()
+            .map(|(terminal, _)| terminal)
+            .collect()
     }
 
     /// Captures one terminal's semantic screen without attaching, resizing, or
@@ -633,6 +670,10 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
             ErrorCode::ResourceExhausted,
             "terminal PTY limit reached; close a Terminal or raise Terminal PTYs in Global Config",
         ),
+        GenericTerminalError::RetentionBackpressure => (
+            ErrorCode::ResourceExhausted,
+            "daemon operation history retention budget is exhausted",
+        ),
         GenericTerminalError::RetentionExhausted(_) => (
             ErrorCode::ResourceExhausted,
             "daemon terminal history retention budget is exhausted",
@@ -682,6 +723,7 @@ fn map_error(error: GenericTerminalError) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usecase::resources::StoreError;
     use crate::usecase::terminal::SnapshotWire;
     use crate::usecase::terminal_owner::JsonTerminalOwner as TerminalOwner;
     use crate::usecase::{
@@ -703,12 +745,29 @@ mod tests {
         fn save(
             &mut self,
             _: super::super::generic_terminal::TerminalStoreSnapshot,
-        ) -> Result<(), ()> {
-            if self.fail { Err(()) } else { Ok(()) }
+        ) -> Result<(), StoreError> {
+            if self.fail {
+                Err(StoreError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
     }
     struct Resolver;
     impl TerminalProfileResolver for Resolver {
+        fn validate_request(
+            &self,
+            request: &TerminalLaunchRequest,
+        ) -> Result<(), TerminalLaunchValidationError> {
+            if request.profile_id.as_str() == "login-shell" {
+                Ok(())
+            } else {
+                Err(TerminalLaunchValidationError::UnknownProfile {
+                    profile_id: request.profile_id.clone(),
+                })
+            }
+        }
+
         fn resolve(
             &mut self,
             request: &usagi_core::domain::terminal_launch::TerminalLaunchRequest,
@@ -969,14 +1028,22 @@ mod tests {
         cols: u16,
     ) -> TerminalRequest {
         TerminalRequest::Launch {
-            intent: usagi_core::infrastructure::ipc::TerminalLaunchIntent {
-                request: TerminalLaunchRequest {
-                    profile_id: TerminalProfileId::new("login-shell").unwrap(),
-                    scope: scope.clone(),
-                },
-                geometry: TerminalGeometry { cols, rows: 24 },
-                launch_operation: operation,
+            intent: launch_intent(scope, operation, cols),
+        }
+    }
+
+    fn launch_intent(
+        scope: &TerminalLaunchScope,
+        operation: Option<OperationId>,
+        cols: u16,
+    ) -> TerminalLaunchIntent {
+        TerminalLaunchIntent {
+            request: TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope: scope.clone(),
             },
+            geometry: TerminalGeometry { cols, rows: 24 },
+            launch_operation: operation,
         }
     }
 
@@ -989,6 +1056,73 @@ mod tests {
     }
 
     #[test]
+    fn launch_preparation_skips_known_producers_and_rejects_pure_invalid_requests() {
+        let scope = scope_of(Some(SessionId::new()));
+        let mut runtime = runtime_for(scope.clone());
+        let producer = OperationId::new();
+        let mut intent = launch_intent(&scope, Some(producer), 80);
+        assert!(runtime.launch_needs_profile_resolution(&intent).unwrap());
+        call(
+            &mut runtime,
+            ConnectionId::new(),
+            ClientId::new(),
+            TerminalAction::Launch,
+            TerminalRequest::Launch {
+                intent: intent.clone(),
+            },
+        );
+        assert!(!runtime.launch_needs_profile_resolution(&intent).unwrap());
+
+        // Even invalid changed bytes under a known producer belong to the
+        // cached conflict path, before any geometry/profile/environment work.
+        intent.geometry.cols = 0;
+        intent.request.profile_id = TerminalProfileId::new("unknown-profile").unwrap();
+        assert!(!runtime.launch_needs_profile_resolution(&intent).unwrap());
+        let conflict = runtime
+            .request(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: intent.clone(),
+                })
+                .unwrap(),
+                SnapshotWire::RawTail,
+            )
+            .unwrap_err();
+        assert_eq!(conflict.code, ErrorCode::IdempotencyConflict);
+        assert_eq!(runtime.pty.spawned_directories.len(), 1);
+
+        intent.launch_operation = None;
+        assert_eq!(
+            runtime
+                .launch_needs_profile_resolution(&intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        intent.geometry.cols = 80;
+        assert_eq!(
+            runtime
+                .launch_needs_profile_resolution(&intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        intent.request.profile_id = TerminalProfileId::new("login-shell").unwrap();
+        assert!(runtime.launch_needs_profile_resolution(&intent).unwrap());
+
+        // Resolvers without a pure metadata validator retain their normal
+        // resolve-time validation contract.
+        let scoped = ScopedProfileResolver {
+            profile: &mut runtime.resolver,
+            working_directory: PathBuf::from("/available-worktree"),
+        };
+        scoped.validate_request(&intent.request).unwrap();
+    }
+
+    #[test]
     fn configured_terminal_limit_refuses_the_next_pty_before_spawn() {
         let scope = scope_of(Some(SessionId::new()));
         let mut runtime = runtime_for_limit(scope.clone(), 1);
@@ -998,6 +1132,15 @@ mod tests {
             ClientId::new(),
             TerminalAction::Launch,
             launch_request(&scope, Some(OperationId::new()), 80),
+        );
+
+        let intent = launch_intent(&scope, Some(OperationId::new()), 80);
+        assert_eq!(
+            runtime
+                .launch_needs_profile_resolution(&intent)
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceExhausted
         );
 
         let error = runtime
@@ -1222,7 +1365,10 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::StaleTarget, "forged {field}");
         }
-        assert!(runtime.pty.resized.is_empty());
+        assert_eq!(
+            runtime.pty.resized,
+            [] as [crate::usecase::terminal::Geometry; 0]
+        );
     }
 
     #[test]
@@ -1667,7 +1813,10 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
-        assert!(runtime.pty.spawned_directories.is_empty());
+        assert_eq!(
+            runtime.pty.spawned_directories,
+            [] as [std::path::PathBuf; 0]
+        );
 
         let invalid_scope = TerminalLaunchScope {
             workspace_id: workspace,
@@ -1854,7 +2003,10 @@ mod tests {
             })
             .is_ok()
         );
-        assert!(runtime.pty.resized.is_empty());
+        assert_eq!(
+            runtime.pty.resized,
+            [] as [crate::usecase::terminal::Geometry; 0]
+        );
     }
 
     #[test]
@@ -1953,6 +2105,7 @@ mod tests {
         );
 
         let errors = [
+            GenericTerminalError::RetentionBackpressure,
             GenericTerminalError::Terminal(RegistryError::CheckpointUnavailable),
             GenericTerminalError::Terminal(RegistryError::ScreenBudgetExceeded),
             GenericTerminalError::Terminal(RegistryError::PtyResizeFailed),
@@ -1980,6 +2133,7 @@ mod tests {
             ),
         ];
         let expected = [
+            ErrorCode::ResourceExhausted,
             ErrorCode::ResourceExhausted,
             ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,
@@ -2310,11 +2464,25 @@ mod tests {
 
         // The workspace-wide question a retirement asks: this workspace has a
         // running child, another workspace does not.
-        assert!(runtime.has_running_in_workspace(workspace));
-        assert!(!runtime.has_running_in_workspace(WorkspaceId::new()));
-        assert_eq!(runtime.running_count_in_workspace(workspace), 1);
-        assert_eq!(runtime.running_count_in_workspace(WorkspaceId::new()), 0);
         assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 1);
+        assert_eq!(
+            runtime.retirement_blocker_count_in_workspace(WorkspaceId::new()),
+            0
+        );
+        assert_eq!(
+            runtime.cache_cleanup_activity(workspace),
+            vec![(
+                terminal.clone(),
+                crate::usecase::terminal::TerminalRuntimeState::Running
+            )]
+        );
+        assert_eq!(
+            runtime.cache_cleanup_activity(WorkspaceId::new()),
+            [] as [(
+                usagi_core::domain::id::TerminalRef,
+                crate::usecase::terminal::TerminalRuntimeState
+            ); 0]
+        );
 
         // A different scope (foreign session) sees nothing.
         let foreign = TerminalLaunchScope {
@@ -2322,10 +2490,16 @@ mod tests {
             session_id: Some(SessionId::new()),
             worktree_id: worktree,
         };
-        assert!(TerminalOwner::inventory(&runtime, &foreign).is_empty());
+        assert_eq!(
+            TerminalOwner::inventory(&runtime, &foreign),
+            [] as [usagi_core::domain::terminal_launch::TerminalInventoryEntry; 0]
+        );
 
         // Before exit the terminal is not a completed tombstone.
-        assert!(TerminalOwner::completed_inventory(&runtime, &scope).is_empty());
+        assert_eq!(
+            TerminalOwner::completed_inventory(&runtime, &scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
 
         // After the terminal exits it is no longer attachable (`live == false`).
         runtime.exit(&terminal, 0).unwrap();
@@ -2333,9 +2507,16 @@ mod tests {
         assert_eq!(exited.len(), 1);
         assert!(!exited[0].live);
         // An exited child no longer keeps its workspace.
-        assert!(!runtime.has_running_in_workspace(workspace));
-        assert_eq!(runtime.running_count_in_workspace(workspace), 0);
         assert_eq!(runtime.retirement_blocker_count_in_workspace(workspace), 0);
+        // Retain the stopped identity in the snapshot so a scan can detect
+        // that a runtime started and exited while the tree was measured.
+        assert_eq!(
+            runtime.cache_cleanup_activity(workspace),
+            vec![(
+                terminal.clone(),
+                crate::usecase::terminal::TerminalRuntimeState::Exited
+            )]
+        );
 
         // The exited terminal now appears as a completed tombstone (#525) with
         // its exit status; a foreign scope still sees none.
@@ -2344,7 +2525,10 @@ mod tests {
         assert!(completed[0].terminal.fences(&terminal));
         assert_eq!(completed[0].kind, TerminalKind::Terminal);
         assert_eq!(completed[0].exit_status, 0);
-        assert!(TerminalOwner::completed_inventory(&runtime, &foreign).is_empty());
+        assert_eq!(
+            TerminalOwner::completed_inventory(&runtime, &foreign),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
     }
 
     #[test]
@@ -2357,6 +2541,14 @@ mod tests {
         let resized = runtime.pty.resized.clone();
         let written = runtime.pty.writes.clone();
 
+        assert_eq!(
+            runtime.search_targets(terminal.workspace_id),
+            vec![terminal.clone()]
+        );
+        assert_eq!(
+            runtime.search_targets(WorkspaceId::new()),
+            [] as [usagi_core::domain::id::TerminalRef; 0]
+        );
         let snapshot = runtime.inspect(&terminal).unwrap();
 
         assert_eq!(snapshot.terminal, terminal);

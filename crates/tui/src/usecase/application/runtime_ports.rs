@@ -33,7 +33,7 @@ pub trait ExternalTerminalPort: Send {
 
 /// Daemon-authoritative durable decision boundary.
 pub trait DecisionCommandPort: Send {
-    /// Fetches the authoritative pending snapshot for one workspace.
+    /// Fetches pending questions and answers awaiting agent receipt.
     fn refresh(&mut self, workspace: WorkspaceId) -> BackendEvent;
 
     /// Submits one already validated answer.
@@ -43,6 +43,9 @@ pub trait DecisionCommandPort: Send {
         decision_id: UserDecisionId,
         answer: UserDecisionAnswer,
     ) -> BackendEvent;
+
+    /// Discards a saved answer after explicit human confirmation.
+    fn discard(&mut self, workspace: WorkspaceId, decision_id: UserDecisionId) -> BackendEvent;
 }
 
 /// Durable per-target environment boundary.
@@ -62,6 +65,18 @@ pub trait DesktopNotificationPort {
 
 /// Read-only daemon lane used to observe other projects in the Garden.
 pub trait GardenInventoryPort: Send {
+    /// Search retained terminal output without attaching or sending input.
+    /// # Errors
+    /// Returns feedback when the workspace snapshot cannot be read.
+    fn search_terminal_output(
+        &mut self,
+        _workspace: WorkspaceId,
+        _query: &str,
+        _session: Option<SessionId>,
+    ) -> Result<usagi_core::usecase::terminal_search::WorkspaceOutputSearch, String> {
+        Err("Terminal output search is unavailable".into())
+    }
+
     /// Returns the safe Agent observation for `workspace`, with interrupted
     /// history filtered through the saved display intent and tab projection.
     /// Refresh that intent on every observation so another TUI's dismissal or
@@ -72,6 +87,16 @@ pub trait GardenInventoryPort: Send {
     /// Returns safe feedback when the daemon is unavailable or refuses the
     /// workspace.
     fn inventory(&mut self, workspace: WorkspaceId) -> Result<AgentWorkspaceObservation, String>;
+
+    /// Human attention across already opened workspaces, without attach or mutation.
+    /// # Errors
+    /// Returns safe feedback if the daemon cannot provide a complete snapshot.
+    fn attention(
+        &mut self,
+        _workspace: WorkspaceId,
+    ) -> Result<usagi_core::domain::attention::WorkspaceAttention, String> {
+        Err("Workspace attention is unavailable".into())
+    }
 }
 
 /// Dedicated restore-client connection lifecycle.
@@ -114,6 +139,8 @@ pub struct SessionCommandResult {
     pub session_roles: Option<BTreeMap<SessionId, SessionRoleProjection>>,
     /// Monotonic daemon lifecycle revision.
     pub revision: Option<u64>,
+    /// Timestamp of the annotation store read with these sidebar rows.
+    pub notes_updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SessionCommandResult {
@@ -128,6 +155,7 @@ impl SessionCommandResult {
             session_lifecycles: None,
             session_roles: None,
             revision: None,
+            notes_updated_at: None,
         }
     }
 }

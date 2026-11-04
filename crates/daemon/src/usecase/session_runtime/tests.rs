@@ -8,6 +8,200 @@ use tempfile::TempDir;
 use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
 use usagi_core::infrastructure::git::GitOutput;
 
+#[test]
+fn director_membership_survives_removing_ancestors_and_restart_for_old_and_new_records() {
+    for legacy in [false, true] {
+        let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
+        let director = AgentContinuationRef::new();
+        let mut parent = None;
+        let mut ids = Vec::new();
+        for name in ["manager", "worker", "grandchild"] {
+            let creator = if parent.is_none() {
+                director
+            } else {
+                AgentContinuationRef::new()
+            };
+            runtime
+                .handle(
+                    SessionAction::Create,
+                    &operation(),
+                    &json!({
+                        "name":name, "creator_agent_id":AgentId::new(),
+                        "creator_continuation":creator, "parent_session_id":parent,
+                        // A caller-supplied organization must never be trusted.
+                        "director_continuation":AgentContinuationRef::new()
+                    }),
+                )
+                .unwrap();
+            parent = Some(runtime.session_id(name).unwrap());
+            ids.push(parent.unwrap());
+        }
+        if legacy {
+            let mut state = runtime.state().unwrap();
+            for session in &mut state.sessions {
+                session.director_continuation = None;
+            }
+            runtime
+                .store
+                .replace_if_revision(state.state_revision, &state)
+                .unwrap();
+        }
+        assert!(
+            runtime
+                .session_conversations()
+                .unwrap()
+                .values()
+                .all(|value| value.director == Some(director))
+        );
+        runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"manager", "force":true}),
+            )
+            .unwrap();
+        drop(runtime);
+        let mut restored = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .unwrap();
+        let state = restored.state().unwrap();
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.sessions[0].parent_session_id, Some(ids[0]));
+        assert_eq!(state.sessions[0].director_continuation, Some(director));
+        assert_ne!(state.sessions[0].creator_continuation, Some(director));
+        assert!(
+            restored
+                .session_conversations()
+                .unwrap()
+                .values()
+                .all(|value| value.director == Some(director))
+        );
+        restored
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"worker", "force":true}),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.state().unwrap().sessions[0].director_continuation,
+            Some(director)
+        );
+        assert_eq!(
+            restored.session_conversations().unwrap()[&ids[2]].director,
+            Some(director)
+        );
+    }
+}
+
+#[test]
+fn artifact_preparation_failure_can_be_removed_and_release_the_session_name() {
+    use crate::infrastructure::session_worktree::SystemGit;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repository");
+    let data = temp.path().join("data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(root.join("artifacts"), "project input").unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["add", "artifacts"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    ] {
+        assert!(SystemGit.run(&root, &args).unwrap().success);
+    }
+    let runtime = Arc::new(Mutex::new(
+        SessionRuntime::open_at(
+            root.clone(),
+            &data.join("state"),
+            &data,
+            DaemonGeneration::new(),
+            SystemGit,
+            SystemSessionWorktreeIo,
+        )
+        .unwrap(),
+    ));
+    assert!(
+        perform_create(
+            &runtime,
+            &SystemGit,
+            &operation(),
+            &json!({"name":"blocked"})
+        )
+        .is_err()
+    );
+    assert!(!root.join(".usagi/sessions/blocked").exists());
+    perform_remove(
+        &runtime,
+        &TeardownSignal::new(),
+        &operation(),
+        &json!({"name":"blocked"}),
+    )
+    .unwrap();
+    let reports = drain_pending_teardowns(
+        &SharedSessionTeardown::new(Arc::clone(&runtime)),
+        &WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo),
+        &|| false,
+    );
+    assert_eq!(reports.len(), 1);
+    assert!(
+        reports[0].effect_error.is_none(),
+        "{:?}",
+        reports[0].effect_error
+    );
+    assert!(reports[0].finalize_error.is_none());
+    assert_eq!(
+        runtime.lock().unwrap().snapshot().unwrap()["sessions"]
+            .as_array()
+            .unwrap()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
+    );
+    std::fs::remove_file(root.join("artifacts")).unwrap();
+    assert!(SystemGit.run(&root, &["add", "-u"]).unwrap().success);
+    assert!(
+        SystemGit
+            .run(
+                &root,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-m",
+                    "remove collision"
+                ]
+            )
+            .unwrap()
+            .success
+    );
+    perform_create(
+        &runtime,
+        &SystemGit,
+        &operation(),
+        &json!({"name":"blocked"}),
+    )
+    .unwrap();
+    assert!(
+        root.join(".usagi/sessions/blocked/artifacts/.gitignore")
+            .is_file()
+    );
+}
+
 struct FakeSessionGit(bool);
 impl FakeSessionGit {
     fn ok() -> Self {
@@ -26,6 +220,7 @@ struct FakeSessionWorktreeIo {
 struct SetupSessionWorktreeIo {
     calls: Arc<Mutex<Vec<(PathBuf, String)>>>,
     fail_on: Option<String>,
+    after_command: Option<fn(&Arc<Mutex<SessionRuntime>>)>,
     runtime: Arc<Mutex<Option<std::sync::Weak<Mutex<SessionRuntime>>>>>,
     observed_unlocked: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -120,6 +315,7 @@ struct FailingSessionWorktreeIo;
 
 struct ConfinementIo {
     canonical: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
+    canonical_after_remove: std::collections::BTreeMap<PathBuf, Option<PathBuf>>,
     occupied: bool,
     remove_calls: Arc<AtomicUsize>,
 }
@@ -128,6 +324,7 @@ impl ConfinementIo {
     fn new(remove_calls: Arc<AtomicUsize>) -> Self {
         Self {
             canonical: std::collections::BTreeMap::new(),
+            canonical_after_remove: std::collections::BTreeMap::new(),
             occupied: false,
             remove_calls,
         }
@@ -140,8 +337,11 @@ impl SessionWorktreeIo for ConfinementIo {
         self.occupied
     }
     fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
-        self.canonical
-            .get(path)
+        let after_remove = (self.remove_calls.load(Ordering::SeqCst) > 0)
+            .then(|| self.canonical_after_remove.get(path))
+            .flatten();
+        after_remove
+            .or_else(|| self.canonical.get(path))
             .cloned()
             .unwrap_or_else(|| Some(path.into()))
     }
@@ -294,6 +494,9 @@ impl SessionWorktreeIo for SetupSessionWorktreeIo {
             && runtime.try_lock().is_ok()
         {
             self.observed_unlocked.store(true, Ordering::SeqCst);
+            if let Some(after_command) = self.after_command {
+                after_command(&runtime);
+            }
         }
         if self.fail_on.as_deref() == Some(command) {
             Err(anyhow::anyhow!("injected setup failure"))
@@ -335,6 +538,7 @@ fn specialized_worktree_fakes_keep_their_noop_contracts_explicit() {
     let setup = SetupSessionWorktreeIo {
         calls: Arc::new(Mutex::new(Vec::new())),
         fail_on: None,
+        after_command: None,
         runtime: Arc::new(Mutex::new(None)),
         observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
@@ -414,8 +618,18 @@ impl GitRunner for WorkspaceExistsGit {
         })
     }
 }
+// Successful fake checkout must materialize the directory: the real IO adapter
+// now prepares artifacts in the worktree before reporting creation complete.
+fn materialize_fake_worktree(args: &[&str], success: bool) -> anyhow::Result<()> {
+    if success && let ["worktree", "add", "--no-checkout", "--", destination, _] = args {
+        std::fs::create_dir_all(destination)?;
+    }
+    Ok(())
+}
+
 impl GitRunner for FakeSessionGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, self.0)?;
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
         }
@@ -458,11 +672,14 @@ impl GitRunner for ScriptedGit {
                 success,
                 stdout,
                 stderr,
-            } => Ok(GitOutput {
-                success,
-                stdout: stdout.into(),
-                stderr: stderr.into(),
-            }),
+            } => {
+                materialize_fake_worktree(args, success)?;
+                Ok(GitOutput {
+                    success,
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
+                })
+            }
             ScriptedGitResult::Error => Err(anyhow::anyhow!("injected Git IO failure")),
         }
     }
@@ -492,6 +709,7 @@ impl RecordingGit {
 }
 impl GitRunner for RecordingGit {
     fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, true)?;
         self.calls.lock().unwrap().push((
             repo.into(),
             args.iter().map(|arg| (*arg).to_owned()).collect(),
@@ -505,6 +723,7 @@ impl GitRunner for RecordingGit {
 }
 impl GitRunner for CountingGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, true)?;
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
@@ -518,6 +737,7 @@ impl GitRunner for CountingGit {
 }
 impl GitRunner for OutcomeGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, self.succeeds)?;
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(output) = checkout_validation_output(args) {
             return Ok(output);
@@ -551,6 +771,16 @@ fn runtime(git: FakeSessionGit) -> (TempDir, SessionRuntime) {
     .unwrap();
     (tmp, runtime)
 }
+// Most removal fixtures have no provider-verified merged head.
+fn perform_remove(
+    runtime: &Mutex<SessionRuntime>,
+    teardown: &TeardownSignal,
+    operation_id: &str,
+    payload: &Value,
+) -> Result<SessionReply, SessionRuntimeError> {
+    perform_remove_with_merged_head(runtime, teardown, operation_id, payload, None)
+}
+
 fn operation() -> String {
     OperationId::new().to_string()
 }
@@ -578,6 +808,29 @@ fn a_branch_preserving_teardown_skips_git_branch_deletion() {
         delete_teardown_branch(&FakeSessionGit::ok(), &confined_teardown()),
         Ok(())
     );
+}
+
+#[test]
+fn registration_recovery_rechecks_confinement_after_physical_removal() {
+    for (changed, resolved, reason) in [
+        ("/repo/.usagi/sessions/one", Some("/outside"), "outside"),
+        ("/repo/.usagi/sessions", Some("/outside"), "symlinked"),
+        ("/data", None, "data home"),
+    ] {
+        let removed = Arc::new(AtomicUsize::new(0));
+        let mut io = ConfinementIo::new(Arc::clone(&removed));
+        io.occupied = true;
+        io.canonical_after_remove
+            .insert(changed.into(), resolved.map(PathBuf::from));
+        let git = RecordingGit::new();
+        let calls = Arc::clone(&git.calls);
+        let error = WorktreeTeardown::new(git, io)
+            .tear_down(&confined_teardown())
+            .unwrap_err();
+        assert!(error.contains(reason), "{error}");
+        assert_eq!(removed.load(Ordering::SeqCst), 1);
+        assert!(calls.lock().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -710,13 +963,20 @@ fn removal_identity_treats_a_missing_branch_as_absent_and_rejects_unknown_names(
         &json!({"name":"one"}),
     )
     .unwrap();
-    let runtime = runtime.lock().unwrap();
+    let mut runtime = runtime.lock().unwrap();
     let session_id = runtime.session_id("one").unwrap();
     assert_eq!(runtime.removal_identity("one").unwrap(), (session_id, None));
     assert_eq!(
         runtime.removal_identity("missing"),
         Err(SessionRuntimeError::UnknownSession)
     );
+    let before = runtime.state().unwrap();
+    runtime.git = Box::new(ScriptedGit::new([ScriptedGitResult::Error]));
+    assert_eq!(
+        runtime.removal_identity("one"),
+        Err(SessionRuntimeError::Storage)
+    );
+    assert_eq!(runtime.state().unwrap(), before);
 }
 
 #[test]
@@ -843,7 +1103,10 @@ fn startup_adopts_a_clean_merged_orphan_and_safe_remove_deletes_actual_branch() 
             &json!({"name":"review"}),
         )
         .unwrap();
-    assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        removed.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
     let calls = git_calls.lock().unwrap();
     assert!(
@@ -971,7 +1234,10 @@ fn explicit_orphan_purge_removes_unregistered_files_and_unmerged_work() {
             )
             .unwrap();
 
-        assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+        assert_eq!(
+            removed.body["sessions"].as_array().unwrap().as_slice(),
+            [] as [serde_json::Value; 0]
+        );
         assert_eq!(remove_calls.load(Ordering::SeqCst), 1);
         let calls = git_calls.lock().unwrap();
         assert!(
@@ -1034,7 +1300,10 @@ fn create_lists_overview_and_removes_a_durable_session() {
     let removed = runtime
         .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
         .unwrap();
-    assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        removed.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -1073,7 +1342,7 @@ fn session_base_ref_accepts_only_fully_qualified_branch_refs() {
         );
     }
     assert_eq!(
-        create_semantic_key(CreateOrigin::Direct, "one", None, None, None, None),
+        create_semantic_key(CreateOrigin::Direct, "one", None, None, None, None, None),
         "create:one"
     );
     assert_ne!(
@@ -1083,11 +1352,13 @@ fn session_base_ref_accepts_only_fully_qualified_branch_refs() {
             None,
             None,
             None,
+            None,
             Some("refs/heads/main")
         ),
         create_semantic_key(
             CreateOrigin::Direct,
             "one",
+            None,
             None,
             None,
             None,
@@ -1172,7 +1443,7 @@ fn role_errors_preserve_their_derived_value_contract() {
         let cloned = error.clone();
         assert_eq!(cloned, error);
         assert_eq!(format!("{cloned:?}"), format!("{error:?}"));
-        assert!(!error.safe_message().is_empty());
+        assert_ne!(error.safe_message(), "");
     }
 }
 
@@ -1286,6 +1557,19 @@ fn lists_a_failed_session_but_refuses_to_resolve_it_then_removes_it_to_free_the_
     assert_eq!(listed["sessions"][0]["name"], "one");
     assert_eq!(listed["sessions"][0]["lifecycle"], "failed");
     assert_eq!(listed["sessions"][0]["failure"]["summary"], "create failed");
+    let observed = runtime.session_lifecycles().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].session_id, state.sessions[0].session_id);
+    assert_eq!(observed[0].name, "one");
+    assert_eq!(observed[0].lifecycle, SessionLifecycle::Failed);
+    assert_eq!(
+        observed[0].failure.as_ref().unwrap().summary,
+        "create failed"
+    );
+    assert_eq!(
+        runtime.revision().unwrap(),
+        listed["revision"].as_u64().unwrap()
+    );
 
     // Scope resolution still refuses it: attach targets only Available.
     let workspace = state.workspace_id;
@@ -1303,7 +1587,10 @@ fn lists_a_failed_session_but_refuses_to_resolve_it_then_removes_it_to_free_the_
     let removed = runtime
         .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
         .unwrap();
-    assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        removed.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
     let recreated = runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
@@ -1336,6 +1623,12 @@ fn synchronous_failed_session_removal_records_a_branch_deletion_failure() {
                 stderr: "",
             },
             ScriptedGitResult::Output {
+                success: true,
+                stdout: "",
+                stderr: "",
+            },
+            ScriptedGitResult::Output {
+                // The stable repository released the worktree registration.
                 success: true,
                 stdout: "",
                 stderr: "",
@@ -1412,7 +1705,10 @@ fn adopts_a_non_worktree_stale_workspace_before_create_without_invoking_git() {
         lifecycle_state.sessions[0].failure.as_ref().unwrap().stage,
         FailureStage::Integrity
     );
-    assert!(runtime.state().unwrap().operations.is_empty());
+    assert_eq!(
+        runtime.state().unwrap().operations,
+        [] as [usagi_core::domain::session_lifecycle::OperationJournal; 0]
+    );
 }
 
 #[test]
@@ -1535,6 +1831,167 @@ fn existing_session_create_never_reparents_the_session() {
     assert_eq!(
         existing.body["sessions"][0]["parent_session_id"],
         json!(original_parent)
+    );
+}
+
+#[test]
+fn creator_conversation_survives_agent_reuse_restart_and_history_retention() {
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
+    let creator = AgentId::new();
+    let first = AgentContinuationRef::new();
+    let second = AgentContinuationRef::new();
+    let mut expected = BTreeMap::new();
+    for (name, continuation) in [("first", first), ("second", second)] {
+        runtime
+            .handle(
+                SessionAction::Create,
+                &operation(),
+                &json!({
+                    "name":name, "creator_agent_id":creator, "creator_continuation":continuation,
+                }),
+            )
+            .unwrap();
+        expected.insert(
+            runtime.session_id(name).unwrap(),
+            SessionConversations {
+                creator: Some(continuation),
+                director: Some(continuation),
+            },
+        );
+    }
+    // Reusing a session from a new conversation never rewrites its origin.
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({
+                "name":"first", "creator_agent_id":creator, "creator_continuation":second,
+            }),
+        )
+        .unwrap();
+    assert_eq!(runtime.session_conversations().unwrap(), expected);
+    drop(runtime);
+    let restored = SessionRuntime::open(
+        tmp.path().to_path_buf(),
+        &tmp.path().join("daemon"),
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .unwrap();
+    assert_eq!(restored.session_conversations().unwrap(), expected);
+    assert_eq!(
+        restored
+            .created_session_ids(&CallerRef {
+                session_id: None,
+                agent_id: creator
+            })
+            .unwrap(),
+        expected.keys().copied().collect()
+    );
+}
+
+#[test]
+fn legacy_create_replay_accepts_newly_observed_creator_conversation_without_reassigning() {
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
+    let creator = AgentId::new();
+    let operation = operation();
+    let mut payload = json!({"name":"legacy-owned", "creator_agent_id":creator});
+    let original = runtime
+        .handle(SessionAction::Create, &operation, &payload)
+        .unwrap();
+    // After an upgrade the authenticated boundary adds conversation metadata
+    // even when the producer retries an operation admitted by the old daemon.
+    payload["creator_continuation"] = json!(AgentContinuationRef::new());
+    assert_eq!(
+        runtime
+            .handle(SessionAction::Create, &operation, &payload)
+            .unwrap()
+            .body,
+        original.body
+    );
+    assert!(
+        runtime.state().unwrap().sessions[0]
+            .creator_continuation
+            .is_none()
+    );
+    payload["name"] = json!("different-request");
+    assert_eq!(
+        runtime.handle(SessionAction::Create, &operation, &payload),
+        Err(SessionRuntimeError::IdempotencyConflict)
+    );
+}
+
+#[test]
+fn creator_conversation_is_validated_and_part_of_create_replay_identity() {
+    let (_tmp, mut runtime) = runtime(FakeSessionGit::ok());
+    let creator = AgentId::new();
+    let continuation = AgentContinuationRef::new();
+    for payload in [
+        json!({"name":"invalid", "creator_agent_id":creator, "creator_continuation":"invalid"}),
+        json!({"name":"unowned", "creator_continuation":continuation}),
+    ] {
+        assert_eq!(
+            runtime.handle(SessionAction::Create, &operation(), &payload),
+            Err(SessionRuntimeError::InvalidRequest)
+        );
+    }
+    let operation = operation();
+    let mut payload =
+        json!({"name":"owned", "creator_agent_id":creator, "creator_continuation":continuation});
+    let first = runtime
+        .handle(SessionAction::Create, &operation, &payload)
+        .unwrap();
+    assert_eq!(
+        runtime
+            .handle(SessionAction::Create, &operation, &payload)
+            .unwrap()
+            .body,
+        first.body
+    );
+    payload["creator_continuation"] = json!(AgentContinuationRef::new());
+    assert_eq!(
+        runtime.handle(SessionAction::Create, &operation, &payload),
+        Err(SessionRuntimeError::IdempotencyConflict)
+    );
+}
+
+#[test]
+fn legacy_conversation_stays_unknown_when_an_agent_starts_new_conversations() {
+    let (tmp, mut runtime) = runtime(FakeSessionGit::ok());
+    let creator = AgentId::new();
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({"name":"legacy", "creator_agent_id":creator}),
+        )
+        .unwrap();
+    let legacy = runtime.session_id("legacy").unwrap();
+    assert_eq!(
+        runtime.session_conversations().unwrap()[&legacy],
+        SessionConversations::default()
+    );
+    for name in ["new-a", "new-b"] {
+        runtime.handle(SessionAction::Create, &operation(), &json!({
+            "name":name, "creator_agent_id":creator, "creator_continuation":AgentContinuationRef::new()
+        })).unwrap();
+        assert_eq!(
+            runtime.session_conversations().unwrap()[&legacy],
+            SessionConversations::default()
+        );
+    }
+    // There is deliberately no runtime-history input: collection cannot change membership.
+    std::fs::write(tmp.path().join("daemon/sessions.json"), "not json").unwrap();
+
+    assert_eq!(runtime.revision(), Err(SessionRuntimeError::Storage));
+    assert_eq!(
+        runtime.session_lifecycles(),
+        Err(SessionRuntimeError::Storage)
+    );
+    assert_eq!(
+        runtime.session_conversations(),
+        Err(SessionRuntimeError::Storage)
     );
 }
 
@@ -2195,6 +2652,7 @@ fn resolver_requires_complete_available_scope_and_restart_reconciles_interrupted
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: journal(
                     operation,
                     runtime.generation,
@@ -2271,6 +2729,18 @@ fn open_repairs_a_legacy_failed_session_and_replays_failure() {
         .store
         .replace_if_revision(revision, &legacy)
         .unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |_| {
+        SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .err()
+        .expect("legacy repair must persist before startup succeeds")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
     drop(runtime);
 
     let mut reopened = SessionRuntime::open(
@@ -2568,7 +3038,10 @@ fn pending_teardowns_skip_incomplete_delete_records() {
     state.sessions = vec![missing_plan, missing_operation];
     runtime.store.replace_if_revision(revision, &state).unwrap();
 
-    assert!(runtime.pending_teardowns().unwrap().is_empty());
+    assert_eq!(
+        runtime.pending_teardowns().unwrap(),
+        [] as [crate::usecase::session_teardown::PendingTeardown; 0]
+    );
 }
 
 /// A Git runner that records whether the shared session lock was free at the
@@ -2580,6 +3053,7 @@ struct LockProbeGit {
 }
 impl GitRunner for LockProbeGit {
     fn run(&self, _: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        materialize_fake_worktree(args, true)?;
         let runtime = self.runtime.upgrade().expect("runtime remains alive");
         self.observed_unlocked.store(
             runtime.try_lock().is_ok(),
@@ -2665,6 +3139,7 @@ fn configured_setup_commands_run_in_order_without_holding_the_session_lock() {
             SetupSessionWorktreeIo {
                 calls: Arc::clone(&calls),
                 fail_on: None,
+                after_command: None,
                 runtime: Arc::clone(&runtime_probe),
                 observed_unlocked: Arc::clone(&observed_unlocked),
             },
@@ -2712,6 +3187,7 @@ fn create_and_setup_completion_refresh_the_fence_after_unrelated_mutations() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -2774,6 +3250,7 @@ fn create_and_setup_completion_rejects_a_different_workspace_identity() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -2844,6 +3321,7 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
             SetupSessionWorktreeIo {
                 calls: Arc::clone(&calls),
                 fail_on: Some("fail".into()),
+                after_command: None,
                 runtime: Arc::new(Mutex::new(None)),
                 observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
@@ -2884,6 +3362,9 @@ fn setup_failure_is_durable_and_does_not_skip_later_commands_or_replay() {
         state.sessions[0].setup_plan.as_ref().unwrap().commands,
         ["fail", "fail", "after"]
     );
+    let observed = runtime.lock().unwrap().session_lifecycles().unwrap();
+    assert_eq!(observed[0].lifecycle, SessionLifecycle::Failed);
+    assert!(observed[0].setup_plan.is_none());
     assert!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"][0]
             .get("setup_plan")
@@ -2921,6 +3402,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -2950,6 +3432,7 @@ fn restart_marks_an_interrupted_setup_as_an_initialize_failure() {
         SetupSessionWorktreeIo {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on: None,
+            after_command: None,
             runtime: Arc::new(Mutex::new(None)),
             observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
@@ -3042,7 +3525,10 @@ fn a_session_without_an_owning_operation_is_not_a_delegation_candidate() {
         rt.state().unwrap().sessions[0].lifecycle,
         SessionLifecycle::Available
     );
-    assert!(rt.delegated_sessions().unwrap().is_empty());
+    assert_eq!(
+        rt.delegated_sessions().unwrap(),
+        [] as [crate::usecase::session_runtime::DelegatedCreate; 0]
+    );
 }
 
 /// Compensating a delegated create undoes the branch too, so the same session
@@ -3240,7 +3726,10 @@ fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
     );
 
     assert_eq!(reports[0].effect_error, None);
-    assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
+    assert_eq!(
+        runtime.lock().unwrap().state().unwrap().sessions,
+        [] as [usagi_core::domain::session_lifecycle::ManagedSession; 0]
+    );
     assert!(
         calls
             .lock()
@@ -3319,7 +3808,10 @@ fn removing_a_failed_session_deletes_its_branch() {
 
     assert_eq!(reports[0].effect_error, None);
     assert!(!session_root.exists());
-    assert!(runtime.lock().unwrap().state().unwrap().sessions.is_empty());
+    assert_eq!(
+        runtime.lock().unwrap().state().unwrap().sessions,
+        [] as [usagi_core::domain::session_lifecycle::ManagedSession; 0]
+    );
     assert!(calls.lock().unwrap().iter().any(|(repo, args)| {
         repo == tmp.path() && args == &["branch", "-d", "--", "usagi/one"]
     }));
@@ -3410,21 +3902,19 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
     );
     assert_eq!(reports[0].effect_error, None);
     assert_eq!(reports[0].finalize_error, None);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // Checkout removal, owning-repository registration removal, branch deletion.
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(!session_root.exists());
-    assert!(
+    assert_eq!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
-    assert!(
-        runtime
-            .lock()
-            .unwrap()
-            .pending_teardowns()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        runtime.lock().unwrap().pending_teardowns().unwrap(),
+        [] as [crate::usecase::session_teardown::PendingTeardown; 0]
     );
 }
 
@@ -3548,10 +4038,10 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
             ),
             &|| false,
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         let succeeded = perform_remove(&runtime, &signal, &operation, &request).unwrap();
         assert_eq!(succeeded.operation_id, operation);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         drop(runtime);
 
         // A terminal successful outcome also survives restart without a
@@ -3570,7 +4060,7 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
         ));
         let after_restart = perform_remove(&restarted, &signal, &operation, &request).unwrap();
         assert_eq!(after_restart.operation_id, operation);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             perform_remove(
                 &restarted,
@@ -3816,13 +4306,9 @@ fn a_teardown_failure_records_the_reason_on_a_failed_row_and_frees_the_name_afte
     assert!(summary.contains("could not remove the session worktree \"one\""));
     assert!(summary.contains("contains modified or untracked files"));
     // The failed row still owns the name; removing it frees it again.
-    assert!(
-        runtime
-            .lock()
-            .unwrap()
-            .pending_teardowns()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        runtime.lock().unwrap().pending_teardowns().unwrap(),
+        [] as [crate::usecase::session_teardown::PendingTeardown; 0]
     );
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
     drain_pending_teardowns(
@@ -3897,11 +4383,12 @@ fn an_interrupted_teardown_is_resumed_after_restart_instead_of_failing() {
         &|| false,
     );
     assert!(!session_root.exists());
-    assert!(
+    assert_eq!(
         restarted.lock().unwrap().snapshot().unwrap()["sessions"]
             .as_array()
             .unwrap()
-            .is_empty()
+            .as_slice(),
+        [] as [serde_json::Value; 0]
     );
 }
 
@@ -4160,7 +4647,10 @@ fn finalizing_a_teardown_twice_reports_durable_truth_without_a_stale_write() {
         .unwrap();
 
     assert_eq!(repeated.revision, completed.revision);
-    assert!(repeated.body["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        repeated.body["sessions"].as_array().unwrap().as_slice(),
+        [] as [serde_json::Value; 0]
+    );
 }
 
 #[test]
@@ -4269,6 +4759,43 @@ fn perform_remove_maps_a_poisoned_session_lock_to_storage() {
         ),
         Err(SessionRuntimeError::Storage)
     ));
+}
+
+#[test]
+fn perform_create_preserves_initializing_state_when_setup_poisons_the_owner() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    std::fs::write(
+        temp.path().join(".usagi/config.toml"),
+        "[session]\nsetup_commands = [\"setup\"]\n",
+    )
+    .unwrap();
+    let probe = Arc::new(Mutex::new(None));
+    runtime.io = Arc::new(SetupSessionWorktreeIo {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        fail_on: None,
+        after_command: Some(poison_lock),
+        runtime: Arc::clone(&probe),
+        observed_unlocked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let state_path = runtime.store.state_path();
+    let runtime = Arc::new(Mutex::new(runtime));
+    *probe.lock().unwrap() = Some(Arc::downgrade(&runtime));
+    assert_eq!(
+        perform_create(
+            &runtime,
+            &FakeSessionGit::ok(),
+            &operation(),
+            &json!({"name":"pending"})
+        ),
+        Err(SessionRuntimeError::Storage)
+    );
+    let store = DaemonLifecycleStore::new(state_path.parent().unwrap());
+    let state = store.load().unwrap().unwrap();
+    assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Initializing);
+    assert_eq!(
+        state.sessions[0].setup_plan.as_ref().unwrap().commands,
+        ["setup"]
+    );
 }
 
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
@@ -4695,5 +5222,425 @@ fn shared_teardown_reports_storage_failure() {
     assert_eq!(
         SharedSessionTeardown::new(shared).finish(&pending, Ok(())),
         Err("daemon could not persist session lifecycle state".into())
+    );
+}
+
+#[test]
+fn status_git_observations_run_without_the_session_owner_lock() {
+    struct ObservingGit<'a>(&'a Mutex<SessionRuntime>, AtomicUsize);
+    impl GitRunner for ObservingGit<'_> {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            let owner = self
+                .0
+                .try_lock()
+                .expect("Git must run outside the session owner lock");
+            assert!(owner.workspace_id().is_ok());
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(GitOutput {
+                success: true,
+                stdout: "main\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = SessionRuntime::open(
+        temp.path().join("repository"),
+        &temp.path().join("daemon"),
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        FakeSessionWorktreeIo {
+            occupied: false,
+            build_calls: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .unwrap();
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({"name":"sample"}),
+        )
+        .unwrap();
+    let runtime = Mutex::new(runtime);
+    let git = ObservingGit(&runtime, AtomicUsize::new(0));
+    let reply = perform_status(&runtime, &git, &operation()).unwrap();
+    assert_eq!(reply.body["sessions"][0]["name"], "sample");
+    assert_eq!(git.1.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn status_git_io_failures_preserve_the_durable_session_state() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    runtime
+        .handle(
+            SessionAction::Create,
+            &operation(),
+            &json!({"name":"sample"}),
+        )
+        .unwrap();
+    let state_path = temp.path().join("daemon/sessions.json");
+    let before = std::fs::read(&state_path).unwrap();
+    let runtime = Mutex::new(runtime);
+
+    // Base branch, worktree status, worktree branch and ancestry each perform
+    // independent Git IO. An unavailable command must not yield partial status
+    // or mutate the lifecycle snapshot captured before observation.
+    for failed_command in 0..4 {
+        let git = ScriptedGit::new(
+            (0..failed_command)
+                .map(|_| ScriptedGitResult::Output {
+                    success: true,
+                    stdout: "main\n",
+                    stderr: "",
+                })
+                .chain(std::iter::once(ScriptedGitResult::Error)),
+        );
+        assert_eq!(
+            perform_status(&runtime, &git, &operation()),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(git.results.lock().unwrap().len(), 0);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    }
+}
+
+#[test]
+fn status_refuses_an_unavailable_owner_before_git_without_rewriting_state() {
+    for poisoned in [false, true] {
+        let (temp, runtime) = runtime(FakeSessionGit::ok());
+        let state_path = temp.path().join("daemon/sessions.json");
+        let runtime = Arc::new(Mutex::new(runtime));
+        if poisoned {
+            poison_lock(&runtime);
+        } else {
+            std::fs::write(&state_path, "corrupt lifecycle state").unwrap();
+        }
+        let before = std::fs::read(&state_path).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let git = CountingGit {
+            calls: Arc::clone(&calls),
+        };
+
+        assert_eq!(
+            perform_status(&runtime, &git, &operation()),
+            Err(SessionRuntimeError::Storage)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+    }
+}
+
+/// Keep reads available while refusing the real store's next write lock.
+/// Every failed lifecycle transition must leave the serialized state intact.
+fn with_lifecycle_writes_blocked<T>(
+    runtime: &mut SessionRuntime,
+    action: impl FnOnce(&mut SessionRuntime) -> T,
+) -> T {
+    let state = runtime.store.state_path();
+    let lock = state.with_file_name(".lock");
+    let before = std::fs::read(&state).unwrap();
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let result = action(runtime);
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+    std::fs::remove_dir(&lock).unwrap();
+    std::fs::write(&lock, "").unwrap();
+    result
+}
+
+#[test]
+fn lifecycle_reservation_write_failures_leave_create_and_remove_retryable() {
+    let (_temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let create = operation();
+    let payload = json!({"name":"retryable"});
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .begin_create(CreateOrigin::Direct, &create, &payload)
+            .err()
+            .expect("a reservation requires a writable lifecycle store")
+    });
+    assert_eq!(error, SessionRuntimeError::Rejected);
+    runtime
+        .handle(SessionAction::Create, &create, &payload)
+        .unwrap();
+
+    let remove = operation();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .begin_remove(RemoveKind::Requested, &remove, &payload, None)
+            .err()
+            .expect("removal must be durably admitted before worktree teardown")
+    });
+    assert_eq!(error, SessionRuntimeError::Rejected);
+    runtime
+        .begin_remove(RemoveKind::Requested, &remove, &payload, None)
+        .unwrap();
+    let pending = runtime.pending_teardowns().unwrap().pop().unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime.finish_teardown(&pending, Ok(())).unwrap_err()
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        runtime.pending_teardowns().unwrap(),
+        std::slice::from_ref(&pending)
+    );
+    runtime.finish_teardown(&pending, Ok(())).unwrap();
+    assert_eq!(runtime.state().unwrap().sessions, [] as [ManagedSession; 0]);
+}
+
+#[test]
+fn lifecycle_create_completion_write_failure_keeps_the_reservation() {
+    let (_temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let pending = pending_create(
+        runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"pending"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .finish_create(*pending, Ok(()))
+            .err()
+            .expect("a successful effect still requires a durable completion")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        runtime.state().unwrap().sessions[0].lifecycle,
+        SessionLifecycle::Creating
+    );
+    runtime.reconcile().unwrap();
+    assert_eq!(
+        runtime.state().unwrap().sessions[0].lifecycle,
+        SessionLifecycle::Failed
+    );
+}
+
+#[test]
+fn lifecycle_setup_completion_write_failure_keeps_initialization_recoverable() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    std::fs::write(
+        temp.path().join(".usagi/config.toml"),
+        "[session]\nsetup_commands = [\"setup\"]\n",
+    )
+    .unwrap();
+    let pending = pending_create(
+        runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"pending"}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let initializing =
+        pending_initialize(runtime.finish_create(*pending, Ok(())).unwrap()).unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime.finish_initialize(initializing, Ok(())).unwrap_err()
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        runtime.state().unwrap().sessions[0].lifecycle,
+        SessionLifecycle::Initializing
+    );
+    let error = with_lifecycle_writes_blocked(&mut runtime, SessionRuntime::reconcile).unwrap_err();
+    assert_eq!(error, SessionRuntimeError::Storage);
+    runtime.reconcile().unwrap();
+    let state = runtime.state().unwrap();
+    assert_eq!(state.sessions[0].lifecycle, SessionLifecycle::Failed);
+    assert_eq!(
+        state.sessions[0].failure.as_ref().unwrap().stage,
+        FailureStage::Initialize
+    );
+}
+
+#[test]
+fn startup_refuses_corrupt_current_state_without_replacing_its_bytes() {
+    let (temp, runtime) = runtime(FakeSessionGit::ok());
+    let state = runtime.store.state_path();
+    drop(runtime);
+    std::fs::write(&state, "corrupt current lifecycle").unwrap();
+
+    let error = SessionRuntime::open(
+        temp.path().into(),
+        &temp.path().join("daemon"),
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .err()
+    .expect("corrupt current state must not be replaced by an empty workspace");
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        std::fs::read_to_string(state).unwrap(),
+        "corrupt current lifecycle"
+    );
+}
+
+#[test]
+fn a_teardown_without_its_journal_entry_cannot_commit_an_unfenced_outcome() {
+    let (_temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let payload = json!({"name":"retained"});
+    runtime
+        .handle(SessionAction::Create, &operation(), &payload)
+        .unwrap();
+    runtime
+        .begin_remove(RemoveKind::Requested, &operation(), &payload, None)
+        .unwrap();
+    let pending = runtime.pending_teardowns().unwrap().pop().unwrap();
+    let mut state = runtime.state().unwrap();
+    let revision = state.state_revision;
+    // Old snapshots may retain the deleting session after its journal row was
+    // lost. Its identity alone cannot authorize a completion from this worker.
+    state
+        .operations
+        .retain(|entry| entry.operation_id != pending.operation_id);
+    state.state_revision += 1;
+    runtime.store.replace_if_revision(revision, &state).unwrap();
+    let before = std::fs::read(runtime.store.state_path()).unwrap();
+
+    for outcome in [Ok(()), Err("late worker failure".into())] {
+        let reply = runtime.finish_teardown(&pending, outcome).unwrap();
+        assert_eq!(reply.revision, state.state_revision);
+        assert_eq!(std::fs::read(runtime.store.state_path()).unwrap(), before);
+        assert_eq!(
+            runtime.state().unwrap().sessions[0].lifecycle,
+            SessionLifecycle::Deleting
+        );
+    }
+}
+
+#[test]
+fn startup_refuses_corrupt_legacy_state_without_creating_a_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("repository");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let legacy = project_data_dir(&root).join("lifecycle-state.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, "corrupt legacy lifecycle").unwrap();
+    let daemon = temp.path().join("daemon");
+    let error = SessionRuntime::open(
+        root,
+        &daemon,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .err()
+    .expect("corrupt legacy state must not be replaced by an empty workspace");
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        std::fs::read_to_string(legacy).unwrap(),
+        "corrupt legacy lifecycle"
+    );
+    assert!(!daemon.join("sessions.json").exists());
+}
+
+#[test]
+fn startup_refuses_unreadable_repository_metadata_without_rewriting_sessions() {
+    for blocked in [".gitignore", ".usagi/sessions"] {
+        let (temp, runtime) = runtime(FakeSessionGit::ok());
+        let state = runtime.store.state_path();
+        let before = std::fs::read(&state).unwrap();
+        drop(runtime);
+        let path = temp.path().join(blocked);
+        // A directory cannot be read as ignore text; a file cannot be scanned
+        // as the session container. Neither failure permits forgetting state.
+        if blocked == ".gitignore" {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, "occupied session container").unwrap();
+        }
+        let error = SessionRuntime::open(
+            temp.path().into(),
+            &temp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .err()
+        .expect("unreadable repository metadata must fail startup");
+        assert_eq!(error, SessionRuntimeError::Storage);
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+    }
+}
+
+#[test]
+fn startup_requires_a_writable_lock_for_initialization_and_root_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    std::fs::create_dir_all(repository.join(".git")).unwrap();
+    let daemon = temp.path().join("daemon");
+    std::fs::create_dir_all(daemon.join(".lock")).unwrap();
+    let error = SessionRuntime::open(
+        repository.clone(),
+        &daemon,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .err()
+    .expect("initialization must obtain the lifecycle write lock");
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert!(!daemon.join("sessions.json").exists());
+    std::fs::remove_dir(daemon.join(".lock")).unwrap();
+    let mut runtime = SessionRuntime::open(
+        repository.clone(),
+        &daemon,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        SystemSessionWorktreeIo,
+    )
+    .unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |_| {
+        SessionRuntime::open(
+            repository,
+            &daemon,
+            DaemonGeneration::new(),
+            FakeSessionGit::ok(),
+            SystemSessionWorktreeIo,
+        )
+        .err()
+        .expect("root identity must be checked under the lifecycle write lock")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+}
+
+#[test]
+fn lifecycle_orphan_adoption_write_failures_preserve_the_unowned_directory() {
+    let (temp, mut runtime) = runtime(FakeSessionGit::ok());
+    let orphan = temp.path().join(".usagi/sessions/orphan");
+    std::fs::create_dir_all(&orphan).unwrap();
+    std::fs::write(orphan.join("user-data"), "retain me").unwrap();
+    let error = with_lifecycle_writes_blocked(&mut runtime, |runtime| {
+        runtime
+            .begin_create(
+                CreateOrigin::Direct,
+                &operation(),
+                &json!({"name":"orphan"}),
+            )
+            .err()
+            .expect("an occupied path must be adopted durably before reporting its recovery state")
+    });
+    assert_eq!(error, SessionRuntimeError::Storage);
+    let error =
+        with_lifecycle_writes_blocked(&mut runtime, SessionRuntime::reconcile_orphan_worktrees)
+            .unwrap_err();
+    assert_eq!(error, SessionRuntimeError::Storage);
+    assert_eq!(
+        std::fs::read_to_string(orphan.join("user-data")).unwrap(),
+        "retain me"
+    );
+    runtime.reconcile_orphan_worktrees().unwrap();
+    let state = runtime.state().unwrap();
+    assert_eq!(state.sessions[0].name, "orphan");
+    assert_eq!(
+        state.sessions[0].failure.as_ref().unwrap().stage,
+        FailureStage::Integrity
     );
 }

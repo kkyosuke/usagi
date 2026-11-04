@@ -65,14 +65,14 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
 | `shell-words` | `usagi-core` の usecase（`workspace_guard`）による root モードの Bash command の字句分割 | 本依存 |
 | `unicode-width` | 端末セルの表示桁数測定（CJK など全角の 2 桁計上）。`usagi-core` の VT parser（`usecase::vt_screen`）と `usagi-tui` の描画が使う | 本依存 |
-| `unicode-segmentation` | `usagi-tui` のテキスト入力で結合文字・絵文字を見た目上の1文字単位に編集する | 本依存 |
+| `unicode-segmentation` | `usagi-tui` の入力編集・表示の折り返しと省略・出力選択で結合文字と絵文字を見た目上の1文字単位に扱う | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
 | `clap_complete` | `usagi completion <shell>` のシェル補完スクリプト生成 | 本依存 |
 | `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
 | `portable-pty` | `usagi-daemon` の infrastructure（`pty`）による PTY の確保、子プロセス起動、入出力・resize・wait | 本依存 |
 | `libc` | `usagi-core` infrastructure の atomic temp file 検証（Unix の no-follow・所有者・link identity）と合成ルートでの daemon process-start identity 観測・exact-owner signal | 本依存 |
 | `signal-hook` | 合成ルートで daemon の SIGINT / SIGTERM handler と同期 wait を worker spawn 前に準備する | 本依存 |
-| `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
+| `tempfile` | 合成ルートの本人専用 Artifact 表示コピー、ユニットテスト用の一時ディレクトリ | 本依存・dev |
 | `syn` | Rust source の AST 検査（architecture・coverage attribute などの構造テスト） | dev |
 
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は
@@ -84,7 +84,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `unicode-width` は
 `usagi-core` の usecase 層（VT parser `vt_screen`）と `usagi-tui` の描画が使う（domain の
 `chrono` / `serde` / `uuid` 規則は不変で、`unicode-width` は domain には持ち込まない）。
-`unicode-segmentation` は `usagi-tui` の入力 widget だけで使い、domain には持ち込まない。
+`unicode-segmentation` は `usagi-tui` の入力 widget・表示の折り返しと省略・出力選択で使い、domain には持ち込まない。
 `clap` / `clap_complete` は `usagi-cli` が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、runtime が workspace・executable 別の bootstrap broker endpoint、IPC contract が rollover operation ID を
 作るほか、root runtime が設定 env の secret cache を分離する `op read` credential identity を作り、
@@ -124,7 +124,10 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
   （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
   Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
   issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
-- ベースブランチは `main`。
+- 単独 PR と stacked PR の最下段のベースブランチは `main`。stack の上段は直前の PR の
+  head branch をベースにし、各 PR の本文で順序と前段を示す。現在の必須 CI は `main` 向け PR が
+  対象のため、各段を一時的に `main` 向けにして最終 head の CI を検証してからベースを前段へ変更する。
+  前段を更新したら上段を restack し、更新後の head を同じ手順でレビュー・検証し直す。
 - **PR は Draft で開き、[CI](#cigithub-actions) の必須チェック（fmt / clippy / full test / coverage 100%、該当時は Markdown link check）が green になってから Ready for review にする**。ローカル push では重い full gate を走らせないため（[Git Hooks](#git-hookslefthook)）、最終的な full gate の green は CI で確認する。CI が落ちたら Draft のまま修正して push し直す。
 
 ## ドキュメント規約
@@ -225,7 +228,7 @@ CI で full test / coverage gate が必須となる条件は次のとおり（�
   - 計測から外す必要がある item には、ファイル名の正規表現ではなく該当する module または function に `#[coverage(off)]` を付ける（外部 module ファイル全体を外す場合は inner attribute の `#![coverage(off)]`）。使用できるのは、テスト可能なロジックを抜いたあとの「実 IO そのもの」、または LLVM coverage が generic の単相化を重複計上する場合に限る。いずれも振る舞いを検証する fake / integration test を残し、除外理由を同じ変更に記録する。未テストの業務ロジック、到達しにくい error path、短期的な coverage 目標の回避には使わない。
   - `#[coverage(off)]` はその item だけに適用され、内部の closure など別 item には継承されない。除外した合成関数は closure-free に保つか、入れ子の item をテスト可能な関数へ分離し、意図しない未計測 item を作らない。
   - `#[coverage(off)]` は nightly の `coverage_attribute` feature を必要とする。通常の build / test と coverage gate は、同じ nightly toolchain で実行する。
-  - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI の workflow は `dtolnay/rust-toolchain@nightly` で component を入れるが、その対象は日付なしの `nightly` なので、pin した toolchain が使う component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` の `components` が正本である。
+  - **その nightly は `rust-toolchain.toml` で日付 pin する**。`channel = "nightly"` のままだと CI が毎回その日の nightly を取り、新しく安定化した lint が既存コードで一斉に発火して無関係な PR まで Rust lint で落ちる。toolchain の更新は「pin を上げる PR」で意図的に行い、その PR で新 lint の対応もまとめる。CI は SHA 固定の `dtolnay/rust-toolchain` に `toolchain: nightly` を渡して bootstrap する。プロジェクトの build / test が使う日付と component（`llvm-tools-preview` / `rustfmt` / `clippy`）は `rust-toolchain.toml` を正本とする。
 - **`#[allow(clippy::…)]` には理由コメントを必ず添える**（属性の直前の行、または同じ行）。pedantic を黙らせるためだけの allow は、後から「まだ要るのか」を判断できなくなる。理由は lint 名の言い換えではなく、その item がその形である理由を書く。
   **allow が不要かどうかをローカルの clippy 1 回で判断しない**。`libc` の型幅のように target で結果が変わる lint は、host によって発火する側が入れ替わる（macOS で `cast_lossless`、Linux で `unnecessary_cast`）。target 依存を理由に両方 allow している箇所は、その旨をコメントに書いて残す。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
@@ -252,6 +255,8 @@ fn read_real_pty() { /* OS call only */ }
 を実行する。source だけの追加、registry だけ残る stale symbol、重複、理由・owner・期限・テスト証跡の欠落、期限切れ、
 許可外理由に加え、[`coverage-off-budget.json`](../coverage-off-budget.json) の owner / path 別 inventory と一致しない
 件数変更は CI を失敗させる。budget 更新は増減を review 上で明示するだけで、許可理由の適合確認を代替しない。
+source scan はルートと各 crate の `build.rs`・`src/`・`tests/`・`examples/`・`benches/` を対象にする。
+これらの未追跡ファイルも検査し、`artifacts/` の生成物や依存キャッシュ、build 出力は検査に混ぜない。
 現行 debt の領域別 inventory と返済順序は
 [8. coverage exclusion inventory](08-coverage.md) を参照する。
 
@@ -320,6 +325,10 @@ daemon から分離して常駐する bootstrap broker も同じ teardown の対
 `daemon serve` の直接起動だけでなく、`daemon start` / `daemon restart` と client bootstrap（`session ...` /
 `mcp` / TUI）による間接起動も同じ経路に載せる。自プロセス上に fake daemon を立てるテストの record は reap 対象外に
 なる（自分自身を撃たない）。
+
+Agent IPC E2E の Git fixture は daemon と同じ system PATH で準備する。macOS では親の PATH が Homebrew Git、
+daemon の固定 PATH が Apple Git を選ぶことがあるため、daemon が使う toolchain の初回起動を fixture 準備に含める。
+daemon の Git read / effect deadline は production と同じ値で検証する。
 
 ### 重い E2E の直列化
 
@@ -455,6 +464,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
   除外規模を隠さず、完全なpath inventoryと上限は `coverage-off-budget.json` が保持する。追加・削除・owner移動は
   budgetを同時にreviewしない限り失敗する。
 - カバレッジ未達（100% 未満）のとき、`coverage.yml` は `cargo llvm-cov report --json` から**未達ファイルと未達関数**（ファイル path・関数名・宣言行・関数率/行率・不足量・未達行レンジ）のレポートを生成し、PR コメント（同一リポジトリ PR。`marocchino/sticky-pull-request-comment` の header + recreate で再実行時も 1 件に更新）と Job Summary の両方へ出す。Job Summary は権限不要のため fork PR でも一覧が見え、コメント投稿は `continue-on-error` で **coverage gate の合否（exit code）から独立**させる。関数カバレッジは JSON summary（generic の単相化をマージした集計＝gate と一致。lcov の per-monomorphization な `FN/FNDA` を数えると gate と食い違う）を使い、関数名は `c++filt`（binutils。Rust v0 を demangle）で可読化する。出力はファイル/関数/行レンジの上限で切り詰め、超過分は明示する。レポート生成は `scripts/coverage-report-comment.rb`（Ruby, stdlib のみ）に抽出し、`scripts/tests/coverage-report-comment.sh` の fixture test（`test.yml` の script-tests job で実行）で固定する。閾値・対象パッケージ選択の SSoT は `scripts/coverage.sh`。
+- coverage の完全な JSON・LCOV・コメント用レポートは workflow artifact として 7 日間保存する。PR コメントの表示上限を超えた未達箇所も、この artifact から確認できる。
 - TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれからルート `[package].version` を読む。version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。
 
 ## リリース

@@ -3,6 +3,7 @@
 //! Home frame loop は「どこへ入力を渡すか」だけを見て、Garden 固有の判断は
 //! ここが持つ。
 
+use super::background_job::Job as GardenObservationJob;
 use super::{
     AgentRuntimeId, AgentWorkspaceObservation, AppEvent, Effect, GardenClick, GardenInventoryPort,
     HomeFrameMaterial, Key, LiveTerminalAction, MAX_OBSERVED_PROJECTS, Overlay, PointerEvent,
@@ -206,6 +207,10 @@ pub(super) struct GardenObservationCompletion {
     /// Inventories the daemon answered, each already checked to be the
     /// workspace it was asked for.
     pub(super) inventories: Vec<AgentWorkspaceObservation>,
+    pub(super) attention: Vec<(
+        WorkspaceId,
+        Result<usagi_core::domain::attention::WorkspaceAttention, String>,
+    )>,
 }
 
 /// Observe the other open projects' Agent inventory off the frame thread.
@@ -216,19 +221,38 @@ pub(super) struct GardenObservationCompletion {
 pub(super) fn spawn_garden_observation_job(
     mut port: Box<dyn GardenInventoryPort>,
     workspaces: Vec<WorkspaceId>,
+    observe_agents: bool,
     sender: Sender<GardenObservationCompletion>,
-) {
-    std::thread::spawn(move || {
+) -> GardenObservationJob {
+    GardenObservationJob::spawn(move |cancel| {
         let mut inventories = Vec::new();
+        let mut attention = Vec::new();
         for workspace in workspaces.into_iter().take(MAX_OBSERVED_PROJECTS) {
-            if let Ok(inventory) = port.inventory(workspace)
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                port.attention(workspace)
+            }))
+            .unwrap_or_else(|_| Err("Workspace attention is unavailable".into()));
+            attention.push((workspace, result));
+            if observe_agents
+                && !cancel.load(std::sync::atomic::Ordering::Acquire)
+                && let Ok(Ok(inventory)) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        port.inventory(workspace)
+                    }))
                 && inventory.inventory.workspace_id == workspace
             {
                 inventories.push(inventory);
             }
         }
-        let _ = sender.send(GardenObservationCompletion { port, inventories });
-    });
+        let _ = sender.send(GardenObservationCompletion {
+            port,
+            inventories,
+            attention,
+        });
+    })
 }
 
 /// Select one visible managed-session tab after the frame's hit test resolved
@@ -259,4 +283,135 @@ pub(super) fn visit_garden_agent(
         return false;
     };
     select_right_pane_tab(ui, runtime, index)
+}
+
+#[cfg(test)]
+mod observation_worker_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    use usagi_core::domain::{agent::AgentInventory, attention::WorkspaceAttention};
+
+    struct BlockingPort {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        attention_calls: Arc<AtomicUsize>,
+        inventory_calls: Arc<AtomicUsize>,
+    }
+    impl GardenInventoryPort for BlockingPort {
+        fn attention(&mut self, workspace: WorkspaceId) -> Result<WorkspaceAttention, String> {
+            self.attention_calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.send(()).unwrap();
+            self.release
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            Ok(WorkspaceAttention {
+                workspace,
+                items: vec![],
+            })
+        }
+        fn inventory(&mut self, _: WorkspaceId) -> Result<AgentWorkspaceObservation, String> {
+            self.inventory_calls.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected inventory after cancellation".into())
+        }
+    }
+
+    #[test]
+    fn cancelling_observation_joins_only_the_current_call_and_skips_remaining_projects() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let attention_calls = Arc::new(AtomicUsize::new(0));
+        let inventory_calls = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = mpsc::channel();
+        let job = spawn_garden_observation_job(
+            Box::new(BlockingPort {
+                entered: entered_tx,
+                release: release_rx,
+                attention_calls: Arc::clone(&attention_calls),
+                inventory_calls: Arc::clone(&inventory_calls),
+            }),
+            vec![WorkspaceId::new(), WorkspaceId::new()],
+            true,
+            sender,
+        );
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        job.cancel();
+        release_tx.send(()).unwrap();
+        drop(job);
+        let mut result = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(result.attention.len(), 1);
+        assert_eq!(
+            result.inventories,
+            [] as [usagi_core::domain::agent::AgentWorkspaceObservation; 0]
+        );
+        assert_eq!(attention_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(inventory_calls.load(Ordering::SeqCst), 0);
+        // Even cancellation returns a usable port to its owner.
+        assert!(result.port.inventory(WorkspaceId::new()).is_err());
+        assert_eq!(inventory_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct PanickingPort {
+        attention_calls: usize,
+        inventory_calls: usize,
+    }
+    impl GardenInventoryPort for PanickingPort {
+        fn attention(&mut self, workspace: WorkspaceId) -> Result<WorkspaceAttention, String> {
+            self.attention_calls += 1;
+            assert_ne!(self.attention_calls, 1, "injected attention panic");
+            Ok(WorkspaceAttention {
+                workspace,
+                items: vec![],
+            })
+        }
+        fn inventory(
+            &mut self,
+            workspace: WorkspaceId,
+        ) -> Result<AgentWorkspaceObservation, String> {
+            self.inventory_calls += 1;
+            assert_ne!(self.inventory_calls, 1, "injected inventory panic");
+            Ok(AgentWorkspaceObservation {
+                inventory: AgentInventory {
+                    workspace_id: workspace,
+                    runtimes: vec![],
+                    resumable: vec![],
+                },
+                session_statuses: std::collections::BTreeMap::default(),
+            })
+        }
+    }
+
+    #[test]
+    fn observation_panic_returns_the_port_and_continues_other_projects() {
+        let first = WorkspaceId::new();
+        let second = WorkspaceId::new();
+        let (sender, receiver) = mpsc::channel();
+        let job = spawn_garden_observation_job(
+            Box::new(PanickingPort {
+                attention_calls: 0,
+                inventory_calls: 0,
+            }),
+            vec![first, second],
+            true,
+            sender,
+        );
+        let mut result = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(job);
+        assert_eq!(result.attention.len(), 2);
+        assert!(result.attention[0].1.is_err());
+        assert!(result.attention[1].1.is_ok());
+        assert_eq!(result.inventories.len(), 1);
+        assert_eq!(result.inventories[0].inventory.workspace_id, second);
+        assert!(result.port.attention(first).is_ok());
+        assert!(result.port.inventory(first).is_ok());
+    }
 }

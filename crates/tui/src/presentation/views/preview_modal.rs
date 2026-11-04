@@ -51,6 +51,9 @@ pub fn render_over(
     if let Some(path) = state.path() {
         return render_document(height, width, base, state, path);
     }
+    if state.file_filter().is_artifacts() {
+        return super::artifact_modal::render_over(height, width, base, state);
+    }
     render_finder(height, width, base, state)
 }
 
@@ -362,7 +365,9 @@ fn empty_rows(state: &PreviewOverlay, inner: usize) -> Vec<String> {
             ))];
         }
         return vec![modal::empty_notice(match state.file_filter() {
-            PreviewFileFilter::All => "No files available.",
+            PreviewFileFilter::All
+            | PreviewFileFilter::Artifacts
+            | PreviewFileFilter::AllArtifacts => "No files available.",
             PreviewFileFilter::Changed => "No changed files.",
             PreviewFileFilter::Tracked => "No tracked files.",
         })];
@@ -387,9 +392,14 @@ fn empty_rows(state: &PreviewOverlay, inner: usize) -> Vec<String> {
 }
 
 fn file_tabs(active: PreviewFileFilter) -> String {
+    if active.is_artifacts() {
+        return active.label().to_owned();
+    }
     let choices = PreviewFileFilter::TABS.map(|filter| {
         let role = match filter {
-            PreviewFileFilter::All => Role::Accent,
+            PreviewFileFilter::All
+            | PreviewFileFilter::Artifacts
+            | PreviewFileFilter::AllArtifacts => Role::Accent,
             PreviewFileFilter::Changed => Role::Warning,
             PreviewFileFilter::Tracked => Role::Info,
         };
@@ -433,7 +443,9 @@ fn render_document(
         let query = widgets::clip_to_width(state.search(), 32);
         format!("Preview · {path} · /{query} [{match_position}]")
     };
-    let footer = if state.is_search_editing() {
+    let footer = if state.file_filter().is_artifacts() && !state.is_search_editing() {
+        "Esc: files  Tab: open app  /: search  ↑↓: scroll".to_owned()
+    } else if state.is_search_editing() {
         search_footer(state.search(), inner)
     } else {
         format!(
@@ -448,6 +460,7 @@ fn render_document(
         base,
         &TextOverlay::new(title, document)
             .scrolled_to(projected_scroll)
+            .with_status(super::artifact_modal::open_feedback(state, inner))
             .with_footer(footer),
         desired_inner_width(width),
         desired_body_height(height),
@@ -899,6 +912,46 @@ mod tests {
         let reopened = joined(&state);
         assert!(reopened.contains("recent"));
         assert!(reopened.contains("changed · 1"));
+    }
+
+    #[test]
+    fn a_recent_file_remains_selected_after_the_last_changed_row_moves_to_recent() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        let request_id = state.preview_overlay().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target: Target::Session(session),
+                request_id,
+                path: None,
+                filter: PreviewFileFilter::All,
+                files: vec!["README.md".into()],
+                changed: vec!["README.md".into()],
+                lines: Vec::new(),
+            }),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let rendered = joined(&state);
+        assert!(rendered.contains("recent"));
+        assert!(!rendered.contains("changed ·"));
+        assert!(rendered.contains("README.md"));
+        assert_eq!(
+            state.preview_overlay().unwrap().selected_file(),
+            Some("README.md")
+        );
+    }
+
+    #[test]
+    fn highlighting_empty_text_has_no_spurious_style_or_cells() {
+        assert_eq!(highlighted("", &[], 0, Role::Accent.style()), "");
+        assert_eq!(
+            widgets::strip_ansi(&highlighted("日本語", &[1], 0, Style::new())),
+            "日本語"
+        );
     }
 
     #[test]
@@ -1421,5 +1474,48 @@ mod tests {
             vec![],
         );
         assert!(joined(&state).contains("No tracked files"));
+    }
+    #[test]
+    fn artifacts_finder_and_document_show_native_open_controls() {
+        assert!(file_tabs(PreviewFileFilter::Artifacts).contains("session artifacts"));
+        assert_eq!(PreviewFileFilter::Artifacts.tab_index(), 0);
+        let workspace = WorkspaceId::new();
+        let target = Target::Root(workspace);
+        let mut state = AppState::home(workspace, vec![]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("artifact".to_owned())),
+        );
+        assert!(joined(&state).contains("Artifacts"));
+        complete_preview(
+            &mut state,
+            target,
+            None,
+            PreviewFileFilter::AllArtifacts,
+            vec![],
+            vec![],
+        );
+        assert!(joined(&state).contains("No deliverables yet"));
+        let path = ".usagi/sessions/one/artifacts/report.md".to_owned();
+        complete_preview(
+            &mut state,
+            target,
+            None,
+            PreviewFileFilter::AllArtifacts,
+            vec![path.clone()],
+            vec![],
+        );
+        assert!(joined(&state).contains("Tab preview"));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
+        complete_preview(
+            &mut state,
+            target,
+            Some(&path),
+            PreviewFileFilter::AllArtifacts,
+            vec![],
+            vec!["result".to_owned()],
+        );
+        assert!(joined(&state).contains("Tab: open app"));
     }
 }

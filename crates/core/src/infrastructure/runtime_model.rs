@@ -31,7 +31,6 @@ pub struct SupportedAgentRuntime {
 ///
 /// [`DefaultModel::ALL`] is the closed-vocabulary `SSoT`; adding a provider there
 /// automatically makes it a candidate on every catalog consumer.
-#[must_use]
 pub fn supported_agent_runtimes() -> impl ExactSizeIterator<Item = SupportedAgentRuntime> {
     DefaultModel::ALL
         .into_iter()
@@ -97,6 +96,8 @@ struct RuntimeConfig {
 struct SessionConfig {
     #[serde(default)]
     setup_commands: Vec<String>,
+    #[serde(default)]
+    cache_cleanup: crate::domain::session_cache::SessionCachePolicy,
 }
 
 /// Agent configuration read from `.usagi/config.toml`.
@@ -108,9 +109,11 @@ pub struct WorkspaceAgentConfig {
 impl Default for WorkspaceAgentConfig {
     fn default() -> Self {
         // A freshly initialized workspace must be able to delegate without an
-        // undocumented config edit. `default` is the provider-owned selector:
-        // the CLI, rather than usagi, chooses the concrete Claude model.
-        Self::from_runtime_allowlists([("claude", vec!["default".to_owned()])])
+        // undocumented config edit. `default` asks the selected provider CLI
+        // to choose its model; availability is still checked at admission.
+        Self::from_runtime_allowlists(
+            supported_agent_runtimes().map(|runtime| (runtime.id, vec!["default".to_owned()])),
+        )
     }
 }
 
@@ -186,6 +189,7 @@ impl WorkspaceAgentConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceSessionConfig {
     setup_commands: Vec<String>,
+    cache_cleanup: crate::domain::session_cache::SessionCachePolicy,
 }
 
 impl WorkspaceSessionConfig {
@@ -216,8 +220,14 @@ impl WorkspaceSessionConfig {
         };
         let parsed = toml::from_str::<WorkspaceConfig>(&text)
             .context(format!("failed to parse {}", path.display()))?;
+        parsed
+            .session
+            .cache_cleanup
+            .validate()
+            .map_err(anyhow::Error::msg)?;
         Ok(Self {
             setup_commands: normalize_setup_commands(parsed.session.setup_commands),
+            cache_cleanup: parsed.session.cache_cleanup,
         })
     }
 
@@ -260,6 +270,12 @@ impl WorkspaceSessionConfig {
     pub fn setup_commands(&self) -> &[String] {
         &self.setup_commands
     }
+
+    /// Retention of explicitly selected, regenerable session directories.
+    #[must_use]
+    pub const fn cache_cleanup(&self) -> &crate::domain::session_cache::SessionCachePolicy {
+        &self.cache_cleanup
+    }
 }
 
 fn normalize_setup_commands(commands: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -291,6 +307,45 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn session_cache_config_is_opt_in_and_preserved_by_setup_editor() {
+        let workspace = tempdir().unwrap();
+        assert_eq!(
+            WorkspaceSessionConfig::read(workspace.path())
+                .cache_cleanup()
+                .paths,
+            [] as [std::path::PathBuf; 0]
+        );
+        std::fs::create_dir(workspace.path().join(".usagi")).unwrap();
+        let path = workspace.path().join(".usagi/config.toml");
+        std::fs::write(&path, "[session.cache_cleanup]\npaths = ['target', 'node_modules']\nmax_age_hours = 168\nmax_bytes = 10737418240\n").unwrap();
+        let config = WorkspaceSessionConfig::load(workspace.path()).unwrap();
+        assert_eq!(
+            config.cache_cleanup().paths,
+            [std::path::PathBuf::from("target"), "node_modules".into()]
+        );
+        assert_eq!(config.cache_cleanup().max_bytes, Some(10_737_418_240));
+        WorkspaceSessionConfig::save_setup_commands(workspace.path(), &["setup".into()]).unwrap();
+        assert_eq!(
+            WorkspaceSessionConfig::load(workspace.path())
+                .unwrap()
+                .cache_cleanup(),
+            config.cache_cleanup()
+        );
+        std::fs::write(
+            &path,
+            "[session.cache_cleanup]\npaths = ['../outside']\nmax_bytes = 1\n",
+        )
+        .unwrap();
+        assert!(WorkspaceSessionConfig::load(workspace.path()).is_err());
+        assert_eq!(
+            WorkspaceSessionConfig::read(workspace.path())
+                .cache_cleanup()
+                .paths,
+            [] as [std::path::PathBuf; 0]
+        );
+    }
+
+    #[test]
     fn reader_admits_only_well_formed_runtime_specific_allowlists() {
         let injected =
             WorkspaceAgentConfig::from_allowlists(vec!["opus".into()], vec!["gpt-5".into()]);
@@ -310,39 +365,36 @@ mod tests {
         let config = WorkspaceAgentConfig::read(workspace.path());
         assert!(config.allows("claude", "sonnet"));
         assert!(!config.allows("claude", "opus"));
-        assert!(config.models("codex").is_empty());
+        assert_eq!(config.models("codex"), [] as [String; 0]);
         assert!(config.allows("agy", "gemini-model"));
         assert_eq!(
             WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
             ["first", "second"]
         );
 
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path().join("missing").as_path())
-                .allows("claude", "default")
-        );
-        assert!(
+        let missing = WorkspaceAgentConfig::read(workspace.path().join("missing").as_path());
+        for runtime in supported_agent_runtimes() {
+            assert!(missing.allows(runtime.id, "default"));
+        }
+        assert_eq!(
             WorkspaceSessionConfig::read(workspace.path().join("missing").as_path())
-                .setup_commands()
-                .is_empty()
+                .setup_commands(),
+            [] as [String; 0]
         );
         std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [toml").unwrap();
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path())
-                .models("claude")
-                .is_empty()
+        assert_eq!(
+            WorkspaceAgentConfig::read(workspace.path()).models("claude"),
+            [] as [String; 0]
         );
-        assert!(
-            WorkspaceSessionConfig::read(workspace.path())
-                .setup_commands()
-                .is_empty()
+        assert_eq!(
+            WorkspaceSessionConfig::read(workspace.path()).setup_commands(),
+            [] as [String; 0]
         );
         std::fs::remove_file(workspace.path().join(".usagi/config.toml")).unwrap();
         std::fs::create_dir(workspace.path().join(".usagi/config.toml")).unwrap();
-        assert!(
-            WorkspaceAgentConfig::read(workspace.path())
-                .models("claude")
-                .is_empty()
+        assert_eq!(
+            WorkspaceAgentConfig::read(workspace.path()).models("claude"),
+            [] as [String; 0]
         );
         assert!(WorkspaceSessionConfig::load(workspace.path()).is_err());
         assert!(
@@ -352,17 +404,17 @@ mod tests {
             )
             .is_err()
         );
-        assert!(config.models("unknown").is_empty());
+        assert_eq!(config.models("unknown"), [] as [String; 0]);
     }
 
     #[test]
     fn session_setup_writer_preserves_other_toml_and_round_trips_atomically() {
         let workspace = tempdir().unwrap();
-        assert!(
+        assert_eq!(
             WorkspaceSessionConfig::load(workspace.path())
                 .unwrap()
-                .setup_commands()
-                .is_empty()
+                .setup_commands(),
+            [] as [String; 0]
         );
         WorkspaceSessionConfig::save_setup_commands(
             workspace.path(),

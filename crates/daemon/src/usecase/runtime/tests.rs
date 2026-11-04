@@ -1,6 +1,7 @@
 //! runtime の振る舞いを固定するテスト。
 
 use super::*;
+use crate::usecase::resources::StoreError;
 use std::{collections::BTreeSet, path::PathBuf};
 use usagi_core::domain::{
     agent::{
@@ -31,7 +32,7 @@ fn spawn_provision_carries_an_optional_ephemeral_sandbox_launcher() {
 #[derive(Default)]
 struct Store(Vec<RuntimeStoreSnapshot>);
 impl RuntimeStore for Store {
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0.push(snapshot);
         Ok(())
     }
@@ -41,10 +42,10 @@ struct ConditionalStore {
     fail_after: Option<usize>,
 }
 impl RuntimeStore for ConditionalStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.saves += 1;
         if self.fail_after.is_some_and(|limit| self.saves > limit) {
-            Err(())
+            Err(StoreError::Unavailable)
         } else {
             Ok(())
         }
@@ -52,9 +53,30 @@ impl RuntimeStore for ConditionalStore {
 }
 struct FailingStore(usize);
 impl RuntimeStore for FailingStore {
-    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
         self.0 += 1;
-        if self.0 == 2 { Err(()) } else { Ok(()) }
+        if self.0 == 2 {
+            Err(StoreError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+}
+struct BackpressureStore;
+impl RuntimeStore for BackpressureStore {
+    fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+        Err(StoreError::RetentionBackpressure)
+    }
+}
+struct NoSpawn;
+impl PtySpawner for NoSpawn {
+    fn spawn(
+        &mut self,
+        _: &DurableLaunchSnapshot,
+        _: &SpawnProvision,
+        _: &TerminalRef,
+    ) -> Result<ProcessIdentity, SpawnFailure> {
+        panic!("refused admission must not spawn")
     }
 }
 #[derive(Default)]
@@ -169,6 +191,141 @@ fn process() -> ProcessIdentity {
 }
 
 #[test]
+fn fresh_admission_rejects_decision_authority_from_another_conversation_before_effects() {
+    let request = request();
+    let (runtime, operation) = refs(&request);
+    let owner = UserDecisionOwner {
+        workspace_id: operation.workspace_id,
+        session_id: operation.session_id,
+        caller: usagi_core::domain::agent::CallerRef {
+            session_id: None,
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        },
+        run_id: operation.operation_id,
+    };
+    let invalid = [
+        (
+            Some(UserDecisionOwner {
+                run_id: OperationId::new(),
+                ..owner.clone()
+            }),
+            Vec::new(),
+        ),
+        (None, vec![owner.clone()]),
+        (Some(owner.clone()), vec![owner.clone()]),
+        (
+            Some(UserDecisionOwner {
+                session_id: Some(SessionId::new()),
+                ..owner.clone()
+            }),
+            Vec::new(),
+        ),
+    ];
+    for (owner, aliases) in invalid {
+        let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+        let mut resolver = Resolver::default();
+        let mut store = Store::default();
+        assert_eq!(
+            coordinator.launch_with_provenance(
+                &request,
+                runtime.clone(),
+                operation.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+                None,
+                "fresh".into(),
+                &[],
+                None,
+                owner,
+                aliases,
+            ),
+            Err(RuntimeError::ScopeMismatch)
+        );
+        assert_eq!(resolver.calls, 0);
+        assert_eq!(
+            store.0,
+            [] as [crate::usecase::runtime::RuntimeStoreSnapshot; 0]
+        );
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+        );
+    }
+}
+
+#[test]
+fn exact_resume_cannot_replace_or_expand_existing_decision_authority() {
+    let request = request();
+    let (source, operation) = refs(&request);
+    let owner = UserDecisionOwner {
+        workspace_id: operation.workspace_id,
+        session_id: operation.session_id,
+        caller: usagi_core::domain::agent::CallerRef {
+            session_id: None,
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        },
+        run_id: operation.operation_id,
+    };
+    let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+    let mut resolver = Resolver::default();
+    let mut store = Store::default();
+    coordinator
+        .launch_with_provenance(
+            &request,
+            source.clone(),
+            operation.clone(),
+            Geometry { cols: 80, rows: 24 },
+            &mut resolver,
+            &mut store,
+            &mut Spawner(Ok(process())),
+            None,
+            "source".into(),
+            &[],
+            None,
+            Some(owner.clone()),
+            Vec::new(),
+        )
+        .unwrap();
+    coordinator.exit(&source, 0, &mut store).unwrap();
+    let before = coordinator.snapshot();
+    let changed_owner = UserDecisionOwner {
+        run_id: OperationId::new(),
+        ..owner.clone()
+    };
+    for (candidate, aliases) in [
+        (None, Vec::new()),
+        (Some(changed_owner.clone()), Vec::new()),
+        (Some(owner.clone()), vec![changed_owner]),
+    ] {
+        let (mut runtime, mut fence) = refs(&request);
+        runtime.terminal.daemon_generation = operation.owner_daemon_generation;
+        fence.owner_daemon_generation = operation.owner_daemon_generation;
+        assert_eq!(
+            coordinator.launch_with_provenance(
+                &request,
+                runtime,
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+                None,
+                "replacement".into(),
+                std::slice::from_ref(&source),
+                None,
+                candidate,
+                aliases,
+            ),
+            Err(RuntimeError::ProviderResumeMismatch)
+        );
+        assert_eq!(coordinator.snapshot(), before);
+        assert_eq!(resolver.calls, 1);
+    }
+}
+
+#[test]
 fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
     let request = request();
     let (runtime, operation) = refs(&request);
@@ -177,6 +334,9 @@ fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
         schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
         records: vec![
             DurableRuntimeRecord {
+                launch_provenance: None,
+                user_decision_owner: None,
+                user_decision_owner_aliases: Vec::new(),
                 runtime: runtime.clone(),
                 operation: operation.clone(),
                 launch: launch.clone(),
@@ -192,6 +352,9 @@ fn restart_reconcile_marks_only_unfinished_runtimes_identity_unknown() {
                 credential_provenance: Some(CredentialProvenance::DaemonMintedEphemeral),
             },
             DurableRuntimeRecord {
+                launch_provenance: None,
+                user_decision_owner: None,
+                user_decision_owner_aliases: Vec::new(),
                 runtime,
                 operation,
                 launch,
@@ -409,6 +572,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (runtime, operation) = refs(&request);
     let launch = Resolver::default().resolve(&request).unwrap().snapshot;
     let record = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime,
         operation,
         launch,
@@ -473,6 +639,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (other_runtime, mut same_operation) = refs(&request);
     same_operation.operation_id = record.operation.operation_id;
     let duplicate_operation = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: other_runtime,
         operation: same_operation,
         ..record.clone()
@@ -494,6 +663,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     lineage_source.resume_source = Some(source_id);
     let (replacement_runtime, replacement_operation) = refs(&request);
     let mut replacement = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: replacement_runtime,
         operation: replacement_operation,
         ..record.clone()
@@ -566,6 +738,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     );
     let (competing_runtime, competing_operation) = refs(&request);
     let mut competing_replacement = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: competing_runtime,
         operation: competing_operation,
         resume_source: Some(usagi_core::domain::id::AgentResumeSourceId::new()),
@@ -614,6 +789,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let mut unfenced_source = record.clone();
     unfenced_source.superseded_by = Some(unfenced_runtime.agent_runtime_id);
     let unfenced_replacement = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: unfenced_runtime,
         operation: unfenced_operation,
         ..record.clone()
@@ -632,6 +810,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
     let (first_runtime, first_operation) = refs(&request);
     let (second_runtime, second_operation) = refs(&request);
     let mut first_cycle = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: first_runtime,
         operation: first_operation,
         continuation: Some(continuation),
@@ -640,6 +821,9 @@ fn hydrate_validates_schema_identity_and_legacy_outcomes() {
         ..record.clone()
     };
     let second_cycle = DurableRuntimeRecord {
+        launch_provenance: None,
+        user_decision_owner: None,
+        user_decision_owner_aliases: Vec::new(),
         runtime: second_runtime,
         operation: second_operation,
         continuation: Some(continuation),
@@ -730,6 +914,21 @@ fn corrupt_generation_binding_fails_closed_before_hydrate() {
 }
 
 #[test]
+fn hydrate_refuses_a_missing_active_generation_in_current_and_legacy_snapshots() {
+    for schema_version in [1, RUNTIME_SNAPSHOT_SCHEMA_VERSION] {
+        let mut snapshot = RuntimeStoreSnapshot {
+            schema_version,
+            ..RuntimeStoreSnapshot::default()
+        };
+        snapshot.generation.current = Some(DaemonGeneration::new());
+        assert_eq!(
+            RuntimeCoordinator::hydrate(snapshot, 1, 64, 1).unwrap_err(),
+            RuntimeSnapshotError::Generation
+        );
+    }
+}
+
+#[test]
 fn terminal_ownership_projection_covers_orphan_and_lost_states() {
     assert_eq!(
         terminal_ownership_state(RuntimeState::ReconcileRequired(
@@ -763,6 +962,9 @@ fn durable_snapshot_schema_round_trips_every_safe_outcome_and_rejects_unknown_fi
         let snapshot = RuntimeStoreSnapshot {
             schema_version: RUNTIME_SNAPSHOT_SCHEMA_VERSION,
             records: vec![DurableRuntimeRecord {
+                launch_provenance: None,
+                user_decision_owner: None,
+                user_decision_owner_aliases: Vec::new(),
                 runtime: runtime.clone(),
                 operation: operation.clone(),
                 launch: launch.clone(),
@@ -828,15 +1030,18 @@ fn closing_an_empty_session_converges_without_a_terminal_snapshot() {
     let mut store = Store::default();
     let mut spawner = CompensatingSpawner { terminated: false };
 
-    assert!(
+    assert_eq!(
         coordinator
             .close_session(SessionId::new(), &mut store, &mut spawner)
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [usagi_core::domain::id::AgentRuntimeRef; 0]
     );
     assert!(!spawner.terminated);
     assert_eq!(store.0.len(), 1, "only the converging save is required");
-    assert!(store.0[0].records.is_empty());
+    assert_eq!(
+        store.0[0].records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -879,7 +1084,10 @@ fn closing_a_session_terminates_and_forgets_its_agent_runtime() {
 
     assert!(spawner.terminated);
     assert_eq!(closed, [runtime]);
-    assert!(coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
     coordinator.snapshot().validate_ownership().unwrap();
     assert_eq!(
         store.0[store.0.len() - 2].records[0].state,
@@ -892,7 +1100,10 @@ fn closing_a_session_terminates_and_forgets_its_agent_runtime() {
         .unwrap();
     assert_eq!(provider.last_known_status, ProviderResumeStatus::Exited);
     assert_eq!(provider.last_known_phase, Some(ProviderResumePhase::Ended));
-    assert!(store.0.last().unwrap().records.is_empty());
+    assert_eq!(
+        store.0.last().unwrap().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -956,13 +1167,19 @@ fn closing_a_session_forgets_an_agent_that_already_exited() {
         [runtime]
     );
     assert!(!spawner.terminated);
-    assert!(coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
     assert_eq!(
         store.0[store.0.len() - 2].records[0].state,
         RuntimeState::Reclaimed,
         "the acknowledged terminal state is durable before removal"
     );
-    assert!(store.0.last().unwrap().records.is_empty());
+    assert_eq!(
+        store.0.last().unwrap().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1075,7 +1292,10 @@ fn closing_a_reconciled_session_persists_termination_before_forgetting_it() {
         RuntimeState::Reclaimed,
         "startup reconciliation remains durable long enough to release a foreign claim"
     );
-    assert!(store.0.last().unwrap().records.is_empty());
+    assert_eq!(
+        store.0.last().unwrap().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -1170,6 +1390,38 @@ fn interrupting_agents_marks_a_process_that_cannot_be_reaped_for_reconcile() {
 }
 
 #[test]
+fn interrupting_an_agent_without_a_provider_session_retains_its_final() {
+    let request = request();
+    let (runtime, fence) = refs(&request);
+    let mut coordinator = RuntimeCoordinator::new(1, 1024, 2);
+    let mut store = Store::default();
+    let mut spawner = CompensatingSpawner { terminated: false };
+    launch(
+        &mut coordinator,
+        &request,
+        runtime.clone(),
+        fence,
+        &mut spawner,
+        &mut store,
+    )
+    .unwrap();
+    let ids = BTreeSet::from([runtime.agent_runtime_id.as_str()]);
+    assert_eq!(
+        coordinator.interrupt_agents(&ids, &mut store, &mut spawner),
+        Ok(1)
+    );
+    let record = &coordinator.snapshot().records[0];
+    assert_eq!(record.state, RuntimeState::Exited);
+    assert_eq!(record.process, None);
+    assert_eq!(record.provider_resume, None);
+    assert!(spawner.terminated);
+    assert_eq!(
+        coordinator.interrupt_agents(&ids, &mut store, &mut spawner),
+        Ok(0)
+    );
+}
+
+#[test]
 fn sleeping_an_agent_releases_its_slot_and_becomes_bounded_resume_history() {
     let request = request();
     let (runtime, fence) = refs(&request);
@@ -1260,6 +1512,98 @@ fn sleeping_an_agent_releases_its_slot_and_becomes_bounded_resume_history() {
     ));
     assert_eq!(coordinator.occupied_slots(), 1);
     snapshot.validate_ownership().unwrap();
+}
+
+#[test]
+fn durable_retention_pressure_restores_fresh_admission_and_generation() {
+    let request = request();
+    let (runtime, fence) = refs(&request);
+    let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+    let before = coordinator.snapshot();
+    for _ in 0..2 {
+        assert_eq!(
+            launch(
+                &mut coordinator,
+                &request,
+                runtime.clone(),
+                fence.clone(),
+                &mut NoSpawn,
+                &mut BackpressureStore
+            ),
+            Err(RuntimeError::RetentionBackpressure)
+        );
+        assert_eq!(coordinator.snapshot(), before);
+        assert_eq!(coordinator.retention().metrics().reserved_finals, 0);
+        assert_eq!(coordinator.occupied_slots(), 0);
+    }
+}
+
+#[test]
+fn durable_retention_pressure_leaves_a_resume_source_available_for_retry() {
+    let request = request();
+    let (source, fence) = refs(&request);
+    let mut coordinator = RuntimeCoordinator::new(1, 64, 1);
+    let mut store = Store::default();
+    let mut spawner = CompensatingSpawner { terminated: false };
+    launch(
+        &mut coordinator,
+        &request,
+        source.clone(),
+        fence,
+        &mut spawner,
+        &mut store,
+    )
+    .unwrap();
+    coordinator
+        .sleep_agents(
+            &[source.agent_runtime_id.as_str()].into_iter().collect(),
+            &mut store,
+            &mut spawner,
+        )
+        .unwrap();
+    let before = coordinator.snapshot();
+    let retained = coordinator.retention().metrics().retained_finals;
+    let reserved = coordinator.retention().metrics().reserved_finals;
+    let source_retention = coordinator.retention().lookup(&source.terminal);
+    let (replacement, fence) = refs(&request);
+    assert_eq!(
+        coordinator.resume_with_semantic(
+            &request,
+            replacement.clone(),
+            fence.clone(),
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver::default(),
+            &mut BackpressureStore,
+            &mut NoSpawn,
+            None,
+            "retry".into(),
+            std::slice::from_ref(&source)
+        ),
+        Err(RuntimeError::RetentionBackpressure)
+    );
+    assert_eq!(coordinator.snapshot(), before);
+    assert_eq!(
+        coordinator.retention().lookup(&source.terminal),
+        source_retention
+    );
+    assert_eq!(coordinator.retention().metrics().retained_finals, retained);
+    assert_eq!(coordinator.retention().metrics().reserved_finals, reserved);
+    coordinator
+        .resume_with_semantic(
+            &request,
+            replacement,
+            fence,
+            Geometry { cols: 80, rows: 24 },
+            &mut Resolver::default(),
+            &mut store,
+            &mut spawner,
+            None,
+            "retry".into(),
+            &[source],
+        )
+        .unwrap();
+    coordinator.snapshot().validate_ownership().unwrap();
+    assert_eq!(coordinator.occupied_slots(), 1);
 }
 
 #[test]
@@ -1445,7 +1789,10 @@ fn inventory_lists_only_in_scope_agents_and_marks_live_until_exit() {
         session_id: Some(SessionId::new()),
         worktree_id: request.scope.worktree_id,
     };
-    assert!(c.inventory(&foreign).is_empty());
+    assert_eq!(
+        c.inventory(&foreign),
+        [] as [usagi_core::domain::terminal_launch::TerminalInventoryEntry; 0]
+    );
 
     // After the Agent exits it is no longer attachable (`live == false`).
     c.exit(&runtime, 0, &mut store).unwrap();
@@ -2084,8 +2431,8 @@ fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
     }
     struct RejectingStore;
     impl RuntimeStore for RejectingStore {
-        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
-            Err(())
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), StoreError> {
+            Err(StoreError::Unavailable)
         }
     }
     struct RejectingJournal;
@@ -2265,13 +2612,19 @@ fn a_collected_agent_final_leaves_no_record_and_answers_typed() {
     clock.advance(1000);
     retention.collect();
     assert_eq!(coordinator.collect_garbage(&mut store), 1);
-    assert!(coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
     let scope = usagi_core::domain::terminal_launch::TerminalLaunchScope {
         workspace_id: runtime.terminal.workspace_id,
         session_id: runtime.terminal.session_id,
         worktree_id: runtime.terminal.worktree_id,
     };
-    assert!(coordinator.completed_inventory(&scope).is_empty());
+    assert_eq!(
+        coordinator.completed_inventory(&scope),
+        [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+    );
     assert_eq!(
         coordinator.terminal_snapshot(&runtime),
         Err(RuntimeError::FinalEvicted(
@@ -2451,8 +2804,14 @@ fn a_reclaimed_resume_source_ages_out_without_leaving_generation_ownership() {
     restored.collect();
     assert_eq!(restarted.collect_garbage(&mut store), 1);
     let collected = restarted.snapshot();
-    assert!(collected.records.is_empty());
-    assert!(collected.generation.terminals.is_empty());
+    assert_eq!(
+        collected.records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
+    assert_eq!(
+        collected.generation.terminals,
+        [] as [crate::usecase::generation::TerminalOwnership; 0]
+    );
     collected.validate_ownership().unwrap();
 }
 

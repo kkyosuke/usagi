@@ -21,16 +21,9 @@ fn sidebar_reserved_pr_cells_without_a_visible_pr_do_not_open_a_modal() {
         }),
     );
 
-    assert!(
-        update(
-            &mut state,
-            AppEvent::Pointer {
-                column: 35,
-                row: 3,
-                at: std::time::Duration::ZERO,
-            },
-        )
-        .is_empty()
+    assert_eq!(
+        pointer_effects(&mut state, 35, 3, std::time::Duration::ZERO),
+        [] as [Effect; 0]
     );
     assert_eq!(state.overlay(), None);
 }
@@ -393,6 +386,42 @@ fn delayed_pr_request_does_not_steal_focus_and_empty_refresh_closes_modal() {
 }
 
 #[test]
+fn delayed_pr_errors_preserve_drawers_opened_after_the_request() {
+    for (key, focus) in [
+        (AppKey::ToggleDirectorDrawer, WorkspaceDrawerFocus::Director),
+        (
+            AppKey::ToggleRootTerminalDrawer,
+            WorkspaceDrawerFocus::Terminal,
+        ),
+    ] {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::OpenPrs)),
+            vec![Effect::LoadPullRequests { target }]
+        );
+        let _ = update(&mut state, AppEvent::Key(key));
+        assert_eq!(state.pr_request(), Some(target));
+        assert_eq!(state.workspace_drawer_focus(), Some(focus));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+
+        assert_eq!(state.pr_request(), None);
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+        assert!(state.workspace_drawer_open());
+        assert_eq!(state.workspace_drawer_focus(), Some(focus));
+        assert!(state.pr_focus.is_none());
+    }
+}
+
+#[test]
 fn newly_detected_pr_auto_opens_without_reopening_or_stealing_focus() {
     let (workspace, session, _) = ids();
     let target = Target::Session(session);
@@ -576,7 +605,10 @@ fn pr_reference_filter_copy_dismiss_and_safe_auto_open_modes() {
             url: "https://github.com/o/r/pull/1".into()
         }]
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('d'))).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('d'))),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::CtrlX)),
         vec![Effect::DismissPullRequest {
@@ -634,7 +666,7 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
-    assert!(state.pr_overlay().unwrap().prs().is_empty());
+    assert_eq!(state.pr_overlay().unwrap().prs(), []);
     let mut refreshed_merged = newly_detected;
     refreshed_merged.state = PrState::Merged;
     let _ = update(
@@ -647,7 +679,7 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     );
     assert_eq!(state.overlay(), Some(Overlay::Prs));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Closed);
-    assert!(state.pr_overlay().unwrap().prs().is_empty());
+    assert_eq!(state.pr_overlay().unwrap().prs(), []);
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Left));
     assert_eq!(state.pr_overlay().unwrap().filter(), PrFilter::Open);
@@ -673,7 +705,10 @@ fn open_pr_overlay_tracks_new_detection_and_navigates_status_tabs() {
     );
 
     state.pr_overlay = None;
-    assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Left)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -735,4 +770,415 @@ fn dismissed_pr_does_not_auto_open() {
 
     assert_eq!(state.overlay(), None);
     assert!(state.pr_overlay().is_none());
+}
+
+#[test]
+fn inbox_pr_focus_survives_loading_and_targets_the_selected_number() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let target = Target::Session(session);
+    let mut state = AppState::home(workspace, vec![session]);
+    let first = pr_link(1);
+    let second = pr_link(2);
+    assert_eq!(
+        update(
+            &mut state,
+            AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone()))
+        ),
+        vec![Effect::LoadPullRequests { target }]
+    );
+    assert_eq!(state.pr_request(), Some(target));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![first.clone(), second.clone()],
+        }),
+    );
+    assert_eq!(
+        state.pr_overlay().unwrap().selected_pr().unwrap().identity,
+        second.identity
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        vec![Effect::OpenPullRequest {
+            url: second.url().into()
+        }]
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone())),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![first.clone(), second.clone()],
+        }),
+    );
+    assert_eq!(
+        state.pr_overlay().unwrap().selected_pr().unwrap().identity,
+        second.identity
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone())),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 2,
+            prs: vec![second.clone(), first.clone()],
+        }),
+    );
+    assert_eq!(
+        state.pr_overlay().unwrap().selected_pr().unwrap().identity,
+        second.identity
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone())),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 3,
+            prs: vec![first.clone()],
+        }),
+    );
+    assert!(state.pr_overlay().unwrap().error().is_some());
+    assert!(state.pr_overlay().unwrap().selected_pr().is_none());
+    let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(effects, [] as [Effect; 0]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone())),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 4,
+            prs: vec![first],
+        }),
+    );
+    assert!(state.pr_overlay().unwrap().error().is_some());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+}
+
+#[test]
+fn inbox_pr_loading_is_cancelled_by_escape_or_a_new_interaction() {
+    for cached in [false, true] {
+        for event in [
+            AppEvent::Key(AppKey::Escape),
+            AppEvent::Key(AppKey::Down),
+            AppEvent::Pointer {
+                target: None,
+                at: std::time::Duration::ZERO,
+            },
+        ] {
+            let session = SessionId::new();
+            let target = Target::Session(session);
+            let mut state = AppState::home(WorkspaceId::new(), vec![session, SessionId::new()]);
+            let first = pr_link(1);
+            let pr = pr_link(2);
+            if cached {
+                let _ = update(
+                    &mut state,
+                    AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                        target,
+                        revision: 1,
+                        prs: vec![first.clone()],
+                    }),
+                );
+            }
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::OpenPullRequest(pr.identity.clone())),
+            );
+            let _ = update(&mut state, AppEvent::Tick);
+            assert_eq!(state.pr_request(), Some(target));
+            let _ = update(&mut state, event);
+            assert!(state.pr_request().is_none());
+            assert!(state.pr_focus.is_none());
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsError {
+                    target,
+                    error: SafeError {
+                        message: SafeMessage::new("Unavailable"),
+                        error_id: "failed".into(),
+                    },
+                }),
+            );
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision: 2,
+                    prs: vec![first, pr],
+                }),
+            );
+            assert_eq!(state.overlay(), None);
+            assert!(state.pr_overlay().is_none());
+        }
+    }
+}
+
+#[test]
+fn inbox_pr_cancellation_is_forgotten_when_its_session_disappears() {
+    let session = SessionId::new();
+    let target = Target::Session(session);
+    let mut state = AppState::home(WorkspaceId::new(), vec![session]);
+    let pr = pr_link(2);
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(pr.identity.clone())),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::Sessions(vec![])),
+    );
+    assert!(state.pr_cancelled.is_empty());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr],
+        }),
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.pr_overlay().is_none());
+}
+
+#[test]
+fn inbox_pr_refreshes_never_replace_a_missing_exact_selection() {
+    for failed in [false, true] {
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let mut state = AppState::home(WorkspaceId::new(), vec![session]);
+        let first = pr_link(1);
+        let second = pr_link(2);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![first.clone(), second.clone()],
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone())),
+        );
+        let event = if failed {
+            BackendEvent::PullRequestsError {
+                target,
+                error: SafeError {
+                    message: SafeMessage::new("Unavailable"),
+                    error_id: "failed".into(),
+                },
+            }
+        } else {
+            BackendEvent::PullRequestsLoaded {
+                target,
+                revision: 1,
+                prs: vec![first.clone(), second],
+            }
+        };
+        let _ = update(&mut state, AppEvent::Backend(event));
+        for revision in [2, 3] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision,
+                    prs: vec![first.clone()],
+                }),
+            );
+            assert!(state.pr_overlay().unwrap().selected_pr().is_none());
+            assert!(state.pr_overlay().unwrap().error().is_some());
+            assert_eq!(
+                update(&mut state, AppEvent::Key(AppKey::Enter)),
+                [] as [Effect; 0]
+            );
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Right));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::OpenPullRequest {
+                url: first.url().into()
+            }]
+        );
+    }
+}
+
+#[test]
+fn inbox_pr_focus_is_released_when_visiting_another_session() {
+    let session = SessionId::new();
+    let other = SessionId::new();
+    let target = Target::Session(session);
+    let mut state = AppState::home(WorkspaceId::new(), vec![session, other]);
+    let pr = pr_link(2);
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr.clone()],
+        }),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(pr.identity.clone())),
+    );
+    assert!(state.pr_focus.is_some());
+    let _ = update(&mut state, AppEvent::VisitSession(other));
+    assert_eq!(state.active(), Some(other));
+    assert!(state.pr_focus.is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 2,
+            prs: vec![pr],
+        }),
+    );
+    assert_eq!(state.overlay(), None);
+    assert!(state.pr_overlay().is_none());
+}
+
+#[test]
+fn inbox_pr_requests_can_replace_the_drawer_they_were_opened_from() {
+    for focus in [
+        WorkspaceDrawerFocus::Director,
+        WorkspaceDrawerFocus::Terminal,
+    ] {
+        for failed in [false, true] {
+            let session = SessionId::new();
+            let target = Target::Session(session);
+            let mut state = AppState::home(WorkspaceId::new(), vec![session]);
+            state.workspace_drawer_focus = Some(focus);
+            state.director_drawer_open = focus == WorkspaceDrawerFocus::Director;
+            state.root_terminal_drawer_open = focus == WorkspaceDrawerFocus::Terminal;
+            let _ = update(&mut state, AppEvent::VisitSession(session));
+            assert!(state.workspace_drawer_open());
+            let first = pr_link(1);
+            let second = pr_link(2);
+            let _ = update(
+                &mut state,
+                AppEvent::Key(AppKey::OpenPullRequest(second.identity.clone())),
+            );
+            let event = if failed {
+                BackendEvent::PullRequestsError {
+                    target,
+                    error: SafeError {
+                        message: SafeMessage::new("Unavailable"),
+                        error_id: "failed".into(),
+                    },
+                }
+            } else {
+                BackendEvent::PullRequestsLoaded {
+                    target,
+                    revision: 1,
+                    prs: vec![first, second.clone()],
+                }
+            };
+            let _ = update(&mut state, AppEvent::Backend(event));
+            assert_eq!(state.overlay(), Some(Overlay::Prs));
+            if failed {
+                assert!(state.pr_overlay().unwrap().error().is_some());
+                assert_eq!(
+                    update(&mut state, AppEvent::Key(AppKey::Enter)),
+                    [] as [Effect; 0]
+                );
+            } else {
+                assert_eq!(
+                    state.pr_overlay().unwrap().selected_pr().unwrap().identity,
+                    second.identity
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn inbox_pr_load_errors_keep_focus_until_a_newer_interaction() {
+    let mut empty = AppState::home(WorkspaceId::new(), Vec::new());
+    assert_eq!(
+        update(
+            &mut empty,
+            AppEvent::Key(AppKey::OpenPullRequest(pr_link(2).identity))
+        ),
+        [] as [Effect; 0]
+    );
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let target = Target::Session(session);
+    let mut state = AppState::home(workspace, vec![session]);
+    let pr = pr_link(2);
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(pr.identity.clone())),
+    );
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsError {
+            target,
+            error: SafeError {
+                message: SafeMessage::new("Unavailable"),
+                error_id: "failed".into(),
+            },
+        }),
+    );
+    assert_eq!(
+        state.pr_focus.as_ref().map(|(_, id)| id),
+        Some(&pr.identity)
+    );
+    assert!(state.pr_overlay().unwrap().error().is_some());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(pr.identity.clone())),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+            target,
+            revision: 1,
+            prs: vec![pr.clone()],
+        }),
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Decisions));
+    assert!(state.pr_focus.is_none());
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(
+        &mut state,
+        AppEvent::Key(AppKey::OpenPullRequest(pr.identity.clone())),
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+    assert!(state.pr_focus.is_none());
+    let _ = update(
+        &mut state,
+        AppEvent::Backend(BackendEvent::PullRequestsError {
+            target,
+            error: SafeError {
+                message: SafeMessage::new("Unavailable"),
+                error_id: "failed".into(),
+            },
+        }),
+    );
+    assert!(state.pr_overlay().unwrap().error().is_some());
 }

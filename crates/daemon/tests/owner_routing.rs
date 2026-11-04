@@ -34,6 +34,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use usagi_core as core_crate;
 use usagi_core::domain::id::{DaemonGeneration, TerminalId, WorkspaceId, WorktreeId};
 use usagi_core::domain::terminal_launch::{
     TerminalInventoryEntry, TerminalKind, TerminalLaunchScope,
@@ -48,9 +49,17 @@ use usagi_core::infrastructure::ipc::{
     read_json_frame, write_json_frame,
 };
 use usagi_core::infrastructure::owner_routing::{
-    GenerationDirectory, GenerationTransport, OwnerPresence, OwnerRouter, TrustedEndpoint,
-    presence_of, terminal_request,
+    GenerationDirectory, TrustedEndpoint, terminal_request,
 };
+
+#[path = "../../core/tests/support/owner_router.rs"]
+#[expect(
+    dead_code,
+    reason = "The shared harness includes methods exercised only by Core unit tests."
+)]
+mod owner_router;
+use owner_router::{GenerationTransport, OwnerPresence, OwnerRouter, presence_of};
+
 use usagi_daemon::infrastructure::generation_registry::{
     GenerationRegistryFile, TrustedGenerationDirectory,
 };
@@ -633,7 +642,7 @@ fn closing_and_reopening_the_client_re_establishes_the_old_subscription_from_its
         vec![64],
         "the reopened stream resumes at the cursor instead of replaying"
     );
-    assert!(world.old.observed.inputs().is_empty());
+    assert_eq!(world.old.observed.inputs(), [] as [Vec<u8>; 0]);
     world.shutdown();
 }
 
@@ -722,7 +731,7 @@ fn a_forged_or_unknown_generation_cannot_name_an_endpoint() {
             }))
             .is_err()
     );
-    assert!(world.connects().is_empty());
+    assert_eq!(world.connects(), [] as [DaemonGeneration; 0]);
 
     // A record that names a socket outside its own generation directory is
     // refused by the transport, not connected to.
@@ -742,6 +751,7 @@ fn a_rollover_is_refused_while_a_connected_client_cannot_route_by_owner() {
     let ledger = RoutingLedger::new();
     let mut legacy = usagi_core::infrastructure::ipc::ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId("legacy".into()),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: Vec::new(),

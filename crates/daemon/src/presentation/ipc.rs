@@ -5,6 +5,7 @@
 use std::io::{self, Read, Write};
 
 use crate::usecase::terminal_owner::{TerminalOwner, TerminalRequestContext, TerminalResponse};
+use serde::Deserialize as _;
 use serde_json::json;
 use usagi_core::infrastructure::ipc::{
     Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, ProtocolError, ResponseOutcome,
@@ -499,10 +500,13 @@ pub fn handle_admitted_connection_with_terminal_and_observe(
                         // Store the lease outside the match arm before dispatch so
                         // response observation and writing remain inside its lifetime.
                         request_lease = lease;
-                        if let Ok(usagi_core::infrastructure::ipc::DaemonRequest::Terminal {
-                            action,
-                            payload,
-                        }) = serde_json::from_value(body.clone())
+                        // Other request families are decoded by their dispatcher.
+                        if body.get("kind").and_then(serde_json::Value::as_str) == Some("terminal")
+                            && let Ok(usagi_core::infrastructure::ipc::DaemonRequest::Terminal {
+                                action,
+                                payload,
+                            }) =
+                                usagi_core::infrastructure::ipc::DaemonRequest::deserialize(&body)
                         {
                             match usagi_core::domain::id::RequestId::parse(&request_id.0) {
                                 Ok(owner_request_id) => dispatch_terminal_request(
@@ -745,9 +749,9 @@ pub fn server_protocol(
         supported_protocols: vec![usagi_core::infrastructure::ipc::ProtocolRange {
             generation: usagi_core::infrastructure::ipc::TERMINAL_WIRE_GENERATION,
             min_revision: 0,
-            // Revision 2 adds the semantic screen checkpoint; a client that
-            // negotiates a lower revision keeps the legacy raw tail.
-            max_revision: usagi_core::infrastructure::ipc::TERMINAL_CHECKPOINT_REVISION,
+            // Preserve older revisions for request families with compatible
+            // contracts. Decision dispatch separately enforces its delivery revision.
+            max_revision: usagi_core::infrastructure::ipc::CURRENT_PROTOCOL_REVISION,
         }],
         capabilities: usagi_core::infrastructure::ipc::server_advertised_capabilities(
             usagi_core::infrastructure::ipc::GenerationRole::Active,
@@ -911,6 +915,7 @@ mod tests {
     fn client_hello() -> ClientHello {
         ClientHello {
             client_id: ClientId("client".into()),
+            surface: None,
             connection_nonce: "n".into(),
             expected_daemon_generation: None,
             supported_protocols: vec![ProtocolRange {
@@ -1118,6 +1123,15 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(registered.registered_connection().is_some());
+        assert_eq!(
+            connection_id(&fence, registered.registered_connection(), &client_hello()).unwrap(),
+            registered.registered_connection().unwrap()
+        );
+        assert_eq!(
+            fence.admitted.get(),
+            1,
+            "a registered peer must not be admitted twice"
+        );
 
         let refused_connection = RefusingConnection {
             refuse_handshake: true,
@@ -1561,7 +1575,7 @@ mod tests {
             &mut serve_ordinary,
         )
         .unwrap();
-        assert!(refused.clients.is_empty());
+        assert_eq!(refused.clients, [] as [usagi_core::domain::id::ClientId; 0]);
         let mut output = Cursor::new(output);
         let _ = read_json_frame::<Bootstrap>(&mut output, 4096).unwrap();
         let response = serde_json::to_value(
@@ -1676,11 +1690,11 @@ mod tests {
     fn the_negotiated_revision_advertises_and_selects_the_checkpoint_wire() {
         use crate::usecase::terminal::SnapshotWire;
         use usagi_core::infrastructure::ipc::{
-            TERMINAL_CHECKPOINT_REVISION, TERMINAL_SCREEN_CHECKPOINT_CAPABILITY,
-            TERMINAL_WIRE_GENERATION,
+            CURRENT_PROTOCOL_REVISION, TERMINAL_CHECKPOINT_REVISION,
+            TERMINAL_SCREEN_CHECKPOINT_CAPABILITY, TERMINAL_WIRE_GENERATION,
         };
 
-        // The daemon advertises the checkpoint capability and revision 2.
+        // The current daemon still advertises the revision 2 checkpoint contract.
         let server = server();
         assert!(
             server
@@ -1693,7 +1707,7 @@ mod tests {
             vec![ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                max_revision: TERMINAL_CHECKPOINT_REVISION,
+                max_revision: CURRENT_PROTOCOL_REVISION,
             }]
         );
 
@@ -1704,6 +1718,11 @@ mod tests {
             (
                 TERMINAL_CHECKPOINT_REVISION,
                 TERMINAL_CHECKPOINT_REVISION,
+                SnapshotWire::ScreenCheckpoint,
+            ),
+            (
+                CURRENT_PROTOCOL_REVISION,
+                CURRENT_PROTOCOL_REVISION,
                 SnapshotWire::ScreenCheckpoint,
             ),
         ] {
@@ -1832,7 +1851,10 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let mut owner = RecordingTerminal::default();
-        assert!(TerminalOwner::completed_inventory(&owner, &scope).is_empty());
+        assert_eq!(
+            TerminalOwner::completed_inventory(&owner, &scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
         TerminalOwner::disconnect(&mut owner, usagi_core::domain::id::ConnectionId::new());
         assert_eq!(owner.disconnects, 1);
     }
@@ -2382,6 +2404,7 @@ mod tests {
             "agent",
             "restart_agents",
             "resume_agent",
+            "resume_agent_headless",
             "resume_agent_with_current_integration",
             "dispatch",
         ] {

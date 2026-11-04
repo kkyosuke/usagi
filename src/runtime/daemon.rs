@@ -2,16 +2,27 @@
 
 mod agent;
 mod agent_provisioning;
+mod attention;
 mod broker;
 mod dispatch;
 mod instance_lock;
 mod ipc_accept;
+mod managed_update;
+mod notifications;
+mod pending_update;
 mod pty;
+mod restart_intent;
 mod secure_path;
+#[cfg(any(target_os = "macos", test))]
+mod service_context;
+mod session_cache;
 mod standby;
 mod tenant_control;
+mod terminal_search;
 mod workers;
-mod workflow;
+
+pub(crate) use managed_update::{ManagedUpdateSync, sync_after_update};
+pub(crate) use pending_update::{complete_deferred_update, schedule_deferred_update};
 
 use ipc_accept::{
     AcceptedStream, EstablishedResponseWriter, IpcReady, ObservedChildren,
@@ -24,12 +35,12 @@ use ipc_accept::{ResponseFrameProgress, start_terminal_observer};
 #[cfg(test)]
 use agent::spawn_decision_maintenance;
 use agent::{
-    AgentDecisionWaker, DeferredDecisionWaker, PendingDaemonAgentRestart, SharedAgent,
-    SharedAgentState, SystemTenantOpener, TenantWorkspaces, append_live_tenant_inventory,
-    clear_pending_daemon_agent_restart, current_agent_integrations, open_agent_runtime,
-    planned_agent_workspace_root, provisioned_agent_command, read_pending_daemon_agent_restart,
-    reconcile_removed_session_agents, restore_pending_daemon_agents, retained_startup_root,
-    send_agent_observation, start_daemon_agent_restart_recovery, start_decision_maintenance,
+    PendingDaemonAgentRestart, SharedAgent, SharedAgentState, SystemTenantOpener, TenantWorkspaces,
+    append_live_tenant_inventory, clear_pending_daemon_agent_restart, current_agent_integrations,
+    open_agent_runtime, planned_agent_workspace_root, provisioned_agent_command,
+    read_pending_daemon_agent_restart, reconcile_removed_session_agents,
+    restore_pending_daemon_agents, retained_startup_root, send_agent_observation,
+    start_daemon_agent_restart_recovery, start_decision_maintenance,
     write_pending_daemon_agent_restart,
 };
 
@@ -40,8 +51,8 @@ use workers::{
     ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown, SigtermTerminator, SystemAgentReadiness,
     retain_client_worker, spawn_critical_worker, spawn_orphan_cleanup_worker,
     spawn_pr_refresh_worker, spawn_tenant_retire_worker, start_connection_cleanup_worker,
-    start_draining_collection_worker, start_pr_projection_worker, start_retention_gc_worker,
-    start_session_teardown_worker,
+    start_draining_collection_worker, start_lock_watchdog, start_pr_projection_worker,
+    start_retention_gc_worker, start_session_teardown_worker,
 };
 #[cfg(test)]
 use workers::{
@@ -93,43 +104,30 @@ use broker::{
 
 use dispatch::session::reconcile_orphan_delegations;
 use dispatch::{
-    DispatchToolContext, SessionDispatchContext, authenticated_supervisor_caller,
-    clean_orphan_session_resources, daemon_request_surface, dispatch_agent,
-    dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
-    dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
-    dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
-    dispatch_supervisor_tool, dispatch_user_decision, envelope, expected_client_disconnect,
-    reconcile_aborted_supervisor_workers, reconcile_pending_goal_artifacts,
-    reconcile_pending_supervisor_promotions, reconcile_startup_supervisor_promotions,
-    reconcile_startup_supervisor_workers, request_mcp_credential, run_agent_readiness,
-    unexpected_daemon_response_entry,
+    DispatchToolContext, SessionDispatchContext, clean_orphan_session_resources,
+    daemon_request_surface, dispatch_agent, dispatch_agent_phase_report,
+    dispatch_codex_session_capture, dispatch_dispatch, dispatch_dispatch_tool,
+    dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot, dispatch_rollover,
+    dispatch_session, dispatch_user_decision, envelope, expected_client_disconnect,
+    request_mcp_credential, run_agent_readiness, unexpected_daemon_response_entry,
 };
 
 #[cfg(test)]
 use dispatch::{
-    AuthenticatedSupervisorCaller, PendingPromotionCandidate, PendingPromotionKind,
-    best_effort_merged_pr_head, exact_merged_pr_head, finish_supervisor_promotion_reconciliation,
-    goal_supervisor_caller, lock_agent_runtime, lock_supervisor_runtime, map_inbox_query_error,
-    project_reported_pr, promotion_admission_matches, prompt_supervisor_retry,
-    reconcile_supervisor_promotion, reconcile_supervisor_promotion_outcome,
-    reconcile_supervisor_promotions, reconcile_supervisor_run_workers,
-    record_supervisor_promotion_result, require_stable_supervisor_fence,
-    require_supervisor_reservation_presence, reserve_goal_supervisor_run,
-    resolve_goal_artifact_repository, safe_log_token, session_response_envelope,
-    start_goal_supervisor_run, supervisor_caller_descriptor, supervisor_control_error,
-    supervisor_control_unconfirmed, supervisor_error,
+    best_effort_merged_pr_head, exact_merged_pr_head, map_inbox_query_error, project_reported_pr,
+    safe_log_token, session_response_envelope,
 };
 
 #[cfg(test)]
 use agent_provisioning::{
     ClaudeSandboxPolicyError, SandboxLauncherPaths, SandboxPolicyInputs, agent_writable_roots,
-    agy_arguments_for_integration, agy_plugin_arguments, agy_plugin_documents,
+    agy_arguments_for_integration, agy_workspace_arguments, agy_workspace_documents,
     claude_mcp_arguments, claude_prompt_arguments, claude_sandbox_launcher,
     claude_settings_arguments, claude_system_prompt_arguments, claude_writable_roots,
     codex_developer_instructions_arguments, codex_integration_arguments,
     codex_system_prompt_arguments, configured_environment, configured_mcp_tools,
     effective_role_instruction, git_common_dir, insert_root_git_environment, launch_environment,
-    lexical_prefix_overlaps_path, materialize_agy_plugin, mcp_environment,
+    lexical_prefix_overlaps_path, materialize_agy_workspace, mcp_environment,
     mcp_environment_allowlist, prompt_scope, repair_codex_arg0_permissions,
     repair_codex_arg0_permissions_with_limit, root_agent_writable_roots, root_memory_store_root,
     sandbox_mode, session_git_common_dir, session_git_policy, shell_quote, toml_basic_string,
@@ -164,17 +162,19 @@ use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
 use usagi_core::domain::agent::prompt::{PromptScope, launch_system_prompt};
 use usagi_core::domain::agent::{
     AgentIntegrationRevision, AgentProfileId, DaemonRestartAgent, DaemonRestartAgentPlan,
-    DurableLaunchSnapshot, EnvironmentVariableName, aggregate_agent_status,
+    DurableLaunchSnapshot, EnvironmentVariableName,
 };
 use usagi_core::domain::clock::LogicalClock;
 use usagi_core::domain::clock::MonotonicClock;
 use usagi_core::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use usagi_core::domain::id::{
-    AgentRuntimeRef, ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    ConnectionId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::session_lifecycle::AGENT_PHASE_HOOK_EVENTS;
 use usagi_core::domain::settings::{AgentReadinessCommand, DefaultModel};
-use usagi_core::infrastructure::bounded_process::{ChildObservation, ChildPolicy, observe};
+use usagi_core::infrastructure::bounded_process::{
+    ChildObservation, ChildPolicy, observe, observe_until,
+};
 use usagi_core::infrastructure::client::{
     ClientPolicy, DaemonClient, DeadlineConnection, DeadlineStream, IpcClient, PolicyClient,
     TerminalLaneBudget,
@@ -192,7 +192,7 @@ use usagi_core::infrastructure::ipc::{
     build_rollover_trigger,
 };
 use usagi_core::infrastructure::ipc::{ClientError, DaemonRestartAgents};
-use usagi_core::infrastructure::ipc::{DaemonRequest, DispatchToolAction, SupervisorToolAction};
+use usagi_core::infrastructure::ipc::{DaemonRequest, DispatchToolAction};
 use usagi_core::infrastructure::paths;
 #[cfg(test)]
 use usagi_core::infrastructure::persistence::json_file;
@@ -223,7 +223,7 @@ use usagi_daemon::presentation::{
 };
 use usagi_daemon::usecase::agent_ipc::{
     AGENT_RUNTIME_LIMIT, AgentAdmission, AgentReadinessPreflight, AgentRuntime, AgentTerminalActor,
-    PromptMode, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
+    ResolvedAgentScope, ScopeResolveError, SessionScopeResolver, SharedTerminalOwner,
     TerminalOutcome,
 };
 use usagi_daemon::usecase::agy::AgyAdapter;
@@ -243,7 +243,7 @@ use usagi_daemon::usecase::authority::registry::{
     DEFAULT_GENERATION_LIMIT, GenerationRegistry, RegistryDocument,
 };
 use usagi_daemon::usecase::authority::rollover::{CurrentLocator, recover as recover_rollover};
-use usagi_daemon::usecase::authority::routing::{RESTART_AGENTS_REMEDY, RoutingLedger};
+use usagi_daemon::usecase::authority::routing::RoutingLedger;
 use usagi_daemon::usecase::authority::standby::{
     ActiveOwner, StandbyCustody, StandbyProbe, admissible_active, evaluate_custody, prepare_standby,
 };
@@ -299,14 +299,8 @@ use usagi_daemon::usecase::session_teardown::{
 };
 use usagi_daemon::usecase::shutdown::{BackgroundWorker, ShutdownRequest};
 use usagi_daemon::usecase::stop::{StaleCleanup, StaleDaemonCleanup};
-use usagi_daemon::usecase::supervisor_runtime::{
-    ArtifactVerification, ArtifactVerificationRequest, ArtifactVerificationStatus,
-    ArtifactVerifier, DecisionWake, DecisionWaker, InitialTask, SupervisorRuntime,
-    bounded_supervisor_query,
-};
 use usagi_daemon::usecase::tenant::{
-    DEFAULT_TENANT_LIMIT, OpenedTenant, Tenant, TenantRegistry, TenantRuntimeOpener,
-    WorkspaceFenceFactory,
+    DEFAULT_TENANT_LIMIT, OpenedTenant, TenantRegistry, TenantRuntimeOpener, WorkspaceFenceFactory,
 };
 use usagi_daemon::usecase::terminal::{
     Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure, output_pipeline_counters,
@@ -593,8 +587,9 @@ fn bounded_readiness_command(
     arguments: &[&str],
     bounds: ReadinessBounds,
     terminate_grace: Duration,
+    abort: &AtomicBool,
 ) -> AgentReadiness {
-    readiness_from_observation(&observe(
+    let observation = observe_until(
         program,
         arguments,
         ChildPolicy {
@@ -602,7 +597,37 @@ fn bounded_readiness_command(
             terminate_grace,
             output_limit: bounds.output_limit,
         },
-    ))
+        abort,
+    );
+    // The wire answer stays one safe message, so the closed failure kind is the
+    // only evidence that tells a slow CLI from a missing or signed-out one.
+    if let Some(reason) = readiness_failure_reason(&observation, abort.load(Ordering::Acquire)) {
+        ErrorLog::record(&format!(
+            "agent readiness probe failed: program={program} reason={reason}"
+        ));
+    }
+    readiness_from_observation(&observation)
+}
+
+/// The non-secret, closed name of why a status probe did not prove readiness.
+/// The program is a vocabulary command name; argv, output, and OS errors are
+/// never part of it.
+fn readiness_failure_reason(
+    observation: &ChildObservation,
+    shutdown_requested: bool,
+) -> Option<&'static str> {
+    match observation {
+        ChildObservation::Success(_) | ChildObservation::EmptyOutput => None,
+        ChildObservation::SpawnFailed => Some("spawn_failed"),
+        ChildObservation::ExitFailure => Some("exit_failure"),
+        // Shutdown cancellation normalizes to TimedOut. Completed failures
+        // retain their own cause when shutdown races with their observation.
+        ChildObservation::TimedOut if shutdown_requested => Some("shutdown"),
+        ChildObservation::TimedOut => Some("timed_out"),
+        ChildObservation::OutputTooLarge => Some("output_too_large"),
+        ChildObservation::InvalidOutput => Some("invalid_output"),
+        ChildObservation::ObservationFailed => Some("observation_failed"),
+    }
 }
 
 fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness {
@@ -820,7 +845,6 @@ fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Optio
 type RootAgentRuntime = AgentRuntime;
 
 type SharedAgentRuntime = Arc<SharedAgentState>;
-type SharedSupervisorRuntime = Arc<Mutex<SupervisorRuntime>>;
 
 const PTY_OBSERVATION_QUEUE_ITEMS: usize = 64;
 
@@ -842,13 +866,6 @@ type SharedTerminalRuntime = Arc<
 /// writer ([`FencedPrInventory`]). Only the active generation reaches the
 /// document, so a draining process's PTY observation cannot lose an update.
 type SharedPrInventory = Arc<Mutex<OutputPrProjector<FencedPrInventory<PrInventoryStore>>>>;
-
-/// Process-lifetime cache of workflow PR verification reads.
-///
-/// The resident lane and every client request share one handle, because they
-/// verify the same runs: without that sharing an open tab and the sweep would
-/// each keep their own copy and the GitHub reads would simply double.
-type SharedVerificationCache = Arc<Mutex<usagi_daemon::usecase::workflow::VerificationCache>>;
 
 /// How often the PR refresh worker claims due work.
 ///
@@ -916,11 +933,6 @@ const CLIENT_NOFILE_TARGET: u64 =
 /// write: expiry no longer takes the store lock or fsyncs unless something
 /// actually changed.
 const DECISION_MAINTENANCE_TICK: Duration = Duration::from_millis(250);
-const SUPERVISOR_RECOVERY_TICK: Duration = Duration::from_secs(1);
-/// Workflow progress is measured in Agent turns, so the resident lane sweeps
-/// slowly: often enough that a finished review reaches the human in seconds,
-/// rarely enough that an idle run costs one journal read per sweep.
-const WORKFLOW_LANE_TICK: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy)]
 struct GhProcess;
 
@@ -1259,15 +1271,26 @@ fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<Sessio
 fn start_orphan_cleanup_worker(
     workspaces: &Workspaces,
     gate: AdmissionGate,
+    agent: SharedAgentRuntime,
+    terminal: SharedTerminalRuntime,
+    cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_orphan_cleanup_worker(
         AutomaticOrphanCleanup {
             workspaces: Arc::clone(workspaces),
             gate,
+            agent,
+            terminal,
+            cache_jobs,
+            clock: SystemClock::new(),
+            schedule: usagi_daemon::usecase::session_cache_jobs::MaintenanceSchedule::new(
+                0,
+                u64::try_from(ORPHAN_CLEANUP_TICK.as_millis()).unwrap_or(u64::MAX),
+            ),
         },
         shutdown,
-        ORPHAN_CLEANUP_TICK,
+        Duration::from_secs(1),
     )
 }
 
@@ -1311,7 +1334,6 @@ const TENANT_IDLE_RETIREMENT: Duration = Duration::from_mins(10);
 struct DaemonWorkspaceActivity {
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
-    supervisor: SharedSupervisorRuntime,
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=one_daemon_adopts_every_selected_workspace_and_refuses_only_the_fenced_one
@@ -1330,15 +1352,10 @@ impl usagi_daemon::usecase::tenant::WorkspaceActivity<SharedSessionRuntime>
             .agent
             .lock()
             .map_or(true, |agent| agent.has_running_agent(workspace));
-        let running_supervisor = self.supervisor.lock().map_or(true, |supervisor| {
-            supervisor
-                .has_unfinished_workspace(workspace)
-                .unwrap_or(true)
-        });
         let unfinished = runtime.lock().map_or(true, |runtime| {
             runtime.has_unfinished_work().unwrap_or(true)
         });
-        running_terminal || running_agent || running_supervisor || unfinished
+        running_terminal || running_agent || unfinished
     }
 }
 
@@ -2118,176 +2135,6 @@ fn pending_daemon_agent_restart_path(data_dir: &Path) -> PathBuf {
         .join(PENDING_DAEMON_AGENT_RESTART_FILE)
 }
 
-/// The daemon's own desktop notice for a workflow that needs a human.
-///
-/// The TUI notifies about decisions it observes, but a workflow reaches
-/// `Needs attention` or `PR ready` whether or not anyone has usagi open — which
-/// is the whole point of the resident lane. The daemon runs as the same user, so
-/// it raises the notice itself and the moment survives a closed TUI.
-struct PlatformWorkflowNotifier {
-    reaper: crate::runtime::platform_child_reaper::PlatformChildReaper,
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=platform_child_reaper_reaps_short_helpers_around_a_long_lived_child
-impl workflow::AttentionNotifier for PlatformWorkflowNotifier {
-    fn notify(&self, title: &str, body: &str) {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = std::process::Command::new("osascript");
-            command
-                .arg("-e")
-                .arg("on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run")
-                .arg("--")
-                .arg(title)
-                .arg(body);
-            command
-        } else if cfg!(target_os = "linux") {
-            let mut command = std::process::Command::new("notify-send");
-            // `--` first: a goal line that starts with `-` is text, not a flag.
-            command
-                .arg("--app-name=usagi")
-                .arg("--")
-                .arg(title)
-                .arg(body);
-            command
-        } else {
-            return;
-        };
-        let _ = self.reaper.spawn(&mut command);
-    }
-}
-
-/// Starts the resident lane that carries stored workflow runs forward without a
-/// client connection.
-///
-/// Reconcile, queued-instruction delivery and PR verification used to run only
-/// inside a Workflow request, which made progress a property of what the user
-/// happened to be looking at. This lane owns that progress instead; the request
-/// path keeps the same pass so an open tab still answers with fresh state.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_resident_workflow_lane_advances_a_run_without_any_client_request
-fn start_workflow_lane(
-    agent: SharedAgentRuntime,
-    pr_inventory: SharedPrInventory,
-    verification: SharedVerificationCache,
-    verification_clock: Arc<SystemClock>,
-    workspaces: Workspaces,
-    shutdown: Arc<ShutdownRequest>,
-    tick: Duration,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    let sweeping = Arc::clone(&shutdown);
-    let mut failures = FailureTransitionLog::default();
-    let notifier = PlatformWorkflowNotifier {
-        reaper: crate::runtime::platform_child_reaper::PlatformChildReaper::default(),
-    };
-    spawn_workflow_lane(
-        Box::new(move || {
-            let scope = SharedScopeResolver(Arc::clone(&workspaces));
-            let failure = workflow::sweep(
-                &agent,
-                &pr_inventory,
-                workflow::Verification {
-                    cache: &verification,
-                    clock: verification_clock.as_ref(),
-                },
-                &scope,
-                &notifier,
-                &|| sweeping.is_requested(),
-            )
-            .err()
-            .map(|error| format!("workflow lane sweep deferred: {}", error.message));
-            if let Some(entry) = failures.changed(failure) {
-                ErrorLog::record(&entry);
-            }
-        }),
-        shutdown,
-        tick,
-    )
-}
-
-/// The lane loop, with the sweep injected so a test can drive it without a
-/// daemon, a PTY, or a store.
-fn spawn_workflow_lane(
-    mut sweep: Box<dyn FnMut() + Send>,
-    shutdown: Arc<ShutdownRequest>,
-    tick: Duration,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
-        .name("usagi-workflow-lane".to_owned())
-        .spawn(move || {
-            let worker_health = shutdown.monitor_background_worker(BackgroundWorker::WorkflowLane);
-            while !shutdown.is_requested() {
-                sweep();
-                if shutdown.wait_for_tick(tick) {
-                    break;
-                }
-            }
-            worker_health.finish_planned();
-        })
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=artifact_verification_preparation_captures_only_the_exact_completed_dispatch
-fn start_supervisor_recovery(
-    supervisor: SharedSupervisorRuntime,
-    agent: SharedAgentRuntime,
-    workspaces: Workspaces,
-    shutdown: Arc<ShutdownRequest>,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new()
-        .name("usagi-supervisor-recovery".to_owned())
-        .spawn(move || {
-            let worker_health =
-                shutdown.monitor_background_worker(BackgroundWorker::SupervisorRecovery);
-            let mut promotion_log = FailureTransitionLog::default();
-            let mut worker_log = FailureTransitionLog::default();
-            let mut artifact_log = FailureTransitionLog::default();
-            let mut state_log = FailureTransitionLog::default();
-            while !shutdown.is_requested() {
-                let now = chrono::Utc::now();
-                let failure = reconcile_pending_supervisor_promotions(&supervisor, &agent)
-                    .err()
-                    .map(|error| format!("supervisor promotion reconciliation deferred: {error}"));
-                if let Some(entry) = promotion_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = reconcile_aborted_supervisor_workers(&supervisor, &agent)
-                    .err()
-                    .map(|error| {
-                        format!("supervisor worker termination reconciliation deferred: {error}")
-                    });
-                if let Some(entry) = worker_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = reconcile_pending_goal_artifacts(&supervisor, &workspaces, now)
-                    .err()
-                    .map(|error| {
-                        format!("Goal artifact verification reconciliation deferred: {error}")
-                    });
-                if let Some(entry) = artifact_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                let failure = supervisor.lock().map_or_else(
-                    |_| {
-                        Some("supervisor state reconciliation deferred: runtime unavailable".into())
-                    },
-                    |runtime| {
-                        runtime
-                            .tick_all(now, &mut AgentDecisionWaker { agent: &agent })
-                            .err()
-                            .map(|error| {
-                                format!("supervisor state reconciliation deferred: {error}")
-                            })
-                    },
-                );
-                if let Some(entry) = state_log.changed(failure) {
-                    ErrorLog::record(&entry);
-                }
-                if shutdown.wait_for_tick(SUPERVISOR_RECOVERY_TICK) {
-                    break;
-                }
-            }
-            worker_health.finish_planned();
-        })
-}
-
 struct IpcRolloverRequester<'a> {
     data_dir: &'a Path,
     launcher: &'a ServeLauncher,
@@ -2485,12 +2332,10 @@ impl IpcRolloverRequester<'_> {
         if client.daemon_generation().0 != generation.as_str() {
             return false;
         }
-        if read_pending_daemon_agent_restart(self.data_dir)
-            .ok()
-            .flatten()
-            .is_some_and(|pending| pending.operation_id == operation.0)
-        {
-            return false;
+        match read_pending_daemon_agent_restart(self.data_dir) {
+            Ok(Some(pending)) if pending.operation_id == operation.0 => return false,
+            Err(_) => return false,
+            Ok(_) => {}
         }
         matches!(
             client.request(DaemonRequest::Tenant {
@@ -2531,17 +2376,20 @@ impl IpcRolloverRequester<'_> {
         };
         Err(std::io::Error::other(reason))
     }
-}
-
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
-impl RolloverRequester for IpcRolloverRequester<'_> {
-    fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
-        let agent_plan = self.prepare_agent_restart()?;
+    fn rollover_planned(
+        &self,
+        operation: &OperationId,
+        agent_plan: Option<&DaemonRestartAgentPlan>,
+    ) -> std::io::Result<String> {
         let agent_workspace = agent_plan
-            .as_ref()
             .map(|plan| planned_agent_workspace_root(self.data_dir, plan))
             .transpose()?
             .flatten();
+        if let Some(intent) =
+            agent_plan.and_then(|plan| restart_intent::RestartIntent::new(&operation.0, plan))
+        {
+            restart_intent::write(self.data_dir, &intent)?;
+        }
         let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
         let standby = self.launcher.launch_standby(agent_workspace.as_deref())?;
         let standby_record = standby.record.clone();
@@ -2557,7 +2405,7 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
             .and_then(|mut client| {
                 client.request(DaemonRequest::Rollover {
                     operation_id: operation.0.clone(),
-                    restart_agents: agent_plan.as_ref().map(|plan| DaemonRestartAgents {
+                    restart_agents: agent_plan.map(|plan| DaemonRestartAgents {
                         expected: current_agent_integrations(),
                         runtimes: plan
                             .agents
@@ -2591,11 +2439,58 @@ impl RolloverRequester for IpcRolloverRequester<'_> {
         // frame was lost.
         reap_child(standby.child);
         self.wait_until_serving(&standby_record, operation)?;
+        restart_intent::clear(self.data_dir, &operation.0)?;
         Ok(format!(
             "daemon authority handed off (operation {}), restarted {} Agent(s)",
             operation.0,
-            agent_plan.as_ref().map_or(0, |plan| plan.agents.len())
+            agent_plan.map_or(0, |plan| plan.agents.len())
         ))
+    }
+}
+
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=root_restart_recovers_agents_after_requester_exit
+impl RolloverRequester for IpcRolloverRequester<'_> {
+    fn rollover(&self, operation: &OperationId) -> std::io::Result<String> {
+        let plan = self.prepare_agent_restart()?;
+        if plan.is_none() {
+            return self.rollover_planned(operation, plan.as_ref());
+        }
+        // The observer has no lifecycle authority. Its channel is dropped on
+        // every return and unwind, and the scoped thread is always joined.
+        let data_dir = self.data_dir;
+        let operation_id = operation.0.clone();
+        std::thread::scope(|scope| {
+            let (stop, stopped) = std::sync::mpsc::channel::<()>();
+            let observer = scope.spawn(move || {
+                use std::io::IsTerminal as _;
+                use usagi_cli::cli::update_progress::{RestartProgress, restart_stage};
+                let stderr = std::io::stderr();
+                let terminal = stderr.is_terminal();
+                let update = std::env::var("USAGI_UPDATE_PROGRESS").as_deref() == Ok("1");
+                let mut progress = RestartProgress::new(stderr, terminal, update);
+                loop {
+                    let pending = read_pending_daemon_agent_restart(data_dir).ok().flatten()
+                        .filter(|pending| pending.operation_id == operation_id);
+                    let document = read_registry_document(data_dir).ok().flatten();
+                    let handoff = document.as_ref().and_then(|document| document.handoff.as_ref())
+                        .filter(|handoff| handoff.operation.0 == operation_id);
+                    let committed = document.as_ref().is_some_and(|document| document.completed_operation.as_ref().is_some_and(|operation| operation.0 == operation_id))
+                        || handoff.is_some_and(|handoff| handoff.phase == usagi_daemon::usecase::authority::registry::HandoffPhase::Committed);
+                    let recovery = pending.as_ref().map(|pending| (pending.agents.iter().filter(|item| item.completed).count(), pending.agents.len()));
+                    let _ = progress.show(restart_stage(committed, handoff.is_some(), recovery));
+                    if !matches!(stopped.recv_timeout(Duration::from_millis(150)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                        break;
+                    }
+                }
+                progress
+            });
+            let result = self.rollover_planned(operation, plan.as_ref());
+            drop(stop);
+            if let Ok(mut progress) = observer.join() {
+                let _ = progress.finish(result.is_ok());
+            }
+            result
+        })
     }
 }
 
@@ -2784,16 +2679,25 @@ fn run_inner(
     operation: Option<usagi_core::infrastructure::ipc::OperationId>,
     lifecycle_custody_held: bool,
 ) -> std::io::Result<()> {
+    // Select the service namespace before the broker, cached OS user lookup,
+    // or any worker can inherit a login session's bootstrap port.
+    #[cfg(target_os = "macos")]
+    service_context::prepare_with(&command, &mut service_context::real_io::select)?;
     if let Some(result) = run_broker_lifecycle_command(&command) {
         return result;
+    }
+    if matches!(command, CliDaemonCommand::ContinueUpdate) {
+        return pending_update::continue_update();
     }
     let data_dir = prepare_private_data_dir()?;
     let daemon_dir = data_dir.join("daemon");
     let restart_agents = match &command {
+        // Explicit Agent restart authorizes interrupting the current turn;
+        // its durable plan resumes that turn with `continue` after handoff.
         CliDaemonCommand::Restart {
             restart_agents: true,
-            force,
-        } => Some(*force),
+            ..
+        } => Some(true),
         _ => None,
     };
     // Stop and replacement observe and mutate one machine-wide daemon
@@ -2917,9 +2821,8 @@ fn run_inner(
         } => PresentationDaemonCommand::Replace {
             operation: operation
                 .or_else(|| manual_operation_id(&current_build(), runtime_channel())),
-            // With `--restart-agents`, force authorizes interrupting a Running
-            // Agent, never destruction of generic PTYs. The daemon transition
-            // itself therefore remains planned and uses the rollover barrier.
+            // Agent restart always keeps the daemon transition planned and
+            // uses the rollover barrier, preserving generic PTYs.
             mode: transition_mode(force && !restart_agents),
         },
         CliDaemonCommand::Replace { .. } => {
@@ -2928,12 +2831,13 @@ fn run_inner(
                 "daemon replace must be routed through the client trigger",
             ));
         }
-        CliDaemonCommand::SyncAfterUpdate => {
+        CliDaemonCommand::SyncAfterUpdate { .. } => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "managed daemon synchronization must be routed through the update adapter",
             ));
         }
+        CliDaemonCommand::ContinueUpdate => unreachable!("handled before daemon lifecycle setup"),
     };
     ensure_private_dir(&daemon_dir)?;
     let store = DaemonRecordStore::new(FsRecordFile {
@@ -3028,6 +2932,7 @@ fn run_inner(
     }
     if reporting && outcome.is_ok() {
         append_live_tenant_inventory(out);
+        pending_update::report_pending_update(out, &data_dir)?;
     }
     outcome
 }
@@ -3849,109 +3754,6 @@ pub(crate) fn managed_update_diagnostic_client(
     }
 }
 
-/// Synchronize the published daemon with the exact installed binary while the
-/// installer still owns `update.lock`.
-///
-/// This lifecycle-only path never starts an absent daemon and never repairs or
-/// restarts Agents. A live process-local Agent credential leaves the old daemon
-/// untouched and makes the update report a deferred synchronization.
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=managed_update_with_a_live_generic_pty_keeps_the_draining_owner
-pub(crate) fn sync_after_update(
-    out: &mut dyn Write,
-    policy: ClientPolicy,
-    info: &AppInfo,
-) -> std::io::Result<Result<(), ClientError>> {
-    let expected_build = current_build();
-    let (lock, client) = match managed_update_diagnostic_client(policy) {
-        Ok(value) => value,
-        Err(error) => return Ok(Err(error)),
-    };
-    let Some(mut owner) = client else {
-        writeln!(out, "daemon sync: daemon is not running; left it stopped")?;
-        return Ok(Ok(()));
-    };
-    let published_build = owner.server_build().clone();
-    if published_build != expected_build {
-        let workspace = owner
-            .request(DaemonRequest::Session {
-                action: usagi_core::infrastructure::ipc::SessionAction::List,
-                operation_id: usagi_core::domain::id::OperationId::new().to_string(),
-                payload: serde_json::json!({}),
-            })
-            .and_then(|reply| {
-                let body = match reply {
-                    usagi_core::infrastructure::ipc::DaemonReply::Ok(body)
-                    | usagi_core::infrastructure::ipc::DaemonReply::Accepted { body, .. } => body,
-                };
-                serde_json::from_value::<WorkspaceId>(body["workspace_id"].clone()).map_err(|_| {
-                    ClientError::Lifecycle(
-                        "daemon returned an invalid workspace identity".to_owned(),
-                    )
-                })
-            });
-        let workspace = match workspace {
-            Ok(workspace) => workspace,
-            Err(error) => return Ok(Err(error)),
-        };
-        let diagnosis = owner
-            .request(DaemonRequest::DiagnoseAgents {
-                workspace,
-                expected: current_agent_integrations(),
-            })
-            .and_then(|reply| {
-                let body = match reply {
-                    usagi_core::infrastructure::ipc::DaemonReply::Ok(body)
-                    | usagi_core::infrastructure::ipc::DaemonReply::Accepted { body, .. } => body,
-                };
-                serde_json::from_value::<usagi_core::domain::agent::AgentIntegrationDiagnosis>(body)
-                    .map_err(|_| {
-                        ClientError::Lifecycle(
-                            "daemon cannot prove server-side handoff fencing".to_owned(),
-                        )
-                    })
-            });
-        let diagnosis = match diagnosis {
-            Ok(diagnosis) => diagnosis,
-            Err(error) => return Ok(Err(error)),
-        };
-        match diagnosis.provisioned_mcp_callers {
-            Some(0) => {}
-            Some(credentials) => {
-                return Ok(Err(ClientError::Lifecycle(format!(
-                    "daemon synchronization deferred: {credentials} daemon-provisioned MCP caller credential(s) remain; {RESTART_AGENTS_REMEDY}"
-                ))));
-            }
-            None => {
-                return Ok(Err(ClientError::Lifecycle(
-                    "daemon cannot prove server-side handoff fencing".to_owned(),
-                )));
-            }
-        }
-        drop(owner);
-        if let Err(error) = replace_running_daemon_during_update(out, policy, info, &lock)? {
-            return Ok(Err(error));
-        }
-    }
-    let mut current = match diagnostic_client(policy, true) {
-        Ok(client) => client,
-        Err(error) => return Ok(Err(error)),
-    };
-    if current.server_build() != &expected_build {
-        return Ok(Err(ClientError::Lifecycle(
-            "daemon synchronization returned before the installed build was serving".to_owned(),
-        )));
-    }
-    if let Err(error) = current.request(DaemonRequest::Tenant {
-        action: usagi_core::infrastructure::ipc::TenantAction::Inventory,
-        root: None,
-        force: false,
-    }) {
-        return Ok(Err(error));
-    }
-    writeln!(out, "daemon sync: installed build is current and serving")?;
-    Ok(Ok(()))
-}
-
 /// A workspace-bound daemon client for a background observation lane.
 ///
 /// It is [`policy_client`] without the bootstrap: same declared workspace, same
@@ -4199,19 +4001,24 @@ pub(crate) fn replace_running_daemon_during_update(
     policy: ClientPolicy,
     info: &AppInfo,
     lock: &ManagedUpdateLock,
+    restart_agents: bool,
 ) -> std::io::Result<Result<(), ClientError>> {
-    let trigger = match request_replacement_while_locked(policy) {
-        Ok(trigger) => trigger,
-        Err(error) => return Ok(Err(error)),
+    let operation = if restart_agents {
+        manual_operation_id(&current_build(), runtime_channel())
+    } else {
+        match request_replacement_while_locked(policy) {
+            Ok(trigger) => Some(trigger.operation_id),
+            Err(error) => return Ok(Err(error)),
+        }
     };
     run_with_lifecycle_custody(
         out,
         CliDaemonCommand::Restart {
-            restart_agents: false,
+            restart_agents,
             force: false,
         },
         info,
-        Some(trigger.operation_id),
+        operation,
         Some(&lock.lifecycle),
     )
     .map(Ok)

@@ -3,18 +3,53 @@
 use anyhow::Result;
 
 use super::{
-    AgentAdmission, AgentAdmissionReservation, AgentCapability, AgentId, AgentLaunchIntent,
-    AgentPhase, AgentResumeRelation, AgentResumeTarget, AgentRuntime, AgentRuntimeId,
-    AgentRuntimeRef, AgentStatus, BTreeSet, CallerRef, CompletionFence, DispatchBinding,
-    DispatchCredentialProvenance, DispatchRun, ErrorCode, LaunchMode, LaunchRequest, LaunchScope,
-    McpCaller, ModelSelector, OperationId, ProtocolError, ProviderResumeReason, RunStatus,
-    RuntimeAuthorization, SessionScopeResolver, TerminalId, TerminalRef, Utc, WorkerRef,
-    agent_operation_digest, dispatch_admission_incomplete, dispatch_agent_not_found,
-    dispatch_binding_unavailable, durable_operation_outcome, is_resume_source_state,
-    map_dispatch_storage_error, map_orchestration_error, map_runtime_error, map_scope_error,
+    AgentAdmission, AgentAdmissionReservation, AgentCapability, AgentId, AgentLaunchContext,
+    AgentLaunchIntent, AgentPhase, AgentResumeRelation, AgentResumeTarget, AgentRuntime,
+    AgentRuntimeId, AgentRuntimeRef, AgentStatus, BTreeSet, CallerRef, CompletionFence,
+    DispatchBinding, DispatchCredentialProvenance, DispatchRun, ErrorCode, LaunchMode,
+    LaunchRequest, LaunchScope, McpCaller, ModelSelector, OperationId, ProtocolError,
+    ProviderResumeReason, RunStatus, RuntimeAuthorization, SessionScopeResolver, TerminalId,
+    TerminalRef, UserDecisionOwner, Utc, WorkerRef, agent_operation_digest,
+    dispatch_admission_incomplete, dispatch_agent_not_found, dispatch_binding_unavailable,
+    durable_operation_outcome, is_resume_source_state, map_dispatch_storage_error,
+    map_orchestration_error, map_runtime_error, map_scope_error,
 };
+use usagi_core::domain::agent::{AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource};
 
 impl AgentRuntime {
+    /// Keep an Agent's creator through fresh conversations as well as exact
+    /// resume. A retained legacy run or an expired audit never acquires a
+    /// guessed creation source from its next launch.
+    fn provenance_for_agent(
+        &self,
+        agent: AgentId,
+        launched: AgentLaunchOrigin,
+        fresh_identity: bool,
+    ) -> Result<AgentLaunchProvenance, ProtocolError> {
+        let previous = self
+            .dispatch
+            .runs()
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .filter(|run| run.agent_id == agent)
+            .max_by_key(|run| (run.started_at, run.run_id));
+        let created = match previous {
+            None if fresh_identity => Some(launched.clone()),
+            None => None,
+            Some(run) => self
+                .coordinator
+                .records()
+                .find(|record| record.operation.operation_id == run.run_id)
+                .and_then(|record| record.launch_provenance.as_ref())
+                .and_then(|provenance| provenance.created.clone()),
+        };
+        Ok(AgentLaunchProvenance {
+            agent_id: Some(agent),
+            created,
+            launched,
+        })
+    }
+
     /// Frees one slot at saturation by sleeping the oldest completed turn that
     /// can be resumed exactly. Running, waiting, and merely ready Agents are
     /// never selected automatically.
@@ -22,7 +57,7 @@ impl AgentRuntime {
         if !self.coordinator.concurrency().is_saturated() {
             return Ok(false);
         }
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let mut candidate = None;
         for record in &records {
             let eligible = record.state == crate::usecase::runtime::RuntimeState::Running
@@ -61,6 +96,7 @@ impl AgentRuntime {
         caller: &CallerRef,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
+        mut context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         if let Some(existing) = self
             .dispatch
@@ -111,7 +147,9 @@ impl AgentRuntime {
         let request = LaunchRequest {
             profile_id: worker.runtime.clone(),
             mode: LaunchMode::Interactive,
-            model: Some(worker.model.clone()),
+            // `default` is usagi's provider-default selector, not a model
+            // slug understood by every CLI (notably AGY and Codex).
+            model: (worker.model.as_str() != "default").then(|| worker.model.clone()),
             resume: false,
             provider_resume: None,
             initial_prompt: Some(prompt.to_owned()),
@@ -124,10 +162,31 @@ impl AgentRuntime {
                 .into_iter()
                 .collect(),
         };
+        let fresh_identity = self
+            .dispatch
+            .agent(worker.agent_id)
+            .map_err(map_dispatch_storage_error)?
+            .is_none();
+        if context.source == AgentLaunchSource::Mcp {
+            context.caller = Some(caller.clone());
+        } else {
+            context.caller = None;
+            context.caller_operation_id = None;
+        }
+        let provenance =
+            self.provenance_for_agent(worker.agent_id, context.origin(operation), fresh_identity)?;
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
             mcp_allowed: true,
+            launch_provenance: Some(provenance),
+            user_decision_owner: Some(UserDecisionOwner {
+                workspace_id: launch.workspace,
+                session_id: worker.session_id,
+                caller: caller.clone(),
+                run_id: operation,
+            }),
+            user_decision_owner_aliases: Vec::new(),
         };
         let credential = OperationId::new().to_string();
         let mut reserved_worker = worker.clone();
@@ -169,7 +228,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::launch_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -180,11 +239,7 @@ impl AgentRuntime {
             Some(credential.clone()),
             semantic_key.to_owned(),
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -205,20 +260,17 @@ impl AgentRuntime {
     }
 
     #[allow(clippy::too_many_lines)] // Admission atomically fences launch, caller registration, and replay state.
+    #[allow(clippy::too_many_arguments)] // Repair, audit origin, and an optional new provider turn must remain distinct from the exact source fence.
     pub(super) fn admit_resume_exact(
         &mut self,
-        operation_id: &str,
+        operation: OperationId,
         target: &AgentResumeTarget,
         semantic_key: &str,
         scope: &dyn SessionScopeResolver,
         repair_revision: Option<u32>,
+        launch_origin: Option<AgentLaunchOrigin>,
+        prompt: Option<super::ResumePrompt<'_>>,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let operation = OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent resume operation id must be canonical",
-            )
-        })?;
         if self
             .dispatch
             .admission(operation)
@@ -235,7 +287,7 @@ impl AgentRuntime {
                 "agent resume admission is incomplete and cannot be spawned again",
             ));
         }
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let source = records
             .iter()
             .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
@@ -274,12 +326,22 @@ impl AgentRuntime {
                     "agent resume replacement history was collected",
                 ));
             };
+            if (prompt.is_some() || replacement.launch.request.initial_prompt.is_some())
+                && replacement.semantic_key.as_deref() != Some(semantic_key)
+            {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "agent resume source was consumed by a different turn; select its current target",
+                ));
+            }
             debug_assert_eq!(replacement.resumed_from, Some(target.source));
             debug_assert_eq!(replacement.continuation, Some(target.continuation));
             return durable_operation_outcome(replacement);
         }
         let (available, reason) = match repair_revision {
-            Some(revision) => self.repair_resume_source_availability(source, &records, revision),
+            Some(revision) => {
+                self.resume_source_availability_at_revision(source, &records, revision)
+            }
             None => self.resume_source_availability(source, &records),
         };
         if !available {
@@ -329,13 +391,18 @@ impl AgentRuntime {
             lifecycle_attempt: 1,
             expected_revision: 0,
         };
+        let (mode, initial_prompt) = match prompt {
+            Some(super::ResumePrompt::Interactive(text)) => (LaunchMode::Interactive, Some(text)),
+            Some(super::ResumePrompt::Headless(text)) => (LaunchMode::Headless, Some(text)),
+            None => (LaunchMode::Interactive, None),
+        };
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
-            mode: LaunchMode::Interactive,
+            mode,
             model: source.launch.request.model.clone(),
             resume: true,
             provider_resume: Some(reference),
-            initial_prompt: None,
+            initial_prompt: initial_prompt.map(str::to_owned),
             scope: LaunchScope {
                 workspace_id: target.workspace_id,
                 session_id: target.session_id,
@@ -346,19 +413,30 @@ impl AgentRuntime {
                 .collect(),
         };
         let superseded = [source.runtime.clone()];
-        let authorization = RuntimeAuthorization {
-            runtime,
-            operation: fence,
-            mcp_allowed: true,
-        };
-        let credential = OperationId::new().to_string();
-        // A tuple no longer identifies an Agent: same-session peers may use
-        // the same provider/model. Preserve the exact source's mailbox identity.
         let source_binding = self
             .dispatch
             .binding(source.operation.operation_id)
             .map_err(map_dispatch_storage_error)?
             .ok_or_else(dispatch_binding_unavailable)?;
+        let decision_authority = self.user_decision_authority_for_record(source, &records)?;
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+            launch_provenance: launch_origin.map(|launched| AgentLaunchProvenance {
+                agent_id: Some(source_binding.worker.agent_id),
+                created: source
+                    .launch_provenance
+                    .as_ref()
+                    .and_then(|provenance| provenance.created.clone()),
+                launched,
+            }),
+            user_decision_owner: Some(decision_authority.owner.clone()),
+            user_decision_owner_aliases: decision_authority.aliases,
+        };
+        let credential = OperationId::new().to_string();
+        // A tuple no longer identifies an Agent: same-session peers may use
+        // the same provider/model. Preserve the exact source's mailbox identity.
         let mut worker = self
             .dispatch
             .agent_in_workspace(target.workspace_id, source_binding.worker.agent_id)
@@ -368,10 +446,7 @@ impl AgentRuntime {
         self.require_peer_stopped_except(worker.agent_id, Some(source.operation.operation_id))?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
-        let caller = CallerRef {
-            session_id: worker.session_id,
-            agent_id: worker.agent_id,
-        };
+        let caller = decision_authority.owner.caller;
         self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission(
@@ -407,7 +482,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.resume_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::resume_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -419,16 +494,12 @@ impl AgentRuntime {
             semantic_key.to_owned(),
             &superseded,
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
         Ok(AgentAdmission {
-            operation_id: operation_id.to_owned(),
+            operation_id: operation.to_string(),
             revision: 1,
             runtime: authorization.runtime.clone(),
             terminal,
@@ -449,8 +520,8 @@ impl AgentRuntime {
         operation_id: &str,
         intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
-        initial_prompt: Option<&str>,
         launch_semantic: &str,
+        context: AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
         let profile_id = intent
             .profile
@@ -519,21 +590,13 @@ impl AgentRuntime {
             .dispatch
             .queued_prompt(intent.workspace, intent.session)
             .map_err(map_dispatch_storage_error)?;
-        if initial_prompt.is_some() && queued.is_some() {
-            return Err(ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "workspace root already has a queued prompt",
-            ));
-        }
         let request = LaunchRequest {
             profile_id: profile_id.clone(),
             mode: LaunchMode::Interactive,
             model: None,
             resume: false,
             provider_resume: None,
-            initial_prompt: initial_prompt
-                .map(str::to_owned)
-                .or_else(|| queued.as_ref().map(|item| item.prompt.clone())),
+            initial_prompt: queued.as_ref().map(|item| item.prompt.clone()),
             scope: LaunchScope {
                 workspace_id: intent.workspace,
                 session_id: intent.session,
@@ -543,12 +606,17 @@ impl AgentRuntime {
                 .into_iter()
                 .collect(),
         };
-        let authorization = RuntimeAuthorization {
-            runtime,
-            operation: fence,
-            mcp_allowed: true,
-        };
         let credential = OperationId::new().to_string();
+        // Agent identities survive dispatch-run retention. Capture existence
+        // before upsert so an adopted legacy identity or a collected history
+        // cannot be mistaken for a freshly minted Agent.
+        let existing_agents = self
+            .dispatch
+            .agents()
+            .map_err(map_dispatch_storage_error)?
+            .into_iter()
+            .map(|agent| agent.agent_id)
+            .collect::<BTreeSet<_>>();
         let mut worker = self
             .dispatch
             .upsert_agent_by_runtime_model(
@@ -562,6 +630,9 @@ impl AgentRuntime {
             // Ordinary launches must not steal a live peer's identity either.
             worker.agent_id = AgentId::new();
         }
+        let fresh_identity = !existing_agents.contains(&worker.agent_id);
+        let provenance =
+            self.provenance_for_agent(worker.agent_id, context.origin(operation), fresh_identity)?;
         worker.status = AgentStatus::Starting;
         worker.current_run = Some(operation);
         // A delayed delegation carries the authenticated parent in its durable
@@ -574,6 +645,19 @@ impl AgentRuntime {
                 session_id: worker.session_id,
                 agent_id: worker.agent_id,
             });
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: true,
+            launch_provenance: Some(provenance),
+            user_decision_owner: Some(UserDecisionOwner {
+                workspace_id: intent.workspace,
+                session_id: worker.session_id,
+                caller: caller.clone(),
+                run_id: operation,
+            }),
+            user_decision_owner_aliases: Vec::new(),
+        };
         self.sleep_one_for_capacity()?;
         self.dispatch
             .reserve_admission_for_workspace(
@@ -615,7 +699,7 @@ impl AgentRuntime {
                 child: None,
             },
         );
-        if let Err(error) = self.orchestrator.launch_with_semantic(
+        if let Err(error) = crate::usecase::orchestration::launch_with_semantic(
             &mut self.coordinator,
             &mut self.registry,
             &authorization,
@@ -626,11 +710,7 @@ impl AgentRuntime {
             Some(credential.clone()),
             launch_semantic.to_owned(),
         ) {
-            self.mcp_callers.remove(&credential);
-            let _ = self
-                .coordinator
-                .fail_reserved_launch(&authorization.runtime, &mut *self.store);
-            let _ = self.dispatch.fail_admission(operation);
+            self.rollback_uncommitted_admission(operation, &credential, &authorization.runtime);
             return Err(map_orchestration_error(error));
         }
         self.commit_admission(operation, &credential, &authorization.runtime)?;
@@ -648,6 +728,21 @@ impl AgentRuntime {
             completed: false,
             semantic_digest: Some(semantic_digest),
         })
+    }
+
+    /// Release the ephemeral caller and fail both reservations after an
+    /// unsuccessful launch. Preserve the original launch failure if cleanup fails.
+    fn rollback_uncommitted_admission(
+        &mut self,
+        operation: OperationId,
+        credential: &str,
+        runtime: &AgentRuntimeRef,
+    ) {
+        self.mcp_callers.remove(credential);
+        let _ = self
+            .coordinator
+            .fail_reserved_launch(runtime, &mut *self.store);
+        let _ = self.dispatch.fail_admission(operation);
     }
 
     pub(super) fn commit_admission(

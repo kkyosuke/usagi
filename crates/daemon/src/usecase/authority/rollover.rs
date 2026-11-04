@@ -124,7 +124,7 @@ impl std::error::Error for HandoffFailure {}
 ///
 /// It exists so the shipping restart (#507) cannot start a handoff that would
 /// leave a draining generation nobody can reach: the participants are named
-/// here, and [`execute_gated_rollover`] refuses before the first durable write.
+/// here, and [`execute_gated_rollover_with_guard`] refuses before the first durable write.
 pub struct RolloverPlan<'a> {
     /// Every admitted client connection's routing capability.
     pub ledger: &'a RoutingLedger,
@@ -136,34 +136,6 @@ pub struct RolloverPlan<'a> {
     pub from: Option<DaemonGeneration>,
     /// Verified standby generation receiving authority.
     pub to: DaemonGeneration,
-}
-
-/// Hand authority over only when every participant can address the generation
-/// this leaves draining.
-///
-/// This is the entry point a shipping rollover uses. The plain
-/// [`execute_rollover`] performs the handoff itself and is what the fixtures
-/// drive directly; it deliberately does not know about clients.
-///
-/// # Errors
-/// Returns [`HandoffFailure::Routing`] with nothing written when a participant
-/// cannot route by owner generation or the registry moved, or any failure
-/// [`execute_rollover`] returns.
-pub fn execute_gated_rollover(
-    registry: &GenerationRegistry,
-    locator: &dyn CurrentLocator,
-    gate: Option<&AdmissionGate>,
-    plan: &RolloverPlan<'_>,
-    operation: &OperationId,
-) -> Result<RolloverOutcome, HandoffFailure> {
-    let snapshot = registry.load()?;
-    let _routing_freeze = admit_rollover(
-        plan.ledger,
-        snapshot.document(),
-        plan.planned_revision,
-        plan.successor,
-    )?;
-    execute_rollover(registry, locator, gate, operation, plan.from, plan.to)
 }
 
 /// Hand authority over only after the active-control barrier has drained and a

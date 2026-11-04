@@ -27,6 +27,7 @@ pub(super) struct WorkspaceIoRuntime {
     /// snapshot revisions additionally fence stale authoritative observations.
     pub(super) session_commands: std::sync::Arc<dyn SessionCommandPort>,
     pub(super) last_session_revision: u64,
+    pub(super) notes_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Non-sensitive interrupted/resume state received from the daemon.
     pub(super) agent_resumes: BTreeMap<SessionId, ProviderResumeProjection>,
     /// Latest coherent workspace-wide Agent inventory received by the restore
@@ -100,6 +101,7 @@ impl WorkspaceIoRuntime {
             workspace,
             session_commands: std::sync::Arc::from(session_commands),
             last_session_revision: 0,
+            notes_updated_at: None,
             agent_resumes: BTreeMap::new(),
             agent_inventory: None,
             material_revision: 0,
@@ -235,9 +237,7 @@ impl WorkspaceIoRuntime {
         focused: Option<&TerminalRef>,
         geometry: Geometry,
     ) {
-        let visible = focused
-            .map(|terminal| vec![(terminal.clone(), geometry)])
-            .unwrap_or_default();
+        let visible = focused.map_or_default(|terminal| vec![(terminal.clone(), geometry)]);
         self.sync_visible_terminals(&visible);
     }
 
@@ -262,6 +262,9 @@ impl WorkspaceIoRuntime {
         for terminal in stale {
             self.close_terminal(&terminal);
         }
+        if self.agent.is_none() {
+            return;
+        }
 
         for (terminal, geometry) in visible {
             if let Some(index) = self
@@ -269,10 +272,11 @@ impl WorkspaceIoRuntime {
                 .iter()
                 .position(|session| session.terminal().fences(terminal))
             {
-                if let Some(agent) = self.agent.as_mut() {
-                    self.terminals[index]
-                        .resize(&mut AgentStreamPort(agent.port.as_mut()), *geometry);
-                }
+                let agent = self
+                    .agent
+                    .as_mut()
+                    .expect("visible terminals use the checked stream port");
+                self.terminals[index].resize(&mut AgentStreamPort(agent.port.as_mut()), *geometry);
             } else {
                 self.start_terminal_session(terminal.clone(), *geometry);
             }

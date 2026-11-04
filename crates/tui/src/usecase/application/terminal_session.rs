@@ -35,9 +35,15 @@ use usagi_core::usecase::vt_screen::{
     ActiveBuffer, CheckpointError, RetainedRowMotion, ScreenCheckpoint,
 };
 
-use super::pane_runtime::Geometry;
 use super::terminal_screen::{TerminalBuffer, TerminalInputModes, TerminalScreen};
 use super::terminal_selection::{TerminalPoint, TerminalSelection};
+
+/// The terminal dimensions requested by this client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Geometry {
+    pub cols: u16,
+    pub rows: u16,
+}
 
 /// How an attach snapshot carries the terminal screen.
 ///
@@ -617,12 +623,14 @@ impl TerminalSession {
 
     /// The rendered screen rows.
     #[must_use]
+    #[cfg(test)]
     pub fn rows(&self) -> Vec<String> {
         self.screen.rows()
     }
 
     /// The rows projected into an active terminal pane, including its cursor.
     #[must_use]
+    #[cfg(test)]
     pub fn display_rows(&self) -> Vec<String> {
         match self.state {
             SessionState::Live => self.screen.rows_with_cursor(),
@@ -635,6 +643,7 @@ impl TerminalSession {
 
     /// The retained terminal history projected into an active terminal pane.
     #[must_use]
+    #[cfg(test)]
     pub fn display_rows_with_scrollback(&self) -> Vec<String> {
         match self.state {
             SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
@@ -687,6 +696,7 @@ impl TerminalSession {
 
     /// Projects the retained output with a cell-precise visual selection.
     #[must_use]
+    #[cfg(test)]
     pub fn display_rows_with_scrollback_selection(
         &self,
         selection: &TerminalSelection,
@@ -707,8 +717,8 @@ impl TerminalSession {
             .rows_with_scrollback_window_tracked_selection(start, end, selection)
     }
 
-    /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
-    /// this retains trailing spaces, while still containing no ANSI styling.
+    /// Complete visible screen cells for selection/copy, retaining trailing
+    /// spaces without ANSI styling.
     #[must_use]
     pub fn cells(&self) -> Vec<String> {
         self.screen.cells_with_scrollback()
@@ -724,6 +734,34 @@ impl TerminalSession {
             self.screen.soft_wraps_with_scrollback(),
             anchor,
         )
+    }
+
+    /// Validate the exact searched snapshot before revealing its cells.
+    #[must_use]
+    pub fn search_selection(
+        &self,
+        source: &usagi_core::usecase::terminal_search::TerminalSearchResult,
+        found: &usagi_core::usecase::terminal_search::OutputMatch,
+        query: &str,
+    ) -> Option<TerminalSelection> {
+        if self.terminal() != &source.terminal
+            || self.cursor != source.output_offset
+            || u32::from(self.geometry.rows) != source.geometry.rows
+            || u32::from(self.geometry.cols) != source.geometry.cols
+            || self.display_row_origin() != source.origin
+            || !self.display_buffer().matches(source.buffer)
+        {
+            return None;
+        }
+        let mut selection = self.begin_selection(TerminalPoint {
+            row: found.row,
+            column: found.column,
+        });
+        selection.extend(TerminalPoint {
+            row: found.row,
+            column: found.end_column,
+        });
+        (selection.text() == query).then_some(selection)
     }
 
     /// Drain visual row-coordinate changes accumulated while applying output.
@@ -1081,6 +1119,7 @@ impl TerminalSession {
 
     /// How many inputs are held behind an unresolved input operation.
     #[must_use]
+    #[cfg(test)]
     pub fn fenced_input_count(&self) -> usize {
         self.fenced_queue.len()
     }
@@ -1088,6 +1127,7 @@ impl TerminalSession {
     /// The length of the input whose effect is unknown, when this terminal's
     /// producer queue is fenced by one.
     #[must_use]
+    #[cfg(test)]
     pub fn unresolved_input_length(&self) -> Option<usize> {
         self.unresolved_input
             .as_ref()
@@ -1665,6 +1705,79 @@ mod tests {
     }
 
     #[test]
+    fn output_search_selection_rejects_changed_snapshot_evicted_rows_and_replaced_terminal() {
+        use usagi_core::usecase::terminal_search::{
+            SearchBudget, SearchTerminalKind, TerminalSearchResult,
+        };
+        let mut port = FakeTerminalPort {
+            attach: vec![Ok(attach(1, 20, b"before\r\nerror\r\nafter", false))],
+            ..FakeTerminalPort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let mut screen = VtScreen::new(3, 20);
+        screen.advance(b"before\r\nerror\r\nafter");
+        let mut source = TerminalSearchResult::unavailable(
+            session.terminal().clone(),
+            SearchTerminalKind::Agent,
+        );
+        source.output_offset = 20;
+        source.search(&screen.checkpoint(), "error", &mut SearchBudget::default());
+        let found = source.matches[0].clone();
+        let selected = session.search_selection(&source, &found, "error").unwrap();
+        assert_eq!(selected.text(), "error");
+        for variant in 0..7 {
+            let mut changed = source.clone();
+            match variant {
+                0 => changed.output_offset += 1,
+                1 => changed.geometry.rows += 1,
+                2 => changed.geometry.cols += 1,
+                3 => changed.origin += 1,
+                4 => changed.buffer = usagi_core::usecase::vt_screen::ActiveBuffer::Alternate,
+                5 => changed.terminal.terminal_id = TerminalId::new(),
+                _ => changed.terminal.daemon_generation = DaemonGeneration::new(),
+            }
+            assert!(
+                session
+                    .search_selection(&changed, &found, "error")
+                    .is_none()
+            );
+        }
+        assert!(session.search_selection(&source, &found, "other").is_none());
+        assert!(session.clear_for_user());
+        assert!(session.search_selection(&source, &found, "error").is_none());
+    }
+
+    #[test]
+    fn output_search_selection_after_emoji_uses_the_snapshot_cell_columns() {
+        use usagi_core::usecase::terminal_search::{
+            SearchBudget, SearchTerminalKind, TerminalSearchResult,
+        };
+        let output = "👍🏽 error";
+        let offset = output.len() as u64;
+        let mut port = FakeTerminalPort {
+            attach: vec![Ok(attach(1, offset, output.as_bytes(), false))],
+            ..FakeTerminalPort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let mut screen = VtScreen::new(3, 20);
+        screen.advance(output.as_bytes());
+        let mut source = TerminalSearchResult::unavailable(
+            session.terminal().clone(),
+            SearchTerminalKind::Agent,
+        );
+        source.output_offset = offset;
+        source.search(&screen.checkpoint(), "error", &mut SearchBudget::default());
+        let selection = session
+            .search_selection(&source, &source.matches[0], "error")
+            .unwrap();
+        assert_eq!(selection.anchor(), TerminalPoint { row: 0, column: 5 });
+        assert_eq!(selection.focus(), TerminalPoint { row: 0, column: 9 });
+        assert_eq!(selection.text(), "error");
+    }
+
+    #[test]
     fn projection_key_gates_terminal_row_and_link_scan_across_one_thousand_idle_ticks() {
         let mut port = FakeTerminalPort {
             attach: vec![Ok(attach(1, 20, b"https://example.com", false))],
@@ -1826,7 +1939,7 @@ mod tests {
             session.send_input(&mut port, b"ls\r"),
             Err(TerminalInputError::NotLive(SessionState::Reconnecting))
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     #[test]
@@ -2153,7 +2266,7 @@ mod tests {
         assert_eq!(port.resolution_queries.len(), 1);
         assert_eq!(session.unresolved_input_length(), Some(4));
         assert_eq!(session.fenced_input_count(), 1);
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
         assert!(
             session
                 .error()
@@ -2171,7 +2284,7 @@ mod tests {
             })
         );
         assert_eq!(session.fenced_input_count(), FENCE_QUEUE_MAX_INPUTS);
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     /// Resolution never upgrades an outcome, and a resolution query that fails on
@@ -2212,7 +2325,7 @@ mod tests {
             session.poll_at(&mut port, now + RETRY_INITIAL);
             assert_eq!(session.unresolved_input_length(), Some(2));
             assert_eq!(session.fenced_input_count(), 1);
-            assert!(port.inputs.is_empty());
+            assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
 
             // The second query converges on the recorded non-success, which is
             // reported as itself and still releases the ordered queue.
@@ -2270,7 +2383,7 @@ mod tests {
         assert_eq!(session.unresolved_input_length(), None);
         // "one" was attempted and definitively failed; "two" is still held.
         assert_eq!(session.fenced_input_count(), 1);
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     /// Retracting a resolved input's uncertainty leaves the other uncertain
@@ -2443,7 +2556,7 @@ mod tests {
             session.send_input(&mut port, b"x"),
             Err(TerminalInputError::NotLive(SessionState::Reconnecting))
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
         assert_eq!(session.state(), SessionState::Reconnecting);
     }
 
@@ -2486,7 +2599,7 @@ mod tests {
             session.error(),
             Some("terminal input acknowledgement was lost; delivery is unknown")
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
         // The unknown effect fences this terminal's producer queue, so the next
         // keystroke is held in order rather than merely refused: it must not be
         // able to overtake an input that may still be applied (#519).
@@ -2494,7 +2607,7 @@ mod tests {
             session.send_input(&mut port, b"y"),
             Err(TerminalInputError::Fenced { queued: 1 })
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
     }
 
     #[test]
@@ -2797,7 +2910,7 @@ mod tests {
             session.send_input_at(&mut port, b"typed-later", now + RETRY_INITIAL),
             Err(TerminalInputError::Fenced { queued: 2 })
         );
-        assert!(port.inputs.is_empty());
+        assert_eq!(port.inputs, [] as [(u64, u64, Vec<u8>); 0]);
 
         // Recovery delivers what was waiting, oldest first.
         session.poll_at(&mut port, now + RETRY_INITIAL * 4);
@@ -2994,7 +3107,7 @@ mod tests {
             TerminalInputError::Transport(TerminalError::OrderingMismatch),
         ];
         for outcome in outcomes {
-            assert!(!outcome.message().is_empty());
+            assert_ne!(outcome.message(), "");
         }
         assert!(
             TerminalInputError::Rejected(TerminalInputOutcome::Failed)
@@ -3090,7 +3203,8 @@ mod tests {
         }
 
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("terminal.sock");
+        // Keep the socket name short enough for macOS worktree paths.
+        let path = temp.path().join("t.sock");
         // Connecting is exactly one round trip: the attach carries this pane's
         // viewport, so nothing precedes it.
         let first_server = serve(UnixListener::bind(&path).unwrap(), 1);
@@ -3507,6 +3621,16 @@ mod tests {
             error.contains("unknown checkpoint schema version"),
             "{error}"
         );
+
+        let mut initial_port = FakeTerminalPort {
+            attach: vec![Ok(hostile(4)), Ok(hostile(5))],
+            ..FakeTerminalPort::default()
+        };
+        let mut initial = TerminalSession::new(terminal(), geometry());
+        initial.connect_at(&mut initial_port, now);
+        assert_eq!(initial.state(), SessionState::Reconnecting);
+        assert_eq!(initial_port.detached, [sub(4), sub(5)]);
+        assert!(initial.error().unwrap().contains("snapshot was rejected"));
     }
 
     #[test]

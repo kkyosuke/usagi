@@ -26,27 +26,7 @@ pub(crate) fn dispatch(
     info: &AppInfo,
 ) -> std::io::Result<ExitCode> {
     let outcome = usagi_cli::cli::run(args, info.version, out, err)?;
-    let action = Action::from(&outcome);
-    action_io::execute_action(action, outcome, out, err, info)
-}
-
-enum Action {
-    Exit,
-    LaunchWelcome,
-    LaunchWorkspace,
-    LaunchConfig,
-    LaunchDoctor,
-    LaunchDaemon,
-    SyncDaemonAfterUpdate,
-    RequestDaemonReplacement,
-    LaunchMcp,
-    Clean,
-    CaptureCodexSession,
-    ReportAgentPhase,
-    GuardWorkspace,
-    ClaudeSandbox,
-    DaemonRequest,
-    SelfUpdate,
+    action_io::execute_action(outcome, out, err, info)
 }
 
 /// How an MCP stdio process reaches the daemon.
@@ -70,77 +50,75 @@ fn mcp_daemon_route(workspace_root: Option<&std::ffi::OsStr>) -> McpDaemonRoute 
     }
 }
 
-impl From<&RunOutcome> for Action {
-    fn from(outcome: &RunOutcome) -> Self {
-        match outcome {
-            RunOutcome::Exit(_) => Self::Exit,
-            RunOutcome::LaunchTui(TuiRequest::Welcome) => Self::LaunchWelcome,
-            RunOutcome::LaunchTui(TuiRequest::Workspace { .. }) => Self::LaunchWorkspace,
-            RunOutcome::LaunchTui(TuiRequest::Config) => Self::LaunchConfig,
-            RunOutcome::LaunchTui(TuiRequest::Doctor { .. }) => Self::LaunchDoctor,
-            RunOutcome::LaunchDaemon(_) => Self::LaunchDaemon,
-            RunOutcome::SyncDaemonAfterUpdate => Self::SyncDaemonAfterUpdate,
-            RunOutcome::RequestDaemonReplacement { .. } => Self::RequestDaemonReplacement,
-            RunOutcome::LaunchMcp => Self::LaunchMcp,
-            RunOutcome::Clean { .. } => Self::Clean,
-            RunOutcome::CaptureCodexSession => Self::CaptureCodexSession,
-            RunOutcome::ReportAgentPhase { .. } => Self::ReportAgentPhase,
-            RunOutcome::GuardWorkspace => Self::GuardWorkspace,
-            RunOutcome::ClaudeSandbox { .. } => Self::ClaudeSandbox,
-            RunOutcome::DaemonRequest(_) => Self::DaemonRequest,
-            RunOutcome::SelfUpdate(_) => Self::SelfUpdate,
-        }
-    }
-}
-
-// Each action arm binds a fully classified route to production stdin, process,
-// daemon, or terminal IO. The classification above remains coverage-visible.
+// Bind parsed outcomes directly to production stdin, process, daemon or terminal IO.
 mod action_io {
     #![coverage(off)]
 
     use super::{
-        Action, AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
+        AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
         LauncherPolicyInputs, McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox, clean,
-        daemon, execute_self_update, exit_code, guard_workspace, mcp_daemon_route, tui,
-        write_client_error, write_daemon_outcome,
+        daemon, execute_self_update, exit_code, guard_workspace, managed_update_sync_exit_code,
+        mcp_daemon_route, tui, write_client_error, write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
     pub(super) fn execute_action(
-        action: Action,
         outcome: RunOutcome,
         out: &mut dyn Write,
         err: &mut dyn Write,
         info: &AppInfo,
     ) -> std::io::Result<ExitCode> {
-        match (action, outcome) {
-            (Action::Exit, RunOutcome::Exit(code)) => Ok(exit_code(code)),
-            (Action::LaunchWelcome, RunOutcome::LaunchTui(TuiRequest::Welcome)) => {
+        match outcome {
+            RunOutcome::Exit(code) => Ok(exit_code(code)),
+            RunOutcome::LaunchTui(TuiRequest::Welcome) => {
                 tui::launch(out, info, &EntryScreen::Welcome).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchWorkspace, RunOutcome::LaunchTui(TuiRequest::Workspace { path })) => {
+            RunOutcome::LaunchTui(TuiRequest::Workspace { path }) => {
                 let path = tui::resolve_workspace_path(&path.unwrap_or(std::env::current_dir()?))?;
                 tui::launch(out, info, &EntryScreen::Workspace { path }).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchConfig, RunOutcome::LaunchTui(TuiRequest::Config)) => {
+            RunOutcome::LaunchTui(TuiRequest::Config) => {
                 tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchDoctor, RunOutcome::LaunchTui(TuiRequest::Doctor { fix })) => {
+            RunOutcome::LaunchTui(TuiRequest::Doctor { fix }) => {
                 tui::launch_doctor(out, info, fix).map(|()| ExitCode::SUCCESS)
             }
-            (Action::LaunchDaemon, RunOutcome::LaunchDaemon(command)) => {
+            RunOutcome::LaunchDaemon(command) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
-            (Action::SyncDaemonAfterUpdate, RunOutcome::SyncDaemonAfterUpdate) => {
-                match daemon::sync_after_update(out, ClientPolicy::cli(), info)? {
-                    Ok(()) => Ok(ExitCode::SUCCESS),
+            RunOutcome::SyncDaemonAfterUpdate { restart_agents } => {
+                match daemon::sync_after_update(out, ClientPolicy::cli(), info, restart_agents)? {
+                    Ok(outcome) => {
+                        let managed_request = std::env::var("USAGI_MANAGED_UPDATE").as_deref()
+                            == Ok("1")
+                            && std::env::var("USAGI_UPDATE_SYNC_RETRY").as_deref() != Ok("1");
+                        let queued = managed_request
+                            && matches!(outcome, daemon::ManagedUpdateSync::Deferred);
+                        if queued {
+                            daemon::schedule_deferred_update()?;
+                            writeln!(
+                                out,
+                                "daemon sync: queued for automatic retry after live runtimes finish"
+                            )?;
+                        } else if managed_request {
+                            // A successful update also retires a reservation
+                            // whose detached worker exited before finishing.
+                            let data_dir = daemon::prepare_private_data_dir()?;
+                            daemon::complete_deferred_update(&data_dir)?;
+                        }
+                        Ok(managed_update_sync_exit_code(
+                            outcome,
+                            std::env::var("USAGI_UPDATE_SYNC_OUTCOMES").as_deref() == Ok("1"),
+                            queued && std::env::var("USAGI_UPDATE_AUTO_SYNC").as_deref() == Ok("1"),
+                        ))
+                    }
                     Err(error) => {
                         write_client_error(err, "daemon synchronization refused", &error)?;
                         Ok(ExitCode::FAILURE)
                     }
                 }
             }
-            (Action::RequestDaemonReplacement, RunOutcome::RequestDaemonReplacement { force }) => {
+            RunOutcome::RequestDaemonReplacement { force } => {
                 match daemon::replace_running_daemon(out, ClientPolicy::cli(), force, info)? {
                     Ok(()) => Ok(ExitCode::SUCCESS),
                     Err(error) => {
@@ -149,7 +127,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::LaunchMcp, RunOutcome::LaunchMcp) => {
+            RunOutcome::LaunchMcp => {
                 let stdin = std::io::stdin();
                 let workspace_root =
                     std::env::var_os(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
@@ -241,10 +219,8 @@ mod action_io {
                     }
                 }
             }
-            (Action::Clean, RunOutcome::Clean { apply, force }) => {
-                clean::run(out, err, apply, force)
-            }
-            (Action::CaptureCodexSession, RunOutcome::CaptureCodexSession) => {
+            RunOutcome::Clean { apply, force } => clean::run(out, err, apply, force),
+            RunOutcome::CaptureCodexSession => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
                 let request = match usagi_cli::cli::hooks::codex_session_capture::request_from_hook(
@@ -277,7 +253,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::ReportAgentPhase, RunOutcome::ReportAgentPhase { phase, hook_event }) => {
+            RunOutcome::ReportAgentPhase { phase, hook_event } => {
                 let stdin = std::io::stdin();
                 let mut input = stdin.lock();
                 let request = match usagi_cli::cli::hooks::agent_phase::request_from_hook(
@@ -300,7 +276,10 @@ mod action_io {
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
                 match daemon::attached_client(ClientPolicy::cli()) {
-                    Ok(mut client) => match client.request(request) {
+                    Ok(mut client) => match usagi_cli::cli::hooks::agent_phase::report_to_daemon(
+                        &mut client,
+                        request,
+                    ) {
                         Ok(_) => {
                             if let Some(response) =
                                 usagi_cli::cli::hooks::agent_phase::response_for_declared_event(
@@ -322,22 +301,30 @@ mod action_io {
                     }
                 }
             }
-            (Action::GuardWorkspace, RunOutcome::GuardWorkspace) => guard_workspace(out),
-            (
-                Action::ClaudeSandbox,
-                RunOutcome::ClaudeSandbox {
-                    mode,
-                    agent,
-                    protected_root,
-                    backend,
-                    tmpdir,
-                    home,
-                    cache_dir,
-                    writable_roots,
-                    read_only_roots,
-                    command,
-                },
-            ) => claude_sandbox(
+            RunOutcome::EmitAgySystemPrompt => {
+                let prompt = std::env::var(usagi_daemon::usecase::agy::SYSTEM_PROMPT_ENV).ok();
+                if usagi_cli::cli::hooks::agy_system_prompt::write_response(prompt.as_deref(), out)
+                    .is_ok()
+                {
+                    Ok(ExitCode::SUCCESS)
+                } else {
+                    writeln!(err, "AGY system context is unavailable")?;
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+            RunOutcome::GuardWorkspace => guard_workspace(out),
+            RunOutcome::ClaudeSandbox {
+                mode,
+                agent,
+                protected_root,
+                backend,
+                tmpdir,
+                home,
+                cache_dir,
+                writable_roots,
+                read_only_roots,
+                command,
+            } => claude_sandbox(
                 mode,
                 agent.as_deref(),
                 LauncherPolicyInputs {
@@ -352,7 +339,7 @@ mod action_io {
                 command,
                 err,
             ),
-            (Action::DaemonRequest, RunOutcome::DaemonRequest(request)) => {
+            RunOutcome::DaemonRequest(request) => {
                 match daemon::policy_client(ClientPolicy::cli()) {
                     Ok(mut client) => write_daemon_outcome(client.request(request), out, err),
                     Err(error) => {
@@ -361,10 +348,7 @@ mod action_io {
                     }
                 }
             }
-            (Action::SelfUpdate, RunOutcome::SelfUpdate(request)) => {
-                execute_self_update(&request, out, err)
-            }
-            _ => unreachable!("action classification and outcome diverged"),
+            RunOutcome::SelfUpdate(request) => execute_self_update(&request, out, err),
         }
     }
 }
@@ -381,7 +365,7 @@ fn execute_self_update(
     out.flush()?;
     err.flush()?;
     execute_self_update_with(request, out, err, &mut |script, select_version| {
-        let mut command = update_installer_command(select_version);
+        let mut command = update_installer_command(select_version, request.restart_agents());
         let mut child = command.spawn()?;
         let write_result = child
             .stdin
@@ -401,7 +385,7 @@ fn execute_self_update(
     })
 }
 
-fn update_installer_command(select_version: bool) -> std::process::Command {
+fn update_installer_command(select_version: bool, restart_agents: bool) -> std::process::Command {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new("bash");
@@ -415,6 +399,9 @@ fn update_installer_command(select_version: bool) -> std::process::Command {
         .stderr(Stdio::inherit());
     if select_version {
         command.arg("--select-version");
+    }
+    if restart_agents {
+        command.arg("--restart-agents");
     }
     command
 }
@@ -540,9 +527,10 @@ fn claude_sandbox(
 }
 
 fn linux_home_entry_inventory(home: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut entries = std::fs::read_dir(home)?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(home)? {
+        entries.push(entry?.path());
+    }
     entries.sort();
     Ok(entries)
 }
@@ -770,6 +758,23 @@ fn write_client_error(
     }
 }
 
+fn managed_update_sync_exit_code(
+    outcome: daemon::ManagedUpdateSync,
+    report_deferred: bool,
+    queued: bool,
+) -> ExitCode {
+    // Older binaries embed an installer that treats every nonzero sync status
+    // as an update failure. A new installer opts into the deferred status so
+    // upgrades from those binaries can still succeed without restarting Agents.
+    match (outcome, report_deferred, queued) {
+        (daemon::ManagedUpdateSync::Deferred, true, true) => ExitCode::from(4),
+        (daemon::ManagedUpdateSync::Deferred, true, false) => ExitCode::from(3),
+        (daemon::ManagedUpdateSync::Complete | daemon::ManagedUpdateSync::Deferred, _, _) => {
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -809,19 +814,37 @@ mod tests {
     use std::io::{self, Write};
     use std::path::PathBuf;
 
-    use usagi_cli::cli::{DaemonCommand, InstallerRequest, RunOutcome, TuiRequest};
-    use usagi_core::infrastructure::ipc::{ClientError, DaemonReply, DaemonRequest};
+    use usagi_cli::cli::InstallerRequest;
+    use usagi_core::infrastructure::ipc::{ClientError, DaemonReply};
     use usagi_core::infrastructure::ipc::{build_identity, build_rollover_trigger};
-    use usagi_core::usecase::claude_sandbox::SandboxMode;
 
     use super::{
-        Action, ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
+        ExitCode, LauncherPolicyError, LauncherPolicyInputs, McpDaemonRoute,
         execute_self_update_with, exit_code, linux_home_entry_inventory, mcp_daemon_route,
         process_outcome, resolve_launch_agent, update_installer_command,
         validate_launcher_policy_inputs, write_client_error, write_daemon_outcome,
     };
 
     struct BrokenWriter;
+
+    #[test]
+    fn pending_update_acknowledgement_preserves_older_installers() {
+        use super::daemon::ManagedUpdateSync::{Complete, Deferred};
+        for (outcome, report_deferred, queued, expected) in [
+            (Complete, false, false, 0),
+            (Complete, true, false, 0),
+            (Complete, true, true, 0),
+            (Deferred, false, false, 0),
+            (Deferred, false, true, 0),
+            (Deferred, true, false, 3),
+            (Deferred, true, true, 4),
+        ] {
+            assert_eq!(
+                super::managed_update_sync_exit_code(outcome, report_deferred, queued),
+                ExitCode::from(expected)
+            );
+        }
+    }
 
     #[test]
     fn the_launch_agent_selector_resolves_a_provider_or_fails_closed() {
@@ -1048,90 +1071,6 @@ mod tests {
     }
 
     #[test]
-    fn every_parsed_outcome_maps_to_one_typed_runtime_action() {
-        let assert_route = |outcome: RunOutcome, expected: Action| {
-            assert_eq!(
-                std::mem::discriminant(&Action::from(&outcome)),
-                std::mem::discriminant(&expected)
-            );
-        };
-        assert_route(RunOutcome::Exit(7), Action::Exit);
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Welcome),
-            Action::LaunchWelcome,
-        );
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Workspace {
-                path: Some(PathBuf::from("workspace")),
-            }),
-            Action::LaunchWorkspace,
-        );
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Config),
-            Action::LaunchConfig,
-        );
-        assert_route(
-            RunOutcome::LaunchTui(TuiRequest::Doctor { fix: false }),
-            Action::LaunchDoctor,
-        );
-        assert_route(
-            RunOutcome::LaunchDaemon(DaemonCommand::Start),
-            Action::LaunchDaemon,
-        );
-        assert_route(
-            RunOutcome::SyncDaemonAfterUpdate,
-            Action::SyncDaemonAfterUpdate,
-        );
-        assert_route(
-            RunOutcome::RequestDaemonReplacement { force: true },
-            Action::RequestDaemonReplacement,
-        );
-        assert_route(RunOutcome::LaunchMcp, Action::LaunchMcp);
-        assert_route(
-            RunOutcome::Clean {
-                apply: false,
-                force: false,
-            },
-            Action::Clean,
-        );
-        assert_route(RunOutcome::CaptureCodexSession, Action::CaptureCodexSession);
-        assert_route(
-            RunOutcome::ReportAgentPhase {
-                phase: "working".into(),
-                hook_event: None,
-            },
-            Action::ReportAgentPhase,
-        );
-        assert_route(RunOutcome::GuardWorkspace, Action::GuardWorkspace);
-        assert_route(
-            RunOutcome::ClaudeSandbox {
-                mode: SandboxMode::Session,
-                agent: Some("claude".to_owned()),
-                protected_root: None,
-                backend: None,
-                tmpdir: None,
-                home: None,
-                cache_dir: None,
-                writable_roots: vec![PathBuf::from("worktree")],
-                read_only_roots: vec![],
-                command: vec!["claude".into()],
-            },
-            Action::ClaudeSandbox,
-        );
-        assert_route(
-            RunOutcome::DaemonRequest(DaemonRequest::Rollover {
-                operation_id: "operation".into(),
-                restart_agents: None,
-            }),
-            Action::DaemonRequest,
-        );
-        assert_route(
-            RunOutcome::SelfUpdate(InstallerRequest::new(b"", [0; 32], false)),
-            Action::SelfUpdate,
-        );
-    }
-
-    #[test]
     fn installer_identity_failure_has_zero_process_effects() {
         let directory = tempfile::tempdir().unwrap();
         let installed = directory.path().join("usagi");
@@ -1162,7 +1101,7 @@ mod tests {
 
             assert_eq!(status, std::process::ExitCode::FAILURE);
             assert_eq!(launches.get(), 0);
-            assert!(out.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
             assert_eq!(
                 String::from_utf8(err).unwrap(),
                 "self-update refused: embedded installer identity is invalid\n"
@@ -1180,7 +1119,7 @@ mod tests {
         let mut err = Vec::new();
         let status =
             execute_self_update_with(&request, &mut out, &mut err, &mut |script, selected| {
-                assert!(script.is_empty());
+                assert_eq!(script, [] as [u8; 0]);
                 assert!(selected);
                 Ok(process_output(0, b"installed\n", b"warning\n"))
             })
@@ -1189,12 +1128,16 @@ mod tests {
         assert_eq!(out, b"installed\n");
         assert_eq!(err, b"warning\n");
 
-        let status =
-            execute_self_update_with(&request, &mut Vec::new(), &mut Vec::new(), &mut |_, _| {
-                Ok(process_output(7, b"", b"failed\n"))
-            })
+        for code in [7_u8, 129, 130, 143] {
+            let status = execute_self_update_with(
+                &request,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut |_, _| Ok(process_output(i32::from(code), b"", b"failed\n")),
+            )
             .unwrap();
-        assert_eq!(status, std::process::ExitCode::from(7));
+            assert_eq!(status, std::process::ExitCode::from(code));
+        }
 
         let launch_error =
             execute_self_update_with(&request, &mut Vec::new(), &mut Vec::new(), &mut |_, _| {
@@ -1253,7 +1196,7 @@ mod tests {
 
     #[test]
     fn managed_installer_environment_is_explicit_and_cwd_independent() {
-        let command = update_installer_command(true);
+        let command = update_installer_command(true, false);
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["-s", "--", "--select-version"]
@@ -1266,9 +1209,14 @@ mod tests {
             environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
             Some(&Some(std::ffi::OsStr::new("1")))
         );
-        let no_daemon = update_installer_command(false);
+        let no_daemon = update_installer_command(false, false);
         assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
         assert!(no_daemon.get_current_dir().is_some());
+        let restart = update_installer_command(true, true);
+        assert_eq!(
+            restart.get_args().collect::<Vec<_>>(),
+            ["-s", "--", "--select-version", "--restart-agents"]
+        );
     }
 
     fn verified_installer_request() -> InstallerRequest {
@@ -1342,7 +1290,7 @@ mod tests {
         .unwrap();
         assert_eq!(status, std::process::ExitCode::SUCCESS);
         assert_eq!(String::from_utf8(out).unwrap(), "{\"result\":\"done\"}\n");
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -1353,7 +1301,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status, std::process::ExitCode::FAILURE);
-        assert!(out.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "daemon request failed [unavailable]: daemon transport is unavailable\n"
@@ -1458,7 +1406,7 @@ mod tests {
     fn a_successful_outcome_keeps_its_exit_code_and_stays_quiet() {
         let mut err = Vec::new();
         let code = process_outcome(Ok(exit_code(3)), &mut err);
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
         assert_eq!(format!("{code:?}"), format!("{:?}", exit_code(3)));
     }
 

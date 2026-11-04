@@ -28,8 +28,7 @@ filesystem sandbox、MCP authorization、session lifecycle の権限ではない
 
 `RoleId` は 1–64 byte の小文字 ASCII kebab-case である。session 名から role を推測せず、session の途中で `role_id` を変更しない。
 role を変える場合は別 session を作成する。
-現在の Team と role catalog は workspace 単位であり、Work Run ごとの Team override / snapshot は持たない。
-goal-driven の root Agent とそこから委譲する session も、launch 時点の同じ effective catalog を使う。
+Team と role catalog は workspace 単位である。
 
 ## catalog
 
@@ -47,7 +46,7 @@ Config の `Team` は次の組み込み catalog を選ぶ。global の値は wor
 `none` は既定値であり、組み込み catalog を注入しない。未知の `team_template` token、および読み取れないworkspace設定も
 委譲権限を暗黙に増やさないよう `none` へ縮退する。
 各テンプレートの委譲上限 `max_concurrency` は 4 である。パイプライン型は role と委譲経路によって工程順を制約し、
-独立した workflow engine や自動ステージ遷移は追加しない。各 Agent が role instruction に従って次工程へ dispatch する。
+各 Agent が role instruction に従って次工程へ dispatch する。
 
 catalog は次の順で合成する。後の layer にある同一 role ID は、前の定義を field 単位で混ぜず定義全体を置換する。
 default は各 layer で指定された scope だけを上書きする。
@@ -121,8 +120,7 @@ Worker → Manager → Director と一段ずつ返る。`delegation` block を�
 `enabled`、`child_roles`、`max_depth`、`max_concurrency` を検証し、prompt の自己申告には依存しない。block を
 持たない role は従来の許可動作を維持する。depth admission も managed session では lifecycle state を直接読み、
 作成完了直後の daemon crash で dispatch sidecar への複製が遅れても深さを過小評価しない。sidecar は lifecycle に
-存在しない legacy / supervisor scope の fallback に限る。
-durable supervisor run ではこれに加えて immutable な `ExecutionPolicy` が dispatch 総数・並列数・深さを制限する。
+存在しない legacy scope の fallback に限る。
 
 階層型チームでは、利用者がTUI/CLIから手動作成する新規sessionを調整役として扱うため、`defaults.session` は
 `manager` とする。Director/Managerが実行者を委譲するときは `role = "worker"` を明示し、既定値に依存しない。
@@ -200,7 +198,7 @@ adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral 
 引数の詳細は列挙せず、`tools/list` のスキーマを正本とし、手順は resource
 `usagi://guides/orchestration` を参照させる（正本は [7. MCP サーバ#tool 面](07-mcp.md#tool-面)）。
 人への質問・確認・選択には `user_decision_request` を使って TUI で回答できるよう促し、返された
-`decision_id` を `user_decision_get` で確認させる。pending 中は回答に依存しない作業だけを進め、
+`decision_id` を `user_decision_get` で確認させ、resolved の回答を受信後に `user_decision_ack` で受信確認させる。pending 中は回答に依存しない作業だけを進め、
 cancelled / expired を承認とみなさず、人の回答を代理送信しないよう指示する。
 
 各行は launch scope に依存せず真である文にする。行が述べるのは「どこで何が受理されるか」で、
@@ -228,7 +226,21 @@ session では許可、root では拒否として同じ 1 行が両方で真に�
 `session_list` / `session_status` / `session_get` は `role_id` と current definition の `role_summary` を safe metadata として返す。list / status / overview の各 session は、これに加えて lifecycle state に作成時だけ保存した `parent_session_id` と、そこから導出する `parent_session_name` / `organization_depth` / `organization_path` を返す。path は root の `Director` から当該 session までで、既存 session への dispatch や同一 session 内の Agent handoff は階層を変更しない。
 catalog が読めない場合も lifecycle metadata を返し、summary は `null` になる。
 
-TUI は `role_id` / `role_summary`、lifecycle state 由来の `parent_session_id`、dispatch state 由来の `agent_status` を stable session identity keyed の controller projection として保持し、
+list / status / overview の optional な `creator_continuation` は表示専用の Conversation identity である。
+daemon は認証済みの作成要求から会話を確定し、session の予約時に保存する。同じ Agent が別の会話を開始しても、
+既存 session の再利用、daemon 再起動、runtime 履歴の削除でも作成時の対応を維持する。
+旧版が受け付けた作成要求の再送は、会話情報を除く作成条件が一致すれば元の結果を返し、既存の所属を補記しない。
+この情報を持たない旧 session はフィールドを省略する。AgentId は別の会話でも再利用され、retained runtime は
+履歴削除で一部だけ残り得るため、候補が1件でも作成会話の証拠にはしない。
+
+optional な `director_continuation` は組織図の root Conversation を表す。直下の session は作成会話、
+子 session は親の所属を予約時に保存する。旧データでは、保存された作成会話と現存する親子関係から導出する。
+親を削除するときは、まだこの値を持たない直下の子へ所属を保存してから、同じ lifecycle 更新内で親を取り除く。
+このため子孫が生存していれば、親の削除と daemon 再起動後も元の Director に表示する。
+既に親と所属情報を失った旧 session、循環した親子関係は推測で補わない。
+認証用の `creator_agent_id` は公開せず、これらの Conversation identity を session 操作の認可には使用しない。
+
+TUI は `role_id` / `role_summary`、lifecycle state 由来の `parent_session_id`、`creator_continuation` / `director_continuation`、dispatch state 由来の `agent_status` を stable session identity keyed の controller projection として保持し、
 legacy `SessionRecord` や `state.json` へコピーしない。sidebar は role ID だけを badge 表示し、role metadata を
 attach / remove などの lifecycle capability 判定には使わない。
 

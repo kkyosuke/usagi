@@ -30,6 +30,7 @@ use usagi_core::domain::{
 
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
+    resources::StoreError,
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         SpawnFailure, TerminalReconcileState, TerminalRegistry, TerminalRuntimeState,
@@ -115,11 +116,20 @@ impl TerminalStoreSnapshot {
     }
 }
 pub trait TerminalStore {
-    #[allow(clippy::result_unit_err)] // Persistence detail is intentionally erased at the usecase port.
-    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()>;
+    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), StoreError>;
 }
 /// Resolves a code-defined profile or trusted local settings once, before spawn.
 pub trait TerminalProfileResolver {
+    /// Checks code-defined profile metadata without external I/O or resolving
+    /// configured environment values. Admission still resolves the profile
+    /// immediately before spawn.
+    fn validate_request(
+        &self,
+        _request: &TerminalLaunchRequest,
+    ) -> Result<(), TerminalLaunchValidationError> {
+        Ok(())
+    }
+
     fn resolve(
         &mut self,
         request: &TerminalLaunchRequest,
@@ -151,6 +161,8 @@ pub enum GenericTerminalError {
     ConcurrencyExhausted,
     Terminal(RegistryError),
     Store,
+    /// The durable operation ledger refused a fresh reservation without writing.
+    RetentionBackpressure,
     InvalidSnapshot,
     SpawnFailed,
     ReconcileRequired(TerminalReconcileState),
@@ -275,9 +287,7 @@ impl GenericTerminalCoordinator {
         if self.records.contains_key(&key) {
             return Err(GenericTerminalError::TerminalAlreadyExists);
         }
-        if self.occupied_slots() >= self.limit {
-            return Err(GenericTerminalError::ConcurrencyExhausted);
-        }
+        self.ensure_launch_capacity()?;
         // Reserve the worst-case final this runtime will leave behind before
         // anything is spawned. An exhausted aggregate budget refuses the launch
         // here instead of dropping somebody else's protected final later.
@@ -347,7 +357,12 @@ impl GenericTerminalCoordinator {
                 )),
             },
         );
-        self.persist(store)?;
+        if let Err(error) = self.persist(store) {
+            if error == GenericTerminalError::RetentionBackpressure {
+                self.records.remove(&key);
+            }
+            return Err(error);
+        }
         if let Err(error) = self.terminals.register(terminal.clone(), geometry) {
             // No PTY effect occurred, so this reservation has a definite final
             // state rather than becoming an ambiguous live owner.
@@ -392,14 +407,7 @@ impl GenericTerminalCoordinator {
     pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
         self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
-        for record in self.records.values() {
-            if record.state == TerminalRuntimeState::Exited {
-                self.retention.set_pinned(
-                    &record.terminal,
-                    self.terminals.is_attached(&record.terminal),
-                );
-            }
-        }
+        self.refresh_exited_retention_pins();
     }
 
     /// Coalesces cleanup for every connection absent from the daemon's current
@@ -410,15 +418,21 @@ impl GenericTerminalCoordinator {
         writer: &mut dyn PtyWriter,
     ) {
         self.terminals.retain_live_connections(live, writer);
-        for record in self.records.values() {
-            if record.state == TerminalRuntimeState::Exited {
-                self.retention.set_pinned(
-                    &record.terminal,
-                    self.terminals.is_attached(&record.terminal),
-                );
-            }
+        self.refresh_exited_retention_pins();
+    }
+    fn refresh_exited_retention_pins(&self) {
+        for record in self
+            .records
+            .values()
+            .filter(|record| record.state == TerminalRuntimeState::Exited)
+        {
+            self.retention.set_pinned(
+                &record.terminal,
+                self.terminals.is_attached(&record.terminal),
+            );
         }
     }
+
     pub fn terminal_snapshot(
         &self,
         terminal: &TerminalRef,
@@ -657,6 +671,11 @@ impl GenericTerminalCoordinator {
         };
         self.persist(store)
     }
+    /// Borrow authoritative records for projections that do not need a durable snapshot.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &DurableTerminalRecord> {
+        self.records.values()
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> TerminalStoreSnapshot {
         TerminalStoreSnapshot {
@@ -664,34 +683,19 @@ impl GenericTerminalCoordinator {
             records: self.records.values().cloned().collect(),
         }
     }
-    /// Whether this workspace still has a generic terminal that is running.
-    ///
-    /// Unlike [`Self::inventory`], the question is about the whole workspace
-    /// rather than one scope inside it: a retirement gives back the workspace,
-    /// so any live child anywhere in it must keep it.
+    /// All workspace runtime identities and states, including stopped records,
+    /// so cache scans can detect a process starting and exiting during IO.
     #[must_use]
-    pub fn has_running_in_workspace(&self, workspace: usagi_core::domain::id::WorkspaceId) -> bool {
-        self.records.values().any(|record| {
-            record.terminal.workspace_id == workspace
-                && matches!(record.state, TerminalRuntimeState::Running)
-        })
-    }
-
-    /// Number of live generic terminal PTYs owned by one workspace.
-    #[must_use]
-    pub fn running_count_in_workspace(
+    pub fn cache_cleanup_activity(
         &self,
         workspace: usagi_core::domain::id::WorkspaceId,
-    ) -> usize {
+    ) -> Vec<(usagi_core::domain::id::TerminalRef, TerminalRuntimeState)> {
         self.records
             .values()
-            .filter(|record| {
-                record.terminal.workspace_id == workspace
-                    && matches!(record.state, TerminalRuntimeState::Running)
-            })
-            .count()
+            .filter(|record| record.terminal.workspace_id == workspace)
+            .map(|record| (record.terminal.clone(), record.state))
+            .collect()
     }
-
     /// Number of PTY records that may still name a live process and therefore
     /// must block an unforced workspace retirement.
     #[must_use]
@@ -702,8 +706,7 @@ impl GenericTerminalCoordinator {
         self.records
             .values()
             .filter(|record| {
-                record.terminal.workspace_id == workspace
-                    && terminal_state_blocks_retirement(record.state)
+                record.terminal.workspace_id == workspace && record.state.requires_termination()
             })
             .count()
     }
@@ -757,7 +760,7 @@ impl GenericTerminalCoordinator {
             .collect::<Vec<_>>();
         let mut terminate_failed = false;
         for record in &targets {
-            if !terminal_state_requires_termination(record.state) {
+            if !record.state.requires_termination() {
                 continue;
             }
             if spawner.terminate_reap(&record.terminal).is_err() {
@@ -856,10 +859,21 @@ impl GenericTerminalCoordinator {
             })
             .count()
     }
+
+    /// Checks the current PTY ceiling without reserving a slot. A caller that
+    /// releases its owner lock must check again when it admits the launch.
+    pub fn ensure_launch_capacity(&self) -> Result<(), GenericTerminalError> {
+        if self.occupied_slots() >= self.limit {
+            Err(GenericTerminalError::ConcurrencyExhausted)
+        } else {
+            Ok(())
+        }
+    }
     fn persist(&self, store: &mut dyn TerminalStore) -> Result<(), GenericTerminalError> {
-        store
-            .save(self.snapshot())
-            .map_err(|()| GenericTerminalError::Store)
+        store.save(self.snapshot()).map_err(|error| match error {
+            StoreError::Unavailable => GenericTerminalError::Store,
+            StoreError::RetentionBackpressure => GenericTerminalError::RetentionBackpressure,
+        })
     }
     fn validate_scope(
         &self,
@@ -931,22 +945,6 @@ impl GenericTerminalCoordinator {
     }
 }
 
-fn terminal_state_requires_termination(state: TerminalRuntimeState) -> bool {
-    matches!(
-        state,
-        TerminalRuntimeState::Running
-            | TerminalRuntimeState::ReconcileRequired(
-                TerminalReconcileState::SpawnAmbiguous
-                    | TerminalReconcileState::PersistAfterSpawn
-                    | TerminalReconcileState::OrphanRunning
-            )
-    )
-}
-
-fn terminal_state_blocks_retirement(state: TerminalRuntimeState) -> bool {
-    terminal_state_requires_termination(state)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,22 +973,22 @@ mod tests {
     #[derive(Default)]
     struct Store(Vec<TerminalStoreSnapshot>);
     impl TerminalStore for Store {
-        fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), ()> {
+        fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), StoreError> {
             self.0.push(snapshot);
             Ok(())
         }
     }
     struct FailingStore;
     impl TerminalStore for FailingStore {
-        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
-            Err(())
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), StoreError> {
+            Err(StoreError::Unavailable)
         }
     }
     struct FailAfter(usize);
     impl TerminalStore for FailAfter {
-        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), StoreError> {
             self.0 = self.0.saturating_sub(1);
-            (self.0 != 0).then_some(()).ok_or(())
+            (self.0 != 0).then_some(()).ok_or(StoreError::Unavailable)
         }
     }
     struct Resolver;
@@ -1118,7 +1116,7 @@ mod tests {
         coordinator.exit(&exited, 0, &mut store).unwrap();
 
         assert_eq!(
-            coordinator.running_count_in_workspace(first.workspace_id),
+            coordinator.retirement_blocker_count_in_workspace(first.workspace_id),
             1
         );
         assert_eq!(
@@ -1319,15 +1317,19 @@ mod tests {
             TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterSpawn),
             TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
         ] {
-            assert!(terminal_state_requires_termination(state));
+            assert!(state.requires_termination());
         }
         for state in [
             TerminalRuntimeState::Reserved,
+            TerminalRuntimeState::Interrupted,
+            TerminalRuntimeState::Sleeping,
             TerminalRuntimeState::Exited,
             TerminalRuntimeState::Reclaimed,
+            TerminalRuntimeState::SpawnFailed,
             TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::PersistAfterExit),
         ] {
-            assert!(!terminal_state_requires_termination(state));
+            assert!(!state.requires_termination());
         }
     }
     #[test]
@@ -1534,7 +1536,10 @@ mod tests {
             )
             .unwrap();
         // A running terminal is not a completed tombstone.
-        assert!(coordinator.completed_inventory(&request.scope).is_empty());
+        assert_eq!(
+            coordinator.completed_inventory(&request.scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
 
         coordinator
             .output(&terminal, b"final output".to_vec())
@@ -1558,7 +1563,10 @@ mod tests {
             session_id: None,
             worktree_id: WorktreeId::new(),
         };
-        assert!(coordinator.completed_inventory(&other_scope).is_empty());
+        assert_eq!(
+            coordinator.completed_inventory(&other_scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
     }
 
     #[test]
@@ -1975,8 +1983,14 @@ mod tests {
         retention.collect();
         assert_eq!(coordinator.collect_garbage(&mut store), 1);
         // The durable record, the journal, and the inventory entry are gone.
-        assert!(coordinator.snapshot().records.is_empty());
-        assert!(coordinator.completed_inventory(&request().scope).is_empty());
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
+        assert_eq!(
+            coordinator.completed_inventory(&request().scope),
+            [] as [usagi_core::domain::terminal_visibility::CompletedTerminalEntry; 0]
+        );
         assert!(
             store
                 .0
@@ -2171,7 +2185,10 @@ mod tests {
         // The store write fails, but the runtime is not resurrected: the record
         // is gone from memory and the query stays typed.
         assert_eq!(coordinator.collect_garbage(&mut FailingStore), 1);
-        assert!(coordinator.snapshot().records.is_empty());
+        assert_eq!(
+            coordinator.snapshot().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
         assert_eq!(
             coordinator.terminal_snapshot(&terminal),
             Err(GenericTerminalError::FinalEvicted(
@@ -2180,6 +2197,9 @@ mod tests {
         );
         // A later successful write publishes the same converged snapshot.
         coordinator.persist(&mut store).unwrap();
-        assert!(store.0.last().unwrap().records.is_empty());
+        assert_eq!(
+            store.0.last().unwrap().records,
+            [] as [crate::usecase::generic_terminal::DurableTerminalRecord; 0]
+        );
     }
 }

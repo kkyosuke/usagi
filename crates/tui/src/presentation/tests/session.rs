@@ -3,6 +3,139 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::session_commands::{adopt_session_snapshot, sync_overlay_session_roots};
+
+#[test]
+#[allow(clippy::too_many_lines)] // Exercise lifecycle refresh through coherent restore with one stable session revision.
+fn session_refresh_discovers_an_agent_started_after_its_session_was_observed() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let terminal = scoped_terminal_ref(workspace, Some(session));
+    let agent = AgentRuntimeInventoryItem {
+        operation_id: None,
+        agent_id: None,
+        launch_provenance: None,
+        runtime: AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), Some(session))
+            .unwrap(),
+        continuation: AgentContinuationRef::new(),
+        state: AgentRuntimeInventoryState::Live,
+        resumed_from: None,
+    };
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::new(),
+        Box::new(MemoryIntentPort {
+            state: Arc::new(Mutex::new(AgentTabIntent::empty(workspace))),
+            mutations: Arc::default(),
+        }),
+    );
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let mut lane = FakeSessionRefreshPort::default();
+    let mut retry = crate::presentation::RestoreRetryState::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut worker = SequencedRestorePort {
+        terminals: VecDeque::new(),
+        agents: VecDeque::new(),
+    };
+    // MCP publishes the session before starting its Agent. Starting the Agent
+    // does not change the session lifecycle revision; later refreshes must still
+    // discover it, and a repeated observation must not duplicate its tab.
+    for present in [false, true, true] {
+        let entries = if present {
+            vec![TerminalInventoryEntry {
+                terminal: terminal.clone(),
+                kind: TerminalKind::Agent,
+                live: true,
+            }]
+        } else {
+            Vec::new()
+        };
+        worker.terminals.extend([Ok(entries.clone()), Ok(entries)]);
+        worker.agents.push_back(Ok(AgentInventory {
+            workspace_id: workspace,
+            runtimes: if present {
+                vec![agent.clone()]
+            } else {
+                Vec::new()
+            },
+            resumable: Vec::new(),
+        }));
+    }
+    let mut port: Box<dyn AgentCommandPort> = Box::new(worker);
+    for (round, expected_agents) in [0, 1, 1].into_iter().enumerate() {
+        lane.queued
+            .lock()
+            .unwrap()
+            .push_back(Ok(SessionCommandResult {
+                message: "daemon snapshot refreshed".into(),
+                sessions: Some(state("demo").sessions),
+                session_ids: Some(vec![session]),
+                agent_resumes: None,
+                session_lifecycles: None,
+                session_roles: None,
+                revision: Some(7),
+                notes_updated_at: None,
+            }));
+        crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut None);
+        let _ = crate::presentation::sync_runtime_sessions(&mut runtime, &ui, &[]);
+        ui.set_allowed_agent_sessions([session]);
+        let at = std::time::Duration::from_secs(round as u64);
+        if ui.take_agent_observation_request() {
+            retry.request_observation(at);
+        }
+        if ui.take_agent_inventory_change_observation_request() {
+            retry.request_changed_observation(at);
+        }
+        assert!(
+            retry.begin_if_due(at),
+            "refresh {round} must observe external Agents even at the same lifecycle revision"
+        );
+        let (interaction, revision) = runtime.restore_fence();
+        crate::presentation::spawn_restore_job(
+            port,
+            workspace,
+            BTreeSet::from([session]),
+            interaction,
+            revision,
+            sender.clone(),
+        );
+        let completion = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("restore worker completes before the next refresh");
+        let applied = crate::presentation::apply_restore_completion(
+            completion,
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &BTreeSet::from([session]),
+        );
+        assert_eq!(
+            applied.outcome,
+            crate::presentation::RestoreJobOutcome::Applied
+        );
+        assert!(!retry.complete(at, applied.outcome));
+        port = applied.port;
+        assert_eq!(ui.last_session_revision, 7);
+        assert_eq!(
+            ui.agent_inventory().unwrap().runtimes.len(),
+            expected_agents
+        );
+        let pane = runtime.panes().pane(Target::Session(session)).unwrap();
+        assert_eq!(pane.tabs().len(), expected_agents);
+        if expected_agents == 1 {
+            assert!(matches!(&pane.tabs()[0], PaneTab::Live(live) if live.terminal == terminal));
+        }
+        assert_eq!(runtime.state().workspace(), workspace);
+        assert!(
+            ui.pane_launches.is_empty(),
+            "observation never starts an Agent"
+        );
+    }
+    // Frame drains without a newly published snapshot do not request more IO.
+    crate::presentation::drain_session_refresh(&mut ui, &mut lane, &mut None);
+    assert!(!ui.take_agent_inventory_change_observation_request());
+}
 
 #[test]
 fn closeup_live_pr_action_requests_the_active_sessions_prs_without_an_empty_modal() {
@@ -58,35 +191,6 @@ fn a_rabbit_click_on_a_tabless_session_stops_at_its_closeup() {
     assert_eq!(runtime.state().overlay(), None);
     visit_garden_agent(&mut ui, &mut runtime, click);
     assert_eq!(runtime.focused_terminal(), None);
-}
-
-#[test]
-fn goal_pane_launch_rejects_a_managed_session_before_calling_the_port() {
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let operation = OperationId::new();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let outcome = crate::presentation::run_pane_launch(
-        &IdentityRecordingLaunchPort(Arc::clone(&requests)),
-        crate::presentation::PaneLaunch::Agent {
-            operation,
-            workspace,
-            session: Some(session),
-            profile: None,
-            goal: Some("invalid scope".to_owned()),
-            resume: false,
-        },
-        terminal_geometry(20, 80),
-    );
-
-    assert!(matches!(
-        outcome,
-        crate::presentation::PaneLaunchOutcome::Agent {
-            operation: actual,
-            result: Err(ref reason),
-        } if actual == operation && reason.contains("workspace-root scope")
-    ));
-    assert!(requests.lock().unwrap().is_empty());
 }
 
 /// #551 acceptance. The frame loop must be "non-blocking drain → projection
@@ -186,6 +290,7 @@ fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
         session_lifecycles: None,
         session_roles: None,
         revision: Some(1),
+        notes_updated_at: None,
     };
     let mut term = CacheInvalidationTerminal::scripted([
         Key::Other,
@@ -240,6 +345,7 @@ fn daemon_session_change_invalidates_the_joined_material_and_redraws() {
 fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
     let snapshot = snapshot("pr-lane");
     let original = snapshot.session_ids[0];
+    let original_root = snapshot.state.sessions[0].root.clone();
     let added = SessionId::new();
     let mut added_record = snapshot.state.sessions[0].clone();
     added_record.name = "pr-lane-added".to_owned();
@@ -252,6 +358,7 @@ fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
         session_lifecycles: None,
         session_roles: None,
         revision: Some(1),
+        notes_updated_at: None,
     };
     let lane = RecordingPrLane::default();
     let mut factory = PrLaneBackendFactory {
@@ -286,6 +393,80 @@ fn a_session_created_after_entry_re_aims_the_resident_pr_lane() {
         observed.iter().any(|targets| targets.contains(&added)),
         "the session created after entry never reached the PR lane: {observed:?}"
     );
+    assert_eq!(
+        lane.observed_roots(),
+        vec![
+            vec![(original, original_root.clone())],
+            vec![
+                (original, original_root),
+                (added, PathBuf::from("/tmp/pr-lane/pr-lane-added"))
+            ],
+        ],
+        "the actual frame loop must publish newly observed roots before input"
+    );
+}
+
+#[test]
+fn preview_roots_follow_only_current_snapshots_including_same_named_recreation() {
+    let initial = snapshot("preview-roots");
+    let old = initial.session_ids[0];
+    let original = initial.state.sessions[0].clone();
+    let view = WorkspaceView::with_runtime_ids(initial.workspace, initial.state, vec![old]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let lane = RecordingPrLane::default();
+    let (host, _) = ControllerHost::channel();
+    let mut backend = DaemonBackend::new(
+        Box::new(host.clone()),
+        Box::new(host),
+        Box::new(UnavailableBackendPort),
+        Box::new(UnavailableBackendPort),
+    )
+    .with_overlay(Box::new(lane.clone()));
+    let mut revision = None;
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots(),
+        vec![vec![(old, original.root.clone())]]
+    );
+
+    let changed = |revision, records, ids| SessionCommandResult {
+        message: String::new(),
+        sessions: Some(records),
+        session_ids: Some(ids),
+        revision: Some(revision),
+        agent_resumes: None,
+        session_lifecycles: None,
+        session_roles: None,
+        notes_updated_at: None,
+    };
+    let fresh = SessionId::new();
+    adopt_session_snapshot(&mut ui, changed(2, vec![original.clone()], vec![fresh]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots().last().unwrap(),
+        &vec![(fresh, original.root.clone())]
+    );
+    let count = lane.observed_roots().len();
+    adopt_session_snapshot(&mut ui, changed(1, vec![original.clone()], vec![old]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots().len(),
+        count,
+        "a late snapshot must not restore a removed identity"
+    );
+
+    let mut moved = original;
+    moved.root = PathBuf::from("/tmp/preview-roots/moved");
+    adopt_session_snapshot(&mut ui, changed(3, vec![moved.clone()], vec![fresh]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(
+        lane.observed_roots().last().unwrap(),
+        &vec![(fresh, moved.root)]
+    );
+    adopt_session_snapshot(&mut ui, changed(4, vec![], vec![]));
+    sync_overlay_session_roots(&mut backend, &ui, &mut revision);
+    assert_eq!(lane.observed_roots().last().unwrap().as_slice(), []);
 }
 
 /// Dispatching a batch of reducer effects is also where a stop takes effect.
@@ -378,9 +559,12 @@ fn malformed_session_identity_refreshes_clear_rows_ids_and_agent_targets() {
             None,
         );
 
-        assert!(ui.workspace.sessions().is_empty());
-        assert!(ui.workspace.session_ids().is_empty());
-        assert!(ui.agent.as_ref().unwrap().sessions.is_empty());
+        assert_eq!(ui.workspace.sessions(), []);
+        assert_eq!(ui.workspace.session_ids(), []);
+        assert_eq!(
+            ui.agent.as_ref().unwrap().sessions,
+            [] as [usagi_core::domain::id::SessionId; 0]
+        );
     }
 }
 
@@ -392,6 +576,7 @@ fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         ws("empty"),
         WorkspaceState {
             sessions: Vec::new(),
+            session_notes: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         },
@@ -426,7 +611,6 @@ fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         Box::new(UnavailableEnvironmentStore),
         Box::new(NoDesktopNotifications),
         Box::new(NoMetrics),
-        Box::new(UnavailablePrSnapshotPort),
         Box::new(UnavailableBrowserOpener),
     );
 
@@ -480,6 +664,7 @@ fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_por
             ws("empty"),
             WorkspaceState {
                 sessions: Vec::new(),
+                session_notes: std::collections::BTreeMap::new(),
                 root_notes: Scratchpad::default(),
                 updated_at: now(),
             },
@@ -517,7 +702,6 @@ fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_por
             Box::new(UnavailableEnvironmentStore),
             Box::new(NoDesktopNotifications),
             Box::new(NoMetrics),
-            Box::new(UnavailablePrSnapshotPort),
             Box::new(UnavailableBrowserOpener),
         );
 
@@ -1018,6 +1202,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(2),
+                notes_updated_at: None,
             }),
             completion: crate::presentation::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
@@ -1044,6 +1229,7 @@ fn stale_session_completion_does_not_replace_a_newer_snapshot() {
                 session_lifecycles: None,
                 session_roles: None,
                 revision: Some(1),
+                notes_updated_at: None,
             }),
             completion: crate::presentation::SessionBackendCompletion::Remove {
                 session: SessionId::new(),
@@ -1120,6 +1306,7 @@ fn drain_session_completions_refluxes_create_success_with_created_identity() {
         session_lifecycles: None,
         session_roles: None,
         revision: None,
+        notes_updated_at: None,
     });
     let completion = crate::presentation::SessionBackendCompletion::Create {
         token,
@@ -1385,11 +1572,16 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         width: 100,
         height: 30,
     });
-    let _ = runtime.apply_event(sidebar_pointer_event(
-        5,
-        2,
-        std::time::Duration::from_millis(1_000),
-    ));
+    let _ = runtime.apply_event(AppEvent::Pointer {
+        target: Some(
+            crate::usecase::application::controller::SidebarPointerTarget::Row(
+                crate::usecase::application::controller::Selection::Target(Target::Session(
+                    session,
+                )),
+            ),
+        ),
+        at: std::time::Duration::from_millis(1_000),
+    });
 
     let (completions, receiver) =
         crate::usecase::application::daemon_backend::Completions::channel();
@@ -1401,6 +1593,7 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
         session_lifecycles: None,
         session_roles: None,
         revision: None,
+        notes_updated_at: None,
     });
     let completion = crate::presentation::SessionBackendCompletion::Remove {
         session: SessionId::new(),
@@ -1423,11 +1616,16 @@ fn session_snapshot_adapter_preserves_reconciliation_boundary_for_pointer_state(
     crate::presentation::drain_session_completions(&mut ui, &mut command_lane);
     let _ = runtime.apply_event(receiver.recv().unwrap());
     assert_eq!(runtime.state().sessions(), &[session]);
-    let _ = runtime.apply_event(sidebar_pointer_event(
-        5,
-        2,
-        std::time::Duration::from_millis(1_100),
-    ));
+    let _ = runtime.apply_event(AppEvent::Pointer {
+        target: Some(
+            crate::usecase::application::controller::SidebarPointerTarget::Row(
+                crate::usecase::application::controller::Selection::Target(Target::Session(
+                    session,
+                )),
+            ),
+        ),
+        at: std::time::Duration::from_millis(1_100),
+    });
 
     let _ = workspace_id;
     assert_eq!(runtime.state().active(), Some(session));
@@ -1528,6 +1726,9 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
                 runtimes: initial_pairs
                     .iter()
                     .map(|(terminal, continuation)| AgentRuntimeInventoryItem {
+                        operation_id: None,
+                        agent_id: None,
+                        launch_provenance: None,
                         runtime: AgentRuntimeRef::new(
                             AgentRuntimeId::new(),
                             terminal.clone(),
@@ -1579,6 +1780,9 @@ fn session_membership_change_requests_one_observation_and_cleans_owned_intent() 
             agents: Ok(AgentInventory {
                 workspace_id: workspace,
                 runtimes: vec![AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(
                         AgentRuntimeId::new(),
                         root_open_terminal.clone(),
@@ -1923,7 +2127,7 @@ fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
         calls,
         created: created.clone(),
     };
-    let keys = [Key::Char('1'), Key::CtrlQ, Key::Char('y')];
+    let keys = [Key::Char('r'), Key::CtrlQ, Key::Char('y')];
     let mut term = FakeTerminal::with_keys(&keys);
     let mut loader = FakeLoader::default();
     let mut settings = DefaultSettingsPort;
@@ -1953,4 +2157,35 @@ fn session_command_result_message_carries_no_projection() {
     assert_eq!(result.message, "daemon accepted");
     assert!(result.sessions.is_none());
     assert!(result.session_ids.is_none());
+}
+
+#[test]
+fn switch_session_reorder_invalidates_row_cache_and_redraws_immediately() {
+    reset_projection_build_counts();
+    let mut term = CacheInvalidationTerminal::scripted([
+        Key::Char('N'),
+        Key::Other,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ]);
+    let mut factory = FixedBackendFactory {
+        sessions: Some(Box::new(UnavailableSessionCommandPort)),
+        agent: Some(Box::new(UnavailableAgentCommandPort)),
+        launch: None,
+        restore: None,
+        metrics: Some(Box::new(NoMetrics)),
+        browser: Some(Box::new(UnavailableBrowserOpener)),
+        session_refresh: None,
+        decisions: None,
+        session_worktrees: None,
+    };
+    let snapshot = snapshot_with_sessions("reorder", &["first-row", "second-row"]);
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+        Exit::Quit
+    );
+    assert_eq!(projection_build_counts(), (2, 1));
+    assert!(term.builds_at_draw.contains(&(2, 1)));
+    let frame = strip_ansi(&term.frames[1].join("\n"));
+    assert!(frame.find("second-row").unwrap() < frame.find("first-row").unwrap());
 }

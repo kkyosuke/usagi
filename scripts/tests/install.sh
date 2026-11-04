@@ -4,8 +4,25 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INSTALLER="$ROOT/scripts/install.sh"
-TEST_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/usagi-install-tests.XXXXXXXX")"
+cleanup_test() {
+    local status=$? child
+    trap - EXIT
+    set +e
+    if [ "$status" -ne 0 ] && [ -n "${CASE_DIR:-}" ]; then
+        printf 'installer regression failed: %s\n' "$CASE_DIR" >&2
+        for child in "$CASE_DIR/err" "$CASE_DIR/progress"; do
+            if [ -f "$child" ]; then cat "$child" >&2; fi
+        done
+    fi
+    # Unblock and reap fake daemon synchronization before deleting fixtures,
+    # including when a startup assertion failed while the child was running.
+    if [ -n "${USAGI_SYNC_WAIT_FOR:-}" ]; then touch "$USAGI_SYNC_WAIT_FOR"; fi
+    for child in $(jobs -p); do wait "$child"; done
+    rm -rf "$TEST_ROOT"
+    exit "$status"
+}
+trap cleanup_test EXIT
 
 case "$(uname -s)" in
     Darwin) TEST_OS=macos ;;
@@ -44,8 +61,10 @@ make_binary() {
         '  daemon)' \
         '    shift' \
         '    [ "${USAGI_SYNC_UNSUPPORTED:-}" != "1" ] || exit 2' \
-        '    [ "$#" -eq 1 ] && [ "$1" = "sync-after-update" ] || exit 2' \
-        '    [ -z "${USAGI_SYNC_LOG:-}" ] || printf "%s|%s\\n" "$PWD" "$1" >> "$USAGI_SYNC_LOG"' \
+        '    [ "$#" -ge 1 ] && [ "$1" = "sync-after-update" ] || exit 2' \
+        '    if [ "$#" -ne 1 ]; then [ "$#" -eq 2 ] && [ "$2" = "--restart-agents" ] && [ "${USAGI_SYNC_RESTART_SUPPORTED:-1}" = 1 ] || exit 2; fi' \
+        '    [ "${USAGI_UPDATE_SYNC_OUTCOMES:-}" = "1" ] || exit 74' \
+        '    [ -z "${USAGI_SYNC_LOG:-}" ] || printf "%s|%s\\n" "$PWD" "$*" >> "$USAGI_SYNC_LOG"' \
         '    while [ -n "${USAGI_SYNC_WAIT_FOR:-}" ] && [ ! -e "$USAGI_SYNC_WAIT_FOR" ]; do sleep 0.01; done' \
         '    exit "${USAGI_SYNC_STATUS:-0}"' \
         '    ;;' \
@@ -114,6 +133,10 @@ fi
 [ -n "$output" ]
 [ -z "${FAKE_CURL_LOG:-}" ] || printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 [ "$(LC_ALL=C ls -ld "$(dirname "$output")" | cut -c1-10)" = "drwx------" ] || exit 71
+if [ -n "${FAKE_CURL_WAIT_FOR:-}" ]; then
+    touch "$FAKE_CURL_READY"
+    while [ ! -e "$FAKE_CURL_WAIT_FOR" ]; do sleep 0.01; done
+fi
 if [ -n "${FAKE_CURL_GUARD:-}" ]; then
     mkdir "$FAKE_CURL_GUARD" || exit 70
     trap 'rmdir "$FAKE_CURL_GUARD"' EXIT
@@ -151,7 +174,7 @@ run_installer_for_version() {
 run_managed_installer() {
     (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
         USAGI_MANAGED_UPDATE=1 PATH="$FAKE_BIN:$PATH" \
-        USAGI_VERSION=v2.0.0 bash "$INSTALLER")
+        USAGI_VERSION=v2.0.0 bash "$INSTALLER" "$@")
 }
 
 run_managed_installer_without_daemon() {
@@ -201,6 +224,13 @@ prepare_case selected-version
 run_installer_for_version >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 
+prepare_case 'spaces in configured home'
+run_installer >"$CASE_DIR/out"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+grep -q 'v1.0.0 から v2.0.0' "$CASE_DIR/out"
+[ "$(mode "$HOME_DIR/.usagi/update.lock")" = 700 ]
+[ -z "$(find "$HOME_DIR/.usagi/update.lock" -name 'owner.*' -print)" ]
+
 prepare_case managed-update
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
 export USAGI_SYNC_LOG
@@ -212,6 +242,32 @@ if grep -q "usagi doctor --fix" "$CASE_DIR/out"; then
     echo "managed update printed the standalone daemon instruction" >&2
     exit 1
 fi
+
+prepare_case managed-update-with-agent-restart
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+export USAGI_SYNC_LOG
+run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/progress"
+unset USAGI_SYNC_LOG
+grep -q '^.*|sync-after-update --restart-agents$' "$CASE_DIR/sync.log"
+grep -q '\[###---\] 3/6' "$CASE_DIR/progress"
+grep -q '\[######\] 6/6' "$CASE_DIR/progress"
+if LC_ALL=C grep -q $'\033' "$CASE_DIR/progress"; then
+    echo "redirected progress contains terminal escapes" >&2
+    exit 1
+fi
+
+prepare_case managed-update-with-unsupported-agent-restart
+USAGI_SYNC_RESTART_SUPPORTED=0
+export USAGI_SYNC_RESTART_SUPPORTED
+if run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/progress"; then
+    echo "unsupported Agent restart must not silently become ordinary synchronization" >&2
+    exit 1
+fi
+unset USAGI_SYNC_RESTART_SUPPORTED
+grep -q 'existing daemon was left unchanged' "$CASE_DIR/progress"
+grep -q '\[###---\] 3/6 本体更新済み・daemon の同期は未完了' "$CASE_DIR/progress"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+if grep -q '6/6' "$CASE_DIR/progress"; then exit 1; fi
 
 prepare_case managed-update-without-daemon
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
@@ -230,22 +286,69 @@ if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
 fi
 unset USAGI_SYNC_UNSUPPORTED
 grep -q 'does not support safe managed daemon synchronization' "$CASE_DIR/err"
+grep -q '\[###-\] 3/4 本体更新済み・daemon の同期は未完了' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
 [ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
 
 prepare_case managed-update-post-commit-failure
 USAGI_SYNC_STATUS=1
 export USAGI_SYNC_STATUS
-if run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+if run_managed_installer --restart-agents >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
     echo "expected a failed managed synchronization to fail the update" >&2
     exit 1
 fi
 unset USAGI_SYNC_STATUS
 grep -q 'could not complete daemon synchronization' "$CASE_DIR/err"
 grep -q "inspect 'usagi daemon status'" "$CASE_DIR/err"
+grep -q '\[###---\] 3/6 本体更新済み・daemon の同期は未完了' "$CASE_DIR/err"
+[ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+if grep -q '6/6' "$CASE_DIR/err"; then exit 1; fi
 if grep -q 'left unchanged' "$CASE_DIR/err"; then
     echo "generic synchronization failure made an invalid pre-commit guarantee" >&2
     exit 1
 fi
+
+prepare_case managed-update-deferred-for-live-connections
+USAGI_SYNC_STATUS=3
+export USAGI_SYNC_STATUS
+run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"
+unset USAGI_SYNC_STATUS
+[ "$($HOME_DIR/.usagi/bin/usagi --version)" = "usagi 2.0.0" ]
+grep -q 'v1.0.0 から v2.0.0' "$CASE_DIR/out"
+grep -q 'daemon の切り替えは保留' "$CASE_DIR/out"
+grep -q '現在の接続を維持' "$CASE_DIR/out"
+grep -q '本体更新済み・daemon の切替は保留中' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
+if grep -q 'daemon の build を同期した' "$CASE_DIR/out"; then
+    echo "deferred synchronization incorrectly reported a serving successor" >&2
+    exit 1
+fi
+
+prepare_case managed-update-automatic-retry-queued
+USAGI_SYNC_STATUS=4
+export USAGI_SYNC_STATUS
+run_managed_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"
+unset USAGI_SYNC_STATUS
+grep -q 'daemon の切り替えを予約' "$CASE_DIR/out"
+grep -q '終了後に自動で再試行' "$CASE_DIR/out"
+grep -q '本体更新済み・daemon の切替は保留中' "$CASE_DIR/err"
+if grep -q '4/4' "$CASE_DIR/err"; then exit 1; fi
+
+prepare_case deferred-sync-only
+USAGI_SYNC_LOG="$CASE_DIR/sync.log"
+USAGI_SYNC_STATUS=3
+export USAGI_SYNC_LOG USAGI_SYNC_STATUS
+set +e
+HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" PATH="$FAKE_BIN:$PATH" \
+    bash "$INSTALLER" --sync-daemon-only >"$CASE_DIR/out" 2>"$CASE_DIR/err"
+SYNC_ONLY_STATUS=$?
+set -e
+unset USAGI_SYNC_LOG USAGI_SYNC_STATUS
+[ "$SYNC_ONLY_STATUS" -eq 3 ]
+assert_old_preserved
+grep -q 'sync-after-update' "$CASE_DIR/sync.log"
+[ ! -s "$CASE_DIR/out" ]
+[ ! -s "$CASE_DIR/err" ]
 
 prepare_case managed-update-lock-covers-daemon-sync
 USAGI_SYNC_LOG="$CASE_DIR/sync.log"
@@ -253,10 +356,15 @@ USAGI_SYNC_WAIT_FOR="$CASE_DIR/release-sync"
 export USAGI_SYNC_LOG USAGI_SYNC_WAIT_FOR
 run_managed_installer >"$CASE_DIR/first.out" 2>"$CASE_DIR/first.err" &
 FIRST_PID=$!
-for _ in $(seq 1 200); do
+for _ in $(seq 1 1500); do
     [ -s "$CASE_DIR/sync.log" ] && break
     sleep 0.01
 done
+if [ ! -s "$CASE_DIR/sync.log" ]; then
+    cat "$CASE_DIR/first.err" >&2
+    echo "managed update did not reach daemon synchronization" >&2
+    exit 1
+fi
 [ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 1 ]
 run_managed_installer >"$CASE_DIR/second.out" 2>"$CASE_DIR/second.err" &
 SECOND_PID=$!
@@ -268,6 +376,9 @@ wait "$FIRST_PID"
 wait "$SECOND_PID"
 unset USAGI_SYNC_LOG USAGI_SYNC_WAIT_FOR
 [ "$(wc -l < "$CASE_DIR/sync.log" | tr -d ' ')" -eq 2 ]
+
+prepare_case signal-cleanup-and-retry
+python3 "$ROOT/scripts/tests/install-signals.py" "$INSTALLER" "$HOME_DIR" "$FIXTURE_DIR" "$FAKE_BIN" "$CWD_DIR"
 
 prepare_case unsupported-linux-arm64
 cat > "$FAKE_BIN/uname" <<'SH'
@@ -554,5 +665,7 @@ wait "$first_pid"
 wait "$second_pid"
 unset FAKE_CURL_GUARD
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
+
+python3 "$ROOT/scripts/tests/install-lock.py" "$INSTALLER" "$TEST_ROOT"
 
 echo "install.sh regression tests passed"

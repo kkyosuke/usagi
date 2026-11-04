@@ -1,7 +1,6 @@
 use super::{
     AgentReadinessCommand, AvailableModels, DefaultModel, EnvBindings, IconMode, LocalSettings,
     ModalSelectionMode, PrAutoOpen, Settings, TeamTemplate, TerminalConcurrencyLimit, Theme,
-    WorkMode,
 };
 use std::time::Duration;
 
@@ -112,7 +111,6 @@ fn settings_round_trip_through_json() {
         issue_enabled: false,
         memory_enabled: false,
         team_template: TeamTemplate::Pipeline,
-        work_mode: WorkMode::GoalDriven,
         env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
     };
     let json = serde_json::to_string(&settings).unwrap();
@@ -240,11 +238,13 @@ fn every_provider_declares_the_status_probe_that_proves_its_cli_usable() {
 
 #[test]
 fn each_probe_carries_the_bounds_its_own_product_needs() {
-    // A credential read answers immediately and prints almost nothing, so the
-    // providers that only read a token share one small budget.
+    // A credential read prints almost nothing, so the providers that only read
+    // a token share one small capture bound. Their budget still covers a slow
+    // process start-up: `claude auth status` alone takes over a second on a
+    // busy host, and a two-second budget refused healthy launches.
     for model in [DefaultModel::Claude, DefaultModel::OpenAi] {
         let probe = model.readiness_command();
-        assert_eq!(probe.timeout(), Duration::from_secs(2), "{model:?}");
+        assert_eq!(probe.timeout(), Duration::from_secs(10), "{model:?}");
         assert_eq!(probe.output_limit(), 16 * 1024, "{model:?}");
     }
     // `agy models` starts Antigravity's language server and lists the models of
@@ -434,41 +434,6 @@ fn team_templates_round_trip_and_cycle_in_both_directions() {
 }
 
 #[test]
-fn work_mode_is_opt_in_and_unknown_tokens_stay_classic() {
-    assert_eq!(WorkMode::default(), WorkMode::Classic);
-    assert_eq!(WorkMode::Classic.cycle(), WorkMode::GoalDriven);
-    assert_eq!(WorkMode::GoalDriven.cycle(), WorkMode::Classic);
-    assert_eq!(
-        serde_json::from_str::<WorkMode>("\"goal_driven\"").unwrap(),
-        WorkMode::GoalDriven
-    );
-    assert_eq!(
-        serde_json::from_str::<WorkMode>("\"future-mode\"").unwrap(),
-        WorkMode::Classic
-    );
-    let missing: Settings = serde_json::from_str("{}").unwrap();
-    assert_eq!(missing.work_mode, WorkMode::Classic);
-    let unknown_local: LocalSettings =
-        serde_json::from_str(r#"{"work_mode":"future-mode"}"#).unwrap();
-    assert_eq!(unknown_local.work_mode, Some(WorkMode::Classic));
-    let goal_default = Settings {
-        work_mode: WorkMode::GoalDriven,
-        ..Settings::default()
-    };
-    assert_eq!(
-        goal_default
-            .clone()
-            .with_local(&LocalSettings::default())
-            .work_mode,
-        WorkMode::GoalDriven
-    );
-    assert_eq!(
-        goal_default.with_local(&unknown_local).work_mode,
-        WorkMode::Classic
-    );
-}
-
-#[test]
 fn local_settings_overlay_only_workspace_owned_fields() {
     let global = Settings {
         theme: Theme::Dark,
@@ -481,7 +446,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         issue_enabled: true,
         memory_enabled: false,
         team_template: TeamTemplate::Hierarchical,
-        work_mode: WorkMode::Classic,
         env: EnvBindings::new(),
     };
     let local = LocalSettings {
@@ -491,6 +455,9 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         team_template: Some(TeamTemplate::Flat),
         ..LocalSettings::default()
     };
+
+    let json = serde_json::to_string(&local).unwrap();
+    assert_eq!(serde_json::from_str::<LocalSettings>(&json).unwrap(), local);
 
     assert_eq!(
         global.with_local(&local),
@@ -505,7 +472,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             issue_enabled: false,
             memory_enabled: false,
             team_template: TeamTemplate::Flat,
-            work_mode: WorkMode::Classic,
             env: EnvBindings::new(),
         }
     );
@@ -533,7 +499,7 @@ fn workspace_env_adds_to_and_overrides_the_global_bindings() {
 
     let effective = global.with_local(&local);
     assert_eq!(
-        effective.env_bindings().collect::<Vec<_>>(),
+        super::valid_bindings(&effective.env).collect::<Vec<_>>(),
         [
             ("GH_TOKEN", "op://Private/GitHub/token"),
             ("PROJECT", "usagi"),
@@ -541,7 +507,7 @@ fn workspace_env_adds_to_and_overrides_the_global_bindings() {
         ]
     );
     assert_eq!(
-        local.env_bindings().collect::<Vec<_>>(),
+        super::valid_bindings(&local.env).collect::<Vec<_>>(),
         [("PROJECT", "usagi"), ("RUST_LOG", "debug")]
     );
 }
@@ -619,6 +585,34 @@ fn local_settings_ignore_global_only_and_unknown_workspace_values() {
 }
 
 #[test]
+fn local_team_templates_preserve_explicit_overrides_and_absence() {
+    for template in [
+        None,
+        Some(TeamTemplate::None),
+        Some(TeamTemplate::Hierarchical),
+        Some(TeamTemplate::Flat),
+        Some(TeamTemplate::Pipeline),
+    ] {
+        let local = LocalSettings {
+            team_template: template,
+            ..LocalSettings::default()
+        };
+        let json = serde_json::to_string(&local).unwrap();
+        let decoded: LocalSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, local);
+        let global = Settings {
+            team_template: TeamTemplate::Hierarchical,
+            ..Settings::default()
+        };
+        assert_eq!(
+            global.with_local(&decoded).team_template,
+            template.unwrap_or(TeamTemplate::Hierarchical),
+            "only an absent override inherits the global template"
+        );
+    }
+}
+
+#[test]
 fn full_settings_convert_to_workspace_owned_values_only() {
     let settings = Settings {
         theme: Theme::Light,
@@ -631,7 +625,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         issue_enabled: false,
         memory_enabled: true,
         team_template: TeamTemplate::Pipeline,
-        work_mode: WorkMode::GoalDriven,
         env: EnvBindings::new(),
     };
     let local = LocalSettings::from(&settings);
@@ -648,11 +641,11 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             issue_enabled: false,
             memory_enabled: true,
             team_template: TeamTemplate::Pipeline,
-            work_mode: WorkMode::GoalDriven,
             env: EnvBindings::new(),
         }
     );
     let json = serde_json::to_string(&local).unwrap();
+    assert_eq!(serde_json::from_str::<LocalSettings>(&json).unwrap(), local);
     assert!(!json.contains("theme"));
     assert!(!json.contains("modal_selection_mode"));
     assert!(format!("{local:?}").contains("Claude"));

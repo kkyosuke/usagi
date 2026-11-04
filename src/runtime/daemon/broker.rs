@@ -290,11 +290,11 @@ impl BrokerActivity {
     /// itself cannot be missed.
     pub(super) fn wait_for_poll(&self, poll: Duration) -> Option<Duration> {
         let state = self.state.lock().ok()?;
-        let (state, _) = self
-            .signal
+        self.signal
             .wait_timeout_while(state, poll, |state| !state.stopped)
-            .ok()?;
-        (!state.stopped).then(|| state.last.elapsed())
+            .ok()
+            .filter(|(state, _)| !state.stopped)
+            .map(|(state, _)| state.last.elapsed())
     }
 }
 

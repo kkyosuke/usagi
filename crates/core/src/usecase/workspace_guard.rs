@@ -15,31 +15,11 @@
 //!   字句上は worktree 内でも実体が外へ出る書き込みを弾く。新規作成のため、存在しない末尾
 //!   component は許容する。
 //! - **root モード**（[`is_write_tool`] / [`command_mutates_repo`]）: コーディネータが workspace
-//!   root（cwd が `.usagi/sessions/` 配下でない。[`is_session_worktree`] 参照）で動く場合。
+//!   root（CLI が canonical な cwd から session worktree を解決できない場合）で動く場合。
 //!   リポジトリを一切変更してはならないため、パスによらず file 書き込みツールをすべて拒否し、
 //!   曖昧さなく read-only な shell command だけを許可する。
 
 use std::path::{Component, Path, PathBuf};
-
-/// `cwd` が usagi の session worktree（`<repo>/.usagi/sessions/<name>/…`）の内側かどうか。
-///
-/// コーディネータが動く workspace root とは区別する。pre-commit フックの免除
-/// （`.usagi/sessions/` セグメントで判定。[06-conventions.md](../../../../document/06-conventions.md)）と
-/// 同じ軸で、連続する `.usagi` → `sessions` component を含むパスを session worktree とみなす。
-/// guard はこれで session モードと（より厳しい）root モードを選ぶ。
-#[must_use]
-pub fn is_session_worktree(cwd: &Path) -> bool {
-    let names: Vec<&std::ffi::OsStr> = cwd
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect();
-    names
-        .windows(2)
-        .any(|pair| pair[0] == ".usagi" && pair[1] == "sessions")
-}
 
 /// root モードで一律拒否する、ファイルへ書き込むツール。フック payload の `tool_name` に
 /// 対して大文字小文字を区別して照合する。`Bash` はここに含めない（[`command_mutates_repo`]
@@ -327,7 +307,7 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
     if basename == "gh" {
         return matches!(tokens.get(1).map(String::as_str), Some("pr"))
             && matches!(tokens.get(2).map(String::as_str), Some("view" | "list"))
-            && !tokens.iter().any(|token| token == "--web");
+            && !gh_opens_browser(&tokens);
     }
     if basename == "sleep" {
         if tokens.len() != 2 {
@@ -353,6 +333,55 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
     )
 }
 
+/// Match the browser flag as gh parses it, including grouped short flags.
+/// Argument-taking flags end a short group and consume their following value.
+fn gh_opens_browser(tokens: &[String]) -> bool {
+    let mut arguments = tokens.iter().skip(3);
+    while let Some(token) = arguments.next() {
+        if token == "--" {
+            break;
+        }
+        if token == "--web" || token.starts_with("--web=") {
+            return true;
+        }
+        if matches!(
+            token.as_str(),
+            "--repo"
+                | "--jq"
+                | "--template"
+                | "--assignee"
+                | "--author"
+                | "--base"
+                | "--head"
+                | "--label"
+                | "--limit"
+                | "--search"
+                | "--state"
+        ) {
+            arguments.next();
+            continue;
+        }
+        let Some(flags) = token
+            .strip_prefix('-')
+            .filter(|flags| !flags.starts_with('-'))
+        else {
+            continue;
+        };
+        for (offset, flag) in flags.char_indices() {
+            if flag == 'w' {
+                return true;
+            }
+            if "RqtAaBHLlSs".contains(flag) {
+                if offset + flag.len_utf8() == flags.len() {
+                    arguments.next();
+                }
+                break;
+            }
+        }
+    }
+    false
+}
+
 fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
     let mut index = 0;
     while index < tokens.len() {
@@ -369,30 +398,11 @@ fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
     None
 }
 
-/// `target` が `worktree` の外へ解決されるとき真。相対 `target` は `worktree`（エージェントの
-/// cwd）を基準にするため常に内側に留まる。絶対パス、または `..` で外へ出る相対パスは、正規化した
-/// 形が worktree 配下でないとき escape する。比較は component 単位なので、名前 prefix を共有する
-/// 兄弟（`…/sessions/work` と `…/sessions/work2`）は「内側」と見なさない。
-#[must_use]
-pub fn escapes_worktree(worktree: &Path, target: &Path) -> bool {
-    let absolute = if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        worktree.join(target)
-    };
-    !normalize(&absolute).starts_with(normalize(worktree))
-}
-
 /// ツールの対象パスが `root`（session worktree）の外へ解決されるかどうか。true のとき呼び出し側は
 /// 拒否する。新規ファイルのため末尾の存在しない component は許容し、存在する symlink 付き ancestor
 /// まで解決してから字句的に付け直す。`root` / `cwd` を canonicalize できない、または cwd が root の
 /// 外にあるケースは、安全のため escape 扱い（true）にする（fail-closed）。
-///
-/// # Panics
-///
-/// 実際には panic しない。`cwd` を canonicalize した絶対パスを基準にするため `normalized` は常に
-/// 絶対パスで、ファイルシステムのルートという存在する ancestor を必ず持ち、その ancestor は
-/// 先に存在確認しているため canonicalize も成功する。
+/// 存在する ancestor の解決に失敗した場合も拒否し、検査中に path が変化しても panic しない。
 #[must_use]
 pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> bool {
     let (Ok(root), Ok(cwd)) = (std::fs::canonicalize(root), std::fs::canonicalize(cwd)) else {
@@ -406,19 +416,18 @@ pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> bool {
     } else {
         cwd.join(target)
     };
-    let normalized = normalize(&absolute);
-    // 存在する最深 ancestor まで遡り、そこを canonicalize（symlink 解決）してから、越えた
-    // 未作成 component を字句的に付け直す。`normalized` は絶対パスなのでルートという存在する
-    // ancestor を必ず持ち、その ancestor は存在するため canonicalize も成功する。
-    let existing = normalized
+    // Preserve symlink/.. ordering until the filesystem has resolved the
+    // existing prefix. Collapsing .. first would turn link/../file into a
+    // different path from the one the kernel opens.
+    absolute
         .ancestors()
         .find(|ancestor| ancestor.exists())
-        .expect("an absolute path always has the existing filesystem root as an ancestor");
-    let mut resolved = std::fs::canonicalize(existing).expect("an existing ancestor canonicalizes");
-    // `existing` は `normalized` の ancestor なので strip_prefix は必ず成功する。万一失敗しても
-    // 空を付け足す（＝存在する ancestor のまま）保守的な挙動に倒す。
-    resolved.push(normalized.strip_prefix(existing).unwrap_or(Path::new("")));
-    !resolved.starts_with(root)
+        .is_none_or(|existing| {
+            std::fs::canonicalize(existing).map_or(true, |mut resolved| {
+                resolved.push(absolute.strip_prefix(existing).unwrap_or(Path::new("")));
+                !normalize(&resolved).starts_with(&root)
+            })
+        })
 }
 
 /// `path` から `.` と `..` を字句的に畳み込む（ファイルシステムを参照しない）。`..` は直前に
@@ -442,8 +451,6 @@ fn normalize(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const WT: &str = "/repo/.usagi/sessions/work";
 
     #[test]
     fn write_tools_and_shell_are_classified_by_name() {
@@ -526,61 +533,28 @@ mod tests {
     }
 
     #[test]
-    fn a_file_under_the_worktree_stays_inside() {
-        assert!(!escapes_worktree(
-            Path::new(WT),
-            Path::new("/repo/.usagi/sessions/work/src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn the_worktree_itself_is_inside() {
-        assert!(!escapes_worktree(Path::new(WT), Path::new(WT)));
-    }
-
-    #[test]
-    fn a_relative_path_is_resolved_against_the_worktree_and_stays_inside() {
-        assert!(!escapes_worktree(Path::new(WT), Path::new("src/lib.rs")));
-    }
-
-    #[test]
-    fn an_absolute_path_into_the_parent_repo_escapes() {
-        assert!(escapes_worktree(
-            Path::new(WT),
-            Path::new("/repo/src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn a_relative_path_climbing_out_with_dotdot_escapes() {
-        assert!(escapes_worktree(
-            Path::new(WT),
-            Path::new("../../../src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn dotdot_that_stays_inside_does_not_escape() {
-        // `work/src/../Cargo.toml` は `work/Cargo.toml` に畳み込まれる。まだ内側。
-        assert!(!escapes_worktree(
-            Path::new(WT),
-            Path::new("src/../Cargo.toml")
-        ));
-    }
-
-    #[test]
-    fn a_sibling_worktree_sharing_a_name_prefix_escapes() {
-        // component 単位の包含: 文字列 prefix が一致しても `work2` は `work` の配下ではない。
-        assert!(escapes_worktree(
-            Path::new(WT),
-            Path::new("/repo/.usagi/sessions/work2/src/main.rs")
-        ));
-    }
-
-    #[test]
-    fn dotdot_at_the_root_does_not_climb_above_it() {
-        // `/..` は `/` に正規化される。worktree 配下ではないので escape 扱い（panic も wrap もしない）。
-        assert!(escapes_worktree(Path::new(WT), Path::new("/../etc/passwd")));
+    fn canonical_paths_preserve_component_boundaries_and_relative_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let sibling = temp.path().join("work2");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        for target in [
+            root.clone(),
+            root.join("src/new.rs"),
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/../Cargo.toml"),
+        ] {
+            assert!(!path_escapes_root(&root, &root, &target), "{target:?}");
+        }
+        for target in [
+            temp.path().join("outside.rs"),
+            sibling.join("src/main.rs"),
+            PathBuf::from("../outside.rs"),
+        ] {
+            assert!(path_escapes_root(&root, &root, &target), "{target:?}");
+        }
+        assert_eq!(normalize(Path::new("/../../")), PathBuf::from("/"));
     }
 
     #[test]
@@ -588,24 +562,6 @@ mod tests {
         // 先頭の `.` は `Path::components` が唯一保持する `CurDir` 形（途中の `.` は既に畳まれる）。
         // 直接正規化すると skip され、実 component だけが残る。
         assert_eq!(normalize(Path::new("./a/b")), PathBuf::from("a/b"));
-    }
-
-    #[test]
-    fn a_session_worktree_path_is_recognized() {
-        assert!(is_session_worktree(Path::new("/repo/.usagi/sessions/work")));
-        assert!(is_session_worktree(Path::new(
-            "/repo/.usagi/sessions/work/src"
-        )));
-    }
-
-    #[test]
-    fn the_workspace_root_and_unrelated_paths_are_not_session_worktrees() {
-        // コーディネータの cwd は repo root。`.usagi/sessions` セグメントを持たない。
-        assert!(!is_session_worktree(Path::new("/repo")));
-        // `sessions` 子を持たない `.usagi`（例: issue ストア）。
-        assert!(!is_session_worktree(Path::new("/repo/.usagi/issues")));
-        // `.usagi` 親を持たない `sessions` は該当しない。
-        assert!(!is_session_worktree(Path::new("/repo/sessions/work")));
     }
 
     #[test]
@@ -807,6 +763,81 @@ mod tests {
             &worktree,
             Path::new("new/file")
         ));
+    }
+
+    #[test]
+    fn gh_browser_aliases_are_denied_without_confusing_argument_values() {
+        for command in [
+            "gh pr view 1 --web",
+            "gh pr view 1 --web=true",
+            "gh pr view 1 --web=false",
+            "gh pr view 1 -w",
+            "gh pr view 1 -wc",
+            "gh pr view 1 -cw",
+            "gh pr view 1 -w=true",
+            "gh pr list -w",
+        ] {
+            assert!(!root_command_is_read_only(command), "allowed {command}");
+        }
+        for command in [
+            "gh pr view 1 -Rowner/web",
+            "gh pr view 1 -R owner/web",
+            "gh pr view 1 -ctw",
+            "gh pr view 1 -t -w",
+            "gh pr view 1 --template -w",
+            "gh pr view 1 --help",
+            "gh pr list --search web",
+            "gh pr list -- -w",
+        ] {
+            assert!(root_command_is_read_only(command), "denied {command}");
+        }
+    }
+
+    #[test]
+    fn symlink_parent_components_follow_filesystem_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("inside/child")).unwrap();
+        std::fs::create_dir_all(outside.join("child")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.join("child"), root.join("escape")).unwrap();
+            std::os::unix::fs::symlink(root.join("inside/child"), root.join("safe")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(outside.join("child"), root.join("escape")).unwrap();
+            std::os::windows::fs::symlink_dir(root.join("inside/child"), root.join("safe"))
+                .unwrap();
+        }
+        for target in [
+            Path::new("escape/../victim"),
+            Path::new("escape/../new/file"),
+        ] {
+            assert!(path_escapes_root(&root, &root, target));
+            assert!(path_escapes_root(&root, &root, &root.join(target)));
+        }
+        std::fs::write(outside.join("victim"), "safe").unwrap();
+        assert!(path_escapes_root(
+            &root,
+            &root,
+            Path::new("escape/../victim")
+        ));
+        assert!(!path_escapes_root(
+            &root,
+            &root,
+            Path::new("safe/../new/file")
+        ));
+        assert!(!path_escapes_root(
+            &root,
+            &root,
+            Path::new("inside/../new/file")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.join("victim")).unwrap(),
+            "safe"
+        );
     }
 
     #[test]

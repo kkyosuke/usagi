@@ -1,13 +1,9 @@
 //! Event-driven daemon metrics / git-diff material for the controller Home frame.
 //!
 //! Daemon metrics (the mascot sidecar) and per-session git diffs (the sidebar
-//! column) are pure draw material: the runtime migration design (§4.1) keeps
-//! them out of `AppState` because nothing in the reducer reacts to them.  Before
-//! this seam the controller frame loop polled the [`MetricsPort`] inline every
-//! frame and stashed the result on the legacy `Workspace` view; that coupled the
-//! material to a view the strangler migration is deleting.
+//! column) are draw material, independent of controller events and operations.
 //!
-//! [`MetricsBackend`] instead owns the port and accepts change-only
+//! [`MetricsBackend`] owns the port and accepts change-only
 //! [`MetricsUpdate`] values through a drain the shell consumes into a
 //! [`MetricsProjection`] cache — the same one-way discipline
 //! (`poll -> drain -> apply -> render`) as
@@ -37,9 +33,17 @@ pub struct GitDiff {
     pub removed: usize,
 }
 
+/// Last completed artifact scan. A failed scan is distinct from an empty list;
+/// sessions without an observation have not been scanned yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCount {
+    Ready(usize),
+    Unavailable,
+}
+
 /// One changed metrics / git-diff observation returned by [`MetricsBackend`].
 ///
-/// A poll may yield neither, either, or both variants. The shell applies them to
+/// A poll may yield any changed observations. The shell applies them to
 /// a [`MetricsProjection`]; no variant touches the reducer or `AppState`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetricsUpdate {
@@ -47,44 +51,22 @@ pub enum MetricsUpdate {
     Metrics(Option<DaemonMetrics>),
     /// The latest completed per-session git diffs.
     GitDiffs(BTreeMap<SessionId, GitDiff>),
+    /// Deliverable counts or scan failures for each session's artifact directory.
+    ArtifactCounts(BTreeMap<SessionId, ArtifactCount>),
 }
 
 /// Pulls the latest safe daemon observation at an application polling boundary.
 pub trait MetricsPort {
-    /// Compatibility observation hook for simple embedders. Production ports
-    /// override [`Self::poll_updates`] to avoid materializing unchanged values.
-    fn latest(&mut self) -> Option<DaemonMetrics> {
-        None
-    }
-
-    /// Compatibility Git snapshot hook. Change-driven ports should override
-    /// [`Self::poll_updates`] and move only changed material instead.
-    fn git_diffs(&mut self, _sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
-        BTreeMap::new()
-    }
-
     /// Return only observations that changed since the previous poll. `sessions`
     /// is supplied only when the daemon session projection changed.
-    fn poll_updates(&mut self, sessions: Option<&[(SessionId, PathBuf)]>) -> Vec<MetricsUpdate> {
-        let mut updates = vec![MetricsUpdate::Metrics(self.latest())];
-        if let Some(sessions) = sessions {
-            updates.push(MetricsUpdate::GitDiffs(self.git_diffs(sessions)));
-        }
-        updates
-    }
-}
-
-/// Creates a fresh metrics port for every workspace opened from the screen graph.
-pub trait MetricsPortFactory {
-    fn create(&mut self) -> Box<dyn MetricsPort>;
+    fn poll_updates(&mut self, sessions: Option<&[(SessionId, PathBuf)]>) -> Vec<MetricsUpdate>;
 }
 
 /// Shell-owned projection cache for the controller Home frame.
 ///
 /// It is updated only by draining [`MetricsUpdate`]s, keeping the material a
 /// pure downstream of the backend poll.  `render_home` reads [`metrics`] and
-/// [`git_diffs`] through `HomeProjection::with_metrics` / `with_git_diffs`,
-/// which this issue leaves unchanged.
+/// [`git_diffs`] through `HomeProjection::with_metrics` / `with_git_diffs`.
 ///
 /// [`metrics`]: Self::metrics
 /// [`git_diffs`]: Self::git_diffs
@@ -92,6 +74,7 @@ pub trait MetricsPortFactory {
 pub struct MetricsProjection {
     metrics: Option<DaemonMetrics>,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    artifact_counts: Arc<BTreeMap<SessionId, ArtifactCount>>,
     /// Diagnostic-only daemon health, folded from the same drained samples.
     ///
     /// It lives beside the metrics cache because health is a projection *of*
@@ -105,7 +88,7 @@ pub struct MetricsProjection {
 impl MetricsProjection {
     /// Fold one drained observation into the cache.
     pub fn apply(&mut self, update: MetricsUpdate) {
-        let changed = match update {
+        match update {
             MetricsUpdate::Metrics(metrics) => {
                 if self.metrics == metrics {
                     return;
@@ -119,19 +102,21 @@ impl MetricsProjection {
                     self.health.observe(metrics);
                 }
                 self.metrics = metrics;
-                true
             }
             MetricsUpdate::GitDiffs(git_diffs) => {
                 if self.git_diffs.as_ref() == &git_diffs {
                     return;
                 }
                 self.git_diffs = Arc::new(git_diffs);
-                true
             }
-        };
-        if changed {
-            self.generation = self.generation.saturating_add(1);
+            MetricsUpdate::ArtifactCounts(counts) => {
+                if self.artifact_counts.as_ref() == &counts {
+                    return;
+                }
+                self.artifact_counts = Arc::new(counts);
+            }
         }
+        self.generation = self.generation.saturating_add(1);
     }
 
     /// The diagnostic health observed so far, for the Home frame material.
@@ -157,6 +142,12 @@ impl MetricsProjection {
         Arc::clone(&self.git_diffs)
     }
 
+    /// Shared artifact observations; failures retain an entry distinct from zero.
+    #[must_use]
+    pub fn shared_artifact_counts(&self) -> Arc<BTreeMap<SessionId, ArtifactCount>> {
+        Arc::clone(&self.artifact_counts)
+    }
+
     /// Monotonic generation of material that actually changed.
     #[must_use]
     pub const fn generation(&self) -> u64 {
@@ -169,9 +160,8 @@ impl MetricsProjection {
 ///
 /// The port owns the sampling cadence (a one-second metrics cache and a git-diff
 /// worker thread in the composition root), so a per-frame [`poll`] preserves the
-/// legacy behaviour while the loop stops calling `latest()` / `git_diffs()`
-/// directly.  The completion channel mirrors `DaemonBackend`, giving the same
-/// `drain_events` seam a fake port drives in tests.
+/// observation boundary. The buffered updates provide the same `drain_events`
+/// seam a fake port drives in tests.
 ///
 /// [`poll`]: Self::poll
 pub struct MetricsBackend {
@@ -206,7 +196,7 @@ impl MetricsBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitDiff, MetricsPort};
+    use super::{ArtifactCount, GitDiff, MetricsPort};
     use super::{MetricsBackend, MetricsProjection, MetricsUpdate};
     use crate::usecase::application::daemon_health::DaemonHealthTracker;
     use std::cell::RefCell;
@@ -296,7 +286,7 @@ mod tests {
             ] if *m == metrics() && g.get(&session) == Some(&git_diff())
         ));
         // The drain empties the channel.
-        assert!(backend.drain_events().is_empty());
+        assert_eq!(backend.drain_events(), [] as [MetricsUpdate; 0]);
     }
 
     #[test]
@@ -362,6 +352,37 @@ mod tests {
         }
         assert_eq!(projection.metrics(), Some(metrics()));
         assert_eq!(projection.git_diffs().get(&session), Some(&git_diff()));
+    }
+
+    #[test]
+    fn artifact_updates_invalidate_the_frame_only_when_observations_change() {
+        let session = SessionId::new();
+        let mut projection = MetricsProjection::default();
+        let counts = BTreeMap::from([(session, ArtifactCount::Ready(2))]);
+        assert!(projection.shared_artifact_counts().is_empty());
+        projection.apply(MetricsUpdate::ArtifactCounts(counts.clone()));
+        assert_eq!(projection.shared_artifact_counts().as_ref(), &counts);
+        assert_eq!(projection.generation(), 1);
+        let shared = projection.shared_artifact_counts();
+        projection.apply(MetricsUpdate::ArtifactCounts(counts));
+        assert_eq!(projection.generation(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            &shared,
+            &projection.shared_artifact_counts()
+        ));
+        let unavailable = BTreeMap::from([(session, ArtifactCount::Unavailable)]);
+        projection.apply(MetricsUpdate::ArtifactCounts(unavailable.clone()));
+        assert_eq!(projection.shared_artifact_counts().as_ref(), &unavailable);
+        assert_eq!(projection.generation(), 2);
+        projection.apply(MetricsUpdate::ArtifactCounts(unavailable));
+        assert_eq!(projection.generation(), 2);
+        let empty = BTreeMap::from([(session, ArtifactCount::Ready(0))]);
+        projection.apply(MetricsUpdate::ArtifactCounts(empty.clone()));
+        assert_eq!(projection.shared_artifact_counts().as_ref(), &empty);
+        assert_eq!(projection.generation(), 3);
+        projection.apply(MetricsUpdate::ArtifactCounts(BTreeMap::new()));
+        assert!(projection.shared_artifact_counts().is_empty());
+        assert_eq!(projection.generation(), 4);
     }
 
     #[test]

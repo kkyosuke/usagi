@@ -484,7 +484,7 @@ mod tests {
             String::from_utf8(buf).unwrap(),
             "rolled over build-rollover-v1-live\n"
         );
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(launcher.launches(), 0);
     }
 
@@ -537,7 +537,7 @@ mod tests {
             let error = run(&mut Vec::new(), command, &info(), &env).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         }
-        assert!(terminator.terminated().is_empty());
+        assert_eq!(terminator.terminated(), [] as [u32; 0]);
         assert_eq!(launcher.launches(), 0);
     }
 

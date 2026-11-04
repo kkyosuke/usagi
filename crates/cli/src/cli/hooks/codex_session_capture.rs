@@ -85,7 +85,7 @@ mod tests {
     fn hidden_handler_requests_composition_capture_without_output() {
         let (outcome, output) = execute(Command::CodexSessionCapture);
         assert_eq!(outcome, RunOutcome::CaptureCodexSession);
-        assert!(output.is_empty());
+        assert_eq!(output, "");
     }
 
     #[test]

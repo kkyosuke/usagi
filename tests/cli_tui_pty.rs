@@ -419,9 +419,7 @@ impl AgentFixtures {
 
 /// fixture provider が今までに起動した child の数。
 fn spawn_count(provider: &Path) -> usize {
-    fs::read_to_string(provider)
-        .map(|text| text.lines().count())
-        .unwrap_or_default()
+    fs::read_to_string(provider).map_or_default(|text| text.lines().count())
 }
 
 /// fixture provider が記録した起動 argv（1 spawn 1 行、起動順）。
@@ -809,9 +807,7 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
 
     let deadline = Instant::now() + FIXTURE_SPAWN_TIMEOUT;
     loop {
-        let lines = fs::read_to_string(path)
-            .map(|text| text.lines().count())
-            .unwrap_or_default();
+        let lines = fs::read_to_string(path).map_or_default(|text| text.lines().count());
         if lines >= expected {
             return;
         }
@@ -1003,8 +999,8 @@ fn wait_for_screen_absent_since_at_size(
 }
 
 fn open_registered_workspace(master: &mut File, output: &Arc<Mutex<Vec<u8>>>, baseline: usize) {
-    wait_for_screen_since(output, baseline, "Recent");
-    send(master, b"1");
+    wait_for_screen_since(output, baseline, "Open last projects");
+    send(master, b"\r");
     wait_for_screen_since(output, baseline, "[switch]");
 }
 
@@ -1232,9 +1228,7 @@ fn wait_for_organization_conversations(
 /// 場合、到達を待つだけでは 2 個目の spawn を見逃す。到達後に settle 窓を置いて再確認する。
 fn assert_spawns_settle(count: &Path, expected: usize) {
     wait_for_file_lines(count, expected);
-    let observed = fs::read_to_string(count)
-        .map(|text| text.lines().count())
-        .unwrap_or_default();
+    let observed = fs::read_to_string(count).map_or_default(|text| text.lines().count());
     assert_eq!(
         observed,
         expected,
@@ -1242,9 +1236,7 @@ fn assert_spawns_settle(count: &Path, expected: usize) {
         count.display()
     );
     thread::sleep(Duration::from_millis(400));
-    let settled = fs::read_to_string(count)
-        .map(|text| text.lines().count())
-        .unwrap_or_default();
+    let settled = fs::read_to_string(count).map_or_default(|text| text.lines().count());
     assert_eq!(
         settled,
         expected,
@@ -1399,10 +1391,9 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // gate that swallowed an input would leave it frozen forever instead of
     // being rescued by the next tick. #556 makes the wait load-bearing for a
     // second reason: a key typed during the startup splash is consumed as its
-    // skip, so `1` has to reach Welcome itself. `1` は Welcome の予約 input で
-    // 最初の Recent を開く。
-    wait_for_screen_since(&captured, baseline, "Recent");
-    send(&mut master, b"1");
+    // skip, so Enter has to reach Welcome itself to resume the last project.
+    wait_for_screen_since(&captured, baseline, "Open last projects");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, baseline, "[switch]");
     // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
     // new surface instead of leaving cells from the former 100-column frame behind.
@@ -1444,7 +1435,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let reattach_baseline = capture_len(&captured);
     let mut reattached =
         spawn_hop(&home, &workspace, &slave).expect("同じPTYへ再接続してhopを起動できる");
-    wait_for_screen_since(&captured, reattach_baseline, "Recent");
+    wait_for_screen_since(&captured, reattach_baseline, "Open last projects");
     send(&mut master, b"q");
     let reattached_status = wait_with_timeout(&mut reattached, Duration::from_secs(5)).unwrap();
     let attributes_reattached = terminal_attributes(&slave).unwrap();
@@ -1458,7 +1449,10 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
 
     assert!(status.success(), "PTY output: {output}");
     assert!(reattached_status.success(), "PTY output: {output}");
-    assert!(output.contains("Recent"), "PTY output: {output}");
+    assert!(
+        output.contains("Open last projects"),
+        "PTY output: {output}"
+    );
     assert!(output.contains("pty-workspace"), "PTY output: {output}");
     assert!(output.contains("+ new session"), "PTY output: {output}");
     assert!(!output.contains("workspace main"), "PTY output: {output}");
@@ -1585,7 +1579,7 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
     send(&mut master, b"w");
     wait_for_screen_absent_since(&captured, baseline, "[switch]");
-    wait_for_screen_since(&captured, baseline, "Recent");
+    wait_for_screen_since(&captured, baseline, "Open last projects");
     assert!(
         child.try_wait().unwrap().is_none(),
         "leaving a workspace must not end the process"
@@ -1593,7 +1587,7 @@ fn real_pty_leaving_a_workspace_returns_to_welcome_and_re_entry_does_not_hang() 
 
     // Re-entry from the returned Welcome reaches Home again, then `q` at the
     // prompt ends the process.
-    send(&mut master, b"1");
+    send(&mut master, b"\r");
     wait_for_screen_since(&captured, baseline, "[switch]");
     send(&mut master, b"\x11");
     wait_for_screen_since(&captured, baseline, "Leave this workspace?");
@@ -1682,10 +1676,11 @@ fn real_pty_project_tabs_add_switch_and_reattach_the_same_agent() {
     let mut child = spawn_hop_with_path(&home, &first, &fixture_path, &slave)
         .expect("usagi hop starts on the PTY");
 
-    // Recent lists the most recently opened workspace first, so the second entry
-    // is the workspace registered first.
-    wait_for_screen_since(&captured, baseline, "Recent");
-    send(&mut master, b"2");
+    // Choose the first workspace by name through the project picker.
+    wait_for_screen_since(&captured, baseline, "Open last projects");
+    send(&mut master, b"o");
+    wait_for_screen_since(&captured, baseline, "Filter:");
+    send(&mut master, b"switch-first\r");
     wait_for_screen_since(&captured, baseline, "[switch]");
     wait_for_screen_since(&captured, baseline, "switch-first");
 
@@ -2973,7 +2968,10 @@ fn real_pty_close_chord_exits_the_focused_live_agent() {
     // Ctrl-O followed by the raw Ctrl-X byte is the exact chord users press.
     send(&mut master, b"\x0f\x18");
     wait_for_dead_processes(&[process]);
-    assert!(agent_processes(home.path(), 0).is_empty());
+    assert_eq!(
+        agent_processes(home.path(), 0),
+        [] as [(TerminalRef, u64); 0]
+    );
     assert!(read_agent_intent(home.path()).dismissed.is_empty());
     assert_eq!(
         fixtures.claude_spawns(),
@@ -3311,7 +3309,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         &mut master,
         &captured,
         cold_baseline,
-        "Claude (interrupted)",
+        "Claude (interrupted) [Manual]",
     );
     send(&mut master, b"\x0f\x18");
     let dismissed = wait_for_agent_intent(home.path(), |intent| {
@@ -3408,7 +3406,10 @@ fn real_pty_empty_workspace_drawer_is_safe_without_agent_clis_at_narrow_width() 
     // installed providers it owns the empty state and remains non-launchable.
     send(&mut master, b"\x0fn");
     wait_for_screen_since(&captured, baseline, "No Agent CLI installed");
-    assert!(agent_processes(home.path(), 0).is_empty());
+    assert_eq!(
+        agent_processes(home.path(), 0),
+        [] as [(TerminalRef, u64); 0]
+    );
 
     // The drawer falls back to full width below its normal minimum and keeps
     // ownership of global input. Ctrl-Q therefore cannot leak through and open

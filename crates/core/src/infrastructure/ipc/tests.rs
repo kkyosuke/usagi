@@ -23,12 +23,37 @@ impl io::Write for BadWriter {
 /// The workspace root the fixture daemon owns.
 const TRUSTED_ROOT: &str = "/workspace/root";
 
+#[test]
+fn removed_workflow_requests_are_rejected() {
+    for kind in [
+        "workflow_snapshot",
+        "workflow_control",
+        "agent_goal",
+        "supervisor_tool",
+        "supervisor_snapshot",
+        "supervisor_control",
+    ] {
+        let error = serde_json::from_value::<DaemonRequest>(json!({"kind": kind})).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+    for action in [
+        "workflow_start",
+        "workflow_status",
+        "workflow_instruct",
+        "workflow_finish",
+    ] {
+        let error = serde_json::from_value::<SessionAction>(json!(action)).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+}
+
 fn build() -> BuildIdentity {
     build_identity("1", "abc", "test", "debug", &"a".repeat(64))
 }
 fn hello() -> ClientHello {
     ClientHello {
         client_id: ClientId("client".into()),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {
@@ -143,6 +168,52 @@ fn server_and_readiness_policies_share_the_closed_capability_vocabulary() {
 }
 
 #[test]
+fn decision_delivery_requires_both_current_peers_and_an_advertised_contract() {
+    for (client_revision, server_revision, advertised, accepted) in [
+        (3, CURRENT_PROTOCOL_REVISION, true, false),
+        (CURRENT_PROTOCOL_REVISION, 3, true, false),
+        (2, CURRENT_PROTOCOL_REVISION, true, false),
+        (CURRENT_PROTOCOL_REVISION, 2, false, false),
+        (
+            CURRENT_PROTOCOL_REVISION,
+            CURRENT_PROTOCOL_REVISION,
+            false,
+            false,
+        ),
+        (
+            CURRENT_PROTOCOL_REVISION,
+            CURRENT_PROTOCOL_REVISION,
+            true,
+            true,
+        ),
+    ] {
+        let mut client = hello();
+        client.supported_protocols[0].max_revision = client_revision;
+        let mut daemon = server();
+        daemon.supported_protocols[0].max_revision = server_revision;
+        if advertised {
+            daemon
+                .capabilities
+                .push(Capability::UserDecisionDelivery.wire_name().into());
+        }
+        // Older peers may still use every compatible non-decision family.
+        let negotiated = negotiate(&client, &daemon).unwrap();
+        let result = require_user_decision_delivery(negotiated.protocol, &negotiated.capabilities);
+        assert_eq!(result.is_ok(), accepted);
+        if !accepted {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, ErrorCode::CapabilityMissing);
+            assert_eq!(error.side_effect, SideEffect::None);
+            assert!(
+                error
+                    .message
+                    .contains("update the daemon and reconnect clients")
+            );
+        }
+    }
+}
+
+#[test]
 fn production_capability_wire_names_are_defined_only_in_the_ipc_vocabulary() {
     fn rust_sources(path: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(path).unwrap() {
@@ -231,7 +302,7 @@ fn invalid_json_is_protocol_error() {
 }
 
 #[test]
-fn json_write_and_queue_error_paths_are_explicit() {
+fn json_write_errors_are_explicit() {
     struct RefusesSerialization;
     impl serde::Serialize for RefusesSerialization {
         fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
@@ -267,30 +338,18 @@ fn json_write_and_queue_error_paths_are_explicit() {
         .kind(),
         io::ErrorKind::InvalidData
     );
-    let mut frame = PendingFrame::new(b"x".to_vec());
     assert_eq!(
-        frame.write_to(&mut ZeroWriter).unwrap_err().kind(),
+        write_json_frame(&mut ZeroWriter, &true, DEFAULT_MAX_FRAME_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::WriteZero
     );
     assert_eq!(
-        frame.write_to(&mut OtherErrorWriter).unwrap_err().kind(),
+        write_json_frame(&mut OtherErrorWriter, &true, DEFAULT_MAX_FRAME_BYTES)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::Other
     );
-
-    let mut queue = OutboundQueues::new(QueueLimits {
-        control_frames: 0,
-        control_bytes: 0,
-        output_frames: 1,
-        output_bytes: 16,
-        control_reserve_bytes: 0,
-    });
-    assert_eq!(
-        queue.push_control(vec![]),
-        Err(QueueError::ResourceExhausted)
-    );
-    assert!(!queue.flush_one(&mut Vec::new()).unwrap());
-    queue.push_output(b"output".to_vec()).unwrap();
-    assert!(queue.flush_one(&mut Vec::new()).unwrap());
 }
 #[test]
 fn negotiation_uses_protocol_not_build_identity() {
@@ -815,54 +874,7 @@ fn envelope_keeps_response_and_event_routing_independent() {
     assert_eq!(stream.epoch, "e");
 }
 #[test]
-fn cache_and_durable_journal_have_distinct_idempotency_keys() {
-    let response = Envelope {
-        protocol: ProtocolVersion {
-            generation: 1,
-            revision: 1,
-        },
-        daemon_generation: DaemonGeneration("d".into()),
-        kind: EnvelopeKind::Response {
-            request_id: RequestId("r".into()),
-            outcome: ResponseOutcome::Ok,
-            body: json!({}),
-        },
-    };
-    let mut cache = ResponseCache::new(1);
-    cache.insert(
-        ClientId("c".into()),
-        RequestId("r".into()),
-        CachedResponse {
-            body_digest: "a".into(),
-            response,
-            received_at_ms: 0,
-        },
-    );
-    assert!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("r".into()), "a")
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("r".into()), "b")
-            .unwrap_err()
-            .code,
-        ErrorCode::IdempotencyConflict
-    );
-    let mut journal = IdempotencyJournal::default();
-    let key = OperationKey {
-        operation_id: OperationId("o".into()),
-        target_scope: "scope".into(),
-        semantic_digest: "d".into(),
-    };
-    assert_eq!(journal.decide(key.clone()), IdempotencyDecision::New);
-    assert_eq!(journal.decide(key), IdempotencyDecision::Existing);
-}
-
-#[test]
-fn covers_protocol_error_and_cache_edge_cases() {
+fn protocol_error_retry_modes_and_framing_failures_are_preserved() {
     assert_eq!(
         ProtocolError::new(ErrorCode::ResyncRequired, "x").retry_mode,
         RetryMode::Resync
@@ -881,129 +893,8 @@ fn covers_protocol_error_and_cache_edge_cases() {
         negotiate(&incompatible, &server()).unwrap_err().code,
         ErrorCode::ProtocolMismatch
     );
-    let mut cache = ResponseCache::new(0);
-    let response = Envelope {
-        protocol: ProtocolVersion {
-            generation: 1,
-            revision: 1,
-        },
-        daemon_generation: DaemonGeneration("d".into()),
-        kind: EnvelopeKind::Response {
-            request_id: RequestId("r".into()),
-            outcome: ResponseOutcome::Ok,
-            body: json!({}),
-        },
-    };
-    cache.insert(
-        ClientId("c".into()),
-        RequestId("r".into()),
-        CachedResponse {
-            body_digest: "d".into(),
-            response: response.clone(),
-            received_at_ms: 0,
-        },
-    );
-    assert!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("r".into()), "d")
-            .unwrap()
-            .is_none()
-    );
-    let mut cache = ResponseCache::new(1);
-    for id in ["a", "b"] {
-        cache.insert(
-            ClientId("c".into()),
-            RequestId(id.into()),
-            CachedResponse {
-                body_digest: id.into(),
-                response: response.clone(),
-                received_at_ms: 0,
-            },
-        );
-    }
-    assert!(
-        cache
-            .get(&ClientId("c".into()), &RequestId("a".into()), "a")
-            .unwrap()
-            .is_none()
-    );
-    let mut journal = IdempotencyJournal::default();
-    assert_eq!(
-        journal.decide(OperationKey {
-            operation_id: OperationId("o".into()),
-            target_scope: "a".into(),
-            semantic_digest: "a".into()
-        }),
-        IdempotencyDecision::New
-    );
-    assert_eq!(
-        journal.decide(OperationKey {
-            operation_id: OperationId("o".into()),
-            target_scope: "b".into(),
-            semantic_digest: "a".into()
-        }),
-        IdempotencyDecision::Conflict
-    );
     assert!(read_frame(&mut Bad).is_err());
     assert!(write_frame(&mut BadWriter, b"x").is_err());
-}
-
-#[test]
-fn partial_write_and_would_block_preserve_a_complete_frame() {
-    struct PartialWriter {
-        bytes: Vec<u8>,
-        calls: usize,
-    }
-    impl io::Write for PartialWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.calls += 1;
-            if self.calls == 2 {
-                return Err(io::Error::from(io::ErrorKind::WouldBlock));
-            }
-            let count = bytes.len().min(3);
-            self.bytes.extend_from_slice(&bytes[..count]);
-            Ok(count)
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut queue = OutboundQueues::new(QueueLimits::default());
-    queue.push_control(b"ack".to_vec()).unwrap();
-    let mut writer = PartialWriter {
-        bytes: Vec::new(),
-        calls: 0,
-    };
-    while !queue.is_empty() {
-        queue.flush_one(&mut writer).unwrap();
-    }
-    assert_eq!(
-        read_frame(&mut Cursor::new(writer.bytes)).unwrap(),
-        Some(b"ack".to_vec())
-    );
-}
-
-#[test]
-fn saturated_output_preserves_control_capacity() {
-    let mut queue = OutboundQueues::new(QueueLimits {
-        output_frames: 1,
-        output_bytes: 16,
-        control_frames: 1,
-        control_bytes: 4,
-        control_reserve_bytes: 8,
-    });
-    queue.push_output(b"output".to_vec()).unwrap();
-    assert_eq!(
-        queue.push_output(b"more".to_vec()),
-        Err(QueueError::Backpressure)
-    );
-    queue.push_control(b"ack".to_vec()).unwrap();
-    let mut bytes = Vec::new();
-    queue.flush_one(&mut bytes).unwrap();
-    assert_eq!(
-        read_frame(&mut Cursor::new(bytes)).unwrap(),
-        Some(b"ack".to_vec())
-    );
 }
 
 #[test]

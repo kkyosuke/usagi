@@ -3,13 +3,13 @@
 
 use usagi_core::domain::id::{DaemonGeneration, OperationId, TerminalRef};
 
-use super::{ActiveConsumer, ConsumeReport, publish_exit, reclaim_outbox};
+use super::{ActiveConsumer, ConsumeReport};
+use crate::usecase::resources::CasFile;
 use crate::usecase::resources::allocator::{ClaimState, ResourceAllocator, ResourceKind};
 use crate::usecase::resources::fixture::{
     FileFault, MemoryFile, SharedBytes, allocator, policy, shard as bind_shard, terminal, verified,
 };
-use crate::usecase::resources::shard::{OwnerShard, ShardDocument};
-use crate::usecase::resources::{CasFile, ResourceError};
+use crate::usecase::resources::shard::{OutboxEvent, OwnerEvent, OwnerShard, ShardDocument};
 
 struct Drained {
     allocator_bytes: SharedBytes,
@@ -76,7 +76,10 @@ impl Drained {
 #[test]
 fn one_exit_releases_capacity_once_across_redelivery_and_consumer_restarts() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, Some(7)).unwrap();
+    world
+        .shard()
+        .update(|document| document.commit_exit(&world.resource, Some(7)))
+        .unwrap();
     let published = world.owner_shard();
     assert_eq!(published.unacked_outbox(), 1);
 
@@ -118,7 +121,13 @@ fn events_are_applied_in_owner_order_however_the_outbox_is_read() {
     world
         .shard()
         .update(|document| {
-            document.commit_output(&world.resource, 4)?;
+            // Keep accepting serialized output events from older owners.
+            document.event_sequence = 1;
+            document.outbox.push(OutboxEvent {
+                event_revision: 1,
+                resource: world.resource.clone(),
+                event: OwnerEvent::Output { offset: 4 },
+            });
             document.commit_exit(&world.resource, Some(0))
         })
         .unwrap();
@@ -139,7 +148,10 @@ fn events_are_applied_in_owner_order_however_the_outbox_is_read() {
 #[test]
 fn the_active_generation_never_writes_the_old_shard() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, Some(0)).unwrap();
+    world
+        .shard()
+        .update(|document| document.commit_exit(&world.resource, Some(0)))
+        .unwrap();
     let published = world.owner_shard();
     let before = world.shard_bytes.get().unwrap();
 
@@ -152,17 +164,28 @@ fn the_active_generation_never_writes_the_old_shard() {
     );
 
     // Only the owner reclaims, and only what the allocator records as consumed.
-    let reclaimed = reclaim_outbox(&world.shard(), &allocator).unwrap();
+    let consumed = allocator.load().unwrap().to_document();
+    let (reclaimed, _) = world
+        .shard()
+        .update(|document| Ok(document.reclaim(&consumed)))
+        .unwrap();
     assert_eq!(reclaimed, 1);
     assert_eq!(world.owner_shard().unacked_outbox(), 0);
     assert_ne!(world.shard_bytes.get().unwrap(), before);
-    assert_eq!(reclaim_outbox(&world.shard(), &allocator).unwrap(), 0);
+    let (repeated, _) = world
+        .shard()
+        .update(|document| Ok(document.reclaim(&consumed)))
+        .unwrap();
+    assert_eq!(repeated, 0);
 }
 
 #[test]
 fn an_event_about_another_owners_resource_is_refused_and_changes_nothing() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, Some(0)).unwrap();
+    world
+        .shard()
+        .update(|document| document.commit_exit(&world.resource, Some(0)))
+        .unwrap();
     let mut forged = world.owner_shard();
     forged.owner = DaemonGeneration::new();
 
@@ -200,7 +223,10 @@ fn an_event_about_another_owners_resource_is_refused_and_changes_nothing() {
 #[test]
 fn a_store_failure_stops_the_pass_without_a_partial_acknowledgement() {
     let world = Drained::new();
-    publish_exit(&world.shard(), &world.resource, Some(0)).unwrap();
+    world
+        .shard()
+        .update(|document| document.commit_exit(&world.resource, Some(0)))
+        .unwrap();
     let published = world.owner_shard();
 
     let broken = ResourceAllocator::new(
@@ -217,18 +243,13 @@ fn a_store_failure_stops_the_pass_without_a_partial_acknowledgement() {
         policy(2, 2),
     );
     assert!(
-        reclaim_outbox(&world.shard(), &unreadable)
+        ActiveConsumer::new(&unreadable)
+            .consume(&published)
             .unwrap_err()
             .refusal()
             .is_none()
     );
 
-    assert_eq!(
-        publish_exit(&world.shard(), &terminal(world.owner), Some(0))
-            .unwrap_err()
-            .refusal(),
-        Some(ResourceError::UnknownResource)
-    );
     assert!(
         MemoryFile::new(&world.shard_bytes)
             .read()

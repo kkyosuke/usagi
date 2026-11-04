@@ -14,16 +14,17 @@ use std::time::Duration;
 use crate::domain::clock::MonotonicClock;
 use crate::domain::daemon::{DaemonProcessObservation, DaemonRecord};
 use crate::infrastructure::ipc::request::{
-    ClientError, DaemonReply, DaemonRequest, SessionAction, SupervisorToolAction, TenantAction,
-    TerminalAction, TuiUserDecisionAction,
+    ClientError, DaemonReply, DaemonRequest, SessionAction, TenantAction, TerminalAction,
+    TuiUserDecisionAction,
 };
 use crate::infrastructure::ipc::{
-    Bootstrap, BuildIdentity, Capability, ClientHello, ClientId, ClientWorkspace, DaemonGeneration,
-    Envelope, EnvelopeKind, ErrorCode, GenerationRole, ProtocolError, ProtocolRange,
-    ProtocolVersion, ResponseOutcome, ServerHello, TERMINAL_CHECKPOINT_REVISION,
+    Bootstrap, BuildIdentity, CURRENT_PROTOCOL_REVISION, Capability, ClientHello, ClientId,
+    ClientWorkspace, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, GenerationRole,
+    ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, ServerHello,
     TERMINAL_WIRE_GENERATION, TerminalInputReplayMode, TerminalSnapshotMode,
     client_advertised_capabilities, client_required_capabilities, is_workspace_mismatch,
-    read_json_frame, terminal_input_replay_mode, terminal_snapshot_mode, write_json_frame,
+    read_json_frame, require_user_decision_delivery, terminal_input_replay_mode,
+    terminal_snapshot_mode, write_json_frame,
 };
 
 #[cfg(test)]
@@ -36,13 +37,14 @@ use crate::domain::pr_inventory::PrInventory;
 use crate::domain::session_lifecycle::AgentPhase;
 #[cfg(test)]
 use crate::infrastructure::ipc::request::{
-    AgentConcurrency, AgentGoalIntent, AgentLaunchIntent, DaemonMetrics, DaemonRestartAgents,
-    DispatchToolAction, McpCallerContext, MetricsAction, PrAction, PrRequest, PrSnapshot,
-    TerminalGeometry, TerminalLaunchIntent, agent_goal_semantic_key, agent_launch_semantic_key,
-    agent_resume_semantic_key, decode_pr_snapshot,
+    AgentConcurrency, AgentLaunchIntent, DaemonMetrics, DaemonRestartAgents, DispatchToolAction,
+    McpCallerContext, MetricsAction, PrAction, PrRequest, PrSnapshot, TerminalGeometry,
+    TerminalLaunchIntent, agent_launch_semantic_key, agent_resume_semantic_key, decode_pr_snapshot,
 };
 #[cfg(test)]
-use crate::infrastructure::ipc::{OWNER_GENERATION_ROUTING_CAPABILITY, WORKSPACE_FENCE_CAPABILITY};
+use crate::infrastructure::ipc::{
+    OWNER_GENERATION_ROUTING_CAPABILITY, TERMINAL_CHECKPOINT_REVISION, WORKSPACE_FENCE_CAPABILITY,
+};
 #[cfg(test)]
 use crate::infrastructure::ipc::{RetryMode, SideEffect};
 #[cfg(test)]
@@ -167,6 +169,7 @@ impl<S: Read + Write> IpcClient<S> {
             client_required_capabilities(expected_owner.is_some(), &workspace);
         let hello = Bootstrap::ClientHello(ClientHello {
             client_id: ClientId(client_id),
+            surface: Some(policy.surface),
             connection_nonce,
             expected_daemon_generation: expected_owner
                 .as_ref()
@@ -174,10 +177,9 @@ impl<S: Read + Write> IpcClient<S> {
             supported_protocols: vec![ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                // Revision 2 carries the semantic screen checkpoint. An older
-                // daemon still negotiates revision 1, which this client treats
-                // as legacy (it never parses the raw tail).
-                max_revision: TERMINAL_CHECKPOINT_REVISION,
+                // Older revisions remain usable for supported families; each
+                // changed contract is checked before submitting its requests.
+                max_revision: CURRENT_PROTOCOL_REVISION,
             }],
             // Advertised, not required: this is what *this* client can do, and
             // it is the daemon that needs it — a rollover may only leave a
@@ -328,6 +330,12 @@ fn verify_owner_binding(
 
 impl<S: Read + Write> DaemonClient for IpcClient<S> {
     fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
+        if matches!(&request, DaemonRequest::UserDecision { .. })
+            || matches!(&request, DaemonRequest::DispatchTool { action, .. } if action.is_user_decision())
+        {
+            require_user_decision_delivery(self.protocol, &self.server_capabilities)
+                .map_err(ClientError::Protocol)?;
+        }
         self.next_request += 1;
         // Terminal owners use this correlation ID as part of their input
         // dedupe fence, so it must satisfy the canonical resource-ID contract
@@ -421,6 +429,41 @@ mod metrics_schema_tests {
                 "phase": "ready",
                 "native_session_id": "provider-session"
             })
+        );
+    }
+
+    #[test]
+    fn headless_resume_round_trips_as_a_distinct_durable_request() {
+        use crate::domain::{
+            agent::AgentResumeTarget,
+            id::{
+                AgentContinuationRef, AgentResumeSourceId, AgentRuntimeId, OperationId,
+                WorkspaceId, WorktreeId,
+            },
+        };
+        let request = DaemonRequest::ResumeAgentHeadless {
+            operation_id: OperationId::new().to_string(),
+            target: AgentResumeTarget {
+                continuation: AgentContinuationRef::new(),
+                source: AgentResumeSourceId::new(),
+                workspace_id: WorkspaceId::new(),
+                session_id: None,
+                worktree_id: WorktreeId::new(),
+                runtime_id: AgentRuntimeId::new(),
+                adapter_revision: 3,
+            },
+            prompt: "--version\n次の turn".into(),
+            caller_context: None,
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["kind"], "resume_agent_headless");
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(encoded).unwrap(),
+            request
+        );
+        assert_eq!(
+            super::RetryEligibility::classify(&request),
+            super::RetryEligibility::DurableOperation
         );
     }
 
@@ -610,6 +653,7 @@ mod metrics_schema_tests {
 /// mutation may only be retried with its original request/operation identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientPolicy {
+    pub surface: crate::domain::agent::AgentClientSurface,
     pub timeout_ms: u64,
     pub reconnect_attempts: u8,
 }
@@ -618,6 +662,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn tui() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Tui,
             timeout_ms: 2_000,
             reconnect_attempts: 3,
         }
@@ -636,6 +681,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn cli() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Cli,
             timeout_ms: 10_000,
             reconnect_attempts: 1,
         }
@@ -643,6 +689,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn mcp() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Mcp,
             timeout_ms: 30_000,
             reconnect_attempts: 1,
         }
@@ -658,6 +705,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn pane_launch() -> Self {
         Self {
+            surface: crate::domain::agent::AgentClientSurface::Tui,
             timeout_ms: 300_000,
             reconnect_attempts: 1,
         }
@@ -963,8 +1011,8 @@ impl RetryEligibility {
             | DaemonRequest::Metrics { .. }
             | DaemonRequest::AgentInventory { .. }
             | DaemonRequest::AgentWorkspaceObservation { .. }
-            | DaemonRequest::SupervisorSnapshot { .. }
-            | DaemonRequest::WorkflowSnapshot { .. }
+            | DaemonRequest::WorkspaceAttention { .. }
+            | DaemonRequest::SearchTerminalOutput { .. }
             | DaemonRequest::DiagnoseAgents { .. }
             | DaemonRequest::PlanDaemonRestartAgents { .. }
             | DaemonRequest::Tenant {
@@ -996,15 +1044,6 @@ impl RetryEligibility {
                     Self::NoCrossConnectionEvidence
                 }
             }
-            DaemonRequest::SupervisorTool { action, .. } => {
-                if supervisor_action_is_read_only(*action) {
-                    Self::ReadOnly
-                } else if supervisor_action_is_durable_operation(*action) {
-                    Self::DurableOperation
-                } else {
-                    Self::NoCrossConnectionEvidence
-                }
-            }
             DaemonRequest::UserDecision { action, .. } => {
                 if user_decision_action_is_read_only(*action) {
                     Self::ReadOnly
@@ -1013,11 +1052,9 @@ impl RetryEligibility {
                 }
             }
             DaemonRequest::Rollover { .. }
-            | DaemonRequest::SupervisorControl { .. }
-            | DaemonRequest::WorkflowControl { .. }
             | DaemonRequest::Agent { .. }
-            | DaemonRequest::AgentGoal { .. }
             | DaemonRequest::ResumeAgent { .. }
+            | DaemonRequest::ResumeAgentHeadless { .. }
             | DaemonRequest::ResumeAgentWithCurrentIntegration { .. }
             | DaemonRequest::Dispatch { .. } => Self::DurableOperation,
             DaemonRequest::PrDismiss { .. }
@@ -1044,14 +1081,14 @@ impl RetryEligibility {
 const fn session_action_is_read_only(action: SessionAction) -> bool {
     matches!(
         action,
-        SessionAction::List
+        SessionAction::Agents
+            | SessionAction::List
             | SessionAction::Status
             | SessionAction::Overview
             | SessionAction::Pr
             | SessionAction::NoteGet
             | SessionAction::TodoList
             | SessionAction::DecisionList
-            | SessionAction::WorkflowStatus
     )
 }
 
@@ -1060,34 +1097,13 @@ const fn session_action_is_durable_operation(action: SessionAction) -> bool {
     // lifecycle mutations (create/remove across daemon restarts). Other
     // mutating actions stay fail-closed until their server-backed durable
     // contract is proven.
-    matches!(
-        action,
-        SessionAction::Create
-            | SessionAction::Remove
-            // A workflow command is admitted by the producer's operation ID, so
-            // retrying a lost response resumes the same run instead of starting
-            // a second one.
-            | SessionAction::WorkflowStart
-            | SessionAction::WorkflowInstruct
-            | SessionAction::WorkflowFinish
-    )
-}
-
-const fn supervisor_action_is_read_only(action: SupervisorToolAction) -> bool {
-    matches!(
-        action,
-        SupervisorToolAction::Get | SupervisorToolAction::List | SupervisorToolAction::Events
-    )
-}
-
-const fn supervisor_action_is_durable_operation(action: SupervisorToolAction) -> bool {
-    matches!(action, SupervisorToolAction::Start)
+    matches!(action, SessionAction::Create | SessionAction::Remove)
 }
 
 const fn user_decision_action_is_read_only(action: TuiUserDecisionAction) -> bool {
     matches!(
         action,
-        TuiUserDecisionAction::Get | TuiUserDecisionAction::List
+        TuiUserDecisionAction::Get | TuiUserDecisionAction::List | TuiUserDecisionAction::ListAll
     )
 }
 
@@ -1272,52 +1288,28 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct Scripted {
         input: Cursor<Vec<u8>>,
         output: Vec<u8>,
+        fail_read: bool,
+        fail_write: bool,
     }
     impl Read for Scripted {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.fail_read {
+                return Err(io::Error::other("read failed"));
+            }
             self.input.read(buf)
         }
     }
     impl Write for Scripted {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::other("write failed"));
+            }
             self.output.extend_from_slice(buf);
             Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct Broken;
-    impl Read for Broken {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("read failed"))
-        }
-    }
-
-    struct ReadFails {
-        output: Vec<u8>,
-    }
-    impl Read for ReadFails {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("read failed"))
-        }
-    }
-    impl Write for ReadFails {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.output.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    impl Write for Broken {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("write failed"))
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
@@ -1329,7 +1321,7 @@ mod tests {
         write_json_frame(&mut input, &message, 1_048_576).unwrap();
         Scripted {
             input: Cursor::new(input),
-            output: vec![],
+            ..Scripted::default()
         }
     }
 
@@ -1371,12 +1363,20 @@ mod tests {
 
         let unavailable = connect(Scripted {
             input: Cursor::new(vec![]),
-            output: vec![],
+            ..Scripted::default()
         })
         .err()
         .unwrap();
         assert_eq!(unavailable.code(), ErrorCode::OwnershipUnknown);
         assert_eq!(unavailable.side_effect(), SideEffect::None);
+
+        let mut wrong_owner = owner_hello(&record, &generation);
+        wrong_owner.daemon_process = Some(DaemonRecord::identified(record.pid, "replacement"));
+        let ownership_unknown = connect(bootstrap_script(&Bootstrap::ServerHello(wrong_owner)))
+            .err()
+            .unwrap();
+        assert_eq!(ownership_unknown.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(ownership_unknown.side_effect(), SideEffect::None);
 
         let mut wrong_nonce = owner_hello(&record, &generation);
         wrong_nonce.connection_nonce = "other-connection".into();
@@ -1535,13 +1535,9 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::PermissionDenied);
         assert_eq!(error.side_effect(), SideEffect::None);
         assert_eq!(error.retry_mode(), RetryMode::Never);
-        let mut surfaced = None;
-        if let ClientError::Protocol(error) = error {
-            surfaced = Some(error);
-        }
-        assert_eq!(
-            surfaced.expect("the refusal stays a typed protocol error"),
-            refusal
+        assert!(
+            matches!(error, ClientError::Protocol(surfaced) if surfaced == refusal),
+            "the refusal stays a typed protocol error"
         );
     }
 
@@ -1586,7 +1582,7 @@ mod tests {
             TerminalSnapshotMode::Checkpoint
         );
 
-        // The client offers revision 2 so a checkpoint daemon can select it.
+        // The current range still includes revision 2 for checkpoint daemons.
         let sent = read_json_frame::<serde_json::Value>(
             &mut Cursor::new(checkpoint.transport().output.clone()),
             1_048_576,
@@ -1599,7 +1595,7 @@ mod tests {
             serde_json::json!([ProtocolRange {
                 generation: TERMINAL_WIRE_GENERATION,
                 min_revision: 0,
-                max_revision: TERMINAL_CHECKPOINT_REVISION,
+                max_revision: CURRENT_PROTOCOL_REVISION,
             }])
         );
 
@@ -1675,7 +1671,7 @@ mod tests {
         write_json_frame(&mut input, &response, 1_048_576).unwrap();
         Scripted {
             input: Cursor::new(input),
-            output: vec![],
+            ..Scripted::default()
         }
     }
 
@@ -1686,6 +1682,75 @@ mod tests {
         assert_eq!(error.retry_mode(), RetryMode::Reconnect);
         assert_eq!(error.side_effect(), SideEffect::PartialOrUnknown);
         assert_eq!(error.to_string(), "Unavailable: daemon is absent");
+    }
+
+    #[test]
+    fn decision_requests_never_reach_a_peer_with_implicit_read_acknowledgements() {
+        let mut requests: Vec<_> = [
+            DispatchToolAction::UserDecisionRequest,
+            DispatchToolAction::UserDecisionGet,
+            DispatchToolAction::UserDecisionAck,
+            DispatchToolAction::UserDecisionList,
+            DispatchToolAction::UserDecisionResolve,
+            DispatchToolAction::UserDecisionCancel,
+            DispatchToolAction::UserDecisionExpire,
+        ]
+        .into_iter()
+        .map(|action| DaemonRequest::DispatchTool {
+            action,
+            payload: serde_json::json!({}),
+            caller_context: None,
+            operation_id: "decision-test".into(),
+        })
+        .collect();
+        for action in [
+            TuiUserDecisionAction::Get,
+            TuiUserDecisionAction::ListAll,
+            TuiUserDecisionAction::Resolve,
+            TuiUserDecisionAction::Discard,
+        ] {
+            requests.push(DaemonRequest::UserDecision {
+                action,
+                payload: serde_json::json!({}),
+            });
+        }
+        for request in requests {
+            let mut client = IpcClient::connect(
+                scripted(ResponseOutcome::Ok, "1"),
+                "client".into(),
+                "nonce".into(),
+                ClientPolicy::mcp(),
+                client_build(),
+                test_workspace(),
+            )
+            .unwrap();
+            let before = client.transport().output.clone();
+            let error = client.request(request.clone()).unwrap_err();
+            assert_eq!(error.code(), ErrorCode::CapabilityMissing);
+            assert_eq!(error.side_effect(), SideEffect::None);
+            assert_eq!(client.transport().output, before);
+            assert_eq!(client.next_request, 0);
+            client
+                .server_capabilities
+                .push(Capability::UserDecisionDelivery.wire_name().into());
+            client.protocol.revision = 3;
+            assert_eq!(
+                client.request(request.clone()).unwrap_err().code(),
+                ErrorCode::CapabilityMissing
+            );
+            assert_eq!(
+                client.transport().output,
+                before,
+                "revision 3 cannot recover answered IDs"
+            );
+            client.protocol.revision = CURRENT_PROTOCOL_REVISION;
+            assert_eq!(
+                client.request(request).unwrap(),
+                DaemonReply::Ok(serde_json::json!({"ok":true}))
+            );
+            assert!(client.transport().output.len() > before.len());
+        }
+        assert!(!DispatchToolAction::AgentGet.is_user_decision());
     }
 
     #[test]
@@ -1712,6 +1777,42 @@ mod tests {
                 .to_string()
                 .contains("exact daemon artifact is unknown")
         );
+    }
+
+    #[test]
+    fn hello_preserves_the_surface_and_remains_readable_without_it() {
+        use crate::domain::agent::AgentClientSurface;
+        for (policy, surface) in [
+            (ClientPolicy::tui(), AgentClientSurface::Tui),
+            (ClientPolicy::cli(), AgentClientSurface::Cli),
+            (ClientPolicy::mcp(), AgentClientSurface::Mcp),
+            (ClientPolicy::pane_launch(), AgentClientSurface::Tui),
+        ] {
+            let client = IpcClient::connect(
+                scripted(ResponseOutcome::Ok, "request"),
+                "public-client-id".into(),
+                "nonce".into(),
+                policy,
+                client_build(),
+                test_workspace(),
+            )
+            .unwrap();
+            let mut frames = Cursor::new(client.stream.output);
+            let hello = read_json_frame::<serde_json::Value>(&mut frames, 1_048_576)
+                .unwrap()
+                .unwrap();
+            assert_eq!(hello["kind"], "client_hello");
+            let hello: ClientHello = serde_json::from_value(hello).unwrap();
+            assert_eq!(hello.surface, Some(surface));
+            let mut legacy = serde_json::to_value(&hello).unwrap();
+            legacy.as_object_mut().unwrap().remove("surface");
+            assert_eq!(
+                serde_json::from_value::<ClientHello>(legacy)
+                    .unwrap()
+                    .surface,
+                None
+            );
+        }
     }
 
     #[test]
@@ -1949,7 +2050,7 @@ mod tests {
             IpcClient::connect(
                 Scripted {
                     input: Cursor::new(bytes),
-                    output: vec![]
+                    ..Scripted::default()
                 },
                 "c".into(),
                 "n".into(),
@@ -1963,7 +2064,7 @@ mod tests {
             IpcClient::connect(
                 Scripted {
                     input: Cursor::new(vec![]),
-                    output: vec![]
+                    ..Scripted::default()
                 },
                 "c".into(),
                 "n".into(),
@@ -1975,7 +2076,11 @@ mod tests {
         ));
         assert!(matches!(
             IpcClient::connect(
-                Broken,
+                Scripted {
+                    fail_read: true,
+                    fail_write: true,
+                    ..Scripted::default()
+                },
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
@@ -1986,7 +2091,10 @@ mod tests {
         ));
         assert!(matches!(
             IpcClient::connect(
-                ReadFails { output: vec![] },
+                Scripted {
+                    fail_read: true,
+                    ..Scripted::default()
+                },
                 "c".into(),
                 "n".into(),
                 ClientPolicy::tui(),
@@ -2035,7 +2143,11 @@ mod tests {
             artifact: "server-artifact".into(),
         };
         let mut broken = IpcClient {
-            stream: Broken,
+            stream: Scripted {
+                fail_read: true,
+                fail_write: true,
+                ..Scripted::default()
+            },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build: server_build.clone(),
@@ -2050,7 +2162,7 @@ mod tests {
         let mut closed = IpcClient {
             stream: Scripted {
                 input: Cursor::new(vec![]),
-                output: vec![],
+                ..Scripted::default()
             },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
@@ -2064,7 +2176,10 @@ mod tests {
             Err(ClientError::Unavailable(_))
         ));
         let mut read_fails = IpcClient {
-            stream: ReadFails { output: vec![] },
+            stream: Scripted {
+                fail_read: true,
+                ..Scripted::default()
+            },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
             server_build,
@@ -2082,15 +2197,22 @@ mod tests {
         assert!(
             Scripted {
                 input: Cursor::new(vec![]),
-                output: vec![]
+                ..Scripted::default()
             }
             .flush()
             .is_ok()
         );
-        let mut broken = Broken;
+        let mut broken = Scripted {
+            fail_read: true,
+            fail_write: true,
+            ..Scripted::default()
+        };
         assert!(broken.read(&mut []).is_err());
         assert!(broken.flush().is_ok());
-        let mut read_fails = ReadFails { output: vec![] };
+        let mut read_fails = Scripted {
+            fail_read: true,
+            ..Scripted::default()
+        };
         assert!(read_fails.flush().is_ok());
     }
 }
@@ -2396,11 +2518,9 @@ mod deadline_and_retry_tests {
                 root: None,
                 force: false,
             },
-            // Reading a workflow reconciles evidence the resident lane would
-            // reconcile anyway, so re-reading it changes nothing a caller owns.
             DaemonRequest::Session {
-                action: SessionAction::WorkflowStatus,
-                operation_id: "op".into(),
+                action: SessionAction::Agents,
+                operation_id: "read-only-audit".into(),
                 payload: session_payload(),
             },
             DaemonRequest::Pr {
@@ -2419,6 +2539,14 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::AgentWorkspaceObservation {
                 workspace: WorkspaceId::new(),
+            },
+            DaemonRequest::WorkspaceAttention {
+                workspace: WorkspaceId::new(),
+            },
+            DaemonRequest::SearchTerminalOutput {
+                workspace: WorkspaceId::new(),
+                query: "error".into(),
+                session: None,
             },
             DaemonRequest::Session {
                 action: SessionAction::List,
@@ -2449,14 +2577,12 @@ mod deadline_and_retry_tests {
                 payload: session_payload(),
                 caller_context: None,
             },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::List,
-                operation_id: String::new(),
-                payload: session_payload(),
-                caller_context: None,
-            },
             DaemonRequest::UserDecision {
                 action: TuiUserDecisionAction::List,
+                payload: session_payload(),
+            },
+            DaemonRequest::UserDecision {
+                action: TuiUserDecisionAction::ListAll,
                 payload: session_payload(),
             },
             // Resolving a durable input operation only reads the daemon's
@@ -2476,42 +2602,11 @@ mod deadline_and_retry_tests {
                 operation_id: "op".into(),
                 payload: session_payload(),
             },
-            // A workflow command is admitted by the producer's operation ID, so
-            // a lost response resumes the same run instead of starting another.
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowStart,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowInstruct,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
-            DaemonRequest::Session {
-                action: SessionAction::WorkflowFinish,
-                operation_id: "op".into(),
-                payload: session_payload(),
-            },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::Dispatch,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
-            },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::Start,
-                operation_id: "op".into(),
-                payload: session_payload(),
-                caller_context: None,
-            },
-            DaemonRequest::SupervisorControl {
-                workspace: WorkspaceId::new(),
-                operation_id: OperationId::new(),
-                command: crate::domain::supervisor::SupervisorWorkspaceCommand::Cancel {
-                    supervisor_run_id: crate::domain::supervisor::SupervisorRunId::new(),
-                    reason: "operator cancelled".into(),
-                },
             },
             DaemonRequest::Agent {
                 operation_id: "op".into(),
@@ -2519,14 +2614,6 @@ mod deadline_and_retry_tests {
                     workspace: WorkspaceId::new(),
                     session: None,
                     profile: None,
-                },
-            },
-            DaemonRequest::AgentGoal {
-                operation_id: "op".into(),
-                intent: AgentGoalIntent {
-                    workspace: WorkspaceId::new(),
-                    profile: None,
-                    goal: "prepare a PR".to_owned(),
                 },
             },
         ];
@@ -2557,12 +2644,6 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::DispatchTool {
                 action: DispatchToolAction::AgentInboxAck,
-                operation_id: "op".into(),
-                payload: session_payload(),
-                caller_context: None,
-            },
-            DaemonRequest::SupervisorTool {
-                action: SupervisorToolAction::Cancel,
                 operation_id: "op".into(),
                 payload: session_payload(),
                 caller_context: None,
@@ -2850,7 +2931,7 @@ mod deadline_and_retry_tests {
             ScriptedConn::new(clock.clone(), vec![1, 2, 3, 4]),
             100,
         );
-        assert!(stream.get_ref().written.is_empty());
+        assert_eq!(stream.get_ref().written, [] as [u8; 0]);
 
         clock.advance(200); // past the deadline
         let mut buf = [0u8; 4];
@@ -2934,6 +3015,11 @@ mod deadline_and_retry_tests {
             io::ErrorKind::TimedOut
         );
 
+        assert_eq!(
+            stream.write(b"late").unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+
         // A transport that could never be armed has no deadline in effect, so the
         // failure propagates instead of leaving an unbounded read.
         let mut never = DeadlineStream::new(
@@ -2992,6 +3078,7 @@ mod deadline_and_retry_tests {
 
         fn bounded_policy() -> ClientPolicy {
             ClientPolicy {
+                surface: crate::domain::agent::AgentClientSurface::Cli,
                 timeout_ms: 200,
                 reconnect_attempts: 0,
             }
@@ -3062,11 +3149,7 @@ mod deadline_and_retry_tests {
             drop(server);
 
             let answer = read_json_frame::<Bootstrap>(&mut stream, 1_048_576).unwrap();
-            let mut surfaced = None;
-            if let Some(Bootstrap::Error(error)) = answer {
-                surfaced = Some(error);
-            }
-            assert_eq!(surfaced, Some(refusal));
+            assert!(matches!(answer, Some(Bootstrap::Error(error)) if error == refusal));
         }
 
         #[test]
@@ -3194,37 +3277,6 @@ mod deadline_and_retry_tests {
         }
     }
 
-    #[test]
-    fn the_agent_goal_semantic_key_covers_the_exact_goal_and_root_launch() {
-        let intent = AgentGoalIntent {
-            workspace: WorkspaceId::new(),
-            profile: None,
-            goal: "目的を実装する".to_owned(),
-        };
-        let key = agent_goal_semantic_key(&intent);
-        assert_eq!(key, agent_goal_semantic_key(&intent));
-        assert!(key.contains("workspace-root"));
-        assert!(key.contains(&format!("goal:{}", intent.goal.len())));
-        assert!(key.ends_with(&intent.goal));
-
-        for other in [
-            AgentGoalIntent {
-                goal: "別の目的".to_owned(),
-                ..intent.clone()
-            },
-            AgentGoalIntent {
-                workspace: WorkspaceId::new(),
-                ..intent.clone()
-            },
-            AgentGoalIntent {
-                profile: Some(AgentProfileId::new("codex").unwrap()),
-                ..intent
-            },
-        ] {
-            assert_ne!(key, agent_goal_semantic_key(&other));
-        }
-    }
-
     /// #522: a resume names one exact interrupted source, so its key stays distinct
     /// from an ordinary launch in the same scope and from any other target.
     #[test]
@@ -3245,6 +3297,13 @@ mod deadline_and_retry_tests {
         };
         let key = agent_resume_semantic_key(&target);
         assert!(key.starts_with("resume:"));
+        let headless =
+            crate::infrastructure::ipc::agent_headless_resume_semantic_key(&target, "one");
+        assert_ne!(key, headless);
+        assert_ne!(
+            headless,
+            crate::infrastructure::ipc::agent_headless_resume_semantic_key(&target, "two")
+        );
         assert_eq!(key, agent_resume_semantic_key(&target));
         assert_ne!(
             key,

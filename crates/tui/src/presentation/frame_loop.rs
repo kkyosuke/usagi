@@ -3,6 +3,8 @@
 use std::io;
 use std::sync::mpsc;
 
+use crate::usecase::application::metrics::ArtifactCount;
+
 use super::{
     AgentTabIntentMutation, AppEvent, AppKey, AppState, Arc, AvailableAgentModels, BTreeMap,
     BTreeSet, BackendEvent, BackendFlow, Color, Completions, Config, ConfigStep, ConfirmationView,
@@ -17,39 +19,35 @@ use super::{
     ProjectedSession, REGISTRY_REFRESH_INTERVAL, Receiver, Recent, RestoreJobOutcome,
     RestoreRetryState, Route, Screen, SessionBackendCompletion, SessionCommand, SessionCommandLane,
     SessionId, SessionRefreshPort, SessionWorktreeHint, SettingsPort, Start, Style, TabSelection,
-    Target, Terminal, TerminalRef, TerminalViewProjection, Utc, WORK_RUN_OBSERVATION_BACKOFF,
-    WORK_RUN_OBSERVATION_INTERVAL, Welcome, WelcomeStep, WorkMode, WorkRunControl,
-    WorkRunControlInput, WorkRunControlOutcome, WorkRunControlResult, WorkRunLaneCompletion,
-    WorkRunProjection, Workspace, WorkspaceConfigContext, WorkspaceCreateEffect,
-    WorkspaceCreateToken, WorkspaceDeck, WorkspaceDrawerFocus, WorkspaceEntryPolicy,
-    WorkspaceInputRoute, WorkspaceIoRuntime, WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot,
-    WorkspaceStep, WorkspaceView, activate_focused_interrupted_tab, activate_workspace_responsive,
-    adjust_project_bar_pointer, adopt_session_command_lane,
-    apply_drawer_header_while_director_open, apply_restore_completion, begin_session_command,
-    close_exited_panes, closes_workspace_help, compose_workspace_shell_frame,
-    controller_terminal_view, deliver_carried_outcome, director_drawer_projection,
-    dismiss_pr_modal_on_project_bar_click, drain_pane_completions_into_runtime,
-    drain_pane_launches, drain_session_completions, drain_session_refresh, enqueue_pane_launch,
-    enter_workspace, enter_workspace_deck, entry_help_context, fail_terminal_launch,
-    focus_workspace_drawer_from_pointer, foreground_terminal_geometry, garden_fits,
-    garden_shell_owned_wake, handle_interrupted_removal_confirmation,
-    handle_work_run_control_input_with_ui, home_header_action_at, intercept_live_terminal_control,
-    managed_background_terminal, managed_background_terminal_geometry, new_project_notice,
-    open_director_from_new_button, open_failure_notice, open_from_registry, opens_workspace_help,
-    prepare_activation_settings, prepare_batch_settings, prepare_deck_workspace,
-    prepare_workspace_deck, project_bar, project_controller_sessions, recent_paths,
-    registry_contains_path, relative_time_clock, remember_workspace_session_focus,
-    remove_registry_paths, render_home, render_home_at, render_missing_workspace_prompt,
-    render_open, restore_workspace_closeup, restore_workspace_session_focus,
-    retarget_drawer_chords, right_pane_tab_at, route_garden_input, route_pr_modal_click,
-    route_workspace_input_before_reducer, run_workspace_config, save_config_responsive,
-    save_config_source_responsive, scroll_key_help, select_right_pane_tab, session_name_for,
-    sidebar_pointer_event, spawn_garden_observation_job, spawn_restore_job,
-    spawn_work_run_control_job, spawn_work_run_observation_job, step_config, step_new, step_open,
-    step_welcome, surface_agent_tab_intent_error, sync_runtime_sessions,
-    sync_terminal_selection_motions, visit_garden_agent, work_run_control_projection,
-    workspace_has_unsaved_surface, workspace_help_context, workspace_navigation_target,
-    workspace_terminal_attachments,
+    Target, Terminal, TerminalRef, TerminalViewProjection, Utc, Welcome, WelcomeStep, Workspace,
+    WorkspaceConfigContext, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
+    WorkspaceDrawerFocus, WorkspaceEntryPolicy, WorkspaceInputRoute, WorkspaceIoRuntime,
+    WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceStep, WorkspaceView,
+    activate_focused_interrupted_tab, activate_workspace_responsive, adjust_project_bar_pointer,
+    adopt_session_command_lane, apply_drawer_header_while_director_open, apply_restore_completion,
+    begin_session_command, close_exited_panes, closes_workspace_help,
+    compose_workspace_shell_frame, controller_terminal_view, deliver_carried_outcome,
+    director_drawer_projection, dismiss_pr_modal_on_project_bar_click,
+    drain_pane_completions_into_runtime, drain_pane_launches, drain_session_completions,
+    drain_session_refresh, enqueue_pane_launch, enter_workspace, enter_workspace_deck,
+    entry_help_context, fail_terminal_launch, focus_workspace_drawer_from_pointer,
+    foreground_terminal_geometry, garden_fits, garden_shell_owned_wake,
+    handle_interrupted_removal_confirmation, home_header_action_at,
+    intercept_live_terminal_control, managed_background_terminal,
+    managed_background_terminal_geometry, new_project_notice, open_director_from_new_button,
+    open_failure_notice, open_from_registry, opens_workspace_help, prepare_activation_settings,
+    prepare_batch_settings, prepare_deck_workspace, prepare_workspace_deck, project_bar,
+    project_controller_sessions, relative_time_clock, remember_registry_workspace,
+    remember_workspace_controller_state, remove_registry_paths, render_home, render_home_at,
+    render_missing_workspace_prompt, render_open, restore_workspace_closeup,
+    restore_workspace_controller_state, retarget_drawer_chords, right_pane_tab_at,
+    route_garden_input, route_pr_modal_click, route_workspace_input_before_reducer,
+    run_workspace_config, save_config_responsive, save_config_source_responsive, scroll_key_help,
+    select_right_pane_tab, session_name_for, sidebar_pointer_event, spawn_garden_observation_job,
+    spawn_restore_job, step_config, step_new, step_open, step_welcome,
+    surface_agent_tab_intent_error, sync_overlay_session_roots, sync_runtime_sessions,
+    sync_terminal_selection_motions, visit_garden_agent, workspace_has_unsaved_surface,
+    workspace_help_context, workspace_navigation_target, workspace_terminal_attachments,
 };
 
 /// Render a single static Home frame from a workspace snapshot, using the same
@@ -111,7 +109,7 @@ pub(super) struct FrameMaterialKey {
     pub(super) height: usize,
     pub(super) width: usize,
     pub(super) controller: (u64, u64),
-    pub(super) sessions: (u64, Option<SessionId>, u64),
+    pub(super) sessions: (u64, Option<SessionId>, u64, u64, u64, u64),
     pub(super) shell: u64,
     pub(super) metrics: u64,
     pub(super) terminal: (u64, u64, u64, u64),
@@ -121,7 +119,6 @@ pub(super) struct FrameMaterialKey {
     /// The other projects' rabbits are draw material this loop owns, so their
     /// change has to reach the key that admits a rebuild.
     pub(super) garden_observations: u64,
-    pub(super) work_run_revision: u64,
     pub(super) now: DateTime<Utc>,
 }
 
@@ -140,7 +137,6 @@ impl FrameMaterialKey {
             && self.animation == other.animation
             && self.create_pending == other.create_pending
             && self.garden_observations == other.garden_observations
-            && self.work_run_revision == other.work_run_revision
             && self.now == other.now
     }
 }
@@ -174,6 +170,7 @@ pub(super) fn home_frame_material(
         metrics,
         health,
         Arc::new(git_diffs.clone()),
+        Arc::new(BTreeMap::new()),
         managed_terminal_view,
         root_terminal_view.as_deref(),
         create_pending,
@@ -196,6 +193,7 @@ pub(super) fn home_frame_material_shared(
     metrics: Option<usagi_core::infrastructure::ipc::DaemonMetrics>,
     health: crate::usecase::application::daemon_health::DaemonHealthTracker,
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    artifact_counts: Arc<BTreeMap<SessionId, ArtifactCount>>,
     managed_terminal_view: Option<Arc<TerminalViewProjection>>,
     root_terminal_view: Option<&TerminalViewProjection>,
     create_pending: Option<&str>,
@@ -222,6 +220,7 @@ pub(super) fn home_frame_material_shared(
         // other renderer input, so an idle Home still skips redraws.
         .with_health(health)
         .with_shared_git_diffs(git_diffs)
+        .with_artifact_counts(artifact_counts)
         .with_shared_terminal_view(managed_terminal_view)
         .with_director_drawer(runtime.director_projection().clone())
         .with_root_terminal_drawer(root_terminal_projection)
@@ -260,6 +259,11 @@ pub(super) fn home_frame_material_shared(
             .agent_launch_error()
             .map(|error| error.message.clone()),
         force_remove_confirmation,
+        note_editor: runtime
+            .state()
+            .note_editor()
+            .filter(|_| runtime.state().overlay() == Some(Overlay::Notes))
+            .cloned(),
         environment_editor: runtime.state().environment_editor().cloned(),
         role_editor: runtime.state().role_editor().cloned(),
         // Garden canonicalization happens only after every composition-owned
@@ -351,6 +355,34 @@ pub(super) fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> 
                 heading,
                 "Previous removal failed. Changes may be discarded.",
             ),
+        );
+    }
+    render_home_editors(material, frame)
+}
+
+fn render_home_editors(material: &HomeFrameMaterial, frame: Vec<String>) -> Vec<String> {
+    if let Some(editor) = &material.note_editor {
+        let label = editor
+            .target()
+            .session_id()
+            .map_or("workspace", |id| material.projection.label_for_session(id));
+        if material.projection.mode() == crate::usecase::application::controller::HomeMode::Switch
+            && editor.section() == crate::usecase::application::controller::NoteSection::Note
+        {
+            return super::views::workspace::render_memo_editor_over(
+                material.height,
+                material.width,
+                &frame,
+                editor,
+                label,
+            );
+        }
+        return super::views::scratchpad_modal::render_notes_for_over(
+            material.height,
+            material.width,
+            &frame,
+            editor,
+            label,
         );
     }
     if let Some(editor) = &material.environment_editor {
@@ -493,21 +525,14 @@ pub(super) fn drain_controller_host_actions(
                     .session
                     .map_or(Target::Root(request.workspace), Target::Session);
                 pending_targets.insert(request.operation_id, target);
-                if let Some(goal) = &request.goal {
-                    runtime.on_effect(&Effect::LaunchGoal {
-                        workspace: request.workspace,
-                        operation_id: request.operation_id,
-                        profile: request.profile.clone(),
-                        goal: goal.clone(),
-                    });
-                } else {
-                    runtime.on_effect(&Effect::LaunchAgent {
-                        workspace: request.workspace,
-                        session: request.session,
-                        operation_id: request.operation_id,
-                        profile: request.profile.clone(),
-                    });
-                }
+
+                runtime.on_effect(&Effect::LaunchAgent {
+                    workspace: request.workspace,
+                    session: request.session,
+                    operation_id: request.operation_id,
+                    profile: request.profile.clone(),
+                });
+
                 enqueue_pane_launch(
                     ui,
                     PaneLaunch::Agent {
@@ -515,7 +540,6 @@ pub(super) fn drain_controller_host_actions(
                         workspace: request.workspace,
                         session: request.session,
                         profile: request.profile,
-                        goal: request.goal,
                         resume: false,
                     },
                 );
@@ -536,7 +560,6 @@ pub(super) fn drain_controller_host_actions(
                         workspace: request.workspace,
                         session: Some(request.session),
                         profile: None,
-                        goal: None,
                         resume: true,
                     },
                 );
@@ -705,7 +728,6 @@ pub(super) fn drive_workspace_controller(
         available_models,
         default_model,
         default_branch,
-        work_mode,
         icon_mode,
     } = entry_policy;
     deck.set_icon_mode(icon_mode);
@@ -717,6 +739,14 @@ pub(super) fn drive_workspace_controller(
     let session_lifecycles = snapshot.session_lifecycles.clone();
     let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
+    let mut unified_port = Some(backend_factory.unified_search(&root_cwd));
+    let (unified_sender, unified_completions) =
+        mpsc::channel::<super::unified_search::Completion>();
+    let mut unified_job: Option<super::unified_search::Job> = None;
+    let mut knowledge_port = Some(backend_factory.knowledge_search(&root_cwd));
+    let (knowledge_sender, knowledge_completions) =
+        mpsc::channel::<super::knowledge_search::Completion>();
+    let mut knowledge_job: Option<super::knowledge_search::Job> = None;
     let composition = backend_factory.create(&snapshot, host);
     let session_catalogs = composition.session_catalogs;
     let mut backend = composition.backend;
@@ -726,7 +756,6 @@ pub(super) fn drive_workspace_controller(
     // Cross-project Garden observation. Its dedicated port is parked here while
     // no round is in flight, exactly like the restore lane's.
     let mut garden_inventory = Some(composition.garden_inventory);
-    let mut work_run_port = Some(composition.work_runs);
     // Resident session-inventory lane. The frame loop only wakes and drains it;
     // the observation itself never runs here (#551).
     let mut session_refresh = composition.session_refresh;
@@ -736,9 +765,12 @@ pub(super) fn drive_workspace_controller(
     // completion sink of a workspace is a clone of the same channel, so keeping
     // the newest is keeping all of them.
     let mut pending_session_refresh: Option<Completions> = None;
+    let mut overlay_session_revision = None;
     let (restore_sender, restore_completions) = mpsc::channel();
     let (garden_sender, garden_completions) = mpsc::channel::<GardenObservationCompletion>();
-    let (work_run_sender, work_run_completions) = mpsc::channel::<WorkRunLaneCompletion>();
+    let mut _garden_job = None;
+    let (output_sender, output_completions) = mpsc::channel::<super::output_search::Completion>();
+    let mut output_job: Option<super::output_search::Job> = None;
     let mut workspace =
         WorkspaceView::with_runtime_ids(snapshot.workspace, snapshot.state, session_ids.clone());
     workspace.set_session_lifecycles(session_lifecycles);
@@ -759,9 +791,11 @@ pub(super) fn drive_workspace_controller(
     let mut runtime =
         WorkspaceRuntime::with_selection_mode(workspace_id, session_ids, modal_selection_mode);
     adopt_session_command_lane(lane, &root_cwd, &mut ui);
-    restore_workspace_session_focus(deck, &root_cwd, &mut runtime);
+    restore_workspace_controller_state(deck, &root_cwd, &mut runtime);
     let mut pending_garden_visit = deck.take_garden_visit(&root_cwd);
     let mut pending_garden_agent = None;
+    let mut pending_palette_visit = deck.take_palette_visit(&root_cwd);
+    let mut palette_tab_revision = None;
     runtime.set_pr_auto_open(pr_auto_open);
     let role_catalog = session_catalogs.roles(&root_cwd);
     let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionRoleCatalog(
@@ -783,12 +817,12 @@ pub(super) fn drive_workspace_controller(
         });
     runtime.set_agent_models(available_models, default_model);
     runtime.set_client_build(backend_factory.client_build());
-    runtime.set_work_mode(work_mode);
     if let Some(error) = ui.take_agent_tab_intent_load_error() {
         surface_agent_tab_intent_error(&mut runtime, error);
     }
     let mut metrics_backend = MetricsBackend::new(composition.metrics);
     let mut metrics_projection = MetricsProjection::default();
+    let mut help_context: Option<super::views::key_help::State> = None;
     let mut pending_targets: std::collections::HashMap<OperationId, Target> =
         std::collections::HashMap::new();
     // The reducer hit-tests sidebar clicks and owns stable-identity double-click
@@ -804,6 +838,7 @@ pub(super) fn drive_workspace_controller(
     // Live-terminal scroll offset, drag selection, and copy feedback the reducer
     // does not own (design §4.2).
     let mut controls = LiveTerminalControls::default();
+    let mut decision_selection = super::decision_selection::DecisionTextSelection::default();
     // Seed the daemon-authoritative snapshots before the first frame so a
     // pending decision and another client's sessions are visible without
     // requiring a manual key binding. Both are wakes of a resident lane, not
@@ -825,13 +860,7 @@ pub(super) fn drive_workspace_controller(
     let mut garden_observation =
         ObservationLane::new(GARDEN_OBSERVATION_INTERVAL, GARDEN_OBSERVATION_BACKOFF);
     let mut garden_observations = 0_u64;
-    let mut work_run_observation =
-        ObservationLane::new(WORK_RUN_OBSERVATION_INTERVAL, WORK_RUN_OBSERVATION_BACKOFF);
-    let mut work_runs = WorkRunProjection::default();
-    let mut work_run_control = WorkRunControl::default();
-    let mut help_context: Option<super::views::key_help::State> = None;
-    let mut pending_work_run_control = None;
-    let mut work_run_revision = 0_u64;
+
     // Filesystem hint for the inline create form. It is off the frame budget:
     // no scan happens while the form is closed (#554).
     let mut worktree_hint = SessionWorktreeHint::new(composition.session_worktrees);
@@ -841,7 +870,7 @@ pub(super) fn drive_workspace_controller(
     let mut drawn_material: Option<HomeFrameMaterial> = None;
     // Owned daemon row/path material is rebuilt only when its authoritative
     // inputs change. The cache never feeds commands back into the controller.
-    let mut session_material_key: Option<(u64, Option<SessionId>, u64)> = None;
+    let mut session_material_key: Option<(u64, Option<SessionId>, u64, u64, u64, u64)> = None;
     let mut sessions: Arc<[ProjectedSession]> = Arc::from([]);
     let mut metrics_sessions = Vec::new();
     let mut terminal_material_key: Option<(Option<TerminalRef>, u64, u64, Geometry)> = None;
@@ -948,6 +977,7 @@ pub(super) fn drive_workspace_controller(
             session_refresh.as_mut(),
             &mut pending_session_refresh,
         );
+        sync_overlay_session_roots(&mut backend, &ui, &mut overlay_session_revision);
         let worktree_names = worktree_hint.names(
             runtime.state().create_session_form().is_some(),
             ui.workspace.path(),
@@ -961,6 +991,37 @@ pub(super) fn drive_workspace_controller(
         if let Some(visit) = pending_garden_visit.take() {
             let _ = runtime.apply_event(AppEvent::VisitSession(visit.session));
             pending_garden_agent = visit.agent.map(|agent| (visit.session, agent));
+        }
+        if let Some((session, destination)) = deck.take_attention_visit(&root_cwd)
+            && session.is_none_or(|id| ui.workspace.session_ids().contains(&id))
+        {
+            use super::workspace_deck::AttentionDestination;
+            if let Some(session) = session {
+                let _ = runtime.apply_event(AppEvent::VisitSession(session));
+            }
+            let key = match destination {
+                AttentionDestination::Decisions => Some(AppKey::OpenDecisions),
+                AttentionDestination::Decision(decision_id) => {
+                    Some(AppKey::OpenDecision(decision_id))
+                }
+                AttentionDestination::PullRequests if runtime.state().active() == session => {
+                    Some(AppKey::OpenPrs)
+                }
+                AttentionDestination::PullRequest(identity)
+                    if runtime.state().active() == session =>
+                {
+                    Some(AppKey::OpenPullRequest(identity))
+                }
+                AttentionDestination::PullRequests
+                | AttentionDestination::PullRequest(_)
+                | AttentionDestination::Session => None,
+            };
+            if let Some(key) = key {
+                let effects = runtime.apply_event(AppEvent::Key(key));
+                if let Some(step) = dispatch_reducer_effects(&mut backend, effects) {
+                    return Ok(step);
+                }
+            }
         }
         // After the one-shot entry restores above: both apply events that close
         // an overlay, so delivering earlier would dismiss the create-failure
@@ -992,6 +1053,33 @@ pub(super) fn drive_workspace_controller(
                 surface_agent_tab_intent_error(&mut runtime, error);
             }
         }
+        if let Some((workspace, action)) = pending_palette_visit.as_ref() {
+            let waiting_for_tabs =
+                matches!(action, super::workspace_deck::palette::Action::Tab { .. })
+                    && !runtime.palette_action_available(*workspace, action)
+                    && (restore_retry.in_flight
+                        || (restore_commands.is_some() && restore_retry.next_retry_at.is_some()));
+            if !waiting_for_tabs {
+                match super::terminal_io::visit_palette_target(
+                    &mut ui,
+                    &mut runtime,
+                    *workspace,
+                    action,
+                ) {
+                    Ok(effects) => {
+                        if let Some(step) = dispatch_reducer_effects(&mut backend, effects) {
+                            return Ok(step);
+                        }
+                    }
+                    Err(message) => {
+                        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(
+                            Notice::new(message),
+                        )));
+                    }
+                }
+                pending_palette_visit = None;
+            }
+        }
         if let Some((session, agent)) = pending_garden_agent {
             let selected = visit_garden_agent(
                 &mut ui,
@@ -1009,9 +1097,48 @@ pub(super) fn drive_workspace_controller(
                 pending_garden_agent = None;
             }
         }
+        if let Some(job) = &unified_job {
+            job.cancel_unless_current(deck.unified_search_token());
+        }
+        for completion in unified_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            if deck.apply_unified_response(completion.token, completion.response) {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            unified_port = Some(completion.port);
+            unified_job = None;
+        }
+        if let Some(job) = &knowledge_job {
+            job.cancel_unless_current(deck.knowledge_search_token());
+        }
+        for completion in knowledge_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            if deck.apply_knowledge_response(completion.token, completion.response) {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            knowledge_port = Some(completion.port);
+            knowledge_job = None;
+        }
+        for completion in output_completions.try_iter().take(FRAME_EVENT_BUDGET) {
+            if deck.apply_output_search(completion.token, completion.responses) {
+                garden_observations = garden_observations.wrapping_add(1);
+            }
+            garden_inventory = Some(completion.port);
+            output_job = None;
+        }
+        if let Some(job) = &output_job {
+            job.cancel_unless_current(deck.output_search_token());
+        }
+        if deck.expire_attention(std::time::Instant::now()) {
+            garden_observations = garden_observations.wrapping_add(1);
+        }
         for completion in garden_completions.try_iter().take(FRAME_EVENT_BUDGET) {
-            let observed = !completion.inventories.is_empty();
+            let observed = completion
+                .attention
+                .iter()
+                .any(|(_, result)| result.is_ok());
             let mut changed = false;
+            for (workspace, result) in completion.attention {
+                changed |= deck.apply_attention(workspace, result);
+            }
             for inventory in &completion.inventories {
                 changed |= deck.apply_garden_inventory(inventory);
             }
@@ -1021,49 +1148,7 @@ pub(super) fn drive_workspace_controller(
             garden_inventory = Some(completion.port);
             garden_observation.complete(restore_clock.elapsed(), observed);
         }
-        for completion in work_run_completions.try_iter().take(FRAME_EVENT_BUDGET) {
-            match completion {
-                WorkRunLaneCompletion::Observation { port, snapshot } => {
-                    let observed = snapshot.is_ok();
-                    let next = match snapshot {
-                        Ok(snapshot) => WorkRunProjection::fresh(snapshot.runs),
-                        Err(_) => work_runs.clone().unavailable(),
-                    };
-                    if next != work_runs {
-                        work_runs = next;
-                        work_run_control.sync_selection(work_runs.runs());
-                        work_run_revision = work_run_revision.wrapping_add(1);
-                    }
-                    work_run_port = Some(port);
-                    work_run_observation.complete(restore_clock.elapsed(), observed);
-                }
-                WorkRunLaneCompletion::Control {
-                    port,
-                    operation_id,
-                    result,
-                } => {
-                    let result = *result;
-                    let previous_control = work_run_control.clone();
-                    let accepted = work_run_control.complete(operation_id, &result);
-                    if accepted && let Ok(result) = &result {
-                        match result {
-                            WorkRunControlResult::Updated(run) => {
-                                work_runs.apply_control(run.as_ref().clone());
-                            }
-                            WorkRunControlResult::Deleted(deletion) => {
-                                work_runs.apply_deletion(*deletion);
-                                work_run_control.sync_selection(work_runs.runs());
-                            }
-                        }
-                    }
-                    if work_run_control != previous_control || accepted {
-                        work_run_revision = work_run_revision.wrapping_add(1);
-                    }
-                    work_run_port = Some(port);
-                    work_run_observation.refresh_now();
-                }
-            }
-        }
+
         let (terminal_height, width) = term.size()?;
         let height = terminal_height.saturating_sub(PROJECT_BAR_ROWS);
         ui.set_terminal_size(height, width);
@@ -1103,6 +1188,19 @@ pub(super) fn drive_workspace_controller(
         }
         controls.retain_terminals(&live_terminals);
         controls.sync_focus(focused_terminal.as_ref());
+        if pending_palette_visit.is_none()
+            && let Some(message) = super::output_search::focus_match(
+                deck,
+                &ui,
+                &mut controls,
+                focused_terminal.as_ref(),
+                usize::from(geometry.rows),
+            )
+        {
+            let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                message,
+            ))));
+        }
         let screen_revision = focused_terminal
             .as_ref()
             .and_then(|terminal| ui.terminal_projection_key(terminal))
@@ -1214,13 +1312,10 @@ pub(super) fn drive_workspace_controller(
             runtime.material_key(),
             ui.material_revision,
             director_terminal_generation,
-            work_run_revision,
         );
         if director_material_key != Some(next_director_key) {
             let drawer_projection =
-                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref())
-                    .with_work_runs(work_runs.clone())
-                    .with_work_run_control(work_run_control_projection(&work_run_control));
+                director_drawer_projection(&ui, &runtime, director_terminal_view.as_deref());
             runtime.set_director_projection(drawer_projection);
             director_material_key = Some(next_director_key);
         }
@@ -1238,6 +1333,9 @@ pub(super) fn drive_workspace_controller(
             ui.workspace.material_revision(),
             ui.removing_session,
             runtime.state().session_pr_revision(),
+            runtime.state().session_order_revision(),
+            runtime.state().note_revision(),
+            runtime.state().session_favorites_revision(),
         );
         let sessions_changed = session_material_key != Some(next_session_key);
         if sessions_changed {
@@ -1248,6 +1346,21 @@ pub(super) fn drive_workspace_controller(
                 .map(|session| (session.id, session.cwd.clone()))
                 .collect();
             session_material_key = Some(next_session_key);
+        }
+        // Retain only tab metadata for inactive projects; output stays with the
+        // resident runtime. Refresh membership before painting or accepting input.
+        let tab_revision = runtime.panes().revision();
+        let unified_changed = if sessions_changed || palette_tab_revision != Some(tab_revision) {
+            deck.update_palette_tabs(&runtime);
+            palette_tab_revision = Some(tab_revision);
+            deck.refresh_unified_navigation()
+        } else {
+            false
+        };
+        if unified_changed || deck.refresh_command_palette_selection() {
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
         }
         // Reflux daemon metrics / git diffs through the backend drain instead of
         // polling the port inline: the shell folds the updates into its own
@@ -1293,7 +1406,6 @@ pub(super) fn drive_workspace_controller(
                 .as_ref()
                 .map(|create| create.name.clone()),
             garden_observations,
-            work_run_revision,
             now,
         };
         if frame_source_key.as_ref() != Some(&next_source_key) {
@@ -1306,6 +1418,7 @@ pub(super) fn drive_workspace_controller(
                 metrics_projection.metrics(),
                 metrics_projection.health(),
                 metrics_projection.shared_git_diffs(),
+                metrics_projection.shared_artifact_counts(),
                 if runtime.state().workspace_drawer_open() {
                     background_terminal_view.as_ref().map(Arc::clone)
                 } else {
@@ -1319,8 +1432,7 @@ pub(super) fn drive_workspace_controller(
                 icon_mode,
             )
             .with_agent_inventory(ui.agent_inventory(), runtime.panes())
-            .with_work_runs(work_runs.clone())
-            .with_workspace_deck_garden(deck)
+            .with_workspace_deck(deck)
             .with_garden_animation(animation, garden_reduced_motion);
             let mut next_frame_key = next_source_key.clone();
             if garden_open {
@@ -1339,7 +1451,18 @@ pub(super) fn drive_workspace_controller(
             if frame_changed
                 && (!controller_may_be_noop || drawn_material.as_ref() != Some(&material))
             {
-                let home = render_home_material(&material);
+                let mut home = render_home_material(&material);
+                decision_selection.sync(
+                    &home,
+                    height,
+                    width,
+                    runtime.state().decision_overlay().filter(|_| {
+                        runtime.state().overlay() == Some(Overlay::Decisions)
+                            && help_context.is_none()
+                            && !deck.overlay_open()
+                    }),
+                );
+                decision_selection.paint(&mut home, width);
                 let frame = compose_workspace_shell_frame(deck, height, width, &home);
                 let frame = match help_context {
                     Some(help) => {
@@ -1353,12 +1476,52 @@ pub(super) fn drive_workspace_controller(
             frame_source_key = Some(next_source_key);
             frame_material_key = Some(next_frame_key);
         }
-        // The other open projects' Agents, observed only while the Garden is the
-        // frame. The active project keeps its own controller's richer phases.
-        if garden_inventory.is_some()
-            && garden_observation.begin_if_due(garden_open, restore_clock.elapsed())
+        if unified_job.is_none()
+            && unified_port.is_some()
+            && let Some((token, request)) = deck.take_unified_request()
         {
-            let targets = deck.observable_workspaces();
+            unified_job = Some(super::unified_search::spawn(
+                unified_port
+                    .take()
+                    .expect("search admission checked the port"),
+                token,
+                request,
+                unified_sender.clone(),
+            ));
+        }
+        if knowledge_job.is_none()
+            && knowledge_port.is_some()
+            && let Some((token, request)) = deck.take_knowledge_request()
+        {
+            knowledge_job = Some(super::knowledge_search::spawn(
+                knowledge_port
+                    .take()
+                    .expect("search admission checked the port"),
+                token,
+                request,
+                knowledge_sender.clone(),
+            ));
+        }
+        // Attention is always observed; detailed Agent inventory is only read
+        // while Garden is visible. Both use the same bounded background lane.
+        if garden_inventory.is_some()
+            && let Some((token, query, workspaces)) = deck.take_output_search()
+        {
+            let port = garden_inventory
+                .take()
+                .expect("search admission checked the port");
+            output_job = Some(super::output_search::spawn(
+                port,
+                token,
+                query,
+                workspaces,
+                output_sender.clone(),
+            ));
+        }
+        if garden_inventory.is_some()
+            && garden_observation.begin_if_due(true, restore_clock.elapsed())
+        {
+            let targets = deck.attention_workspaces();
             if targets.is_empty() {
                 // The only open project is the one this loop already draws.
                 garden_observation.complete(restore_clock.elapsed(), true);
@@ -1366,25 +1529,15 @@ pub(super) fn drive_workspace_controller(
                 let port = garden_inventory
                     .take()
                     .expect("the Garden observation port was checked above");
-                spawn_garden_observation_job(port, targets, garden_sender.clone());
+                _garden_job = Some(spawn_garden_observation_job(
+                    port,
+                    targets,
+                    garden_open,
+                    garden_sender.clone(),
+                ));
             }
         }
-        if work_run_port.is_some() && pending_work_run_control.is_some() {
-            let port = work_run_port
-                .take()
-                .expect("the Work Run control port was checked above");
-            let request = pending_work_run_control
-                .take()
-                .expect("the Work Run control request was checked above");
-            spawn_work_run_control_job(port, workspace_id, request, work_run_sender.clone());
-        } else if work_run_port.is_some()
-            && work_run_observation.begin_if_due(true, restore_clock.elapsed())
-        {
-            let port = work_run_port
-                .take()
-                .expect("the Work Run observation port was checked above");
-            spawn_work_run_observation_job(port, workspace_id, work_run_sender.clone());
-        }
+
         if restore_commands.is_some() && restore_retry.begin_if_due(restore_clock.elapsed()) {
             let port = restore_commands
                 .take()
@@ -1403,6 +1556,10 @@ pub(super) fn drive_workspace_controller(
         // Contextual New is retargeted once here so PTY forwarding, pane
         // controls, and the reducer all see one normalized key.
         let raw_key = retarget_drawer_chords(&runtime, term.read_key()?);
+        // A delayed restore must not steal focus after the user starts another action.
+        if !matches!(raw_key, Key::Other) && pending_palette_visit.take().is_some() {
+            deck.pending_output_hit = None;
+        }
         if handle_interrupted_removal_confirmation(&raw_key, &mut ui, &mut runtime) {
             // This prompt is the exclusive frontmost owner. In particular,
             // Ctrl-D and pane-close chords never reach a live tab behind it.
@@ -1424,11 +1581,10 @@ pub(super) fn drive_workspace_controller(
             // being described.
             continue;
         }
-        if opens_workspace_help(&raw_key, deck, &runtime, &work_run_control) {
-            help_context = Some(super::views::key_help::State::new(
-                workspace_help_context(deck, &runtime, &work_run_control),
-                runtime.state().work_mode(),
-            ));
+        if opens_workspace_help(&raw_key, deck, &runtime) {
+            help_context = Some(super::views::key_help::State::new(workspace_help_context(
+                deck, &runtime,
+            )));
             drawn_material = None;
             frame_source_key = None;
             frame_material_key = None;
@@ -1463,6 +1619,48 @@ pub(super) fn drive_workspace_controller(
         if opens_add {
             deck.open_add(&registry);
             registry_refresh_due = std::time::Duration::ZERO;
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenAttention))
+            || matches!(bar_target, Some(ProjectBarTarget::Attention))
+        {
+            deck.open_attention();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenUnifiedSearch)) {
+            deck.open_unified_search(
+                runtime
+                    .state()
+                    .file_preview_target()
+                    .and_then(Target::session_id),
+            );
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenKnowledgeSearch)) {
+            deck.open_knowledge_search();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenOutputSearch)) {
+            deck.open_output_search();
+            drawn_material = None;
+            frame_source_key = None;
+            frame_material_key = None;
+            continue;
+        }
+        if matches!(key, Key::Live(LiveTerminalAction::OpenCommandPalette)) {
+            deck.open_command_palette();
             drawn_material = None;
             frame_source_key = None;
             frame_material_key = None;
@@ -1506,7 +1704,7 @@ pub(super) fn drive_workspace_controller(
                     &prepared.workspace.path,
                 )
             {
-                remember_workspace_session_focus(deck, runtime.state());
+                remember_workspace_controller_state(deck, runtime.state());
                 if preserve_closeup {
                     deck.schedule_closeup(prepared.workspace.path.clone());
                 }
@@ -1518,7 +1716,110 @@ pub(super) fn drive_workspace_controller(
             continue;
         }
         if deck.overlay_open() {
-            match deck.handle_overlay_key(&key) {
+            let intent = deck.handle_overlay_key_at(&key, height, width);
+            let intent = if let OverlayIntent::OutputVisit(hit) = intent {
+                let action = hit.action();
+                let path = hit.path.clone();
+                let workspace = hit.source.terminal.workspace_id;
+                deck.pending_output_hit = Some(*hit);
+                OverlayIntent::PaletteVisit {
+                    path,
+                    workspace,
+                    action,
+                }
+            } else {
+                intent
+            };
+            match intent {
+                OverlayIntent::OutputVisit(_) => unreachable!("search visits are normalized above"),
+                OverlayIntent::PaletteVisit {
+                    path,
+                    workspace,
+                    action,
+                } => {
+                    if runtime.palette_navigation_blocked()
+                        || workspace_has_unsaved_surface(&runtime)
+                    {
+                        deck.pending_output_hit = None;
+                        deck.set_notice(
+                            "Close the palette and finish the current dialog or draft first.",
+                        );
+                    } else if path == deck.active_path() {
+                        match super::terminal_io::visit_palette_target(
+                            &mut ui,
+                            &mut runtime,
+                            workspace,
+                            &action,
+                        ) {
+                            Ok(effects) => {
+                                deck.close_overlay();
+                                if let Some(step) = dispatch_reducer_effects(&mut backend, effects)
+                                {
+                                    return Ok(step);
+                                }
+                            }
+                            Err(message) => {
+                                deck.pending_output_hit = None;
+                                deck.set_notice(message);
+                            }
+                        }
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                        && prepared.workspace_id == workspace
+                        && action
+                            .session()
+                            .is_none_or(|session| prepared.session_ids.contains(&session))
+                        && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        )
+                    {
+                        deck.schedule_palette_visit(path, workspace, action);
+                        remember_workspace_controller_state(deck, runtime.state());
+                        return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                    } else {
+                        super::restore_prepared_workspace(&mut loader, &root_cwd);
+                        deck.pending_output_hit = None;
+                        deck.set_notice("Target is unavailable; refresh and select again.");
+                    }
+                }
+                OverlayIntent::AttentionVisit {
+                    path,
+                    workspace,
+                    session,
+                    destination,
+                } => {
+                    if workspace_has_unsaved_surface(&runtime) {
+                        deck.set_notice("Save or cancel the current draft before switching.");
+                    } else if path == deck.active_path() {
+                        if workspace == runtime.state().workspace() {
+                            deck.close_overlay();
+                            deck.schedule_attention_visit(path, session, destination);
+                        }
+                    } else if let Some(prepared) =
+                        prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
+                        && prepared.workspace_id == workspace
+                        && session.is_none_or(|id| prepared.session_ids.contains(&id))
+                        && prepare_activation_settings(
+                            &mut workspace_config,
+                            &mut loader,
+                            deck,
+                            &root_cwd,
+                            &prepared.workspace.path,
+                        )
+                    {
+                        deck.schedule_attention_visit(path, session, destination);
+                        remember_workspace_controller_state(deck, runtime.state());
+                        return Ok(WorkspaceStep::Activate(Box::new(prepared)));
+                    } else {
+                        super::restore_prepared_workspace(&mut loader, &root_cwd);
+                        deck.pending_output_hit = None;
+                        deck.set_notice("Target is unavailable; refresh and select again.");
+                    }
+                }
                 OverlayIntent::Stay => {}
                 OverlayIntent::Cancel => deck.close_overlay(),
                 OverlayIntent::Activate(path) => {
@@ -1536,7 +1837,7 @@ pub(super) fn drive_workspace_controller(
                             &prepared.workspace.path,
                         )
                     {
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -1563,7 +1864,7 @@ pub(super) fn drive_workspace_controller(
                         )
                     {
                         deck.schedule_garden_visit(prepared.workspace.path.clone(), session, None);
-                        remember_workspace_session_focus(deck, runtime.state());
+                        remember_workspace_controller_state(deck, runtime.state());
                         return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                     }
                 }
@@ -1643,7 +1944,7 @@ pub(super) fn drive_workspace_controller(
                                 if let Some(loader) = loader.as_mut() {
                                     let _ = (**loader).record_unite(&deck.paths());
                                 }
-                                remember_workspace_session_focus(deck, runtime.state());
+                                remember_workspace_controller_state(deck, runtime.state());
                                 return Ok(WorkspaceStep::Activate(Box::new(first)));
                             }
                         }
@@ -1674,11 +1975,14 @@ pub(super) fn drive_workspace_controller(
                             &prepared.workspace.path,
                         ) {
                             deck.close_path(&path);
-                            remember_workspace_session_focus(deck, runtime.state());
+                            remember_workspace_controller_state(deck, runtime.state());
                             return Ok(WorkspaceStep::Activate(Box::new(prepared)));
                         }
                     } else {
                         deck.close_path(&path);
+                        if let Some(loader) = loader.as_mut() {
+                            super::remember_project_deck(*loader, deck);
+                        }
                         if let Some(loader) = loader.as_mut()
                             && let Err(error) = (**loader).record_unite(&deck.paths())
                         {
@@ -1712,6 +2016,16 @@ pub(super) fn drive_workspace_controller(
         let idle = idle_watch.observe(&key, pointer_clock.elapsed());
         if garden_fits(height, width) {
             let _ = runtime.apply_event(AppEvent::IdleElapsed(idle));
+        }
+        // Project-bar actions own their row first. Selection/copy is still
+        // user activity and must reset the idle deadline before consuming input.
+        let selection_revision = decision_selection.revision();
+        if decision_selection.handle_input(&key, term) {
+            if decision_selection.revision() != selection_revision {
+                frame_source_key = None;
+                frame_material_key = None;
+            }
+            continue;
         }
         // The Garden consumes input before the covered pane. List scrolling
         // and clicks need the drawn viewport below; other shell-owned input
@@ -1774,7 +2088,7 @@ pub(super) fn drive_workspace_controller(
                     visit.session,
                     visit.agent,
                 );
-                remember_workspace_session_focus(deck, runtime.state());
+                remember_workspace_controller_state(deck, runtime.state());
                 return Ok(WorkspaceStep::Activate(Box::new(prepared)));
             }
             let notice = deck.notice().map(str::to_owned);
@@ -1812,49 +2126,9 @@ pub(super) fn drive_workspace_controller(
         });
         let director_new_effects = drawer_header_effects
             .is_none()
-            .then(|| {
-                open_director_from_new_button(
-                    &mut runtime,
-                    &key,
-                    height,
-                    width,
-                    work_run_control.mode(),
-                )
-            })
+            .then(|| open_director_from_new_button(&mut runtime, &key, height, width))
             .flatten();
         let director_new_clicked = director_new_effects.is_some();
-        if drawer_header_effects.is_some() || director_new_clicked {
-            let previous = work_run_control.clone();
-            work_run_control.suspend();
-            if work_run_control != previous {
-                work_run_revision = work_run_revision.wrapping_add(1);
-            }
-        }
-        let work_run_input =
-            if garden_route.is_none() && drawer_header_effects.is_none() && !director_new_clicked {
-                let previous = work_run_control.clone();
-                let input = handle_work_run_control_input_with_ui(
-                    Some(&mut ui),
-                    &mut runtime,
-                    &mut work_run_control,
-                    &work_runs,
-                    &key,
-                );
-                if work_run_control != previous {
-                    work_run_revision = work_run_revision.wrapping_add(1);
-                }
-                input
-            } else {
-                None
-            };
-        if let Some(WorkRunControlInput {
-            outcome: WorkRunControlOutcome::Submit(request),
-            ..
-        }) = work_run_input.as_ref()
-        {
-            pending_work_run_control = Some(request.clone());
-        }
-        let work_run_effects = work_run_input.map(|input| input.effects);
         let input_route = match garden_route {
             Some(GardenInputRoute::Local(effects)) => WorkspaceInputRoute::Garden(effects),
             Some(GardenInputRoute::Agent(effects)) => {
@@ -1867,9 +2141,6 @@ pub(super) fn drive_workspace_controller(
             }
             None if director_new_clicked => WorkspaceInputRoute::Drawer(
                 director_new_effects.expect("matched Director New button"),
-            ),
-            None if work_run_effects.is_some() => WorkspaceInputRoute::Drawer(
-                work_run_effects.expect("matched Work Run control input"),
             ),
             None => route_workspace_input_before_reducer(
                 &mut ui,
@@ -1968,6 +2239,7 @@ pub(super) fn drive_workspace_controller(
                         Vec::new()
                     }
                     (None, None) => runtime.apply_event(sidebar_pointer_event(
+                        drawn_material.as_ref(),
                         column,
                         row,
                         pointer_clock.elapsed(),
@@ -2038,7 +2310,6 @@ pub(super) fn drive_workspace_controller(
                 // A newly saved Agent default applies to the next `agent`
                 // command without reopening the workspace.
                 runtime.set_agent_models(context.available_models, effective.default_model);
-                runtime.set_work_mode(effective.work_mode);
                 let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionBranchCatalog(
                     session_catalogs.branches(&root_cwd, effective.default_branch.as_deref()),
                 )));
@@ -2158,6 +2429,14 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
     let mut registry = workspaces.clone();
     let mut welcome = Welcome::new(recent);
     welcome.set_notice(notice);
+    match loader.last_projects() {
+        Ok(Some(last)) => welcome.set_last_projects(Some(last)),
+        Ok(None) => {}
+        Err(error) => {
+            welcome.set_last_projects(None);
+            welcome.set_notice(Some(format!("Could not read last projects: {error}")));
+        }
+    }
     let mut open = open_from_registry(workspaces, welcome.all_recent());
     let mut new_form = New::default();
     let mut config_form = Config::load_with_available_models(settings, available_models);
@@ -2200,9 +2479,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             }
         }
         if let Some(snapshot) = created_snapshot {
-            if !registry_contains_path(&registry, &snapshot.workspace.path) {
-                registry.push(snapshot.workspace.clone());
-            }
+            remember_registry_workspace(&mut registry, &snapshot.workspace);
             welcome.record_opened(&snapshot.workspace);
             open.record_opened(&snapshot.workspace);
             if let Some(exit) = enter_workspace(
@@ -2216,6 +2493,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             )? {
                 return Ok(exit);
             }
+            super::refresh_entry_projects(loader, &mut welcome, &mut open);
             screen = Screen::Welcome;
             drawn_material = None;
             continue;
@@ -2251,15 +2529,12 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             continue;
         }
         if key == Key::Help {
-            help_context = Some(super::views::key_help::State::new(
-                entry_help_context(
-                    screen,
-                    &open,
-                    &config_form,
-                    missing_workspace_prompt.is_some(),
-                ),
-                WorkMode::Classic,
-            ));
+            help_context = Some(super::views::key_help::State::new(entry_help_context(
+                screen,
+                &open,
+                &config_form,
+                missing_workspace_prompt.is_some(),
+            )));
             drawn_material = None;
             continue;
         }
@@ -2274,10 +2549,10 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 {
                     let paths = prompt.paths.clone();
                     missing_workspace_prompt = None;
-                    let candidates = registry
-                        .iter()
+                    let candidates = open
+                        .workspaces()
+                        .into_iter()
                         .filter(|workspace| paths.contains(&workspace.path))
-                        .cloned()
                         .collect::<Vec<_>>();
                     let removed = loader.cleanup_missing(&candidates)?;
                     open.remove_paths(&removed);
@@ -2328,14 +2603,13 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     config_form = Config::load_with_available_models(settings, available_models);
                     screen = Screen::Config;
                 }
-                WelcomeStep::OpenRecent(index) => {
-                    // `Welcome` only creates this action for a visible Recent
-                    // number, so the index is fenced by the same model.
-                    let recent = &welcome.recent()[index];
-                    let paths = recent_paths(recent);
-                    if paths.is_empty() {
-                        continue;
-                    }
+                WelcomeStep::Resume => {
+                    // Resume is offered only for a validated, nonempty saved set.
+                    let last = welcome
+                        .last_projects()
+                        .expect("Resume has a saved set")
+                        .clone();
+                    let paths = last.paths;
                     match loader.missing_paths(&paths) {
                         Ok(missing) if !missing.is_empty() => {
                             missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
@@ -2349,7 +2623,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     }
                     // A workspace this daemon does not serve keeps the switcher on
                     // screen with the reason, so another Recent entry can be tried.
-                    let (snapshots, snapshot, deck) =
+                    let (snapshots, mut snapshot, mut deck) =
                         match prepare_workspace_deck(term, loader, &paths) {
                             Ok(prepared) => prepared,
                             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -2366,8 +2640,25 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                                 None => return Err(error),
                             },
                         };
+                    if let Some(active) = snapshots
+                        .iter()
+                        .find(|snapshot| snapshot.workspace.path == last.active)
+                    {
+                        if let Err(error) = activate_workspace_responsive(
+                            term,
+                            loader,
+                            &active.workspace.path,
+                            "Activating last project…",
+                        ) {
+                            welcome.set_notice(Some(error.to_string()));
+                            continue;
+                        }
+                        snapshot = active.clone();
+                        deck.activate_snapshot(active);
+                    }
                     welcome.set_notice(None);
                     for snapshot in &snapshots {
+                        remember_registry_workspace(&mut registry, &snapshot.workspace);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
@@ -2383,6 +2674,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
                     screen = Screen::Welcome;
                 }
             },
@@ -2391,7 +2683,12 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
                 OpenStep::Choose(paths) => {
-                    match loader.missing_paths(&paths) {
+                    let missing = if open.view() == super::views::open::OpenView::Directory {
+                        Ok(Vec::new())
+                    } else {
+                        loader.missing_paths(&paths)
+                    };
+                    match missing {
                         Ok(missing) if !missing.is_empty() => {
                             missing_workspace_prompt = Some(MissingWorkspacePrompt::new(missing));
                             continue;
@@ -2418,11 +2715,16 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                                     open.set_notice(Some(notice));
                                     continue;
                                 }
+                                None if open.view() == super::views::open::OpenView::Directory => {
+                                    open.set_notice(Some(error.to_string()));
+                                    continue;
+                                }
                                 None => return Err(error),
                             },
                         };
                     open.set_notice(None);
                     for snapshot in &snapshots {
+                        remember_registry_workspace(&mut registry, &snapshot.workspace);
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
                     }
@@ -2441,16 +2743,19 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
                     screen = Screen::Welcome;
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
+                    welcome.remove_paths(&removed);
                     remove_registry_paths(&mut registry, &removed);
                 }
                 OpenStep::ConfirmUnregister(path) => {
                     let removed = loader.unregister(&[path])?;
                     open.remove_paths(&removed);
+                    welcome.remove_paths(&removed);
                     remove_registry_paths(&mut registry, &removed);
                 }
             },
@@ -2461,6 +2766,9 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     if let Some(pending) = pending_create.as_mut() {
                         pending.cancelled = true;
                         new_form.finish_create();
+                    }
+                    if let Ok(Some(last)) = loader.last_projects() {
+                        welcome.set_last_projects(Some(last));
                     }
                     screen = Screen::Welcome;
                 }

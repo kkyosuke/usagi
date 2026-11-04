@@ -5,6 +5,7 @@
 //! the terminal reconnects, or scrollback advances: copy can never silently
 //! return characters from a newer screen.
 
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 use usagi_core::usecase::vt_screen::RetainedRowMotion;
 
@@ -230,19 +231,53 @@ fn ordered(a: TerminalPoint, b: TerminalPoint) -> (TerminalPoint, TerminalPoint)
     if a <= b { (a, b) } else { (b, a) }
 }
 
+/// Expand inclusive cell endpoints to complete graphemes for highlighting.
+/// Column widths match the scalar-based grid used by the terminal renderer.
+pub(crate) fn whole_grapheme_columns(
+    text: &str,
+    first: usize,
+    last: usize,
+    width: usize,
+) -> (usize, usize) {
+    let mut first = first.min(width);
+    let mut end = last.saturating_add(1).min(width);
+    for (start, stop, _) in grapheme_columns(text) {
+        if start < first && stop > first {
+            first = start;
+        }
+        if start < end && stop > end {
+            end = stop.min(width);
+        }
+    }
+    (first, end)
+}
+
+fn grapheme_columns(line: &str) -> impl Iterator<Item = (usize, usize, &str)> {
+    line.graphemes(true).scan(0, |column, grapheme| {
+        let start = *column;
+        *column += grapheme
+            .chars()
+            .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
+            .sum::<usize>();
+        Some((start, *column, grapheme))
+    })
+}
+
 fn extract_columns(line: &str, from: usize, to: usize) -> String {
     let mut result = String::new();
-    let mut column: usize = 0;
-    for character in line.chars() {
-        let width = UnicodeWidthChar::width(character).unwrap_or(0).max(1);
-        let end = column.saturating_add(width);
-        if end > from && column <= to {
-            result.push(character);
+    for (start, end, grapheme) in grapheme_columns(line) {
+        if start == end {
+            if !result.is_empty() {
+                result.push_str(grapheme);
+            }
+            continue;
         }
-        if column > to {
+        if end > from && start <= to {
+            result.push_str(grapheme);
+        }
+        if start > to {
             break;
         }
-        column = end;
     }
     result
 }
@@ -290,6 +325,26 @@ mod tests {
             TerminalSelection::begin(vec!["AあB".into()], TerminalPoint { row: 0, column: 3 });
         selection.extend(TerminalPoint { row: 0, column: 1 });
         assert_eq!(selection.text(), "あB");
+    }
+
+    #[test]
+    fn keeps_combining_marks_with_the_selected_cell_without_shifting_later_cells() {
+        for (column, expected) in [(0, "A"), (1, "e\u{301}"), (3, "界"), (4, "Z")] {
+            let selection = TerminalSelection::begin(
+                vec!["\u{301}Ae\u{301}界Z".into()],
+                TerminalPoint { row: 0, column },
+            );
+            assert_eq!(selection.text(), expected);
+        }
+    }
+
+    #[test]
+    fn retains_zero_width_separators_after_a_selected_grapheme() {
+        let selection = TerminalSelection::begin(
+            vec!["A\u{200b}B".into()],
+            TerminalPoint { row: 0, column: 0 },
+        );
+        assert_eq!(selection.text(), "A\u{200b}");
     }
 
     #[test]

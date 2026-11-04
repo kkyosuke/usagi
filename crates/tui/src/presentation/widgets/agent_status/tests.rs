@@ -90,9 +90,9 @@ fn every_phase_has_a_single_column_glyph_a_short_label_and_a_colour() {
             "{phase:?} の記号は 1 桁でなければ列がずれる"
         );
         let label = short_label(phase);
-        assert!(!label.is_empty());
+        assert_ne!(label, "");
         assert!(display_width(label) <= 5, "{phase:?} の label が長すぎる");
-        assert!(!super::label(phase).is_empty());
+        assert_ne!(super::label(phase), "");
         // 色を載せても表示桁は変わらない（ANSI は桁を持たない）。
         let painted = style(phase).paint(glyph(phase));
         assert_eq!(display_width(&painted), 1, "{phase:?}");

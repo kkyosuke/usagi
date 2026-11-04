@@ -145,11 +145,6 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
         if request.mode == LaunchMode::Headless && request.initial_prompt.is_none() {
             return Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt));
         }
-        if request.mode == LaunchMode::Headless && request.resume {
-            return Err(AdapterError::Validation(
-                LaunchValidationError::ProviderResumeMismatch,
-            ));
-        }
         let mut provision = self
             .provisioner
             .provision(&ProvisionContext::from_request(request))
@@ -513,7 +508,9 @@ mod tests {
         assert!(matches!(
             adapter.resolve(&headless_resume),
             Err(AdapterError::Validation(
-                LaunchValidationError::ProviderResumeMismatch
+                LaunchValidationError::UnsupportedCapability {
+                    capability: AgentCapability::HeadlessResume
+                }
             ))
         ));
     }

@@ -7,56 +7,54 @@ use usagi_core::infrastructure::daemon::InstanceLock as _;
 
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
+use usagi_daemon::usecase::lock_watch::CapacityWatch;
 
-use super::{tenant_control, workflow};
+use super::tenant_control;
+use serde::Deserialize as _;
 
 use super::{
-    ACCEPT_ERROR_BACKOFF, AdmissionGate, AgentConcurrencyGauge, AgentDecisionWaker, AgentPty,
-    AgentPtyObservation, Arc, AtomicBool, AtomicUsize, BROKER_IO_TIMEOUT, BROKER_OK,
-    BackgroundWorker, BootstrapBrokerRecord, BrokerActivity, BrokerIdlePolicy, BuildIdentity,
-    CLIENT_RETIREMENT_POLL, CapacityRefusalLog, CensusConnectionFence, ChildIdentity,
-    ClientWorkers, ClosePrProjectionOnExit, ConnectionCleanup, ConnectionShutdown,
-    ConnectionWorkspace, DEFAULT_GENERATION_LIMIT, DEFAULT_TENANT_LIMIT, DaemonBackgroundWorkers,
-    DaemonLauncher, DaemonPty, DaemonReady, DaemonRecord, DaemonRecordPort, DaemonRecordStore,
-    DaemonRequest, DaemonWorkspaceActivity, DeadlineConnection, DeadlineUnixStream, DispatchStore,
-    DispatchToolContext, Duration, ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS, EndpointCleanup,
-    EndpointLocator, EndpointObservation, ErrorCode, ErrorLog, FencedPrInventory, FileInstanceLock,
-    FileWorkspaceFence, FileWorkspaceFences, FsCustodyProbe, FsRecordFile, GenerationFence,
-    GenerationRegistry, GenerationRegistryFile, GenerationRole, GenericTerminalRuntime,
-    IdentityAuthority, InitialWorkspaceFence, InstanceLockCustody, Instant, LaunchedStandby,
-    MetricsBroker, MonotonicClock, Mutex, OpCli, Ordering, OutputPrProjector,
-    PRE_HANDSHAKE_CONNECTION_LIMIT, PRE_HANDSHAKE_DEADLINE, Path, PathBuf, PeerProcess,
-    PrInventoryStore, PrProjectionQueue, PreHandshakeAdmission, ProcessIdentity,
-    ProcessObservation, ProcessResourceSampler, PtyObservation, Read, Receiver, RefCell,
-    RegistryDocument, ResponseOutcome, RoutingLedger, RuntimeHydration, SeamlessRefusal,
-    SecureUnixListener, SessionDispatchContext, SharedAgent, SharedAgentRuntime, SharedAgentState,
-    SharedMetricsBroker, SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime,
-    SharedSupervisorRuntime, SharedTerminal, SharedTerminalOwner, SharedTerminalRuntime,
-    SharedVerificationCache, ShutdownOnIpcWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe,
-    ShutdownRequest, SpawnedChildren, StaleCleanup, StaleDaemonCleanup, SupervisorRuntime,
-    SystemClock, SystemTenantOpener, TeardownSignal, TenantRegistry, TenantWorkspaces,
-    TerminalPipelineMetrics, TerminalScopeResolver, TerminalStore, TrustedLoginShell,
-    UnixChildProbe, UserDecisionStore, UserEnvironment, WORKFLOW_LANE_TICK, Workspaces, Write,
-    authenticated_supervisor_caller, bind_ipc_listener, bootstrap_broker_address,
+    ACCEPT_ERROR_BACKOFF, AdmissionGate, AgentConcurrencyGauge, AgentPty, AgentPtyObservation, Arc,
+    AtomicBool, AtomicUsize, BROKER_IO_TIMEOUT, BROKER_OK, BackgroundWorker, BootstrapBrokerRecord,
+    BrokerActivity, BrokerIdlePolicy, BuildIdentity, CLIENT_RETIREMENT_POLL, CapacityRefusalLog,
+    CensusConnectionFence, ChildIdentity, ClientWorkers, ClosePrProjectionOnExit,
+    ConnectionCleanup, ConnectionShutdown, ConnectionWorkspace, DEFAULT_GENERATION_LIMIT,
+    DEFAULT_TENANT_LIMIT, DaemonBackgroundWorkers, DaemonLauncher, DaemonPty, DaemonReady,
+    DaemonRecord, DaemonRecordPort, DaemonRecordStore, DaemonRequest, DaemonWorkspaceActivity,
+    DeadlineConnection, DeadlineUnixStream, DispatchStore, DispatchToolContext, Duration,
+    ESTABLISHED_RESPONSE_WRITE_DEADLINE_MS, EndpointCleanup, EndpointLocator, EndpointObservation,
+    ErrorCode, ErrorLog, FencedPrInventory, FileInstanceLock, FileWorkspaceFence,
+    FileWorkspaceFences, FsCustodyProbe, FsRecordFile, GenerationFence, GenerationRegistry,
+    GenerationRegistryFile, GenerationRole, GenericTerminalRuntime, IdentityAuthority,
+    InitialWorkspaceFence, InstanceLockCustody, Instant, LaunchedStandby, MetricsBroker,
+    MonotonicClock, Mutex, OpCli, Ordering, OutputPrProjector, PRE_HANDSHAKE_CONNECTION_LIMIT,
+    PRE_HANDSHAKE_DEADLINE, Path, PathBuf, PeerProcess, PrInventoryStore, PrProjectionQueue,
+    PreHandshakeAdmission, ProcessIdentity, ProcessObservation, ProcessResourceSampler,
+    PtyObservation, Read, Receiver, RefCell, RegistryDocument, ResponseOutcome, RoutingLedger,
+    RuntimeHydration, SeamlessRefusal, SecureUnixListener, SessionDispatchContext, SharedAgent,
+    SharedAgentRuntime, SharedAgentState, SharedMetricsBroker, SharedPrInventory,
+    SharedProcessResourceSampler, SharedSessionRuntime, SharedTerminal, SharedTerminalOwner,
+    SharedTerminalRuntime, ShutdownOnIpcWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe,
+    ShutdownRequest, SpawnedChildren, StaleCleanup, StaleDaemonCleanup, SystemClock,
+    SystemTenantOpener, TeardownSignal, TenantRegistry, TenantWorkspaces, TerminalPipelineMetrics,
+    TerminalScopeResolver, TerminalStore, TrustedLoginShell, UnixChildProbe, UserDecisionStore,
+    UserEnvironment, Workspaces, Write, bind_ipc_listener, bootstrap_broker_address,
     client_connection_capacity_available, client_connection_limit, connection_cleanup_channel,
     connection_workspace, current_build, current_daemon_is_reachable, daemon_request_surface,
     dispatch_agent, dispatch_agent_phase_report, dispatch_codex_session_capture, dispatch_dispatch,
     dispatch_dispatch_tool, dispatch_mcp_child_claim, dispatch_metrics, dispatch_pr_snapshot,
-    dispatch_rollover, dispatch_session, dispatch_supervisor_control, dispatch_supervisor_snapshot,
-    dispatch_supervisor_tool, dispatch_user_decision, draining_collection, ensure_private_dir,
-    ensure_private_dir_all, envelope, expected_client_disconnect, handle_bootstrap_broker_request,
-    is_same_child, launch_broker_daemon, live_generation_endpoints, new_terminal_runtime,
-    observe_generation_process, open_agent_runtime, open_runtime_state, parent_pid, peer_pid,
-    process_group, process_start_identity, read_allocator_document, read_shard_documents,
-    readable_within, reconcile_orphan_delegations, reconcile_pending_supervisor_promotions,
-    reconcile_removed_session_agents, reconcile_startup_supervisor_promotions,
-    reconcile_startup_supervisor_workers, request_mcp_credential, retain_client_worker,
-    retire_stale_current_preserving, seamless_refusal, spawn_bootstrap_broker,
-    spawn_broker_idle_watch, spawn_critical_worker, start_connection_cleanup_worker,
-    start_custody_worker, start_daemon_agent_restart_recovery, start_decision_maintenance,
-    start_draining_collection_worker, start_orphan_cleanup_worker, start_pr_projection_worker,
-    start_pr_refresh_worker, start_retention_gc_worker, start_session_teardown_worker,
-    start_supervisor_recovery, start_tenant_retire_worker, start_workflow_lane,
+    dispatch_rollover, dispatch_session, dispatch_user_decision, draining_collection,
+    ensure_private_dir, ensure_private_dir_all, envelope, expected_client_disconnect,
+    handle_bootstrap_broker_request, is_same_child, launch_broker_daemon,
+    live_generation_endpoints, new_terminal_runtime, observe_generation_process,
+    open_agent_runtime, open_runtime_state, parent_pid, peer_pid, process_group,
+    process_start_identity, read_allocator_document, read_shard_documents, readable_within,
+    reconcile_orphan_delegations, reconcile_removed_session_agents, request_mcp_credential,
+    retain_client_worker, retire_stale_current_preserving, seamless_refusal,
+    spawn_bootstrap_broker, spawn_broker_idle_watch, spawn_critical_worker,
+    start_connection_cleanup_worker, start_custody_worker, start_daemon_agent_restart_recovery,
+    start_decision_maintenance, start_draining_collection_worker, start_lock_watchdog,
+    start_orphan_cleanup_worker, start_pr_projection_worker, start_pr_refresh_worker,
+    start_retention_gc_worker, start_session_teardown_worker, start_tenant_retire_worker,
     terminal_capacity_limit, terminal_environment, trusted_repository_root,
     unexpected_daemon_response_entry,
 };
@@ -302,6 +300,7 @@ pub(super) fn spawn_ipc_server(
         &children,
         hydration,
         terminal_limit,
+        shutdown.flag(),
     )?;
     background_workers.push(start_daemon_agent_restart_recovery(
         data_dir.to_path_buf(),
@@ -313,38 +312,10 @@ pub(super) fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?);
     reconcile_removed_session_agents(&data_dir.join("daemon"), &agent)?;
-    let supervisor = Arc::new(Mutex::new(SupervisorRuntime::new(&data_dir.join("daemon"))));
-    if let Err(error) = reconcile_startup_supervisor_promotions(&supervisor, &agent) {
-        ErrorLog::record(&format!(
-            "supervisor promotion reconciliation deferred: {error}"
-        ));
-    }
-    if let Err(error) = reconcile_startup_supervisor_workers(&supervisor, &agent) {
-        ErrorLog::record(&format!(
-            "supervisor worker termination reconciliation deferred: {error}"
-        ));
-    }
-    if let Ok(runtime) = supervisor.lock()
-        && let Err(error) = runtime.tick_all(
-            chrono::Utc::now(),
-            &mut AgentDecisionWaker { agent: &agent },
-        )
-    {
-        ErrorLog::record(&format!(
-            "supervisor startup reconciliation deferred: {error}"
-        ));
-    }
-    background_workers.push(start_supervisor_recovery(
-        Arc::clone(&supervisor),
-        Arc::clone(&agent),
-        Arc::clone(&workspaces),
-        Arc::clone(&shutdown),
-    )?);
     background_workers.push(start_agent_observer(
         Arc::downgrade(&agent),
         agent_observations,
         Arc::clone(&projection),
-        Arc::clone(&supervisor),
         Arc::clone(&shutdown),
     )?);
     // Socket workers only remove themselves from the bounded live census and
@@ -362,19 +333,6 @@ pub(super) fn spawn_ipc_server(
         Arc::clone(&projection),
         Arc::clone(&shutdown),
     )?);
-    let verification: SharedVerificationCache = Arc::default();
-    // `SystemClock` measures from its own construction, so the cache's TTL only
-    // means anything while one clock outlives every read of it.
-    let verification_clock = Arc::new(SystemClock::new());
-    background_workers.push(start_workflow_lane(
-        Arc::clone(&agent),
-        Arc::clone(&pr_inventory),
-        Arc::clone(&verification),
-        Arc::clone(&verification_clock),
-        Arc::clone(&workspaces),
-        Arc::clone(&shutdown),
-        WORKFLOW_LANE_TICK,
-    )?);
     let decisions = Arc::new(UserDecisionStore::new(data_dir.join("daemon")));
     background_workers.push(start_decision_maintenance(
         Arc::clone(&decisions),
@@ -385,6 +343,11 @@ pub(super) fn spawn_ipc_server(
         data_dir.join("daemon"),
         Arc::clone(&shutdown),
     )?);
+    background_workers.push(super::notifications::start(
+        data_dir.join("daemon"),
+        fence.gate.clone(),
+        Arc::clone(&shutdown),
+    )?);
     let (teardown, teardown_worker) = start_session_teardown_worker(
         Arc::clone(&workspaces),
         Arc::clone(&agent),
@@ -392,9 +355,13 @@ pub(super) fn spawn_ipc_server(
         Arc::clone(&shutdown),
     )?;
     background_workers.push(teardown_worker);
+    let cache_jobs = usagi_daemon::usecase::session_cache_jobs::CacheJobs::default();
     background_workers.push(start_orphan_cleanup_worker(
         &workspaces,
         fence.gate.clone(),
+        Arc::clone(&agent),
+        Arc::clone(&terminal),
+        cache_jobs.clone(),
         Arc::clone(&shutdown),
     )?);
     // Workspaces adopted for a client that has gone away are given back, so a
@@ -404,7 +371,6 @@ pub(super) fn spawn_ipc_server(
         DaemonWorkspaceActivity {
             terminal: Arc::clone(&terminal),
             agent: Arc::clone(&agent),
-            supervisor: Arc::clone(&supervisor),
         },
         initial_fence.map(|fence| InitialWorkspaceFence {
             root: initial.root().to_path_buf(),
@@ -433,6 +399,12 @@ pub(super) fn spawn_ipc_server(
         Arc::clone(&agent),
         open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
         Arc::clone(&shutdown),
+    )?);
+    background_workers.push(start_lock_watchdog(
+        &agent,
+        &terminal,
+        Arc::clone(&workers),
+        &shutdown,
     )?);
     background_workers.push(start_draining_collection_worker(
         open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
@@ -464,12 +436,11 @@ pub(super) fn spawn_ipc_server(
             workspaces,
             resolver,
             teardown,
+            cache_jobs,
             terminal,
             agent,
             retention,
             pr_inventory,
-            verification,
-            verification_clock,
             projection,
             decisions,
             metrics: Arc::new(Mutex::new(
@@ -481,7 +452,6 @@ pub(super) fn spawn_ipc_server(
             )),
             process_metrics: Arc::new(Mutex::new(ProcessResourceSampler { previous: None })),
             pipeline_metrics,
-            supervisor,
             fence,
             workers,
             disconnected,
@@ -497,7 +467,6 @@ pub(super) fn start_agent_observer(
     agent: std::sync::Weak<SharedAgentState>,
     observations: Receiver<AgentPtyObservation>,
     projection: Arc<PrProjectionQueue>,
-    supervisor: SharedSupervisorRuntime,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let failed_projection = Arc::clone(&projection);
@@ -548,24 +517,6 @@ pub(super) fn start_agent_observer(
                         // A candidate the output never terminated is only
                         // creditable once nothing more can arrive for it.
                         projection.submit_closed(reference.terminal_id, reference.session_id);
-                        if let Some(agent) = agent.upgrade()
-                            && let Err(error) =
-                                reconcile_pending_supervisor_promotions(&supervisor, &agent)
-                        {
-                            ErrorLog::record(&format!(
-                                "supervisor promotion reconciliation deferred: {error}"
-                            ));
-                        }
-                        if let (Some(agent), Ok(runtime)) = (agent.upgrade(), supervisor.lock())
-                            && let Err(error) = runtime.tick_all(
-                                chrono::Utc::now(),
-                                &mut AgentDecisionWaker { agent: &agent },
-                            )
-                        {
-                            ErrorLog::record(&format!(
-                                "supervisor completion reconciliation deferred: {error}"
-                            ));
-                        }
                     }
                     AgentPtyObservation::Shutdown => break,
                 }
@@ -646,19 +597,16 @@ pub(super) struct IpcAcceptContext {
     pub(super) workspaces: Workspaces,
     pub(super) resolver: Arc<TenantWorkspaces>,
     pub(super) teardown: Arc<TeardownSignal>,
+    pub(super) cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     pub(super) terminal: SharedTerminalRuntime,
     pub(super) agent: SharedAgentRuntime,
     pub(super) retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     pub(super) pr_inventory: SharedPrInventory,
-    /// Shared with the resident workflow lane so both sides reuse one GitHub read.
-    pub(super) verification: SharedVerificationCache,
-    pub(super) verification_clock: Arc<SystemClock>,
     pub(super) projection: Arc<PrProjectionQueue>,
     pub(super) decisions: Arc<UserDecisionStore>,
     pub(super) metrics: SharedMetricsBroker,
     pub(super) process_metrics: SharedProcessResourceSampler,
     pub(super) pipeline_metrics: Arc<TerminalPipelineMetrics>,
-    pub(super) supervisor: SharedSupervisorRuntime,
     pub(super) fence: Arc<GenerationFence>,
     pub(super) workers: Arc<ClientWorkers>,
     pub(super) disconnected: ConnectionCleanup,
@@ -681,18 +629,16 @@ pub(super) fn start_ipc_accept_loop(
         workspaces,
         resolver,
         teardown,
+        cache_jobs,
         terminal,
         agent,
         retention,
         pr_inventory,
-        verification,
-        verification_clock,
         projection,
         decisions,
         metrics,
         process_metrics,
         pipeline_metrics,
-        supervisor,
         fence,
         workers,
         disconnected,
@@ -719,6 +665,9 @@ pub(super) fn start_ipc_accept_loop(
             let pre_handshake =
                 PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let mut capacity_log = CapacityRefusalLog::default();
+            // Warns while connections are still admitted, so a growing backlog of
+            // parked workers is visible before the first refusal.
+            let mut capacity_watch = CapacityWatch::new(connection_limit);
             // Waiting on the listening descriptor replaces a non-blocking accept
             // that retried every 10 ms. The wake pipe is what lets one wait cover
             // both a new connection and a shutdown request.
@@ -746,6 +695,7 @@ pub(super) fn start_ipc_accept_loop(
                         }
                         let capacity_available =
                             client_connection_capacity_available(&workers, connection_limit);
+                        capacity_watch.observe(workers.outstanding(), &ErrorLog::record);
                         if capacity_log.should_record(capacity_available) {
                             ErrorLog::record(
                                 "daemon connection refused: client capacity exhausted",
@@ -796,6 +746,7 @@ pub(super) fn start_ipc_accept_loop(
                         let connection_workspaces = Arc::clone(&workspaces);
                         let connection_resolver = Arc::clone(&resolver);
                         let teardown = Arc::clone(&teardown);
+                        let cache_jobs = cache_jobs.clone();
                         let terminal = Arc::clone(&terminal);
                         let tenant_terminal = Arc::clone(&terminal);
                         let visibility = visibility.clone();
@@ -803,13 +754,10 @@ pub(super) fn start_ipc_accept_loop(
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
                         let pr_inventory = Arc::clone(&pr_inventory);
-                        let verification = Arc::clone(&verification);
-                        let verification_clock = Arc::clone(&verification_clock);
                         let decisions = Arc::clone(&decisions);
                         let metrics = Arc::clone(&metrics);
                         let process_metrics = Arc::clone(&process_metrics);
                         let pipeline_metrics = Arc::clone(&pipeline_metrics);
-                        let supervisor = Arc::clone(&supervisor);
                         let connection_fence = Arc::clone(&fence);
                         let connection_data_dir = data_dir.clone();
                         let connection_cleanup = disconnected.clone();
@@ -969,11 +917,12 @@ pub(super) fn start_ipc_accept_loop(
                                 let mut owner =
                                     SharedTerminalOwner::with_visibility_and_retention(
                                         SharedAgent { runtime: agent_owner },
-                                        SharedTerminal(Arc::clone(&terminal)),
+                                        SharedTerminal(Arc::clone(&terminal), agent_launch.launch_environment.clone()),
                                         visibility,
                                         retention,
                                     );
                                 let mut metrics_observer = None;
+                                let launch_surface = admitted.client.surface;
                                 let result = usagi_daemon::presentation::ipc::handle_admitted_connection_with_terminal_and_observe(
                                     &mut reader,
                                     &mut writer,
@@ -981,7 +930,7 @@ pub(super) fn start_ipc_accept_loop(
                                     &census_fence,
                                     &mut owner,
                                     &mut |request_id, body, hello, connection, client| {
-                                        let Ok(request) = serde_json::from_value::<DaemonRequest>(body.clone()) else {
+                                        let Ok(request) = DaemonRequest::deserialize(&body) else {
                                             return usagi_daemon::presentation::ipc::reject_unhandled_request(
                                                 request_id,
                                                 body,
@@ -1017,36 +966,38 @@ pub(super) fn start_ipc_accept_loop(
                                                 serde_json::Value::Null,
                                             );
                                         }
-                                        match request {
-                                            DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &body, hello),
-                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, request_id, &body, hello),
-                                            DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, &body, hello),
-                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, pr_inventory: &pr_inventory, verification: &verification, verification_clock: &verification_clock, supervisor: &supervisor }, request_id, &body, hello),
+                                        let launch_client = usagi_core::domain::agent::AgentLaunchClient {
+                                            surface: launch_surface,
+                                            client_id: client.as_str(),
+                                            connection_id: hello.connection_id.0.clone(),
+                                            request_id: request_id.0.clone(),
+                                            peer_pid: peer_process.pid,
+                                        };
+                                        match &request {
+                                            DaemonRequest::McpChildClaim => dispatch_mcp_child_claim(&agent_launch, &bound, &connection_data_dir, &peer_process, connection, request_id, &request, hello),
+                                            DaemonRequest::Rollover { .. } => dispatch_rollover(&connection_data_dir, connection_fence.as_ref(), &agent_launch, &bound, &connection_tenants, &tenant_terminal, request_id, request, hello),
+                                            DaemonRequest::Tenant { .. } => tenant_control::dispatch(&connection_tenants, &tenant_terminal, &agent_launch, request_id, request, hello),
+                                            DaemonRequest::Session { .. } => dispatch_session(&SessionDispatchContext { bound: &bound, teardown: &teardown, agent: &agent_launch, cache_jobs: &cache_jobs, pr_inventory: &pr_inventory, launch_client: Some(&launch_client) }, request_id, request, hello),
                                             DaemonRequest::Agent { .. }
-                                            | DaemonRequest::AgentGoal { .. }
                                             | DaemonRequest::AgentInventory { .. }
                                             | DaemonRequest::AgentWorkspaceObservation { .. }
                                             | DaemonRequest::DiagnoseAgents { .. }
                                             | DaemonRequest::PlanDaemonRestartAgents { .. }
                                             | DaemonRequest::RestartAgents { .. }
                                             | DaemonRequest::ResumeAgent { .. }
-                                            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. } => dispatch_agent(&agent_launch, &supervisor, &bound, request_id, &body, hello),
-                                            DaemonRequest::CodexSessionCapture { .. } => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, &body, hello),
-                                            DaemonRequest::AgentPhaseReport { .. } => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, &body, hello),
-                                            DaemonRequest::Dispatch { .. } => dispatch_dispatch(&agent_launch, &bound, request_id, &body, hello),
-                                            DaemonRequest::Metrics { .. } => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &body, hello),
+                                            | DaemonRequest::ResumeAgentHeadless { .. }
+                                            | DaemonRequest::ResumeAgentWithCurrentIntegration { .. } => dispatch_agent(&agent_launch, &bound, request_id, request, hello, &launch_client),
+                                            DaemonRequest::CodexSessionCapture { .. } => dispatch_codex_session_capture(&agent_launch, &peer_process, request_id, request, hello),
+                                            DaemonRequest::AgentPhaseReport { .. } => dispatch_agent_phase_report(&agent_launch, &peer_process, request_id, request, hello),
+                                            DaemonRequest::Dispatch { .. } => dispatch_dispatch(&agent_launch, &bound, request_id, request, hello, &launch_client),
+                                            DaemonRequest::Metrics { .. } => dispatch_metrics(&metrics, &process_metrics, &pipeline_metrics, &mut metrics_observer, request_id, &request, hello),
                                             DaemonRequest::Pr { .. }
                                             | DaemonRequest::PrBatch { .. }
-                                            | DaemonRequest::PrDismiss { .. } => dispatch_pr_snapshot(&pr_inventory, request_id, &body, hello),
-                                            DaemonRequest::DispatchTool { .. } => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, supervisor: &supervisor }, request_id, &body, hello),
-                                            DaemonRequest::SupervisorTool { .. } => {
-                                                let caller = authenticated_supervisor_caller(&agent_launch, &bound, &client, &body);
-                                                dispatch_supervisor_tool(&supervisor, caller, request_id, &body, hello)
-                                            },
-                                            DaemonRequest::SupervisorSnapshot { .. } => dispatch_supervisor_snapshot(&supervisor, &bound, request_id, &body, hello),
-                                            DaemonRequest::SupervisorControl { .. } => dispatch_supervisor_control(&supervisor, &agent_launch, &bound, request_id, &body, hello),
-                                            DaemonRequest::WorkflowSnapshot { .. } | DaemonRequest::WorkflowControl { .. } => workflow::dispatch(&workflow::WorkflowDispatchContext { agent: &agent_launch, inventory: &pr_inventory, verification: workflow::Verification { cache: &verification, clock: verification_clock.as_ref() }, bound: &bound }, request_id, request, &body, hello),
-                                            DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, &body, hello),
+                                            | DaemonRequest::PrDismiss { .. } => dispatch_pr_snapshot(&pr_inventory, request_id, request, hello),
+                                            DaemonRequest::DispatchTool { .. } => dispatch_dispatch_tool(&DispatchToolContext { agent: &agent_launch, terminal: &terminal, bound: &bound, pr_inventory: &pr_inventory, decisions: &decisions, launch_client: Some(&launch_client) }, request_id, request, &body, hello),
+                                            DaemonRequest::WorkspaceAttention { workspace } => super::attention::dispatch(&agent_launch, &bound, &decisions, *workspace, request_id, &body, hello),
+                                            DaemonRequest::SearchTerminalOutput { workspace, query, session } => super::terminal_search::dispatch(&agent_launch, &terminal, &bound, *workspace, query, *session, request_id, &body, hello),
+                                            DaemonRequest::UserDecision { .. } => dispatch_user_decision(&agent_launch, &bound, &decisions, request_id, request, &body, hello),
                                             DaemonRequest::Terminal { .. } => usagi_daemon::presentation::ipc::reject_unhandled_request(request_id, body, hello),
                                         }
                                     },
@@ -1808,9 +1759,9 @@ impl ServeLauncher {
             .stderr(std::process::Stdio::null());
         if let Some(workspace_root) = workspace_root {
             // Standby hydration chooses the initialized workspace containing
-            // its cwd. Pinning it to the sole planned Agent workspace makes
-            // that workspace the successor's initial tenant, so exact resume
-            // never has to steal a fence still held by the draining owner.
+            // its cwd. Pin the first planned Agent workspace as the successor's
+            // initial tenant. Other roots are adopted during recovery after
+            // the committed old owner releases their idle fences.
             command.current_dir(workspace_root);
         }
         #[cfg(unix)]

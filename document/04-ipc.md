@@ -22,11 +22,9 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [managed session request](#managed-session-request)
 - [agent launch request](#agent-launch-request)
   - [agent operation identity と final の相関](#agent-operation-identity-と-final-の相関)
-- [session Workflow request](#session-workflow-request)
 - [Codex structured capture request](#codex-structured-capture-request)
 - [agent phase report request](#agent-phase-report-request)
 - [provider conversation resume request](#provider-conversation-resume-request)
-- [Work Run observation and control](#work-run-observation-and-control)
 - [dispatch request](#dispatch-request)
 - [generic terminal request](#generic-terminal-request)
   - [snapshot payload と revision](#snapshot-payload-と-revision)
@@ -121,6 +119,17 @@ capability、build diagnostics を含む。daemon は「意図した daemon か�
 protocol の互換性判定には使わないが、client bootstrap は `ServerHello` の identity で同一 runtime channel の
 daemon が現在 executable と **exact same artifact** かを確認する。client は `build.artifact.v1` capability を必須とし、
 capability を持たない旧 daemon は build tuple へ fallback せず handshake で拒否される。
+
+hello の optional な `surface` は Agent 起動の診断記録に使う。意味と記録の追い方は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
+
+generation 1 revision 4 は user decision の明示ACK・分割取得に加え、未受信回答の一覧回収と人間の明示破棄に対応する。
+decision要求だけは交渉結果がrevision 4以上で、daemonが `user-decision.delivery.v1` を広告していることをclient・daemon双方で必須にする。
+新clientは旧daemonへ暗黙ACKを行う `get` を送信せず、新daemonは旧clientへ `deferred` を含む不完全な一覧を
+成功として返さない。不一致はeffect zeroの `CapabilityMissing` とし、daemonとclientの更新・再接続を案内する。
+revision 3のpendingのみの一覧も、新しい回答回収契約としては受け付けない。
+他の要求は引き続き旧revisionで利用でき、terminal checkpointはrevision 2の契約を保つ。
+具体的な質問・回答・ACKの形は [7. MCPのuser decision](07-mcp.md#user-decision) を正本とする。
 
 `BuildIdentity` は version、commit diagnostics、full target triple、canonical `artifact` を持つ。artifact は
 `usagi-artifact-v1:<profile>:<target>:<source-id>` である。`build.rs` は Git checkout では
@@ -391,8 +400,8 @@ request 送信前に lane を確立できなかった場合は effect が確定�
 ### bootstrap section の bounded wait
 
 connect / cold start を跨いで 1 データディレクトリに daemon が 1 つだけ立つよう、**cold-start authority を持つ** client は `bootstrap.lock` の
-cross-process section を取る。この section と、private directory の setup section（`ensure_private_dir` が親
-ディレクトリに取る flock）は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
+cross-process section を取る。この section、private directory の setup section（`ensure_private_dir` が親
+ディレクトリに取る flock）、`current.lock` と `generations.lock` は、**いずれも blocking `flock` ではなく bounded な `try_lock` retry** である。データ
 ディレクトリはマシン全体で共有されるため、blocking にすると MCP server / CLI / rollover のいずれかが section に
 いる間、UI 経路の接続確立が無期限に待ってしまう。保持したまま wedge したプロセスがいれば永久に待つ。
 
@@ -404,6 +413,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | section | 待ち上限 | 上限の根拠 | 超過時 |
 |---|---|---|---|
 | `bootstrap.lock` | readiness ceiling（40 × 50ms = 2s）＋ spawn margin 3s | section は 1 回の `connect_or_start` を跨いで保持され、最悪ケースは cold start（lifecycle child の spawn ＋ readiness 探索） | typed `bootstrap_contended` |
+| `current.lock` / `generations.lock` | setup section と inode lock を合わせて 2s | locator publication / registry CAS は短い永続化 section。停止・停止状態の holder に期限なく待たない | `would_block`。lock inode と既存の locator / registry は保持する |
 | `lifecycle.lock` | 65s | planned rollover の standby verification 30s と commit 後 serving hydration 30s に launch/output margin 5s を加える | `would_block` の IO error。stop/restart は update と交差せず失敗する |
 | private directory setup | 2s | 1 ディレクトリの作成 / 修復だけなので、健全な保持者は microsecond 単位で去る | `would_block` の IO error |
 
@@ -422,7 +432,7 @@ endpoint へ attach するだけでこの section に入らない。これらは
 | response | 同じ `RequestId` | immediate result、accepted operation、または typed error |
 | event | `SubscriptionId`、`StreamRef`、sequence | server push |
 
-現行 production handler で `RequestId` は一回の RPC correlation にだけ使い、`ResponseCache` は接続されていない。
+現行 production handler で `RequestId` は一回の RPC correlation にだけ使う。
 再接続すると client の request sequence も変わるため、`RequestId` を durable idempotency key として扱わない。
 session / Agent / dispatch / generic Terminal Launch 等の durable mutation は request correlation と独立した
 `OperationId` を持ち、target scope と semantic digest が同じ場合だけ既存 operation として再利用する。producer が
@@ -475,8 +485,7 @@ observer の中間 sample を落として count する。切断された observe
 ### agent concurrency projection
 
 `agent_concurrency` は daemon が Agent launch を admit する権威そのものの level である。
-対象は **Agent runtime の concurrency pool だけ**で、generic terminal capacity や supervisor run の
-`ExecutionPolicy.max_concurrency` とは別物であり、他 pool と合算しない。何を使用中と数えるかは
+対象は **Agent runtime の concurrency pool だけ**で、generic terminal capacity とは別物であり、他 pool と合算しない。何を使用中と数えるかは
 [5. daemon の Agent concurrency projection](05-daemon.md#agent-concurrency-projection) が正本である。
 
 | field | type | meaning |
@@ -546,9 +555,11 @@ snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle 
 
 ## agent launch request
 
-`agent` kind は daemon 所有の Agent runtime に届く。client は producer-issued `OperationId` と、`WorkspaceId` / optional `SessionId`（省略時は workspace root）/ optional profile ID だけの launch intent を送る。worktree、checkout path、profile 既定値、argv、environment、secret は wire field ではなく、daemon が [managed session scope](05-daemon.md#authority-と-lifecycle) と code-defined adapter registry から解決する。profile を省略すると daemon の既定 policy が選ぶ。
+Agent runtime inventory は optional な `launch_provenance` を含む。`session` の read-only `agents` action は
+現在の workspace の inventory に `session_name` を添えて返す。field の意味・旧 peer との互換性は
+[Agent の作成元と起動記録](05-daemon.md#agent-の作成元と起動記録)を正本とする。
 
-設定で opt-in した goal-driven workflow は、classic の `agent` を拡張せず専用の `agent_goal` kind を使う。intent は `WorkspaceId`、optional profile ID、16 KiB 以下の非空 UTF-8 `goal` だけを持ち、managed `SessionId` は受け付けない。daemon は必ず workspace root scope を解決し、goal を code-defined autonomous work contract と組み合わせた初回 prompt として durable launch request に保存する。既存の queued initial prompt が同じ root scope にあれば上書きせず safe error にする。classic client の wire shape と「prompt なしで Agent を開く」挙動は変わらない。
+`agent` kind は daemon 所有の Agent runtime に届く。client は producer-issued `OperationId` と、`WorkspaceId` / optional `SessionId`（省略時は workspace root）/ optional profile ID だけの launch intent を送る。worktree、checkout path、profile 既定値、argv、environment、secret は wire field ではなく、daemon が [managed session scope](05-daemon.md#authority-と-lifecycle) と code-defined adapter registry から解決する。profile を省略すると daemon の既定 policy が選ぶ。
 
 daemon は intent の `(WorkspaceId, SessionId?)` を [available scope](05-daemon.md#authority-と-lifecycle) の完全一致に解決し、その worktree だけを launch に使う。`SessionId` を省略した intent は workspace root に解決し、cwd を trusted repository root にする。creating / deleting / failed / stale / mismatch の scope、未知 profile、canonical でない `OperationId` は PTY を spawn せず typed safe error になる。
 
@@ -589,7 +600,7 @@ operation identity を持たないため、body がその final を相関させ�
 | `operation_id` | この答えが属する producer `OperationId` |
 | `semantic_digest` | 受理した intent の canonical semantic key の digest |
 
-canonical semantic key は classic launch では `(WorkspaceId, SessionId?, profile ID?)`、goal-driven launch では workspace-root classic key に goal の byte length と本文を加えた値、exact resume では target 全体
+canonical semantic key は launch では `(WorkspaceId, SessionId?, profile ID?)`、exact resume では target 全体
 （continuation・source・scope・worktree・runtime・adapter revision）から作る。key の書式は daemon と client が共有する
 1 か所（`usagi-core` の client vocabulary）が持ち、digest は domain-separated hash で
 [terminal input digest](#terminal-input-identity-と-cross-connection-replay) と衝突しない。
@@ -611,47 +622,10 @@ cached replay は direct final と同じ body（同じ identity・digest・`Term
 省略しない。semantic key を持たない旧 durable record は digest を持たないため replay しても intent の一致を証明できず、
 client は final として受けずに安全に失敗する。
 
-## session Workflow request
-
-Session 内 Workflow の human control は次の typed request を使う。操作画面は
-[Session Workflow タブ](03-tui.md#session-workflow-タブ)を正本とする。
-
-| request | payload | 結果 |
-|---|---|---|
-| `WorkflowSnapshot` | workspace、session | session、optional run、optional pending_start を含む snapshot |
-| `WorkflowControl` | workspace、session、operation_id、command | 制御後の同形式 snapshot |
-
-command は `Start { goal, agents }`、`Instruct { recipient, body }`、`Finish` である。接続先 workspace と
-利用可能な session を照合し、**この 2 つの request** は Agent credential を伴う呼び出しを拒否する。
-同じ制御を MCP から行う経路は別にあり、session tool と同じ所有権規則（caller が作成した session に限り、
-caller 自身が動いている session は拒否）で守る（[7. MCP サーバ](07-mcp.md)が正本）。
-制御の再送は同じ operation ID と payload を使う。受理後の通信失敗は未受理と断定せず、
-保存済みの結果を再取得する。異なる payload で operation ID を再利用すると conflict になる。
-`agents` は planner / implementer / reviewer の provider 選択で、省略時は従来の実行・レビュー担当と Codex の計画担当を使う。
-run・pending_start は受理時の担当を固定し、snapshot の agents は開始済みならその担当、未開始ならワークスペースで前回開始した担当を返す。
-同じ operation ID の担当変更は競合として拒否する。
-開始前の intent は `pending_start` に元の operation ID・goal・agents・開始エラーを返すため、
-TUI を再起動しても同じ開始操作を再試行できる。
-
-`Finish` は active な run、または起動前の開始 intent を終了する。終了は保存済み状態の変更だけで、
-Agent の停止も worktree の削除も伴わない。終了した run は `PR ready` なら完了、それ以外の工程なら
-中止として記録し、snapshot の `finished` が古い順に最大 5 件返す。終了済みの record は `pending_start` を
-返さない（開始待ちではなく、次の開始を受け付けられる状態である）。同じ operation ID の再送は二度終了せず、
-別の operation ID による 2 度目の終了と、終了済み record への `Instruct` は拒否する。終了後の `Start` は
-新しい intent として受理し、終了済み run の履歴だけを引き継ぐ。履歴に残っている終了済み run については、
-その operation ID を使った `Start` を拒否する。
-
-daemon は開始 intent と指示を永続化し、認証済み handoff と peer journal の相関から進捗を投影する。
-進捗の再照合と未通知の queued 指示の再試行を所有するのは daemon の常駐 lane であり、client の
-request はその進行を必要としない（[workflow lane](05-daemon.md#workflow-lane)が正本）。snapshot request は
-lane と同じ pass を通るため開いている画面は常に最新の進捗を受け取り、control request は reconcile の
-直後に受理して PR 検証を挟まない。
-PTY 通知の成功と Agent による処理完了は別であり、処理済み ACK は推定しない。
-
 ## Codex structured capture request
 
 `codex_session_capture` kind は profile revision 4 以前の Codex `SessionStart(startup)` command hook と、
-更新済み daemon binary の組み合わせを受けるためだけに残す互換 request である。新しい integration は
+更新済み daemon binary の組み合わせ、または起動後 hook の ID 補完を旧 daemon に送るための互換 request である。新しい integration は
 [`agent_phase_report`](#agent-phase-report-request) へ一本化する。旧 request は documented hook JSON の current
 `session_id` と、同じ process provision にだけ存在する daemon-minted credential を持つ。client は runtime /
 session / provider / path を指定できず、daemon は credential から exact live Codex runtime を逆引きする。同じ
@@ -668,7 +642,7 @@ session request、response、event、status projection、error detail には現�
 
 `agent_phase_report` kind は、daemon が起動した agent のライフサイクルフックだけが送る private request である。
 field は closed vocabulary の `phase`（`ready` / `running` / `waiting` / `ended` / `exited`）、
-provider の structured starting hook（Claude / Codex の `SessionStart`、Antigravity の `PreInvocation`）でだけ current producer が付ける opaque `native_session_id`、同じ process provision にだけ存在する
+Claude / Codex の structured lifecycle hook、または Antigravity の `PreInvocation` が current ID を持つ場合に付ける opaque `native_session_id`、同じ process provision にだけ存在する
 daemon-minted credential である。client は runtime / session / worktree / path / provider を指定できず、daemon は
 credential から exact live runtime を、runtime profile から provider を決める。成功 response は body を持たない。
 
@@ -677,14 +651,21 @@ phase は wire に載る前に hook 側で検証する。共通 validator の li
 Claude はこのうち `PreToolUse` を含む対応 event を、Codex は `SessionStart` / `UserPromptSubmit` / `PreToolUse` /
 `PostToolUse` / `Stop` / `SessionEnd` だけを配線する。Codex は `approval_policy = "never"` で起動するため
 `PermissionRequest` は発火せず、`Notification` も Codex event ではない。Antigravity は `PreInvocation` /
-`PreToolUse` / `PostToolUse` / `Stop` を専用 plugin から配線する。Antigravity の payload は event 名を含まないため、
-plugin command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
+`PreToolUse` / `PostToolUse` / `Stop` を専用 synthetic workspace の `.agents/hooks.json` から配線する。Antigravity の payload は event 名を含まないため、
+hook command の hidden `--hook-event` で宣言し、camelCase の `conversationId` を受け取る。event と phase の対応が
 hook input または配線宣言と一致しない報告、未知 phase、malformed JSON、credential 欠落は request を作らない。
 `SessionStart` では current `session_id` と `ready`、`PreInvocation` では current `conversationId` と `running` を同じ
-request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。この 2 つ
-以外の組み合わせで native ID を付けた報告は拒否する。旧 hook
+request に載せ、conversation ID の capture / 置換と対応 phase を一度の durable mutation として処理する。
+Claude / Codex の他の hook（`SessionEnd` を除く）も ID を送り、metadata が欠けた runtime だけを補完する。既存 ID と異なる
+起動後報告は `stale_target` で拒否し、既知の conversation を置換しない。旧 hook
 producer の ID 無し `ready` は phase だけを反映して wire compatibility を保つが、新しい resume metadata は作らない。
 `transcript_path` は wire field に変換せず、file も開かない。
+Antigravity の後続 hook は phase だけを報告する。`running` の ID は旧 daemon でも `PreInvocation` の開始・置換を
+意味するため、同じ phase を使う `PreToolUse` に ID を付けない。
+
+旧 daemon が起動後報告の ID を effect-free に拒否した場合、更新済み producer は同じ接続で
+`codex_session_capture` による ID 補完を試みてから ID 無しの本来の phase を報告する。Codex 以外の profile は
+補完 request の profile mismatch だけを無視して phase 報告を維持する。transport / 認証 / その他の失敗は再試行しない。
 
 daemon 側では credential の欠落・不一致・失効、runtime の非 live、malformed body、永続化失敗が safe error に
 なり、phase を記録しない。この request は producer `OperationId` を持たない mutation なので、
@@ -712,10 +693,21 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 
 `agent_workspace_observation` は process-level の read-only view が別 workspace を観測する request で、名指しした
 `WorkspaceId` の `AgentInventory` と `session_statuses` を同じ応答で返す。status map は managed session の
-`SessionId` だけを key とし、値は dispatch store の closed `AgentStatus` である。同じ session に複数 Agent がある場合は
+`SessionId` だけを key とし、値は [daemon の活動を反映した](05-daemon.md#agent-phase-の投影) closed `AgentStatus` である。同じ session に複数 Agent がある場合は
 `running > starting > failed > idle > exited` の共通順位で決定的に集約し、`session list` と同じ値になる。root Agent、
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。
+
+`workspace_attention { workspace: WorkspaceId }` は local TUI 用の read-only request で、daemon が既に adopt している
+workspace のみを参照する。応答の `WorkspaceAttention` は exact workspace identity と、stable key・optional SessionId・
+label・分類・短い理由を持つ一覧である。decision 本文、回答、provider identity、path は含めない。
+質問は任意の `target`（`kind: decision` と `decision_id`）を持ち、TUI は個別項目を開く際にこの stable identity を使う。
+観測対象は usagi の質問と session / Agent の状態で、PR inventory は参照しない。
+旧応答の `review` 分類、`kind: pull_request` と canonical PR `identity`、PR 状態の未確認を示す `status_unknown` は
+引き続き読み取れるが、TUI は PR 由来の項目を一覧・件数の集計前に除外する。欠落 field はそれぞれ `None` / `false` として読む。
+MCP caller context は拒否し、観測による adopt・状態変更・runtime 起動は行わない。取得に失敗した入力を空一覧へ
+置き換えず request 全体を unavailable とする。fresh connection で安全に retry できる。
+表示上の分類と移動先は [workspace 横断の対応待ち](03-tui.md#workspace-横断の対応待ち) を参照する。
 
 `ResumeAgent` は利用者が明示的に開始する provider conversation の再開である。payload は canonical
 `operation_id` と inventory が返した `AgentResumeTarget` をそのまま持つ。target は次の public fence だけで
@@ -747,16 +739,23 @@ inventory、IPC、hook、error、log へ出さない。provider capture、fence�
 CLI の `resume-exact`、TUI の exact resume port、MCP `session_resume` は同じ exact contract を使い、inventory は
 CLI / TUI port と MCP `agent_resume_inventory` が共通 contract を使う。session ID / name だけを指定する resume request は受け付けない。
 
+AGY の headless 再開は別 kind の `ResumeAgentHeadless`（wire: `resume_agent_headless`）を使い、同じ exact target と
+非空・NUL を含まない `prompt` を要求する。CLI の `--headless-prompt` / MCP の `headless_prompt` がこの kind を選ぶ。
+mode と prompt も operation semantic に含めるので、異なる turn への operation 再利用は拒否する。別 operation でも
+消費済み source を別の turn として再利用できず、次の turn は更新された inventory target を指定する。
+`HeadlessResume` capability のない profile は readiness / spawn 前に拒否する。旧 daemon は未知の kind として拒否し、
+optional field を無視して対話再開へ降格する互換経路は作らない。
+
 daemon restart、TUI 起動、workspace open 時の pane 復元は `ResumeAgent` を送らない。利用者による明示操作だけが request を作る。
 
 `daemon restart --restart-agents` は同じ exact resume 境界を daemon lifecycle に使う。
 `plan_daemon_restart_agents` は daemon 全体の live Agent を列挙し、全 runtime ref、public resume target、current profile revision、
 reported phase を返す effect-free request である。provider ID・argv・設定本文・provider-native session ID は返さない。
-exact resume metadata が1件でも欠ける場合、ownership-unknown process がある場合、または `running` phase に `--force` が無い場合は
-全件 effect-before-zero で拒否する。successor が旧 owner の workspace fence を奪わず再開できるのは initial tenant だけなので、
-live Agent が複数 workspace にまたがる場合も停止前に拒否する。
+exact resume metadata が1件でも欠ける場合、ownership-unknown process がある場合、または request の `force` が false で `running` phase がある場合は
+全件 effect-before-zero で拒否する。複数 workspace の live Agent も同じ plan に含む。
+CLI の `--restart-agents` は実行中の中断を許可するため、この request と `rollover.restart_agents` の `force` を true にする。
 
-client は plan の exact runtime 集合を `rollover.restart_agents` に再送し、sole Agent workspace を standby の initial tenant に選ぶ。
+client は plan の exact runtime 集合を `rollover.restart_agents` に再送し、最初の Agent の workspace を standby の initial tenant に選ぶ。
 old active は `ActiveControl` admission を close / drain してから同じ daemon-wide 集合を再計算し、完全一致した場合だけ全 Agent を停止する。そのまま provisioned credential が 0 であることを
 検証して最初の durable handoff write へ進むため、plan 後に競合した Agent launch は停止も handoff も行わず stale として拒否される。
 選択した exact source と item ごとの resume operation は最初の停止より先に owner-only の durable transaction へ保存する。commit 前の handoff
@@ -765,39 +764,13 @@ active generation の recovery worker が同じ transaction を current integrat
 拒否し、CLI は transaction の消去と successor serving の両方を確認してから成功する。current-integration resume は source の旧 adapter revision を fence として保持したまま、
 active daemon の期待 revision と current adapter capability を検証し、provider / native session ID / scope / lineage を変えずに
 hook・MCP provision だけを再解決する。通常の `ResumeAgent` は revision migration を許可しない。
+未完了 transaction に対する次の `rollover` は daemon が barrier 内で拒否するため、CLI の事前検証を通らない IPC caller も前の復旧記録を置き換えられない。
+commit 後の old owner は残存作業のない non-initial workspace の fence を解放し、successor は各 workspace を取得・照合してから recovery を進める。
+live generic PTY や未完了 lifecycle work が残る workspace は解放せず、recovery worker が再試行する。
+作業の続行 prompt と再試行の扱いは [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する。
 
 daemon-wide plan vocabulary を持たない旧 daemon は `--restart-agents` を effect-zero で拒否する。`--restart-agents` なしの
 `--force` は従来どおり Agent と generic Terminal を破棄する cold replacement であり、自動 exact resume の互換経路ではない。
-
-## Work Run observation and control
-
-`supervisor_snapshot` は local TUI が接続先 workspace の durable Work Run を観測する read-only request である。
-payload の `WorkspaceId` は connection が束縛する workspace と完全一致する場合だけ受理し、foreign workspace は
-`ownership_unknown` で拒否する。response は task instruction と event provenance を含まず、最大96 UTF-8 bytes の
-presentation-safe な Goal label を任意で持つ `SupervisorRunQuery` の最大16件で、
-root task が workspace-root Agent へ束縛済みの場合だけ redaction-safe な `root_agent_id` も返す。terminal、worktree、
-provider provenance は返さず、TUI はこの stable ID だけで Run Overview から Director Console を解決する。
-判断待ち、失敗、実行中、計画中、終了済みの順（同順位は新しい順）に並ぶ。response が supervisor query の
-512 KiB 上限に達する場合は低順位の末尾から落とす。TUI は専用 background lane から再読し、fresh connection への retry が安全である。
-
-`supervisor_control` は local TUI の human mutation 専用 request で、`workspace`、UUID の `operation_id`、型付き
-`command`（`cancel { supervisor_run_id, reason }` または
-`resolve_escalation { supervisor_run_id, escalation_id, decision }` または
-`delete { supervisor_run_id, observed_state_revision }`）だけを持つ。Agent MCP credential や caller 名、path、
-PID、terminal ID は受け取らない。payload workspace と connection workspace、run に保存された workspace の3者が一致しない
-request は `ownership_unknown` で effect zero になる。operation は daemon の durable semantic reservation で replay され、
-cancel / escalation decision では同じ ID を Supervisor event ID に使うため fresh connection への retry が可能である。
-同じ ID の別 command は `idempotency_conflict` になる。cancel/fail の成功は
-exact Supervisor provenance から選んだ Agent worker の terminate/reap まで含み、停止に失敗した応答も既に commit 済みの run を
-recovery worker が再停止する。
-`delete` は `Succeeded` / `Failed` / `Cancelled` と exact state revision を store lock 内で再検証し、snapshot、journal、index、
-checkpoint と derived list entry を削除して、同じ Run ID / revision の `SupervisorRunDeletion` receipt を返す。初回から存在しない
-Run、active / stale / foreign Run は effect zero で拒否し、durable reservation 後に応答を失った同一 operation の replay だけは、
-すでに snapshot が無くても同じ receipt へ収束する。
-escalation の `resume` は、保存済み provenance の exact live Agent run へ再作業 prompt を配送してから command を commit する。
-配送不能時は escalation を解除せず outcome 未確認を返す。artifact rejection の再開後は同じ候補を自動再検証せず、
-その Agent から新しい completion report が届いた場合だけ verification を再開する。dispatch inbox の初回報告を上書きせず、
-新しい報告の canonical PR 候補だけを bounded な Supervisor fact として保存するため、PR を作り直した再開も daemon restart 後に継続できる。
 
 ## dispatch request
 
@@ -870,10 +843,10 @@ negotiated revision で決まる。
 | negotiated revision | payload | offset | 意味 |
 |---|---|---|---|
 | 1 | `replay`（raw byte tail） | `base_offset + replay.length == output_offset` | 移行互換の legacy 経路。tail は最大 64 KiB |
-| 2 | `screen`（semantic checkpoint） | `base_offset == output_offset`（tail 長 0） | `output_offset` 時点の完全な screen state |
+| 2以上 | `screen`（semantic checkpoint） | `base_offset == output_offset`（tail 長 0） | `output_offset` 時点の完全な screen state |
 
-daemon は generation 1 の `max_revision` を 2 として広告し、`ServerHello.capabilities` に
-`terminal.screen-checkpoint.v1` を含める。client も `max_revision` 2 を広告し、共通 revision が 1 に落ちる旧 client には
+daemon は generation 1 の `max_revision` を 3 として広告し、`ServerHello.capabilities` に
+`terminal.screen-checkpoint.v1` を含める。client も `max_revision` 3 を広告し、共通 revision が 1 に落ちる旧 client には
 従来どおり raw tail を返すため、両 revision が同じ daemon で同時に成立する。revision 2 の `screen` は schema version・
 geometry・active buffer・primary（常に存在）と alternate（active のときだけ）の grid / scrollback /
 oldest-row origin /
@@ -885,7 +858,7 @@ checkpoint 経路の判定は capability を真実源とし、client 側の収�
 
 | client | daemon | capability | 共通 revision | 収束先 |
 |---|---|---|---|---|
-| new | new | 有 | 2 | checkpoint から復元し suffix を feed |
+| new | new | 有 | 2以上 | checkpoint から復元し suffix を feed |
 | new | old | 無 | 1 | client が限定表示へ fail closed（raw tail を parse しない） |
 | new | new | 無（広告漏れ） | 2 | 同じく限定表示（capability を真実源とする） |
 | old | new | 有 | 1 | daemon が revision 1 の raw tail を返し、旧 client の既存挙動を保つ |
@@ -1009,6 +982,10 @@ migration は次のとおりで、いずれも fail closed である。
 | canonical な client incarnation を申告しない peer が `input_operation` を送る | `unauthenticated` で拒否する。ledger を scope できないため、後の「replay」が二度目の write になり得る |
 
 #### daemon 側の ledger
+
+PTY input の 1 回の write は、部分的に進み続ける場合も含めて 2 秒で打ち切る。queue の readiness 待ちと
+`Interrupted` の retry は同じ残り時間を使い、進捗では deadline を延長しない。打ち切り時は実際に適用した
+prefix byte 数を返し、下記 ledger へ final として記録するため、途中まで届いた入力を成功や未適用に読み替えない。
 
 daemon は `(client incarnation, input_operation)` を key に、**terminal registry 全体で 1 つの** bounded ledger を持つ。
 terminal ごとに分けないのは、同じ operation identity を別 terminal へ再利用したとき、fresh write ではなく conflict として
@@ -1294,12 +1271,20 @@ replacement generation の locator または socket を削除することはな�
 `current.lock` を含む lifecycle lock node の secure create / reopen と pathname identity の契約は
 [5. daemon data directory](05-daemon.md#daemon-data-directory) を正本とする。
 
+`current.lock` / `generations.lock` の作成・修復に使う directory setup lock は、inode lock の取得待ちに入る前に
+明示的に解除する。並行する子プロセスが directory fd を継承していても、子の exec や終了を待たずに setup lock を
+解放し、locator を保持する retire と directory 修復との lock 順序の逆転を防ぐ。
+
 lock を保持した locator writer は writer ごとに一意な private temporary file を `create_new` と
 `O_NOFOLLOW | O_CLOEXEC` で開き、file descriptor を `fchmod(0600)` した後に regular file・所有 UID・
 exact mode・`nlink == 1` を検証する。JSON 全体の write と file fsync 後にも同じ fd を再検証し、その場合だけ
 `current.json` へ atomic rename する。rename 後は final path を `O_NOFOLLOW | O_CLOEXEC` で開き、同じ inode、
 regular file、所有 UID、exact mode、single link であることを検証する。discovery も final path を secure-open した
 同じ fd からこれらの invariant を再検証して読むため、symlink、hardlink、non-regular node を拒否する。
+
+generation registry の read-only snapshot 読み取りで、open と検証の間の atomic replacement により古い inode の
+`nlink` が `0` になった場合は、現在の path の secure-open と検証を最大 3 回試行する。内容を読む fd は regular file・
+所有 UID・`0600`・`nlink == 1` を検証し、継続する置換は `WouldBlock`、その他の不正な属性は検証エラーとする。
 
 replacement publish は secure-open した old locator の exact bytes を別の private single-link temporary に保持する。
 rename 前の create / write / sync / verify / rename failure は既存 locator を置換せず、writer 所有 temporary を回収する。

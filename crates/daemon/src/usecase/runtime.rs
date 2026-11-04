@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use usagi_core::domain::{
     agent::{
-        DurableLaunchSnapshot, LaunchRequest, LaunchValidationError, ProviderResumePhase,
-        ProviderResumeRef, ProviderResumeStatus,
+        AgentLaunchProvenance, DurableLaunchSnapshot, LaunchRequest, LaunchValidationError,
+        ProviderResumePhase, ProviderResumeRef, ProviderResumeStatus,
     },
     id::{
         AgentRuntimeRef, ClientId, CompletionFence, ConnectionId, OperationId, SessionId,
@@ -21,6 +21,7 @@ use usagi_core::domain::{
     },
     terminal_launch::TerminalKind,
     terminal_retention::{AdmissionRejection, EvictionReason, FinalLookup, RetainedFinal},
+    user_decision::UserDecisionOwner,
 };
 
 pub use super::terminal::{
@@ -33,6 +34,7 @@ use super::{
         TerminalState,
     },
     metrics::AgentConcurrencyGauge,
+    resources::StoreError,
     terminal::{
         Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
         TerminalRegistry,
@@ -80,6 +82,19 @@ pub struct DurableRuntimeRecord {
     /// in the live Agent owner and claimed MCP child process.
     #[serde(default)]
     pub credential_provenance: Option<CredentialProvenance>,
+    /// Public launch audit, retained through restart and exact resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_provenance: Option<AgentLaunchProvenance>,
+    /// Immutable decision authority for this exact conversation. Each replacement
+    /// carries it in its own owner shard so source/dispatch history may be collected.
+    /// Fresh launches create a new owner even when they reuse an Agent identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_decision_owner: Option<UserDecisionOwner>,
+    /// Owners already used by retained legacy exact-resume runs, newest first.
+    /// Migration captures these once; subsequent resumes copy them without adding
+    /// their new run. They never cross an ordinary fresh-conversation launch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_decision_owner_aliases: Vec<UserDecisionOwner>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -238,8 +253,7 @@ pub enum RuntimeSnapshotError {
 }
 
 pub trait RuntimeStore {
-    #[allow(clippy::result_unit_err)] // Persistence detail is intentionally erased at the usecase port.
-    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()>;
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), StoreError>;
 }
 /// Called exactly once by [`RuntimeCoordinator::launch`], before PTY spawn.
 /// A non-durable instruction to wrap the spawned child in an OS sandbox
@@ -431,6 +445,8 @@ pub enum RuntimeError {
     ConcurrencyExhausted,
     Terminal(RegistryError),
     Store,
+    /// The durable operation ledger refused a fresh reservation without writing.
+    RetentionBackpressure,
     Journal,
     SpawnFailed,
     ReconcileRequired(ReconcileState),
@@ -597,7 +613,7 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
     ) -> Result<(), RuntimeError> {
-        self.launch_with_semantic_superseding(
+        self.launch_with_provenance(
             request,
             runtime,
             operation,
@@ -608,6 +624,9 @@ impl RuntimeCoordinator {
             mcp_credential,
             semantic_key,
             &[],
+            None,
+            None,
+            Vec::new(),
         )
     }
 
@@ -627,7 +646,7 @@ impl RuntimeCoordinator {
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
     ) -> Result<(), RuntimeError> {
-        self.launch_with_semantic_superseding(
+        self.launch_with_provenance(
             request,
             runtime,
             operation,
@@ -638,12 +657,17 @@ impl RuntimeCoordinator {
             mcp_credential,
             semantic_key,
             superseded,
+            None,
+            None,
+            Vec::new(),
         )
     }
 
     /// Releases the pre-admission retention reservation on every failure: a
     /// launch that never reaches `Running` will never commit a final.
-    fn launch_with_semantic_superseding(
+    /// Persist trusted launch provenance together with the runtime reservation,
+    /// before the spawner can perform any external effect.
+    pub fn launch_with_provenance(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
@@ -655,6 +679,9 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
+        launch_provenance: Option<AgentLaunchProvenance>,
+        user_decision_owner: Option<UserDecisionOwner>,
+        user_decision_owner_aliases: Vec<UserDecisionOwner>,
     ) -> Result<(), RuntimeError> {
         let terminal = runtime.terminal.clone();
         let outcome = self.admit_with_semantic_superseding(
@@ -668,6 +695,9 @@ impl RuntimeCoordinator {
             mcp_credential,
             semantic_key,
             superseded,
+            launch_provenance,
+            user_decision_owner,
+            user_decision_owner_aliases,
         );
         if outcome.is_err() {
             self.retention.release(&terminal);
@@ -688,8 +718,25 @@ impl RuntimeCoordinator {
         mcp_credential: Option<String>,
         semantic_key: String,
         superseded: &[AgentRuntimeRef],
+        launch_provenance: Option<AgentLaunchProvenance>,
+        user_decision_owner: Option<UserDecisionOwner>,
+        user_decision_owner_aliases: Vec<UserDecisionOwner>,
     ) -> Result<(), RuntimeError> {
         self.validate_scope(&runtime, &operation)?;
+        if user_decision_owner.as_ref().is_some_and(|owner| {
+            owner.workspace_id != operation.workspace_id
+                || owner.session_id != operation.session_id
+                || (superseded.is_empty() && owner.run_id != operation.operation_id)
+        }) || (!user_decision_owner_aliases.is_empty()
+            && (user_decision_owner.is_none() || superseded.is_empty()))
+            || user_decision_owner_aliases.iter().any(|owner| {
+                owner.workspace_id != operation.workspace_id
+                    || owner.session_id != operation.session_id
+            })
+        {
+            return Err(RuntimeError::ScopeMismatch);
+        }
+        let generation_before = self.generation.clone();
         if self.generation.current().is_none() {
             self.generation
                 .register_standby(
@@ -728,6 +775,12 @@ impl RuntimeCoordinator {
                 return Err(RuntimeError::ProviderResumeMismatch);
             }
             if record.superseded_by.is_some() {
+                return Err(RuntimeError::ProviderResumeMismatch);
+            }
+            if record.user_decision_owner.is_some()
+                && (record.user_decision_owner != user_decision_owner
+                    || record.user_decision_owner_aliases != user_decision_owner_aliases)
+            {
                 return Err(RuntimeError::ProviderResumeMismatch);
             }
             continuation = record.continuation;
@@ -774,11 +827,13 @@ impl RuntimeCoordinator {
         {
             return Err(RuntimeError::ScopeMismatch);
         }
+        let mut source_records = Vec::with_capacity(superseded_keys.len());
         for source in superseded_keys {
             let record = self
                 .records
                 .get_mut(&source)
                 .expect("validated resume source remains present");
+            source_records.push((source.clone(), record.clone()));
             record.superseded_by = Some(runtime.agent_runtime_id);
             // A replaced source is the least valuable history in its lineage:
             // it keeps its minimum TTL but is collected before anything else.
@@ -810,6 +865,46 @@ impl RuntimeCoordinator {
                         .map_err(RuntimeError::Generation)?;
                 }
             }
+        }
+        self.records.insert(
+            key.clone(),
+            DurableRuntimeRecord {
+                runtime: runtime.clone(),
+                operation,
+                launch,
+                state: RuntimeState::Reserved,
+                process: None,
+                provider_resume,
+                continuation: Some(continuation),
+                resume_source: Some(resume_source),
+                resumed_from,
+                superseded_by: None,
+                semantic_key: Some(semantic_key),
+                outcome: DurableOperationOutcome::Accepted,
+                credential_provenance,
+                launch_provenance,
+                user_decision_owner,
+                user_decision_owner_aliases,
+            },
+        );
+        self.generation
+            .reserve_terminal(runtime.terminal.clone())
+            .map_err(|error| {
+                debug_assert_eq!(error, GenerationError::TerminalOwnedElsewhere);
+                RuntimeError::Terminal(RegistryError::StaleTarget)
+            })?;
+        let persistence = self.persist(store);
+        if persistence == Err(RuntimeError::RetentionBackpressure) {
+            self.records.remove(&key);
+            self.records.extend(source_records);
+            self.generation = generation_before;
+            self.publish_concurrency();
+            return persistence;
+        }
+        // A refusal above is effect zero. A successful or ambiguous save keeps
+        // the source transition and its derived retention bookkeeping together.
+        for (_, source) in source_records {
+            let source_terminal = source.runtime.terminal;
             if !self.retention.mark_superseded(&source_terminal)
                 && matches!(
                     self.retention.lookup(&source_terminal),
@@ -833,31 +928,7 @@ impl RuntimeCoordinator {
             }
             self.retention.set_pinned(&source_terminal, false);
         }
-        self.records.insert(
-            key.clone(),
-            DurableRuntimeRecord {
-                runtime: runtime.clone(),
-                operation,
-                launch,
-                state: RuntimeState::Reserved,
-                process: None,
-                provider_resume,
-                continuation: Some(continuation),
-                resume_source: Some(resume_source),
-                resumed_from,
-                superseded_by: None,
-                semantic_key: Some(semantic_key),
-                outcome: DurableOperationOutcome::Accepted,
-                credential_provenance,
-            },
-        );
-        self.generation
-            .reserve_terminal(runtime.terminal.clone())
-            .map_err(|error| {
-                debug_assert_eq!(error, GenerationError::TerminalOwnedElsewhere);
-                RuntimeError::Terminal(RegistryError::StaleTarget)
-            })?;
-        self.persist(store)?; // durable reservation/snapshot precedes every external effect
+        persistence?; // durable reservation/snapshot precedes every external effect
         if let Err(error) = self.terminals.register(runtime.terminal.clone(), geometry) {
             // The store already contains a reservation. Keep it in memory too:
             // removing it would make a later actor believe a replacement is safe.
@@ -1146,7 +1217,7 @@ impl RuntimeCoordinator {
         let mut terminate_failed = false;
 
         for (_, record) in &targets {
-            if runtime_state_requires_termination(record.state) {
+            if record.state.requires_termination() {
                 if spawner.terminate_reap(&record.runtime.terminal).is_err() {
                     terminate_failed = true;
                     continue;
@@ -1237,9 +1308,7 @@ impl RuntimeCoordinator {
 
         let mut interrupted = 0;
         for (key, record) in targets {
-            if record.state != RuntimeState::Reserved
-                && !runtime_state_requires_termination(record.state)
-            {
+            if record.state != RuntimeState::Reserved && !record.state.requires_termination() {
                 continue;
             }
             if record.process.is_some() && spawner.terminate_reap(&record.runtime.terminal).is_err()
@@ -1571,16 +1640,7 @@ impl RuntimeCoordinator {
     pub fn disconnect(&mut self, connection: ConnectionId, writer: &mut dyn PtyWriter) {
         self.terminals.disconnect(connection, writer);
         // Finals this connection was draining are no longer pinned.
-        let exited: Vec<TerminalRef> = self
-            .records
-            .values()
-            .filter(|record| record.state == RuntimeState::Exited)
-            .map(|record| record.runtime.terminal.clone())
-            .collect();
-        for terminal in exited {
-            let attached = self.terminals.is_attached(&terminal);
-            self.retention.set_pinned(&terminal, attached);
-        }
+        self.refresh_exited_retention_pins();
     }
 
     /// Coalesces cleanup for every connection absent from the daemon's current
@@ -1592,15 +1652,18 @@ impl RuntimeCoordinator {
         writer: &mut dyn PtyWriter,
     ) {
         self.terminals.retain_live_connections(live, writer);
-        let exited: Vec<TerminalRef> = self
+        self.refresh_exited_retention_pins();
+    }
+
+    fn refresh_exited_retention_pins(&self) {
+        for record in self
             .records
             .values()
             .filter(|record| record.state == RuntimeState::Exited)
-            .map(|record| record.runtime.terminal.clone())
-            .collect();
-        for terminal in exited {
-            let attached = self.terminals.is_attached(&terminal);
-            self.retention.set_pinned(&terminal, attached);
+        {
+            let terminal = &record.runtime.terminal;
+            self.retention
+                .set_pinned(terminal, self.terminals.is_attached(terminal));
         }
     }
 
@@ -1615,18 +1678,6 @@ impl RuntimeCoordinator {
         self.records
             .values()
             .find(|record| record.runtime.terminal.fences(terminal))
-            .map(|record| record.runtime.clone())
-    }
-
-    /// Resolves the runtime admitted by one durable operation fence.
-    ///
-    /// Operation ownership is unique by construction: hydration rejects a
-    /// duplicate and launch refuses to reserve one twice.
-    #[must_use]
-    pub fn runtime_for_operation(&self, operation_id: OperationId) -> Option<AgentRuntimeRef> {
-        self.records
-            .values()
-            .find(|record| record.operation.operation_id == operation_id)
             .map(|record| record.runtime.clone())
     }
 
@@ -1756,6 +1807,11 @@ impl RuntimeCoordinator {
         reference.last_known_phase = Some(phase);
         self.persist(store)
     }
+    /// Borrow authoritative records for projections that do not need a durable snapshot.
+    pub(crate) fn records(&self) -> impl Iterator<Item = &DurableRuntimeRecord> {
+        self.records.values()
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {
         RuntimeStoreSnapshot {
@@ -1823,9 +1879,10 @@ impl RuntimeCoordinator {
         // consults, and they already changed. A failed write must not leave the
         // observed level behind the level that refuses the next launch.
         self.publish_concurrency();
-        store
-            .save(self.snapshot())
-            .map_err(|()| RuntimeError::Store)
+        store.save(self.snapshot()).map_err(|error| match error {
+            StoreError::Unavailable => RuntimeError::Store,
+            StoreError::RetentionBackpressure => RuntimeError::RetentionBackpressure,
+        })
     }
     fn validate_scope(
         &self,
@@ -1882,18 +1939,6 @@ impl RuntimeCoordinator {
     }
 }
 
-const fn runtime_state_requires_termination(state: RuntimeState) -> bool {
-    matches!(
-        state,
-        RuntimeState::Running
-            | RuntimeState::ReconcileRequired(
-                ReconcileState::SpawnAmbiguous
-                    | ReconcileState::PersistAfterSpawn
-                    | ReconcileState::OrphanRunning
-            )
-    )
-}
-
 fn terminal_ownership_state(state: RuntimeState) -> TerminalState {
     match state {
         RuntimeState::Running => TerminalState::Available,
@@ -1918,6 +1963,31 @@ fn terminal_ownership_matches(state: RuntimeState, ownership: TerminalState) -> 
         || (state == RuntimeState::Reclaimed && ownership == TerminalState::Terminated)
 }
 
+fn validate_hydrated_scope(record: &DurableRuntimeRecord) -> Result<(), RuntimeSnapshotError> {
+    if record.runtime.terminal.session_id != record.runtime.session_id
+        || record.runtime.session_id != record.operation.session_id
+        || record.runtime.terminal.workspace_id != record.operation.workspace_id
+        || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
+        || record.launch.request.scope.workspace_id != record.runtime.terminal.workspace_id
+        || record.launch.request.scope.session_id != record.runtime.terminal.session_id
+        || record.launch.request.scope.worktree_id != record.runtime.terminal.worktree_id
+        || record.user_decision_owner.as_ref().is_some_and(|owner| {
+            owner.workspace_id != record.operation.workspace_id
+                || owner.session_id != record.operation.session_id
+                || (record.resumed_from.is_none() && owner.run_id != record.operation.operation_id)
+        })
+        || (!record.user_decision_owner_aliases.is_empty()
+            && (record.user_decision_owner.is_none() || record.resumed_from.is_none()))
+        || record.user_decision_owner_aliases.iter().any(|owner| {
+            owner.workspace_id != record.operation.workspace_id
+                || owner.session_id != record.operation.session_id
+        })
+    {
+        return Err(RuntimeSnapshotError::ScopeMismatch);
+    }
+    Ok(())
+}
+
 #[inline(never)]
 fn hydrated_records(
     snapshot: RuntimeStoreSnapshot,
@@ -1927,16 +1997,7 @@ fn hydrated_records(
     let mut operations = std::collections::BTreeSet::new();
     let mut resume_sources = std::collections::BTreeSet::new();
     for record in snapshot.records {
-        if record.runtime.terminal.session_id != record.runtime.session_id
-            || record.runtime.session_id != record.operation.session_id
-            || record.runtime.terminal.workspace_id != record.operation.workspace_id
-            || record.runtime.terminal.daemon_generation != record.operation.owner_daemon_generation
-            || record.launch.request.scope.workspace_id != record.runtime.terminal.workspace_id
-            || record.launch.request.scope.session_id != record.runtime.terminal.session_id
-            || record.launch.request.scope.worktree_id != record.runtime.terminal.worktree_id
-        {
-            return Err(RuntimeSnapshotError::ScopeMismatch);
-        }
+        validate_hydrated_scope(&record)?;
         if !operations.insert(record.operation.operation_id) {
             return Err(RuntimeSnapshotError::DuplicateOperation);
         }
@@ -1968,11 +2029,21 @@ fn hydrated_records(
                     record.runtime.terminal.daemon_generation,
                     record.continuation,
                     record.launch.request.scope.clone(),
+                    record.user_decision_owner.clone(),
+                    record.user_decision_owner_aliases.clone(),
                 )
             })
         })
         .collect::<Vec<_>>();
-    for (source_id, replacement_id, replacement_generation, continuation, scope) in source_backrefs
+    for (
+        source_id,
+        replacement_id,
+        replacement_generation,
+        continuation,
+        scope,
+        decision_owner,
+        decision_owner_aliases,
+    ) in source_backrefs
     {
         if !replacement_sources.insert(source_id) {
             return Err(RuntimeSnapshotError::ResumeRelation);
@@ -1988,6 +2059,13 @@ fn hydrated_records(
             continue;
         };
         if source.continuation != continuation || source.launch.request.scope != scope {
+            return Err(RuntimeSnapshotError::ResumeRelation);
+        }
+        if source.user_decision_owner.is_some()
+            && decision_owner.is_some()
+            && (source.user_decision_owner != decision_owner
+                || source.user_decision_owner_aliases != decision_owner_aliases)
+        {
             return Err(RuntimeSnapshotError::ResumeRelation);
         }
         match source.superseded_by {

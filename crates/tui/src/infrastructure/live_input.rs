@@ -176,6 +176,7 @@ pub fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         KeyCode::Delete => Key::Delete,
         KeyCode::Enter => Key::Enter,
         KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => Key::Passthrough(bytes),
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Escape => Key::Escape,
         KeyCode::Char(ch) => Key::Char(ch),

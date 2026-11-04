@@ -40,14 +40,14 @@ pub mod environment_source;
 /// interrupted Agent runtime を tab へ投影し、tab 単位の明示 resume を検証する
 /// 純粋 reducer（#510）。
 pub mod interrupted_tab;
+/// Human Issue / Memory search contracts.
+pub mod knowledge_search;
 /// Daemon metrics / Git observation ports and application-owned polling flow.
 pub mod metrics;
 /// Single-flight cadence policy shared by background observation lanes.
 pub mod observation_lane;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
-/// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
-pub mod pane_runtime;
 /// Daemon-backed PR projection and browser effect ports.
 pub mod pr;
 /// IO-free runtime boundaries used by the controller composition.
@@ -64,9 +64,8 @@ pub mod terminal_screen;
 pub mod terminal_selection;
 /// Polling coordinator mirroring one daemon-owned terminal into a screen grid.
 pub mod terminal_session;
-/// Goal-driven Work Run の選択・確認・同一 operation retry を所有する純粋 state machine。
-pub mod work_run_control;
-pub mod workflow;
+/// Unified human search contracts.
+pub mod unified_search;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +203,27 @@ pub trait WorkspaceLoader: Send {
     ///
     /// Returns an error when the user-data store cannot be updated.
     fn record_unite(&mut self, paths: &[PathBuf]) -> io::Result<()>;
+
+    /// Load the last committed deck, separately from workspace recency.
+    ///
+    /// # Errors
+    /// Returns an error if the optional resume store cannot be read.
+    fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>>;
+
+    /// Reload the committed single-project and group history after leaving a deck.
+    ///
+    /// # Errors
+    /// Returns an error if the history projection cannot be read.
+    fn recent_projects(&mut self) -> io::Result<Vec<usagi_core::domain::recent::Recent>>;
+
+    /// Save tab order and the active project after a successful deck change.
+    ///
+    /// # Errors
+    /// Returns an error if the resume store cannot be written.
+    fn record_last_projects(
+        &mut self,
+        projects: &usagi_core::domain::recent::LastProjectSet,
+    ) -> io::Result<()>;
 
     /// Start a non-blocking read of the global workspace registry.
     ///
@@ -705,7 +725,7 @@ mod tests {
 
         for entry in entries {
             assert_eq!(entry.clone(), entry);
-            assert!(!format!("{entry:?}").is_empty());
+            assert_ne!(format!("{entry:?}"), "");
         }
     }
 
@@ -742,7 +762,7 @@ mod tests {
         ];
         for key in keys {
             assert_eq!(key.clone(), key);
-            assert!(!format!("{key:?}").is_empty());
+            assert_ne!(format!("{key:?}"), "");
         }
         assert_ne!(Key::Char('a'), Key::Char('b'));
         assert_ne!(

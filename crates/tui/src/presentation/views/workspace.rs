@@ -26,7 +26,6 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
 use usagi_core::domain::settings::IconMode;
-use usagi_core::domain::supervisor::SupervisorRunState;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::infrastructure::ipc::{AgentConcurrency, BuildIdentity, DaemonMetrics};
@@ -48,16 +47,15 @@ use crate::presentation::views::root_terminal_drawer::{
     self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
 };
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
-use crate::presentation::views::work_run::{WorkRunFreshness, WorkRunProgress, WorkRunProjection};
 use crate::presentation::widgets;
 pub use crate::presentation::widgets::live_terminal::TerminalViewProjection;
 use crate::usecase::application::controller::{
     AppState, CreateSessionForm, Feedback, GardenClick, HomeMode, Notice, Overlay, PrOverlay,
     PreviewOverlay, Selection, SessionRoleProjection, Target, TargetPhase,
 };
-use crate::usecase::application::metrics::GitDiff;
+use crate::usecase::application::metrics::{ArtifactCount, GitDiff};
 use crate::usecase::application::pane::{
-    PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab, TabSelection,
+    PaneKind, PaneRegistry, PaneSelection, PaneState, PaneTab,
 };
 use crate::usecase::application::runtime_identities_are_valid;
 use crate::usecase::application::terminal_selection::TerminalPoint;
@@ -65,19 +63,20 @@ use usagi_core::domain::id::{
     AgentContinuationRef, AgentRuntimeId, SessionId, TerminalRef, WorkspaceId,
 };
 
+mod sidebar;
+use sidebar::SidebarLayout;
+pub use sidebar::sidebar_pointer_target;
+
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
-// The controller reducer owns the pointer hit-test and must resolve rows with
-// the same sidebar geometry this view renders. Keep its mirrored constants in
-// lock-step with the render so a click never lands on the wrong row.
+// Keep the established sidebar dimensions stable. Rendering and pointer
+// resolution both use SidebarLayout, including variable-height decorations.
 const _: () = assert!(LEFT_WIDTH == crate::usecase::application::controller::SIDEBAR_LEFT_WIDTH);
 const _: () = assert!(CHROME_ROWS == crate::usecase::application::controller::SIDEBAR_CHROME_ROWS);
 /// session 1 行が占める行数（まとめ / 変更履歴 / Agent）。session の行数は Agent の
-/// 有無で変えない。controller の hit-test は runtime-local phase しか持たず、daemon
-/// inventory を重ねた view の Agent 集合とは一致しないため、行数を Agent に依存させると
-/// click が 1 行ずれる。
+/// 有無で変えず、Agent の状態変化でも session 一覧の並びを安定させる。
 const SESSION_ROW_LINES: usize = 3;
 const _: () = assert!(
     SESSION_ROW_LINES == crate::usecase::application::controller::SIDEBAR_SESSION_ROW_LINES
@@ -88,9 +87,13 @@ const MEMORY_ICON: &str = "\u{f233}";
 const AGENT_ICON: &str = "\u{f085}";
 const DECISION_NOTICE_ICON: &str = "\u{f0f3}";
 const PR_ICON: &str = "\u{ea64}";
+/// nf-md-package_variant: a box for generated artifacts.
+const ARTIFACT_ICON: &str = "\u{f03d6}";
+const SIDEBAR_ARTIFACTS_MIN_WIDTH: usize = 16;
 const SESSION_CURSOR_ICON: &str = "\u{f0907}";
 const SWITCH_ICON: &str = "\u{f0ec}";
 const CLOSEUP_ICON: &str = "\u{f00e}";
+const NOTE_ICON: &str = "\u{f249}";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IconSet {
@@ -99,7 +102,9 @@ struct IconSet {
     agents: &'static str,
     decision: &'static str,
     pull_request: &'static str,
+    artifacts: &'static str,
     session_cursor: &'static str,
+    note: &'static str,
 }
 
 const fn icon_set(mode: IconMode) -> IconSet {
@@ -110,7 +115,9 @@ const fn icon_set(mode: IconMode) -> IconSet {
             agents: AGENT_ICON,
             decision: DECISION_NOTICE_ICON,
             pull_request: PR_ICON,
+            artifacts: ARTIFACT_ICON,
             session_cursor: SESSION_CURSOR_ICON,
+            note: NOTE_ICON,
         },
         IconMode::Text => IconSet {
             cpu: "CPU",
@@ -118,7 +125,9 @@ const fn icon_set(mode: IconMode) -> IconSet {
             agents: "Agents",
             decision: "!",
             pull_request: "PR",
+            artifacts: "Artifacts",
             session_cursor: ">",
+            note: "▤",
         },
     }
 }
@@ -168,6 +177,8 @@ pub struct ProjectedSession {
     pub last_modified: DateTime<Utc>,
     /// note scratchpad に表示できる内容があるか。icon の幅は常に予約する。
     pub has_notes: bool,
+    /// Free-form session memo for the read-only Switch preview.
+    pub memo: Option<String>,
     /// dismissed を除いた PR の件数。表示 glyph は global icon mode から決める。
     pub pr_count: usize,
     /// True while daemon-owned removal is pending.
@@ -192,6 +203,8 @@ pub struct ProjectedSession {
     /// Number of visible session ancestors in the sidebar. Direct reports to the
     /// implicit Director use zero because the Director is not rendered there.
     pub organization_depth: usize,
+    /// User-owned favorite marker; independent of lifecycle and role.
+    pub favorite: bool,
 }
 
 /// Keep the common one-digit badge column stable even before a PR is detected.
@@ -209,7 +222,8 @@ impl ProjectedSession {
             cwd: record.root.clone(),
             last_modified: record.last_active_or_created(),
             has_notes: !record.notes.is_empty(),
-            pr_count: visible_pr_links(&record.prs),
+            memo: record.notes.note.clone(),
+            pr_count: PrLink::visible_count(&record.prs),
             removing: false,
             agent_resume: None,
             // Lifecycle is daemon-authoritative and joined by stable ID before
@@ -222,19 +236,40 @@ impl ProjectedSession {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         }
     }
 }
 
 fn organization_label(session: &ProjectedSession) -> String {
+    let label = if session.favorite {
+        format!("★ {}", session.label)
+    } else {
+        session.label.clone()
+    };
     if session.organization_depth == 0 {
-        return session.label.clone();
+        return label;
     }
     format!(
         "{}└─ {}",
         "  ".repeat(session.organization_depth.saturating_sub(1)),
-        session.label
+        label
     )
+}
+
+/// Paint the favorite marker independently, restoring the row style after it.
+fn paint_organization_label(session: &ProjectedSession, label: &str, style: Style) -> String {
+    if session.favorite
+        && let Some((prefix, suffix)) = label.split_once('★')
+    {
+        return format!(
+            "{}{}{}",
+            style.paint(prefix),
+            style.fg(Role::Favorite.color()).paint("★"),
+            style.paint(suffix),
+        );
+    }
+    style.paint(label)
 }
 
 pub(crate) fn role_identity(role: &str) -> String {
@@ -250,16 +285,14 @@ fn role_badge(session: &ProjectedSession) -> String {
     session
         .role_id
         .as_ref()
-        .map(|role| format!("  {}", role_identity(role)))
-        .unwrap_or_default()
+        .map_or_default(|role| format!("  {}", role_identity(role)))
 }
 
 fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, &str>) -> String {
     let role = session
         .role_id
         .as_deref()
-        .map(|role| format!("{} · ", role_identity(role)))
-        .unwrap_or_default();
+        .map_or_default(|role| format!("{} · ", role_identity(role)));
     let lineage = session
         .parent_session_id
         .and_then(|parent| names.get(&parent))
@@ -268,10 +301,6 @@ fn garden_session_label(session: &ProjectedSession, names: &BTreeMap<SessionId, 
             |parent| format!("{parent} › {}", session.label),
         );
     format!("{role}{lineage}")
-}
-
-pub(crate) fn visible_pr_links(prs: &[PrLink]) -> usize {
-    prs.iter().filter(|pr| pr.is_visible()).count()
 }
 
 pub(crate) fn visible_pr_entries(prs: &[PrEntry]) -> usize {
@@ -284,6 +313,15 @@ fn pr_summary(visible: usize, mode: IconMode) -> Option<String> {
         IconMode::NerdFont => format!("{icon} {visible}"),
         IconMode::Text => format!("{icon}{visible}"),
     })
+}
+
+fn artifacts_summary(count: ArtifactCount, mode: IconMode) -> Option<String> {
+    let count = match count {
+        ArtifactCount::Ready(0) => return None,
+        ArtifactCount::Ready(count) => count.to_string(),
+        ArtifactCount::Unavailable => "!".to_owned(),
+    };
+    Some(format!("{} {count}", icon_set(mode).artifacts))
 }
 
 fn short_id(id: &str) -> String {
@@ -327,9 +365,6 @@ pub struct HomeProjection {
     session_states: SessionStateCounts,
     feedback: Option<Feedback>,
     mascot_tick: u64,
-    /// Presentation-only message. Runtime state currently supplies `None`; this
-    /// keeps a future event source out of the renderer and prevents dummy copy.
-    mascot_speech: Option<widgets::mascot::MascotSpeech>,
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,
@@ -343,6 +378,8 @@ pub struct HomeProjection {
     /// sidebar の git 差分列。stable `SessionId` で session 行に結合する非永続の描画素材で、
     /// controller state には持たせない。空なら差分列を描かず metrics 導入前の frame を保つ。
     git_diffs: Arc<BTreeMap<SessionId, GitDiff>>,
+    /// Artifact counts and scan failures refreshed off the frame thread.
+    artifact_counts: Arc<BTreeMap<SessionId, ArtifactCount>>,
     /// 選択中 live terminal の viewport 素材。`None` は live terminal 非表示で、右ペインは
     /// 既存の pane strip をそのまま描く。
     terminal_view: Option<Arc<TerminalViewProjection>>,
@@ -351,16 +388,17 @@ pub struct HomeProjection {
     /// Non-sensitive detail of the selected interrupted Agent tab (#510). It
     /// replaces the phase line while a read-only history tab is selected.
     pane_detail: Option<String>,
-    workflow_panel: Option<crate::usecase::application::workflow::WorkflowPanel>,
-    workflow_selected: bool,
     /// Workspace transition progress replaces only the right-pane content.
     /// The project bar and cached session sidebar remain stable around it.
     content_loading: Option<ContentLoading>,
     /// Whether an explicit or forced Closeup action modal covers the right pane
     /// this frame. Empty Closeup remains a plain pane until Enter opens it.
     closeup_action_visible: bool,
+    foreground_overlay: Option<Overlay>,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    decision_answers: Vec<usagi_core::domain::user_decision::UserDecision>,
+    decision_owners: decision_modal::OwnerNames,
     unread_decision_ids: std::collections::BTreeSet<usagi_core::domain::id::UserDecisionId>,
     /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
     pr_overlay: Option<PrOverlay>,
@@ -413,10 +451,9 @@ pub struct HomeProjection {
     /// the daemon's `session.created` row replaces it.
     create_pending: Option<String>,
     /// Frontmost Director mode drawer material, including its explicit route,
-    /// Workflow-specific Organization or Work Runs projection and optional
+    /// Director Organization projection and optional
     /// Console terminal.
     director_drawer: Option<DirectorDrawerProjection>,
-    work_runs: WorkRunProjection,
     /// Frontmost bottom-anchored workspace-root generic terminal drawer.
     root_terminal_drawer: Option<RootTerminalDrawerProjection>,
 }
@@ -585,8 +622,10 @@ fn project_garden_sessions(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomePaneTab {
     label: String,
+    base_label: String,
     selected: bool,
     pending: bool,
+    agent_terminal: Option<TerminalRef>,
 }
 
 /// Join daemon-observed row material with controller-owned ordering, PR and
@@ -609,6 +648,7 @@ pub(crate) fn project_sessions(
         .iter()
         .filter_map(|id| {
             let mut session = (*snapshot_by_id.get(id)?).clone();
+            session.favorite = state.is_favorite(*id);
             if let Some(prs) = state.session_prs(*id) {
                 session.pr_count = visible_pr_entries(prs);
             }
@@ -633,12 +673,36 @@ pub(crate) fn project_sessions(
                         .and_then(|projection| projection.parent_session_id);
                 }
             }
+            if let Some((_, notes)) = state.saved_notes().filter(|(saved_id, _)| *saved_id == *id) {
+                session.memo.clone_from(&notes.note);
+                session.has_notes = !notes.is_empty();
+            }
             Some(session)
         })
         .collect()
 }
 
+fn project_decision_owners(
+    workspace: WorkspaceId,
+    name: &str,
+    sessions: &[ProjectedSession],
+) -> decision_modal::OwnerNames {
+    decision_modal::OwnerNames {
+        workspaces: BTreeMap::from([(workspace, name.to_owned())]),
+        sessions: sessions
+            .iter()
+            .map(|session| (session.id, session.label.clone()))
+            .collect(),
+    }
+}
+
 impl HomeProjection {
+    /// The Home surface whose pane geometry this projection describes.
+    #[must_use]
+    pub const fn mode(&self) -> HomeMode {
+        self.mode
+    }
+
     /// `state` を snapshot 表示情報へ安全に結合する。
     ///
     /// state にある ID だけをその順番で採用する。欠損した表示情報は描画せず、controller
@@ -681,6 +745,7 @@ impl HomeProjection {
         let garden_sessions = project_garden_sessions(state, &sessions, &session_agents);
         let garden_workspaces =
             garden_workspace_index(state.workspace(), garden_sessions.as_deref());
+        let decision_owners = project_decision_owners(state.workspace(), workspace_name, &sessions);
         Self {
             workspace_name: workspace_name.to_owned(),
             icon_mode: IconMode::default(),
@@ -697,17 +762,15 @@ impl HomeProjection {
             session_states,
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
-            mascot_speech: None,
             metrics: None,
             client_build: None,
             health: DaemonHealthTracker::default(),
             git_diffs: Arc::new(BTreeMap::new()),
+            artifact_counts: Arc::new(BTreeMap::new()),
             terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
             pane_detail: None,
-            workflow_panel: preview.and_then(|session| state.workflow_panel(session).cloned()),
-            workflow_selected: false,
             content_loading: None,
             // Only an explicit/forced `Overlay::Closeup` shows the action modal.
             closeup_action_visible: matches!(
@@ -715,6 +778,7 @@ impl HomeProjection {
                 crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
             ) && state.overlay()
                 == Some(crate::usecase::application::controller::Overlay::Closeup),
+            foreground_overlay: state.overlay(),
             // Same rule as the modals above. The reducer keeps this one's draft
             // across a foreground change, so only the projection hides it.
             decision_overlay: state
@@ -722,6 +786,8 @@ impl HomeProjection {
                 .filter(|_| state.overlay() == Some(Overlay::Decisions))
                 .cloned(),
             decisions: state.decisions().to_vec(),
+            decision_answers: state.decision_answers().to_vec(),
+            decision_owners,
             unread_decision_ids: state.unread_decision_ids().clone(),
             // The foreground overlay is the single source of truth for what a
             // modal owns, so a PR modal that is not the foreground is not drawn
@@ -769,7 +835,6 @@ impl HomeProjection {
             director_drawer: state
                 .director_drawer_open()
                 .then(DirectorDrawerProjection::default),
-            work_runs: WorkRunProjection::default(),
             root_terminal_drawer: state
                 .root_terminal_drawer_open()
                 .then(RootTerminalDrawerProjection::default),
@@ -826,12 +891,22 @@ impl HomeProjection {
     pub(crate) fn with_deck_garden(
         mut self,
         scope: String,
-        sessions: Vec<(WorkspaceId, widgets::garden::GardenSession)>,
+        mut sessions: Vec<(WorkspaceId, widgets::garden::GardenSession)>,
     ) -> Self {
         if self.garden_sessions.is_none() {
             return self;
         }
         self.garden_scope = scope;
+        for (workspace, session) in &mut sessions {
+            session.pending_decisions = self
+                .decisions
+                .iter()
+                .filter(|decision| {
+                    decision.owner.workspace_id == *workspace
+                        && decision.owner.session_id == Some(session.id)
+                })
+                .count();
+        }
         self.garden_workspaces = sessions
             .iter()
             .map(|(workspace, session)| (session.id, *workspace))
@@ -842,6 +917,16 @@ impl HomeProjection {
 
     pub(crate) fn garden_sessions(&self) -> Option<&[widgets::garden::GardenSession]> {
         self.garden_sessions.as_deref()
+    }
+
+    /// Add cached source names from other project tabs; current session labels
+    /// keep priority over a deck cache last observed before a project switch.
+    #[must_use]
+    pub(crate) fn with_decision_owners(mut self, mut owners: decision_modal::OwnerNames) -> Self {
+        owners.workspaces.extend(self.decision_owners.workspaces);
+        owners.sessions.extend(self.decision_owners.sessions);
+        self.decision_owners = owners;
+        self
     }
 
     /// Canonical tick that materially identifies the visible Garden pose.
@@ -897,17 +982,21 @@ impl HomeProjection {
     /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
     #[must_use]
     pub fn with_pane(mut self, pane: &PaneState) -> Self {
-        self.workflow_selected = pane.tabs().iter().any(|tab| {
-            matches!(tab, PaneTab::Ready(ready) if ready.kind == PaneKind::Workflow)
-                && pane_tab_selected(tab, pane.selected())
-        });
         self.pane_tabs = pane
             .tabs()
             .iter()
             .map(|tab| HomePaneTab {
                 label: pane_tab_label(tab),
+                base_label: pane_tab_label(tab),
                 selected: pane_tab_selected(tab, pane.selected()),
                 pending: matches!(tab, PaneTab::Pending(_)),
+                agent_terminal: match tab {
+                    PaneTab::Live(pane) if pane.kind == PaneKind::Agent => {
+                        Some(pane.terminal.clone())
+                    }
+                    PaneTab::Interrupted(pane) => Some(pane.tab.last_terminal.clone()),
+                    _ => None,
+                },
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
@@ -919,14 +1008,6 @@ impl HomeProjection {
                 PaneTab::Interrupted(interrupted) => Some(interrupted_detail(interrupted)),
                 PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
             });
-        self
-    }
-
-    /// Attach a presentation-safe mascot message without changing controller or
-    /// input state. `None` intentionally leaves the mascot silent.
-    #[must_use]
-    pub fn with_mascot_speech(mut self, speech: Option<widgets::mascot::MascotSpeech>) -> Self {
-        self.mascot_speech = speech;
         self
     }
 
@@ -1004,6 +1085,22 @@ impl HomeProjection {
         inventory: Option<&AgentInventory>,
         interrupted: Option<&BTreeMap<AgentContinuationRef, TerminalRef>>,
     ) {
+        if let Some(inventory) = inventory {
+            for tab in &mut self.pane_tabs {
+                if let Some(terminal) = &tab.agent_terminal {
+                    let provenance = inventory
+                        .runtimes
+                        .iter()
+                        .find(|item| item.runtime.terminal.fences(terminal))
+                        .and_then(|item| item.launch_provenance.as_ref());
+                    tab.label = format!(
+                        "{} [{}]",
+                        tab.base_label,
+                        daemon_modal::origin_label(provenance)
+                    );
+                }
+            }
+        }
         if let Some(inventory) = inventory {
             // Present runtimes per session, from the one observation that also
             // decides the Closeup tab strip.
@@ -1091,6 +1188,7 @@ impl HomeProjection {
                         scope,
                         runtime_id: short_id(&item.runtime.agent_runtime_id.to_string()),
                         state: item.state,
+                        origin: daemon_modal::origin_label(item.launch_provenance.as_ref()),
                     }
                 })
                 .collect()
@@ -1127,6 +1225,21 @@ impl HomeProjection {
         self
     }
 
+    /// Attach background artifact counts without reading the filesystem in a frame.
+    #[must_use]
+    pub fn with_artifact_counts(mut self, counts: Arc<BTreeMap<SessionId, ArtifactCount>>) -> Self {
+        self.artifact_counts = counts;
+        self
+    }
+
+    fn artifacts_action(&self, session: &ProjectedSession, width: usize) -> Option<String> {
+        if !session.lifecycle.capabilities().can_use || width < SIDEBAR_ARTIFACTS_MIN_WIDTH {
+            return None;
+        }
+        artifacts_summary(*self.artifact_counts.get(&session.id)?, self.icon_mode)
+            .filter(|label| widgets::display_width(label) < width)
+    }
+
     /// Attach the focused live terminal's viewport rows, scroll offset and
     /// feedback for the right pane without touching controller or input state.
     /// `None` keeps the right pane on its existing tab strip.
@@ -1160,14 +1273,6 @@ impl HomeProjection {
         if self.director_drawer.is_some() {
             self.director_drawer = Some(projection);
         }
-        self
-    }
-
-    /// Attach the shared daemon-owned Work Run observation without deriving a
-    /// second ordering, progress count, or freshness interpretation for Home.
-    #[must_use]
-    pub fn with_work_runs(mut self, runs: WorkRunProjection) -> Self {
-        self.work_runs = runs;
         self
     }
 
@@ -1228,21 +1333,18 @@ impl HomeProjection {
 
     /// Whether the right pane owns keyboard input on this frame.
     ///
-    /// Only a Closeup route whose selected tab is a live terminal or the
-    /// Workflow form, with no foreground surface over it, receives input. Every
-    /// other frame leaves the pane's scroll, tab, selection, and copy controls
-    /// inert, so the pane is drawn dim to say so: Switch (the sidebar
-    /// navigates), a pending or interrupted tab (no live terminal), an open
-    /// overlay or action modal, and an open Director drawer (its root
-    /// conversation owns input). The Workflow tab has no terminal, but its goal
-    /// and instruction composer take every key, so dimming it drew the one
-    /// surface the person is typing into as if it were inactive.
+    /// A Closeup route receives input when its selected tab is a live terminal
+    /// and no foreground surface covers it. The pane is drawn dim on other
+    /// frames: Switch routes input to the sidebar, pending or interrupted tabs
+    /// have no live terminal, and overlays, action modals, or conversation
+    /// drawers own input while open.
     fn right_pane_focused(&self) -> bool {
         self.mode == HomeMode::Closeup
-            && (self.terminal_view.is_some() || self.workflow_selected)
+            && self.terminal_view.is_some()
             && self.director_drawer.is_none()
             && self.root_terminal_drawer.is_none()
             && !self.closeup_action_visible
+            && self.foreground_overlay.is_none()
             && self.overview_modal.is_none()
             && self.pr_overlay.is_none()
             && self.preview_overlay.is_none()
@@ -1260,14 +1362,6 @@ impl HomeProjection {
         self.session_label(self.preview)
     }
 
-    /// Session display names keyed by ID, used to label decision owners.
-    fn session_names(&self) -> BTreeMap<SessionId, String> {
-        self.sessions
-            .iter()
-            .map(|session| (session.id, session.label.clone()))
-            .collect()
-    }
-
     fn session_label(&self, session: Option<SessionId>) -> &str {
         match session {
             Some(id) => self
@@ -1277,6 +1371,12 @@ impl HomeProjection {
                 .map_or("No session selected", |session| session.label.as_str()),
             None => "No session selected",
         }
+    }
+
+    /// Visible label of one stable session, including unavailable fallback.
+    #[must_use]
+    pub fn label_for_session(&self, session: SessionId) -> &str {
+        self.session_label(Some(session))
     }
 }
 
@@ -1326,17 +1426,14 @@ fn pane_tab_label(tab: &PaneTab) -> String {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
         },
         PaneTab::Ready(ready) => match ready.kind {
             PaneKind::Diff => "Diff".to_owned(),
-            PaneKind::Workflow => "Workflow".to_owned(),
             PaneKind::Terminal | PaneKind::Agent => "Pane".to_owned(),
         },
     }
@@ -1345,16 +1442,7 @@ fn pane_tab_label(tab: &PaneTab) -> String {
 fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
     // Each tab kind carries its own stable selection key, so comparing keys is
     // enough: a mismatched kind or identity simply compares unequal.
-    *selection == PaneSelection::Tab(pane_tab_selection(tab))
-}
-
-fn pane_tab_selection(tab: &PaneTab) -> TabSelection {
-    match tab {
-        PaneTab::Pending(pending) => TabSelection::Pending(pending.operation),
-        PaneTab::Live(live) => TabSelection::Live(live.terminal.clone()),
-        PaneTab::Ready(ready) => TabSelection::Ready(ready.operation),
-        PaneTab::Interrupted(pane) => TabSelection::Interrupted(pane.tab.continuation),
-    }
+    *selection == PaneSelection::Tab(tab.selection())
 }
 
 /// Workspace 画面でキーボードが操作する対象。
@@ -1660,18 +1748,26 @@ fn home_header_layout(width: usize, home: &HomeProjection) -> HomeHeaderLayout {
     // The badge stays while any decision is pending, so a decision that was
     // seen in the list but not answered is still discoverable. Unread
     // decisions are emphasized in bold.
-    let notice = (!home.decisions.is_empty()).then(|| {
-        let style = if home.unread_decision_ids.is_empty() {
-            Role::Warning.style()
-        } else {
-            Role::Warning.style().bold()
-        };
-        style.paint(&format!(
-            "{} {} notice",
-            icons.decision,
-            home.decisions.len()
-        ))
-    });
+    let notice = if home.decisions.is_empty() {
+        (!home.decision_answers.is_empty()).then(|| {
+            Style::new()
+                .dim()
+                .paint(&format!("Saved answers ({})", home.decision_answers.len()))
+        })
+    } else {
+        Some({
+            let style = if home.unread_decision_ids.is_empty() {
+                Role::Warning.style()
+            } else {
+                Role::Warning.style().bold()
+            };
+            style.paint(&format!(
+                "{} Reply needed ({})",
+                icons.decision,
+                home.decisions.len()
+            ))
+        })
+    };
     let root_terminal = if home.root_terminal_drawer.is_some() {
         Role::Accent
             .style()
@@ -2016,7 +2112,7 @@ fn mascot_metrics_with_icon_mode(
 /// Both numbers come from the daemon's own admission authority
 /// ([`DaemonMetrics::agent_concurrency`]); this view never counts runtimes itself
 /// and never restates the daemon's limit. It is the **Agent** pool, not the
-/// generic terminal capacity and not a supervisor run's concurrency.
+/// generic terminal capacity.
 ///
 /// `None` means the daemon reported nothing (a peer older than metrics schema 3),
 /// which is drawn as a dash so it cannot be read as an idle `0`.
@@ -2083,8 +2179,7 @@ fn sidecar_labels_with_icon_mode(
     // 観測が無いときは Agent concurrency 行も CPU / メモリ行も出さない（metrics 導入前と
     // 同じ静けさ）。health だけが非 Ok なら badge 行だけが出る。
     let mut metric_rows = metrics
-        .map(|metrics| mascot_metrics_with_icon_mode(Some(metrics), 0, icon_mode))
-        .unwrap_or_default();
+        .map_or_default(|metrics| mascot_metrics_with_icon_mode(Some(metrics), 0, icon_mode));
     // 供給元は 4 つあるが、sidecar はうさぎの 3 行にしか載らない。4 つとも語ることが
     // あるときは **Agent concurrency 行が譲る**。異常な daemon の方が急を要する報せで
     // あり、ここで明示的に落としておかないと widget の `take(3)` が代わりに最下段の
@@ -2485,10 +2580,7 @@ pub fn render_home_at(
     // height underneath, so opening it neither reflows the sidebar (the mascot
     // stays on its row) nor looks like a terminal resize.
     let split = panes::split(width, LEFT_WIDTH);
-    let right = dim_inactive_right_pane(
-        !home.right_pane_focused(),
-        home_right_pane(body_height, split.right, home),
-    );
+    let right = home_right_pane(body_height, split.right, home);
     frame.extend(panes::join(
         body_height,
         &home_left_pane(body_height, split.left, home, now),
@@ -2558,8 +2650,12 @@ fn render_home_modals(
             width,
             &frame,
             overlay,
-            &home.decisions,
-            &home.session_names(),
+            if overlay.show_answers() {
+                &home.decision_answers
+            } else {
+                &home.decisions
+            },
+            &home.decision_owners,
         )
     } else if home.closeup_action_visible {
         // Prefer the runtime's persisted action modal (its caret and selection),
@@ -2599,8 +2695,7 @@ fn render_pr_overlay(
         height,
         width,
         base,
-        &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected())
-            .with_filter(overlay.filter()),
+        &PrModal::with_selection(overlay.prs(), overlay.selected()).with_filter(overlay.filter()),
     )
 }
 
@@ -2642,67 +2737,17 @@ fn home_notice_banner(width: usize, home: &HomeProjection) -> String {
         .iter()
         .find(|item| home.unread_decision_ids.contains(&item.decision_id));
     if let Some(decision) = decision {
-        let control = match home.icon_mode {
-            IconMode::NerdFont => "bell",
-            IconMode::Text => "indicator",
-        };
         return widgets::clip_to_width(
             &Role::Warning.style().paint(&format!(
-                "  {} {}: {}  (click {control} to review)",
+                "  {} Reply needed · {}: {}  (click Reply needed)",
                 icon_set(home.icon_mode).decision,
-                decision_modal::owner_label(decision, &home.session_names()),
+                decision_modal::owner_label(decision, &home.decision_owners),
                 decision.title
             )),
             width,
         );
     }
-    let Some(run) = home.work_runs.primary() else {
-        if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
-            return widgets::clip_to_width(
-                &Role::Warning
-                    .style()
-                    .bold()
-                    .paint("  ⚠ Work Run progress unavailable"),
-                width,
-            );
-        }
-        return header_spacer(width);
-    };
-    let progress = WorkRunProgress::from_run(run);
-    let short_id: String = run.supervisor_run_id.to_string().chars().take(8).collect();
-    let observation = if home.work_runs.freshness() == WorkRunFreshness::Unavailable {
-        "⚠ Stale work"
-    } else if matches!(
-        run.state,
-        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
-    ) {
-        "⚠ Action needed"
-    } else {
-        "● Active work"
-    };
-    let label = run.display_label.as_deref().unwrap_or("Untitled Work Run");
-    widgets::clip_to_width(
-        &format!(
-            "  {observation} {label} #{short_id} · {} · {}/{} tasks · {}/{} agents · Director for details",
-            work_run_state_label(run.state),
-            progress.succeeded_tasks,
-            progress.total_tasks,
-            progress.active_agents,
-            progress.max_agents,
-        ),
-        width,
-    )
-}
-
-const fn work_run_state_label(state: SupervisorRunState) -> &'static str {
-    match state {
-        SupervisorRunState::Planning => "Planning",
-        SupervisorRunState::Running | SupervisorRunState::Verifying => "Working",
-        SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated => "Waiting for you",
-        SupervisorRunState::Succeeded => "Completed",
-        SupervisorRunState::Failed => "Failed",
-        SupervisorRunState::Cancelled => "Cancelled",
-    }
+    header_spacer(width)
 }
 
 fn home_left_pane(
@@ -2714,9 +2759,7 @@ fn home_left_pane(
     if height == 0 {
         return Vec::new();
     }
-    let rows = home.rows();
-    // Size the Git summary columns once for the whole sidebar so every session's
-    // commit and line cells align, matching the legacy `left_pane` computation.
+    let layout = SidebarLayout::new(height, width, home, now);
     let session_ids = home
         .sessions
         .iter()
@@ -2724,84 +2767,37 @@ fn home_left_pane(
         .collect::<Vec<_>>();
     let columns = sidebar_diff_columns(&session_ids, &home.git_diffs);
     let pr_width = sidebar_pr_width(&home.sessions, home.icon_mode);
-    if height == 1 {
-        return home_row_lines_at(width, home, rows[0], columns, pr_width, now)
-            .into_iter()
-            .take(1)
-            .collect();
-    }
-    let body_capacity = height - 1;
-    // Reuse the legacy metric projection so both render paths draw an identical
-    // sidecar. An absent observation yields no metrics row, which keeps the
-    // pre-metrics home frame byte-for-byte unchanged. The diagnostic health
-    // badge is evaluated against the frame's own clock — the renderer stays the
-    // only place that reads time, so `now` remains the whole time input.
-    let sidecar = sidecar_labels_with_icon_mode(
-        width,
-        home.metrics.as_ref(),
-        home.health.evaluate(now.timestamp_millis()),
-        home.session_states,
-        home.icon_mode,
-    );
-    // 明示された mascot speech を優先し、無ければ正常系以外の daemon 状態を吹き出しへ落とす。
-    let daemon_speech = abnormal_daemon_speech(home.feedback.as_ref());
-    let speech = home.mascot_speech.as_ref().or(daemon_speech.as_ref());
-    let mascot =
-        widgets::mascot::sidebar_block_with_sidecar(width, home.mascot_tick, speech, &sidecar);
-    let show_mascot = mascot
-        .as_ref()
-        .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
-    let mascot_rows = if show_mascot {
-        mascot
-            .as_ref()
-            .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
-    } else {
-        0
-    };
-    let content_capacity = body_capacity.saturating_sub(mascot_rows);
-    // Reserve the loading skeleton's rows outside the selectable-row budget so a
-    // pending create draws just above `+ new session` without scrolling it off.
-    let skeleton_rows = if home.create_pending.is_some() {
-        CREATE_SKELETON_ROWS
-    } else {
-        0
-    };
-    let viewport_capacity = content_capacity.saturating_sub(skeleton_rows);
-    let selected_index = rows
-        .iter()
-        .position(|row| *row == home.selected)
-        .unwrap_or(0);
-    let start = home_viewport_start(width, home, &rows, selected_index, viewport_capacity);
     let mut lines = Vec::with_capacity(height);
-    // Track only selectable-row lines against `viewport_capacity`; the skeleton
-    // lives in the space reserved above and never counts toward the break.
-    let mut row_line_count = 0;
-    for row in &rows[start..] {
-        if matches!(row, Selection::NewSession)
-            && let Some(name) = home.create_pending.as_deref()
-        {
-            lines.extend(create_skeleton_lines(
-                width,
-                name,
-                home.mascot_tick,
-                home.icon_mode,
-            ));
+    for row in &layout.rows {
+        if let Some(selection) = row.selection {
+            lines.extend(
+                home_row_lines_at(width, home, selection, columns, pr_width, now)
+                    .into_iter()
+                    .take(row.height),
+            );
+        } else {
+            let name = home
+                .create_pending
+                .as_deref()
+                .expect("sidebar skeleton rows require a pending create");
+            lines.extend(
+                create_skeleton_lines(width, name, home.mascot_tick, home.icon_mode)
+                    .into_iter()
+                    .take(row.height),
+            );
         }
-        let row_lines = home_row_lines_at(width, home, *row, columns, pr_width, now);
-        if row_line_count + row_lines.len() > viewport_capacity {
-            break;
-        }
-        row_line_count += row_lines.len();
-        lines.extend(row_lines);
     }
-    lines.resize(content_capacity, String::new());
-    if show_mascot {
-        lines.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
+    lines.resize(layout.content_capacity, String::new());
+    if height == 1 {
+        return lines;
+    }
+    if let Some(mascot) = layout.mascot {
+        lines.extend(mascot.rows().iter().cloned());
         lines.push(String::new());
     }
     let footer = match home.mode {
         HomeMode::Switch => {
-            "[switch] ←→ project / ↑↓ select / Enter closeup / Ctrl-X force remove / Ctrl-? help"
+            "[switch] ←→ project / ↑↓ select / Enter closeup / n memo / Ctrl-X force remove / Ctrl-? help"
         }
         HomeMode::Closeup => {
             "[closeup] a agent / t terminal / Enter actions / Ctrl-O controls / Ctrl-? help"
@@ -2901,7 +2897,7 @@ fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> us
     home_row_height(row)
 }
 
-/// Paint a Home sidebar row label with the established colour precedence.
+/// Resolve a Home sidebar row label's established colour precedence.
 ///
 /// `+ new session` is a Success (green) affordance in every mode:
 /// resolve it before the generic accent branches so the Switch cursor only adds
@@ -2910,30 +2906,24 @@ fn home_row_height_at(width: usize, home: &HomeProjection, row: Selection) -> us
 /// shared inactive dim, and Closeup keeps it Success but unbolded. Every other
 /// row keeps the established order: selected cursor (accent bold) → Switch
 /// inactive dim → current (accent bold) → plain accent.
-fn home_row_label(
-    row: Selection,
-    label: &str,
-    selected: bool,
-    current: bool,
-    mode: HomeMode,
-) -> String {
+fn home_row_label_style(row: Selection, selected: bool, current: bool, mode: HomeMode) -> Style {
     if matches!(row, Selection::NewSession) {
         return if selected {
-            Role::Success.style().bold().paint(label)
+            Role::Success.style().bold()
         } else if mode == HomeMode::Switch {
-            Style::new().dim().paint(label)
+            Style::new().dim()
         } else {
-            Role::Success.style().paint(label)
+            Role::Success.style()
         };
     }
     if selected {
-        Role::Accent.style().bold().paint(label)
+        Role::Accent.style().bold()
     } else if mode == HomeMode::Switch {
-        Style::new().dim().paint(label)
+        Style::new().dim()
     } else if current {
-        Role::Accent.style().bold().paint(label)
+        Role::Accent.style().bold()
     } else {
-        Role::Accent.style().paint(label)
+        Role::Accent.style()
     }
 }
 
@@ -2958,11 +2948,12 @@ fn home_failed_row_lines(
         &organization_label(session),
         label_width.saturating_sub(widgets::display_width(&badge)),
     );
-    let label = if selected {
-        Role::Danger.style().bold().paint(&clipped)
+    let style = if selected {
+        Role::Danger.style().bold()
     } else {
-        Role::Danger.style().dim().paint(&clipped)
+        Role::Danger.style().dim()
     };
+    let label = paint_organization_label(session, &clipped, style);
     let marker = home_row_marker(row, selected, current, icon_mode);
     if session.failure_stage == Some(FailureStage::Delete) {
         let first = widgets::pad_to_width(&format!("{marker} {label}{badge}"), width);
@@ -3047,6 +3038,11 @@ fn home_row_lines_at(
         let frame = usize::try_from(home.mascot_tick).unwrap_or(usize::MAX);
         let badge = role_badge(session);
         let label = widgets::shimmer_text_with(&organization_label(session), frame, wave);
+        let label = if session.favorite {
+            label.replacen('★', &Role::Favorite.style().paint("★"), 1)
+        } else {
+            label
+        };
         let marker = home_row_marker(row, selected, false, home.icon_mode);
         return vec![
             widgets::pad_to_width(
@@ -3076,7 +3072,7 @@ fn home_row_lines_at(
         );
     }
     let marker = home_row_marker(row, selected, current_marker, home.icon_mode);
-    let badge = session.map(role_badge).unwrap_or_default();
+    let badge = session.map_or_default(role_badge);
     let owned_label = session.map(organization_label);
     let label = if session.is_some() {
         widgets::clip_to_width(
@@ -3088,10 +3084,18 @@ fn home_row_lines_at(
     } else {
         label.to_string()
     };
-    let label = home_row_label(row, &label, selected, current, home.mode);
+    let style = home_row_label_style(row, selected, current, home.mode);
+    let label = session.map_or_else(
+        || style.paint(&label),
+        |session| paint_organization_label(session, &label, style),
+    );
     let first = if let Some(session) = session {
         // Keep the note column stable without showing an unexplained placeholder.
-        let note = if session.has_notes { "✎" } else { " " };
+        let note = if session.has_notes {
+            icon_set(home.icon_mode).note
+        } else {
+            " "
+        };
         widgets::pad_to_width(
             &format!(
                 "{marker} {label}{badge}  {}",
@@ -3152,21 +3156,42 @@ fn home_row_lines_at(
             .session_agents
             .get(&session.id)
             .map_or(&[][..], Vec::as_slice);
+        let artifacts = home.artifacts_action(session, width);
+        let agent_width = artifacts
+            .as_ref()
+            .map_or(width, |label| width - widgets::display_width(label) - 1);
+        let agent_line = sidebar_agent_line_with_icon_mode(
+            agents,
+            agent_width,
+            selected,
+            current_marker,
+            inactive,
+            home.icon_mode,
+        );
         vec![
             first,
             widgets::pad_to_width(&metadata, width),
-            sidebar_agent_line_with_icon_mode(
-                agents,
-                width,
-                selected,
-                current_marker,
-                inactive,
-                home.icon_mode,
-            ),
+            if let Some(label) = artifacts {
+                with_artifacts_action(&agent_line, width, &label)
+            } else {
+                agent_line
+            },
         ]
     } else {
         vec![first]
     }
+}
+
+fn with_artifacts_action(agents: &str, width: usize, label: &str) -> String {
+    let remaining = width - widgets::display_width(label);
+    format!(
+        "{}{}",
+        widgets::pad_to_width(
+            &widgets::clip_to_width(agents.trim_end(), remaining - 1),
+            remaining
+        ),
+        Role::Info.style().underline().paint(label),
+    )
 }
 
 /// session 行の 3 行目: その session に属する Agent の状態。
@@ -3367,6 +3392,157 @@ fn home_session_continuation_marker(selected: bool, current: bool) -> String {
 }
 
 fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
+    let mut rows = dim_inactive_right_pane(
+        !home.right_pane_focused(),
+        home_right_pane_content(height, width, home),
+    );
+    if home.mode != HomeMode::Switch {
+        return rows;
+    }
+    let Selection::Target(Target::Session(id)) = home.selected else {
+        return rows;
+    };
+    let Some(session) = home
+        .sessions
+        .iter()
+        .find(|session| session.id == id && session.lifecycle == SessionLifecycle::Available)
+    else {
+        return rows;
+    };
+    let memo = session.memo.as_deref().filter(|memo| !memo.is_empty());
+    let live_terminal = home.content_loading.is_none()
+        && !home.pane_tabs.is_empty()
+        && home.terminal_view.is_some();
+    let content_top = if home.content_loading.is_some() || home.pane_tabs.is_empty() {
+        1
+    } else {
+        2
+    };
+    let start = if memo.is_some() {
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP
+    } else {
+        widgets::live_terminal::RIGHT_PANE_CONTENT_TOP - 1
+    };
+    let gap = start.saturating_sub(content_top);
+    let budget = if live_terminal {
+        height.saturating_sub(
+            widgets::live_terminal::RIGHT_PANE_CONTENT_TOP + widgets::live_terminal::FOOTER_ROWS,
+        )
+    } else {
+        // Keep room for the tab chrome, agent/detail and feedback rows, and
+        // footer. Empty and loading views also retain their status.
+        height.saturating_sub(7 + gap)
+    };
+    let preview = home_memo_preview(memo, width, home.icon_mode, budget);
+    if preview.is_empty() {
+        return rows;
+    }
+    if live_terminal {
+        // Overlay only the terminal body; its viewport and PTY geometry stay
+        // unchanged. The empty-memo hint uses the blank chrome row instead.
+        for (row, line) in rows.iter_mut().skip(start).zip(preview) {
+            *row = line;
+        }
+    } else {
+        // Other layouts carry status rather than disposable terminal output.
+        // Compose them below the memo, letting their own renderer fit the body.
+        rows = dim_inactive_right_pane(
+            !home.right_pane_focused(),
+            home_right_pane_content(height - gap - preview.len(), width, home),
+        );
+        drop(rows.splice(
+            content_top..content_top,
+            std::iter::repeat_n(String::new(), gap).chain(preview),
+        ));
+    }
+    rows
+}
+
+/// Replace the Switch memo preview in place while preserving sidebar and tab chrome.
+#[must_use]
+pub fn render_memo_editor_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    editor: &crate::usecase::application::controller::NoteEditor,
+    label: &str,
+) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    let top = CHROME_ROWS + widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
+    let available = height.saturating_sub(top + widgets::live_terminal::FOOTER_ROWS);
+    if split.right < 40 || available < 8 {
+        return super::scratchpad_modal::render_notes_for_over(height, width, base, editor, label);
+    }
+    let card = super::scratchpad_modal::memo_card(editor, split.right, available, label);
+    let mut frame = base.to_vec();
+    for (row, line) in frame.iter_mut().skip(top).zip(card) {
+        *row = format!(
+            "{}\x1b[0m{line}\x1b[0m",
+            widgets::modal::columns(row, 0, split.left + 1)
+        );
+    }
+    frame
+}
+
+fn home_memo_preview(
+    memo: Option<&str>,
+    width: usize,
+    icon_mode: IconMode,
+    budget: usize,
+) -> Vec<String> {
+    if width < 4 || budget < if memo.is_some() { 3 } else { 1 } {
+        return Vec::new();
+    }
+    let Some(memo) = memo else {
+        return vec![
+            Style::new()
+                .fg(Color::White)
+                .dim()
+                .paint(&widgets::clip_to_width(
+                    &format!(" {} n: add memo", icon_set(icon_mode).note),
+                    width,
+                )),
+        ];
+    };
+    let inner_width = width - 4;
+    let body_limit = budget.saturating_sub(2).min(3);
+    let title = Role::Accent.style().bold().paint(&format!(
+        "{} Memo · n: edit · shared with agent",
+        icon_set(icon_mode).note
+    ));
+    let mut body = Vec::new();
+    let lines = memo
+        .lines()
+        .flat_map(|line| {
+            let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                widgets::wrap_to_width(&line, inner_width)
+            }
+        })
+        .take(body_limit + 1)
+        .collect::<Vec<_>>();
+    for (index, line) in lines.iter().take(body_limit).enumerate() {
+        let line = usagi_core::domain::presentation_text::sanitize_presentation_line(line);
+        let suffix = if index + 1 == body_limit && lines.len() > body_limit {
+            " …"
+        } else {
+            ""
+        };
+        body.push(Style::new().fg(Color::White).paint(&widgets::clip_to_width(
+            &format!("{line}{suffix}"),
+            inner_width,
+        )));
+    }
+    widgets::modal::compact_boxed(&title, inner_width, &body)
+        .into_iter()
+        .map(|line| format!("\u{1b}[0m{line}\u{1b}[0m"))
+        .collect()
+}
+
+fn home_right_pane_content(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
     let mode = match home.mode {
         HomeMode::Switch => "Switch",
         HomeMode::Closeup => "Closeup",
@@ -3422,15 +3598,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
-    if home.workflow_selected {
-        let mut rows = vec![chrome[0].clone(), chrome[1].clone()];
-        rows.extend(super::workflow::render(
-            height.saturating_sub(4),
-            width,
-            &home.workflow_panel.clone().unwrap_or_default(),
-        ));
-        return with_footer_gap(rows, height, footer);
-    }
+
     if let Some(view) = &home.terminal_view {
         // A focused live terminal renders daemon PTY output below the tab strip,
         // sharing the legacy viewport window and surfacing terminal feedback in
@@ -3575,6 +3743,58 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{home_right_pane, home_right_pane_content, with_artifacts_action};
+    use crate::usecase::application::metrics::ArtifactCount;
+    #[test]
+    fn memo_preview_wraps_long_lines_and_editor_keeps_preview_geometry() {
+        use super::{home_memo_preview, render_memo_editor_over};
+        use crate::usecase::application::controller::{
+            AppEvent, AppKey, AppState, BackendEvent, update,
+        };
+        let preview = home_memo_preview(Some("日本語の長文です\n\n次"), 16, IconMode::Text, 10);
+        let plain = preview
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("日本語の長文"));
+        assert!(plain.contains("です"));
+        let id = SessionId::new();
+        let mut state = AppState::home(WorkspaceId::new(), vec![id]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
+        let request_id = state.note_editor().unwrap().request_id();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::NotesLoaded {
+                target: Target::Session(id),
+                request_id,
+                scratchpad: Scratchpad {
+                    note: Some("original".into()),
+                    ..Default::default()
+                },
+            }),
+        );
+        for (height, width) in [(24, 100), (10, 40), (24, 50)] {
+            let base = vec![".".repeat(width); height];
+            let rendered = render_memo_editor_over(
+                height,
+                width,
+                &base,
+                state.note_editor().unwrap(),
+                "alpha",
+            );
+            assert_eq!(rendered.len(), height);
+            assert!(rendered.iter().all(|line| display_width(line) <= width));
+            assert!(rendered.join("\n").contains("Memo"));
+            if width == 100 {
+                assert_eq!(&rendered[..5], &base[..5]);
+                assert_eq!(rendered.last(), base.last());
+                assert!(rendered[5].starts_with(&".".repeat(37)));
+                assert!(rendered[5].contains("Memo · alpha"));
+            }
+        }
+    }
+
     #[test]
     fn organization_order_preserves_siblings_orphans_and_cycles() {
         use super::{SessionRoleProjection, organization_order};
@@ -3593,6 +3813,8 @@ mod tests {
                 (
                     id,
                     SessionRoleProjection {
+                        director_continuation: None,
+                        creator_continuation: None,
                         role_id: None,
                         role_summary: None,
                         parent_session_id: Some(parent),
@@ -3616,25 +3838,22 @@ mod tests {
         DECISION_NOTICE_ICON, DaemonMetrics, GIBIBYTE, GitDiff, HEALTH_GLYPH, HomeHeaderAction,
         HomeProjection, IconMode, LEFT_WIDTH, MEBIBYTE, MEMORY_ICON, PR_ICON, PR_RESERVE_WIDTH,
         ProjectedSession, SESSION_CURSOR_ICON, SESSION_ROW_LINES, SIDECAR_GUTTER,
-        SidebarDiffColumns, TerminalViewProjection, UNREPORTED, WorkRunProjection, Workspace,
-        abnormal_daemon_speech, create_skeleton_lines, feedback_label, format_memory,
-        garden_click_at, garden_fits, garden_frame, garden_tick, health_badge, health_reason_label,
-        home_header_action_at, home_header_layout, home_left_pane, home_notice_banner,
-        home_row_height, home_row_lines_at, home_viewport_start, load_style,
-        new_session_input_lines, pane_tab_label, pane_tab_selected, phase_label, render_home,
-        render_home_at, resume_label, right_pane_tab_at, role_identity,
-        root_terminal_available_width, short_id, sidebar_agent_line, sidebar_metadata,
-        sidecar_labels, terminal_point_at, with_footer_gap, work_run_state_label,
+        SidebarDiffColumns, TerminalViewProjection, UNREPORTED, Workspace, abnormal_daemon_speech,
+        create_skeleton_lines, feedback_label, format_memory, garden_click_at, garden_fits,
+        garden_frame, garden_tick, health_badge, health_reason_label, home_header_action_at,
+        home_header_layout, home_left_pane, home_notice_banner, home_row_height, home_row_lines_at,
+        home_viewport_start, load_style, new_session_input_lines, pane_tab_label,
+        pane_tab_selected, phase_label, render_home, render_home_at, resume_label,
+        right_pane_tab_at, role_identity, root_terminal_available_width, short_id,
+        sidebar_agent_line, sidebar_metadata, sidecar_labels, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::theme::{Color, Role, Style};
     use crate::presentation::views::director_drawer::{
         self, DIRECTOR_ICON, DirectorConversation, DirectorDrawerProjection, DirectorNewProjection,
-        WorkRunControlProjection,
     };
     use crate::presentation::views::root_terminal_drawer::{
         self, ROOT_TERMINAL_ICON, RootTerminalDrawerProjection,
     };
-    use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{self, display_width, modal, wrap_to_width};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, BranchChoice, Feedback, GARDEN_IDLE_THRESHOLD,
@@ -3664,10 +3883,6 @@ mod tests {
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::role::RoleId;
     use usagi_core::domain::session_lifecycle::{AgentPhase, FailureStage, SessionLifecycle};
-    use usagi_core::domain::supervisor::{
-        ArtifactContract, ExecutionPolicy, SupervisorRunId, SupervisorRunQuery, SupervisorRunState,
-        TaskId, TaskQuery, TaskState,
-    };
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
@@ -3677,119 +3892,6 @@ mod tests {
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
     use usagi_core::usecase::session_state::SessionStateCounts;
-
-    #[test]
-    #[allow(clippy::too_many_lines)] // One banner matrix keeps every Work Run priority and availability state comparable.
-    fn home_banner_surfaces_the_highest_priority_work_run() {
-        let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let mut run = SupervisorRunQuery {
-            supervisor_run_id: SupervisorRunId::new(),
-            state_revision: 1,
-            state: SupervisorRunState::Running,
-            terminal_at: None,
-            terminal_reason: None,
-            display_label: Some("Ship Work Run".into()),
-            root_agent_id: None,
-            policy: ExecutionPolicy::default(),
-            escalation: None,
-            tasks: Vec::new(),
-            provenance: Vec::new(),
-        };
-        run.tasks = [
-            TaskState::Succeeded,
-            TaskState::Dispatched,
-            TaskState::Running,
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, state)| TaskQuery {
-            task_id: TaskId::new(format!("task-{index}")).unwrap(),
-            parent_task_id: None,
-            dependencies: BTreeSet::new(),
-            instruction_digest: format!("digest-{index}"),
-            required_artifact_contract: ArtifactContract::default(),
-            attempt: 1,
-            generation: 1,
-            assigned_dispatch_run: None,
-            verification_attempt: 0,
-            verification_retry_at: None,
-            state,
-        })
-        .collect();
-        let home = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::fresh(vec![run.clone()]));
-        let banner = widgets::strip_ansi(&home_notice_banner(100, &home));
-        assert!(banner.contains("Active work"));
-        assert!(banner.contains("Working"));
-        assert!(banner.contains("1/3 tasks"));
-        assert!(banner.contains("2/4 agents"));
-        assert!(banner.contains("Director for details"));
-
-        let mut action_run = run.clone();
-        action_run.state = SupervisorRunState::WaitingForDecision;
-        let action_home = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::fresh(vec![action_run]));
-        assert!(
-            widgets::strip_ansi(&home_notice_banner(100, &action_home)).contains("Action needed")
-        );
-
-        let states = [
-            SupervisorRunState::Planning,
-            SupervisorRunState::Running,
-            SupervisorRunState::Verifying,
-            SupervisorRunState::WaitingForDecision,
-            SupervisorRunState::Escalated,
-            SupervisorRunState::Succeeded,
-            SupervisorRunState::Failed,
-            SupervisorRunState::Cancelled,
-        ];
-        assert_eq!(
-            states.map(work_run_state_label),
-            [
-                "Planning",
-                "Working",
-                "Working",
-                "Waiting for you",
-                "Waiting for you",
-                "Completed",
-                "Failed",
-                "Cancelled",
-            ]
-        );
-        let sorted = HomeProjection::from_state(&state, "work", &[]).with_work_runs(
-            WorkRunProjection::fresh(
-                states
-                    .into_iter()
-                    .map(|state| SupervisorRunQuery {
-                        supervisor_run_id: SupervisorRunId::new(),
-                        state,
-                        ..run.clone()
-                    })
-                    .collect(),
-            ),
-        );
-        assert!(matches!(
-            sorted.work_runs.runs()[0].state,
-            SupervisorRunState::WaitingForDecision | SupervisorRunState::Escalated
-        ));
-        assert!(matches!(
-            sorted.work_runs.runs().last().unwrap().state,
-            SupervisorRunState::Succeeded | SupervisorRunState::Cancelled
-        ));
-
-        let cached_home = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::fresh(vec![run]).unavailable());
-        let cached_banner = widgets::strip_ansi(&home_notice_banner(100, &cached_home));
-        assert!(cached_banner.contains("Stale work"));
-        assert!(!cached_banner.contains("● Active work"));
-
-        let unavailable = HomeProjection::from_state(&state, "work", &[])
-            .with_work_runs(WorkRunProjection::default().unavailable());
-        assert!(
-            widgets::strip_ansi(&home_notice_banner(100, &unavailable))
-                .contains("Work Run progress unavailable")
-        );
-    }
 
     #[test]
     fn ordered_frame_projection_reuses_owned_session_git_and_terminal_components() {
@@ -3966,6 +4068,103 @@ mod tests {
         assert_eq!(terminal_point_at(20, 80, 30, 0, 41, 18), None);
     }
 
+    #[test]
+    fn artifacts_action_is_flush_right_and_keeps_narrow_rows_unchanged() {
+        for mode in [IconMode::NerdFont, IconMode::Text] {
+            for count in [ArtifactCount::Ready(2), ArtifactCount::Unavailable] {
+                let label = super::artifacts_summary(count, mode).unwrap();
+                let expected_width = match mode {
+                    IconMode::NerdFont => 3,
+                    IconMode::Text => 11,
+                };
+                assert_eq!(widgets::display_width(&label), expected_width);
+                for width in [16, 36] {
+                    let line = with_artifacts_action("  Agents: running", width, &label);
+                    assert_eq!(widgets::display_width(&line), width);
+                    assert!(widgets::strip_ansi(&line).ends_with(&label));
+                }
+                let padded = widgets::pad_to_width("  —", 36);
+                assert!(!with_artifacts_action(&padded, 36, &label).contains('…'));
+            }
+        }
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Ready(2), IconMode::NerdFont),
+            Some(format!("{} 2", super::ARTIFACT_ICON))
+        );
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Ready(2), IconMode::Text).as_deref(),
+            Some("Artifacts 2")
+        );
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Unavailable, IconMode::NerdFont),
+            Some(format!("{} !", super::ARTIFACT_ICON))
+        );
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Unavailable, IconMode::Text).as_deref(),
+            Some("Artifacts !")
+        );
+        assert_eq!(
+            super::artifacts_summary(ArtifactCount::Ready(0), IconMode::NerdFont),
+            None
+        );
+    }
+
+    #[test]
+    fn session_artifacts_action_matches_lifecycle_and_available_width() {
+        for lifecycle in [
+            SessionLifecycle::Creating,
+            SessionLifecycle::Initializing,
+            SessionLifecycle::Available,
+            SessionLifecycle::Deleting,
+            SessionLifecycle::Failed,
+        ] {
+            for icon_mode in [IconMode::NerdFont, IconMode::Text] {
+                let home = home_with_session_states(&[(lifecycle, None)]).with_icon_mode(icon_mode);
+                let selection = Selection::Target(Target::Session(home.sessions[0].id));
+                for count in [
+                    None,
+                    Some(ArtifactCount::Ready(0)),
+                    Some(ArtifactCount::Ready(1)),
+                    Some(ArtifactCount::Ready(12)),
+                    Some(ArtifactCount::Ready(usize::MAX)),
+                    Some(ArtifactCount::Unavailable),
+                ] {
+                    let counts = count.map(|count| (home.sessions[0].id, count));
+                    let home = home
+                        .clone()
+                        .with_artifact_counts(Arc::new(counts.into_iter().collect()));
+                    for width in [15, 16, LEFT_WIDTH] {
+                        let lines = home_row_lines_at(
+                            width,
+                            &home,
+                            selection,
+                            SidebarDiffColumns::default(),
+                            0,
+                            now(),
+                        );
+                        let label =
+                            count.and_then(|count| super::artifacts_summary(count, icon_mode));
+                        let visible = lifecycle.capabilities().can_use
+                            && width >= super::SIDEBAR_ARTIFACTS_MIN_WIDTH
+                            && label
+                                .as_ref()
+                                .is_some_and(|label| widgets::display_width(label) < width);
+                        let rendered = strip(&lines[2]);
+                        assert_eq!(
+                            rendered.contains(super::icon_set(icon_mode).artifacts),
+                            visible,
+                            "{lifecycle:?}, {icon_mode:?}, count {count:?}, width {width}"
+                        );
+                        if visible {
+                            assert!(rendered.ends_with(label.as_ref().unwrap()));
+                        }
+                        assert_eq!(widgets::display_width(&lines[2]), width);
+                    }
+                }
+            }
+        }
+    }
+
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -3987,6 +4186,7 @@ mod tests {
                 session("tui", Some("UI work"), SessionOrigin::Human),
                 session("daemon", None, SessionOrigin::Mcp),
             ],
+            session_notes: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         };
@@ -4000,6 +4200,83 @@ mod tests {
         assert_eq!(
             with_footer_gap(Vec::new(), 1, "footer".to_string()),
             vec!["footer"]
+        );
+    }
+
+    #[test]
+    fn switch_memo_preview_follows_cursor_and_preserves_pane_dimensions() {
+        let [first, second] = std::array::from_fn(|_| SessionId::new());
+        let mut state = AppState::home(WorkspaceId::new(), vec![first, second]);
+        let mut rows = vec![
+            projected_session(first, "first", "/work/first"),
+            projected_session(second, "second", "/work/second"),
+        ];
+        rows[0].memo =
+            Some("一行目\u{1b}[2J\u{1b}]52;c;payload\u{7}\n二行目\n三行目\n隠れた四行目".into());
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        let preview = home_right_pane(20, 50, &home);
+        let content = home_right_pane_content(20, 50, &home);
+        let start = widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
+        assert!(strip(&preview[start]).starts_with("┌─ "));
+        assert!(preview[start].contains("Memo · n: edit"));
+        assert!(preview[start + 1].contains("\u{1b}[37m一行目"));
+        assert!(!preview[start + 1].contains("\u{1b}[2m"));
+        assert_eq!(strip(&preview[0]), strip(&content[0]));
+        assert_eq!(strip(&preview[18]), strip(&content[18]));
+        assert_eq!(strip(&preview[19]), strip(&content[19]));
+        let raw = preview.join("\n");
+        assert!(!raw.contains("\u{1b}[2J") && !raw.contains("\u{1b}]52") && !raw.contains('\u{7}'));
+        let text = home_right_pane(20, 50, &home)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("一行目") && text.contains("三行目 …"));
+        assert!(!text.contains("隠れた四行目"));
+        for height in [0, 1, 5, 7, 8, 20] {
+            for width in [0, 1, 3, 4, 8, 50] {
+                let content = home_right_pane_content(height, width, &home);
+                let preview = home_right_pane(height, width, &home);
+                assert_eq!(preview.len(), content.len());
+                assert!(preview.iter().zip(&content).all(|(line, original)| {
+                    widgets::display_width(line) <= width.max(widgets::display_width(original))
+                }));
+            }
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        let text = home_right_pane(20, 50, &home).join("\n");
+        assert!(text.contains("n: add memo"));
+        assert!(!text.contains("一行目"));
+        assert_eq!(state.active(), Some(first));
+        rows[1].memo = Some(String::new());
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        assert!(
+            home_right_pane(20, 50, &home)
+                .join("\n")
+                .contains("n: add memo")
+        );
+        rows[1].lifecycle = SessionLifecycle::Failed;
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        assert!(
+            !home_right_pane(20, 50, &home)
+                .join("\n")
+                .contains("n: add memo")
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(&state, "work", &rows);
+        assert!(
+            !home_right_pane(20, 50, &home)
+                .join("\n")
+                .contains("n: add memo")
+        );
+        let mut closeup = home;
+        closeup.mode = HomeMode::Closeup;
+        closeup.selected = Selection::Target(Target::Session(first));
+        assert!(
+            !home_right_pane(20, 50, &closeup)
+                .join("\n")
+                .contains("一行目")
         );
     }
 
@@ -4041,6 +4318,7 @@ mod tests {
             cwd: PathBuf::from(cwd),
             last_modified: now(),
             has_notes: false,
+            memo: None,
             pr_count: 0,
             removing: false,
             agent_resume: None,
@@ -4050,6 +4328,7 @@ mod tests {
             role_id: None,
             parent_session_id: None,
             organization_depth: 0,
+            favorite: false,
         }
     }
 
@@ -4068,8 +4347,153 @@ mod tests {
         .expect("a session owns its own terminal")
     }
 
-    /// Build a Home projection whose rows carry the given daemon-authoritative
-    /// lifecycle and, when present, one Agent runtime reporting that phase.
+    #[test]
+    fn agent_tabs_show_their_creator_using_exact_runtime_fences() {
+        use crate::usecase::application::pane::LivePane;
+        use usagi_core::domain::agent::{
+            AgentLaunchEntry, AgentLaunchOrigin, AgentLaunchProvenance, AgentLaunchSource,
+        };
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mcp = runtime_ref(workspace, session);
+        let manual = runtime_ref(workspace, session);
+        let missing = runtime_ref(workspace, session);
+        let shell = runtime_ref(workspace, session);
+        let mut foreign = missing.clone();
+        foreign.terminal.daemon_generation = DaemonGeneration::new();
+        let pane = PaneState::with_live(
+            PaneSelection::None,
+            vec![
+                LivePane {
+                    terminal: mcp.terminal.clone(),
+                    kind: PaneKind::Agent,
+                },
+                LivePane {
+                    terminal: manual.terminal.clone(),
+                    kind: PaneKind::Agent,
+                },
+                LivePane {
+                    terminal: missing.terminal.clone(),
+                    kind: PaneKind::Agent,
+                },
+                LivePane {
+                    terminal: shell.terminal,
+                    kind: PaneKind::Terminal,
+                },
+            ],
+        );
+        let item = |runtime, source| {
+            let origin = AgentLaunchOrigin {
+                source,
+                entrypoint: AgentLaunchEntry::Agent,
+                caller: None,
+                caller_operation_id: None,
+                client: None,
+                operation_id: OperationId::new(),
+                at: now(),
+            };
+            AgentRuntimeInventoryItem {
+                runtime,
+                operation_id: None,
+                agent_id: None,
+                continuation: AgentContinuationRef::new(),
+                state: AgentRuntimeInventoryState::Live,
+                resumed_from: None,
+                launch_provenance: Some(AgentLaunchProvenance {
+                    agent_id: None,
+                    created: Some(origin.clone()),
+                    launched: origin,
+                }),
+            }
+        };
+        let inventory = AgentInventory {
+            workspace_id: workspace,
+            runtimes: vec![
+                item(mcp, AgentLaunchSource::Mcp),
+                item(manual, AgentLaunchSource::Manual),
+                item(foreign, AgentLaunchSource::Mcp),
+            ],
+            resumable: Vec::new(),
+        };
+        let state = AppState::home(workspace, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            &[projected_session(session, "worker", "/work")],
+        )
+        .with_pane(&pane);
+        assert_eq!(home.pane_tabs[0].label, "Agent");
+        let mut home = home.with_agent_inventory(Some(&inventory));
+        assert_eq!(home.pane_tabs[0].label, "Agent [MCP]");
+        assert_eq!(home.pane_tabs[1].label, "Agent [Manual]");
+        assert_eq!(home.pane_tabs[2].label, "Agent [Unknown]");
+        assert_eq!(home.pane_tabs[3].label, "Terminal");
+        home.apply_agent_inventory(Some(&inventory), None);
+        assert_eq!(home.pane_tabs[0].label, "Agent [MCP]");
+    }
+
+    #[test]
+    fn session_favorites_project_a_star_without_changing_labels_or_hierarchy() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let row = projected_session(session, "builder", "/work/builder");
+        let _ = crate::usecase::application::controller::update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::SessionFavorites(BTreeSet::from([session]))),
+        );
+        let mut home = HomeProjection::from_state(&state, "work", &[row]);
+        assert_eq!(home.sessions[0].label, "builder");
+        assert_eq!(super::organization_label(&home.sessions[0]), "★ builder");
+        let mut nested = home.sessions[0].clone();
+        nested.organization_depth = 2;
+        assert_eq!(super::organization_label(&nested), "  └─ ★ builder");
+        let rendered = render_home_at(30, 100, &home, Utc::now()).join("\n");
+        assert!(widgets::strip_ansi(&rendered).contains("★ builder"));
+        home.sessions = Arc::from([nested]);
+        let row = Selection::Target(Target::Session(session));
+        for (mode, selected, current, style) in [
+            (HomeMode::Switch, true, false, Role::Accent.style().bold()),
+            (HomeMode::Switch, false, true, Style::new().dim()),
+            (HomeMode::Closeup, false, true, Role::Accent.style().bold()),
+            (HomeMode::Closeup, false, false, Role::Accent.style()),
+        ] {
+            home.mode = mode;
+            home.selected = if selected { row } else { Selection::NewSession };
+            home.active = current.then_some(session);
+            let lines = home_row_lines_at(30, &home, row, SidebarDiffColumns::default(), 0, now());
+            assert!(lines[0].contains(&style.fg(Color::Yellow).paint("★")));
+            assert!(lines[0].contains(&style.paint("  └─ ")));
+            assert!(lines[0].contains(&style.paint(" builder")));
+            assert!(widgets::strip_ansi(&lines[0]).contains("  └─ ★ builder"));
+            assert_eq!(display_width(&lines[0]), 30);
+        }
+        Arc::make_mut(&mut home.sessions)[0].lifecycle = SessionLifecycle::Failed;
+        home.mode = HomeMode::Switch;
+        home.selected = row;
+        let failed = home_row_lines_at(30, &home, row, SidebarDiffColumns::default(), 0, now());
+        assert!(failed[0].contains(&Style::new().fg(Color::Yellow).bold().paint("★")));
+        assert!(failed[0].contains(&Role::Danger.style().bold().paint(" builder")));
+
+        Arc::make_mut(&mut home.sessions)[0].removing = true;
+        for frame in 0..8 {
+            home.mascot_tick = frame * 4;
+            let removing =
+                home_row_lines_at(30, &home, row, SidebarDiffColumns::default(), 0, now());
+            assert!(removing[0].contains(&Style::new().fg(Color::Yellow).paint("★")));
+            assert!(widgets::strip_ansi(&removing[0]).contains("  └─ ★ builder"));
+        }
+        let session = &mut Arc::make_mut(&mut home.sessions)[0];
+        session.removing = false;
+        session.lifecycle = SessionLifecycle::Available;
+        let clipped = home_row_lines_at(7, &home, row, SidebarDiffColumns::default(), 0, now());
+        assert!(!clipped[0].contains('★'));
+        assert!(!clipped[0].contains(";33m"));
+        assert_eq!(display_width(&clipped[0]), 7);
+    }
+
+    /// Build a Home projection with the given lifecycle and Agent phase.
     fn home_with_session_states(rows: &[(SessionLifecycle, Option<AgentPhase>)]) -> HomeProjection {
         let workspace = WorkspaceId::new();
         let ids = rows.iter().map(|_| SessionId::new()).collect::<Vec<_>>();
@@ -4379,12 +4803,18 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: waiting,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: live,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
@@ -4430,6 +4860,9 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
+                launch_provenance: None,
                 runtime,
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Interrupted,
@@ -4482,6 +4915,9 @@ mod tests {
             runtimes: [live.clone(), history.clone(), dismissed, superseded.clone()]
                 .into_iter()
                 .map(|runtime| AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     state: if runtime == live {
                         AgentRuntimeInventoryState::Live
                     } else {
@@ -4562,7 +4998,10 @@ mod tests {
         )
         .with_agent_inventory_and_panes(None, &empty);
         assert!(home.session_agents.is_empty());
-        assert!(home.garden_sessions.as_ref().unwrap()[0].agents.is_empty());
+        assert_eq!(
+            home.garden_sessions.as_ref().unwrap()[0].agents,
+            [] as [crate::presentation::widgets::agent_status::AgentStatus; 0]
+        );
     }
 
     #[test]
@@ -4587,6 +5026,8 @@ mod tests {
             AppEvent::Backend(BackendEvent::SessionRoles(BTreeMap::from([(
                 session,
                 SessionRoleProjection {
+                    director_continuation: None,
+                    creator_continuation: None,
                     role_id: None,
                     role_summary: None,
                     parent_session_id: None,
@@ -4941,12 +5382,20 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         assert_eq!(state.overlay(), None);
         let mut home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
+        for width in [1, 18] {
+            let layout = home_header_layout(width, &home);
+            assert_eq!(display_width(&layout.line), width);
+            assert!(
+                (0..width)
+                    .all(|column| layout.action_at(column) != Some(HomeHeaderAction::Decisions))
+            );
+        }
 
         let text_banner = strip(&home_notice_banner(
             100,
             &home.clone().with_icon_mode(IconMode::Text),
         ));
-        assert!(text_banner.contains("click indicator to review"));
+        assert!(text_banner.contains("click Reply needed"));
         // The decision notice is highlighted in the warning color (yellow).
         assert!(home_notice_banner(100, &home).contains("\u{1b}[33m"));
 
@@ -4958,7 +5407,7 @@ mod tests {
         assert!(strip(&layout.line).contains(DECISION_NOTICE_ICON));
         assert!(!strip(&layout.line).contains('🔔'));
         assert!(strip(&layout.line).contains(&format!("{ROOT_TERMINAL_ICON} Shell")));
-        assert!(strip(&layout.line).contains("notice"));
+        assert!(strip(&layout.line).contains("Reply needed"));
         assert!(layout.line.contains("\u{1b}[1;33m"));
         let workspace_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::Director))
@@ -4969,9 +5418,9 @@ mod tests {
         let terminal_columns = (0..100)
             .filter(|column| layout.action_at(*column) == Some(HomeHeaderAction::RootTerminal))
             .collect::<Vec<_>>();
-        assert!(!workspace_columns.is_empty());
-        assert!(!notice_columns.is_empty());
-        assert!(!terminal_columns.is_empty());
+        assert_ne!(workspace_columns, [] as [usize; 0]);
+        assert_ne!(notice_columns, [] as [usize; 0]);
+        assert_ne!(terminal_columns, [] as [usize; 0]);
         for column in workspace_columns {
             assert_eq!(
                 home_header_action_at(100, &home, u16::try_from(column).unwrap(), 0),
@@ -5025,9 +5474,38 @@ mod tests {
         assert!(state.unread_decision_ids().is_empty());
         let home = HomeProjection::from_state(&state, "日本語 workspace", &[]);
         let read_line = home_header_layout(100, &home).line;
-        assert!(strip(&read_line).contains("1 notice"));
+        assert!(strip(&read_line).contains("Reply needed (1)"));
         assert!(read_line.contains("\u{1b}[33m"));
         assert!(!read_line.contains("\u{1b}[1;33m"));
+    }
+
+    #[test]
+    fn saved_decision_answers_remain_accessible_without_pending_questions() {
+        let workspace = WorkspaceId::new();
+        let mut saved = pending_confirm_decision(workspace);
+        saved.status = usagi_core::domain::user_decision::UserDecisionStatus::Resolved;
+        saved.answer = Some(
+            usagi_core::domain::user_decision::UserDecisionAnswer::Option {
+                option_id: saved.options[0].id.clone(),
+                comment: None,
+            },
+        );
+        let mut state = AppState::home(workspace, vec![]);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![saved],
+            }),
+        );
+        let home = HomeProjection::from_state(&state, "work", &[]);
+        let layout = home_header_layout(120, &home);
+        assert!(strip(&layout.line).contains("Saved answers (1)"));
+        assert!(!strip(&layout.line).contains("Reply needed"));
+        assert!((0..120).any(|col| layout.action_at(col) == Some(HomeHeaderAction::Decisions)));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenDecisions));
+        let home = HomeProjection::from_state(&state, "work", &[]);
+        assert!(joined_home(&home).contains("Answers awaiting receipt"));
     }
 
     #[test]
@@ -5113,11 +5591,9 @@ mod tests {
     fn drawer_projection_seam_only_replaces_material_while_the_drawer_is_open() {
         let workspace = WorkspaceId::new();
         let material = DirectorDrawerProjection {
+            organization_cursor: 0,
             focused: true,
-            goal_driven: false,
-            route: crate::usecase::application::controller::DirectorRoute::Console(
-                crate::usecase::application::controller::DirectorConsoleParent::Organization,
-            ),
+            route: crate::usecase::application::controller::DirectorRoute::Console,
             conversations: vec![DirectorConversation {
                 label: "root conversation".to_owned(),
                 selected: true,
@@ -5133,8 +5609,6 @@ mod tests {
             interrupted_detail: None,
             feedback: None,
             new: DirectorNewProjection::default(),
-            work_runs: WorkRunProjection::default(),
-            work_run_control: WorkRunControlProjection::default(),
         };
 
         let closed_state = AppState::home(workspace, Vec::new());
@@ -5701,6 +6175,8 @@ mod tests {
                 (
                     session_id,
                     SessionRoleProjection {
+                        director_continuation: None,
+                        creator_continuation: None,
                         role_id: Some(RoleId::new("reviewer").unwrap()),
                         role_summary: None,
                         parent_session_id: None,
@@ -5710,6 +6186,8 @@ mod tests {
                 (
                     child_id,
                     SessionRoleProjection {
+                        director_continuation: None,
+                        creator_continuation: None,
                         role_id: Some(RoleId::new("worker").unwrap()),
                         role_summary: None,
                         parent_session_id: Some(session_id),
@@ -5746,7 +6224,7 @@ mod tests {
             )[0],
         );
         assert!(!first.contains('·'));
-        assert!(!first.contains('✎'));
+        assert!(!first.contains(super::icon_set(home.icon_mode).note));
 
         let mut noted = session;
         noted.has_notes = true;
@@ -5761,7 +6239,21 @@ mod tests {
                 now(),
             )[0],
         );
-        assert!(first.contains('✎'));
+        assert!(first.contains(super::icon_set(home.icon_mode).note));
+        let mut text_home = home;
+        text_home.icon_mode = IconMode::Text;
+        let first = strip(
+            &home_row_lines_at(
+                LEFT_WIDTH,
+                &text_home,
+                Selection::Target(Target::Session(session_id)),
+                SidebarDiffColumns::default(),
+                PR_RESERVE_WIDTH,
+                now(),
+            )[0],
+        );
+        assert!(first.contains('▤'));
+        assert!(!first.contains(super::NOTE_ICON));
     }
 
     #[test]
@@ -5877,7 +6369,7 @@ mod tests {
         };
         for width in [0usize, 1, 2, 3] {
             let lines = new_session_input_lines(width, &draft);
-            assert!(!lines.is_empty());
+            assert_ne!(lines, [] as [String; 0]);
             assert!(lines.iter().all(|line| display_width(line) <= width));
         }
     }
@@ -5919,25 +6411,23 @@ mod tests {
         // controller が集約する phase をすべて踏みつつ、Garden は runtime ごとの
         // phase を失わず投影することを固定する。
         let phases = [
-            Some(AgentPhase::Absent),
-            Some(AgentPhase::Ready),
-            Some(AgentPhase::Running),
-            Some(AgentPhase::Waiting),
-            Some(AgentPhase::Ended),
+            AgentPhase::Absent,
+            AgentPhase::Ready,
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Ended,
         ];
         let ids = phases.iter().map(|_| SessionId::new()).collect::<Vec<_>>();
         let mut state = AppState::home(workspace, ids.clone());
         let mut projected = Vec::new();
         for (index, phase) in phases.iter().enumerate() {
-            if let Some(phase) = *phase {
-                let _ = update(
-                    &mut state,
-                    AppEvent::Backend(BackendEvent::RuntimePhase {
-                        runtime: runtime_ref(workspace, ids[index]),
-                        phase,
-                    }),
-                );
-            }
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase {
+                    runtime: runtime_ref(workspace, ids[index]),
+                    phase: *phase,
+                }),
+            );
             projected.push(projected_session(ids[index], &format!("s{index}"), "/work"));
         }
         projected[4].lifecycle = SessionLifecycle::Failed;
@@ -6043,6 +6533,9 @@ mod tests {
         let root = AgentRuntimeRef::new(AgentRuntimeId::new(), root_terminal, None)
             .expect("a root runtime owns a root terminal");
         let item = |runtime, state| AgentRuntimeInventoryItem {
+            operation_id: None,
+            agent_id: None,
+            launch_provenance: None,
             runtime,
             continuation: AgentContinuationRef::new(),
             state,
@@ -6142,12 +6635,18 @@ mod tests {
             workspace_id: workspace,
             runtimes: vec![
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: closed,
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Exited,
                     resumed_from: None,
                 },
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: live.clone(),
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
@@ -6200,6 +6699,9 @@ mod tests {
         let inventory = AgentInventory {
             workspace_id: workspace,
             runtimes: vec![AgentRuntimeInventoryItem {
+                operation_id: None,
+                agent_id: None,
+                launch_provenance: None,
                 runtime: closed,
                 continuation: AgentContinuationRef::new(),
                 state: AgentRuntimeInventoryState::Reclaimed,
@@ -6677,6 +7179,9 @@ mod tests {
             (
                 runtime_id,
                 AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(runtime_id, terminal, session_id).unwrap(),
                     continuation: AgentContinuationRef::new(),
                     state: AgentRuntimeInventoryState::Live,
@@ -6707,12 +7212,12 @@ mod tests {
         assert!(frame.contains("daemon build —"));
         assert!(frame.contains("16/16  saturated"));
         assert!(frame.contains(&format!(
-            "root  live  #{}",
+            "root  [Unknown]  live  #{}",
             short_id(&runtime_id.to_string())
         )));
-        assert!(frame.contains("known-session  live"));
+        assert!(frame.contains("known-session  [Unknown]  live"));
         assert!(frame.contains(&format!(
-            "session #{}  live",
+            "session #{}  [Unknown]  live",
             short_id(&missing_session.to_string())
         )));
         assert!(frame.contains("Lifecycle actions (non-force)"));
@@ -6720,7 +7225,7 @@ mod tests {
     }
 
     #[test]
-    fn a_modal_that_lost_the_foreground_is_not_drawn_over_the_surface_that_took_it() {
+    fn a_pending_pane_does_not_dismiss_the_decision_the_user_is_reading() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let mut state = AppState::home(workspace, vec![session]);
@@ -6775,14 +7280,13 @@ mod tests {
                 .contains("continue the deploy?")
         );
 
-        // A pane going live releases the Closeup foreground, so every key now
-        // reaches Home. The decision modal keeps its draft in the reducer but
-        // must stop being drawn: a box nothing can answer is worse than none.
+        // A background pane completion cannot take an explicitly opened
+        // decision off the screen or redirect its input to the terminal.
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
-        assert_eq!(state.overlay(), None);
+        assert_eq!(state.overlay(), Some(Overlay::Decisions));
         assert!(state.decision_overlay().is_some());
         assert!(
-            !joined_home(&HomeProjection::from_state(&state, "work", &rows))
+            joined_home(&HomeProjection::from_state(&state, "work", &rows))
                 .contains("continue the deploy?")
         );
     }
@@ -6915,6 +7419,8 @@ mod tests {
         assert_eq!(text.decision, "!");
         assert_eq!(text.session_cursor, ">");
         assert_eq!(nerd.session_cursor, super::SESSION_CURSOR_ICON);
+        assert_eq!(nerd.note, super::NOTE_ICON);
+        assert_eq!(text.note, "▤");
 
         let nerd_marker = strip(&super::home_row_marker(
             Selection::Target(Target::Session(session)),
@@ -7029,15 +7535,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_mascot_reservation_matches_the_hit_test_constants() {
-        // The controller pointer hit-test mirrors this view's foot-of-sidebar
-        // mascot reservation with plain constants. The controller Home renders the
-        // rabbit without a speech bubble, so pin those constants to what the mascot
-        // widget actually reserves and where it drops out for width.
+    fn silent_mascot_footprint_is_independent_of_its_sidecar() {
+        // A silent rabbit has a fixed footprint. Speech height is resolved by
+        // SidebarLayout and covered by the rendered-cell pointer tests.
         use crate::presentation::widgets::mascot::sidebar_block_with_sidecar;
-        use crate::usecase::application::controller::{
-            SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
-        };
+        const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
+        const SIDEBAR_MASCOT_ROWS: usize = 4;
         let block = sidebar_block_with_sidecar(LEFT_WIDTH, 0, None, &[])
             .expect("the rabbit fits the sidebar width");
         assert_eq!(block.reserved_rows(), SIDEBAR_MASCOT_ROWS);
@@ -7457,9 +7960,12 @@ mod tests {
 
     #[test]
     fn home_speech_reserves_a_blank_row_and_does_not_change_home_state() {
-        let state = AppState::home(WorkspaceId::new(), Vec::new());
-        let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
-        let home = HomeProjection::from_state(&state, "work", &[]).with_mascot_speech(Some(speech));
+        let mut state = AppState::home(WorkspaceId::new(), Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
+        );
+        let home = HomeProjection::from_state(&state, "work", &[]);
         let frame = render_home(30, 80, &home);
         let left_rows = frame[CHROME_ROWS..]
             .iter()
@@ -7632,9 +8138,8 @@ mod tests {
     #[test]
     fn narrow_sidebar_clips_the_agent_concurrency_row() {
         use crate::presentation::widgets::mascot::sidebar_block_with_sidecar;
-        use crate::usecase::application::controller::{
-            SIDEBAR_MASCOT_MIN_LEFT, SIDEBAR_MASCOT_ROWS,
-        };
+        const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
+        const SIDEBAR_MASCOT_ROWS: usize = 4;
         let sidecar = vec![
             super::agent_concurrency_row(Some(AgentConcurrency {
                 in_use: 16,
@@ -7880,14 +8385,14 @@ mod tests {
             ),
             super::mascot_metrics(Some(&metrics), 0)
         );
-        assert!(
+        assert_eq!(
             sidecar_labels(
                 LEFT_WIDTH,
                 None,
                 DaemonHealth::Ok,
                 SessionStateCounts::default()
-            )
-            .is_empty()
+            ),
+            [] as [String; 0]
         );
     }
 
@@ -8020,21 +8525,6 @@ mod tests {
         let text = strip(&render_home(30, 80, &home).join("\n"));
         assert!(!text.contains("╰──┬"), "healthy state stays silent");
         assert!(text.contains("(o.o)?"));
-    }
-
-    #[test]
-    fn explicit_mascot_speech_wins_over_the_daemon_state_bubble() {
-        let workspace = WorkspaceId::new();
-        let mut state = AppState::home(workspace, Vec::new());
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
-        );
-        let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
-        let home = HomeProjection::from_state(&state, "work", &[]).with_mascot_speech(Some(speech));
-        let text = strip(&render_home(30, 80, &home).join("\n"));
-        assert!(text.contains("同期済み"));
-        assert!(!text.contains("daemon 切断"));
     }
 
     #[test]
@@ -8548,62 +9038,6 @@ mod tests {
     }
 
     #[test]
-    fn home_workflow_tab_projects_native_progress_and_composer() {
-        let workspace = WorkspaceId::new();
-        let session = SessionId::new();
-        let target = Target::Session(session);
-        let operation = OperationId::new();
-        let mut pane = PaneState::new(PaneSelection::Target(target));
-        let _ = reduce(
-            &mut pane,
-            PaneEvent::Request {
-                operation,
-                target,
-                kind: PaneKind::Workflow,
-            },
-        );
-        let _ = reduce(&mut pane, PaneEvent::Resolved { operation });
-        let _ = reduce(
-            &mut pane,
-            PaneEvent::Select(PaneSelection::Tab(TabSelection::Ready(operation))),
-        );
-        let state = AppState::home(workspace, vec![session]);
-        let mut home = HomeProjection::from_state(
-            &state,
-            "repo",
-            &[projected_session(session, "login", "/work/login")],
-        )
-        .with_pane(&pane);
-        assert!(home.workflow_selected);
-        // The form takes every key in Closeup, so it is drawn at full
-        // brightness there; Switch still dims the preview it navigates past.
-        home.mode = HomeMode::Switch;
-        assert!(!home.right_pane_focused());
-        home.mode = HomeMode::Closeup;
-        assert!(home.right_pane_focused());
-        let empty = super::home_right_pane(20, 80, &home);
-        assert_eq!(empty.len(), 20);
-        assert!(empty.iter().any(|row| strip(row).contains("Not started")));
-        let mut panel = crate::usecase::application::workflow::WorkflowPanel {
-            run: Some(crate::usecase::application::workflow::fixture_run(session)),
-            ..Default::default()
-        };
-        panel.draft.replace("Add regression tests");
-        home.workflow_panel = Some(panel);
-        let running = super::home_right_pane(20, 80, &home);
-        assert!(
-            running
-                .iter()
-                .any(|row| strip(row).contains("Current owner: codex"))
-        );
-        assert!(
-            running
-                .iter()
-                .any(|row| strip(row).contains("Add regression tests"))
-        );
-    }
-
-    #[test]
     fn home_right_pane_renders_live_terminal_viewport_and_feedback() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
@@ -8690,6 +9124,124 @@ mod tests {
     }
 
     #[test]
+    fn switch_memo_card_preserves_terminal_chrome_output_and_feedback() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        let mut projected = projected_session(session, "session", "/work/session");
+        projected.memo = Some("次の作業\nテストを確認する".into());
+        let mut switch = HomeProjection::from_state(&state, "actual", &[projected]);
+        switch.pane_tabs.push(super::HomePaneTab {
+            label: "terminal".into(),
+            base_label: "terminal".into(),
+            selected: true,
+            pending: false,
+            agent_terminal: None,
+        });
+        switch = switch.with_terminal_view(Some(TerminalViewProjection {
+            total_rows: 40,
+            rows: (0..40).map(|row| format!("terminal row {row}")).collect(),
+            row_offset: 0,
+            scroll: 0,
+            feedback: Some("copied 3 lines".to_owned()),
+        }));
+        let content = home_right_pane_content(28, 69, &switch);
+        let preview = home_right_pane(28, 69, &switch);
+        let start = widgets::live_terminal::RIGHT_PANE_CONTENT_TOP;
+        assert_eq!(preview.len(), content.len());
+        for row in (0..start).chain(start + 4..content.len()) {
+            assert_eq!(strip(&preview[row]), strip(&content[row]));
+        }
+        assert!(preview[start + 1].contains("次の作業"));
+        assert!(preview[25].contains("terminal row 39"));
+        assert!(preview[27].contains("copied 3 lines"));
+        let frame = render_home(30, 100, &switch);
+        let memo_row = frame[CHROME_ROWS + start + 1]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(memo_row.contains("\u{1b}[37m次の作業"));
+        assert!(!memo_row.contains("\u{1b}[2m"));
+    }
+
+    #[test]
+    fn switch_memo_preserves_agent_phase_resume_detail_and_errors_without_terminal() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業\nテストを確認する")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_tabs.push(super::HomePaneTab {
+                label: "agent".into(),
+                base_label: "agent".into(),
+                selected: true,
+                pending: true,
+                agent_terminal: None,
+            });
+            home.preview_phase = TargetPhase::Waiting;
+            home.pane_error = Some("agent launch failed".into());
+            for detail in [None, Some("interrupted — Ctrl-O r resumes it")] {
+                home.pane_detail = detail.map(str::to_owned);
+                for height in [7, 8, 10, 11, 12, 20] {
+                    let rows = home_right_pane(height, 80, &home);
+                    let text = strip(&rows.join("\n"));
+                    assert_eq!(rows.len(), height);
+                    assert!(text.contains(&format!("agent: {}", detail.unwrap_or("waiting"))));
+                    assert!(text.contains("feedback: agent launch failed"));
+                    assert!(text.ends_with("[Switch] preview pane"));
+                    if height == 20 {
+                        assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                            "次の作業"
+                        } else {
+                            "n: add memo"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn switch_memo_preserves_empty_pane_captions_and_loading_label() {
+        let session = SessionId::new();
+        let state = AppState::home(WorkspaceId::new(), vec![session]);
+        for memo in [None, Some(""), Some("次の作業")] {
+            let mut projected = projected_session(session, "session", "/work/session");
+            projected.memo = memo.map(str::to_owned);
+            let mut home = HomeProjection::from_state(&state, "actual", &[projected]);
+            home.pane_error = Some("session unavailable".into());
+            for loading in [None, Some(super::ContentLoading::Pending)] {
+                home.content_loading = loading;
+                for height in [7, 8, 10, 11, 12, 20] {
+                    let rows = home_right_pane(height, 80, &home);
+                    let text = strip(&rows.join("\n"));
+                    assert_eq!(rows.len(), height);
+                    assert!(text.ends_with("[Switch] preview pane"));
+                    if home.content_loading.is_none() {
+                        assert!(text.contains("a: agent / t: terminal / Enter: actions"));
+                        assert!(text.contains("feedback: session unavailable"));
+                    }
+                }
+            }
+            home = home.with_content_loading("Opening session", 3);
+            for height in [7, 8, 10, 11, 12, 20] {
+                let rows = home_right_pane(height, 80, &home);
+                let text = strip(&rows.join("\n"));
+                assert_eq!(rows.len(), height);
+                assert!(text.contains("Opening session"));
+                assert!(text.ends_with("[Switch] preview pane"));
+                if height == 20 {
+                    assert!(text.contains(if memo.is_some_and(|memo| !memo.is_empty()) {
+                        "次の作業"
+                    } else {
+                        "n: add memo"
+                    }));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn home_terminal_scroll_offset_matches_the_viewport_window() {
         let workspace_id = WorkspaceId::new();
         let session = SessionId::new();
@@ -8748,7 +9300,7 @@ mod tests {
                 .filter(|line| line.starts_with("row "))
                 .collect::<Vec<_>>()
         };
-        assert!(!output_rows(&controller).is_empty());
+        assert_ne!(output_rows(&controller), [] as [String; 0]);
         // A two-row scrollback offset keeps the live tail hidden.
         assert!(!output_rows(&controller).iter().any(|line| line == "row 19"));
     }
@@ -8858,6 +9410,11 @@ mod tests {
             ProjectedSession::from_record(SessionId::new(), &one).pr_count,
             2
         );
+        one.prs[0].state = PrState::Dismissed;
+        assert_eq!(
+            ProjectedSession::from_record(SessionId::new(), &one).pr_count,
+            1
+        );
 
         let target = Target::Root(WorkspaceId::new());
         let operation = OperationId::new();
@@ -8866,18 +9423,13 @@ mod tests {
             target,
             kind: PaneKind::Terminal,
         };
-        for kind in [
-            PaneKind::Terminal,
-            PaneKind::Agent,
-            PaneKind::Diff,
-            PaneKind::Workflow,
-        ] {
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
             let mut item = pending;
             item.kind = kind;
             let tab = PaneTab::Pending(item);
-            assert!(!pane_tab_label(&tab).is_empty());
+            assert_ne!(pane_tab_label(&tab), "");
             let ready = PaneTab::Ready(item);
-            assert!(!pane_tab_label(&ready).is_empty());
+            assert_ne!(pane_tab_label(&ready), "");
             assert!(pane_tab_selected(
                 &ready,
                 &PaneSelection::Tab(TabSelection::Ready(operation))
@@ -8890,20 +9442,15 @@ mod tests {
             terminal_id: TerminalId::new(),
             daemon_generation: DaemonGeneration::new(),
         };
-        for kind in [
-            PaneKind::Terminal,
-            PaneKind::Agent,
-            PaneKind::Diff,
-            PaneKind::Workflow,
-        ] {
-            assert!(
-                !pane_tab_label(&PaneTab::Live(
+        for kind in [PaneKind::Terminal, PaneKind::Agent, PaneKind::Diff] {
+            assert_ne!(
+                pane_tab_label(&PaneTab::Live(
                     crate::usecase::application::pane::LivePane {
                         terminal: terminal.clone(),
                         kind,
                     }
-                ))
-                .is_empty()
+                )),
+                ""
             );
         }
 
@@ -8914,7 +9461,7 @@ mod tests {
             TargetPhase::Waiting,
             TargetPhase::Done,
         ] {
-            assert!(!phase_label(phase).is_empty());
+            assert_ne!(phase_label(phase), "");
         }
         for feedback in [
             Feedback::Progress(SafeMessage::new("working")),
@@ -8930,7 +9477,7 @@ mod tests {
             Feedback::Reconnected,
             Feedback::ResyncRequired,
         ] {
-            assert!(!feedback_label(Some(&feedback)).is_empty());
+            assert_ne!(feedback_label(Some(&feedback)), "");
         }
 
         let workspace_id = WorkspaceId::new();

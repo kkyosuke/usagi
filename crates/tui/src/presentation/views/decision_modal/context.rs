@@ -15,11 +15,16 @@ pub(super) fn render(block: &UserDecisionContext, width: usize, column: usize) -
         } => {
             let mut output = wrapped_content_lines(title, "", width);
             let available = width.saturating_sub(modal::BODY_INDENT_WIDTH);
-            // Preserve every cell at narrow widths, using labelled records when
-            // a grid would leave less than six terminal cells per column.
+            // Use labelled records when the grid is too narrow or would clip
+            // an indivisible grapheme in a header or cell.
             let cell_width = available.saturating_sub(columns.len().saturating_sub(1) * 3)
                 / columns.len().max(1);
-            if cell_width < 6 {
+            let oversized_grapheme = columns.iter().chain(rows.iter().flatten()).any(|cell| {
+                sanitize_presentation_line(cell)
+                    .graphemes(true)
+                    .any(|grapheme| widgets::display_width(grapheme) > cell_width)
+            });
+            if cell_width < 6 || oversized_grapheme {
                 for row in rows {
                     output.push(String::new());
                     for (label, cell) in columns.iter().zip(row) {

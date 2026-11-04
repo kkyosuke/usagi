@@ -14,6 +14,39 @@ use serde::{Deserialize, Serialize};
 
 use super::workspace::WorkspaceOverview;
 
+/// The last committed project deck, independent of Recent ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastProjectSet {
+    pub paths: Vec<PathBuf>,
+    pub active: PathBuf,
+}
+
+impl LastProjectSet {
+    /// Keep registered members in tab order, falling back to the first active tab.
+    pub fn retain_paths(&mut self, mut keep: impl FnMut(&std::path::Path) -> bool) {
+        self.paths.retain(|path| keep(path));
+        if !self.paths.contains(&self.active)
+            && let Some(first) = self.paths.first()
+        {
+            self.active.clone_from(first);
+        }
+    }
+
+    /// Reject malformed persisted identities before using them to reopen projects.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        !self.paths.is_empty()
+            && self.paths.iter().all(|path| path.is_absolute())
+            && self.paths.contains(&self.active)
+            && self
+                .paths
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == self.paths.len()
+    }
+}
+
 /// A union (unite) of workspaces the user opened together, with the at-a-glance
 /// figures the recent list shows for the group.
 ///
@@ -55,21 +88,6 @@ impl UniteOverview {
     #[must_use]
     pub fn members(&self) -> &[WorkspaceOverview] {
         &self.members
-    }
-
-    /// The primary (first) member's workspace name, or `""` when the unite is
-    /// empty.
-    #[must_use]
-    pub fn primary_name(&self) -> &str {
-        self.members
-            .first()
-            .map_or("", |member| member.workspace.name.as_str())
-    }
-
-    /// How many members there are beyond the primary (0 for a lone workspace).
-    #[must_use]
-    pub fn extra_count(&self) -> usize {
-        self.members.len().saturating_sub(1)
     }
 
     /// The most recent `updated_at` across the members, or `None` when the unite

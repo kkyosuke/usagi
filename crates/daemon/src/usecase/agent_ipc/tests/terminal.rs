@@ -3,41 +3,6 @@
 use super::*;
 
 #[test]
-fn runtime_operation_join_is_exact_and_durable_ownership_is_unique() {
-    let mut agent = runtime();
-    let first_operation = OperationId::new();
-    let first = agent
-        .launch(
-            &first_operation.to_string(),
-            &intent(None),
-            &FakeScope(Ok(scope())),
-        )
-        .unwrap();
-    assert_eq!(
-        agent.runtime_for_operation(first_operation),
-        agent.coordinator.runtime_for_terminal(&first.terminal)
-    );
-    assert_eq!(agent.runtime_for_operation(OperationId::new()), None);
-
-    let second_operation = OperationId::new();
-    agent
-        .launch(
-            &second_operation.to_string(),
-            &intent(None),
-            &FakeScope(Ok(scope())),
-        )
-        .unwrap();
-    let mut duplicate = agent.coordinator.snapshot();
-    for record in &mut duplicate.records {
-        record.operation.operation_id = first_operation;
-    }
-    assert_eq!(
-        RuntimeCoordinator::hydrate(duplicate, 16, 64 * 1024, 64).unwrap_err(),
-        crate::usecase::runtime::RuntimeSnapshotError::DuplicateOperation
-    );
-}
-
-#[test]
 fn agent_output_answers_cursor_position_queries_through_the_owned_pty() {
     let mut agent = runtime();
     let admission = agent
@@ -391,7 +356,13 @@ fn agent_resize_rejects_each_forged_terminal_ref_field_before_pty_effect() {
             TerminalOutcome::NotOwned
         ));
     }
-    assert!(pty(&runtime).resized.is_empty());
+    assert_eq!(
+        pty(&runtime).resized,
+        [] as [(
+            usagi_core::domain::id::TerminalRef,
+            crate::usecase::terminal::Geometry
+        ); 0]
+    );
 }
 
 #[test]
@@ -514,7 +485,10 @@ fn shared_owner_inventory_merges_agent_and_generic_and_rejects_invalid_scope() {
     let client = ClientId::new();
     // The shared owner handles Inventory through `request`; when used as a
     // nested generic owner its trait-level default inventory is empty.
-    assert!(TerminalOwner::inventory(&owner, &inventory_scope).is_empty());
+    assert_eq!(
+        TerminalOwner::inventory(&owner, &inventory_scope),
+        [] as [usagi_core::domain::terminal_launch::TerminalInventoryEntry; 0]
+    );
 
     let reply = owner
         .request(
@@ -818,4 +792,41 @@ fn trimmed_agent_output_maps_to_a_resync_protocol_error() {
     let error = map_runtime_error(RuntimeError::Terminal(RegistryError::ResyncRequired));
 
     assert_eq!(error.code, ErrorCode::ResyncRequired);
+}
+
+#[test]
+fn search_inspection_does_not_attach_or_write_and_rejects_replaced_identity() {
+    let mut agent = runtime();
+    let admission = agent
+        .launch(
+            &OperationId::new().to_string(),
+            &intent(None),
+            &FakeScope(Ok(scope())),
+        )
+        .unwrap();
+    agent
+        .output(&admission.terminal, b"error".to_vec())
+        .unwrap();
+    let writes = pty(&agent).writes.clone();
+    assert_eq!(
+        agent.search_targets(admission.terminal.workspace_id),
+        vec![admission.terminal.clone()]
+    );
+    assert_eq!(
+        agent.search_targets(WorkspaceId::new()),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
+    let before = agent.inventory(admission.terminal.workspace_id);
+    std::fs::write(agent.dispatch.registry_path(), "broken").unwrap();
+    assert_eq!(agent.inventory(admission.terminal.workspace_id), before);
+    assert_eq!(
+        agent.search_targets(admission.terminal.workspace_id),
+        vec![admission.terminal.clone()]
+    );
+    let snapshot = agent.inspect_terminal(&admission.terminal).unwrap();
+    assert_eq!(snapshot.output_offset, 5);
+    assert_eq!(pty(&agent).writes, writes);
+    let mut foreign = admission.terminal;
+    foreign.terminal_id = usagi_core::domain::id::TerminalId::new();
+    assert!(agent.inspect_terminal(&foreign).is_err());
 }

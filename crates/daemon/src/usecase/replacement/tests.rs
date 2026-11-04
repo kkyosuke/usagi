@@ -211,49 +211,6 @@ fn live_resources_sum_both_kinds_and_name_only_the_ones_that_are_live() {
 }
 
 #[test]
-fn only_states_that_still_hold_a_pty_master_are_counted_as_live() {
-    use crate::usecase::terminal::{TerminalReconcileState, TerminalRuntimeState};
-
-    for owned in [
-        TerminalRuntimeState::Reserved,
-        TerminalRuntimeState::Running,
-    ] {
-        assert!(super::owns_pty(owned), "{owned:?} holds the PTY master");
-    }
-    // An exited, reclaimed, failed, or crash-orphaned record has no owner left
-    // to take anything from.
-    for released in [
-        TerminalRuntimeState::Exited,
-        TerminalRuntimeState::Reclaimed,
-        TerminalRuntimeState::SpawnFailed,
-        TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
-        TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning),
-    ] {
-        assert!(
-            !super::owns_pty(released),
-            "{released:?} owns no PTY master"
-        );
-    }
-
-    assert_eq!(
-        super::census_of(
-            &[
-                TerminalRuntimeState::Running,
-                TerminalRuntimeState::Exited,
-                TerminalRuntimeState::Reserved,
-            ],
-            &[TerminalRuntimeState::Running],
-        ),
-        LiveResources {
-            agents: 2,
-            terminals: 1,
-        }
-    );
-    // Two daemons that have never launched anything are equally idle.
-    assert_eq!(super::census_of(&[], &[]), LiveResources::default());
-}
-
-#[test]
 fn an_absent_registry_has_no_successor_to_hand_authority_to() {
     assert_eq!(
         seamless_refusal(None, false, EndpointObservation::NotObserved, 2, None),
@@ -970,7 +927,7 @@ fn stopping_a_busy_daemon_is_refused_with_nothing_signalled() {
     // It also has no successor to resume the Agents on, so it must not send the
     // operator to a flag that only a replacement could honour.
     assert!(!error.to_string().contains("--restart-agents"));
-    assert!(terminator.terminated().is_empty());
+    assert_eq!(terminator.terminated(), [] as [u32; 0]);
     assert_eq!(store.load().unwrap(), Some(existing));
 }
 
@@ -1041,7 +998,7 @@ fn a_census_failure_stops_a_transition_before_it_signals_anything() {
     .unwrap_err();
     assert_eq!(replace_error.to_string(), "runtime store unreadable");
 
-    assert!(terminator.terminated().is_empty());
+    assert_eq!(terminator.terminated(), [] as [u32; 0]);
     assert_eq!(launcher.launches(), 0);
     assert_eq!(store.load().unwrap(), Some(running));
 }
@@ -1162,7 +1119,7 @@ fn replacing_a_busy_daemon_is_refused_and_names_the_missing_prerequisite() {
     assert!(error.to_string().contains("3 generic terminal(s)"));
     assert!(error.to_string().contains("no generation registry exists"));
     // Effect zero: the old daemon is untouched and no successor was launched.
-    assert!(terminator.terminated().is_empty());
+    assert_eq!(terminator.terminated(), [] as [u32; 0]);
     assert_eq!(launcher.launches(), 0);
     assert_eq!(store.load().unwrap(), Some(running));
 }
@@ -1206,7 +1163,7 @@ fn a_replacement_blocked_by_a_missing_prerequisite_offers_only_what_clears_it() 
         "the refusal offers a flag that would meet the same refusal: {message}"
     );
     // Effect zero: naming a remedy does not take one.
-    assert!(terminator.terminated().is_empty());
+    assert_eq!(terminator.terminated(), [] as [u32; 0]);
     assert_eq!(launcher.launches(), 0);
     assert_eq!(store.load().unwrap(), Some(running));
 }
@@ -1257,7 +1214,7 @@ fn seamless_rollover_requires_and_forwards_the_durable_operation() {
         .unwrap(),
         "rolled over build-rollover-v1-seamless"
     );
-    assert!(terminator.terminated().is_empty());
+    assert_eq!(terminator.terminated(), [] as [u32; 0]);
     assert_eq!(launcher.launches(), 0);
     assert_eq!(store.load().unwrap(), Some(running));
 }

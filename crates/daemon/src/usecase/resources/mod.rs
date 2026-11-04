@@ -11,7 +11,6 @@
 //! | [`shard`] | what does *this* generation own, and may it be written by *this* process? |
 //! | [`allocator`] | across every retained generation: who holds capacity, and what did each producer operation already decide? |
 //! | [`identity`] | is this child the exact OS process this owner spawned? |
-//! | [`launch`] | claim → reserve → spawn → final, with one named boundary per crash point |
 //! | [`drain`] | how a draining owner's exit reaches the active consumer exactly once |
 //! | [`retention`] | how the operation ledger stays bounded without ever replaying a wrong answer |
 //! | [`migration`] | can the legacy single-writer stores be adopted, or must the rollover refuse? |
@@ -32,7 +31,6 @@ pub mod drain;
 pub mod durable;
 pub mod fence;
 pub mod identity;
-pub mod launch;
 pub mod migration;
 pub mod retention;
 pub mod shard;
@@ -93,8 +91,6 @@ pub enum ResourceError {
     /// The child's recorded start identity is not OS-verifiable, so it can never
     /// be used as spawn authority.
     IdentityUnverifiable,
-    /// The writer lease was sealed against revisions that have since moved.
-    SealedElsewhere,
     /// The generation still owns live state, so it cannot be collected.
     NotCollectable,
 }
@@ -117,7 +113,6 @@ impl fmt::Display for ResourceError {
             Self::WrongState => "resource is not in the required state",
             Self::OwnershipUnknown => "resource ownership cannot be proved",
             Self::IdentityUnverifiable => "child process identity is not verifiable",
-            Self::SealedElsewhere => "sealed revision moved before the writer opened",
             Self::NotCollectable => "generation still owns live state",
         })
     }
@@ -163,6 +158,25 @@ impl ResourceFailure {
         match self {
             Self::Refused(error) => Some(*error),
             Self::Io(_) => None,
+        }
+    }
+}
+
+/// The coordinator only rolls back reservations when this save proves that
+/// neither durable object changed. Earlier maintenance commits remain valid;
+/// other failures may follow a partial write within this save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreError {
+    Unavailable,
+    RetentionBackpressure,
+}
+
+impl From<ResourceFailure> for StoreError {
+    fn from(error: ResourceFailure) -> Self {
+        if error.refusal() == Some(ResourceError::RetentionBackpressure) {
+            Self::RetentionBackpressure
+        } else {
+            Self::Unavailable
         }
     }
 }

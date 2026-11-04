@@ -1,6 +1,277 @@
 //! resume の振る舞いを固定するテスト。
 
 use super::*;
+use usagi_core::domain::agent::{AgentLaunchEntry, AgentLaunchSource};
+
+#[test]
+#[allow(clippy::too_many_lines)] // One conversation checks headless admission, replay, capture, and continuation identity together.
+fn agy_headless_resume_fences_the_new_turn_and_preserves_capture() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("agy"), "fixture").unwrap();
+    let mut runtime = agy_runtime();
+    runtime.locator = Box::new(FixtureLocator(fixture.path().to_path_buf()));
+    let launch = intent(Some("agy"));
+    let resolved = scope();
+    let scope = FakeScope(Ok(resolved));
+    let initial = runtime
+        .launch(&OperationId::new().to_string(), &launch, &scope)
+        .unwrap();
+    let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("agy-private-conversation").unwrap()),
+        )
+        .unwrap();
+    runtime.exit(&initial.terminal, 0).unwrap();
+    let target = runtime
+        .inventory(launch.workspace)
+        .resumable
+        .into_iter()
+        .find_map(|item| item.target)
+        .unwrap();
+    let operation = OperationId::new().to_string();
+    for prompt in ["", " \n", "invalid\0turn"] {
+        assert_eq!(
+            runtime
+                .prepare_headless_resume_readiness(&operation, &target, prompt)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+    }
+    let prompt = "--version\nresume only this turn";
+    let ticket = runtime
+        .prepare_headless_resume_readiness(&operation, &target, prompt)
+        .unwrap();
+    let context =
+        || AgentLaunchContext::new(AgentLaunchSource::Manual, AgentLaunchEntry::SessionResume);
+    let resumed = runtime
+        .resume_headless_from_after_readiness(
+            &operation,
+            &target,
+            prompt,
+            &scope,
+            ticket.as_ref(),
+            context(),
+        )
+        .unwrap();
+    let snapshot = runtime.coordinator.snapshot();
+    let record = snapshot
+        .records
+        .iter()
+        .find(|record| record.runtime == resumed.runtime)
+        .unwrap();
+    assert_eq!(record.launch.request.mode, LaunchMode::Headless);
+    assert_eq!(
+        record.launch.request.initial_prompt.as_deref(),
+        Some(prompt)
+    );
+    assert_eq!(resumed.continuation, initial.continuation);
+    assert_eq!(
+        record
+            .provider_resume
+            .as_ref()
+            .unwrap()
+            .native_session_id
+            .expose_sensitive(),
+        "agy-private-conversation"
+    );
+    assert!(
+        !serde_json::to_string(&record.launch)
+            .unwrap()
+            .contains("agy-private-conversation")
+    );
+    assert!(
+        runtime
+            .prepare_headless_resume_readiness(&operation, &target, prompt)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        runtime
+            .resume_headless_from_after_readiness(
+                &operation,
+                &target,
+                prompt,
+                &scope,
+                None,
+                context()
+            )
+            .unwrap(),
+        resumed
+    );
+    assert_eq!(
+        runtime
+            .prepare_headless_resume_readiness(&operation, &target, "different turn")
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        runtime
+            .prepare_resume_readiness(&operation, &target)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    let duplicate_operation = OperationId::new().to_string();
+    let duplicate_ticket = runtime
+        .prepare_headless_resume_readiness(&duplicate_operation, &target, prompt)
+        .unwrap();
+    assert_eq!(
+        runtime
+            .resume_headless_from_after_readiness(
+                &duplicate_operation,
+                &target,
+                prompt,
+                &scope,
+                duplicate_ticket.as_ref(),
+                context()
+            )
+            .unwrap(),
+        resumed
+    );
+    let changed_operation = OperationId::new().to_string();
+    let changed_ticket = runtime
+        .prepare_headless_resume_readiness(&changed_operation, &target, "changed turn")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .resume_headless_from_after_readiness(
+                &changed_operation,
+                &target,
+                "changed turn",
+                &scope,
+                changed_ticket.as_ref(),
+                context()
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    assert_eq!(
+        runtime
+            .resume_exact(&OperationId::new().to_string(), &target, &scope)
+            .unwrap_err()
+            .code,
+        ErrorCode::IdempotencyConflict
+    );
+    let credential = runtime.mcp_callers.keys().next().unwrap().clone();
+    runtime
+        .report_agent_phase_with_session(
+            &credential,
+            AgentPhase::Running,
+            Some(ProviderSessionId::new("agy-refreshed-conversation").unwrap()),
+        )
+        .unwrap();
+    runtime.exit(&resumed.terminal, 0).unwrap();
+    let inventory = runtime.inventory(launch.workspace);
+    assert!(inventory.resumable.iter().any(|item| {
+        item.available
+            && item
+                .target
+                .as_ref()
+                .is_some_and(|target| target.runtime_id == resumed.runtime.agent_runtime_id)
+    }));
+}
+
+#[test]
+fn headless_resume_refuses_other_providers_before_spawn() {
+    let mut runtime = runtime();
+    let launch = intent(None);
+    let scope = FakeScope(Ok(scope()));
+    let initial = runtime
+        .launch(&OperationId::new().to_string(), &launch, &scope)
+        .unwrap();
+    runtime.exit(&initial.terminal, 0).unwrap();
+    let target = runtime
+        .inventory(launch.workspace)
+        .resumable
+        .into_iter()
+        .find_map(|item| item.target)
+        .unwrap();
+    let before = runtime.coordinator.snapshot();
+    assert_eq!(
+        runtime
+            .prepare_headless_resume_readiness(&OperationId::new().to_string(), &target, "next")
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+    assert_eq!(runtime.coordinator.snapshot(), before);
+}
+
+#[test]
+fn completion_report_does_not_make_an_active_turn_safe_to_sleep() {
+    for phase in [AgentPhase::Running, AgentPhase::Waiting] {
+        let mut agent = runtime();
+        let mut one_slot = RuntimeCoordinator::new(1, 64 * 1024, 64);
+        one_slot
+            .activate_generation(agent.active_generation().unwrap())
+            .unwrap();
+        agent.coordinator = one_slot;
+        agent
+            .pty
+            .as_any_mut()
+            .downcast_mut::<Pty>()
+            .unwrap()
+            .terminate_success = true;
+        let launch_intent = intent(None);
+        let session = launch_intent.session.unwrap();
+        agent
+            .launch(
+                &OperationId::new().to_string(),
+                &launch_intent,
+                &FakeScope(Ok(scope())),
+            )
+            .unwrap();
+        let credential = agent.mcp_callers.keys().next().unwrap().clone();
+        agent.report_agent_phase(&credential, phase).unwrap();
+        assert!(
+            agent
+                .report_from_mcp(&credential, None, InboxKind::Completed, "done".into(), None)
+                .unwrap()
+                .accepted
+        );
+
+        // Completion is an MCP tool call inside the provider's active turn.
+        // Only its lifecycle Stop report makes that turn safe to sleep.
+        assert_eq!(agent.sleep_one_for_capacity(), Ok(false));
+        assert_eq!(
+            agent.sleep_session(session).unwrap_err().code,
+            ErrorCode::Busy
+        );
+        assert_eq!(agent.session_phase(session), phase);
+        assert_eq!(
+            agent
+                .workspace_agent_statuses(launch_intent.workspace)
+                .unwrap()[&session],
+            AgentStatus::Running
+        );
+        assert_eq!(
+            agent
+                .pty
+                .as_any_mut()
+                .downcast_mut::<Pty>()
+                .unwrap()
+                .terminate_calls,
+            0
+        );
+
+        agent
+            .report_agent_phase(&credential, AgentPhase::Ended)
+            .unwrap();
+        assert_eq!(
+            agent
+                .workspace_agent_statuses(launch_intent.workspace)
+                .unwrap()[&session],
+            AgentStatus::Idle
+        );
+        assert_eq!(agent.sleep_one_for_capacity(), Ok(true));
+    }
+}
 
 #[test]
 fn saturated_capacity_selection_compares_every_completed_resume_candidate() {
@@ -52,6 +323,9 @@ fn saturated_capacity_selection_compares_every_completed_resume_candidate() {
     snapshot.records[0].operation.operation_id = operations[2];
     snapshot.records[1].operation.operation_id = operations[0];
     snapshot.records[2].operation.operation_id = operations[1];
+    for record in &mut snapshot.records {
+        record.user_decision_owner.as_mut().unwrap().run_id = record.operation.operation_id;
+    }
     let oldest = snapshot.records[1].runtime.clone();
     agent.coordinator = RuntimeCoordinator::hydrate(snapshot, 3, 64 * 1024, 64).unwrap();
 
@@ -220,6 +494,7 @@ fn readiness_ticket_is_revalidated_before_launch_effects() {
     let stale = AgentReadinessPreflight {
         profile: ticket.profile.clone(),
         profile_revision: ticket.profile_revision + 1,
+        capabilities: ticket.capabilities.clone(),
         generation: ticket.generation,
     };
     let error = runtime
@@ -234,7 +509,10 @@ fn readiness_ticket_is_revalidated_before_launch_effects() {
         )
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::RevisionConflict);
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 
     std::fs::remove_file(fixture.path().join("claude")).unwrap();
     let error = runtime
@@ -249,7 +527,10 @@ fn readiness_ticket_is_revalidated_before_launch_effects() {
         )
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::Unavailable);
-    assert!(runtime.coordinator.snapshot().records.is_empty());
+    assert_eq!(
+        runtime.coordinator.snapshot().records,
+        [] as [crate::usecase::runtime::DurableRuntimeRecord; 0]
+    );
 }
 
 #[test]
@@ -449,7 +730,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         )
         .unwrap();
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::LiveOrOwnershipUnknown)
     );
     let first_runtime = runtime
@@ -521,10 +802,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         .unwrap()
         .provenance = ProviderCaptureProvenance::DaemonIssued;
     assert_eq!(
-        runtime.resume_source_availability(
-            &wrong_capture_policy,
-            std::slice::from_ref(&wrong_capture_policy),
-        ),
+        runtime.resume_source_availability(&wrong_capture_policy, &[&wrong_capture_policy],),
         (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
     assert_eq!(
@@ -556,13 +834,29 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
             .code,
         ErrorCode::InvalidArgument
     );
+    let before_invalid_repair = runtime.coordinator.snapshot();
+    assert_eq!(
+        runtime
+            .resume_with_current_integration(
+                "not-an-operation-id",
+                &target,
+                target.adapter_revision,
+                &FakeScope(Ok(resolved.clone())),
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArgument
+    );
+    assert_eq!(runtime.coordinator.snapshot(), before_invalid_repair);
     assert_eq!(
         runtime
             .admit_resume_exact(
-                &initial_operation.to_string(),
+                initial_operation,
                 &target,
                 &resume_semantic_key(&target),
                 &FakeScope(Ok(resolved.clone())),
+                None,
+                None,
                 None,
             )
             .unwrap_err()
@@ -570,7 +864,7 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         ErrorCode::OwnershipUnknown
     );
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (true, ProviderResumeReason::ExplicitResumeAvailable)
     );
     let mut ambiguous_snapshot = runtime.coordinator.snapshot();
@@ -593,6 +887,11 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
     ambiguous_record.runtime.terminal.terminal_id = ambiguous_terminal_id;
     ambiguous_ownership.terminal.terminal_id = ambiguous_terminal_id;
     ambiguous_record.operation.operation_id = OperationId::new();
+    ambiguous_record
+        .user_decision_owner
+        .as_mut()
+        .unwrap()
+        .run_id = ambiguous_record.operation.operation_id;
     ambiguous_record.semantic_key = Some("ambiguous-resume-source".into());
     ambiguous_record
         .provider_resume
@@ -609,14 +908,14 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         RuntimeCoordinator::hydrate(ambiguous_snapshot, 16, 64 * 1024, 64).unwrap(),
     );
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::AmbiguousProviderMetadata)
     );
     runtime.coordinator = original_coordinator;
 
     let original_registry = std::mem::replace(&mut runtime.registry, AdapterRegistry::new());
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::IncompatibleProviderMetadata)
     );
     assert_eq!(
@@ -739,6 +1038,8 @@ fn structured_codex_identity_enables_one_explicit_new_runtime_resume() {
         }
         if record.resumed_from == Some(target.source) {
             record.resumed_from = None;
+            record.user_decision_owner.as_mut().unwrap().run_id = record.operation.operation_id;
+            record.user_decision_owner_aliases.clear();
         }
     }
     runtime.coordinator = RuntimeCoordinator::hydrate(live_replacement, 16, 64 * 1024, 64).unwrap();
@@ -774,7 +1075,7 @@ fn codex_without_structured_identity_fails_closed_for_resume() {
         .unwrap();
     runtime.exit(&first.terminal, 0).unwrap();
     assert_eq!(
-        runtime.session_resume_status(session),
+        session_resume_status(&runtime, workspace, session),
         (false, ProviderResumeReason::ProviderMetadataUnavailable)
     );
     let item = &runtime.inventory(workspace).resumable[0];
@@ -963,124 +1264,20 @@ fn schema_v3_runtime_without_public_lineage_loads_as_resume_unavailable() {
     runtime.coordinator = RuntimeCoordinator::hydrate(legacy, 16, 64 * 1024, 64).unwrap();
 
     let inventory = runtime.inventory(workspace);
-    assert!(inventory.runtimes.is_empty());
+    assert_eq!(
+        inventory.runtimes,
+        [] as [usagi_core::domain::agent::AgentRuntimeInventoryItem; 0]
+    );
+    assert_eq!(
+        runtime.search_targets(workspace),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(inventory.resumable.len(), 1);
     assert!(inventory.resumable[0].target.is_none());
     assert!(!inventory.resumable[0].available);
     assert_eq!(
         inventory.resumable[0].reason,
         ProviderResumeReason::ProviderMetadataUnavailable
-    );
-}
-
-#[test]
-fn session_workflow_launch_rechecks_readiness_and_embeds_exact_prompt() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let intent = intent(None);
-    let operation = OperationId::new().to_string();
-    let prompt = "workflow task";
-    let scope = FakeScope(Ok(scope()));
-    for invalid in ["", "\0", " "] {
-        assert!(
-            runtime
-                .prepare_workflow_readiness(&operation, &intent, invalid)
-                .is_err()
-        );
-    }
-    assert!(
-        runtime
-            .prepare_workflow_readiness("invalid", &intent, prompt)
-            .is_err()
-    );
-    let preflight = runtime
-        .prepare_workflow_readiness(&operation, &intent, prompt)
-        .unwrap();
-    assert!(
-        runtime
-            .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
-            .is_err()
-    );
-    let first = runtime
-        .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, preflight.as_ref())
-        .unwrap();
-    let replay = runtime
-        .launch_workflow_after_readiness(&operation, &intent, prompt, &scope, None)
-        .unwrap();
-    assert_eq!(first, replay);
-    assert!(
-        runtime
-            .prepare_workflow_readiness(&operation, &intent, "changed")
-            .is_err()
-    );
-    assert_eq!(
-        runtime.coordinator.snapshot().records[0]
-            .launch
-            .request
-            .initial_prompt
-            .as_deref(),
-        Some(prompt)
-    );
-    let other = OperationId::new().to_string();
-    let preflight = runtime
-        .prepare_workflow_readiness(&other, &intent, prompt)
-        .unwrap();
-    assert!(
-        runtime
-            .launch_workflow_after_readiness(&other, &intent, prompt, &scope, preflight.as_ref())
-            .is_err()
-    );
-}
-
-#[test]
-fn goal_readiness_defaults_profile_and_rejects_semantic_conflict() {
-    let fixture = tempfile::tempdir().unwrap();
-    std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
-    let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
-    let operation = OperationId::new().to_string();
-    let mut intent = AgentGoalIntent {
-        workspace: WorkspaceId::new(),
-        profile: None,
-        goal: "use the default profile".into(),
-    };
-    assert_eq!(
-        runtime.goal_worker_profile(&intent).unwrap().as_str(),
-        "claude"
-    );
-    let mut explicit = intent.clone();
-    explicit.profile = Some(AgentProfileId::new("claude").unwrap());
-    assert_eq!(
-        runtime.goal_worker_profile(&explicit).unwrap().as_str(),
-        "claude"
-    );
-    let mut invalid = intent.clone();
-    invalid.goal = " ".into();
-    assert_eq!(
-        runtime.goal_worker_profile(&invalid).unwrap_err().code,
-        ErrorCode::InvalidArgument
-    );
-    let readiness = runtime
-        .prepare_goal_launch_readiness(&operation, &intent)
-        .unwrap()
-        .unwrap();
-    assert_eq!(readiness.product(), "claude");
-    runtime
-        .launch_goal_after_readiness(
-            &operation,
-            &intent,
-            &FakeScope(Ok(scope())),
-            Some(&readiness),
-        )
-        .unwrap();
-
-    intent.goal = "a different goal".into();
-    assert_eq!(
-        runtime
-            .prepare_goal_launch_readiness(&operation, &intent)
-            .unwrap_err()
-            .code,
-        ErrorCode::IdempotencyConflict
     );
 }
 
@@ -1238,44 +1435,4 @@ fn same_model_launches_and_exact_resume_preserve_each_peer_identity() {
         .notify_peer(workspace, session, second_agent)
         .unwrap();
     assert_eq!(pty(&runtime).selected.as_ref(), Some(&resumed.terminal));
-    assert_eq!(
-        runtime.workflow_operation_lineage(second_operation),
-        vec![second_operation, resumed_operation]
-    );
-    assert_eq!(
-        runtime.workflow_live_operation(second_operation),
-        Some(resumed_operation)
-    );
-    assert_eq!(
-        runtime.workflow_operation_lineage(first_operation),
-        vec![first_operation]
-    );
-    assert!(
-        runtime
-            .workflow_operation_lineage(OperationId::new())
-            .is_empty()
-    );
-    runtime.exit(&resumed.terminal, 0).unwrap();
-    assert_eq!(
-        runtime.workflow_operation_lineage(second_operation),
-        vec![second_operation, resumed_operation]
-    );
-    assert_eq!(runtime.workflow_live_operation(second_operation), None);
-    assert_eq!(runtime.workflow_live_operation(OperationId::new()), None);
-    let snapshot = runtime.coordinator.snapshot();
-    for replacement in [AgentRuntimeId::new(), resumed.runtime.agent_runtime_id] {
-        let mut broken = snapshot.clone();
-        broken
-            .records
-            .iter_mut()
-            .find(|record| record.operation.operation_id == resumed_operation)
-            .unwrap()
-            .superseded_by = Some(replacement);
-        // Missing/cyclic replacement data cannot invent another admitted
-        // operation or loop forever, even before hydration rejects it.
-        assert_eq!(
-            AgentRuntime::workflow_lineage(&broken, second_operation),
-            vec![second_operation, resumed_operation]
-        );
-    }
 }

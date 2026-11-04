@@ -127,9 +127,11 @@ pub struct DecoderCheckpoint {
 ```
 
 `VtScreen::checkpoint()` が上記を生成し、`VtScreen::from_checkpoint(&ScreenCheckpoint)
--> Result<VtScreen, CheckpointError>` が bounded に復元する。serialized wire の運搬は
-`ScreenCheckpoint::to_json_bytes()` / `from_json_bytes()` が担い、`CHECKPOINT_BYTES_MAX`
-を確保前に強制する（parse 前に過大 payload を弾く）。
+-> Result<VtScreen, CheckpointError>` が bounded に復元する。現在の transport では
+`ScreenCheckpoint` を typed IPC snapshot の一部として serde で運び、daemon が送信前に
+checkpoint の serialized size を `CHECKPOINT_BYTES_MAX` 以下に収める。受信側は IPC framing
+で確保前に negotiated frame limit を検証し、`VtScreen::from_checkpoint` で復元時の構造・確保上限を
+検証する。現在の境界の正本は [snapshot payload と revision](../04-ipc.md#snapshot-payload-と-revision) を参照する。
 
 **設計上の要点**
 

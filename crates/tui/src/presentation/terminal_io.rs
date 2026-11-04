@@ -7,7 +7,7 @@ use super::{
     AgentTabIntentMutation, AppEvent, AppKey, BrowserOpener, ExactAgentResume,
     ExternalTerminalPort, FRAME_EVENT_BUDGET, Geometry, Key, LiveTerminalAction,
     LiveTerminalControls, Notice, OperationId, PANE_LAUNCH_BUSY, PANE_LAUNCH_FIRST,
-    PANE_LAUNCH_QUEUE_LIMIT, PANE_LAUNCH_UNADMITTED, PANE_LAUNCH_WORKER_FAILED,
+    PANE_LAUNCH_QUEUE_LIMIT, PANE_LAUNCH_UNADMITTED, PANE_LAUNCH_WORKER_FAILED, PaneKind,
     PaneLaunchCommandPort, PasteMode, Path, PointerEvent, PointerKind, PointerRelease, SessionId,
     TabSelection, Target, Terminal, TerminalRef, TerminalViewProjection, WHEEL_LINES,
     WorkspaceDrawerFocus, WorkspaceId, WorkspaceIoRuntime, WorkspaceRuntime,
@@ -231,8 +231,6 @@ pub(super) enum PaneLaunch {
         /// Absent for a workspace-root Agent.
         session: Option<SessionId>,
         profile: Option<AgentProfileId>,
-        /// Present only for the opt-in workspace-root Work Run.
-        goal: Option<String>,
         resume: bool,
     },
     Terminal {
@@ -371,7 +369,6 @@ pub(super) fn run_pane_launch(
             workspace,
             session,
             profile,
-            goal,
             resume,
         } => {
             let result = if resume {
@@ -379,12 +376,6 @@ pub(super) fn run_pane_launch(
                     || Err("workspace-root Agent resume is unavailable".to_owned()),
                     |session| port.resume(workspace, session, operation),
                 )
-            } else if let Some(goal) = goal {
-                if session.is_some() {
-                    Err("goal-driven Agent launch requires workspace-root scope".to_owned())
-                } else {
-                    port.launch_goal(operation, workspace, profile, &goal)
-                }
             } else {
                 // The pending pane's own operation is what the daemon admits and
                 // finalizes, so no second identity can complete this pane (#522).
@@ -426,6 +417,7 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
         LiveTerminalAction::OpenPreview => Some(AppKey::OpenPreview),
+        LiveTerminalAction::OpenArtifacts => Some(AppKey::OpenArtifacts),
         LiveTerminalAction::OpenDecisions => Some(AppKey::OpenDecisions),
         LiveTerminalAction::OpenNotes => Some(AppKey::OpenNotes),
         LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),
@@ -433,7 +425,6 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::Director => Some(AppKey::ToggleDirectorDrawer),
         LiveTerminalAction::DirectorBack => Some(AppKey::DirectorBack),
         LiveTerminalAction::DirectorNew => Some(AppKey::OpenDirectorNew),
-        LiveTerminalAction::WorkRuns => Some(AppKey::OpenDirectorWorkRuns),
         LiveTerminalAction::RootTerminal => Some(AppKey::ToggleRootTerminalDrawer),
         LiveTerminalAction::RootTerminalFullHeight => Some(AppKey::ToggleRootTerminalFullHeight),
         LiveTerminalAction::NewRootTerminal => Some(AppKey::OpenRootTerminal),
@@ -441,6 +432,11 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::KeyboardHelp
         | LiveTerminalAction::OpenWorkspace
         | LiveTerminalAction::OpenWorkspaceSwitcher
+        | LiveTerminalAction::OpenUnifiedSearch
+        | LiveTerminalAction::OpenKnowledgeSearch
+        | LiveTerminalAction::OpenOutputSearch
+        | LiveTerminalAction::OpenCommandPalette
+        | LiveTerminalAction::OpenAttention
         | LiveTerminalAction::ActivateWorkspace(_)
         | LiveTerminalAction::PreviousWorkspace
         | LiveTerminalAction::NextWorkspace
@@ -732,9 +728,10 @@ pub(super) fn close_focused_terminal_pane(
             return;
         }
         let outcome = runtime.close_focused_pane();
-        if let Some(terminal) = outcome.detach {
-            ui.close_generic_terminal(&terminal);
-        }
+        let terminal = outcome
+            .detach
+            .expect("closing the focused live tab detaches it");
+        ui.close_generic_terminal(&terminal);
         return;
     }
     let outcome = runtime.close_focused_pane();
@@ -796,9 +793,9 @@ pub(super) fn handle_terminal_pointer(
     match pointer.kind {
         PointerKind::Move => return true,
         PointerKind::Down => {
-            // Live input is a session-wide level: a non-terminal tab such as
-            // Workflow can be selected while another tab of the same session is
-            // live. That frame has no terminal to select text in, so the press
+            // Live input is a session-wide level: a Diff tab can be selected
+            // while another tab of the same session is live. That frame has no
+            // terminal to select text in, so the press
             // belongs to the pane's own controls rather than to a PTY.
             let Some(terminal) = runtime
                 .wants_live_input()
@@ -866,7 +863,9 @@ pub(super) fn copy_terminal_selection(
 }
 
 pub(super) fn select_root_terminal_tab(key: &Key, runtime: &mut WorkspaceRuntime) -> bool {
-    if !runtime.state().root_terminal_drawer_open() {
+    if runtime.state().workspace_drawer_focus() != Some(WorkspaceDrawerFocus::Terminal)
+        || runtime.state().overlay().is_some()
+    {
         return false;
     }
     let direction = match key {
@@ -920,6 +919,39 @@ pub(super) fn select_right_pane_tab(
     }
 }
 
+/// Commit the same durable Agent selection used by the tab strip before moving
+/// the visible focus. Searching and visiting interrupted history never resumes it.
+pub(super) fn visit_palette_target(
+    ui: &mut WorkspaceIoRuntime,
+    runtime: &mut WorkspaceRuntime,
+    workspace: WorkspaceId,
+    action: &super::workspace_deck::palette::Action,
+) -> Result<Vec<crate::usecase::application::controller::Effect>, &'static str> {
+    runtime.validate_palette_action(workspace, action)?;
+    if let super::workspace_deck::palette::Action::Tab {
+        target,
+        selection,
+        kind,
+    } = action
+        // Root Shell and Director keep independent selections. Choosing a shell
+        // must not clear the Director's durable conversation selection.
+        && (*kind == PaneKind::Agent || target.session_id().is_some())
+        && ui.has_agent_intent_for(target.session_id())
+    {
+        let continuation = match selection {
+            TabSelection::Live(terminal) => ui.agent_continuation_for(terminal),
+            TabSelection::Interrupted(continuation) => Some(*continuation),
+            TabSelection::Pending(_) | TabSelection::Ready(_) => None,
+        };
+        ui.mutate_agent_intent(AgentTabIntentMutation::Select {
+            session_id: target.session_id(),
+            continuation,
+        })
+        .map_err(|_| "Could not save tab selection; try again.")?;
+    }
+    runtime.activate_palette_action(workspace, action)
+}
+
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 // 注入された port をそのまま受け取る composition 境界で、束ねると呼び手が構造体を組むだけになる。
@@ -958,9 +990,10 @@ pub(super) fn intercept_live_terminal_control(
             *column,
             *row,
         ) {
-            if let Some(selection) = runtime.root_terminal_selection_at(index) {
-                let _ = runtime.select_tab_selection(selection);
-            }
+            let selection = runtime
+                .root_terminal_selection_at(index)
+                .expect("the rendered root terminal tab has a stable selection");
+            let _ = runtime.select_tab_selection(selection);
             return true;
         }
     }

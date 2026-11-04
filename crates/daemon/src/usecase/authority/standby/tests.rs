@@ -76,7 +76,10 @@ fn preparing_a_standby_verifies_it_without_touching_the_current_locator() {
     assert_eq!(probe.calls(), vec![ENDPOINT.to_owned()]);
     // Exactly two registry writes — admit and verify — and nothing else.
     assert_eq!(file.writes(), 2);
-    assert!(locator.publishes().is_empty());
+    assert_eq!(
+        locator.publishes(),
+        [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+    );
     assert_eq!(locator.retires(), 0);
 
     // Re-running readiness is idempotent: no probe, no further write.
@@ -159,7 +162,10 @@ fn a_mismatched_or_unreachable_standby_keeps_the_old_authority() {
             Some(GenerationRole::Standby)
         );
         assert_eq!(document.document().current, Some(active));
-        assert!(locator.publishes().is_empty());
+        assert_eq!(
+            locator.publishes(),
+            [] as [crate::usecase::authority::handoff::PublishedLocator; 0]
+        );
     }
 }
 
@@ -180,7 +186,7 @@ fn an_unknown_expected_artifact_is_refused_before_a_slot_is_taken() {
     .unwrap_err();
     assert!(matches!(&failure, StandbyFailure::Registry(registry)
             if registry.refusal() == Some(RegistryError::BuildIdentityUnknown)));
-    assert!(probe.calls().is_empty());
+    assert_eq!(probe.calls(), [] as [std::string::String; 0]);
     assert_eq!(file.writes(), 0);
     assert_eq!(store.load().unwrap().document().retained(), 0);
 }
@@ -193,7 +199,7 @@ fn every_readiness_refusal_reads_as_a_safety_outcome() {
         ReadinessRefusal::IdentityMismatch,
         ReadinessRefusal::UnsupportedCapability,
     ] {
-        assert!(!refusal.to_string().is_empty());
+        assert_ne!(refusal.to_string(), "");
         assert!(refusal.source().is_none());
         let failure: StandbyFailure = refusal.into();
         assert_eq!(failure.to_string(), refusal.to_string());
@@ -385,7 +391,7 @@ fn every_start_refusal_reads_as_a_safety_outcome() {
         StandbyStartRefusal::HandoffInFlight,
     ];
     for refusal in refusals {
-        assert!(!refusal.to_string().is_empty());
+        assert_ne!(refusal.to_string(), "");
         assert!(refusal.source().is_none());
         assert_eq!(
             std::io::Error::from(refusal).to_string(),

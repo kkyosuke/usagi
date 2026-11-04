@@ -180,26 +180,6 @@ fn new_validation_rejects_terminal_and_direction_controls() {
 }
 
 #[test]
-fn goal_composer_normalizes_paste_and_rejects_terminal_controls() {
-    let workspace = WorkspaceId::new();
-    let mut state = sized_home(workspace, Vec::new(), 100, 30);
-    state.set_work_mode(WorkMode::GoalDriven);
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew));
-
-    let _ = update(
-        &mut state,
-        AppEvent::Key(AppKey::Paste(
-            "first\r\nsecond\t\u{2028}\u{a0} \u{1b}[2J\u{7}third\u{202e} fourth".to_owned(),
-        )),
-    );
-    let _ = update(&mut state, AppEvent::Key(AppKey::Char('\u{9b}')));
-
-    assert_eq!(state.director_goal(), "first second [2Jthird fourth");
-    assert!(!state.director_goal().chars().any(char::is_control));
-    assert!(!state.director_goal().chars().any(is_bidi_control));
-}
-
-#[test]
 fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
     let (workspace, first, second) = ids();
     let mut state = AppState::home(workspace, vec![first, second]);
@@ -234,24 +214,20 @@ fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
             arguments: "open".to_owned(),
         }]
     );
-    assert!(
-        update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleRootTerminalFullHeight)
-        )
-        .is_empty()
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::ToggleRootTerminalFullHeight),
     );
+    assert_eq!(effects, [] as [Effect; 0]);
     assert!(state.root_terminal_full_height());
-    assert!(
-        update(
-            &mut state,
-            AppEvent::Key(AppKey::ToggleRootTerminalFullHeight)
-        )
-        .is_empty()
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::ToggleRootTerminalFullHeight),
     );
+    assert_eq!(effects, [] as [Effect; 0]);
     assert!(!state.root_terminal_full_height());
     for key in [AppKey::Up, AppKey::OpenOverview, AppKey::Escape] {
-        assert!(update(&mut state, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
         assert!(state.root_terminal_drawer_open());
         assert_eq!(
             (
@@ -269,7 +245,10 @@ fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
         AppEvent::Key(AppKey::ToggleRootTerminalFullHeight),
     );
     assert!(state.root_terminal_full_height());
-    assert!(update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::ToggleDirectorDrawer)),
+        [] as [Effect; 0]
+    );
     assert!(!state.root_terminal_full_height());
     assert!(state.root_terminal_drawer_open());
     assert!(state.director_drawer_open());
@@ -289,14 +268,20 @@ fn root_terminal_drawer_opens_root_shell_and_preserves_background_state() {
 
     // From Director the Shell toggle closes the open Shell; a second toggle
     // reopens and focuses it.
-    assert!(update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer)),
+        [] as [Effect; 0]
+    );
     assert!(!state.root_terminal_drawer_open());
     let _ = update(&mut state, AppEvent::Key(AppKey::ToggleRootTerminalDrawer));
     assert_eq!(
         state.workspace_drawer_focus(),
         Some(WorkspaceDrawerFocus::Terminal)
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::OpenDirectorNew)),
+        [] as [Effect; 0]
+    );
     assert!(state.root_terminal_drawer_open());
     assert!(state.director_drawer_open());
     assert!(matches!(state.director_new(), DirectorNew::Choosing(_)));
@@ -313,7 +298,10 @@ fn empty_root_terminal_drawer_closes_without_replaying_the_user_toggle() {
         state.workspace_drawer_focus(),
         Some(WorkspaceDrawerFocus::Terminal)
     );
-    assert!(update(&mut state, AppEvent::RootTerminalDrawerEmptied).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::RootTerminalDrawerEmptied),
+        [] as [Effect; 0]
+    );
     assert!(!state.root_terminal_drawer_open());
     assert_eq!(state.workspace_drawer_focus(), None);
 
@@ -323,7 +311,10 @@ fn empty_root_terminal_drawer_closes_without_replaying_the_user_toggle() {
         state.workspace_drawer_focus(),
         Some(WorkspaceDrawerFocus::Director)
     );
-    assert!(update(&mut state, AppEvent::RootTerminalDrawerEmptied).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::RootTerminalDrawerEmptied),
+        [] as [Effect; 0]
+    );
     assert!(!state.root_terminal_drawer_open());
     assert!(state.director_drawer_open());
     assert_eq!(
@@ -336,7 +327,10 @@ fn empty_root_terminal_drawer_closes_without_replaying_the_user_toggle() {
 fn switch_ctrl_c_is_ignored_while_closeup_preserves_existing_quit_behavior() {
     let (workspace, session, _) = ids();
     let mut idle = AppState::home(workspace, Vec::new());
-    assert!(update(&mut idle, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    assert_eq!(
+        update(&mut idle, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
     assert_eq!(idle.route(), Route::Home(HomeMode::Switch));
     assert_eq!(idle.overlay(), None);
 
@@ -345,12 +339,15 @@ fn switch_ctrl_c_is_ignored_while_closeup_preserves_existing_quit_behavior() {
     let _ = update(&mut live, AppEvent::Key(AppKey::Enter));
     assert_eq!(live.route(), Route::Home(HomeMode::Closeup));
     assert!(live.has_live_pane());
-    assert!(update(&mut live, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    assert_eq!(
+        update(&mut live, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
     assert_eq!(live.overlay(), Some(Overlay::QuitConfirmation));
 
     // Confirmation is deliberately immune to repeated quit chords.
     for key in [AppKey::CtrlC, AppKey::CtrlQ] {
-        assert!(update(&mut live, AppEvent::Key(key)).is_empty());
+        assert_eq!(update(&mut live, AppEvent::Key(key)), [] as [Effect; 0]);
         assert_eq!(live.overlay(), Some(Overlay::QuitConfirmation));
     }
     assert_eq!(
@@ -367,12 +364,18 @@ fn switch_ctrl_c_never_detaches_after_leaving_a_live_pane() {
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
     assert!(state.ctrl_c_grace());
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
     assert!(state.ctrl_c_grace());
 
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     assert!(!state.ctrl_c_grace());
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -400,6 +403,40 @@ fn live_pane_availability_reacts_on_the_edge_not_the_level() {
     assert!(state.ctrl_c_grace());
 }
 
+#[test]
+fn a_pane_becoming_live_dismisses_only_the_unforced_closeup_launcher() {
+    let (workspace, session, _) = ids();
+    for forced in [false, true] {
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        if forced {
+            let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(state.closeup_action_forced, forced);
+        if forced {
+            // An explicit action over a live pane stays forced even while its
+            // pane is interrupted and a replacement is becoming available.
+            let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+            assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        }
+
+        assert_eq!(
+            update(&mut state, AppEvent::LivePaneAvailability(true)),
+            [] as [Effect; 0]
+        );
+        assert!(state.has_live_pane());
+        assert_eq!(state.active(), Some(session));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        assert_eq!(
+            state.overlay(),
+            forced.then_some(Overlay::Closeup),
+            "only the unforced launcher should yield to the live pane"
+        );
+    }
+}
+
 /// Escape and Ctrl-C close only the Closeup action modal and return input to
 /// the underlying Closeup, while Ctrl-Q stays inert like every other overlay.
 #[test]
@@ -416,11 +453,17 @@ fn closeup_action_modal_returns_to_closeup_on_escape_and_ctrl_c() {
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
         // Ctrl-Q keeps the modal, matching the other overlays' swallow.
-        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlQ)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
 
         // The exit key closes only the modal and lands on Closeup.
-        assert!(update(&mut state, AppEvent::Key(exit_key.clone())).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(exit_key.clone())),
+            [] as [Effect; 0]
+        );
         assert_eq!(
             state.route(),
             Route::Home(HomeMode::Closeup),
@@ -463,7 +506,10 @@ fn empty_closeup_uses_primary_shortcuts_and_enter_opens_actions() {
     assert_eq!(terminal.overlay(), None);
 
     let mut actions = closeup();
-    assert!(update(&mut actions, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut actions, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     assert_eq!(actions.overlay(), Some(Overlay::Closeup));
 }
 
@@ -483,7 +529,10 @@ fn closeup_forced_action_modal_returns_to_the_live_closeup() {
         // Force the action modal over the live pane, then exit it.
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
-        assert!(update(&mut state, AppEvent::Key(exit_key.clone())).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(exit_key.clone())),
+            [] as [Effect; 0]
+        );
         assert_eq!(
             state.route(),
             Route::Home(HomeMode::Closeup),
@@ -569,7 +618,7 @@ fn terminal_launch_failure_opens_a_dismissible_error_dialog() {
             AppEvent::TerminalLaunchFailed(Notice::new("shell executable was not found")),
         );
 
-        assert!(effects.is_empty());
+        assert_eq!(effects, [] as [Effect; 0]);
         assert_eq!(state.overlay(), Some(Overlay::TerminalLaunchError));
         assert_eq!(
             state
@@ -582,7 +631,10 @@ fn terminal_launch_failure_opens_a_dismissible_error_dialog() {
             Some("shell executable was not found")
         );
 
-        assert!(update(&mut state, AppEvent::Key(dismiss)).is_empty());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(dismiss)),
+            [] as [Effect; 0]
+        );
         assert_eq!(state.overlay(), None);
         assert!(state.terminal_launch_error().is_none());
     }
@@ -623,14 +675,14 @@ fn empty_home_refuses_root_agent_terminal_and_closeup_actions() {
         &mut state,
         AppEvent::Key(AppKey::SubmitCloseup("agent".to_owned())),
     );
-    assert!(agent.is_empty());
+    assert_eq!(agent, [] as [Effect; 0]);
 
     state.overlay = Some(Overlay::Closeup);
     let terminal = update(
         &mut state,
         AppEvent::Key(AppKey::SubmitCloseup("terminal open".to_owned())),
     );
-    assert!(terminal.is_empty());
+    assert_eq!(terminal, [] as [Effect; 0]);
     assert_eq!(state.route(), Route::Home(HomeMode::Switch));
     assert_eq!(state.selected(), Selection::Idle);
 
@@ -712,7 +764,7 @@ fn closeup_agent_selects_an_installed_cli_and_refuses_the_rest() {
 
     // With no CLI installed even the default is refused rather than sent.
     state.set_agent_models(AvailableModels::default(), DefaultModel::OpenAi);
-    assert!(launch(&mut state, "agent").is_empty());
+    assert_eq!(launch(&mut state, "agent"), [] as [Effect; 0]);
     assert_eq!(
         state.notice().map(|notice| notice.message.as_str()),
         Some("the configured agent CLI is not installed")
@@ -763,24 +815,36 @@ fn closeup_env_opens_a_workspace_locked_editor_and_rejects_arguments() {
     assert!(!editor.is_loading());
     assert!(!editor.is_saving());
 
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
-    assert!(
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
         update(
             &mut state,
             AppEvent::Key(AppKey::Paste("RUST_LOG=debug\r\nNEXT=2".to_owned())),
-        )
-        .is_empty()
+        ),
+        [] as [Effect; 0]
     );
     assert_eq!(
         state.environment_editor().unwrap().draft(),
         "KEEP=1\nRUST_LOG=debug\nNEXT=2"
     );
     let end = state.environment_editor().unwrap().cursor();
-    assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Up)),
+        [] as [Effect; 0]
+    );
     assert!(state.environment_editor().unwrap().cursor() < end);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Down)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Down)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.environment_editor().unwrap().cursor(), end);
-    assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Tab)),
+        [] as [Effect; 0]
+    );
     let editor = state.environment_editor().unwrap();
     assert_eq!(editor.scope(), EnvScope::Workspace);
     assert!(editor.is_save_focused());
@@ -802,12 +866,12 @@ fn closeup_env_opens_a_workspace_locked_editor_and_rejects_arguments() {
     let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
     for input in ["env workspace", "env global", "env extra"] {
-        assert!(
+        assert_eq!(
             update(
                 &mut state,
                 AppEvent::Key(AppKey::SubmitCloseup(input.to_owned())),
-            )
-            .is_empty()
+            ),
+            [] as [Effect; 0]
         );
         assert_eq!(state.overlay(), Some(Overlay::Closeup));
         assert!(state.environment_editor().is_none());
@@ -846,7 +910,7 @@ fn closeup_environment_source_edits_at_the_cursor_and_keeps_validation_errors() 
     let _ = update(&mut state, AppEvent::Key(AppKey::Right));
     let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
     let _ = update(&mut state, AppEvent::Key(AppKey::Backspace));
-    assert!(state.environment_editor().unwrap().draft().is_empty());
+    assert_eq!(state.environment_editor().unwrap().draft(), "");
 
     let _ = update(
         &mut state,
@@ -859,7 +923,10 @@ fn closeup_environment_source_edits_at_the_cursor_and_keeps_validation_errors() 
     let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
     assert!(!state.environment_editor().unwrap().is_save_focused());
     let _ = update(&mut state, AppEvent::Key(AppKey::Tab));
-    assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Enter)),
+        [] as [Effect; 0]
+    );
     let editor = state.environment_editor().unwrap();
     assert_eq!(editor.draft(), "MISSING_EQUALS");
     assert!(!editor.is_save_focused());
@@ -882,10 +949,22 @@ fn closeup_environment_source_edits_at_the_cursor_and_keeps_validation_errors() 
         update(&mut state, AppEvent::Key(AppKey::SaveEnvironment)).is_empty(),
         "a save in flight must not be submitted twice"
     );
-    assert!(update(&mut state, AppEvent::Key(AppKey::Tab)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Left)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Up)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Down)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Tab)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Left)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Up)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Down)),
+        [] as [Effect; 0]
+    );
 }
 
 #[test]
@@ -964,23 +1043,131 @@ fn closeup_environment_source_reports_each_invalid_line_shape_and_limits() {
 }
 
 #[test]
-fn a_live_pane_that_releases_the_foreground_takes_its_modal_state_with_it() {
+fn a_pane_becoming_live_preserves_explicit_preview_and_artifacts() {
+    for key in [AppKey::OpenPreview, AppKey::OpenArtifacts] {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(key));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('報')));
+        let before = state.preview_overlay().cloned().unwrap();
+        assert_eq!(
+            update(&mut state, AppEvent::LivePaneAvailability(true)),
+            [] as [Effect; 0]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert_eq!(state.preview_overlay(), Some(&before));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('告')));
+        assert_eq!(state.preview_overlay().unwrap().filter(), "報告");
+    }
+}
+
+fn assert_artifact_open(
+    state: &AppState,
+    effects: &[Effect],
+    target: Target,
+    path: &str,
+    filter: PreviewFileFilter,
+) {
+    let request = state
+        .preview_overlay()
+        .unwrap()
+        .artifact_open()
+        .unwrap()
+        .request_id();
+    assert!(
+        matches!(effects, [Effect::OpenArtifact { target: actual_target, request_id, path: actual_path, filter: actual_filter }]
+        if *actual_target == target && *request_id == request && actual_path == path && *actual_filter == filter)
+    );
+}
+
+#[test]
+fn artifacts_finder_scopes_session_and_workspace_and_opens_selected_artifacts() {
     let (workspace, session, _) = ids();
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-    assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
-
-    // A pane going live releases the Closeup foreground. Whatever modal held it
-    // must go with it: input is routed by the foreground alone, so a surviving
-    // modal would be drawn while every key reached Home instead.
-    let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
-    assert_eq!(state.overlay(), Some(Overlay::Preview));
-    assert!(state.preview_overlay().is_some());
-    assert_eq!(
-        update(&mut state, AppEvent::LivePaneAvailability(true)),
-        vec![Effect::CancelPreview],
-        "closing the preview this way also ends the scan behind it"
+    for (arguments, target, filter) in [
+        (
+            "artifact",
+            Target::Session(session),
+            PreviewFileFilter::Artifacts,
+        ),
+        (
+            "artifact all",
+            Target::Root(workspace),
+            PreviewFileFilter::AllArtifacts,
+        ),
+    ] {
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup(arguments.to_owned())),
+        );
+        let overlay = state.preview_overlay().unwrap();
+        let request_id = overlay.request_id();
+        assert_eq!(
+            effects,
+            vec![Effect::LoadPreview {
+                target,
+                request_id,
+                path: None,
+                filter
+            }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Tab)),
+            [] as [Effect; 0]
+        );
+        let path = if filter == PreviewFileFilter::Artifacts {
+            "artifacts/report.md"
+        } else {
+            ".usagi/sessions/one/artifacts/report.md"
+        }
+        .to_owned();
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target,
+                request_id,
+                path: None,
+                filter,
+                files: vec![path.clone()],
+                changed: vec![],
+                lines: vec![],
+            }),
+        );
+        let native = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_artifact_open(&state, &native, target, &path, filter);
+        let preview = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert!(
+            matches!(preview.as_slice(), [Effect::LoadPreview { path: Some(selected), .. }] if selected == &path)
+        );
+        let native = update(&mut state, AppEvent::Key(AppKey::Tab));
+        assert_artifact_open(&state, &native, target, &path, filter);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        for key in [AppKey::Left, AppKey::Right] {
+            assert_eq!(update(&mut state, AppEvent::Key(key)), [] as [Effect; 0]);
+            assert_eq!(state.preview_overlay().unwrap().file_filter(), filter);
+        }
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    }
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+    let effects = update(
+        &mut state,
+        AppEvent::Key(AppKey::SubmitOverview("artifact".to_owned())),
     );
-    assert_eq!(state.overlay(), None);
-    assert!(state.preview_overlay().is_none());
+    assert!(
+        matches!(effects.as_slice(), [Effect::LoadPreview { target: Target::Root(id), filter: PreviewFileFilter::AllArtifacts, .. }] if *id == workspace)
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+    assert_eq!(
+        update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("artifact bad".to_owned()))
+        ),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.notice().unwrap().message, "usage: artifact [all]");
 }

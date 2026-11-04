@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn render_handles_empty_and_footer_only_regions() {
         let view = TerminalViewProjection::default();
-        assert!(render(&view, 80, 0, 0, "keys").is_empty());
+        assert_eq!(render(&view, 80, 0, 0, "keys"), [] as [String; 0]);
         let footer_only = render(&view, 80, 1, 8, "keys");
         assert_eq!(footer_only.len(), 1);
         assert_eq!(widgets::strip_ansi(&footer_only[0]), "keys");

@@ -14,11 +14,44 @@ pub(super) fn cycle_input(editor: &mut DecisionEditor) {
         editor.input_freeform = editor.decision.allow_freeform;
     } else if editor.input_freeform {
         editor.input_freeform = false;
-    } else {
+    } else if editor.decision.allow_comment {
         editor.input_comment = true;
+    } else {
+        editor.input_freeform = editor.decision.allow_freeform;
     }
     editor.scroll_offset = None;
     editor.follow_freeform = editor.input_freeform;
+    editor.error = None;
+}
+
+/// Traverse fields in their visual order without discarding any draft or checks.
+pub(super) fn move_input(editor: &mut DecisionEditor, forward: bool) {
+    let options = editor.decision.options.len();
+    let comment = usize::from(editor.decision.allow_comment);
+    let current = if editor.input_freeform {
+        options + comment
+    } else if editor.input_comment {
+        options
+    } else {
+        editor.selected_option
+    };
+    let last = options + comment + usize::from(editor.decision.allow_freeform) - 1;
+    let next = if forward {
+        current.saturating_add(1).min(last)
+    } else if current == options {
+        // Tab can leave any option for an input field. Return to that answer,
+        // rather than silently replacing it with the last option in the list.
+        editor.selected_option
+    } else {
+        current.saturating_sub(1)
+    };
+    editor.input_comment = next == options && editor.decision.allow_comment;
+    editor.input_freeform = next == options + comment && editor.decision.allow_freeform;
+    if next < options {
+        editor.selected_option = next;
+    }
+    editor.follow_freeform = editor.input_freeform;
+    editor.scroll_offset = None;
     editor.error = None;
 }
 
@@ -37,6 +70,13 @@ pub(super) fn edit_comment(editor: &mut DecisionEditor, key: &AppKey) -> bool {
 }
 
 fn valid_answer(editor: &mut DecisionEditor, answer: &UserDecisionAnswer) -> bool {
+    if matches!(answer, UserDecisionAnswer::Freeform { text } if text.trim().is_empty()) {
+        editor.error = Some(SafeError {
+            message: SafeMessage::new("Write a freeform answer before continuing."),
+            error_id: "decision-empty-freeform".into(),
+        });
+        return false;
+    }
     if editor
         .decision
         .validate_answer(answer, chrono::Utc::now())
@@ -85,12 +125,6 @@ pub(super) fn update_confirmation(
             editor.confirmation = None;
             editor.scroll_offset = None;
             editor.error = None;
-        }
-        AppKey::PageUp => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_sub(8));
-        }
-        AppKey::PageDown => {
-            editor.scroll_offset = Some(editor.scroll_offset.unwrap_or_default().saturating_add(8));
         }
         AppKey::Enter | AppKey::SubmitDecision => {
             let answer = editor

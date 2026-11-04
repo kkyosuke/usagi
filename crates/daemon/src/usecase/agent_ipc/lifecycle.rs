@@ -2,16 +2,17 @@
 
 use anyhow::Result;
 
+use super::dispatch_operation_id;
 use super::{
-    AgentAdmission, AgentCapability, AgentGoalIntent, AgentId, AgentIntegrationRevision,
-    AgentLaunchIntent, AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime,
-    AgentRuntimeRef, BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan,
-    DaemonRestartInterruptionError, ErrorCode, OperationId, ProtocolError,
-    ProviderCaptureProvenance, ProviderKind, ProviderResumeReason, SessionId, SessionScopeResolver,
-    autonomous_goal_prompt, expected_integration_revisions, goal_semantic_key,
+    AgentAdmission, AgentCapability, AgentId, AgentIntegrationRevision, AgentLaunchIntent,
+    AgentPhase, AgentReadinessPreflight, AgentResumeTarget, AgentRuntime, AgentRuntimeRef,
+    BTreeSet, DaemonRestartAgent, DaemonRestartAgentPlan, DaemonRestartInterruptionError,
+    DaemonRestartResumeOptions, ErrorCode, OperationId, ProtocolError, ProviderCaptureProvenance,
+    ProviderKind, ProviderResumeReason, ResumePrompt, SessionScopeResolver,
+    daemon_restart_resume_semantic_key, expected_integration_revisions,
     holds_live_or_unknown_agent, is_resume_source_state, map_dispatch_storage_error,
     map_runtime_error, provider_matches_profile, repair_resume_semantic_key, resume_semantic_key,
-    resume_target, semantic_key, validate_goal,
+    resume_target, semantic_key,
 };
 
 impl AgentRuntime {
@@ -45,37 +46,6 @@ impl AgentRuntime {
         self.readiness_ticket(profile).map(Some)
     }
 
-    /// Goal-driven counterpart whose idempotency meaning includes the exact
-    /// objective while reusing the ordinary profile readiness proof.
-    pub fn prepare_goal_launch_readiness(
-        &self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
-        validate_goal(intent)?;
-        let semantic = goal_semantic_key(intent);
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing.conflicts_with(&semantic) {
-                return Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "operation id was reused with a different goal launch",
-                ));
-            }
-            return Ok(None);
-        }
-        OperationId::parse(operation_id).map_err(|_| {
-            ProtocolError::new(
-                ErrorCode::InvalidArgument,
-                "agent operation id must be a canonical operation identifier",
-            )
-        })?;
-        let profile = intent
-            .profile
-            .clone()
-            .unwrap_or_else(|| self.default_profile.clone());
-        self.readiness_ticket(profile).map(Some)
-    }
-
     /// Captures the provider and owner generation for one exact resume without
     /// invoking an adapter or mutating durable state.
     pub fn prepare_resume_readiness(
@@ -87,6 +57,35 @@ impl AgentRuntime {
         self.prepare_resume_readiness_for(operation_id, target, &semantic)
     }
 
+    /// Reject invalid turns and unsupported providers before readiness or spawn.
+    pub fn prepare_headless_resume_readiness(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        prompt: &str,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        if prompt.trim().is_empty() || prompt.contains('\0') {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "headless resume prompt must be non-empty and contain no NUL",
+            ));
+        }
+        let semantic =
+            usagi_core::infrastructure::ipc::agent_headless_resume_semantic_key(target, prompt);
+        let ticket = self.prepare_resume_readiness_for(operation_id, target, &semantic)?;
+        if ticket.as_ref().is_some_and(|ticket| {
+            !ticket
+                .capabilities
+                .contains(&AgentCapability::HeadlessResume)
+        }) {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent profile does not support headless conversation resume",
+            ));
+        }
+        Ok(ticket)
+    }
+
     /// Readiness preflight for the repair-only revision migration semantic.
     pub fn prepare_current_integration_resume_readiness(
         &self,
@@ -95,6 +94,16 @@ impl AgentRuntime {
         expected_revision: u32,
     ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
         let semantic = repair_resume_semantic_key(target, expected_revision);
+        self.prepare_resume_readiness_for(operation_id, target, &semantic)
+    }
+
+    pub fn prepare_daemon_restart_resume_readiness(
+        &self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        options: DaemonRestartResumeOptions,
+    ) -> Result<Option<AgentReadinessPreflight>, ProtocolError> {
+        let semantic = daemon_restart_resume_semantic_key(target, options);
         self.prepare_resume_readiness_for(operation_id, target, &semantic)
     }
 
@@ -121,14 +130,12 @@ impl AgentRuntime {
         })?;
         let record = self
             .coordinator
-            .snapshot()
-            .records
-            .into_iter()
+            .records()
             .find(|record| record.runtime.agent_runtime_id == target.runtime_id)
             .ok_or_else(|| {
                 ProtocolError::new(ErrorCode::StaleTarget, "agent resume target is stale")
             })?;
-        self.readiness_ticket(record.launch.plan.profile_id)
+        self.readiness_ticket(record.launch.plan.profile_id.clone())
             .map(Some)
     }
 
@@ -142,23 +149,30 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let current = self.prepare_launch_readiness(operation_id, intent)?;
-        self.validate_readiness(preflight, current.as_ref())?;
-        self.launch(operation_id, intent, scope)
+        self.launch_from_after_readiness(
+            operation_id,
+            intent,
+            scope,
+            preflight,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::Agent,
+            ),
+        )
     }
 
-    /// Admit an opt-in goal launch after the same owner-external readiness
-    /// check used by classic launches.
-    pub fn launch_goal_after_readiness(
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_from_after_readiness(
         &mut self,
         operation_id: &str,
-        intent: &AgentGoalIntent,
+        intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let current = self.prepare_goal_launch_readiness(operation_id, intent)?;
+        let current = self.prepare_launch_readiness(operation_id, intent)?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.launch_goal(operation_id, intent, scope)
+        self.launch_from(operation_id, intent, scope, context)
     }
 
     /// Exact-resume counterpart of [`Self::launch_after_readiness`].
@@ -174,6 +188,37 @@ impl AgentRuntime {
         self.resume_exact(operation_id, target, scope)
     }
 
+    /// Resume with audit context derived by the authenticated daemon boundary.
+    #[allow(clippy::too_many_arguments)] // Keep the exact target and readiness ticket separate from trusted origin metadata.
+    pub fn resume_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_resume_readiness(operation_id, target)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_exact_from(operation_id, target, scope, context)
+    }
+
+    /// Executes a headless turn after the owner-external readiness probe.
+    #[allow(clippy::too_many_arguments)] // The exact source, new turn, readiness evidence, and authenticated origin are independently fenced.
+    pub fn resume_headless_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        prompt: &str,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let current = self.prepare_headless_resume_readiness(operation_id, target, prompt)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        self.resume_exact_with_prompt_from(operation_id, target, scope, context, Some(prompt))
+    }
+
     /// Repair-only resume counterpart. The readiness ticket is taken from the
     /// current adapter while `target` continues to fence the old durable source.
     pub fn resume_with_current_integration_after_readiness(
@@ -184,13 +229,81 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         preflight: Option<&AgentReadinessPreflight>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_with_current_integration_from_after_readiness(
+            operation_id,
+            target,
+            expected_revision,
+            scope,
+            preflight,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
+            ),
+        )
+    }
+
+    /// Preserve the actual initiator when daemon restart also migrates the
+    /// provider integration revision.
+    #[allow(clippy::too_many_arguments)] // Exact repair fences and trusted audit context remain separate.
+    pub fn resume_with_current_integration_from_after_readiness(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let current = self.prepare_current_integration_resume_readiness(
             operation_id,
             target,
             expected_revision,
         )?;
         self.validate_readiness(preflight, current.as_ref())?;
-        self.resume_with_current_integration(operation_id, target, expected_revision, scope)
+        self.resume_with_current_integration_from(
+            operation_id,
+            target,
+            expected_revision,
+            scope,
+            context,
+        )
+    }
+
+    /// Resumes the exact interrupted conversation with the restart's persisted
+    /// continuation policy after validating the owner-external readiness proof.
+    pub fn resume_after_daemon_restart(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        options: DaemonRestartResumeOptions,
+        scope: &dyn SessionScopeResolver,
+        preflight: Option<&AgentReadinessPreflight>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        let current =
+            self.prepare_daemon_restart_resume_readiness(operation_id, target, options)?;
+        self.validate_readiness(preflight, current.as_ref())?;
+        let semantic = daemon_restart_resume_semantic_key(target, options);
+        if let Some(existing) = self.operations.get(operation_id) {
+            return existing.outcome.clone();
+        }
+        let context = super::AgentLaunchContext::new(
+            usagi_core::domain::agent::AgentLaunchSource::Daemon,
+            usagi_core::domain::agent::AgentLaunchEntry::DaemonRestart,
+        );
+        let outcome = self.admit_resume_exact(
+            operation,
+            target,
+            &semantic,
+            scope,
+            options.integration_revision,
+            Some(context.origin(operation)),
+            options
+                .continue_work
+                .then_some(ResumePrompt::Interactive("continue")),
+        );
+        self.remember_operation(operation_id, Some(&semantic), outcome.clone());
+        outcome
     }
 
     /// Admits one Agent launch.  The same producer `operation_id` with the same
@@ -202,6 +315,25 @@ impl AgentRuntime {
         intent: &AgentLaunchIntent,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.launch_from(
+            operation_id,
+            intent,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::Agent,
+            ),
+        )
+    }
+
+    /// Launch with connection evidence captured at the daemon boundary.
+    pub fn launch_from(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = semantic_key(intent);
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic_key) {
@@ -212,43 +344,7 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit(operation_id, intent, scope, None, &semantic_key);
-        self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
-        outcome
-    }
-
-    /// Launch one workspace-root Director with the autonomous work contract as
-    /// its initial prompt. This is a separate entry point so classic launch
-    /// cannot accidentally inherit goal semantics.
-    pub fn launch_goal(
-        &mut self,
-        operation_id: &str,
-        intent: &AgentGoalIntent,
-        scope: &dyn SessionScopeResolver,
-    ) -> Result<AgentAdmission, ProtocolError> {
-        validate_goal(intent)?;
-        let semantic_key = goal_semantic_key(intent);
-        if let Some(existing) = self.operations.get(operation_id) {
-            if existing.conflicts_with(&semantic_key) {
-                return Err(ProtocolError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "operation id was reused with a different goal launch",
-                ));
-            }
-            return existing.outcome.clone();
-        }
-        let launch = AgentLaunchIntent {
-            workspace: intent.workspace,
-            session: None,
-            profile: intent.profile.clone(),
-        };
-        let runtime = intent
-            .profile
-            .as_ref()
-            .unwrap_or(&self.default_profile)
-            .as_str();
-        let prompt = autonomous_goal_prompt(&intent.goal, runtime);
-        let outcome = self.admit(operation_id, &launch, scope, Some(&prompt), &semantic_key);
+        let outcome = self.admit(operation_id, intent, scope, &semantic_key, context);
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -265,7 +361,7 @@ impl AgentRuntime {
         force: bool,
     ) -> Result<DaemonRestartAgentPlan, ProtocolError> {
         let expected = expected_integration_revisions(expected)?;
-        let records = self.coordinator.snapshot().records;
+        let records = self.coordinator.records().collect::<Vec<_>>();
         let failed = self.failed_dispatch_ids().unwrap_or_default();
         if records.iter().any(|record| {
             holds_live_or_unknown_agent(record.state)
@@ -299,11 +395,18 @@ impl AgentRuntime {
                             "a live Agent profile has no current integration revision",
                         )
                     })?;
-                let (available, _) = Self::repair_source_availability(record, &records);
+                let (available, reason) = Self::resume_source_metadata_availability(record, &records);
                 let target = resume_target(record).filter(|_| available).ok_or_else(|| {
                     ProtocolError::new(
                         ErrorCode::Busy,
-                        "a live Agent has no exact provider resume metadata; no Agent was stopped",
+                        format!(
+                            "a live {} Agent (session {}, runtime {}) has no exact provider resume metadata ({reason:?}); \
+                             no Agent was stopped. Retry after its next prompt/tool lifecycle hook; \
+                             if its launch predates session capture, exit and reopen that Agent once",
+                            record.launch.plan.profile_id.as_str(),
+                            record.runtime.session_id.map_or_else(|| "root".to_owned(), |id| id.to_string()),
+                            record.runtime.agent_runtime_id,
+                        ),
                     )
                 })?;
                 let phase = self.record_phase(record, &failed).1;
@@ -323,16 +426,6 @@ impl AgentRuntime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         agents.sort_by_key(|item| item.runtime.agent_runtime_id.as_str());
-        let workspaces = agents
-            .iter()
-            .map(|item| item.runtime.terminal.workspace_id)
-            .collect::<BTreeSet<_>>();
-        if workspaces.len() > 1 {
-            return Err(ProtocolError::new(
-                ErrorCode::Busy,
-                "live Agents span multiple workspaces; no Agent was stopped",
-            ));
-        }
         let selected = agents
             .iter()
             .map(|item| item.runtime.agent_runtime_id)
@@ -388,9 +481,7 @@ impl AgentRuntime {
         {
             let stopped = self
                 .coordinator
-                .snapshot()
-                .records
-                .into_iter()
+                .records()
                 .filter(|record| {
                     runtime_ids.contains(&record.runtime.agent_runtime_id.as_str())
                         && record.state == crate::usecase::runtime::RuntimeState::Exited
@@ -429,7 +520,9 @@ impl AgentRuntime {
     /// Agent identity already has another non-terminal run (the operator
     /// relaunched or resumed it by hand), exact resume would refuse with "peer
     /// runtime already exists" forever; that Agent is already running again.
-    /// Every other state is left to that path's full fences.
+    /// An exact replacement which durably spawned also completes the source,
+    /// even if its final turn exited before progress was saved. Every other
+    /// state is left to that path's full fences.
     #[must_use]
     pub fn daemon_restart_restore_needed(&self, runtime: &AgentRuntimeRef) -> bool {
         let Ok(record) = self.coordinator.record_for(runtime) else {
@@ -440,6 +533,29 @@ impl AgentRuntime {
             crate::usecase::runtime::RuntimeState::Reserved
                 | crate::usecase::runtime::RuntimeState::Running
         ) {
+            return false;
+        }
+        if let (Some(replacement_id), Some(source_id), Some(continuation)) = (
+            record.superseded_by,
+            record.resume_source,
+            record.continuation,
+        ) && self.coordinator.records().any(|replacement| {
+            use crate::usecase::runtime::DurableOperationOutcome;
+            replacement.runtime.agent_runtime_id == replacement_id
+                && replacement.resumed_from == Some(source_id)
+                && replacement.continuation == Some(continuation)
+                && replacement.launch.request.scope == record.launch.request.scope
+                && matches!(
+                    replacement.outcome,
+                    DurableOperationOutcome::ResumeSucceeded
+                        | DurableOperationOutcome::Completed
+                        | DurableOperationOutcome::ExitUnavailable
+                )
+        }) {
+            // A later generation would use integration-repair semantics while
+            // an old-owner rollback used the original integration. A committed
+            // spawn closes this pending item; replaying its operation under the
+            // new semantic key would strand that completed item in a conflict.
             return false;
         }
         let source = record.operation.operation_id;
@@ -472,7 +588,44 @@ impl AgentRuntime {
         target: &AgentResumeTarget,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
-        let semantic_key = resume_semantic_key(target);
+        self.resume_exact_from(
+            operation_id,
+            target,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionResume,
+            ),
+        )
+    }
+
+    /// Record the actual authenticated resume initiator while keeping the
+    /// conversation's original creation provenance in the runtime store.
+    #[allow(clippy::too_many_arguments)] // Audit context is distinct from the exact provider resume target.
+    pub fn resume_exact_from(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_exact_with_prompt_from(operation_id, target, scope, context, None)
+    }
+
+    fn resume_exact_with_prompt_from(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+        headless_prompt: Option<&str>,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let semantic_key = headless_prompt.map_or_else(
+            || resume_semantic_key(target),
+            |prompt| {
+                usagi_core::infrastructure::ipc::agent_headless_resume_semantic_key(target, prompt)
+            },
+        );
         if let Some(existing) = self.operations.get(operation_id) {
             if existing.conflicts_with(&semantic_key) {
                 return Err(ProtocolError::new(
@@ -482,7 +635,17 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
-        let outcome = self.admit_resume_exact(operation_id, target, &semantic_key, scope, None);
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
+        let origin = context.origin(operation);
+        let outcome = self.admit_resume_exact(
+            operation,
+            target,
+            &semantic_key,
+            scope,
+            None,
+            Some(origin),
+            headless_prompt.map(ResumePrompt::Headless),
+        );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
@@ -498,6 +661,27 @@ impl AgentRuntime {
         expected_revision: u32,
         scope: &dyn SessionScopeResolver,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.resume_with_current_integration_from(
+            operation_id,
+            target,
+            expected_revision,
+            scope,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Manual,
+                usagi_core::domain::agent::AgentLaunchEntry::IntegrationRepair,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Keep the repair revision and authenticated initiating operation distinct.
+    fn resume_with_current_integration_from(
+        &mut self,
+        operation_id: &str,
+        target: &AgentResumeTarget,
+        expected_revision: u32,
+        scope: &dyn SessionScopeResolver,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let semantic_key = repair_resume_semantic_key(target, expected_revision);
         if let Some(existing) = self.operations.get(operation_id) {
             if !existing.matches(&semantic_key) {
@@ -508,42 +692,40 @@ impl AgentRuntime {
             }
             return existing.outcome.clone();
         }
+        let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         let outcome = self.admit_resume_exact(
-            operation_id,
+            operation,
             target,
             &semantic_key,
             scope,
             Some(expected_revision),
+            Some(context.origin(operation)),
+            None,
         );
         self.remember_operation(operation_id, Some(&semantic_key), outcome.clone());
         outcome
     }
 
-    /// Safe interrupted/resume projection for a managed session. Provider IDs
-    /// are never returned; only availability and a stable reason cross IPC.
-    #[must_use]
-    pub fn session_resume_status(&self, session: SessionId) -> (bool, ProviderResumeReason) {
-        let records = self.coordinator.snapshot().records;
-        let mut resumable = Vec::new();
-        for record in &records {
-            if record.runtime.session_id != Some(session) {
-                continue;
-            }
-            if holds_live_or_unknown_agent(record.state) {
-                return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
-            }
-            if is_resume_source_state(record.state) {
-                resumable.push(record);
-            }
-        }
-        if resumable.is_empty() {
-            return (false, ProviderResumeReason::ProviderMetadataUnavailable);
+    pub(super) fn session_resume_status_from(
+        &self,
+        session_records: &[&crate::usecase::runtime::DurableRuntimeRecord],
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        if session_records
+            .iter()
+            .any(|record| holds_live_or_unknown_agent(record.state))
+        {
+            return (false, ProviderResumeReason::LiveOrOwnershipUnknown);
         }
         let mut available = 0;
         let mut reason = ProviderResumeReason::ProviderMetadataUnavailable;
-        for record in resumable {
+        for record in session_records
+            .iter()
+            .copied()
+            .filter(|record| is_resume_source_state(record.state))
+        {
             let (candidate_available, candidate_reason) =
-                self.resume_source_availability(record, &records);
+                self.resume_source_availability(record, records);
             available += usize::from(candidate_available);
             if reason == ProviderResumeReason::ProviderMetadataUnavailable
                 && candidate_reason != ProviderResumeReason::ProviderMetadataUnavailable
@@ -560,10 +742,11 @@ impl AgentRuntime {
         (false, reason)
     }
 
-    pub(super) fn resume_source_availability(
-        &self,
+    /// Validates durable lineage and provider metadata independently from the
+    /// installed adapter revision, which integration repair may intentionally migrate.
+    pub(super) fn resume_source_metadata_availability(
         record: &crate::usecase::runtime::DurableRuntimeRecord,
-        records: &[crate::usecase::runtime::DurableRuntimeRecord],
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
     ) -> (bool, ProviderResumeReason) {
         let (Some(continuation), Some(_source), Some(reference)) = (
             record.continuation,
@@ -598,43 +781,46 @@ impl AgentRuntime {
             && record.launch.request.scope == reference.scope
             && record.runtime.terminal.workspace_id == reference.scope.workspace_id
             && record.runtime.terminal.session_id == reference.scope.session_id
-            && record.runtime.terminal.worktree_id == reference.scope.worktree_id;
-        let adapter_compatible = self
-            .registry
-            .profile(&record.launch.plan.profile_id)
-            .is_ok_and(|profile| {
-                profile.revision == reference.adapter_revision
-                    && profile.capabilities.contains(&AgentCapability::Resume)
-                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
-            });
-        if internally_compatible && adapter_compatible {
+            && record.runtime.terminal.worktree_id == reference.scope.worktree_id
+            && provider_matches_profile(reference.provider, &record.launch.plan.profile_id);
+        if internally_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
         } else {
             (false, ProviderResumeReason::IncompatibleProviderMetadata)
         }
     }
 
-    pub(super) fn repair_resume_source_availability(
+    pub(super) fn resume_source_availability(
         &self,
         record: &crate::usecase::runtime::DurableRuntimeRecord,
-        records: &[crate::usecase::runtime::DurableRuntimeRecord],
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
+    ) -> (bool, ProviderResumeReason) {
+        self.resume_source_availability_at_revision(
+            record,
+            records,
+            record.launch.plan.profile_revision,
+        )
+    }
+
+    /// Normal resume uses the captured revision; integration repair supplies
+    /// the current revision while preserving the same durable source checks.
+    pub(super) fn resume_source_availability_at_revision(
+        &self,
+        record: &crate::usecase::runtime::DurableRuntimeRecord,
+        records: &[&crate::usecase::runtime::DurableRuntimeRecord],
         expected_revision: u32,
     ) -> (bool, ProviderResumeReason) {
-        let (source_compatible, reason) = Self::repair_source_availability(record, records);
+        let (source_compatible, reason) =
+            Self::resume_source_metadata_availability(record, records);
         if !source_compatible {
             return (false, reason);
         }
-        let reference = record
-            .provider_resume
-            .as_ref()
-            .expect("repair-compatible source has provider metadata");
         let current_compatible = self
             .registry
             .profile(&record.launch.plan.profile_id)
             .is_ok_and(|profile| {
                 profile.revision == expected_revision
                     && profile.capabilities.contains(&AgentCapability::Resume)
-                    && provider_matches_profile(reference.provider, &record.launch.plan.profile_id)
             });
         if current_compatible {
             (true, ProviderResumeReason::ExplicitResumeAvailable)
@@ -674,7 +860,7 @@ impl AgentRuntime {
             .filter(|run| run.agent_id == agent_id && Some(run.run_id) != source)
             .map(|run| run.run_id)
             .collect();
-        Ok(!self.coordinator.snapshot().records.iter().any(|record| {
+        Ok(!self.coordinator.records().any(|record| {
             runs.contains(&record.operation.operation_id)
                 && !matches!(
                     record.state,

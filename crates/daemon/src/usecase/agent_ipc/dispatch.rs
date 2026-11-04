@@ -107,6 +107,29 @@ impl AgentRuntime {
         scope: &dyn SessionScopeResolver,
         planned_worker: Option<&usagi_core::domain::agent::Agent>,
     ) -> Result<AgentAdmission, ProtocolError> {
+        self.dispatch_with_planned_worker_from(
+            operation_id,
+            intent,
+            session,
+            scope,
+            planned_worker,
+            super::AgentLaunchContext::new(
+                usagi_core::domain::agent::AgentLaunchSource::Mcp,
+                usagi_core::domain::agent::AgentLaunchEntry::SessionDispatch,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // The trusted entry point joins the existing exact worker admission fences.
+    pub(super) fn dispatch_with_planned_worker_from(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &dyn SessionScopeResolver,
+        planned_worker: Option<&usagi_core::domain::agent::Agent>,
+        context: super::AgentLaunchContext,
+    ) -> Result<AgentAdmission, ProtocolError> {
         let operation = OperationId::parse(operation_id).map_err(|_| dispatch_operation_id())?;
         if intent.prompt.is_empty() {
             return Err(dispatch_empty_prompt());
@@ -207,6 +230,7 @@ impl AgentRuntime {
             &intent.caller,
             &semantic,
             scope,
+            context,
         );
         self.remember_operation(operation_id, Some(&semantic), outcome.clone());
         outcome

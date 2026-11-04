@@ -3,7 +3,7 @@
 //! Every operation shells out to the system `git` binary (rather than linking a
 //! git library) so the user's own git configuration is respected and the crate
 //! stays dependency-light. The subprocess itself is the one piece of real IO, so
-//! it is injected as a [`GitRunner`]: the operations here (`worktree`, `repo`)
+//! it is injected as a [`GitRunner`]: the operations here (such as `worktree` and `diff`)
 //! take a `&dyn GitRunner` and stay pure and unit-testable, while the composition
 //! root binds the real `git`-spawning implementation (mirroring the daemon's
 //! `RecordFile` / `LivenessProbe` seams).
@@ -17,7 +17,6 @@ pub mod clean;
 pub mod clone;
 pub mod diff;
 pub mod environment;
-pub mod repo;
 pub mod runner;
 pub mod worktree;
 

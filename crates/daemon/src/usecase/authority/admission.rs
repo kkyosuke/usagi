@@ -32,7 +32,7 @@ use crate::usecase::generation::GenerationRole;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseClass {
     /// Control operations, new spawns, and active-only background producers
-    /// (supervisor tick, decision worker, PR refresh).
+    /// (decision worker, PR refresh).
     ActiveControl,
     /// IO on a terminal this generation already owns. It outlives the control
     /// barrier so a draining owner can keep serving its PTYs.

@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::id::{
-    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentContinuationRef, AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId,
+    WorkspaceId, WorktreeId,
 };
 use crate::domain::role::RoleId;
 
@@ -114,17 +115,6 @@ impl AgentPhase {
             .into_iter()
             .find_map(|(wired, phase)| (wired == event).then_some(phase))
     }
-}
-
-/// The git relationship of a worktree; it is intentionally independent of lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BranchStatus {
-    New,
-    Dirty,
-    Local,
-    Pushed,
-    Synced,
 }
 
 // いずれも独立した設定で、enum にまとめると組み合わせが表現できなくなる。
@@ -264,6 +254,14 @@ pub struct ManagedSession {
     /// from sessions created by a human control plane or another root Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_agent_id: Option<AgentId>,
+    /// Conversation that created this session, fixed at reservation. This
+    /// display association survives Agent reuse and runtime history retention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_continuation: Option<AgentContinuationRef>,
+    /// Root conversation whose organization owns this session. Unlike the
+    /// immediate creator, this association survives removal of an ancestor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub director_continuation: Option<AgentContinuationRef>,
     /// Stable role assignment for this incarnation. Missing on legacy records
     /// and never populated implicitly during migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -330,6 +328,8 @@ impl ManagedSession {
             name,
             parent_session_id,
             creator_agent_id,
+            creator_continuation: None,
+            director_continuation: None,
             role_id,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
@@ -352,6 +352,8 @@ impl ManagedSession {
             name,
             parent_session_id: None,
             creator_agent_id: None,
+            creator_continuation: None,
+            director_continuation: None,
             role_id: None,
             lifecycle: SessionLifecycle::Available,
             attempt: 1,
@@ -377,6 +379,8 @@ impl ManagedSession {
             name,
             parent_session_id: None,
             creator_agent_id: None,
+            creator_continuation: None,
+            director_continuation: None,
             role_id: None,
             lifecycle: SessionLifecycle::Failed,
             attempt: 1,
@@ -461,6 +465,29 @@ impl std::fmt::Display for LifecycleError {
 impl std::error::Error for LifecycleError {}
 
 impl WorkspaceLifecycleState {
+    /// Resolve organization membership using only durable creation facts.
+    /// Older records can follow surviving parents; missing or cyclic ancestry
+    /// stays unknown and never borrows a later Agent runtime's conversation.
+    #[must_use]
+    pub fn director_continuation(&self, session_id: SessionId) -> Option<AgentContinuationRef> {
+        let mut current = session_id;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(current) {
+            let session = self
+                .sessions
+                .iter()
+                .find(|session| session.session_id == current)?;
+            if let Some(continuation) = session.director_continuation {
+                return Some(continuation);
+            }
+            match session.parent_session_id {
+                Some(parent) => current = parent,
+                None => return session.creator_continuation,
+            }
+        }
+        None
+    }
+
     pub const FORMAT: &'static str = "usagi-workspace-lifecycle";
     pub const MAJOR: u16 = 2;
     #[must_use]
@@ -543,12 +570,10 @@ impl WorkspaceLifecycleState {
                 continue;
             };
             let operation = &mut self.operations[operation_pos];
-            if operation.status == OperationStatus::Succeeded {
-                operation.status = OperationStatus::Failed;
-                operation.progress_revision += 1;
-                self.sessions[session_pos].operation_id = Some(operation.operation_id);
-                repaired += 1;
-            }
+            operation.status = OperationStatus::Failed;
+            operation.progress_revision += 1;
+            self.sessions[session_pos].operation_id = Some(operation.operation_id);
+            repaired += 1;
         }
         if repaired != 0 {
             self.changed(now);
@@ -574,6 +599,7 @@ pub enum LifecycleEvent {
         role_id: Option<RoleId>,
         parent_session_id: Option<SessionId>,
         creator_agent_id: Option<AgentId>,
+        creator_continuation: Option<AgentContinuationRef>,
         operation: OperationJournal,
     },
     CreateCompleted {
@@ -630,6 +656,7 @@ pub fn reduce(
             role_id,
             parent_session_id,
             creator_agent_id,
+            creator_continuation,
             operation,
         } => reserve_create(
             state,
@@ -637,6 +664,7 @@ pub fn reduce(
             role_id,
             parent_session_id,
             creator_agent_id,
+            creator_continuation,
             operation,
             now,
         ),
@@ -728,12 +756,14 @@ fn begin_remove(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the atomic reservation fields together.
 fn reserve_create(
     state: &mut WorkspaceLifecycleState,
     name: String,
     role_id: Option<RoleId>,
     parent_session_id: Option<SessionId>,
     creator_agent_id: Option<AgentId>,
+    creator_continuation: Option<AgentContinuationRef>,
     operation: OperationJournal,
     now: DateTime<Utc>,
 ) -> Result<(), LifecycleError> {
@@ -742,16 +772,20 @@ fn reserve_create(
         return Err(LifecycleError::DuplicateSessionName);
     }
     let id = operation.operation_id;
-    state
-        .sessions
-        .push(ManagedSession::new_creating_with_role_parent_and_creator(
-            name,
-            id,
-            now,
-            role_id,
-            parent_session_id,
-            creator_agent_id,
-        ));
+    let mut session = ManagedSession::new_creating_with_role_parent_and_creator(
+        name,
+        id,
+        now,
+        role_id,
+        parent_session_id,
+        creator_agent_id,
+    );
+    session.creator_continuation = creator_continuation;
+    session.director_continuation = match parent_session_id {
+        Some(parent) => state.director_continuation(parent),
+        None => creator_continuation,
+    };
+    state.sessions.push(session);
     state.operations.push(operation);
     state.changed(now);
     Ok(())
@@ -854,6 +888,16 @@ fn complete(
             session.changed_at = now;
         }
         SessionLifecycle::Deleting => {
+            // Backfill direct children of pre-field records atomically with
+            // removal. Their descendants can still follow these survivors.
+            let removed = state.sessions[pos].session_id;
+            let continuation = state.director_continuation(removed);
+            for child in &mut state.sessions {
+                if child.parent_session_id == Some(removed) && child.director_continuation.is_none()
+                {
+                    child.director_continuation = continuation;
+                }
+            }
             state.sessions.remove(pos);
         }
         SessionLifecycle::Creating | SessionLifecycle::Available | SessionLifecycle::Failed => {
@@ -889,6 +933,107 @@ fn fail(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn organization_resolution_uses_durable_facts_and_bounds_incomplete_ancestry() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let mut root = ManagedSession::adopt_available("root".into(), now());
+        let continuation = AgentContinuationRef::new();
+        root.creator_continuation = Some(continuation);
+        let mut child = ManagedSession::adopt_available("child".into(), now());
+        child.parent_session_id = Some(root.session_id);
+        child.creator_continuation = Some(AgentContinuationRef::new());
+        let child_id = child.session_id;
+        state.sessions = vec![root, child];
+        assert_eq!(state.director_continuation(child_id), Some(continuation));
+        assert_eq!(state.director_continuation(SessionId::new()), None);
+        state.sessions[0].creator_continuation = None;
+        assert_eq!(state.director_continuation(child_id), None);
+        state.sessions[0].parent_session_id = Some(child_id);
+        assert_eq!(state.director_continuation(child_id), None);
+        state.sessions[1].parent_session_id = Some(SessionId::new());
+        assert_eq!(state.director_continuation(child_id), None);
+        state.sessions[1].director_continuation = Some(continuation);
+        assert_eq!(state.director_continuation(child_id), Some(continuation));
+    }
+
+    #[test]
+    fn child_membership_is_inherited_and_preserved_when_its_parent_is_removed() {
+        let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
+        let continuation = AgentContinuationRef::new();
+        let saved_continuation = AgentContinuationRef::new();
+        let mut root = ManagedSession::adopt_available("root".into(), now());
+        root.creator_continuation = Some(continuation);
+        let root_id = root.session_id;
+        let mut legacy = ManagedSession::adopt_available("legacy".into(), now());
+        legacy.parent_session_id = Some(root_id);
+        let legacy_id = legacy.session_id;
+        let mut saved = ManagedSession::adopt_available("saved".into(), now());
+        saved.parent_session_id = Some(root_id);
+        saved.director_continuation = Some(saved_continuation);
+        let saved_id = saved.session_id;
+        let unrelated = ManagedSession::adopt_available("unrelated".into(), now());
+        let unrelated_id = unrelated.session_id;
+        state.sessions = vec![root, legacy, saved, unrelated];
+        let immediate_creator = AgentContinuationRef::new();
+        reduce(
+            &mut state,
+            LifecycleEvent::ReserveCreate {
+                name: "new-child".into(),
+                role_id: None,
+                parent_session_id: Some(root_id),
+                creator_agent_id: Some(AgentId::new()),
+                creator_continuation: Some(immediate_creator),
+                operation: op(),
+            },
+            now(),
+        )
+        .unwrap();
+        let new_child = state.sessions.last().unwrap();
+        let new_child_id = new_child.session_id;
+        assert_eq!(new_child.creator_continuation, Some(immediate_creator));
+        assert_eq!(new_child.director_continuation, Some(continuation));
+        let operation = op();
+        reduce(
+            &mut state,
+            LifecycleEvent::BeginRemove {
+                session_id: root_id,
+                operation: operation.clone(),
+                delete_plan: DeletePlan {
+                    targets: vec!["root".into()],
+                    force: false,
+                    delete_branch: false,
+                    branch_name: None,
+                    force_delete_branch: false,
+                    merged_head_oid: None,
+                },
+            },
+            now(),
+        )
+        .unwrap();
+        let completion = fence(&state, &state.sessions[0], &operation);
+        reduce(
+            &mut state,
+            LifecycleEvent::Completed { fence: completion },
+            now(),
+        )
+        .unwrap();
+        assert_eq!(state.sessions.len(), 4);
+        assert_eq!(state.director_continuation(root_id), None);
+        assert_eq!(state.sessions[0].director_continuation, Some(continuation));
+        assert_eq!(state.director_continuation(legacy_id), Some(continuation));
+        assert_eq!(
+            state.director_continuation(saved_id),
+            Some(saved_continuation)
+        );
+        assert_eq!(state.director_continuation(unrelated_id), None);
+        assert_eq!(
+            state.director_continuation(new_child_id),
+            Some(continuation)
+        );
+        assert_eq!(state.operations[1].status, OperationStatus::Succeeded);
+    }
+
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }
@@ -921,7 +1066,6 @@ mod tests {
     fn lifecycle_axes_and_capabilities_stay_separate() {
         assert!(SessionLifecycle::Available.capabilities().can_use);
         assert_eq!(AgentPhase::Running, AgentPhase::Running);
-        assert_eq!(BranchStatus::Dirty, BranchStatus::Dirty);
         let adopted = ManagedSession::adopt_available("legacy".into(), now());
         assert_eq!(adopted.name, "legacy");
         assert_eq!(adopted.lifecycle, SessionLifecycle::Available);
@@ -934,9 +1078,11 @@ mod tests {
         let wire = serde_json::to_value(&legacy).unwrap();
         assert!(wire.get("role_id").is_none());
         assert!(wire.get("creator_agent_id").is_none());
+        assert!(wire.get("creator_continuation").is_none());
         let decoded: ManagedSession = serde_json::from_value(wire).unwrap();
         assert!(decoded.role_id.is_none());
         assert!(decoded.creator_agent_id.is_none());
+        assert!(decoded.creator_continuation.is_none());
 
         let assigned = ManagedSession::new_creating_with_role(
             "review".into(),
@@ -997,6 +1143,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1038,6 +1185,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1093,6 +1241,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: create.clone(),
             },
             now(),
@@ -1137,6 +1286,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: fresh,
             },
             now(),
@@ -1169,6 +1319,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1187,6 +1338,26 @@ mod tests {
         )
         .unwrap();
         let id = state.sessions[0].session_id;
+        // Legacy snapshots can retain a session's operation identity without
+        // its journal row. Recovery must still fail the interrupted session.
+        let mut without_journal = state.clone();
+        without_journal.operations.clear();
+        reduce(
+            &mut without_journal,
+            LifecycleEvent::ReconcileInterrupted {
+                session_id: id,
+                operation_id: operation.operation_id,
+                stage: FailureStage::Initialize,
+            },
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            without_journal.sessions[0].lifecycle,
+            SessionLifecycle::Failed
+        );
+        assert!(without_journal.sessions[0].failure.is_some());
+        assert_eq!(without_journal.operations, [] as [OperationJournal; 0]);
         reduce(
             &mut state,
             LifecycleEvent::ReconcileInterrupted {
@@ -1295,14 +1466,15 @@ mod tests {
                     role_id: None,
                     parent_session_id: None,
                     creator_agent_id: None,
+                    creator_continuation: None,
                     operation: op(),
                 },
                 now(),
             ),
             Err(LifecycleError::InvalidSessionName)
         );
-        assert!(state.sessions.is_empty());
-        assert!(state.operations.is_empty());
+        assert_eq!(state.sessions, [] as [ManagedSession; 0]);
+        assert_eq!(state.operations, [] as [OperationJournal; 0]);
     }
 
     // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
@@ -1347,6 +1519,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),
@@ -1360,6 +1533,7 @@ mod tests {
                     role_id: None,
                     parent_session_id: None,
                     creator_agent_id: None,
+                    creator_continuation: None,
                     operation: op()
                 },
                 now()
@@ -1457,6 +1631,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: create.clone(),
             },
             now(),
@@ -1561,6 +1736,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: create.clone(),
             },
             now(),
@@ -1645,6 +1821,7 @@ mod tests {
                 role_id: None,
                 parent_session_id: None,
                 creator_agent_id: None,
+                creator_continuation: None,
                 operation: operation.clone(),
             },
             now(),

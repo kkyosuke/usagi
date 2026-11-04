@@ -5,7 +5,7 @@
 //! injected Git and filesystem ports, then applies the exact completion fence
 //! captured from the reservation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -13,14 +13,15 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use usagi_core::domain::agent::{CallerRef, ProviderResumeReason};
 use usagi_core::domain::id::{
-    AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+    AgentContinuationRef, AgentId, CompletionFence, DaemonGeneration, OperationId, SessionId,
+    WorkspaceId, WorktreeId,
 };
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
-    AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal,
-    OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
+    AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, ManagedSession,
+    OperationJournal, OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
 };
-use usagi_core::infrastructure::git::{GitRunner, delete_branch};
+use usagi_core::infrastructure::git::{GitRunner, delete_branch, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
 use usagi_core::infrastructure::ipc::SessionAction;
@@ -28,8 +29,8 @@ use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR, project_data_di
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::runtime_model::WorkspaceSessionConfig;
 use usagi_core::infrastructure::session_snapshot::{
-    SessionListItem, SessionListSnapshot, SessionRuntimeObservation, SessionStatusItem,
-    SessionStatusSnapshot, SessionWorktreeStatus,
+    SessionListItem, SessionListLifecycle, SessionListSnapshot, SessionRuntimeObservation,
+    SessionStatusItem, SessionStatusSnapshot, SessionWorktreeStatus,
 };
 use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
@@ -37,6 +38,13 @@ use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use crate::usecase::session_teardown::{
     PendingTeardown, TeardownEffect, TeardownJournal, TeardownSignal,
 };
+
+/// Display associations, never authorization inputs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionConversations {
+    pub creator: Option<AgentContinuationRef>,
+    pub director: Option<AgentContinuationRef>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionReply {
@@ -417,6 +425,122 @@ impl OrphanRemoveIntent {
     }
 }
 
+/// Observes Git status using a lifecycle snapshot captured under the session
+/// lock. Every Git command runs after releasing that lock, so a stalled status
+/// cannot block scope resolution, session list, or launch admission.
+///
+/// # Errors
+///
+/// Returns a safe storage error if the snapshot or Git observation fails.
+pub fn perform_status(
+    runtime: &Mutex<SessionRuntime>,
+    git: &dyn GitRunner,
+    operation_id: &str,
+) -> Result<SessionReply, SessionRuntimeError> {
+    let plan = runtime
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)?
+        .status_plan()?;
+    plan.observe(git, operation_id)
+}
+
+struct SessionStatusPlan {
+    state: WorkspaceLifecycleState,
+    repo_root: PathBuf,
+    data_home: PathBuf,
+}
+
+impl SessionStatusPlan {
+    fn observe(
+        &self,
+        git: &dyn GitRunner,
+        operation_id: &str,
+    ) -> Result<SessionReply, SessionRuntimeError> {
+        let state = &self.state;
+        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
+            &self.data_home,
+            &self.repo_root,
+        )
+        .ok();
+        let base = git
+            .run(&self.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        if !base.success {
+            return Err(SessionRuntimeError::Storage);
+        }
+        let base = base.stdout.trim();
+        let sessions = state
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.lifecycle
+                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .map(|session| {
+                let root = self
+                    .repo_root
+                    .join(STATE_DIR)
+                    .join(SESSIONS_DIR)
+                    .join(&session.name);
+                let porcelain = git
+                    .run(&root, &["status", "--porcelain"])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let branch = git
+                    .run(&root, &["rev-parse", "--abbrev-ref", "HEAD"])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                let merged = git
+                    .run(&root, &["merge-base", "--is-ancestor", "HEAD", base])
+                    .map_err(|_| SessionRuntimeError::Storage)?;
+                if !porcelain.success || !branch.success {
+                    return Err(SessionRuntimeError::Storage);
+                }
+                let dirty = !porcelain.stdout.trim().is_empty();
+                let merged = merged.success;
+                let status = if dirty {
+                    "dirty"
+                } else if merged {
+                    "synced"
+                } else {
+                    "local"
+                };
+                Ok(SessionStatusItem {
+                    name: session.name.clone(),
+                    session_id: session.session_id,
+                    role_id: session.role_id.clone(),
+                    role_summary: session.role_id.as_ref().and_then(|id| {
+                        catalog
+                            .as_ref()?
+                            .roles
+                            .get(id)
+                            .map(|role| role.summary.clone())
+                    }),
+                    lifecycle: session.lifecycle,
+                    parent_session_id: session.parent_session_id,
+                    worktrees: vec![SessionWorktreeStatus {
+                        path: root,
+                        branch: branch.stdout.trim().to_owned(),
+                        status: status.to_owned(),
+                        dirty,
+                        merged,
+                    }],
+                    runtime: unobserved_runtime(&session.name),
+                })
+            })
+            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+        let body = serde_json::to_value(SessionStatusSnapshot {
+            workspace_id: state.workspace_id,
+            revision: state.state_revision,
+            sessions,
+        })
+        .or(Err(SessionRuntimeError::Storage))?;
+        Ok(SessionReply {
+            operation_id: operation_id.to_owned(),
+            revision: state.state_revision,
+            body,
+        })
+    }
+}
+
 /// Creates a session while holding the shared session lock only for the fast
 /// durable transitions. The heavy Git worktree build runs with the lock
 /// released so concurrent reads (session list, terminal poll, user-decision
@@ -497,18 +621,6 @@ fn perform_create_from(
 /// hold the requesting connection past every client attempt deadline (TUI 2 s /
 /// CLI 10 s / MCP 30 s) and block the other requests queued on that connection.
 ///
-/// # Errors
-///
-/// Returns a typed safe error when the request cannot be admitted.
-pub fn perform_remove(
-    runtime: &Mutex<SessionRuntime>,
-    teardown: &TeardownSignal,
-    operation_id: &str,
-    payload: &Value,
-) -> Result<SessionReply, SessionRuntimeError> {
-    perform_remove_with_merged_head(runtime, teardown, operation_id, payload, None)
-}
-
 /// Admits a requested removal with an optional provider-verified merged PR head.
 /// The durable teardown rechecks this OID against the branch after removing the
 /// worktree, so commits added after the PR remain protected.
@@ -649,11 +761,30 @@ impl<G: GitRunner, I: SessionWorktreeIo> WorktreeTeardown<G, I> {
 impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, I> {
     fn tear_down(&self, teardown: &PendingTeardown) -> Result<(), String> {
         validate_teardown_target(&self.io, teardown)?;
-        self.io
-            .remove_session_tree(&self.git, &teardown.session_root, teardown.force)
-            .map_err(|error| error.to_string())?;
+        remove_teardown_tree(&self.git, &self.io, teardown)?;
         delete_teardown_branch(&self.git, teardown)
     }
+}
+
+/// A missing checkout or `.git` file does not prove that Git released its
+/// registration. After physical teardown, remove that exact target through the
+/// stable owning repository before any branch deletion. This also makes retry
+/// safe after an interrupted `git worktree remove` lost the checkout first.
+fn remove_teardown_tree(
+    git: &dyn GitRunner,
+    io: &dyn SessionWorktreeIo,
+    teardown: &PendingTeardown,
+) -> Result<(), String> {
+    io.remove_session_tree(git, &teardown.session_root, teardown.force)
+        .map_err(|error| error.to_string())?;
+    validate_teardown_target(io, teardown)?;
+    remove_worktree(
+        git,
+        &teardown.repository_root,
+        &teardown.session_root,
+        teardown.force,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Deletes a teardown branch outside the generic effect implementation so every
@@ -926,7 +1057,7 @@ impl SessionRuntime {
                     operation_id: operation_id.to_owned(),
                     revision: state.state_revision,
                     body: projected_snapshot(
-                        &state,
+                        state,
                         self.root_worktree_id,
                         &self.data_home,
                         &self.repo_root,
@@ -934,7 +1065,9 @@ impl SessionRuntime {
                 })
             }
             SessionAction::Status => self.status(operation_id),
-            SessionAction::Clean
+            SessionAction::Agents
+            | SessionAction::Clean
+            | SessionAction::Cache
             | SessionAction::Sleep
             | SessionAction::Setup
             | SessionAction::Prompt
@@ -949,101 +1082,20 @@ impl SessionRuntime {
             | SessionAction::DecisionList
             | SessionAction::DecisionLog
             | SessionAction::DelegateIssue
-            | SessionAction::DelegateBrief
-            | SessionAction::WorkflowStart
-            | SessionAction::WorkflowStatus
-            | SessionAction::WorkflowInstruct
-            | SessionAction::WorkflowFinish => Err(SessionRuntimeError::InvalidRequest),
+            | SessionAction::DelegateBrief => Err(SessionRuntimeError::InvalidRequest),
         }
     }
 
+    fn status_plan(&self) -> Result<SessionStatusPlan, SessionRuntimeError> {
+        Ok(SessionStatusPlan {
+            state: self.state()?,
+            repo_root: self.repo_root.clone(),
+            data_home: self.data_home.clone(),
+        })
+    }
+
     fn status(&self, operation_id: &str) -> Result<SessionReply, SessionRuntimeError> {
-        let state = self.state()?;
-        let catalog = usagi_core::infrastructure::role_catalog::load_effective(
-            &self.data_home,
-            &self.repo_root,
-        )
-        .ok();
-        let base = self
-            .git
-            .run(&self.repo_root, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .map_err(|_| SessionRuntimeError::Storage)?;
-        if !base.success {
-            return Err(SessionRuntimeError::Storage);
-        }
-        let base = base.stdout.trim();
-        let sessions = state
-            .sessions
-            .iter()
-            .filter(|session| {
-                session.lifecycle
-                    == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
-            })
-            .map(|session| {
-                let root = self
-                    .repo_root
-                    .join(STATE_DIR)
-                    .join(SESSIONS_DIR)
-                    .join(&session.name);
-                let porcelain = self
-                    .git
-                    .run(&root, &["status", "--porcelain"])
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                let branch = self
-                    .git
-                    .run(&root, &["rev-parse", "--abbrev-ref", "HEAD"])
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                let merged = self
-                    .git
-                    .run(&root, &["merge-base", "--is-ancestor", "HEAD", base])
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                if !porcelain.success || !branch.success {
-                    return Err(SessionRuntimeError::Storage);
-                }
-                let dirty = !porcelain.stdout.trim().is_empty();
-                let merged = merged.success;
-                let status = if dirty {
-                    "dirty"
-                } else if merged {
-                    "synced"
-                } else {
-                    "local"
-                };
-                Ok(SessionStatusItem {
-                    name: session.name.clone(),
-                    session_id: session.session_id,
-                    role_id: session.role_id.clone(),
-                    role_summary: session.role_id.as_ref().and_then(|id| {
-                        catalog
-                            .as_ref()?
-                            .roles
-                            .get(id)
-                            .map(|role| role.summary.clone())
-                    }),
-                    lifecycle: session.lifecycle,
-                    parent_session_id: session.parent_session_id,
-                    worktrees: vec![SessionWorktreeStatus {
-                        path: root,
-                        branch: branch.stdout.trim().to_owned(),
-                        status: status.to_owned(),
-                        dirty,
-                        merged,
-                    }],
-                    runtime: unobserved_runtime(&session.name),
-                })
-            })
-            .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
-        let body = serde_json::to_value(SessionStatusSnapshot {
-            workspace_id: state.workspace_id,
-            revision: state.state_revision,
-            sessions,
-        })
-        .map_err(|_| SessionRuntimeError::Storage)?;
-        Ok(SessionReply {
-            operation_id: operation_id.to_owned(),
-            revision: state.state_revision,
-            body,
-        })
+        self.status_plan()?.observe(self.git.as_ref(), operation_id)
     }
 
     /// Resolves an available session by its public name to its stable identity.
@@ -1083,6 +1135,30 @@ impl SessionRuntime {
                     && session.creator_agent_id == Some(caller.agent_id)
             })
             .map(|session| session.session_id)
+            .collect())
+    }
+
+    /// Project only durable creation facts. Runtime history is incomplete after
+    /// retention and cannot establish the creator of a legacy session.
+    ///
+    /// # Errors
+    /// Returns a storage error when lifecycle state cannot be read.
+    pub fn session_conversations(
+        &self,
+    ) -> Result<BTreeMap<SessionId, SessionConversations>, SessionRuntimeError> {
+        let state = self.state()?;
+        Ok(state
+            .sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.session_id,
+                    SessionConversations {
+                        creator: session.creator_continuation,
+                        director: state.director_continuation(session.session_id),
+                    },
+                )
+            })
             .collect())
     }
 
@@ -1306,11 +1382,35 @@ impl SessionRuntime {
     pub fn snapshot(&self) -> Result<Value, SessionRuntimeError> {
         let state = self.state()?;
         Ok(projected_snapshot(
-            &state,
+            state,
             self.root_worktree_id,
             &self.data_home,
             &self.repo_root,
         ))
+    }
+
+    /// Read the durable revision without constructing a client snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable lifecycle state cannot be read.
+    pub fn revision(&self) -> Result<u64, SessionRuntimeError> {
+        Ok(self.state()?.state_revision)
+    }
+
+    /// Observe every session lifecycle without role lookup or JSON conversion.
+    /// Setup commands and creator credentials remain private recovery state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable lifecycle state cannot be read.
+    pub fn session_lifecycles(&self) -> Result<Vec<SessionListLifecycle>, SessionRuntimeError> {
+        Ok(self
+            .state()?
+            .sessions
+            .into_iter()
+            .map(observed_lifecycle)
+            .collect())
     }
 
     /// Resolves only an available, fully fenced managed session to a path.
@@ -1386,6 +1486,7 @@ impl SessionRuntime {
         let requested_role = requested_role(payload)?;
         let parent_session_id = parent_session_id(payload)?;
         let creator_agent_id = creator_agent_id(payload)?;
+        let creator_continuation = creator_continuation(payload, creator_agent_id)?;
         // Re-read both catalog layers at the daemon admission boundary; the
         // registered repository root is authoritative for workspace policy.
         let catalog = usagi_core::infrastructure::role_catalog::load_effective(
@@ -1412,20 +1513,28 @@ impl SessionRuntime {
         let setup_commands = WorkspaceSessionConfig::read(&self.repo_root)
             .setup_commands()
             .to_vec();
-        let semantic_key = create_semantic_key(
-            origin,
-            &name,
-            role_id.as_ref(),
-            parent_session_id,
-            creator_agent_id,
-            base_ref.as_deref(),
-        );
+        let request_key = |continuation| {
+            create_semantic_key(
+                origin,
+                &name,
+                role_id.as_ref(),
+                parent_session_id,
+                creator_agent_id,
+                continuation,
+                base_ref.as_deref(),
+            )
+        };
+        let semantic_key = request_key(creator_continuation);
         if let Some(existing) = before
             .operations
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
-            if existing.semantic_key != semantic_key {
+            // An upgraded daemon observes conversation metadata even when an
+            // older daemon admitted this producer operation without it. Match
+            // every original create input before replaying; do not rewrite the
+            // session's origin or relax conflicts between new-format requests.
+            if existing.semantic_key != semantic_key && existing.semantic_key != request_key(None) {
                 return Err(SessionRuntimeError::IdempotencyConflict);
             }
             return self.replay(&before, existing).map(SessionCreateStep::Done);
@@ -1447,11 +1556,8 @@ impl SessionRuntime {
                 body: snapshot(&before, self.root_worktree_id),
             }));
         }
-        let path = self
-            .repo_root
-            .join(STATE_DIR)
-            .join(SESSIONS_DIR)
-            .join(&name);
+        let sessions_root = self.repo_root.join(STATE_DIR).join(SESSIONS_DIR);
+        let path = sessions_root.join(&name);
         // Do not reserve a lifecycle operation or invoke Git when a previous,
         // untracked session directory still occupies the destination.  The
         // durable snapshot cannot represent such a stale path, so the client
@@ -1470,6 +1576,7 @@ impl SessionRuntime {
                     role_id,
                     parent_session_id,
                     creator_agent_id,
+                    creator_continuation,
                     operation,
                 },
                 Utc::now(),
@@ -1705,7 +1812,7 @@ impl SessionRuntime {
     }
 
     /// Removes a session synchronously: admit, tear down, finalize, all on this
-    /// thread. The IPC path uses [`perform_remove`] plus the teardown worker
+    /// thread. The IPC path uses [`perform_remove_with_merged_head`] plus the teardown worker
     /// instead, so no client connection waits for the worktree effect.
     fn remove(
         &mut self,
@@ -1715,21 +1822,8 @@ impl SessionRuntime {
         match self.begin_remove(RemoveKind::Requested, operation_id, payload, None)? {
             SessionRemoveStep::Settled(reply) => Ok(reply),
             SessionRemoveStep::Accepted { pending, .. } => {
-                let outcome = match self.io.remove_session_tree(
-                    self.git.as_ref(),
-                    &pending.session_root,
-                    pending.force,
-                ) {
-                    Ok(()) => {
-                        // Every newly accepted removal carries branch deletion.
-                        // Legacy branch-preserving plans can only be replayed as
-                        // `Settled`, so they never reach this effect path.
-                        delete_teardown_branch(self.git.as_ref(), &pending)
-                            .map_err(anyhow::Error::msg)
-                    }
-                    Err(error) => Err(error),
-                }
-                .map_err(|error| error.to_string());
+                let outcome = remove_teardown_tree(self.git.as_ref(), self.io.as_ref(), &pending)
+                    .and_then(|()| delete_teardown_branch(self.git.as_ref(), &pending));
                 self.finish_teardown(&pending, outcome)
             }
         }
@@ -2298,6 +2392,23 @@ fn parent_session_id(payload: &Value) -> Result<Option<SessionId>, SessionRuntim
         .map_err(|_| SessionRuntimeError::InvalidRequest)
 }
 
+fn creator_continuation(
+    payload: &Value,
+    creator_agent_id: Option<AgentId>,
+) -> Result<Option<AgentContinuationRef>, SessionRuntimeError> {
+    let creator_continuation = payload
+        .get("creator_continuation")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<AgentContinuationRef>)
+        .transpose()
+        .map_err(|_| SessionRuntimeError::InvalidRequest)?;
+    if creator_continuation.is_some() && creator_agent_id.is_none() {
+        return Err(SessionRuntimeError::InvalidRequest);
+    }
+    Ok(creator_continuation)
+}
+
 fn creator_agent_id(payload: &Value) -> Result<Option<AgentId>, SessionRuntimeError> {
     payload
         .get("creator_agent_id")
@@ -2576,6 +2687,7 @@ fn create_semantic_key(
     role_id: Option<&RoleId>,
     parent_session_id: Option<SessionId>,
     creator_agent_id: Option<AgentId>,
+    creator_continuation: Option<AgentContinuationRef>,
     base_ref: Option<&str>,
 ) -> String {
     let action = semantic_key(origin.semantic_action(), name);
@@ -2587,6 +2699,9 @@ fn create_semantic_key(
         parent_session_id.map_or(action.clone(), |parent| format!("{action}:parent={parent}"));
     let action = creator_agent_id.map_or(action.clone(), |creator| {
         format!("{action}:creator={creator}")
+    });
+    let action = creator_continuation.map_or(action.clone(), |continuation| {
+        format!("{action}:conversation={continuation}")
     });
     base_ref.map_or(action.clone(), |base_ref| {
         format!("{action}:base={base_ref}")
@@ -2679,6 +2794,8 @@ fn names_session_operation(semantic_key: &str, action_and_name: &str) -> bool {
 
 fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
     SessionRuntimeObservation {
+        creator_continuation: None,
+        director_continuation: None,
         agent_phase: AgentPhase::Absent,
         agent_resumable: false,
         agent_resume_reason: ProviderResumeReason::ProviderMetadataUnavailable,
@@ -2690,7 +2807,7 @@ fn unobserved_runtime(session_name: &str) -> SessionRuntimeObservation {
 }
 
 fn projected_snapshot(
-    state: &WorkspaceLifecycleState,
+    state: WorkspaceLifecycleState,
     root_worktree_id: WorktreeId,
     data_home: &Path,
     repo_root: &Path,
@@ -2699,9 +2816,8 @@ fn projected_snapshot(
         usagi_core::infrastructure::role_catalog::load_effective(data_home, repo_root).ok();
     let sessions = state
         .sessions
-        .iter()
-        .cloned()
-        .map(|mut session| {
+        .into_iter()
+        .map(|session| {
             let role_summary = session.role_id.as_ref().and_then(|id| {
                 catalog
                     .as_ref()?
@@ -2709,13 +2825,9 @@ fn projected_snapshot(
                     .get(id)
                     .map(|role| role.summary.clone())
             });
-            // Setup command bodies are durable recovery state, not client
-            // observation data. Keep them out of typed list projections just
-            // as mutation snapshots do below.
-            session.setup_plan = None;
             SessionListItem {
                 role_summary,
-                session: session.into(),
+                session: observed_lifecycle(session),
                 runtime: None.into(),
             }
         })
@@ -2727,6 +2839,12 @@ fn projected_snapshot(
         sessions,
     })
     .expect("typed lifecycle snapshot is serializable")
+}
+
+fn observed_lifecycle(mut session: ManagedSession) -> SessionListLifecycle {
+    // Setup command bodies are durable recovery state, not observation data.
+    session.setup_plan = None;
+    session.into()
 }
 
 /// The completion fence for one session operation, taken from the journal entry
@@ -2771,6 +2889,8 @@ fn snapshot(state: &WorkspaceLifecycleState, root_worktree_id: WorktreeId) -> Va
             .as_object_mut()
             .expect("managed sessions serialize as objects");
         session.remove("creator_agent_id");
+        session.remove("creator_continuation");
+        session.remove("director_continuation");
         // Setup command bodies belong to the trusted root configuration and
         // durable recovery state. Session-scoped callers may list lifecycle
         // rows, but never need the command text to act on their capabilities.

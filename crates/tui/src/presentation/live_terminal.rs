@@ -77,6 +77,25 @@ pub struct LiveTerminalControls {
 }
 
 impl LiveTerminalControls {
+    /// Reveal a validated search hit and retain its highlight through redraws.
+    pub(crate) fn show_search_selection(
+        &mut self,
+        selection: TerminalSelection,
+        buffer: TerminalBuffer,
+        origin: u64,
+        total: usize,
+        viewport: usize,
+    ) {
+        let row = selection.anchor().row;
+        self.observe_rows(buffer, origin, total, viewport);
+        self.active.scroll = total
+            .saturating_sub(viewport)
+            .saturating_sub(row.saturating_sub(viewport / 2));
+        self.begin_selection(selection);
+        self.active.dragging = false;
+        self.active.feedback = Some("Search match".into());
+    }
+
     /// Track `terminal` as the focused pane, restoring its terminal-local view
     /// state when focus returns. A pending pointer gesture cannot span panes, so
     /// blur cancels the gesture while retaining an established selection.
@@ -269,10 +288,9 @@ impl LiveTerminalControls {
         self.active.selection.is_some()
     }
 
-    /// Whether a mouse drag is actively extending the selection. The shell uses
-    /// this to decide whether a drag event extends the live selection or starts
-    /// a fresh one over a lingering, finished selection.
+    /// Observe the drag state in input-routing regression tests.
     #[must_use]
+    #[cfg(test)]
     pub fn is_dragging(&self) -> bool {
         self.active.dragging
     }
@@ -343,17 +361,6 @@ impl LiveTerminalControls {
         } else {
             Some(text)
         }
-    }
-
-    /// Explicitly drop a retained selection while preserving scroll position
-    /// and the focused terminal.
-    pub fn clear_selection(&mut self) {
-        self.revision = self.revision.saturating_add(1);
-        self.active.pointer_press = None;
-        self.active.selection = None;
-        self.active.selection_buffer = None;
-        self.active.dragging = false;
-        self.active.feedback = Some("terminal selection cleared".to_owned());
     }
 
     /// Record the outcome of writing `text` to the OS clipboard as feedback.
@@ -979,6 +986,33 @@ mod tests {
     }
 
     #[test]
+    fn motion_in_another_buffer_preserves_the_selection_without_redrawing() {
+        let mut controls = LiveTerminalControls::default();
+        let terminal = terminal();
+        controls.sync_focus(Some(&terminal));
+        let _ = controls.visible_range(TerminalBuffer::Alternate, 0, 1, 1);
+        controls.begin_selection(TerminalSelection::begin(
+            vec!["selected".into()],
+            TerminalPoint { row: 0, column: 0 },
+        ));
+        controls.extend_selection(TerminalPoint { row: 0, column: 7 });
+        let before = controls.revision();
+        controls.apply_retained_row_motions(
+            &terminal,
+            &[RetainedRowMotion::Up {
+                buffer: ActiveBuffer::Primary,
+                top: 0,
+                bottom: 0,
+                count: 1,
+            }],
+        );
+        assert_eq!(controls.revision(), before);
+        let selection = controls.selection_for(TerminalBuffer::Alternate).unwrap();
+        assert_eq!(selection.text(), "selected");
+        assert_eq!(selection.visual_columns_at(0), Some((0, 7)));
+    }
+
+    #[test]
     fn agent_row_motion_also_follows_a_pointer_press_before_it_becomes_a_drag() {
         let mut controls = LiveTerminalControls::default();
         let terminal = terminal();
@@ -1079,30 +1113,6 @@ mod tests {
         let mut controls = LiveTerminalControls::default();
         controls.extend_selection(TerminalPoint { row: 0, column: 0 });
         assert!(controls.finish_drag().is_none());
-    }
-
-    #[test]
-    fn clearing_a_retained_selection_preserves_scroll_and_focus() {
-        let mut controls = LiveTerminalControls::default();
-        let terminal = terminal();
-        controls.sync_focus(Some(&terminal));
-        let _ = controls.project(rows(10), 5);
-        controls.scroll_up();
-        controls.begin_selection(TerminalSelection::begin(
-            vec!["hello".to_owned()],
-            TerminalPoint { row: 0, column: 0 },
-        ));
-        let _ = controls.finish_drag();
-
-        controls.clear_selection();
-
-        assert!(!controls.has_selection());
-        assert!(!controls.is_dragging());
-        assert_eq!(controls.project(rows(10), 5).scroll, 1);
-        assert_eq!(
-            controls.project(rows(10), 5).feedback.as_deref(),
-            Some("terminal selection cleared")
-        );
     }
 
     #[test]
@@ -1223,7 +1233,7 @@ mod tests {
             TerminalPoint { row: 0, column: 28 },
             &mut browser
         ));
-        assert!(browser.opened.is_empty());
+        assert_eq!(browser.opened, [] as [String; 0]);
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("earlier")
@@ -1242,7 +1252,7 @@ mod tests {
             TerminalPoint { row: 0, column: 5 },
             &mut browser
         ));
-        assert!(browser.opened.is_empty());
+        assert_eq!(browser.opened, [] as [String; 0]);
         assert_eq!(
             controls.project(rows(1), 1).feedback.as_deref(),
             Some("Could not open browser: browser launch failed")

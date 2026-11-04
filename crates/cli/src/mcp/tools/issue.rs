@@ -8,6 +8,7 @@ use std::path::Path;
 use usagi_core::infrastructure::store::issue::IssueStore;
 use usagi_core::usecase::issue::{self, NewIssue};
 
+use super::wire::{execution, output, parse};
 use crate::mcp::tool::{Tool, ToolDescriptor, ToolError};
 
 fn store(root: &Path) -> IssueStore {
@@ -17,14 +18,6 @@ fn store(root: &Path) -> IssueStore {
 fn writable_store(root: &Path) -> anyhow::Result<IssueStore> {
     issue::ensure_write_allowed(root)?;
     Ok(IssueStore::new(root))
-}
-
-fn invalid_params(error: &serde_json::Error) -> ToolError {
-    ToolError::InvalidParams(error.to_string())
-}
-
-fn execution_error(error: &anyhow::Error) -> ToolError {
-    ToolError::Execution(error.to_string())
 }
 
 use super::issue_wire::{
@@ -58,13 +51,10 @@ impl Tool for IssueCreate {
         r#"{"type":"object","properties":{"title":{"type":"string"},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":"integer"},"milestone":{"type":"string"},"body":{"type":"string"}},"required":["title"]}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
-        let spec: NewIssue =
-            serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let store = writable_store(store_root).map_err(|error| execution_error(&error))?;
-        let created =
-            issue::create(&store, spec, Utc::now()).map_err(|error| execution_error(&error))?;
-        Ok(serde_json::to_string_pretty(&IssueView::from(&created))
-            .expect("MCP wire views must serialize"))
+        let spec: NewIssue = parse(params)?;
+        let store = execution(writable_store(store_root))?;
+        let created = execution(issue::create(&store, spec, Utc::now()))?;
+        Ok(output(&IssueView::from(&created)))
     }
 }
 
@@ -73,21 +63,9 @@ pub struct IssueGet;
 
 impl IssueGet {
     pub(super) fn call_with_store(params: &str, store: &IssueStore) -> Result<String, ToolError> {
-        let args: NumberArgs = match serde_json::from_str(params) {
-            Ok(args) => args,
-            Err(error) => return Err(invalid_params(&error)),
-        };
-        let issue = match issue::get(store, args.number) {
-            Ok(issue) => issue,
-            Err(error) => return Err(execution_error(&error)),
-        };
-        issue.as_ref().map_or_else(
-            || Ok("null".to_owned()),
-            |issue| {
-                Ok(serde_json::to_string_pretty(&IssueView::from(issue))
-                    .expect("MCP wire views must serialize"))
-            },
-        )
+        let args: NumberArgs = parse(params)?;
+        let issue = execution(issue::get(store, args.number))?;
+        Ok(output(&issue.as_ref().map(IssueView::from)))
     }
 }
 
@@ -120,19 +98,15 @@ impl Tool for IssueToPrompt {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
-        let args: NumberArgs =
-            serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let Some(issue) =
-            issue::get(&store(store_root), args.number).map_err(|error| execution_error(&error))?
-        else {
+        let args: NumberArgs = parse(params)?;
+        let Some(issue) = execution(issue::get(&store(store_root), args.number))? else {
             return Err(ToolError::Execution(format!("no issue #{}", args.number)));
         };
-        Ok(serde_json::to_string_pretty(&PromptView {
+        Ok(output(&PromptView {
             number: issue.number,
             title: &issue.title,
             prompt: issue::to_prompt(&issue),
-        })
-        .expect("MCP wire views must serialize"))
+        }))
     }
 }
 
@@ -150,18 +124,15 @@ impl Tool for IssueSearch {
         r#"{"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"label":{"type":"string"},"parent":{"type":"integer"},"milestone":{"type":"string"},"ready":{"type":"boolean"}}}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
-        let args: SearchArgs =
-            serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let issues = issue::search(
+        let args: SearchArgs = parse(params)?;
+        let issues = execution(issue::search(
             &store(store_root),
             args.query.as_deref().unwrap_or(""),
             &args.filter,
-        )
-        .map_err(|error| execution_error(&error))?;
-        Ok(serde_json::to_string_pretty(
+        ))?;
+        Ok(output(
             &issues.iter().map(ListedIssueView::from).collect::<Vec<_>>(),
-        )
-        .expect("MCP wire views must serialize"))
+        ))
     }
 }
 
@@ -179,16 +150,13 @@ impl Tool for IssueUpdate {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":["integer","null"]},"milestone":{"type":["string","null"]},"body":{"type":"string"}},"required":["number"]}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
-        let args: UpdateArgs =
-            serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let store = writable_store(store_root).map_err(|error| execution_error(&error))?;
-        let Some(updated) = issue::update(&store, args.number, args.patch, Utc::now())
-            .map_err(|error| execution_error(&error))?
+        let args: UpdateArgs = parse(params)?;
+        let store = execution(writable_store(store_root))?;
+        let Some(updated) = execution(issue::update(&store, args.number, args.patch, Utc::now()))?
         else {
             return Err(ToolError::Execution(format!("no issue #{}", args.number)));
         };
-        Ok(serde_json::to_string_pretty(&IssueView::from(&updated))
-            .expect("MCP wire views must serialize"))
+        Ok(output(&IssueView::from(&updated)))
     }
 }
 
@@ -206,14 +174,11 @@ impl Tool for IssueDelete {
         r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
-        let args: NumberArgs =
-            serde_json::from_str(params).map_err(|error| invalid_params(&error))?;
-        let store = writable_store(store_root).map_err(|error| execution_error(&error))?;
-        let deleted =
-            issue::delete(&store, args.number).map_err(|error| execution_error(&error))?;
-        Ok(serde_json::to_string_pretty(
+        let args: NumberArgs = parse(params)?;
+        let store = execution(writable_store(store_root))?;
+        let deleted = execution(issue::delete(&store, args.number))?;
+        Ok(output(
             &serde_json::json!({"number": args.number, "deleted": deleted}),
-        )
-        .expect("MCP wire views must serialize"))
+        ))
     }
 }

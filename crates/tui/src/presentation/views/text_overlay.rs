@@ -25,8 +25,8 @@ pub struct TextOverlay {
     title: String,
     document: OverlayDocument,
     scroll: usize,
-    dismiss_on_any_key: bool,
     footer: String,
+    status: Option<String>,
 }
 
 impl TextOverlay {
@@ -37,23 +37,21 @@ impl TextOverlay {
             title: title.into(),
             document,
             scroll: 0,
-            dismiss_on_any_key: false,
             footer: "↑↓ scroll   Esc: close".to_owned(),
+            status: None,
         }
-    }
-
-    /// Mark this overlay as an acknowledgement dialog. Its owner closes it on
-    /// the next user input instead of exposing scroll controls.
-    #[must_use]
-    pub fn acknowledgement(mut self) -> Self {
-        self.dismiss_on_any_key = true;
-        self
     }
 
     /// Replace the default viewer controls with context-specific hints.
     #[must_use]
     pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
         self.footer = footer.into();
+        self
+    }
+
+    /// Pin caller-formatted feedback above a reserved document viewport.
+    pub(crate) fn with_status(mut self, status: Option<String>) -> Self {
+        self.status = status;
         self
     }
 
@@ -98,7 +96,7 @@ impl TextOverlay {
     fn body(&self, body_height: usize) -> Vec<String> {
         let lines = self.lines();
         // border 2, status 1, footer 1 を先に確保する。極小 terminal でも 1 行だけは
-        // viewport に残し、render_modal / render_over が最終 clip を担う。
+        // viewport に残し、render_over が最終 clip を担う。
         // scroll indicator（最大 2 行）と footer（空行を含め 2 行）および枠を
         // 先に差し引く。これにより通常サイズでは footer が clip されない。
         let viewport = body_height.saturating_sub(4).max(1);
@@ -107,11 +105,7 @@ impl TextOverlay {
         let (start, end) = modal::viewport_window(lines.len(), self.scroll, viewport);
         let mut body = modal::scroll_window(&lines, start, end);
         body.push(String::new());
-        body.push(modal::footer(if self.dismiss_on_any_key {
-            "Press any key to close"
-        } else {
-            &self.footer
-        }));
+        body.push(modal::footer(&self.footer));
         modal::fixed_body(body, body_height)
     }
 
@@ -122,6 +116,15 @@ impl TextOverlay {
     /// one document row and the footer over showing every scroll indicator so
     /// the reader never loses its way back to the finder.
     fn body_with_reserved_footer(&self, body_height: usize) -> Vec<String> {
+        if let Some(status) = self.status.as_ref().filter(|_| body_height > 0) {
+            let mut body = vec![status.clone()];
+            body.extend(self.document_body_with_reserved_footer(body_height - 1));
+            return body;
+        }
+        self.document_body_with_reserved_footer(body_height)
+    }
+
+    fn document_body_with_reserved_footer(&self, body_height: usize) -> Vec<String> {
         if body_height >= 5 {
             return self.body(body_height);
         }
@@ -129,11 +132,7 @@ impl TextOverlay {
         let lines = self.lines();
         let (start, end) = modal::viewport_window(lines.len(), self.scroll, 1);
         let line = lines[start].clone();
-        let footer = modal::footer(if self.dismiss_on_any_key {
-            "Press any key to close"
-        } else {
-            &self.footer
-        });
+        let footer = modal::footer(&self.footer);
         match body_height {
             0 => Vec::new(),
             1 => vec![line],
@@ -153,20 +152,6 @@ impl TextOverlay {
             }
         }
     }
-}
-
-/// 空の画面に中央配置して描く。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &TextOverlay) -> Vec<String> {
-    let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
-    let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
-    modal::render_modal(
-        raw_height,
-        raw_width,
-        &state.title,
-        INNER_WIDTH,
-        &state.body(body_height),
-    )
 }
 
 /// `base` を背景に残して中央配置して描く。
@@ -215,8 +200,33 @@ pub(crate) fn render_over_with_layout(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayDocument, TextOverlay, render, render_over};
+    use super::{OverlayDocument, TextOverlay, render_over};
     use crate::presentation::widgets::display_width;
+
+    fn render(height: usize, width: usize, state: &TextOverlay) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
+
+    #[test]
+    fn reserved_status_stays_visible_while_the_document_scrolls() {
+        let overlay = TextOverlay::new(
+            "Preview",
+            OverlayDocument::Ready((0..40).map(|n| format!("line {n}")).collect()),
+        )
+        .with_status(Some("External app failed".into()))
+        .scrolled_to(30);
+        for height in 0..12 {
+            let body = overlay.body_with_reserved_footer(height);
+            assert_eq!(body.len(), height);
+            if height > 0 {
+                assert_eq!(body[0], "External app failed");
+            }
+            if height >= 3 {
+                assert!(body.iter().any(|line| line.contains("line 30")));
+                assert!(body.iter().any(|line| line.contains("Esc: close")));
+            }
+        }
+    }
 
     #[test]
     fn long_text_scrolls_without_losing_the_footer() {
@@ -296,7 +306,7 @@ mod tests {
         .scrolled_to(1)
         .with_footer("Esc: back to files");
 
-        assert!(modal.body_with_reserved_footer(0).is_empty());
+        assert_eq!(modal.body_with_reserved_footer(0), [] as [String; 0]);
         assert_eq!(modal.body_with_reserved_footer(1).len(), 1);
         assert_eq!(modal.body_with_reserved_footer(2).len(), 2);
         assert_eq!(modal.body_with_reserved_footer(3).len(), 3);
@@ -311,13 +321,6 @@ mod tests {
             .body_with_reserved_footer(4);
         assert!(only_line.join("\n").contains("only"));
         assert_eq!(modal.body_with_reserved_footer(5).len(), 5);
-        assert!(
-            modal
-                .acknowledgement()
-                .body_with_reserved_footer(2)
-                .join("\n")
-                .contains("Press any key to close")
-        );
     }
 
     #[test]
@@ -330,17 +333,5 @@ mod tests {
         assert!(frame[0].starts_with("workspace-0-"));
         assert!(frame.join("\n").contains("Notes"));
         assert!(frame.iter().all(|line| display_width(line) == 80));
-    }
-
-    #[test]
-    fn acknowledgement_uses_an_any_key_dismiss_hint() {
-        let modal = TextOverlay::new("Error", OverlayDocument::Ready(vec!["failed".into()]))
-            .acknowledgement();
-
-        assert!(
-            render(24, 80, &modal)
-                .join("\n")
-                .contains("Press any key to close")
-        );
     }
 }

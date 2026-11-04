@@ -1,11 +1,19 @@
-//! Atomic durable decisions and their polling-acknowledgement outbox.
+//! Atomic durable decisions and their explicitly acknowledged outbox.
 //!
 //! A resolve changes the decision and appends its delivery in one replaced JSON
 //! document under one lock. The authenticated caller polls the durable decision,
-//! and the daemon acknowledges the event only after returning that terminal
-//! record to its owner.
+//! and acknowledges receipt in a separate authenticated operation.
 
 #![allow(clippy::missing_errors_doc)] // Store IO errors follow the shared store contract.
+
+mod capacity;
+#[cfg(test)]
+mod inbox;
+mod page;
+#[cfg(test)]
+mod regression;
+pub mod wire;
+pub use page::{UserDecisionPageError, UserDecisionScope};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -31,10 +39,11 @@ use crate::{
 
 const FILE: &str = "user-decisions.json";
 
-/// Exact upper bound of the pretty JSON document written by this store.
+/// Normal admission budget, including reserved terminal growth.
 ///
 /// Count limits alone do not bound caller-controlled prompt and answer bytes.
-/// Four MiB keeps every read/parse/rewrite finite while leaving room for the
+/// Four MiB bounds ordinary state; legacy recovery has a finite extra reserve.
+/// This leaves room for the
 /// maximum ordinary pending backlog when requests are much smaller than their
 /// individual field ceilings.
 const MAX_SERIALIZED_BYTES: usize = 4 * 1024 * 1024;
@@ -48,10 +57,10 @@ const MAX_SERIALIZED_BYTES: usize = 4 * 1024 * 1024;
 /// than silently creating a second human question.
 const TERMINAL_RETENTION: usize = 256;
 
-/// Newest terminal decisions protected even during byte-pressure compaction.
+/// Recent terminal decisions retained during ordinary completion mutations.
 ///
-/// This is the minimum duplicate-recovery window. Older terminal records may
-/// be replaced by idempotency tombstones to meet the aggregate byte budget.
+/// New admission and legacy recovery may reclaim this history when needed to
+/// fit the byte budget. Tombstones still prevent a duplicate human question.
 const MIN_TERMINAL_RETENTION: usize = 32;
 
 /// How many unanswered decisions one workspace may hold at once.
@@ -80,16 +89,15 @@ pub struct UserDecisionResolvedEvent {
     pub answer: UserDecisionAnswer,
     pub created_at: DateTime<Utc>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UserDecisionDeliveryError {
-    Inconsistent,
-}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct State {
     decisions: Vec<UserDecision>,
     events: Vec<UserDecisionResolvedEvent>,
     #[serde(default)]
     expired_idempotency: KeyTombstones,
+    /// Bounded, shrinking headroom for pending records admitted by older versions.
+    #[serde(default)]
+    recovery_bytes: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -202,13 +210,100 @@ impl UserDecisionStore {
     }
     pub fn pending(&self, workspace: WorkspaceId) -> Result<Vec<UserDecision>> {
         Ok(self
+            .pending_all()?
+            .into_iter()
+            .filter(|item| item.owner.workspace_id == workspace)
+            .collect())
+    }
+    /// Human-facing pending inventory across the daemon's workspaces. Agent
+    /// callers must continue using their authenticated workspace/owner scope.
+    pub fn pending_all(&self) -> Result<Vec<UserDecision>> {
+        Ok(self
             .load()?
             .decisions
             .into_iter()
-            .filter(|item| {
-                item.owner.workspace_id == workspace && item.status == UserDecisionStatus::Pending
-            })
+            .filter(|item| item.status == UserDecisionStatus::Pending)
             .collect())
+    }
+    /// Observe one page after applying the caller's authenticated scope. Both
+    /// revision and offsets describe only that scope's pending snapshot. The
+    /// caller subtracts transport envelope overhead from the page budget.
+    pub fn pending_page(
+        &self,
+        scope: UserDecisionScope<'_>,
+        cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
+        max_page_bytes: usize,
+    ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
+        self.scoped_page(scope, cursor, max_page_bytes, false)
+    }
+
+    /// Recover outstanding questions and answers whose receipt has not been
+    /// acknowledged, including when the creation response (and ID) was lost.
+    pub fn inbox_page(
+        &self,
+        scope: UserDecisionScope<'_>,
+        cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
+        max_page_bytes: usize,
+    ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
+        self.scoped_page(scope, cursor, max_page_bytes, true)
+    }
+
+    fn scoped_page(
+        &self,
+        scope: UserDecisionScope<'_>,
+        cursor: Option<&crate::infrastructure::ipc::UserDecisionCursor>,
+        max_page_bytes: usize,
+        include_answers: bool,
+    ) -> Result<Result<crate::infrastructure::ipc::UserDecisionPage, UserDecisionPageError>> {
+        let state = self.load()?;
+        let waiting: std::collections::BTreeSet<_> =
+            state.events.iter().map(|event| event.decision_id).collect();
+        let decisions = state
+            .decisions
+            .into_iter()
+            .filter(|decision| {
+                decision.status == UserDecisionStatus::Pending
+                    || (include_answers
+                        && decision.status == UserDecisionStatus::Resolved
+                        && waiting.contains(&decision.decision_id))
+            })
+            .filter(|decision| match scope {
+                UserDecisionScope::All => true,
+                UserDecisionScope::Workspace(workspace) => decision.owner.workspace_id == workspace,
+                UserDecisionScope::Owners(owners) => owners.contains(&decision.owner),
+            })
+            .collect();
+        page::pending_page(decisions, cursor, max_page_bytes)
+    }
+
+    /// Explicit human disposal of a reviewed, undelivered answer. Removing its
+    /// record and outbox together releases capacity without claiming delivery
+    /// to the agent. Keys remain tombstoned so a retry cannot ask again.
+    pub fn discard_answer(
+        &self,
+        workspace: WorkspaceId,
+        id: UserDecisionId,
+    ) -> Result<Result<(), UserDecisionError>> {
+        self.mutate_decision(|state| {
+            let index = state
+                .decisions
+                .iter()
+                .position(|decision| {
+                    decision.decision_id == id
+                        && decision.owner.workspace_id == workspace
+                        && decision.status == UserDecisionStatus::Resolved
+                })
+                .ok_or(UserDecisionError::Terminal)?;
+            if !state.events.iter().any(|event| event.decision_id == id) {
+                return Err(UserDecisionError::Terminal);
+            }
+            let decision = state.decisions.remove(index);
+            state.events.retain(|event| event.decision_id != id);
+            if let Some(key) = decision.idempotency_key {
+                state.expired_idempotency.insert(&decision.owner, &key);
+            }
+            Ok(())
+        })
     }
     /// Marks every due pending decision terminal. Expiry deliberately produces
     /// no delivery event: an answer must never be invented for a timed-out
@@ -242,17 +337,6 @@ impl UserDecisionStore {
     pub fn events(&self) -> Result<Vec<UserDecisionResolvedEvent>> {
         Ok(self.load()?.events)
     }
-    /// Returns the resolved durable record only when it still agrees with an
-    /// outbox event.  This prevents a consumer from routing an answer based on
-    /// forged or stale event data.
-    pub fn get_for_event(&self, event: &UserDecisionResolvedEvent) -> Result<Option<UserDecision>> {
-        Ok(self.load()?.decisions.into_iter().find(|decision| {
-            decision.decision_id == event.decision_id
-                && decision.owner.caller == event.recipient
-                && decision.status == UserDecisionStatus::Resolved
-                && decision.answer.as_ref() == Some(&event.answer)
-        }))
-    }
     /// Acknowledges one validated terminal observation. Repeated
     /// acknowledgements are a safe no-op, which makes reconnect recovery
     /// idempotent.
@@ -269,37 +353,71 @@ impl UserDecisionStore {
             true
         })
     }
-    pub fn consume_events(&self) -> Result<Result<usize, UserDecisionDeliveryError>> {
-        self.mutate(|state| {
-            let consistent = state.events.iter().all(|event| {
-                state.decisions.iter().any(|decision| {
-                    decision.decision_id == event.decision_id
-                        && decision.owner.caller == event.recipient
-                        && decision.status == UserDecisionStatus::Resolved
-                        && decision.answer.as_ref() == Some(&event.answer)
-                })
-            });
-            if !consistent {
-                return Err(UserDecisionDeliveryError::Inconsistent);
-            }
-            let consumed = state.events.len();
-            state.events.clear();
-            Ok(consumed)
-        })
-    }
     pub fn create(
         &self,
         decision: UserDecision,
     ) -> Result<Result<UserDecision, UserDecisionError>> {
-        if let Err(error) = decision.validate_request() {
-            return Ok(Err(error));
+        self.create_inner(decision, false, &[])
+    }
+
+    /// Apply the daemon's default deadline once, anchored to the original
+    /// creation time even when a caller retries after reconnecting.
+    pub fn create_with_default_expiry(
+        &self,
+        decision: UserDecision,
+    ) -> Result<Result<UserDecision, UserDecisionError>> {
+        let default_expiry = decision.expires_at.is_none();
+        self.create_inner(decision, default_expiry, &[])
+    }
+
+    /// Replay a decision from the authenticated exact conversation, including
+    /// legacy runs that created decisions under different immutable owners.
+    /// Owners are ordered newest-first. A retained or expired key on the first
+    /// matching owner wins; a conflicting request never falls through to an
+    /// older owner's answer. Selection and creation share the same store lock.
+    pub fn create_with_default_expiry_for_owners(
+        &self,
+        decision: UserDecision,
+        owners: &[UserDecisionOwner],
+    ) -> Result<Result<UserDecision, UserDecisionError>> {
+        if owners.first() != Some(&decision.owner)
+            || owners.iter().any(|owner| {
+                owner.workspace_id != decision.owner.workspace_id
+                    || owner.session_id != decision.owner.session_id
+            })
+        {
+            return Ok(Err(UserDecisionError::InvalidRequest));
         }
+        let default_expiry = decision.expires_at.is_none();
+        self.create_inner(decision, default_expiry, owners)
+    }
+
+    fn create_inner(
+        &self,
+        mut decision: UserDecision,
+        default_expiry: bool,
+        inherited_owners: &[UserDecisionOwner],
+    ) -> Result<Result<UserDecision, UserDecisionError>> {
         self.mutate_decision(|state| {
+            if let Some(key) = &decision.idempotency_key
+                && let Some(owner) = inherited_owners.iter().find(|owner| {
+                    state.decisions.iter().any(|item| {
+                        &item.owner == *owner && item.idempotency_key.as_ref() == Some(key)
+                    }) || state.expired_idempotency.contains(owner, key)
+                })
+            {
+                decision.owner = owner.clone();
+            }
             if let Some(key) = &decision.idempotency_key
                 && let Some(existing) = state.decisions.iter().find(|item| {
                     item.owner == decision.owner && item.idempotency_key.as_ref() == Some(key)
                 })
             {
+                if default_expiry {
+                    decision.expires_at = existing
+                        .created_at
+                        .checked_add_signed(chrono::Duration::hours(24));
+                }
                 return if same_request(existing, &decision) {
                     Ok(existing.clone())
                 } else {
@@ -310,6 +428,14 @@ impl UserDecisionStore {
                 && state.expired_idempotency.contains(&decision.owner, key)
             {
                 return Err(UserDecisionError::IdempotencyExpired);
+            }
+            // A retry is compared with its durable request above. Only a new
+            // admission interprets the deadline relative to this call's clock.
+            decision.validate_request()?;
+            if default_expiry {
+                decision.expires_at = decision
+                    .created_at
+                    .checked_add_signed(chrono::Duration::hours(24));
             }
             // Admission is charged before the record exists, so a refusal
             // leaves the store byte-for-byte as it was.
@@ -332,7 +458,28 @@ impl UserDecisionStore {
             if pending >= self.limits.pending_per_workspace {
                 return Err(UserDecisionError::PendingLimitReached);
             }
+            if wire::record_bytes(&decision) + capacity::answer_bound(&decision)
+                > wire::MAX_RECORD_BYTES
+            {
+                return Err(UserDecisionError::InvalidRequest);
+            }
             state.decisions.push(decision.clone());
+            // Recovery headroom may finish old questions, never admit new ones.
+            let recovery = state.recovery_bytes;
+            state.recovery_bytes = 0;
+            // Completed history must not permanently block fresh questions.
+            // Pending records and unacknowledged answers remain protected;
+            // reclaimed keys become tombstones before this admission commits.
+            let admission_limits = StoreLimits {
+                minimum_terminal_retention: 0,
+                ..self.limits
+            };
+            if !compact_bounded(state, admission_limits)
+                .expect("decision state is JSON serializable")
+            {
+                return Err(UserDecisionError::CapacityReached);
+            }
+            state.recovery_bytes = recovery;
             Ok(decision)
         })
     }
@@ -406,20 +553,17 @@ impl UserDecisionStore {
         let Some(mut file) = file else {
             return Ok(State::default());
         };
-        let max_bytes = u64::try_from(self.limits.max_serialized_bytes)
-            .expect("serialized byte limit fits u64");
+        let hard_limit = capacity::recovery_limit(self.limits);
+        let max_bytes = u64::try_from(hard_limit).expect("serialized byte limit fits u64");
         let mut text = String::new();
         file.by_ref()
             .take(max_bytes.saturating_add(1))
             .read_to_string(&mut text)
             .context(format!("failed to read {}", path.display()))?;
-        if text.len() > self.limits.max_serialized_bytes {
-            anyhow::bail!(
-                "user decision document exceeds its {} byte hard limit",
-                self.limits.max_serialized_bytes
-            );
+        if text.len() > hard_limit {
+            anyhow::bail!("user decision document exceeds its {hard_limit} byte hard limit");
         }
-        let state: State =
+        let mut state: State =
             serde_json::from_str(&text).context(format!("failed to parse {}", path.display()))?;
         if state
             .decisions
@@ -450,6 +594,7 @@ impl UserDecisionStore {
         {
             anyhow::bail!("user decision document exceeds its pending hard limit");
         }
+        capacity::recover(&mut state, self.limits, text.len())?;
         Ok(state)
     }
     fn mutate<T>(&self, f: impl FnOnce(&mut State) -> T) -> Result<T> {
@@ -483,15 +628,16 @@ impl UserDecisionStore {
 
 /// Drop the terminal decisions past [`TERMINAL_RETENTION`], oldest first.
 ///
-/// Three classes are never dropped, because dropping them would lose state a
+/// Two classes are never dropped, because dropping them would lose state a
 /// caller is still owed:
 ///
 /// - **pending** — someone is blocked waiting for the answer;
 /// - **referenced by an un-acknowledged event** — the answer has not reached its
-///   caller, and [`UserDecisionStore::get_for_event`] validates the delivery
-///   against this record;
-/// - **the newest terminal records** — a retry carrying the same idempotency key
-///   is answered from these instead of asking the person twice.
+///   caller; reconnect discovery returns the answer from this retained record.
+///
+/// Recent completed records answer retries until new admission or legacy
+/// recovery needs their space. Tombstones continue preventing duplicate human
+/// questions after those records have been reclaimed.
 ///
 /// Running on every mutation keeps the bound a property of the document rather
 /// than of a maintenance tick that may never run.
@@ -509,27 +655,56 @@ fn compact_bounded(state: &mut State, limits: StoreLimits) -> Result<bool> {
         evictable_count -= over;
     }
 
-    while serialized_len(state)? > limits.max_serialized_bytes {
+    // Legacy pending records may finish above the ordinary budget. Keeping a
+    // minimum history larger than that budget would reject every future request
+    // even after all answers were acknowledged. During recovery only, reclaim
+    // completed history until ordinary admission can resume. Pending decisions
+    // and answers whose receipt has not been acknowledged remain protected.
+    while state.recovery_bytes > 0
+        && evictable_count > 0
+        && capacity::reserved_len(state)? > limits.max_serialized_bytes
+    {
+        drop_oldest_evictable(state, &referenced, 1);
+        evictable_count -= 1;
+    }
+
+    while capacity::reserved_len(state)? > limits.max_serialized_bytes + state.recovery_bytes {
         if evictable_count <= limits.minimum_terminal_retention {
             return Ok(false);
         }
         drop_oldest_evictable(state, &referenced, 1);
         evictable_count -= 1;
     }
+    state.recovery_bytes = state
+        .recovery_bytes
+        .min(capacity::reserved_len(state)?.saturating_sub(limits.max_serialized_bytes));
     Ok(true)
 }
 
-/// Removes up to `count` append-ordered terminal records and remembers any
+/// Removes up to `count` oldest completed records and remembers any
 /// idempotency keys before the records disappear.
-fn drop_oldest_evictable(state: &mut State, referenced: &[UserDecisionId], mut count: usize) {
+fn drop_oldest_evictable(state: &mut State, referenced: &[UserDecisionId], count: usize) {
+    let mut candidates: Vec<_> = state
+        .decisions
+        .iter()
+        .filter(|decision| {
+            decision.status != UserDecisionStatus::Pending
+                && !referenced.contains(&decision.decision_id)
+        })
+        .collect();
+    // A question can remain pending for days. Retain the most recently completed
+    // answers, irrespective of when their questions were appended.
+    candidates.sort_by_key(|decision| decision.resolved_at.unwrap_or(decision.created_at));
+    let ids: Vec<_> = candidates
+        .iter()
+        .take(count)
+        .map(|decision| decision.decision_id)
+        .collect();
     let mut expired_keys = Vec::new();
     state.decisions.retain(|decision| {
-        let evictable = decision.status != UserDecisionStatus::Pending
-            && !referenced.contains(&decision.decision_id);
-        if count == 0 || !evictable {
+        if !ids.contains(&decision.decision_id) {
             return true;
         }
-        count -= 1;
         if let Some(key) = &decision.idempotency_key {
             expired_keys.push((decision.owner.clone(), key.clone()));
         }
@@ -538,7 +713,6 @@ fn drop_oldest_evictable(state: &mut State, referenced: &[UserDecisionId], mut c
     for (owner, key) in expired_keys {
         state.expired_idempotency.insert(&owner, &key);
     }
-    debug_assert_eq!(count, 0, "evictable count was computed from the same state");
 }
 
 fn serialized_len(state: &State) -> Result<usize> {
@@ -566,7 +740,7 @@ mod tests {
         user_decision::{UserDecisionOption, UserDecisionOwner, UserDecisionPolicy},
     };
     use chrono::TimeZone as _;
-    fn item() -> UserDecision {
+    pub(super) fn item() -> UserDecision {
         UserDecision {
             decision_id: UserDecisionId::new(),
             owner: UserDecisionOwner {
@@ -602,12 +776,15 @@ mod tests {
             resolved_at: None,
         }
     }
-    fn fixed_now() -> DateTime<Utc> {
+    pub(super) fn fixed_now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 8, 27, 12, 0, 0)
             .single()
             .unwrap()
     }
-    fn small_limits(max_serialized_bytes: usize, terminal_retention: usize) -> StoreLimits {
+    pub(super) fn small_limits(
+        max_serialized_bytes: usize,
+        terminal_retention: usize,
+    ) -> StoreLimits {
         StoreLimits {
             max_serialized_bytes,
             terminal_retention,
@@ -616,6 +793,527 @@ mod tests {
             pending_global: 16,
         }
     }
+
+    fn later_owner(owner: &UserDecisionOwner) -> UserDecisionOwner {
+        UserDecisionOwner {
+            run_id: OperationId::new(),
+            caller: CallerRef {
+                session_id: owner.session_id,
+                agent_id: AgentId::new(),
+            },
+            ..owner.clone()
+        }
+    }
+
+    #[test]
+    fn inherited_owners_replay_legacy_requests_without_rewriting_their_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut older = item();
+        older.idempotency_key = Some("older-only".into());
+        let mut newer = older.clone();
+        newer.decision_id = UserDecisionId::new();
+        newer.owner = later_owner(&older.owner);
+        newer.idempotency_key = Some("newer-only".into());
+        let owners = [newer.owner.clone(), older.owner.clone()];
+        let older = store.create_with_default_expiry(older).unwrap().unwrap();
+        let newer = store.create_with_default_expiry(newer).unwrap().unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        for original in [&older, &newer] {
+            let mut retry = original.clone();
+            retry.decision_id = UserDecisionId::new();
+            retry.owner = owners[0].clone();
+            retry.created_at += chrono::Duration::days(3);
+            retry.expires_at = None;
+            assert_eq!(
+                store
+                    .create_with_default_expiry_for_owners(retry, &owners)
+                    .unwrap()
+                    .unwrap(),
+                *original
+            );
+        }
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+
+        let mut fresh = newer;
+        fresh.decision_id = UserDecisionId::new();
+        fresh.idempotency_key = Some("new-key".into());
+        fresh.expires_at = None;
+        assert_eq!(
+            store
+                .create_with_default_expiry_for_owners(fresh.clone(), &owners)
+                .unwrap()
+                .unwrap()
+                .owner,
+            owners[0]
+        );
+        fresh.decision_id = UserDecisionId::new();
+        fresh.idempotency_key = None;
+        let first = store
+            .create_with_default_expiry_for_owners(fresh.clone(), &owners)
+            .unwrap()
+            .unwrap();
+        fresh.decision_id = UserDecisionId::new();
+        let second = store
+            .create_with_default_expiry_for_owners(fresh, &owners)
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.decision_id, second.decision_id);
+        assert_eq!(second.owner, owners[0]);
+    }
+
+    #[test]
+    fn inherited_duplicate_keys_choose_the_latest_owner_without_conflict_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let older = item();
+        let mut newer = older.clone();
+        newer.decision_id = UserDecisionId::new();
+        newer.owner = later_owner(&older.owner);
+        newer.title = "the newer question".into();
+        let owners = [newer.owner.clone(), older.owner.clone()];
+        let older = store.create_with_default_expiry(older).unwrap().unwrap();
+        let newer = store.create_with_default_expiry(newer).unwrap().unwrap();
+        let resolved = store
+            .resolve(
+                newer.owner.workspace_id,
+                newer.decision_id,
+                UserDecisionAnswer::Option {
+                    option_id: "a".into(),
+                    comment: None,
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut retry = newer;
+        retry.expires_at = None;
+        assert_eq!(
+            store
+                .create_with_default_expiry_for_owners(retry.clone(), &owners)
+                .unwrap()
+                .unwrap(),
+            resolved
+        );
+        let before = std::fs::read(store.path()).unwrap();
+        retry.title.clone_from(&older.title);
+        assert_eq!(
+            store
+                .create_with_default_expiry_for_owners(retry.clone(), &owners)
+                .unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+
+        // A new conversation has a disjoint authority set even with the same key.
+        retry.decision_id = UserDecisionId::new();
+        retry.owner = later_owner(&owners[0]);
+        let separate = store
+            .create_with_default_expiry_for_owners(retry.clone(), &[retry.owner.clone()])
+            .unwrap()
+            .unwrap();
+        assert_ne!(separate.decision_id, older.decision_id);
+        assert_ne!(separate.decision_id, resolved.decision_id);
+    }
+
+    #[test]
+    fn inherited_tombstones_do_not_recreate_questions_or_return_an_older_answer() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = store.create_with_default_expiry(item()).unwrap().unwrap();
+        let newer = later_owner(&decision.owner);
+        let owners = [newer.clone(), decision.owner.clone()];
+        let mut state = store.load().unwrap();
+        state.expired_idempotency.insert(&newer, "k");
+        state.expired_idempotency.insert(&decision.owner, "lost");
+        json_file::write_atomic(temp.path(), &store.path(), &state).unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        let mut retry = decision;
+        retry.owner = newer;
+        retry.expires_at = None;
+        for key in ["k", "lost"] {
+            retry.idempotency_key = Some(key.into());
+            assert_eq!(
+                store
+                    .create_with_default_expiry_for_owners(retry.clone(), &owners)
+                    .unwrap(),
+                Err(UserDecisionError::IdempotencyExpired)
+            );
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn inherited_owner_scope_mismatch_is_rejected_before_any_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let decision = item();
+        let later = later_owner(&decision.owner);
+        let mut other_workspace = later.clone();
+        other_workspace.workspace_id = WorkspaceId::new();
+        let mut other_session = later.clone();
+        other_session.session_id = None;
+        for owners in [
+            vec![],
+            vec![later],
+            vec![decision.owner.clone(), other_workspace],
+            vec![decision.owner.clone(), other_session],
+        ] {
+            assert_eq!(
+                store
+                    .create_with_default_expiry_for_owners(decision.clone(), &owners)
+                    .unwrap(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            assert!(!store.path().exists());
+        }
+    }
+
+    #[test]
+    fn human_inventory_includes_pending_decisions_from_each_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let first = item();
+        let second = item();
+        let terminal = item();
+        assert_eq!(store.pending_all().unwrap(), [] as [UserDecision; 0]);
+        for decision in [&first, &second, &terminal] {
+            store.create(decision.clone()).unwrap().unwrap();
+        }
+        store
+            .terminal(
+                terminal.owner.workspace_id,
+                terminal.decision_id,
+                UserDecisionStatus::Cancelled,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.pending_all().unwrap(),
+            vec![first.clone(), second.clone()]
+        );
+        assert_eq!(
+            store.pending(first.owner.workspace_id).unwrap(),
+            vec![first]
+        );
+        assert_eq!(
+            store.pending(second.owner.workspace_id).unwrap(),
+            vec![second]
+        );
+    }
+
+    #[test]
+    fn scoped_inventory_pages_filter_before_revision_and_offset_calculation() {
+        use crate::infrastructure::ipc::UserDecisionPage;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let mut first = item();
+        first.idempotency_key = None;
+        let workspace = first.owner.workspace_id;
+        let mut inherited = first.clone();
+        inherited.decision_id = UserDecisionId::new();
+        inherited.owner = later_owner(&first.owner);
+        inherited.prompt = "p".repeat(4096);
+        let mut sibling = first.clone();
+        sibling.decision_id = UserDecisionId::new();
+        sibling.owner.caller.agent_id = AgentId::new();
+        let mut fresh_run = first.clone();
+        fresh_run.decision_id = UserDecisionId::new();
+        fresh_run.owner.run_id = OperationId::new();
+        let foreign = item();
+        // Interleave unauthorized records so global offsets cannot work.
+        for decision in [&foreign, &first, &sibling, &inherited, &fresh_run] {
+            store.create(decision.clone()).unwrap().unwrap();
+        }
+        let owners = [first.owner.clone(), inherited.owner.clone()];
+        let scope = UserDecisionScope::Owners(&owners);
+        let first_page = store.pending_page(scope, None, 2048).unwrap().unwrap();
+        assert_eq!(first_page.decisions, vec![first.clone()]);
+        let cursor = first_page.next_cursor.unwrap();
+        assert_eq!(cursor.offset, 1);
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::Owners(&[]), None, 2048)
+                .unwrap()
+                .unwrap(),
+            UserDecisionPage {
+                deferred: Vec::new(),
+                decisions: vec![],
+                next_cursor: None
+            }
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::Workspace(workspace), None, 16_384)
+                .unwrap()
+                .unwrap()
+                .decisions,
+            vec![first.clone(), sibling.clone(), inherited.clone(), fresh_run]
+        );
+        for other_scope in [
+            UserDecisionScope::All,
+            UserDecisionScope::Workspace(workspace),
+            UserDecisionScope::Owners(&owners[..1]),
+        ] {
+            assert_eq!(
+                store
+                    .pending_page(other_scope, Some(&cursor), 16_384)
+                    .unwrap(),
+                Err(UserDecisionPageError::RevisionConflict)
+            );
+        }
+        // Mutations outside the authenticated scope do not invalidate it.
+        for decision in [&foreign, &sibling] {
+            store
+                .resolve(
+                    decision.owner.workspace_id,
+                    decision.decision_id,
+                    UserDecisionAnswer::Option {
+                        option_id: "a".into(),
+                        comment: None,
+                    },
+                    Utc::now(),
+                )
+                .unwrap()
+                .unwrap();
+        }
+        let before = std::fs::read(store.path()).unwrap();
+        assert_eq!(
+            store
+                .pending_page(scope, Some(&cursor), 16_384)
+                .unwrap()
+                .unwrap(),
+            UserDecisionPage {
+                deferred: Vec::new(),
+                decisions: vec![inherited],
+                next_cursor: None
+            }
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        assert_eq!(store.events().unwrap().len(), 2);
+        store
+            .terminal(
+                workspace,
+                first.decision_id,
+                UserDecisionStatus::Cancelled,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.pending_page(scope, Some(&cursor), 16_384).unwrap(),
+            Err(UserDecisionPageError::RevisionConflict)
+        );
+    }
+
+    #[test]
+    fn human_inventory_pages_preserve_large_cross_workspace_backlogs() {
+        use crate::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, UserDecisionPage};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let workspaces = [WorkspaceId::new(), WorkspaceId::new()];
+        let mut expected = Vec::new();
+        for workspace in workspaces {
+            for _ in 0..40 {
+                let mut decision = item();
+                decision.owner.workspace_id = workspace;
+                decision.prompt = "p".repeat(UserDecisionPolicy::PROMPT_MAX_BYTES);
+                decision.idempotency_key = None;
+                expected.push(store.create(decision).unwrap().unwrap());
+            }
+            assert!(
+                serde_json::to_vec(&store.pending(workspace).unwrap())
+                    .unwrap()
+                    .len()
+                    < DEFAULT_MAX_FRAME_BYTES
+            );
+        }
+        assert!(serde_json::to_vec(&expected).unwrap().len() > DEFAULT_MAX_FRAME_BYTES);
+        // A smaller negotiated frame exercises multiple continuations and
+        // their stable revision. The daemon tests measure exact envelope sizes.
+        let budget = DEFAULT_MAX_FRAME_BYTES / 2;
+        let mut collected = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let page = store
+                .pending_page(UserDecisionScope::All, cursor.as_ref(), budget)
+                .unwrap()
+                .unwrap();
+            let encoded = serde_json::to_vec(&page).unwrap();
+            assert!(encoded.len() <= budget);
+            assert_eq!(
+                serde_json::from_slice::<UserDecisionPage>(&encoded).unwrap(),
+                page
+            );
+            assert_ne!(page.decisions, [] as [UserDecision; 0]);
+            collected.extend(page.decisions);
+            pages += 1;
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            assert_eq!(next.offset, collected.len());
+            if let Some(previous) = &cursor {
+                assert_eq!(next.revision, previous.revision);
+            }
+            cursor = Some(next);
+        }
+        assert!(pages >= 3);
+        assert_eq!(collected, expected);
+    }
+
+    #[test]
+    fn human_inventory_pages_keep_empty_observations_bounded() {
+        use crate::infrastructure::ipc::UserDecisionPage;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let empty = UserDecisionPage {
+            deferred: Vec::new(),
+            decisions: vec![],
+            next_cursor: None,
+        };
+        let empty_bytes = serde_json::to_vec(&empty).unwrap().len();
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, empty_bytes)
+                .unwrap(),
+            Ok(empty)
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, empty_bytes - 1)
+                .unwrap(),
+            Err(UserDecisionPageError::PageTooSmall)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One snapshot fixes full-record, deferred-reference and cursor boundaries together.
+    fn human_inventory_pages_enforce_exact_byte_and_cursor_boundaries() {
+        use crate::infrastructure::ipc::{UserDecisionCursor, UserDecisionPage};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let first = item();
+        let mut second = item();
+        // JSON escaping must count toward the transport budget.
+        second.prompt = "\"\\\n".repeat(1024);
+        store.create(first.clone()).unwrap().unwrap();
+        store.create(second.clone()).unwrap().unwrap();
+        let cursor = store
+            .pending_page(UserDecisionScope::All, None, 2048)
+            .unwrap()
+            .unwrap()
+            .next_cursor
+            .unwrap();
+        let first_page = UserDecisionPage {
+            deferred: Vec::new(),
+            decisions: vec![first.clone()],
+            next_cursor: Some(cursor.clone()),
+        };
+        let first_bytes = serde_json::to_vec(&first_page).unwrap().len();
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, first_bytes)
+                .unwrap(),
+            Ok(first_page)
+        );
+        let deferred_first = UserDecisionPage {
+            deferred: vec![wire::reference(&first)],
+            decisions: Vec::new(),
+            next_cursor: Some(cursor.clone()),
+        };
+        let deferred_first_bytes = serde_json::to_vec(&deferred_first).unwrap().len();
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, first_bytes - 1)
+                .unwrap(),
+            Ok(deferred_first)
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, None, deferred_first_bytes - 1)
+                .unwrap(),
+            Err(UserDecisionPageError::PageTooSmall)
+        );
+        let deferred_last = UserDecisionPage {
+            deferred: vec![wire::reference(&second)],
+            decisions: Vec::new(),
+            next_cursor: None,
+        };
+        let last_page = UserDecisionPage {
+            deferred: Vec::new(),
+            decisions: vec![second],
+            next_cursor: None,
+        };
+        let last_bytes = serde_json::to_vec(&last_page).unwrap().len();
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes)
+                .unwrap(),
+            Ok(last_page)
+        );
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes - 1)
+                .unwrap(),
+            Ok(deferred_last)
+        );
+        for offset in [0, 2, usize::MAX] {
+            assert_eq!(
+                store
+                    .pending_page(
+                        UserDecisionScope::All,
+                        Some(&UserDecisionCursor {
+                            offset,
+                            ..cursor.clone()
+                        }),
+                        last_bytes
+                    )
+                    .unwrap(),
+                Err(UserDecisionPageError::InvalidCursor)
+            );
+        }
+        assert_eq!(
+            store
+                .pending_page(
+                    UserDecisionScope::All,
+                    Some(&UserDecisionCursor {
+                        revision: "old".into(),
+                        ..cursor.clone()
+                    }),
+                    last_bytes
+                )
+                .unwrap(),
+            Err(UserDecisionPageError::RevisionConflict)
+        );
+        store
+            .terminal(
+                first.owner.workspace_id,
+                first.decision_id,
+                UserDecisionStatus::Cancelled,
+                Utc::now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .pending_page(UserDecisionScope::All, Some(&cursor), last_bytes)
+                .unwrap(),
+            Err(UserDecisionPageError::RevisionConflict)
+        );
+        std::fs::write(store.path(), "{").unwrap();
+        assert!(
+            store
+                .pending_page(UserDecisionScope::All, None, last_bytes)
+                .is_err()
+        );
+    }
+
     #[test]
     fn retry_and_resolve_are_durable_and_once() {
         let temp = tempfile::tempdir().unwrap();
@@ -646,10 +1344,17 @@ mod tests {
         let event = store.events().unwrap().pop().unwrap();
         assert_eq!(event.decision_id, decision.decision_id);
         assert_eq!(event.recipient, decision.owner.caller);
-        assert_eq!(store.get_for_event(&event).unwrap(), Some(resolved.clone()));
+        assert_eq!(
+            store.get(workspace, event.decision_id).unwrap(),
+            Some(resolved.clone())
+        );
+        assert_eq!(Some(event.answer.clone()), resolved.answer);
         assert!(store.ack_event(event.decision_id).unwrap());
         assert!(!store.ack_event(event.decision_id).unwrap());
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
         assert_eq!(
             store
                 .resolve(
@@ -675,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_resolved_event_is_consumed_once() {
+    fn resolved_event_is_acknowledged_once_across_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let store = UserDecisionStore::new(temp.path());
         let decision = item();
@@ -693,8 +1398,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(store.consume_events().unwrap(), Ok(1));
-        assert_eq!(store.consume_events().unwrap(), Ok(0));
+        let reopened = UserDecisionStore::new(temp.path());
+        assert!(reopened.ack_event(decision.decision_id).unwrap());
+        assert!(!reopened.ack_event(decision.decision_id).unwrap());
+        assert_eq!(
+            UserDecisionStore::new(temp.path()).events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
     }
 
     #[test]
@@ -705,7 +1415,10 @@ mod tests {
         let store = UserDecisionStore::new(temp.path());
         // With no decisions at all the sweep must not even create the document,
         // so an idle daemon's maintenance tick costs one read and no fsync.
-        assert!(store.expire_due(Utc::now()).unwrap().is_empty());
+        assert_eq!(
+            store.expire_due(Utc::now()).unwrap(),
+            [] as [UserDecisionId; 0]
+        );
         assert!(!store.path().exists());
 
         // A decision that is not yet due must not be rewritten either. An atomic
@@ -715,7 +1428,10 @@ mod tests {
         decision.expires_at = Some(Utc::now() + chrono::Duration::seconds(60));
         store.create(decision).unwrap().unwrap();
         let before = std::fs::metadata(store.path()).unwrap().ino();
-        assert!(store.expire_due(Utc::now()).unwrap().is_empty());
+        assert_eq!(
+            store.expire_due(Utc::now()).unwrap(),
+            [] as [UserDecisionId; 0]
+        );
         assert_eq!(std::fs::metadata(store.path()).unwrap().ino(), before);
     }
 
@@ -730,7 +1446,7 @@ mod tests {
         store.create(decision.clone()).unwrap().unwrap();
 
         assert_eq!(store.expire_due(now).unwrap(), vec![decision.decision_id]);
-        assert!(store.expire_due(now).unwrap().is_empty());
+        assert_eq!(store.expire_due(now).unwrap(), [] as [UserDecisionId; 0]);
         assert_eq!(
             store
                 .get(decision.owner.workspace_id, decision.decision_id)
@@ -739,11 +1455,14 @@ mod tests {
                 .status,
             UserDecisionStatus::Expired
         );
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
     }
 
     #[test]
-    fn consumer_rejects_an_event_without_its_resolved_record() {
+    fn inbox_ignores_an_event_without_its_resolved_record() {
         let temp = tempfile::tempdir().unwrap();
         let store = UserDecisionStore::new(temp.path());
         let decision = item();
@@ -757,10 +1476,18 @@ mod tests {
             }],
         });
         std::fs::write(store.path(), serde_json::to_vec(&state).unwrap()).unwrap();
-        assert_eq!(
-            store.consume_events().unwrap(),
-            Err(UserDecisionDeliveryError::Inconsistent)
-        );
+        let before = std::fs::read(store.path()).unwrap();
+        let page = store
+            .inbox_page(
+                UserDecisionScope::Workspace(decision.owner.workspace_id),
+                None,
+                crate::infrastructure::ipc::DEFAULT_MAX_FRAME_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.decisions, [] as [UserDecision; 0]);
+        assert_eq!(page.deferred, [] as [wire::DecisionReference; 0]);
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
         assert_eq!(store.events().unwrap().len(), 1);
     }
     #[test]
@@ -792,7 +1519,10 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
     }
 
     #[test]
@@ -809,7 +1539,10 @@ mod tests {
         );
         store.create(decision.clone()).unwrap().unwrap();
         assert_eq!(store.pending(workspace).unwrap(), vec![decision.clone()]);
-        assert!(store.pending(WorkspaceId::new()).unwrap().is_empty());
+        assert_eq!(
+            store.pending(WorkspaceId::new()).unwrap(),
+            [] as [UserDecision; 0]
+        );
 
         let mut conflict = decision.clone();
         conflict.title = "other".into();
@@ -827,7 +1560,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(expired.status, UserDecisionStatus::Expired);
-        assert!(store.pending(workspace).unwrap().is_empty());
+        assert_eq!(store.pending(workspace).unwrap(), [] as [UserDecision; 0]);
         assert_eq!(
             store
                 .terminal(
@@ -850,6 +1583,119 @@ mod tests {
                 .unwrap(),
             Err(UserDecisionError::Terminal)
         );
+    }
+
+    #[test]
+    fn default_deadline_retries_keep_original_identity_and_terminal_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = UserDecisionStore::new(temp.path());
+        let request = item();
+        let first = store
+            .create_with_default_expiry(request.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first.expires_at,
+            Some(request.created_at + chrono::Duration::hours(24))
+        );
+        let mut retry = request.clone();
+        retry.decision_id = UserDecisionId::new();
+        retry.created_at += chrono::Duration::hours(48);
+        // Reopen to exercise durable replay, not an in-memory cache.
+        let store = UserDecisionStore::new(temp.path());
+        assert_eq!(
+            store
+                .create_with_default_expiry(retry.clone())
+                .unwrap()
+                .unwrap(),
+            first
+        );
+        let terminal = store
+            .terminal(
+                first.owner.workspace_id,
+                first.decision_id,
+                UserDecisionStatus::Expired,
+                retry.created_at,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .create_with_default_expiry(retry.clone())
+                .unwrap()
+                .unwrap(),
+            terminal
+        );
+        retry.prompt.push_str("changed");
+        assert_eq!(
+            store.create_with_default_expiry(retry.clone()).unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        retry.prompt = request.prompt;
+        retry.expires_at = Some(retry.created_at + chrono::Duration::hours(1));
+        assert_eq!(
+            store.create_with_default_expiry(retry).unwrap(),
+            Err(UserDecisionError::IdempotencyConflict)
+        );
+        assert_eq!(store.pending(first.owner.workspace_id).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn explicit_deadline_replays_after_expiry_without_readmitting_or_changing_content() {
+        for resolved in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = UserDecisionStore::new(temp.path());
+            let mut request = item();
+            request.expires_at = Some(request.created_at + chrono::Duration::hours(1));
+            let first = store
+                .create_with_default_expiry(request.clone())
+                .unwrap()
+                .unwrap();
+            let expected = if resolved {
+                store
+                    .resolve(
+                        first.owner.workspace_id,
+                        first.decision_id,
+                        UserDecisionAnswer::Option {
+                            option_id: "a".into(),
+                            comment: None,
+                        },
+                        first.created_at,
+                    )
+                    .unwrap()
+                    .unwrap()
+            } else {
+                store
+                    .terminal(
+                        first.owner.workspace_id,
+                        first.decision_id,
+                        UserDecisionStatus::Expired,
+                        first.created_at + chrono::Duration::hours(2),
+                    )
+                    .unwrap()
+                    .unwrap()
+            };
+            request.created_at += chrono::Duration::hours(2);
+            request.decision_id = UserDecisionId::new();
+            let store = UserDecisionStore::new(temp.path());
+            assert_eq!(
+                store.create_with_default_expiry(request.clone()).unwrap(),
+                Ok(expected)
+            );
+            let before = std::fs::read(store.path()).unwrap();
+            let mut changed = request.clone();
+            changed.prompt.push_str("changed");
+            assert_eq!(
+                store.create_with_default_expiry(changed).unwrap(),
+                Err(UserDecisionError::IdempotencyConflict)
+            );
+            request.idempotency_key = Some("new request".into());
+            assert_eq!(
+                store.create_with_default_expiry(request).unwrap(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        }
     }
 
     #[test]
@@ -906,7 +1752,10 @@ mod tests {
             Err(UserDecisionError::InvalidRequest)
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
-        assert!(store.events().unwrap().is_empty());
+        assert_eq!(
+            store.events().unwrap(),
+            [] as [UserDecisionResolvedEvent; 0]
+        );
 
         let mut state = store.load().unwrap();
         state.decisions[0].title = "t".repeat(UserDecisionPolicy::TITLE_MAX_BYTES + 1);
@@ -998,7 +1847,7 @@ mod tests {
     }
 
     /// An answer that has not reached its caller yet is not history: dropping it
-    /// would make `get_for_event` refuse the delivery it is meant to validate.
+    /// would leave reconnect discovery without the answer it must return.
     #[test]
     fn a_decision_with_an_unacknowledged_delivery_survives_retention() {
         let temp = tempfile::tempdir().unwrap();
@@ -1038,10 +1887,13 @@ mod tests {
             .into_iter()
             .find(|event| event.decision_id == awaited_id)
             .expect("the delivery is still outstanding");
-        assert!(
-            store.get_for_event(&event).unwrap().is_some(),
-            "retention dropped a record an outstanding delivery validates against"
-        );
+        let retained = store
+            .get(workspace, event.decision_id)
+            .unwrap()
+            .expect("retention must preserve an unacknowledged answer");
+        assert_eq!(retained.status, UserDecisionStatus::Resolved);
+        assert_eq!(retained.owner.caller, event.recipient);
+        assert_eq!(retained.answer, Some(event.answer));
     }
 
     /// Pending records cannot be evicted, so saturation has to refuse the new
@@ -1091,37 +1943,26 @@ mod tests {
     }
 
     #[test]
-    fn exact_serialized_budget_refuses_each_growing_mutation_with_zero_effect() {
+    fn admission_requires_terminal_headroom_and_retains_zero_effect_rejections() {
         let temp = tempfile::tempdir().unwrap();
-        let mut decision = item();
-        decision.created_at = fixed_now();
-        let exact = serialized_len(&State {
+        let decision = item();
+        let state = State {
             decisions: vec![decision.clone()],
             ..State::default()
-        })
-        .unwrap();
+        };
+        let exact = serialized_len(&state).unwrap();
         let store = UserDecisionStore::with_limits(temp.path(), small_limits(exact, 8));
-        store.create(decision.clone()).unwrap().unwrap();
-        assert_eq!(std::fs::metadata(store.path()).unwrap().len(), exact as u64);
-        let before = std::fs::read(store.path()).unwrap();
-
         assert_eq!(
-            store
-                .resolve(
-                    decision.owner.workspace_id,
-                    decision.decision_id,
-                    UserDecisionAnswer::Option {
-                        comment: None,
-                        option_id: "a".into(),
-                    },
-                    fixed_now(),
-                )
-                .unwrap(),
+            store.create(decision.clone()).unwrap(),
             Err(UserDecisionError::CapacityReached)
         );
-        assert_eq!(std::fs::read(store.path()).unwrap(), before);
-
-        let mut second = decision;
+        assert!(!store.path().exists());
+        let budget = capacity::reserved_len(&state).unwrap();
+        let store = UserDecisionStore::with_limits(temp.path(), small_limits(budget, 8));
+        store.create(decision.clone()).unwrap().unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        assert_eq!(before.len(), exact);
+        let mut second = decision.clone();
         second.decision_id = UserDecisionId::new();
         second.idempotency_key = None;
         assert_eq!(
@@ -1129,10 +1970,27 @@ mod tests {
             Err(UserDecisionError::CapacityReached)
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), before);
-
+        store
+            .resolve(
+                decision.owner.workspace_id,
+                decision.decision_id,
+                UserDecisionAnswer::Option {
+                    comment: None,
+                    option_id: "a".into(),
+                },
+                fixed_now(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(std::fs::metadata(store.path()).unwrap().len() <= budget as u64);
         let oversized = tempfile::tempdir().unwrap();
-        let tiny = UserDecisionStore::with_limits(oversized.path(), small_limits(64, 8));
-        std::fs::write(tiny.path(), vec![b' '; 65]).unwrap();
+        let limits = small_limits(64, 8);
+        let tiny = UserDecisionStore::with_limits(oversized.path(), limits);
+        std::fs::write(
+            tiny.path(),
+            vec![b' '; capacity::recovery_limit(limits) + 1],
+        )
+        .unwrap();
         assert!(
             tiny.events()
                 .unwrap_err()
@@ -1142,38 +2000,37 @@ mod tests {
     }
 
     #[test]
-    fn expiry_capacity_failure_uses_the_generic_effect_zero_transaction() {
+    fn legacy_expiry_can_finish_at_the_old_serialized_limit() {
         let temp = tempfile::tempdir().unwrap();
         let mut decision = item();
         decision.created_at = fixed_now();
         decision.expires_at = Some(fixed_now() + chrono::Duration::seconds(1));
-        let exact = serialized_len(&State {
+        let state = State {
             decisions: vec![decision.clone()],
             ..State::default()
-        })
-        .unwrap();
+        };
+        let exact = serialized_len(&state).unwrap();
         let limits = StoreLimits {
             minimum_terminal_retention: 1,
             ..small_limits(exact, 8)
         };
         let store = UserDecisionStore::with_limits(temp.path(), limits);
-        store.create(decision.clone()).unwrap().unwrap();
-        let before = std::fs::read(store.path()).unwrap();
-        assert!(
+        json_file::write_atomic(temp.path(), &store.path(), &state).unwrap();
+        assert_eq!(
             store
                 .expire_due(fixed_now() + chrono::Duration::seconds(1))
-                .unwrap_err()
-                .to_string()
-                .contains("capacity is exhausted")
+                .unwrap(),
+            vec![decision.decision_id]
         );
-        assert_eq!(std::fs::read(store.path()).unwrap(), before);
-        assert_eq!(
+        assert!(
             store
                 .get(decision.owner.workspace_id, decision.decision_id)
                 .unwrap()
-                .unwrap()
-                .status,
-            UserDecisionStatus::Pending
+                .is_none()
+        );
+        assert_eq!(
+            store.create(decision).unwrap(),
+            Err(UserDecisionError::IdempotencyExpired)
         );
     }
 
@@ -1194,8 +2051,9 @@ mod tests {
             decisions: vec![second.clone()],
             events: Vec::new(),
             expired_idempotency: tombstones,
+            recovery_bytes: 0,
         };
-        let budget = serialized_len(&compacted).unwrap();
+        let budget = capacity::reserved_len(&compacted).unwrap();
         let limits = small_limits(budget, 8);
         let store = UserDecisionStore::with_limits(temp.path(), limits);
         store.create(first.clone()).unwrap().unwrap();
@@ -1324,7 +2182,7 @@ mod tests {
 
         let reopened = UserDecisionStore::with_limits(temp.path(), limits);
         let state = reopened.load().unwrap();
-        assert!(state.events.is_empty());
+        assert_eq!(state.events, [] as [UserDecisionResolvedEvent; 0]);
         assert!(state.decisions.len() <= 4);
     }
 
@@ -1351,19 +2209,12 @@ mod tests {
                 created_at: fixed_now(),
             }],
             expired_idempotency: KeyTombstones::default(),
+            recovery_bytes: 0,
         };
         let budget = serialized_len(&expected).unwrap();
         let store = UserDecisionStore::with_limits(temp.path(), small_limits(budget, 8));
-        store.create(awaited.clone()).unwrap().unwrap();
-        store
-            .resolve(
-                awaited.owner.workspace_id,
-                awaited.decision_id,
-                answer,
-                fixed_now(),
-            )
-            .unwrap()
-            .unwrap();
+        // An existing undelivered legacy answer must remain protected as well.
+        json_file::write_atomic(temp.path(), &store.path(), &expected).unwrap();
         let before = std::fs::read(store.path()).unwrap();
 
         let mut blocked = distinct(awaited.owner.workspace_id);

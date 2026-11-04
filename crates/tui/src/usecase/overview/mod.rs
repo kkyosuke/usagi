@@ -24,6 +24,7 @@ pub struct CommandInfo {
 /// `arguments` は前後の空白だけを除いた未解釈文字列で、文法の検証は各ハンドラに委ねる。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Artifacts { arguments: String },
     Clean { arguments: String },
     Config { arguments: String },
     Daemon { arguments: String },
@@ -83,6 +84,15 @@ struct CommandDefinition {
 /// Overview 固有コマンドの registry。metadata と入力名の解決で共有する単一情報源。
 /// 候補表示が安定するよう名前順に並べる。
 const DEFINITIONS: &[CommandDefinition] = &[
+    CommandDefinition {
+        info: CommandInfo {
+            name: "artifact",
+            description: "Browse generated files and retained artifacts",
+            usage: "artifact [all]",
+            long_description: "Browse artifacts from all sessions, including retained archives.",
+        },
+        factory: |arguments| Command::Artifacts { arguments },
+    },
     CommandDefinition {
         info: CommandInfo {
             name: "clean",
@@ -188,7 +198,6 @@ const SESSION_SUBCOMMANDS: &[&str] = &[
 ];
 
 /// Overview 固有コマンドの metadata を名前順に返す。
-#[must_use]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
 }
@@ -337,6 +346,7 @@ impl Command {
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
+            Self::Artifacts { .. } => "artifact",
             Self::Clean { .. } => "clean",
             Self::Config { .. } => "config",
             Self::Daemon { .. } => "daemon",
@@ -418,7 +428,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
+                "session"
             ]
         );
         assert!(
@@ -434,6 +445,9 @@ mod tests {
         assert!(session.usage.contains("sleep"));
         assert_eq!(
             [
+                Command::Artifacts {
+                    arguments: String::new()
+                },
                 Command::Clean {
                     arguments: String::new()
                 },
@@ -461,7 +475,8 @@ mod tests {
             ]
             .map(|command| command.name()),
             [
-                "clean", "config", "daemon", "env", "garden", "issue", "roles", "session"
+                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
+                "session"
             ]
         );
     }
@@ -520,7 +535,10 @@ mod tests {
             help(&fake, "status --short").unwrap().long_description,
             "Summarize the current workspace state without changing it."
         );
-        assert!(complete(&DefaultRegistry, "zz").is_empty());
+        assert_eq!(
+            complete(&DefaultRegistry, "zz"),
+            [] as [super::CommandInfo; 0]
+        );
     }
 
     #[test]
@@ -565,15 +583,17 @@ mod tests {
             Err("session name must not contain whitespace")
         );
         assert_eq!(parse_session("sleep"), Err("session name is required"));
-        assert_eq!(
-            parse_session("remove feature-x --force"),
-            Ok(SessionCommand::Remove {
-                name: "feature-x".into(),
-                force: true,
-                force_delete_branch: true,
-                purge_orphan: false,
-            })
-        );
+        for input in ["remove feature-x --force", "remove --force feature-x"] {
+            assert_eq!(
+                parse_session(input),
+                Ok(SessionCommand::Remove {
+                    name: "feature-x".into(),
+                    force: true,
+                    force_delete_branch: true,
+                    purge_orphan: false,
+                })
+            );
+        }
         assert_eq!(
             parse_session("remove feature-x"),
             Ok(SessionCommand::Remove {

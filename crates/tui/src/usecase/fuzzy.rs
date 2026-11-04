@@ -34,6 +34,17 @@ pub(crate) fn fuzzy_score(candidate: &str, query: &str) -> Option<usize> {
     fuzzy_match(candidate, query).map(|matched| matched.score)
 }
 
+/// A complete case-insensitive fragment, expressed in original character cells.
+#[must_use]
+pub(crate) fn contiguous_match(candidate: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    let query = query.chars().map(lowercase).collect::<Vec<_>>();
+    if query.is_empty() {
+        return Some(0..0);
+    }
+    let candidate = candidate.chars().map(lowercase).collect::<Vec<_>>();
+    contiguous_start(&candidate, &query).map(|start| start..start + query.len())
+}
+
 /// Rank a case-insensitive subsequence match and report where it landed.
 ///
 /// This is [`fuzzy_score`] with the matched positions retained; both share one
@@ -253,7 +264,7 @@ fn lowercase(character: char) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{FuzzyMatch, fuzzy_match, fuzzy_score, path_match};
+    use super::{FuzzyMatch, contiguous_match, fuzzy_match, fuzzy_score, path_match};
 
     fn cells(matched: FuzzyMatch) -> Vec<usize> {
         matched.into_positions()
@@ -263,7 +274,7 @@ mod tests {
     fn an_empty_query_matches_everything_without_positions() {
         let matched = fuzzy_match("crates/tui/src/lib.rs", "").unwrap();
         assert_eq!(matched.score(), 0);
-        assert!(cells(matched).is_empty());
+        assert_eq!(cells(matched), [] as [usize; 0]);
     }
 
     #[test]
@@ -347,6 +358,7 @@ mod tests {
         );
         // 早い greedy 一致に隠れず、連続一致を選び直す。
         assert_eq!(cells(path_match("aXbXabc", "abc").unwrap()), [4, 5, 6]);
+        assert_eq!(cells(path_match("abc-abc", "abc").unwrap()), [0, 1, 2]);
     }
 
     #[test]
@@ -375,7 +387,15 @@ mod tests {
     fn an_empty_query_keeps_every_path_at_rank_zero() {
         let matched = path_match("src/lib.rs", "").unwrap();
         assert_eq!(matched.score(), 0);
-        assert!(cells(matched).is_empty());
+        assert_eq!(cells(matched), [] as [usize; 0]);
         assert_eq!(path_match("src/lib.rs", "zz"), None);
+    }
+    #[test]
+    fn complete_fragments_preserve_character_ranges_and_do_not_match_gaps() {
+        assert_eq!(contiguous_match("CI checks", "ci"), Some(0..2));
+        assert_eq!(contiguous_match("notice-ui", "CI"), None);
+        assert_eq!(contiguous_match("日本語の確認", "確認"), Some(4..6));
+        assert_eq!(contiguous_match("", ""), Some(0..0));
+        assert_eq!(contiguous_match("a", "long"), None);
     }
 }

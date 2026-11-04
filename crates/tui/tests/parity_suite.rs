@@ -21,26 +21,30 @@ use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, Feedback, Overlay, SafeError, SafeMessage,
     TabDirection, Target, TargetPhase, update,
 };
-use usagi_tui::usecase::application::metrics::GitDiff;
+use usagi_tui::usecase::application::metrics::{ArtifactCount, GitDiff};
 use usagi_tui::usecase::application::pane::{
-    LivePane, PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
-};
-use usagi_tui::usecase::application::pane_runtime::{
-    Geometry, PaneRuntime, TerminalError, TerminalInventory, TerminalPort, TerminalSnapshot,
+    PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
 };
 use usagi_tui::usecase::application::terminal_screen::TerminalScreen;
+use usagi_tui::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
+use usagi_tui::usecase::application::terminal_session::{
+    Geometry, SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalInputError,
+    TerminalInputOutcome, TerminalSession, TerminalStreamPort, TerminalSubscription,
+};
 
 #[test]
 fn selected_terminal_window_rejects_empty_reversed_and_out_of_bounds_ranges() {
     let mut screen = TerminalScreen::new(2, 8);
     screen.advance(b"one\r\ntwo");
-    let anchor = (0, 0);
-    let focus = (1, 2);
+    let mut selection = TerminalSelection::begin(
+        screen.cells_with_scrollback(),
+        TerminalPoint { row: 0, column: 0 },
+    );
+    selection.extend(TerminalPoint { row: 1, column: 2 });
     for (start, end) in [(1, 1), (2, 1), (usize::MAX, usize::MAX)] {
-        assert!(
-            screen
-                .rows_with_scrollback_window_selection(start, end, anchor, focus)
-                .is_empty()
+        assert_eq!(
+            screen.rows_with_scrollback_window_tracked_selection(start, end, &selection),
+            [] as [String; 0]
         );
     }
 }
@@ -75,6 +79,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
             .unwrap()
             .with_timezone(&Utc),
         has_notes: false,
+        memo: None,
         pr_count: 0,
         removing: false,
         agent_resume: None,
@@ -84,6 +89,7 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
         role_id: None,
         parent_session_id: None,
         organization_depth: 0,
+        favorite: false,
     }
 }
 
@@ -116,7 +122,7 @@ fn pane_completion_background_exit() {
     let second_target = Target::Session(second);
     let mut state = PaneState::new(PaneSelection::Target(first_target));
     let operation = OperationId::new();
-    assert!(
+    assert_eq!(
         reduce(
             &mut state,
             PaneEvent::Request {
@@ -124,51 +130,54 @@ fn pane_completion_background_exit() {
                 target: first_target,
                 kind: PaneKind::Agent
             }
-        )
-        .is_empty()
+        ),
+        [] as [PaneEffect; 0]
     );
-    assert!(
+    assert_eq!(
         reduce(
             &mut state,
             PaneEvent::Select(PaneSelection::Target(second_target))
-        )
-        .is_empty()
+        ),
+        [] as [PaneEffect; 0]
     );
 
     let first_terminal = terminal(workspace, first);
-    assert!(
+    assert_eq!(
         reduce(
             &mut state,
             PaneEvent::Succeeded {
                 operation,
                 terminal: first_terminal.clone()
             }
-        )
-        .is_empty()
+        ),
+        [] as [PaneEffect; 0]
     );
     assert_eq!(state.tabs().len(), 1);
 
     let second_terminal = terminal(workspace, second);
-    assert!(
+    assert_eq!(
         reduce(
             &mut state,
             PaneEvent::Restore(usagi_tui::usecase::application::pane::LivePane {
                 terminal: second_terminal.clone(),
                 kind: PaneKind::Terminal
             })
-        )
-        .is_empty()
+        ),
+        [] as [PaneEffect; 0]
     );
-    assert!(
+    assert_eq!(
         reduce(
             &mut state,
             PaneEvent::Select(PaneSelection::Tab(
                 usagi_tui::usecase::application::pane::TabSelection::Live(second_terminal.clone())
             ))
-        )
-        .is_empty()
+        ),
+        [] as [PaneEffect; 0]
     );
-    assert!(reduce(&mut state, PaneEvent::Exited(first_terminal)).is_empty());
+    assert_eq!(
+        reduce(&mut state, PaneEvent::Exited(first_terminal)),
+        [] as [PaneEffect; 0]
+    );
     assert_eq!(state.tabs().len(), 1);
     assert_eq!(
         reduce(&mut state, PaneEvent::Exited(second_terminal)),
@@ -196,13 +205,25 @@ fn quit_phase_error_redaction() {
 
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
     assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-    assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::Char('n'))),
+        [] as [Effect; 0]
+    );
     let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
     assert!(state.ctrl_c_grace());
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+        [] as [Effect; 0]
+    );
     assert!(!state.ctrl_c_grace());
 
     let safe = SafeError {
@@ -364,7 +385,10 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     );
 
     // 2: Ctrl-O clears a forced overlay as well as changing mode.
-    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlO)),
+        [] as [Effect; 0]
+    );
     assert_eq!(
         state.route(),
         usagi_tui::usecase::application::controller::Route::Home(
@@ -374,83 +398,72 @@ fn controller_closeup_prefix_and_tab_gating_match_live_model() {
     assert_eq!(state.overlay(), None);
 }
 
-#[derive(Default)]
 struct ResumeFixturePort {
-    inventory: Vec<TerminalInventory>,
+    error: TerminalError,
     attachments: Vec<TerminalRef>,
 }
 
-impl TerminalPort for ResumeFixturePort {
-    fn inventory(&mut self) -> Result<Vec<TerminalInventory>, TerminalError> {
-        Ok(self.inventory.clone())
-    }
-
+impl TerminalStreamPort for ResumeFixturePort {
     fn attach(
         &mut self,
         terminal: &TerminalRef,
-        _: Option<u64>,
-    ) -> Result<TerminalSnapshot, TerminalError> {
+        _: Geometry,
+    ) -> Result<TerminalAttach, TerminalError> {
         self.attachments.push(terminal.clone());
-        Ok(TerminalSnapshot {
-            terminal: terminal.clone(),
-            output_offset: 0,
-            geometry: Geometry { cols: 80, rows: 24 },
-            replay: Vec::new(),
-            exited: false,
-        })
+        Err(self.error)
     }
 
-    fn resync(&mut self, _: &TerminalRef) -> Result<TerminalSnapshot, TerminalError> {
-        Err(TerminalError::Unavailable)
+    fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
+        panic!("a refused attachment cannot poll")
     }
 
-    fn input(&mut self, _: &TerminalRef, _: &[u8]) -> Result<(), TerminalError> {
-        Ok(())
+    fn input(
+        &mut self,
+        _: &TerminalRef,
+        _: TerminalSubscription,
+        _: u64,
+        _: OperationId,
+        _: &[u8],
+    ) -> Result<TerminalInputOutcome, TerminalError> {
+        panic!("a refused attachment cannot send input")
     }
 
-    fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), TerminalError> {
-        Ok(())
+    fn detach(&mut self, _: &TerminalRef, _: TerminalSubscription) {
+        panic!("a refused attachment has no subscription to detach")
     }
-
-    fn detach(&mut self, _: &TerminalRef) {}
 }
 
 #[test]
-fn terminal_resume_falls_back_for_missing_and_stale_inventory() {
-    let workspace = WorkspaceId::new();
-    let surviving_session = SessionId::new();
-
-    let saved = terminal(workspace, surviving_session);
-    let pane = PaneState::with_live(
-        PaneSelection::Tab(TabSelection::Live(saved.clone())),
-        vec![LivePane {
-            terminal: saved.clone(),
-            kind: PaneKind::Terminal,
-        }],
-    );
-
-    // Missing inventory data is a safe no-attach fallback.
-    let mut missing = PaneRuntime::new(pane.clone());
-    let mut port = ResumeFixturePort::default();
-    missing.reconnect(&mut port);
-    assert!(missing.pane().tabs().is_empty());
-    assert!(port.attachments.is_empty());
-
-    // An old TerminalRef (same terminal ID but another daemon incarnation) is
-    // stale rather than a candidate for heuristic migration.
-    let mut old = saved;
-    old.daemon_generation = DaemonGeneration::new();
-    let mut stale = PaneRuntime::new(pane);
-    let mut port = ResumeFixturePort {
-        inventory: vec![TerminalInventory {
-            terminal: old,
-            live: true,
-        }],
-        ..ResumeFixturePort::default()
-    };
-    stale.reconnect(&mut port);
-    assert!(stale.pane().tabs().is_empty());
-    assert!(port.attachments.is_empty());
+fn terminal_resume_preserves_identity_and_refuses_input_for_unavailable_or_stale_targets() {
+    let saved = terminal(WorkspaceId::new(), SessionId::new());
+    for (error, expected_state, message) in [
+        (
+            TerminalError::Unavailable,
+            SessionState::Reconnecting,
+            "daemon unavailable",
+        ),
+        (
+            TerminalError::Stale,
+            SessionState::Disconnected,
+            "terminal is no longer available",
+        ),
+    ] {
+        let mut port = ResumeFixturePort {
+            error,
+            attachments: Vec::new(),
+        };
+        let mut session = TerminalSession::new(saved.clone(), Geometry { cols: 80, rows: 24 });
+        session.connect(&mut port);
+        assert_eq!(session.state(), expected_state);
+        assert!(session.error().unwrap().contains(message));
+        assert_eq!(session.terminal(), &saved);
+        assert_eq!(port.attachments, vec![saved.clone()]);
+        assert_eq!(
+            session.send_input(&mut port, b"command\n"),
+            Err(TerminalInputError::NotLive(expected_state)),
+        );
+        assert_eq!(port.attachments.len(), 1);
+    }
 }
 
 /// Freezes the sidebar Git diff columns projected through `with_git_diffs`.
@@ -490,7 +503,12 @@ fn home_frame_golden_covers_sidebar_git_diffs() {
             },
         ),
     ]);
-    let home = HomeProjection::from_state(&state, "atlas", &[alpha, beta]).with_git_diffs(&diffs);
+    let home = HomeProjection::from_state(&state, "atlas", &[alpha, beta])
+        .with_git_diffs(&diffs)
+        .with_artifact_counts(std::sync::Arc::new(BTreeMap::from([(
+            first,
+            ArtifactCount::Ready(2),
+        )])));
 
     let actual = render_home(14, 60, &home)
         .iter()

@@ -86,12 +86,6 @@ pub enum DaemonRequest {
         operation_id: String,
         intent: AgentLaunchIntent,
     },
-    /// Opt-in workspace-root launch carrying one goal. Keeping this separate
-    /// means old clients and classic launch semantics are unchanged.
-    AgentGoal {
-        operation_id: String,
-        intent: AgentGoalIntent,
-    },
     /// Private Codex `SessionStart` hook delivery. The opaque credential binds
     /// the provider-owned ID to one live daemon runtime; callers cannot name a
     /// runtime, session, path, or provider themselves.
@@ -106,8 +100,8 @@ pub enum DaemonRequest {
     /// and the phase itself is a closed non-sensitive vocabulary.
     AgentPhaseReport {
         phase: AgentPhase,
-        /// Present only for a provider's structured starting event:
-        /// `SessionStart` or Antigravity's `PreInvocation`.
+        /// Present for Claude/Codex structured lifecycle hooks except
+        /// `SessionEnd`, or Antigravity's starting `PreInvocation` event.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_session_id: Option<ProviderSessionId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,26 +121,15 @@ pub enum DaemonRequest {
     /// per-session dispatch status. Process-level cross-project views use this
     /// instead of treating a coarse live PTY as proof that dispatch is running.
     AgentWorkspaceObservation { workspace: WorkspaceId },
-    /// Read the redaction-safe durable Work Runs owned by the connection's
-    /// workspace. This TUI-only observation never accepts an Agent credential.
-    SupervisorSnapshot { workspace: WorkspaceId },
-    WorkflowSnapshot {
+    /// Human-only read of attention in an already adopted workspace.
+    WorkspaceAttention { workspace: WorkspaceId },
+    /// Human-only bounded search of retained terminal screens; no attachment or input.
+    SearchTerminalOutput {
         workspace: WorkspaceId,
-        session: SessionId,
-    },
-    WorkflowControl {
-        workspace: WorkspaceId,
-        session: SessionId,
-        operation_id: OperationId,
-        command: crate::domain::workflow::WorkflowCommand,
-    },
-    /// Mutate one durable Supervisor Run through the workspace-bound human
-    /// control plane. The daemon verifies the requested workspace against the
-    /// connection and replays the command by its durable operation identity.
-    SupervisorControl {
-        workspace: WorkspaceId,
-        operation_id: OperationId,
-        command: crate::domain::supervisor::SupervisorWorkspaceCommand,
+        query: String,
+        /// Filter before applying scan budgets. Omission retains workspace scope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<SessionId>,
     },
     /// Diagnose launch-time hook/MCP integration revisions against the invoking
     /// binary without exposing rendered configuration or provider identity.
@@ -179,6 +162,16 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
+    /// Resume one exact AGY conversation and execute a new headless turn.
+    /// A separate wire kind makes older daemons reject this intent instead of
+    /// silently treating it as an ordinary interactive resume.
+    ResumeAgentHeadless {
+        operation_id: String,
+        target: AgentResumeTarget,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_context: Option<McpCallerContext>,
+    },
     /// Repair-only exact resume. The old revision still fences the retained
     /// source, while the active daemon re-resolves hooks/MCP with its current
     /// profile revision.
@@ -205,25 +198,13 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller_context: Option<McpCallerContext>,
     },
-    /// Workspace-scoped human decision surface used by the local TUI. Unlike
+    /// Human decision surface used by the local TUI, including cross-workspace
+    /// observation and explicitly workspace-addressed answers. Unlike
     /// `DispatchTool`, this path never accepts agent-originated requests and
     /// does not treat a missing agent credential as authorization.
     UserDecision {
         action: TuiUserDecisionAction,
         payload: Value,
-    },
-    /// MCP control and observation for a daemon-owned supervisor aggregate.
-    /// Caller provenance is derived by the daemon from the IPC context; it is
-    /// intentionally not a client-supplied field in this request.
-    SupervisorTool {
-        action: SupervisorToolAction,
-        operation_id: String,
-        payload: Value,
-        /// Opaque daemon-minted capability used to authenticate the durable
-        /// caller scope. The daemon combines the resolved scope with the
-        /// handshake client incarnation; neither value is sufficient alone.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caller_context: Option<McpCallerContext>,
     },
 }
 
@@ -346,6 +327,7 @@ pub enum DispatchToolAction {
     AgentInboxAck,
     UserDecisionRequest,
     UserDecisionGet,
+    UserDecisionAck,
     UserDecisionList,
     UserDecisionResolve,
     UserDecisionCancel,
@@ -353,6 +335,21 @@ pub enum DispatchToolAction {
 }
 
 impl DispatchToolAction {
+    /// Whether the action requires the explicit-receipt decision protocol.
+    #[must_use]
+    pub const fn is_user_decision(self) -> bool {
+        matches!(
+            self,
+            Self::UserDecisionRequest
+                | Self::UserDecisionGet
+                | Self::UserDecisionAck
+                | Self::UserDecisionList
+                | Self::UserDecisionResolve
+                | Self::UserDecisionCancel
+                | Self::UserDecisionExpire
+        )
+    }
+
     /// Whether this action only reads daemon state, so a fresh-connection retry
     /// re-reads safely.
     #[must_use]
@@ -388,21 +385,30 @@ impl DispatchToolAction {
 pub enum TuiUserDecisionAction {
     Get,
     List,
+    ListAll,
     Resolve,
     Cancel,
+    /// Human-confirmed disposal of an undelivered resolved answer.
+    Discard,
 }
 
-/// The opt-in supervisor MCP surface.  It is separate from dispatch so adding
-/// it cannot change the existing session/agent tool contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SupervisorToolAction {
-    Start,
-    Get,
-    List,
-    Cancel,
-    ResolveEscalation,
-    Events,
+/// Continuation within one immutable observation of the decision inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserDecisionCursor {
+    pub revision: String,
+    pub offset: usize,
+}
+
+/// A byte-bounded part of the authorized decision inbox. Consumers publish
+/// only after following every cursor from the same revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDecisionPage {
+    /// Legacy records fetched separately in bounded, revision-fenced chunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<crate::infrastructure::store::user_decision::wire::DecisionReference>,
+    pub decisions: Vec<crate::domain::user_decision::UserDecision>,
+    pub next_cursor: Option<UserDecisionCursor>,
 }
 
 /// Control vocabulary for the daemon metrics stream.
@@ -418,7 +424,7 @@ pub enum MetricsAction {
 /// admits Agent launches sees it.
 ///
 /// This is the **Agent runtime** pool only. It is neither the generic terminal
-/// capacity nor a supervisor run's `ExecutionPolicy.max_concurrency`, and the two
+/// capacity, and the two
 /// numbers are never summed with another pool's. `in_use` counts exactly what
 /// admission counts, so a client can tell "the next launch is refused" from
 /// "there is room" without re-deriving the daemon's rule.
@@ -518,17 +524,6 @@ pub struct AgentLaunchIntent {
     pub profile: Option<AgentProfileId>,
 }
 
-/// One bounded objective admitted as a workspace-root Director launch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentGoalIntent {
-    pub workspace: WorkspaceId,
-    pub profile: Option<AgentProfileId>,
-    pub goal: String,
-}
-
-/// Maximum UTF-8 size of one goal accepted by the daemon.
-pub const MAX_AGENT_GOAL_BYTES: usize = 16 * 1024;
-
 /// The canonical semantic intent of one Agent launch.
 ///
 /// This string, not the producer-issued `OperationId`, is what makes a launch
@@ -553,27 +548,8 @@ pub fn agent_launch_semantic_key(intent: &AgentLaunchIntent) -> String {
     )
 }
 
-/// Canonical idempotency meaning of one goal-driven launch. The goal is part of
-/// the durable launch request, so reusing an operation for different text must
-/// conflict even when workspace and provider are identical.
-#[must_use]
-pub fn agent_goal_semantic_key(intent: &AgentGoalIntent) -> String {
-    let launch = AgentLaunchIntent {
-        workspace: intent.workspace,
-        session: None,
-        profile: intent.profile.clone(),
-    };
-    format!(
-        "{}\ngoal:{}:{}",
-        agent_launch_semantic_key(&launch),
-        intent.goal.len(),
-        intent.goal
-    )
-}
-
 /// Canonical idempotency meaning of a session dispatch after its exact worker
-/// Agent has been reserved. Supervisor promotion stores the digest of this key
-/// before spawn and compares it with the Agent admission at bind time.
+/// Agent has been reserved. Replay compares the same worker and prompt.
 #[must_use]
 pub fn agent_dispatch_semantic_key(
     session_name: &str,
@@ -614,6 +590,15 @@ pub fn agent_resume_semantic_key(target: &AgentResumeTarget) -> String {
     )
 }
 
+/// Includes the new turn in replay identity without changing legacy resume keys.
+#[must_use]
+pub fn agent_headless_resume_semantic_key(target: &AgentResumeTarget, prompt: &str) -> String {
+    format!(
+        "{}\nheadless_prompt={prompt}",
+        agent_resume_semantic_key(target)
+    )
+}
+
 /// The exclusive worker selector for an immediate dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -641,6 +626,8 @@ pub struct DispatchIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionAction {
+    /// Read public Agent runtime provenance without launching or resuming.
+    Agents,
     Create,
     Remove,
     /// Stop quiescent Agents in the session while retaining exact provider
@@ -648,6 +635,8 @@ pub enum SessionAction {
     Sleep,
     /// Inspect or remove Git resources absent from daemon lifecycle state.
     Clean,
+    /// Inspect or reclaim configured regenerable directories without removing sessions.
+    Cache,
     List,
     Status,
     Overview,
@@ -665,15 +654,6 @@ pub enum SessionAction {
     DecisionLog,
     DelegateIssue,
     DelegateBrief,
-    /// Start the session's implementation/review workflow on behalf of the
-    /// human who is running this MCP client.
-    WorkflowStart,
-    /// Read one session's workflow progress.
-    WorkflowStatus,
-    /// Send one durable instruction to a running workflow.
-    WorkflowInstruct,
-    /// End one session's workflow so the session can start another.
-    WorkflowFinish,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,23 +7,22 @@
 
 mod decision;
 use decision::update_decision_editor;
-mod entry;
 mod new;
+mod notes;
 mod preview;
 mod pull_requests;
 
-pub use entry::{EntryEvent, EntryRoute, EntryState, EntryWorkspace, HomeSnapshot, update_entry};
-pub use new::{
-    NewEvent, NewForm, NewMode, NewRequest, NewRoute, NewState, NewValidationError, update_new,
-    validate_new_form,
-};
+use chrono::{DateTime, Utc};
+
+pub use new::{NewForm, NewMode, NewRequest, NewValidationError, validate_new_form};
+pub use notes::{NoteCloseChoice, NoteEditor, NoteSection};
 pub use preview::{
-    PreviewCandidate, PreviewFileFilter, PreviewOverlay, PreviewPane, PreviewSearchMatch,
+    ArtifactOpenOutcome, ArtifactOpenState, PreviewCandidate, PreviewFileFilter, PreviewOverlay,
+    PreviewPane, PreviewSearchMatch,
 };
 pub use pull_requests::{PrFilter, PrOverlay};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
 use usagi_core::domain::id::{
@@ -31,7 +30,7 @@ use usagi_core::domain::id::{
     UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::pr_inventory::{PrEntry, PrState};
+use usagi_core::domain::pr_inventory::{PrEntry, PrIdentity, PrState};
 use usagi_core::domain::presentation_text::{
     presentation_character_is_safe, presentation_text_is_safe, sanitize_presentation_line,
 };
@@ -40,9 +39,8 @@ use usagi_core::domain::session_lifecycle::{
     AgentPhase, FailureStage, SessionLifecycle, SessionLifecycleProjection,
 };
 use usagi_core::domain::settings::{
-    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, WorkMode, format_env_bindings,
+    AvailableModels, DefaultModel, EnvBindings, PrAutoOpen, format_env_bindings,
 };
-use usagi_core::domain::supervisor::SupervisorRunId;
 use usagi_core::domain::user_decision::{
     UserDecision, UserDecisionAnswer, UserDecisionSelectionMode, UserDecisionStatus,
 };
@@ -93,7 +91,7 @@ pub enum Overlay {
     Roles,
     /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
     CreateSession,
-    /// Workspace-scoped pending user decisions and their answer editor.
+    /// Daemon-wide pending user decisions and their answer editor.
     Decisions,
     /// Merge-confirmed sessions awaiting explicit, sequential cleanup.
     CleanupQueue,
@@ -118,8 +116,6 @@ pub enum Overlay {
 const MAX_SESSION_NAME_LEN: usize = 64;
 /// Targets that keep a preview history at once.
 const MAX_PREVIEW_RECENT_TARGETS: usize = 8;
-/// Goal composer bound. The daemon repeats this limit before admitting work.
-pub const MAX_WORK_GOAL_BYTES: usize = usagi_core::infrastructure::ipc::MAX_AGENT_GOAL_BYTES;
 
 /// daemon へ送る前の、TUI-local な新規 session 入力。
 ///
@@ -166,6 +162,8 @@ pub struct SessionRoleCatalog {
 /// Safe daemon-owned role metadata, kept separate from persisted session annotations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRoleProjection {
+    pub creator_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
+    pub director_continuation: Option<usagi_core::domain::id::AgentContinuationRef>,
     pub role_id: Option<RoleId>,
     pub role_summary: Option<String>,
     pub parent_session_id: Option<SessionId>,
@@ -179,18 +177,6 @@ pub enum RoleEditorScope {
 }
 
 pub const ROLE_EDITOR_VIEWPORT_LINES: usize = 14;
-
-/// Frame ticks between two background Workflow snapshot reads.
-///
-/// The composition root wakes this reducer every 16ms, so gating the read on
-/// `mascot_tick % 10` ran a daemon round trip roughly six times a second for as
-/// long as a Workflow tab stayed selected — the per-frame inventory flood #551
-/// removed from the session and decision lanes, left behind on this one. It
-/// also kept `loading` set most of the time, which is what made the header
-/// flicker and, until the guard moved, swallowed Ctrl+S. Counting from the
-/// *completion* of the previous read keeps the lane single-flight and puts its
-/// steady cadence in the same one-second band as the resident lanes.
-const WORKFLOW_SNAPSHOT_TICKS: u64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleEditor {
@@ -461,65 +447,6 @@ fn profile_for(model: DefaultModel) -> AgentProfileId {
     AgentProfileId::new(model.profile_id()).expect("vocabulary profile ID is canonical")
 }
 
-/// Note editor で現在表示・編集している section。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoteSection {
-    Note,
-    Todos,
-    Decisions,
-}
-
-/// Target-local scratchpad の overlay state。
-///
-/// 保存前の値も含め TUI が所有する。port の失敗は [`error`](Self::error) にだけ
-/// 投影するので、利用者が入力した内容は失われない。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoteEditor {
-    target: Target,
-    scratchpad: Scratchpad,
-    section: NoteSection,
-    draft: String,
-    error: Option<SafeError>,
-}
-
-impl NoteEditor {
-    fn loading(target: Target) -> Self {
-        Self {
-            target,
-            scratchpad: Scratchpad::default(),
-            section: NoteSection::Note,
-            draft: String::new(),
-            error: None,
-        }
-    }
-
-    /// Overlay が対象とする stable identity。
-    #[must_use]
-    pub const fn target(&self) -> Target {
-        self.target
-    }
-    /// 現在の表示・編集値。
-    #[must_use]
-    pub fn scratchpad(&self) -> &Scratchpad {
-        &self.scratchpad
-    }
-    /// 選択された section。
-    #[must_use]
-    pub const fn section(&self) -> NoteSection {
-        self.section
-    }
-    /// todo / decision 追加用、または note の編集値。
-    #[must_use]
-    pub fn draft(&self) -> &str {
-        &self.draft
-    }
-    /// port が分類した安全なエラー。
-    #[must_use]
-    pub fn error(&self) -> Option<&SafeError> {
-        self.error.as_ref()
-    }
-}
-
 /// One editable environment variable. Values intentionally remain inside the
 /// settings port and TUI-local state; they are never placed in a notice/error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -544,8 +471,31 @@ pub struct EnvironmentEditor {
     saving: bool,
 }
 
+/// Last observed inbox, unread markers, and completions still awaiting an
+/// observation. The process deck carries this bounded state across workspaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionSnapshot {
+    decisions: Vec<UserDecision>,
+    answers: Vec<UserDecision>,
+    unread: BTreeSet<UserDecisionId>,
+    completions: BTreeMap<UserDecisionId, DecisionCompletion>,
+}
+
+/// A daemon-confirmed transition that an in-flight inbox read may predate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecisionCompletion {
+    Resolved,
+    Discarded,
+}
+
 /// Local navigation and draft state for a durable user decision.  The durable
 /// record itself remains daemon-owned; dismissing this state never mutates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavedAnswerMode {
+    View,
+    ConfirmDiscard,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionEditor {
     decision: UserDecision,
@@ -556,7 +506,9 @@ pub struct DecisionEditor {
     input_comment: bool,
     comment: String,
     confirmation: Option<UserDecisionAnswer>,
-    /// Explicit text viewport offset. `None` follows the active automatic anchor.
+    saved_answer_mode: SavedAnswerMode,
+    /// First visible content row. `None` follows the active automatic anchor.
+    /// Presentation resolves paging against the actual rendered viewport.
     scroll_offset: Option<usize>,
     /// Whether automatic scrolling follows the freeform draft instead.
     follow_freeform: bool,
@@ -568,17 +520,19 @@ impl DecisionEditor {
     fn new(decision: UserDecision) -> Self {
         let scroll_offset =
             (!decision.context.is_empty() || decision.recommendation.is_some()).then_some(0);
+        let input_freeform = decision.options.is_empty() && decision.allow_freeform;
         Self {
             decision,
             selected_option: 0,
             checked_options: BTreeSet::new(),
             context_column: 0,
-            input_freeform: false,
+            input_freeform,
             input_comment: false,
             comment: String::new(),
             confirmation: None,
+            saved_answer_mode: SavedAnswerMode::View,
             scroll_offset,
-            follow_freeform: false,
+            follow_freeform: input_freeform,
             freeform: String::new(),
             error: None,
         }
@@ -606,6 +560,10 @@ impl DecisionEditor {
     #[must_use]
     pub fn confirmation(&self) -> Option<&UserDecisionAnswer> {
         self.confirmation.as_ref()
+    }
+    #[must_use]
+    pub const fn discard_confirmation(&self) -> bool {
+        matches!(self.saved_answer_mode, SavedAnswerMode::ConfirmDiscard)
     }
     #[must_use]
     pub fn decision(&self) -> &UserDecision {
@@ -637,11 +595,30 @@ impl DecisionEditor {
 /// editor.  Returning from the editor keeps the list available for re-display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionOverlayState {
+    show_answers: bool,
     selected: usize,
     editor: Option<DecisionEditor>,
+    requested: Option<UserDecisionId>,
+    error: Option<&'static str>,
+    /// Keep the inbox identity across missing or delayed observations.
+    exact: Option<UserDecisionId>,
 }
 
 impl DecisionOverlayState {
+    #[must_use]
+    pub const fn show_answers(&self) -> bool {
+        self.show_answers
+    }
+    #[must_use]
+    pub const fn is_loading(&self) -> bool {
+        self.requested.is_some()
+    }
+
+    #[must_use]
+    pub const fn request_error(&self) -> Option<&'static str> {
+        self.error
+    }
+
     #[must_use]
     pub const fn selected(&self) -> usize {
         self.selected
@@ -1168,7 +1145,7 @@ pub struct AppState {
     /// Home's right-anchored Director mode drawer.
     director_drawer_open: bool,
     /// Explicit screen inside the Director shell. Closing the drawer preserves
-    /// this route so reopening returns to the same stable Work Run context.
+    /// this route so reopening returns to the same conversation.
     director_route: DirectorRoute,
     /// Home's bottom-anchored workspace-root generic terminal drawer. It is
     /// independent from Director and preserves the managed Home state beneath
@@ -1184,20 +1161,21 @@ pub struct AppState {
     /// availability is injected with [`AvailableModels`]; opening and moving
     /// this picker performs no daemon work.
     director_new: DirectorNew,
-    /// Goal composer source. It is populated only in goal-driven mode and is
-    /// moved into one daemon launch effect on confirmation.
-    director_goal: String,
     /// One root launch submitted from the picker. It remains fenced until the
     /// shell reports the matching completion, so repeated Enter cannot mint a
     /// second operation while the first request is in flight.
     director_launching: Option<OperationId>,
     note_editor: Option<NoteEditor>,
+    saved_notes: Option<(SessionId, Scratchpad)>,
+    saved_note_at: Option<DateTime<Utc>>,
+    note_revision: u64,
     environment_editor: Option<EnvironmentEditor>,
     role_editor: Option<RoleEditor>,
-    workflows: std::collections::BTreeMap<SessionId, super::workflow::WorkflowPanel>,
     daemon_control: DaemonControlState,
     decisions: Vec<UserDecision>,
+    decision_answers: Vec<UserDecision>,
     unread_decisions: std::collections::BTreeSet<UserDecisionId>,
+    decision_completions: BTreeMap<UserDecisionId, DecisionCompletion>,
     decision_overlay: Option<DecisionOverlayState>,
     /// The visible Pull Request modal. It exists exactly while
     /// [`Overlay::Prs`] is the foreground overlay; an inventory request that has
@@ -1209,6 +1187,10 @@ pub struct AppState {
     /// it. The reducer keeps it only so the returning snapshot can open the
     /// modal on the target the user actually asked for.
     pr_request: Option<Target>,
+    /// Exact inbox destination until the user changes or acts on its selection.
+    pr_focus: Option<(Target, PrIdentity)>,
+    /// The next new inventory must not announce a cancelled inbox visit.
+    pr_cancelled: BTreeSet<Target>,
     cleanup_queue: Option<CleanupQueueState>,
     remove_queue: Option<RemoveQueueState>,
     preview_overlay: Option<PreviewOverlay>,
@@ -1221,9 +1203,13 @@ pub struct AppState {
     agent_launch_error: Option<Notice>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
+    /// Workspace-local display preference; daemon lifecycle order is unchanged.
+    session_order_revision: u64,
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
     /// authoritative な identity は [`sessions`](Self::sessions) が持つ。
     session_names: Vec<String>,
+    favorite_sessions: std::collections::BTreeSet<SessionId>,
+    session_favorites_revision: u64,
     /// Per-session lifecycle by stable identity, used to gate actions by
     /// capability (attach only when `can_use`). A session absent here is treated
     /// as `Available`, so pre-lifecycle callers keep their behaviour.
@@ -1275,8 +1261,6 @@ pub struct AppState {
     available_models: AvailableModels,
     /// The configured provider a Closeup `agent` without `-m` launches.
     default_model: DefaultModel,
-    /// Compatibility defaults to the historical conversation picker.
-    work_mode: WorkMode,
     ctrl_c_grace: bool,
     /// Focus of the exit prompt's three buttons. Opening the overlay resets it
     /// to [`ExitChoice::Quit`], so the historical `Ctrl-Q` + `Enter` still ends
@@ -1320,58 +1304,13 @@ pub enum DirectorNew {
     Empty,
 }
 
-/// Parent restored by the Director-local back command from a Console.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DirectorConsoleParent {
-    Organization,
-    RunOverview(SupervisorRunId),
-}
-
 /// Explicit Director screen hierarchy. Transient Start/confirmation states are
 /// layered over one of these retained routes and return to it on cancellation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DirectorRoute {
     #[default]
     Organization,
-    WorkRuns,
-    RunOverview(SupervisorRunId),
-    Console(DirectorConsoleParent),
-}
-
-impl DirectorRoute {
-    /// Primary Director surface for one workspace interaction model.
-    ///
-    /// Classic work starts from the workspace organization, while goal-driven
-    /// work starts from its durable Work Run inventory. Retained routes still
-    /// win when the configured mode has not changed.
-    #[must_use]
-    const fn landing_for(mode: WorkMode) -> Self {
-        match mode {
-            WorkMode::Classic => Self::Organization,
-            WorkMode::GoalDriven => Self::WorkRuns,
-        }
-    }
-
-    /// Whether this retained route belongs to the selected workflow.
-    ///
-    /// Classic conversations and goal-driven Work Runs are separate screen
-    /// trees. A workflow switch keeps daemon-owned work alive, but never
-    /// exposes the previous workflow's route in the newly selected tree.
-    #[must_use]
-    const fn belongs_to(self, mode: WorkMode) -> bool {
-        matches!(
-            (mode, self),
-            (
-                WorkMode::Classic,
-                Self::Organization | Self::Console(DirectorConsoleParent::Organization)
-            ) | (
-                WorkMode::GoalDriven,
-                Self::WorkRuns
-                    | Self::RunOverview(_)
-                    | Self::Console(DirectorConsoleParent::RunOverview(_))
-            )
-        )
-    }
+    Console,
 }
 
 impl ExitChoice {
@@ -1412,6 +1351,12 @@ impl ExitChoice {
 }
 
 impl AppState {
+    /// Whether this exact session is a user favorite.
+    #[must_use]
+    pub fn is_favorite(&self, session: SessionId) -> bool {
+        self.favorite_sessions.contains(&session)
+    }
+
     /// The first managed session is selected/active when present. An empty Home
     /// starts neutral instead of implicitly selecting the new-session action.
     #[must_use]
@@ -1429,18 +1374,23 @@ impl AppState {
             root_terminal_full_height: false,
             workspace_drawer_focus: None,
             director_new: DirectorNew::Idle,
-            director_goal: String::new(),
             director_launching: None,
             note_editor: None,
+            saved_notes: None,
+            saved_note_at: None,
+            note_revision: 0,
             environment_editor: None,
             role_editor: None,
-            workflows: std::collections::BTreeMap::new(),
             daemon_control: DaemonControlState::default(),
             decisions: Vec::new(),
+            decision_answers: Vec::new(),
             unread_decisions: std::collections::BTreeSet::new(),
+            decision_completions: BTreeMap::new(),
             decision_overlay: None,
             pr_overlay: None,
             pr_request: None,
+            pr_focus: None,
+            pr_cancelled: BTreeSet::new(),
             cleanup_queue: None,
             remove_queue: None,
             preview_overlay: None,
@@ -1451,7 +1401,10 @@ impl AppState {
             agent_launch_error: None,
             workspace,
             sessions,
+            session_order_revision: 0,
             session_names: Vec::new(),
+            favorite_sessions: std::collections::BTreeSet::new(),
+            session_favorites_revision: 0,
             session_lifecycles: BTreeMap::new(),
             session_roles: BTreeMap::new(),
             prs: BTreeMap::new(),
@@ -1479,7 +1432,6 @@ impl AppState {
             closeup_action_forced: false,
             available_models: AvailableModels::all(),
             default_model: DefaultModel::default(),
-            work_mode: WorkMode::default(),
             ctrl_c_grace: false,
             exit_choice: ExitChoice::Quit,
             force_remove_confirmation: None,
@@ -1553,6 +1505,23 @@ impl AppState {
     pub const fn mascot_tick(&self) -> u64 {
         self.mascot_tick
     }
+    /// The last successful note save, until the next authoritative snapshot.
+    #[must_use]
+    pub fn saved_notes(&self) -> Option<&(SessionId, Scratchpad)> {
+        self.saved_notes.as_ref()
+    }
+
+    /// Revision of the save acknowledgement used by the session-row cache.
+    #[must_use]
+    pub const fn note_revision(&self) -> u64 {
+        self.note_revision
+    }
+
+    #[must_use]
+    pub const fn saved_note_at(&self) -> Option<DateTime<Utc>> {
+        self.saved_note_at
+    }
+
     /// Open note editor, including unsaved values after a save failure.
     #[must_use]
     pub fn note_editor(&self) -> Option<&NoteEditor> {
@@ -1591,24 +1560,35 @@ impl AppState {
         self.role_editor.as_ref()
     }
 
-    #[must_use]
-    pub fn workflow_panel(&self, session: SessionId) -> Option<&super::workflow::WorkflowPanel> {
-        self.workflows.get(&session)
-    }
     /// Current selection, pending action, and safe result in the daemon modal.
     #[must_use]
     pub const fn daemon_control(&self) -> &DaemonControlState {
         &self.daemon_control
     }
-    /// Pending decisions from the current workspace only.
+    /// Pending decisions across the daemon's workspaces.
     #[must_use]
     pub fn decisions(&self) -> &[UserDecision] {
         &self.decisions
+    }
+    /// Saved answers still awaiting the requesting agent's receipt.
+    #[must_use]
+    pub fn decision_answers(&self) -> &[UserDecision] {
+        &self.decision_answers
     }
     /// Pending decisions the user has not opened from the notice centre yet.
     #[must_use]
     pub fn unread_decision_ids(&self) -> &std::collections::BTreeSet<UserDecisionId> {
         &self.unread_decisions
+    }
+    /// Capture only when leaving a workspace, never on the frame tick.
+    #[must_use]
+    pub fn decision_snapshot(&self) -> DecisionSnapshot {
+        DecisionSnapshot {
+            decisions: self.decisions.clone(),
+            answers: self.decision_answers.clone(),
+            unread: self.unread_decisions.clone(),
+            completions: self.decision_completions.clone(),
+        }
     }
     /// Open decision list/editor state, if its overlay is visible.
     #[must_use]
@@ -1624,6 +1604,7 @@ impl AppState {
     /// A request is invisible and owns no input; the modal appears only once
     /// the daemon's snapshot proves there is something to show.
     #[must_use]
+    #[cfg(test)]
     pub const fn pr_request(&self) -> Option<Target> {
         self.pr_request
     }
@@ -1662,6 +1643,29 @@ impl AppState {
     pub fn sessions(&self) -> &[SessionId] {
         &self.sessions
     }
+    /// Generation of manual session-order changes, used by the row cache.
+    #[must_use]
+    pub const fn session_order_revision(&self) -> u64 {
+        self.session_order_revision
+    }
+    /// Generation of favorite changes used by the interactive session-row cache.
+    #[must_use]
+    pub const fn session_favorites_revision(&self) -> u64 {
+        self.session_favorites_revision
+    }
+    /// Apply the local display preference to a fresh authoritative membership.
+    /// Existing identities keep their positions; newly observed sessions append
+    /// in snapshot order. Before the first reorder, follow snapshot order.
+    pub fn order_session_snapshot(&self, sessions: &mut [SessionId]) {
+        if self.session_order_revision != 0 {
+            sessions.sort_by_key(|id| {
+                self.sessions
+                    .iter()
+                    .position(|current| current == id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+    }
     /// 表示中 session の name（同名 validation 用の advisory copy）。
     #[must_use]
     pub fn session_names(&self) -> &[String] {
@@ -1691,6 +1695,7 @@ impl AppState {
             .is_some_and(|until| self.mascot_tick <= *until)
     }
     #[must_use]
+    #[cfg(test)]
     pub fn role_catalog(&self) -> &SessionRoleCatalog {
         &self.role_catalog
     }
@@ -1808,40 +1813,12 @@ impl AppState {
     pub const fn default_model(&self) -> DefaultModel {
         self.default_model
     }
-    /// Configured Director interaction model.
-    #[must_use]
-    pub const fn work_mode(&self) -> WorkMode {
-        self.work_mode
-    }
-    /// Current goal composer text. Empty in classic mode and after admission.
-    #[must_use]
-    pub fn director_goal(&self) -> &str {
-        &self.director_goal
-    }
     /// Apply the observed CLI availability and the configured default provider.
     /// The composition root supplies both, so this usecase performs no PATH or
     /// settings IO of its own.
     pub const fn set_agent_models(&mut self, available: AvailableModels, default: DefaultModel) {
         self.available_models = available;
         self.default_model = default;
-    }
-
-    /// Apply the effective workspace interaction setting.
-    ///
-    /// A real mode transition selects that workflow's primary Director
-    /// surface. Re-applying the same effective setting preserves the retained
-    /// route used when the drawer is closed and reopened. Returning to classic
-    /// also drops a draft that was never submitted, but never touches a live
-    /// Agent or Work Run.
-    pub fn set_work_mode(&mut self, mode: WorkMode) {
-        if self.work_mode == mode {
-            return;
-        }
-        self.work_mode = mode;
-        self.director_route = DirectorRoute::landing_for(mode);
-        if mode == WorkMode::Classic {
-            self.director_goal.clear();
-        }
     }
 
     /// Convert the managed active session to the target vocabulary used at
@@ -1861,8 +1838,7 @@ impl AppState {
         self.preview_recent
             .iter()
             .find(|(recorded, _)| *recorded == target)
-            .map(|(_, files)| files.clone())
-            .unwrap_or_default()
+            .map_or_default(|(_, files)| files.clone())
     }
 
     /// Replace one target's recently opened preview files.
@@ -1879,7 +1855,7 @@ impl AppState {
         }
     }
 
-    fn file_preview_target(&self) -> Option<Target> {
+    pub(crate) fn file_preview_target(&self) -> Option<Target> {
         let session = match self.route {
             Route::Home(HomeMode::Switch) => match self.selected {
                 Selection::Target(Target::Session(session)) => session,
@@ -1921,111 +1897,13 @@ impl AppState {
     }
 
     /// Move the cursor directly to `selection` when it names a live row.
-    /// [`sidebar_selection_at`](Self::sidebar_selection_at) only ever resolves a
+    /// The presentation's sidebar layout only resolves a
     /// row that exists, but the reducer stays defensive so a stale pointer event
     /// can never point the cursor at a session that has since disappeared.
     fn select_row(&mut self, selection: Selection) {
         if self.rows().contains(&selection) {
             self.selected = selection;
         }
-    }
-
-    /// Resolve a 0-based terminal cell to the Home sidebar row it lands on, using
-    /// the same viewport geometry the frame is drawn with. Returns `None` for the
-    /// header, the mascot sidecar, the footer, or a click
-    /// outside the sidebar body.
-    ///
-    /// This is the controller-owned hit-test the pointer reducer shares with the
-    /// `home_left_pane` render: it mirrors the chrome rows, the left/right split,
-    /// the foot-of-sidebar mascot reservation, and the scroll offset so a click
-    /// always lands on the row the user sees. It reads the last terminal geometry
-    /// from [`AppState::size`], so a pointer event before the first resize is
-    /// inert.
-    fn sidebar_selection_at(&self, column: u16, row: u16) -> Option<Selection> {
-        self.sidebar_hit_at(column, row).map(|hit| hit.selection)
-    }
-
-    fn sidebar_hit_at(&self, column: u16, row: u16) -> Option<SidebarHit> {
-        let (raw_width, raw_height) = self.size?;
-        let width = if raw_width == 0 {
-            80
-        } else {
-            usize::from(raw_width)
-        };
-        let height = if raw_height == 0 {
-            24
-        } else {
-            usize::from(raw_height)
-        };
-        let left = SIDEBAR_LEFT_WIDTH.min(width.saturating_sub(2));
-        if usize::from(column) >= left
-            || usize::from(row) < SIDEBAR_CHROME_ROWS
-            || height <= SIDEBAR_CHROME_ROWS
-        {
-            return None;
-        }
-        let rows = self.rows();
-        let body_height = height - SIDEBAR_CHROME_ROWS;
-        if body_height == 1 {
-            return (usize::from(row) == SIDEBAR_CHROME_ROWS).then(|| SidebarHit {
-                selection: rows[0],
-                line: 0,
-                left,
-            });
-        }
-        let body_capacity = body_height - 1;
-        let content_capacity =
-            body_capacity.saturating_sub(sidebar_mascot_rows(left, body_capacity));
-        let clicked = usize::from(row) - SIDEBAR_CHROME_ROWS;
-        if clicked >= content_capacity {
-            return None;
-        }
-        let selected_index = rows
-            .iter()
-            .position(|entry| *entry == self.selected)
-            .unwrap_or(0);
-        let start = sidebar_viewport_start(&rows, selected_index, content_capacity);
-        let mut offset = 0;
-        for entry in &rows[start..] {
-            let lines = sidebar_row_content_lines(*entry);
-            if offset + lines > content_capacity {
-                break;
-            }
-            if (offset..offset + lines).contains(&clicked) {
-                return Some(SidebarHit {
-                    selection: *entry,
-                    line: clicked - offset,
-                    left,
-                });
-            }
-            offset += lines;
-        }
-        None
-    }
-
-    /// Resolve only the visible `<PR icon> <count>` cells at the right edge of
-    /// a session metadata row. The count and width mirror the view's badge.
-    fn sidebar_pr_at(&self, column: u16, row: u16) -> Option<SessionId> {
-        let hit = self.sidebar_hit_at(column, row)?;
-        let Selection::Target(Target::Session(session)) = hit.selection else {
-            return None;
-        };
-        if hit.line != 1 {
-            return None;
-        }
-        let visible = self
-            .session_prs(session)?
-            .iter()
-            .filter(|pr| pr.is_visible())
-            .count();
-        if visible == 0 {
-            return None;
-        }
-        let badge_width = 2 + visible.to_string().len();
-        let start = hit.left.saturating_sub(badge_width);
-        (start..hit.left)
-            .contains(&usize::from(column))
-            .then_some(session)
     }
 
     fn reconcile_sessions(&mut self, previous_sessions: &[SessionId]) {
@@ -2066,13 +1944,15 @@ impl AppState {
     }
 }
 
+/// Semantic target resolved against the Home frame that was actually drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SidebarHit {
-    selection: Selection,
-    /// Zero-based line inside the logical sidebar row.
-    line: usize,
-    /// Width of the rendered left pane.
-    left: usize,
+pub enum SidebarPointerTarget {
+    /// Select a visible row, or activate it on a second press.
+    Row(Selection),
+    /// Open the visible pull-request badge for this stable session.
+    PullRequests(SessionId),
+    /// Open the visible generated-file action for this stable session.
+    Artifacts(SessionId),
 }
 
 /// Choose a deterministic surviving row at the removed session's former
@@ -2106,71 +1986,9 @@ pub(crate) const SIDEBAR_CHROME_ROWS: usize = 2;
 /// Desired Home sidebar left-pane width. The split clamps it to leave the right
 /// pane at least one column. Mirrors `views::workspace`'s `LEFT_WIDTH`.
 pub(crate) const SIDEBAR_LEFT_WIDTH: usize = 36;
-/// Lines one session row occupies: its summary, its change history, and its
-/// Agent states. The count never varies with how many Agents a session has —
-/// this hit-test only knows runtime-local phases, while the view also folds in
-/// the daemon Agent inventory, so an Agent-dependent height would drift by a
-/// row and land clicks on the wrong session. Mirrors `views::workspace`'s
-/// `SESSION_ROW_LINES`, which asserts the two agree at compile time.
+/// Established session-row footprint: summary, change history, and Agent states.
+/// Presentation resolves pointer targets using its actual rendered layout.
 pub(crate) const SIDEBAR_SESSION_ROW_LINES: usize = 3;
-/// Rows the foot-of-sidebar mascot reserves in the controller Home: three rabbit
-/// lines and one trailing gap. The controller frame never renders a speech
-/// bubble, so the reservation is constant whenever the mascot is shown.
-pub(crate) const SIDEBAR_MASCOT_ROWS: usize = 4;
-/// Minimum left-pane width that fits the mascot rabbit (its nine-cell art plus a
-/// one-column indent). Below this the sidebar drops the mascot for list space.
-pub(crate) const SIDEBAR_MASCOT_MIN_LEFT: usize = 10;
-
-/// Rows the mascot sidecar reserves for a given left-pane width and body
-/// capacity, mirroring `home_left_pane`'s reservation. The rabbit shows only
-/// when the pane is wide enough for its art and the body has room for the
-/// reservation plus two list rows.
-fn sidebar_mascot_rows(left: usize, body_capacity: usize) -> usize {
-    if left >= SIDEBAR_MASCOT_MIN_LEFT && body_capacity >= SIDEBAR_MASCOT_ROWS + 2 {
-        SIDEBAR_MASCOT_ROWS
-    } else {
-        0
-    }
-}
-
-/// Scroll rows the sidebar viewport uses to weight one row: a session spans its
-/// summary, change-history, and Agent lines, and the `+ new session` action is a
-/// single line.
-fn sidebar_row_height(row: Selection) -> usize {
-    match row {
-        Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
-        // Root is not a Home row. Treat a stale/private synthetic value as one
-        // line so geometry remains total without reintroducing a divider.
-        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
-    }
-}
-
-/// Body lines a row actually draws: a session identity row carries a metadata
-/// row and an Agent row, while the action row is a single line.
-fn sidebar_row_content_lines(row: Selection) -> usize {
-    match row {
-        Selection::Target(Target::Session(_)) => SIDEBAR_SESSION_ROW_LINES,
-        Selection::Idle | Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
-    }
-}
-
-/// First visible row so the selected row stays in view, mirroring the render's
-/// scroll math: advance the viewport start until the selected row and everything
-/// above it fits within `capacity`.
-fn sidebar_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> usize {
-    let mut start = 0;
-    while start < selected
-        && rows[start..=selected]
-            .iter()
-            .map(|row| sidebar_row_height(*row))
-            .sum::<usize>()
-            > capacity
-    {
-        start += 1;
-    }
-    start
-}
-
 /// terminal adapter が将来投影する入力語彙。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppKey {
@@ -2233,14 +2051,10 @@ pub enum AppKey {
     OpenRootTerminal,
     /// Open the Director mode drawer and its explicit New CLI picker.
     OpenDirectorNew,
-    /// Open the classic Director Organization screen.
+    /// Open the Director Organization screen.
     OpenDirectorOrganization,
-    /// Open the Work Run list directly.
-    OpenDirectorWorkRuns,
-    /// Open one stable Work Run observation.
-    OpenDirectorRunOverview(SupervisorRunId),
     /// Open the selected root Director Agent from its retained parent.
-    OpenDirectorConsole(DirectorConsoleParent),
+    OpenDirectorConsole,
     /// Move one level up inside Director without closing the drawer.
     DirectorBack,
     /// workspace scope overlay を開く。
@@ -2255,10 +2069,16 @@ pub enum AppKey {
     OpenEnvironment,
     /// Open the active target's Pull Request list overlay (`Ctrl-O p`).
     OpenPrs,
+    /// Open the exact PR selected in the cross-workspace inbox.
+    OpenPullRequest(PrIdentity),
     /// Open the selected session's file preview overlay.
     OpenPreview,
-    /// Open the current workspace's durable pending decision list.
+    /// Open the selected session's artifacts, or the workspace-wide inventory.
+    OpenArtifacts,
+    /// Open the daemon's durable pending decision list.
     OpenDecisions,
+    /// Refresh and open the exact pending question selected in the inbox.
+    OpenDecision(UserDecisionId),
     /// Move within the pending list or current decision options.
     DecisionPrevious,
     /// Move within the pending list or current decision options.
@@ -2310,6 +2130,9 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
     }
     match key.code {
         KeyCode::Char('x' | 'X') if is_control_and_shift(key.modifiers) => Some(AppKey::CtrlX),
+        KeyCode::Char('\u{13}') if !key.modifiers.shift && !key.modifiers.alt => {
+            Some(AppKey::SaveRoles)
+        }
         KeyCode::Char('s')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
@@ -2368,12 +2191,8 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    WorkflowEdit {
-        session: SessionId,
-        edit: super::workflow::WorkflowEdit,
-    },
-    /// Input captured by the selected native workflow pane, never by a PTY.
-    WorkflowInput { session: SessionId, key: AppKey },
+    /// Open an exact artifact selected by the process search picker.
+    OpenArtifact { target: Target, path: String },
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
     /// The runtime's current live-pane availability, sampled on every event.
@@ -2436,7 +2255,6 @@ pub enum AppEvent {
     /// fence against stale or replayed completions.
     DirectorLaunchFinished {
         operation: OperationId,
-        supervisor_run_id: Option<SupervisorRunId>,
         succeeded: bool,
     },
     /// One terminal open request failed after it left the reducer. The message
@@ -2460,16 +2278,15 @@ pub enum AppEvent {
     /// workspace drawers. Geometry and z-order stay presentation concerns; the
     /// reducer owns the focus invariant shared with keyboard toggles.
     WorkspaceDrawerFocused(WorkspaceDrawerFocus),
-    /// A pointer gesture over the Home sidebar, in 0-based terminal cells. The
-    /// reducer resolves the row with the same viewport geometry the frame draws
-    /// and either moves the cursor or, for two presses on the same stable
-    /// session identity within 400ms, activates that session. A click outside
-    /// the sidebar body clears the pending press and is otherwise inert.
-    /// Terminal-pane drag and copy stay a shell +
-    /// `TerminalSession` concern and never reach this vocabulary.
+    /// A page move resolved against the decision's rendered content and size.
+    DecisionScrolled {
+        decision_id: UserDecisionId,
+        offset: usize,
+    },
+    /// A sidebar press resolved by the presentation's rendered layout. A miss
+    /// clears the pending double click. Stable identities remain fenced here.
     Pointer {
-        column: u16,
-        row: u16,
+        target: Option<SidebarPointerTarget>,
         at: std::time::Duration,
     },
     /// Time elapsed since the last *user* interaction, measured by the shell on a
@@ -2493,6 +2310,11 @@ pub enum AppEvent {
     /// deck uses this when returning to a workspace whose controller was torn
     /// down during a project switch.
     FocusSession(SessionId),
+    /// Restore the process deck's manual display order on project re-entry.
+    RestoreSessionOrder(Vec<SessionId>),
+    /// Carry the daemon-wide decision observation through a project switch
+    /// without treating its existing questions as newly arrived.
+    RestoreDecisions(DecisionSnapshot),
     /// Open one stable session without relying on list position. The process
     /// deck uses this after a Garden visit switched to another workspace.
     VisitSession(SessionId),
@@ -2544,13 +2366,8 @@ impl From<RuntimeEvent<BackendEvent>> for AppEvent {
 /// backend が TUI-local projection として返す event。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendEvent {
-    Workflow {
-        job: super::workflow::WorkflowJob,
-        result: Result<
-            Box<usagi_core::domain::workflow::WorkflowSnapshot>,
-            super::workflow::WorkflowError,
-        >,
-    },
+    /// Persisted workspace-local session favorites.
+    SessionFavorites(std::collections::BTreeSet<SessionId>),
     /// stable identity で表した session snapshot。
     Sessions(Vec<SessionId>),
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
@@ -2586,11 +2403,29 @@ pub enum BackendEvent {
     Feedback(Feedback),
     /// Scratchpad data returned by its persistence owner.
     NotesLoaded {
+        request_id: RequestId,
         target: Target,
         scratchpad: Scratchpad,
     },
     /// A safe scratchpad read/save failure.
-    NotesError { target: Target, error: SafeError },
+    NotesError {
+        request_id: RequestId,
+        target: Target,
+        error: SafeError,
+    },
+    /// A successful note write, fenced separately from reads.
+    NotesSaved {
+        request_id: RequestId,
+        target: Target,
+        scratchpad: Scratchpad,
+        updated_at: Option<DateTime<Utc>>,
+    },
+    /// A workspace snapshot has caught up with a saved memo.
+    SessionNoteObserved {
+        session: SessionId,
+        note: Option<String>,
+        updated_at: Option<DateTime<Utc>>,
+    },
     /// Environment bindings returned by the settings owner: the edited scope's
     /// own bindings, plus the global ones a workspace inherits (empty when the
     /// edited scope *is* global).
@@ -2605,7 +2440,10 @@ pub enum BackendEvent {
         inherited: Vec<EnvironmentEntry>,
     },
     /// A safe environment read/save failure.
-    EnvironmentError { scope: EnvScope, error: SafeError },
+    EnvironmentError {
+        scope: EnvScope,
+        error: SafeError,
+    },
     RolesLoaded {
         scope: RoleEditorScope,
         source: String,
@@ -2614,13 +2452,20 @@ pub enum BackendEvent {
         scope: RoleEditorScope,
         error: SafeError,
     },
-    /// Atomic daemon snapshot; records outside `workspace` are rejected by the reducer.
+    /// Atomic daemon-wide snapshot, fenced to the observing workspace composition.
     Decisions {
         workspace: WorkspaceId,
         decisions: Vec<UserDecision>,
     },
+    DecisionsUnavailable {
+        workspace: WorkspaceId,
+    },
     /// Daemon confirmation after resolve.  The item remains visible until this arrives.
     DecisionResolved {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+    },
+    DecisionDiscarded {
         workspace: WorkspaceId,
         decision_id: UserDecisionId,
     },
@@ -2639,7 +2484,10 @@ pub enum BackendEvent {
         prs: Vec<PrEntry>,
     },
     /// A safe Pull Request read failure.
-    PullRequestsError { target: Target, error: SafeError },
+    PullRequestsError {
+        target: Target,
+        error: SafeError,
+    },
     /// Repository file candidates or one selected file returned by the overlay
     /// data owner. `path: None` carries the finder candidates; `Some` carries
     /// that file's safe UTF-8 lines.
@@ -2666,6 +2514,14 @@ pub enum BackendEvent {
         filter: PreviewFileFilter,
         error: SafeError,
     },
+    /// Native viewer result, fenced independently from finder/document reads.
+    ArtifactOpenFinished {
+        target: Target,
+        request_id: RequestId,
+        path: String,
+        filter: PreviewFileFilter,
+        result: Result<ArtifactOpenOutcome, SafeError>,
+    },
 }
 
 /// 非同期 request の成否。
@@ -2691,9 +2547,10 @@ pub enum TabDirection {
 /// reducer が要求する外部操作。daemon wire 型への変換は adapter 側の責務。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    Workflow(super::workflow::WorkflowJob),
-    /// Select the session's non-terminal workflow tab without launching an Agent.
-    OpenWorkflow {
+    /// Read workspace-local favorite preferences.
+    LoadSessionFavorites,
+    /// Toggle one exact session under the preference store lock.
+    ToggleSessionFavorite {
         session: SessionId,
     },
     /// Ask the pane owner to move its stable tab selection without exposing tab
@@ -2726,10 +2583,12 @@ pub enum Effect {
     },
     /// Read an active target's scratchpad through the existing persistence owner.
     LoadNotes {
+        request_id: RequestId,
         target: Target,
     },
     /// Save an edited scratchpad through the existing persistence owner.
     SaveNotes {
+        request_id: RequestId,
         target: Target,
         scratchpad: Scratchpad,
     },
@@ -2759,6 +2618,11 @@ pub enum Effect {
         decision_id: UserDecisionId,
         answer: UserDecisionAnswer,
     },
+    /// Discard a saved answer only after explicit human confirmation.
+    DiscardDecision {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+    },
     /// target の terminal を開くか再利用する。
     OpenTerminal {
         target: Target,
@@ -2780,15 +2644,6 @@ pub enum Effect {
         session: Option<SessionId>,
         operation_id: OperationId,
         profile: Option<AgentProfileId>,
-    },
-    /// Start a workspace-root Director with one bounded goal and the daemon's
-    /// autonomous delivery contract. Classic Agent launch remains a separate
-    /// effect and request path.
-    LaunchGoal {
-        workspace: WorkspaceId,
-        operation_id: OperationId,
-        profile: Option<AgentProfileId>,
-        goal: String,
     },
     /// Explicit provider-native resume for an interrupted session. The daemon
     /// validates retained metadata and creates a new PTY/runtime.
@@ -2818,28 +2673,6 @@ pub enum Effect {
         /// Whether the exact target is a diagnosed integrity orphan whose
         /// unregistered files and unmerged commits may be discarded.
         purge_orphan: bool,
-    },
-    /// Open a workspace and request the Home snapshot for this exact incarnation.
-    ///
-    /// The identity is deliberately not a name or path: a delayed completion for
-    /// a different workspace must never replace the Home currently being opened.
-    AttachWorkspace {
-        workspace: WorkspaceId,
-    },
-    /// Clone a repository through the backend git port, then register the
-    /// resulting project through its project/registry ports.
-    CloneProject {
-        repository: String,
-        destination: PathBuf,
-        branch: Option<String>,
-        token: PendingToken,
-    },
-    /// Register an already-existing directory through the backend
-    /// project/registry ports.
-    RegisterWorkspace {
-        path: PathBuf,
-        name: String,
-        token: PendingToken,
     },
     /// Detach this TUI client and end the process. The adapter owns the
     /// connection cleanup; this effect intentionally carries no terminal or
@@ -2872,6 +2705,13 @@ pub enum Effect {
     },
     /// Discard pending and in-flight preview work after leaving the overlay.
     CancelPreview,
+    /// Open a selected generated artifact using the platform viewer.
+    OpenArtifact {
+        target: Target,
+        request_id: RequestId,
+        path: String,
+        filter: PreviewFileFilter,
+    },
     /// Open one already-selected Pull Request URL through the browser opener.
     /// URL validation stays with the executor; the reducer forwards the raw URL.
     OpenPullRequest {
@@ -2917,6 +2757,15 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
     if state.overlay.is_some() {
         state.pr_request = None;
     }
+    if state.pr_focus.as_ref().is_some_and(|(target, _)| {
+        state.pr_request != Some(*target)
+            && state
+                .pr_overlay
+                .as_ref()
+                .is_none_or(|overlay| overlay.target() != *target)
+    }) {
+        state.pr_focus = None;
+    }
     // Dropping the preview also ends the scan behind it, like every other way
     // the overlay closes. `take` keeps this to the drop that happens here: the
     // Escape paths have already cleared the overlay and cancelled their own.
@@ -2927,23 +2776,23 @@ fn reconcile_modal_surfaces(state: &mut AppState) -> Vec<Effect> {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // Keep the exhaustive event dispatch in one decision table.
 fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
+    pull_requests::cancel_inbox_wait(state, &event);
     match event {
-        AppEvent::WorkflowEdit { session, edit } => update_workflow_edit(state, session, edit),
+        AppEvent::OpenArtifact { target, path } => open_artifact_path(state, target, path),
         AppEvent::Backend(event) => update_backend_event(state, event),
         AppEvent::Key(key) => {
             state.pending_session_click = None;
             update_key(state, key)
         }
-        AppEvent::WorkflowInput { session, key } => update_workflow_input(state, session, key),
         AppEvent::RetainedPaneActivated(target) => update_retained_pane_activated(state, target),
         AppEvent::LivePaneAvailability(has_live_pane) => {
             update_live_pane_availability(state, has_live_pane)
         }
-        AppEvent::PaneTabAvailability {
-            available: has_pane_tab,
-            error,
-        } => update_pane_tab_availability(state, has_pane_tab, error),
+        AppEvent::PaneTabAvailability { available, error } => {
+            update_pane_tab_availability(state, available, error)
+        }
         AppEvent::TerminalLaunchFailed(error) => {
             state.notice = Some(error.clone());
             if state.overlay.is_none() {
@@ -2968,7 +2817,7 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             }
             Vec::new()
         }
-        AppEvent::Pointer { column, row, at } => update_pointer(state, column, row, at),
+        AppEvent::Pointer { target, at } => update_pointer(state, target, at),
         AppEvent::IdleElapsed(elapsed) => update_idle(state, elapsed),
         AppEvent::GardenClick(click) => update_garden_click(state, click),
         AppEvent::GardenHover { column, row } => {
@@ -2978,6 +2827,8 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::FocusSession(session) => focus_session(state, session),
+        AppEvent::RestoreSessionOrder(order) => restore_session_order(state, &order),
+        AppEvent::RestoreDecisions(snapshot) => decision::restore(state, snapshot),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
             if state.overlay == Some(Overlay::Garden) {
@@ -2999,9 +2850,8 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Tick => update_tick(state),
         AppEvent::DirectorLaunchFinished {
             operation,
-            supervisor_run_id,
             succeeded,
-        } => update_director_launch_finished(state, operation, supervisor_run_id, succeeded),
+        } => update_director_launch_finished(state, operation, succeeded),
         AppEvent::RootTerminalDrawerEmptied => {
             state.root_terminal_drawer_open = false;
             state.root_terminal_full_height = false;
@@ -3015,7 +2865,6 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::DirectorDrawerEmptied => {
             state.director_drawer_open = false;
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             if state.workspace_drawer_focus == Some(WorkspaceDrawerFocus::Director) {
                 state.workspace_drawer_focus = state
                     .root_terminal_drawer_open
@@ -3024,6 +2873,10 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::WorkspaceDrawerFocused(focus) => update_workspace_drawer_focused(state, focus),
+        AppEvent::DecisionScrolled {
+            decision_id,
+            offset,
+        } => decision::scroll(state, decision_id, offset),
         AppEvent::OperationResult(result) => update_operation_result(state, result),
         AppEvent::CarriedCreateOutcome { name, error } => {
             update_carried_create_outcome(state, &name, error)
@@ -3081,35 +2934,6 @@ fn update_retained_pane_activated(state: &mut AppState, target: Target) -> Vec<E
     Vec::new()
 }
 
-fn update_workflow_edit(
-    state: &mut AppState,
-    session: SessionId,
-    edit: super::workflow::WorkflowEdit,
-) -> Vec<Effect> {
-    if state.active != Some(session)
-        || state.overlay.is_some()
-        || state.workspace_drawer_focus.is_some()
-        || state.route != Route::Home(HomeMode::Closeup)
-        || !state.session_can_use(session)
-    {
-        return Vec::new();
-    }
-    if let Some(panel) = state.workflows.get_mut(&session) {
-        match edit {
-            // Reading the history is not editing the draft, so it stays
-            // available while the start form owns the caret.
-            super::workflow::WorkflowEdit::HistoryLatest => panel.show_latest_history(),
-            // The draft edits are exactly what the start form takes the caret
-            // away from.
-            _ if panel.run.is_none() && panel.agent_field.is_some() => {}
-            super::workflow::WorkflowEdit::Start => panel.draft.move_edge(false),
-            super::workflow::WorkflowEdit::End => panel.draft.move_edge(true),
-            super::workflow::WorkflowEdit::Delete => panel.draft.delete_forward(),
-        }
-    }
-    Vec::new()
-}
-
 fn update_live_pane_availability(state: &mut AppState, has_live_pane: bool) -> Vec<Effect> {
     // The runtime samples this level on every event; only an actual edge
     // may move the grace one-shot or the Closeup overlay. A repeated
@@ -3126,6 +2950,7 @@ fn update_live_pane_availability(state: &mut AppState, has_live_pane: bool) -> V
     if matches!(state.route, Route::Home(HomeMode::Closeup))
         && has_live_pane
         && !state.closeup_action_forced
+        && state.overlay == Some(Overlay::Closeup)
     {
         state.overlay = None;
     }
@@ -3137,45 +2962,18 @@ fn update_tick(state: &mut AppState) -> Vec<Effect> {
     state
         .pr_merge_celebrations
         .retain(|_, until| state.mascot_tick <= *until);
-    let tick = state.mascot_tick;
-    if let Some(session) = state.active
-        && state.session_can_use(session)
-        && let Some(panel) = state.workflows.get_mut(&session)
-        && !panel.loading
-        && !panel.submitting
-        && tick >= panel.snapshot_due_tick
-    {
-        panel.loading = true;
-        vec![Effect::Workflow(super::workflow::WorkflowJob {
-            workspace: state.workspace,
-            session,
-            control: None,
-        })]
-    } else {
-        Vec::new()
-    }
+    Vec::new()
 }
 
 fn update_director_launch_finished(
     state: &mut AppState,
     operation: OperationId,
-    supervisor_run_id: Option<SupervisorRunId>,
     succeeded: bool,
 ) -> Vec<Effect> {
     if state.director_launching == Some(operation) {
         state.director_launching = None;
         if succeeded {
-            state.director_route = match (state.work_mode, supervisor_run_id) {
-                (WorkMode::GoalDriven, Some(run)) => DirectorRoute::RunOverview(run),
-                (WorkMode::Classic, None) => {
-                    DirectorRoute::Console(DirectorConsoleParent::Organization)
-                }
-                // The launch belongs to the workflow active when it
-                // was submitted. A later workflow switch keeps the
-                // daemon-owned result alive without crossing the two
-                // Director screen trees.
-                (mode, _) => DirectorRoute::landing_for(mode),
-            };
+            state.director_route = DirectorRoute::Console;
         }
     }
     Vec::new()
@@ -3275,95 +3073,11 @@ fn update_pane_tab_availability(
     Vec::new()
 }
 
-fn update_workflow_input(state: &mut AppState, session: SessionId, key: AppKey) -> Vec<Effect> {
-    if state.active != Some(session)
-        || !state.sessions.contains(&session)
-        || !state.session_can_use(session)
-        || state.overlay.is_some()
-        || state.workspace_drawer_focus().is_some()
-        || state.route != Route::Home(HomeMode::Closeup)
-    {
-        return Vec::new();
-    }
-    let available = state.available_models;
-    let panel = state.workflows.entry(session).or_default();
-    panel.restrict_agents(available);
-    if panel.run.is_none() && panel.agent_field.is_some() {
-        match key {
-            AppKey::Left => {
-                panel.cycle_agent(false, available);
-                return Vec::new();
-            }
-            AppKey::Right => {
-                panel.cycle_agent(true, available);
-                return Vec::new();
-            }
-            // Reading the history is not editing the draft, so the scroll keys
-            // stay live while the start form owns the caret — the same rule
-            // `WorkflowEdit::HistoryLatest` follows, and what the pane's hint and
-            // `document/11-keybindings.md` promise.
-            AppKey::Tab | AppKey::SaveRoles | AppKey::PageUp | AppKey::PageDown => {}
-            _ => return Vec::new(),
-        }
-    }
-    match key {
-        AppKey::Char(character) => panel.draft.insert(&character.to_string()),
-        AppKey::Paste(text) => panel.draft.paste(&text),
-        AppKey::Enter => panel.draft.newline(),
-        AppKey::Backspace => panel.draft.backspace(),
-        AppKey::Left => panel.draft.move_cursor(false),
-        AppKey::Right => panel.draft.move_cursor(true),
-        AppKey::Up => panel.draft.move_vertical(false),
-        AppKey::Down => panel.draft.move_vertical(true),
-        AppKey::Tab => panel.cycle_recipient(),
-        AppKey::PageUp => panel.scroll_history(true),
-        AppKey::PageDown => panel.scroll_history(false),
-        AppKey::SaveRoles => {
-            // A background snapshot read is not the person's request,
-            // so it must not swallow this one. Only a submission still
-            // in flight owns the panel.
-            if panel.submitting {
-                return Vec::new();
-            }
-            if panel.pending.is_none() {
-                let body = panel.draft.value().to_owned();
-                if body.trim().is_empty() || body.len() > 16 * 1024 || body.contains('\0') {
-                    panel.error = Some("Enter a non-empty instruction of at most 16 KiB".into());
-                    return Vec::new();
-                }
-                let command = if panel.run.is_some() {
-                    usagi_core::domain::workflow::WorkflowCommand::Instruct {
-                        recipient: panel
-                            .recipient
-                            .unwrap_or(usagi_core::domain::workflow::Recipient::Automatic),
-                        body,
-                    }
-                } else {
-                    usagi_core::domain::workflow::WorkflowCommand::Start {
-                        goal: body,
-                        agents: panel.agents,
-                        revision_limit: panel.revision_limit,
-                    }
-                };
-                panel.pending = Some((OperationId::new(), command));
-            }
-            panel.submitting = true;
-            panel.error = None;
-            return vec![Effect::Workflow(super::workflow::WorkflowJob {
-                workspace: state.workspace,
-                session,
-                control: panel.pending.clone(),
-            })];
-        }
-        _ => {}
-    }
-    Vec::new()
-}
-
 /// update backend event.
 fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect> {
     match event {
-        BackendEvent::Workflow { job, result } => update_workflow_backend(state, job, result),
+        BackendEvent::DecisionsUnavailable { workspace } => decision::unavailable(state, workspace),
+        BackendEvent::SessionFavorites(favorites) => update_session_favorites(state, favorites),
         BackendEvent::Decisions {
             workspace,
             decisions,
@@ -3377,13 +3091,11 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
         BackendEvent::DecisionResolved {
             workspace,
             decision_id,
-        } => decision::update(
-            state,
-            decision::Event::Resolved {
-                workspace,
-                decision_id,
-            },
-        ),
+        } => decision::complete(state, workspace, decision_id, DecisionCompletion::Resolved),
+        BackendEvent::DecisionDiscarded {
+            workspace,
+            decision_id,
+        } => decision::complete(state, workspace, decision_id, DecisionCompletion::Discarded),
         BackendEvent::DecisionError {
             workspace,
             decision_id,
@@ -3397,7 +3109,9 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             },
         ),
         event @ (BackendEvent::NotesLoaded { .. }
+        | BackendEvent::NotesSaved { .. }
         | BackendEvent::NotesError { .. }
+        | BackendEvent::SessionNoteObserved { .. }
         | BackendEvent::EnvironmentLoaded { .. }
         | BackendEvent::EnvironmentSaved { .. }
         | BackendEvent::EnvironmentError { .. }
@@ -3406,7 +3120,8 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
         | BackendEvent::PullRequestsLoaded { .. }
         | BackendEvent::PullRequestsError { .. }
         | BackendEvent::PreviewLoaded { .. }
-        | BackendEvent::PreviewError { .. }) => {
+        | BackendEvent::PreviewError { .. }
+        | BackendEvent::ArtifactOpenFinished { .. }) => {
             let _ = update_editor_backend(state, &event);
             // 候補が届いた直後の選択にも側 pane を追随させる。
             preview::sync_preview_pane(state)
@@ -3454,6 +3169,14 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             }
         }
     }
+}
+
+fn update_session_favorites(state: &mut AppState, favorites: BTreeSet<SessionId>) -> Vec<Effect> {
+    if state.favorite_sessions != favorites {
+        state.favorite_sessions = favorites;
+        state.session_favorites_revision = state.session_favorites_revision.saturating_add(1);
+    }
+    Vec::new()
 }
 
 fn update_backend_notice(state: &mut AppState, notice: Notice) -> Vec<Effect> {
@@ -3521,14 +3244,21 @@ fn update_runtime_phase(
     Vec::new()
 }
 
-fn update_session_snapshot(state: &mut AppState, sessions: Vec<SessionId>) -> Vec<Effect> {
+fn update_session_snapshot(state: &mut AppState, mut sessions: Vec<SessionId>) -> Vec<Effect> {
+    state.order_session_snapshot(&mut sessions);
     // Never combine a press from before an authoritative snapshot with
     // one after it, even when the same stable ID remains visible.
     state.pending_session_click = None;
     let previous_sessions = std::mem::replace(&mut state.sessions, sessions);
-    state
-        .workflows
-        .retain(|session, _| state.sessions.contains(session));
+    if state
+        .saved_notes
+        .as_ref()
+        .is_some_and(|(id, _)| !state.sessions.contains(id))
+    {
+        state.saved_notes = None;
+        state.saved_note_at = None;
+        state.note_revision = state.note_revision.saturating_add(1);
+    }
     state
         .runtimes
         // A workspace-root runtime (no session) is always retained; a
@@ -3545,6 +3275,7 @@ fn update_session_snapshot(state: &mut AppState, sessions: Vec<SessionId>) -> Ve
     let mut effects = vec![Effect::SyncPullRequestTargets {
         sessions: state.sessions.clone(),
     }];
+    effects.extend(preview::forget_untracked_target(state));
     effects.extend(continue_cleanup_after_snapshot(state));
     effects.extend(continue_remove_after_snapshot(state));
     effects
@@ -3600,126 +3331,42 @@ fn update_session_lifecycles(
     }
     reconcile_cleanup_queue(state);
     reconcile_remove_queue(state);
-    Vec::new()
-}
-
-fn update_workflow_backend(
-    state: &mut AppState,
-    job: super::workflow::WorkflowJob,
-    result: Result<
-        Box<usagi_core::domain::workflow::WorkflowSnapshot>,
-        super::workflow::WorkflowError,
-    >,
-) -> Vec<Effect> {
-    if job.workspace != state.workspace || !state.sessions.contains(&job.session) {
-        return Vec::new();
-    }
-    let tick = state.mascot_tick;
-    let available = state.available_models;
-    let Some(panel) = state.workflows.get_mut(&job.session) else {
-        return Vec::new();
-    };
-    if let Some(control) = &job.control {
-        if panel.pending.as_ref() != Some(control) {
-            return Vec::new();
-        }
-        panel.submitting = false;
-    } else {
-        panel.loading = false;
-        panel.snapshot_due_tick = tick.saturating_add(WORKFLOW_SNAPSHOT_TICKS);
-    }
-    match result {
-        Ok(snapshot) if snapshot.session == job.session => {
-            panel.freshness = super::workflow::WorkflowFreshness::Observed;
-            if !panel.agents_edited && panel.pending.is_none() {
-                panel.agents = snapshot.agents;
-                panel.revision_limit = snapshot.revision_limit;
-            }
-            if let Some(start) = snapshot.pending_start {
-                // A background read can now land while the person's own
-                // submission is in flight, so the saved intent must not
-                // repaint the agents they just chose or bring back the
-                // error that submission already cleared. A control
-                // response has set `submitting` false above, so this
-                // only holds back the overlapping read.
-                if !panel.submitting {
-                    panel.agents = start.agents;
-                    panel.revision_limit = start.revision_limit;
-                }
-                if panel.pending.is_none() {
-                    if panel.draft.value().is_empty() {
-                        panel.draft.paste(&start.goal);
-                    }
-                    panel.pending = Some((
-                        start.operation_id,
-                        usagi_core::domain::workflow::WorkflowCommand::Start {
-                            goal: start.goal,
-                            agents: start.agents,
-                            revision_limit: start.revision_limit,
-                        },
-                    ));
-                }
-                if !panel.submitting {
-                    panel.error = start.error;
-                }
-            }
-            panel.run = snapshot.run;
-            panel.finished = snapshot.finished;
-            panel.anchor_history();
-            if panel.pending.is_none() {
-                panel.error = None;
-            }
-            if let Some((_, command)) = job.control {
-                // Finishing carries no draft, so nothing it submitted
-                // could have consumed one.
-                let body = match command {
-                    usagi_core::domain::workflow::WorkflowCommand::Start { goal, .. } => Some(goal),
-                    usagi_core::domain::workflow::WorkflowCommand::Instruct { body, .. } => {
-                        Some(body)
-                    }
-                    usagi_core::domain::workflow::WorkflowCommand::Finish => None,
-                };
-                panel.submitted(body.as_deref());
-                panel.pending = None;
-            }
-        }
-        Ok(_) => panel.error = Some("Workflow response belongs to another session".into()),
-        Err(error) => {
-            if job.control.is_some() && !error.unconfirmed {
-                panel.pending = None;
-            }
-            panel.error = Some(error.message);
-        }
-    }
-    // The daemon keeps the previous run's choices as the next start's
-    // defaults, and a machine that lost a CLI (or never configured a
-    // provider's credential) must not be offered them again.
-    panel.restrict_agents(available);
-    Vec::new()
+    preview::forget_untracked_target(state)
 }
 
 #[allow(clippy::too_many_lines)] // Exhaustive reflux routing keeps every editor completion fenced in one match.
 fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     match event {
-        BackendEvent::NotesLoaded { target, scratchpad } => {
-            if let Some(editor) = state
-                .note_editor
-                .as_mut()
-                .filter(|editor| editor.target == *target)
-            {
-                editor.scratchpad.clone_from(scratchpad);
-                editor.error = None;
-            }
+        BackendEvent::ArtifactOpenFinished {
+            target,
+            request_id,
+            path,
+            filter,
+            result,
+        } => {
+            preview::artifact_open_finished(state, *target, *request_id, path, *filter, result);
         }
-        BackendEvent::NotesError { target, error } => {
-            if let Some(editor) = state
-                .note_editor
-                .as_mut()
-                .filter(|editor| editor.target == *target)
-            {
-                editor.error = Some(error.clone());
-            }
-        }
+        BackendEvent::NotesLoaded {
+            request_id,
+            target,
+            scratchpad,
+        } => notes::loaded(state, *request_id, *target, scratchpad),
+        BackendEvent::NotesSaved {
+            request_id,
+            target,
+            scratchpad,
+            updated_at,
+        } => notes::saved(state, *request_id, *target, scratchpad, *updated_at),
+        BackendEvent::NotesError {
+            request_id,
+            target,
+            error,
+        } => notes::failed(state, *request_id, *target, error),
+        BackendEvent::SessionNoteObserved {
+            session,
+            note,
+            updated_at,
+        } => notes::observed(state, *session, note.as_deref(), *updated_at),
         BackendEvent::EnvironmentLoaded {
             scope,
             entries,
@@ -3893,6 +3540,11 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
 
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     state.interaction_count = state.interaction_count.saturating_add(1);
+    // These carry an explicit Inbox choice. The process-level owner has
+    // already checked unsaved surfaces before replacing its background modal.
+    if matches!(&key, AppKey::OpenDecision(_) | AppKey::OpenPullRequest(_)) {
+        return update_management_key(state, key);
+    }
     // Existing modal overlays have precedence even if an asynchronous
     // completion opened one while the drawer was already visible.
     if let Some(overlay) = state.overlay {
@@ -3908,21 +3560,9 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         state.director_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
         state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
         return Vec::new();
     }
-    if matches!(key, AppKey::OpenDirectorWorkRuns)
-        && state.work_mode == WorkMode::GoalDriven
-        && state.director_launching.is_none()
-        && matches!(state.director_new, DirectorNew::Idle)
-    {
-        state.director_drawer_open = true;
-        state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
-        state.director_route = DirectorRoute::WorkRuns;
-        state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
-        return Vec::new();
-    }
+
     if matches!(key, AppKey::OpenDirectorNew) {
         state.director_drawer_open = true;
         state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
@@ -3975,12 +3615,9 @@ pub(crate) const NORMALIZED_TERMINAL_ROWS: usize = 24;
 /// rows: the Home header above the drawer, the panel's top and bottom borders,
 /// two vertical padding rows, the route breadcrumb, its separator, and the
 /// footer hint.
-/// Mirrors `views::director_drawer`'s `PICKER_CHROME_ROWS`; the assertion there
-/// keeps the launch gate and the render agreeing on the geometry.
+/// The Director drawer tests compare its rendered candidate rows against
+/// `director_picker_capacity` so rendering and the launch gate stay in agreement.
 pub(crate) const DIRECTOR_PICKER_CHROME_ROWS: usize = 8;
-/// Goal label, input, and provider label consume three additional rows before
-/// Goal Composer can show the selected provider.
-pub(crate) const DIRECTOR_GOAL_COMPOSER_CHROME_ROWS: usize = DIRECTOR_PICKER_CHROME_ROWS + 3;
 
 /// Candidate rows the launch picker can draw at `height` terminal rows.
 ///
@@ -3997,104 +3634,20 @@ pub(crate) fn director_picker_capacity(height: usize) -> usize {
     height.saturating_sub(DIRECTOR_PICKER_CHROME_ROWS)
 }
 
-/// Provider rows the Goal Composer can draw at `height` terminal rows.
-#[must_use]
-pub(crate) fn director_goal_composer_picker_capacity(height: usize) -> usize {
-    let height = if height == 0 {
-        NORMALIZED_TERMINAL_ROWS
-    } else {
-        height
-    };
-    height.saturating_sub(DIRECTOR_GOAL_COMPOSER_CHROME_ROWS)
-}
-
-/// Whether the drawer can currently draw the highlighted candidate row. An
-/// unobserved terminal size keeps the picker usable: the renderer normalizes the
-/// same way, so the first frame is never gated on a resize event.
 fn director_picker_shows_selection(state: &AppState) -> bool {
-    state.size.is_none_or(|(_, height)| {
-        let height = usize::from(height);
-        if state.work_mode == WorkMode::GoalDriven {
-            director_goal_composer_picker_capacity(height) > 0
-        } else {
-            director_picker_capacity(height) > 0
-        }
-    })
-}
-
-/// Unicode bidi controls can reorder surrounding labels without being visible.
-/// They are not accepted in a single-field terminal composer even though Rust
-/// does not classify every one of them as a control character.
-const fn is_bidi_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}'
-    )
-}
-
-/// Append one paste/key stream to the Goal `SSoT`.
-///
-/// Goal Composer is a single logical field: line-breaking controls become one
-/// visible separator, all other terminal/control and bidi formatting bytes are
-/// discarded, and the daemon's byte limit is applied on UTF-8 boundaries.
-fn append_goal_text(goal: &mut String, characters: impl IntoIterator<Item = char>) {
-    let mut normalized_separator = false;
-    for character in characters {
-        let character = if character == ' ' {
-            if normalized_separator {
-                continue;
-            }
-            character
-        } else if character.is_whitespace() {
-            normalized_separator = true;
-            if goal.chars().last().is_some_and(char::is_whitespace) {
-                continue;
-            }
-            ' '
-        } else if character.is_control() || is_bidi_control(character) {
-            continue;
-        } else {
-            normalized_separator = false;
-            character
-        };
-        if goal.len() + character.len_utf8() > MAX_WORK_GOAL_BYTES {
-            break;
-        }
-        goal.push(character);
-    }
-}
-
-fn update_goal_composer_text(state: &mut AppState, key: &AppKey) -> bool {
-    if state.work_mode != WorkMode::GoalDriven
-        || !matches!(state.director_new, DirectorNew::Choosing(_))
-    {
-        return false;
-    }
-    match &key {
-        AppKey::Backspace => {
-            state.director_goal.pop();
-        }
-        AppKey::Char(character) => append_goal_text(&mut state.director_goal, [*character]),
-        AppKey::Paste(value) => {
-            append_goal_text(&mut state.director_goal, value.chars());
-        }
-        _ => return false,
-    }
-    true
+    state
+        .size
+        .is_none_or(|(_, height)| director_picker_capacity(usize::from(height)) > 0)
 }
 
 fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(effects) = update_director_shell_key(state, &key) {
         return effects;
     }
-    if update_director_route_key(state, &key) {
+    if state.director_launching.is_some() {
         return Vec::new();
     }
-    if update_goal_composer_text(state, &key) {
+    if update_director_route_key(state, &key) {
         return Vec::new();
     }
     match (state.director_new, key) {
@@ -4103,7 +3656,7 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             Vec::new()
         }
         (DirectorNew::Idle, AppKey::Escape) => {
-            if state.director_route == DirectorRoute::landing_for(state.work_mode) {
+            if state.director_route == DirectorRoute::Organization {
                 state.director_drawer_open = false;
                 state.workspace_drawer_focus = state
                     .root_terminal_drawer_open
@@ -4115,7 +3668,6 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
         }
         (DirectorNew::Choosing(_) | DirectorNew::Empty, AppKey::Escape | AppKey::CtrlC) => {
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             Vec::new()
         }
         (DirectorNew::Choosing(selected), AppKey::Up) => {
@@ -4147,29 +3699,18 @@ fn update_director_drawer_key(state: &mut AppState, key: AppKey) -> Vec<Effect> 
             Vec::new()
         }
         (DirectorNew::Choosing(selected), AppKey::Enter)
-            if state.director_launching.is_none()
-                && director_picker_shows_selection(state)
-                && (state.work_mode == WorkMode::Classic
-                    || !state.director_goal.trim().is_empty()) =>
+            if state.director_launching.is_none() && director_picker_shows_selection(state) =>
         {
             let operation_id = OperationId::new();
             state.director_new = DirectorNew::Idle;
             state.director_launching = Some(operation_id);
-            if state.work_mode == WorkMode::GoalDriven {
-                vec![Effect::LaunchGoal {
-                    workspace: state.workspace,
-                    operation_id,
-                    profile: Some(profile_for(selected)),
-                    goal: std::mem::take(&mut state.director_goal),
-                }]
-            } else {
-                vec![Effect::LaunchAgent {
-                    workspace: state.workspace,
-                    session: None,
-                    operation_id,
-                    profile: Some(profile_for(selected)),
-                }]
-            }
+
+            vec![Effect::LaunchAgent {
+                workspace: state.workspace,
+                session: None,
+                operation_id,
+                profile: Some(profile_for(selected)),
+            }]
         }
         // Empty, submitted, and unsupported drawer input are all inert. In
         // particular Enter while a root launch is fenced cannot mint a second
@@ -4203,7 +3744,6 @@ fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<E
             .root_terminal_drawer_open
             .then_some(WorkspaceDrawerFocus::Terminal);
         state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
         return Some(Vec::new());
     }
     (state.director_launching.is_some() && matches!(key, AppKey::Escape)).then(Vec::new)
@@ -4212,43 +3752,13 @@ fn update_director_shell_key(state: &mut AppState, key: &AppKey) -> Option<Vec<E
 fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
     match key {
         AppKey::OpenDirectorOrganization => {
-            if state.work_mode != WorkMode::Classic {
-                return true;
-            }
             state.director_route = DirectorRoute::Organization;
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             true
         }
-        AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven
-                || state.director_launching.is_some()
-                || !matches!(state.director_new, DirectorNew::Idle)
-            {
-                return true;
-            }
-            state.director_route = DirectorRoute::WorkRuns;
+        AppKey::OpenDirectorConsole => {
+            state.director_route = DirectorRoute::Console;
             state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
-            true
-        }
-        AppKey::OpenDirectorRunOverview(run) => {
-            if state.work_mode != WorkMode::GoalDriven {
-                return true;
-            }
-            state.director_route = DirectorRoute::RunOverview(*run);
-            state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
-            true
-        }
-        AppKey::OpenDirectorConsole(parent) => {
-            let route = DirectorRoute::Console(*parent);
-            if !route.belongs_to(state.work_mode) {
-                return true;
-            }
-            state.director_route = route;
-            state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
             true
         }
         AppKey::DirectorBack => {
@@ -4264,29 +3774,15 @@ fn update_director_route_key(state: &mut AppState, key: &AppKey) -> bool {
 fn director_back(state: &mut AppState) {
     if !matches!(state.director_new, DirectorNew::Idle) {
         state.director_new = DirectorNew::Idle;
-        state.director_goal.clear();
         return;
     }
-    state.director_route = match (state.work_mode, state.director_route) {
-        (WorkMode::Classic, DirectorRoute::Console(DirectorConsoleParent::Organization)) => {
-            DirectorRoute::Organization
-        }
-        (WorkMode::GoalDriven, DirectorRoute::RunOverview(_)) => DirectorRoute::WorkRuns,
-        (WorkMode::GoalDriven, DirectorRoute::Console(DirectorConsoleParent::RunOverview(run))) => {
-            DirectorRoute::RunOverview(run)
-        }
-        (mode, route) if route == DirectorRoute::landing_for(mode) => route,
-        // Normalize impossible or stale cross-workflow routes instead of
-        // exposing the other workflow's screen tree.
-        (mode, _) => DirectorRoute::landing_for(mode),
-    };
+    state.director_route = DirectorRoute::Organization;
 }
 
 fn open_director_new(state: &mut AppState) {
     if state.director_launching.is_some() {
         return;
     }
-    state.director_goal.clear();
     state.director_new = if state.available_models.is_empty() {
         DirectorNew::Empty
     } else {
@@ -4425,10 +3921,12 @@ fn begin_next_cleanup(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         }
         return Vec::new();
     };
-    if let Some(queue) = state.cleanup_queue.as_mut() {
-        queue.in_flight = Some(session);
-        queue.feedback = None;
-    }
+    let queue = state
+        .cleanup_queue
+        .as_mut()
+        .expect("a cleanup candidate belongs to an open queue");
+    queue.in_flight = Some(session);
+    queue.feedback = None;
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
@@ -4489,11 +3987,13 @@ fn continue_cleanup_after_snapshot(state: &mut AppState) -> Vec<Effect> {
         reconcile_cleanup_queue(state);
         return Vec::new();
     };
-    if let Some(queue) = state.cleanup_queue.as_mut() {
-        queue.in_flight = None;
-        queue.selected.remove(&completed);
-        queue.feedback = None;
-    }
+    let queue = state
+        .cleanup_queue
+        .as_mut()
+        .expect("the completed cleanup belongs to an open queue");
+    queue.in_flight = None;
+    queue.selected.remove(&completed);
+    queue.feedback = None;
     begin_next_cleanup(state, true)
 }
 
@@ -4555,10 +4055,12 @@ fn begin_next_remove(state: &mut AppState, continuing: bool) -> Vec<Effect> {
         .remove_queue
         .as_ref()
         .is_some_and(RemoveQueueState::force);
-    if let Some(queue) = state.remove_queue.as_mut() {
-        queue.in_flight = Some(session);
-        queue.feedback = None;
-    }
+    let queue = state
+        .remove_queue
+        .as_mut()
+        .expect("a removal candidate belongs to an open queue");
+    queue.in_flight = Some(session);
+    queue.feedback = None;
     vec![Effect::RemoveSession {
         workspace: state.workspace,
         session,
@@ -4611,11 +4113,13 @@ fn continue_remove_after_snapshot(state: &mut AppState) -> Vec<Effect> {
         reconcile_remove_queue(state);
         return Vec::new();
     };
-    if let Some(queue) = state.remove_queue.as_mut() {
-        queue.in_flight = None;
-        queue.selected.remove(&completed);
-        queue.feedback = None;
-    }
+    let queue = state
+        .remove_queue
+        .as_mut()
+        .expect("the completed removal belongs to an open queue");
+    queue.in_flight = None;
+    queue.selected.remove(&completed);
+    queue.feedback = None;
     begin_next_remove(state, true)
 }
 
@@ -4690,7 +4194,8 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             _ => Vec::new(),
         },
-        Overlay::Notes | Overlay::Environment => {
+        Overlay::Notes => notes::key(state, &key),
+        Overlay::Environment => {
             if matches!(key, AppKey::Escape) {
                 state.overlay = None;
                 state.note_editor = None;
@@ -4883,40 +4388,71 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         return;
     };
     if let Some(editor) = &overlay.editor {
-        let mut present = false;
-        for item in &state.decisions {
-            if item.decision_id == editor.decision.decision_id {
-                present = true;
-                break;
+        let current = state
+            .decisions
+            .iter()
+            .chain(&state.decision_answers)
+            .find(|item| item.decision_id == editor.decision.decision_id);
+        if let Some(current) = current {
+            if current.status != editor.decision.status {
+                overlay.show_answers = current.status == UserDecisionStatus::Resolved;
+                overlay.editor = Some(DecisionEditor::new(current.clone()));
+            }
+        } else {
+            overlay.editor = None;
+            if overlay.exact.is_some() {
+                overlay.error =
+                    Some("This question is no longer available. Close and refresh the inbox.");
             }
         }
-        if !present {
-            overlay.editor = None;
-        }
     }
-    overlay.selected = overlay
-        .selected
-        .min(state.decisions.len().saturating_sub(1));
+    let rows = if overlay.show_answers {
+        &state.decision_answers
+    } else {
+        &state.decisions
+    };
+    overlay.selected = overlay.selected.min(rows.len().saturating_sub(1));
 }
 
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
-    let workspace = state.workspace;
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();
     };
+    if overlay.requested.is_some() || overlay.error.is_some() {
+        if key == AppKey::Escape {
+            state.overlay = None;
+            // Keep the cancelled identity until the next observation so a
+            // delayed result cannot reopen a question after closing its error.
+            overlay.requested = overlay.requested.or(overlay.exact);
+        }
+        return Vec::new();
+    }
     if overlay
         .editor
         .as_ref()
-        .is_some_and(|editor| editor.confirmation.is_none())
+        .is_some_and(|editor| editor.confirmation.is_none() && !editor.discard_confirmation())
         && matches!(&key, AppKey::Escape)
     {
         overlay.editor = None;
+        overlay.exact = None;
         return Vec::new();
     }
     if let Some(editor) = overlay.editor.as_mut() {
-        return update_decision_editor(workspace, editor, key);
+        return update_decision_editor(editor.decision.owner.workspace_id, editor, key);
     }
+    let rows = if overlay.show_answers {
+        &state.decision_answers
+    } else {
+        &state.decisions
+    };
     match key {
+        AppKey::Tab => {
+            overlay.show_answers = !overlay.show_answers;
+            overlay.selected = 0;
+            return vec![Effect::RefreshDecisions {
+                workspace: state.workspace,
+            }];
+        }
         AppKey::Escape => {
             state.overlay = None;
             state.decision_overlay = None;
@@ -4925,14 +4461,45 @@ fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             overlay.selected = overlay.selected.saturating_sub(1);
         }
         AppKey::DecisionNext | AppKey::Down => {
-            overlay.selected = (overlay.selected + 1).min(state.decisions.len().saturating_sub(1));
+            overlay.selected = (overlay.selected + 1).min(rows.len().saturating_sub(1));
         }
         AppKey::Enter => {
-            if let Some(decision) = state.decisions.get(overlay.selected).cloned() {
+            if let Some(decision) = rows.get(overlay.selected).cloned() {
                 overlay.editor = Some(DecisionEditor::new(decision));
             }
         }
         _ => {}
+    }
+    Vec::new()
+}
+
+fn restore_session_order(state: &mut AppState, order: &[SessionId]) -> Vec<Effect> {
+    state.sessions.sort_by_key(|id| {
+        order
+            .iter()
+            .position(|saved| saved == id)
+            .unwrap_or(usize::MAX)
+    });
+    state.session_order_revision = state.session_order_revision.saturating_add(1);
+    Vec::new()
+}
+
+/// Move only the cursor's row; stable selected/active identities do not change.
+fn reorder_selected_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect> {
+    let Selection::Target(Target::Session(session)) = state.selected else {
+        return Vec::new();
+    };
+    let Some(index) = state.sessions.iter().position(|id| *id == session) else {
+        return Vec::new();
+    };
+    let next = match direction {
+        TabDirection::Previous => index.saturating_sub(1),
+        TabDirection::Next => (index + 1).min(state.sessions.len() - 1),
+    };
+    if index != next {
+        state.sessions.swap(index, next);
+        state.session_order_revision = state.session_order_revision.saturating_add(1);
+        state.pending_session_click = None;
     }
     Vec::new()
 }
@@ -4984,12 +4551,18 @@ fn navigate_session(state: &mut AppState, direction: TabDirection) -> Vec<Effect
 }
 
 /// Open the pending-decision list and ask its owner for a fresh snapshot.
-fn open_decisions(state: &mut AppState) -> Vec<Effect> {
-    state.unread_decisions.clear();
+fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Vec<Effect> {
+    if requested.is_none() {
+        state.unread_decisions.clear();
+    }
     state.overlay = Some(Overlay::Decisions);
     state.decision_overlay = Some(DecisionOverlayState {
+        show_answers: state.decisions.is_empty() && !state.decision_answers.is_empty(),
         selected: 0,
         editor: None,
+        requested,
+        error: None,
+        exact: requested,
     });
     vec![Effect::RefreshDecisions {
         workspace: state.workspace,
@@ -4999,7 +4572,30 @@ fn open_decisions(state: &mut AppState) -> Vec<Effect> {
 #[allow(clippy::too_many_lines)] // Exhaustive Home command ownership remains visible in one reducer table.
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
-        AppKey::OpenDecisions => open_decisions(state),
+        AppKey::Char('f')
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            match state.selected {
+                Selection::Target(Target::Session(session))
+                    if state.sessions.contains(&session) =>
+                {
+                    vec![Effect::ToggleSessionFavorite { session }]
+                }
+                _ => Vec::new(),
+            }
+        }
+        AppKey::Char('P')
+            if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
+        {
+            reorder_selected_session(state, TabDirection::Previous)
+        }
+        AppKey::Char('N')
+            if state.route == Route::Home(HomeMode::Switch) && state.overlay.is_none() =>
+        {
+            reorder_selected_session(state, TabDirection::Next)
+        }
+        AppKey::OpenDecisions => open_decisions(state, None),
+        AppKey::OpenDecision(decision_id) => open_decisions(state, Some(decision_id)),
         AppKey::Up => {
             state.move_selection(-1);
             Vec::new()
@@ -5078,7 +4674,19 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::OpenPrs => pull_requests::open(state),
+        AppKey::OpenPullRequest(identity) => pull_requests::open_identity(state, &identity),
         AppKey::OpenPreview => open_preview(state),
+        AppKey::OpenArtifacts => {
+            let target = state
+                .file_preview_target()
+                .unwrap_or(Target::Root(state.workspace));
+            open_artifacts(state, target, "")
+        }
+        AppKey::Char('n')
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            notes::open(state)
+        }
         AppKey::Char('a')
             if matches!(state.route, Route::Home(HomeMode::Closeup)) && !state.has_pane_tab =>
         {
@@ -5117,9 +4725,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         | AppKey::OpenRootTerminal
         | AppKey::OpenDirectorNew
         | AppKey::OpenDirectorOrganization
-        | AppKey::OpenDirectorWorkRuns
-        | AppKey::OpenDirectorRunOverview(_)
-        | AppKey::OpenDirectorConsole(_)
+        | AppKey::OpenDirectorConsole
         | AppKey::DirectorBack
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
@@ -5147,7 +4753,6 @@ fn toggle_director_from_root_terminal(state: &mut AppState) {
     state.director_new = DirectorNew::Idle;
     if state.director_drawer_open {
         state.director_drawer_open = false;
-        state.director_goal.clear();
         return;
     }
     state.root_terminal_full_height = false;
@@ -5180,21 +4785,6 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
             open_director_new(state);
             Vec::new()
         }
-        AppKey::OpenDirectorWorkRuns => {
-            if state.work_mode != WorkMode::GoalDriven
-                || state.director_launching.is_some()
-                || !matches!(state.director_new, DirectorNew::Idle)
-            {
-                return Vec::new();
-            }
-            state.root_terminal_full_height = false;
-            state.director_drawer_open = true;
-            state.workspace_drawer_focus = Some(WorkspaceDrawerFocus::Director);
-            state.director_route = DirectorRoute::WorkRuns;
-            state.director_new = DirectorNew::Idle;
-            state.director_goal.clear();
-            Vec::new()
-        }
         AppKey::OpenRootTerminal => vec![Effect::OpenTerminal {
             target: Target::Root(state.workspace),
             operation_id: OperationId::new(),
@@ -5222,16 +4812,18 @@ fn update_root_terminal_drawer_key(state: &mut AppState, key: &AppKey) -> Vec<Ef
         | AppKey::OpenQuitConfirmation
         | AppKey::OpenOverview
         | AppKey::OpenDirectorOrganization
-        | AppKey::OpenDirectorRunOverview(_)
-        | AppKey::OpenDirectorConsole(_)
+        | AppKey::OpenDirectorConsole
         | AppKey::DirectorBack
         | AppKey::OpenCloseupOverlay
         | AppKey::OpenNotes
         | AppKey::OpenEnvironment
         | AppKey::OpenGarden
         | AppKey::OpenPrs
+        | AppKey::OpenPullRequest(_)
         | AppKey::OpenPreview
+        | AppKey::OpenArtifacts
         | AppKey::OpenDecisions
+        | AppKey::OpenDecision(_)
         | AppKey::DecisionPrevious
         | AppKey::DecisionNext
         | AppKey::PageUp
@@ -5295,51 +4887,18 @@ fn remove_selected_session(state: &AppState) -> Vec<Effect> {
 }
 
 fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> {
-    let notes_open = state.overlay == Some(Overlay::Notes);
     let environment_open = state.overlay == Some(Overlay::Environment);
     if let Some(effects) = update_environment_source_key(state, key, environment_open) {
         return Some(effects);
     }
     match key {
-        AppKey::OpenNotes => Some(open_notes(state)),
+        AppKey::OpenNotes => Some(notes::open(state)),
         AppKey::OpenEnvironment => Some(open_environment_source(state, EnvScope::Workspace)),
-        AppKey::SelectNoteSection(section) => {
-            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
-                editor.section = *section;
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::SetNoteDraft(draft) => {
-            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
-                editor.draft.clone_from(draft);
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::Paste(text) if notes_open => Some(paste_note_draft(state, text)),
-        AppKey::CommitNoteDraft => Some(commit_note_draft(state)),
-        AppKey::ToggleTodo(index) => {
-            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open)
-                && let Some(todo) = editor.scratchpad.todos.get_mut(*index)
-            {
-                todo.done = !todo.done;
-                editor.error = None;
-            }
-            Some(Vec::new())
-        }
-        AppKey::SaveNotes => Some(
-            state
-                .note_editor
-                .as_ref()
-                .filter(|_| notes_open)
-                .map_or_else(Vec::new, |editor| {
-                    vec![Effect::SaveNotes {
-                        target: editor.target,
-                        scratchpad: editor.scratchpad.clone(),
-                    }]
-                }),
-        ),
+        AppKey::SelectNoteSection(_)
+        | AppKey::SetNoteDraft(_)
+        | AppKey::CommitNoteDraft
+        | AppKey::ToggleTodo(_)
+        | AppKey::SaveNotes => Some(notes::key(state, key)),
         _ => None,
     }
 }
@@ -5454,14 +5013,6 @@ fn save_environment_source(state: &mut AppState, environment_open: bool) -> Vec<
     }]
 }
 
-fn paste_note_draft(state: &mut AppState, text: &str) -> Vec<Effect> {
-    if let Some(editor) = state.note_editor.as_mut() {
-        editor.draft.push_str(text);
-        editor.error = None;
-    }
-    Vec::new()
-}
-
 /// The environment editor when it owns input and accepts edits (no read or save
 /// in flight).
 fn editable_environment(
@@ -5472,16 +5023,6 @@ fn editable_environment(
         .environment_editor
         .as_mut()
         .filter(|editor| environment_open && !editor.is_busy())
-}
-
-fn open_notes(state: &mut AppState) -> Vec<Effect> {
-    let Some(target) = state.active_target() else {
-        return Vec::new();
-    };
-    state.overlay = Some(Overlay::Notes);
-    state.environment_editor = None;
-    state.note_editor = Some(NoteEditor::loading(target));
-    vec![Effect::LoadNotes { target }]
 }
 
 /// The scope named by the `env` command's argument. No argument edits this
@@ -5503,6 +5044,63 @@ fn open_environment_source(state: &mut AppState, scope: EnvScope) -> Vec<Effect>
     vec![Effect::LoadEnvironment { scope }]
 }
 
+fn open_workspace_artifacts(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+    let target = Target::Root(state.workspace);
+    open_artifacts(state, target, arguments)
+}
+
+fn open_artifacts(state: &mut AppState, target: Target, arguments: &str) -> Vec<Effect> {
+    let target = match arguments.trim() {
+        "" => target,
+        "all" => Target::Root(state.workspace),
+        _ => {
+            state.notice = Some(Notice::new("usage: artifact [all]"));
+            return Vec::new();
+        }
+    };
+    let filter = match target {
+        Target::Root(_) => PreviewFileFilter::AllArtifacts,
+        Target::Session(_) => PreviewFileFilter::Artifacts,
+    };
+    let mut overlay = PreviewOverlay::loading(target, Vec::new());
+    overlay.file_filter = filter;
+    let request_id = overlay.request_id();
+    state.closeup_action_forced = false;
+    state.overlay = Some(Overlay::Preview);
+    state.preview_overlay = Some(overlay);
+    state.pr_overlay = None;
+    state.notice = None;
+    vec![Effect::LoadPreview {
+        target,
+        request_id,
+        path: None,
+        filter,
+    }]
+}
+
+fn open_artifact_path(state: &mut AppState, target: Target, path: String) -> Vec<Effect> {
+    let available = match target {
+        Target::Root(workspace) => workspace == state.workspace,
+        Target::Session(session) => {
+            state.sessions.contains(&session)
+                && state
+                    .session_lifecycles
+                    .get(&session)
+                    .is_none_or(|projection| projection.lifecycle.capabilities().can_use)
+        }
+    };
+    if !available {
+        return Vec::new();
+    }
+    let _ = open_artifacts(state, target, "");
+    state
+        .preview_overlay
+        .as_mut()
+        .unwrap()
+        .set_files(vec![path], Vec::new());
+    preview::update_preview_overlay(state, &AppKey::Enter)
+}
+
 fn open_preview(state: &mut AppState) -> Vec<Effect> {
     let Some(target) = state.file_preview_target() else {
         return Vec::new();
@@ -5520,61 +5118,15 @@ fn open_preview(state: &mut AppState) -> Vec<Effect> {
     }]
 }
 
-fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
-    let Some(editor) = state
-        .note_editor
-        .as_mut()
-        .filter(|_| state.overlay == Some(Overlay::Notes))
-    else {
-        return Vec::new();
-    };
-    let draft = editor.draft.trim();
-    match editor.section {
-        NoteSection::Note => {
-            editor.scratchpad.note = if draft.is_empty() {
-                None
-            } else {
-                Some(draft.to_owned())
-            };
-        }
-        NoteSection::Todos if !draft.is_empty() => editor
-            .scratchpad
-            .todos
-            .push(usagi_core::domain::note::SessionTodo::new(draft)),
-        NoteSection::Decisions if !draft.is_empty() => {
-            editor
-                .scratchpad
-                .decisions
-                .push(usagi_core::domain::note::SessionDecision::new(
-                    chrono::Utc::now(),
-                    draft,
-                ));
-        }
-        NoteSection::Todos | NoteSection::Decisions => {}
-    }
-    editor.draft.clear();
-    editor.error = None;
-    Vec::new()
-}
-
 fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Overview) {
         return Vec::new();
     }
     match overview::interpret(input) {
-        Ok(overview::Command::Config { arguments }) => {
-            if arguments.trim().is_empty() {
-                state.overlay = None;
-                state.notice = None;
-                vec![Effect::WorkspaceCommand {
-                    workspace: state.workspace,
-                    command: overview::Command::Config { arguments },
-                }]
-            } else {
-                state.notice = Some(Notice::new("config takes no arguments (usage: config)"));
-                Vec::new()
-            }
+        Ok(overview::Command::Artifacts { arguments }) => {
+            open_workspace_artifacts(state, &arguments)
         }
+        Ok(overview::Command::Config { arguments }) => submit_overview_config(state, arguments),
         Ok(overview::Command::Daemon { arguments }) => {
             if arguments.trim().is_empty() {
                 state.overlay = Some(Overlay::Daemon);
@@ -5657,6 +5209,20 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(error.to_string()));
             Vec::new()
         }
+    }
+}
+
+fn submit_overview_config(state: &mut AppState, arguments: String) -> Vec<Effect> {
+    if arguments.trim().is_empty() {
+        state.overlay = None;
+        state.notice = None;
+        vec![Effect::WorkspaceCommand {
+            workspace: state.workspace,
+            command: overview::Command::Config { arguments },
+        }]
+    } else {
+        state.notice = Some(Notice::new("config takes no arguments (usage: config)"));
+        Vec::new()
     }
 }
 
@@ -5880,6 +5446,9 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                 None
             }
         }
+        closeup::Command::Artifacts { arguments } => {
+            return open_artifacts(state, active_target, &arguments);
+        }
         closeup::Command::Diff { .. } => {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
@@ -5887,9 +5456,6 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
         // `env` owns the workspace-scoped editor rather than a per-session effect,
         // so it opens the editor and returns before the shared dismiss/notice tail.
         closeup::Command::Env { arguments } => return submit_closeup_env(state, &arguments),
-        closeup::Command::Workflow { arguments } => {
-            return submit_closeup_workflow(state, active_session, &arguments);
-        }
     };
     if effect.is_some() {
         dismiss_closeup_action_modal(state);
@@ -5908,65 +5474,6 @@ fn submit_empty_closeup_shortcut(state: &mut AppState, input: &str) -> Vec<Effec
     state.overlay = Some(Overlay::Closeup);
     state.closeup_action_forced = false;
     submit_closeup(state, input)
-}
-
-/// `workflow` opens the tab; `workflow finish` also ends the run it shows.
-///
-/// Finishing always opens the tab first: the daemon owns the decision, so its
-/// refusal — nothing to finish, or already finished — has to land somewhere the
-/// person is looking.
-fn submit_closeup_workflow(
-    state: &mut AppState,
-    session: SessionId,
-    arguments: &str,
-) -> Vec<Effect> {
-    let finish = match arguments.trim() {
-        "" => false,
-        "finish" => true,
-        _ => {
-            state.notice = Some(Notice::new("workflow accepts only `finish`"));
-            return Vec::new();
-        }
-    };
-    let workspace = state.workspace;
-    let available = state.available_models;
-    let panel = state.workflows.entry(session).or_default();
-    panel.restrict_agents(available);
-    let mut control = None;
-    let mut dispatch = false;
-    if finish {
-        // A request already in flight owns the panel. Otherwise resend a finish
-        // whose answer was lost rather than minting a second one, exactly as a
-        // resent instruction does.
-        if !panel.submitting {
-            if !matches!(
-                panel.pending,
-                Some((_, usagi_core::domain::workflow::WorkflowCommand::Finish))
-            ) {
-                panel.pending = Some((
-                    OperationId::new(),
-                    usagi_core::domain::workflow::WorkflowCommand::Finish,
-                ));
-            }
-            panel.submitting = true;
-            panel.error = None;
-            control.clone_from(&panel.pending);
-            dispatch = true;
-        }
-    } else if !panel.loading && !panel.submitting {
-        panel.loading = true;
-        dispatch = true;
-    }
-    dismiss_closeup_action_modal(state);
-    let mut effects = vec![Effect::OpenWorkflow { session }];
-    if dispatch {
-        effects.push(Effect::Workflow(super::workflow::WorkflowJob {
-            workspace,
-            session,
-            control,
-        }));
-    }
-    effects
 }
 
 /// Normalize the two supported terminal forms at the controller boundary.
@@ -6008,21 +5515,44 @@ const SIDEBAR_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_mill
 /// their single-click selection behavior but cannot become double clicks.
 fn update_pointer(
     state: &mut AppState,
-    column: u16,
-    row: u16,
+    target: Option<SidebarPointerTarget>,
     at: std::time::Duration,
 ) -> Vec<Effect> {
     if state.overlay.is_some() || state.workspace_drawer_open() {
         state.pending_session_click = None;
         return Vec::new();
     }
-    if let Some(session) = state.sidebar_pr_at(column, row) {
-        state.pending_session_click = None;
-        return pull_requests::open_for(state, Target::Session(session));
-    }
-    let Some(selection) = state.sidebar_selection_at(column, row) else {
+    let Some(target) = target else {
         state.pending_session_click = None;
         return Vec::new();
+    };
+    let session = match target {
+        SidebarPointerTarget::Row(Selection::Target(Target::Session(session)))
+        | SidebarPointerTarget::PullRequests(session)
+        | SidebarPointerTarget::Artifacts(session) => Some(session),
+        SidebarPointerTarget::Row(_) => None,
+    };
+    if session.is_some_and(|session| !state.sessions.contains(&session)) {
+        state.pending_session_click = None;
+        return Vec::new();
+    }
+    // A real press supersedes background auto-focus just like a keystroke.
+    state.ctrl_c_grace = false;
+    state.interaction_count = state.interaction_count.saturating_add(1);
+    let selection = match target {
+        SidebarPointerTarget::PullRequests(session) => {
+            state.pending_session_click = None;
+            return pull_requests::open_for(state, Target::Session(session));
+        }
+        SidebarPointerTarget::Artifacts(session) => {
+            state.pending_session_click = None;
+            return if state.session_can_use(session) {
+                open_artifacts(state, Target::Session(session), "")
+            } else {
+                Vec::new()
+            };
+        }
+        SidebarPointerTarget::Row(selection) => selection,
     };
     state.select_row(selection);
     let Selection::Target(Target::Session(session)) = selection else {

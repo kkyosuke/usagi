@@ -20,6 +20,12 @@ use crate::domain::session_lifecycle::{
 /// list, overview, and status replies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRuntimeObservation {
+    /// Display-only association captured from the authenticated creator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_continuation: Option<crate::domain::id::AgentContinuationRef>,
+    /// Root organization membership, retained when parent sessions are removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub director_continuation: Option<crate::domain::id::AgentContinuationRef>,
     pub agent_phase: AgentPhase,
     pub agent_resumable: bool,
     pub agent_resume_reason: ProviderResumeReason,
@@ -98,6 +104,8 @@ impl From<SessionListLifecycle> for ManagedSession {
             name: session.name,
             parent_session_id: session.parent_session_id,
             creator_agent_id: None,
+            creator_continuation: None,
+            director_continuation: None,
             role_id: session.role_id,
             lifecycle: session.lifecycle,
             attempt: session.attempt,
@@ -188,7 +196,7 @@ fn decode_session_list_item(value: serde_json::Value) -> Result<SessionListItem,
         .count();
     let runtime = if observed_fields == RUNTIME_FIELDS.len() {
         Some(
-            serde_json::from_value::<SessionRuntimeObservation>(value.clone())
+            SessionRuntimeObservation::deserialize(&value)
                 .map_err(|_| "session runtime observation is malformed")?,
         )
     } else if observed_fields == 0 {
@@ -198,8 +206,7 @@ fn decode_session_list_item(value: serde_json::Value) -> Result<SessionListItem,
     };
     let role_summary = object
         .get("role_summary")
-        .cloned()
-        .map(serde_json::from_value)
+        .map(Deserialize::deserialize)
         .transpose()
         .map_err(|_| "session role summary is malformed")?
         .flatten();
@@ -264,6 +271,8 @@ mod tests {
 
     fn runtime() -> SessionRuntimeObservation {
         SessionRuntimeObservation {
+            director_continuation: None,
+            creator_continuation: None,
             agent_phase: AgentPhase::Interrupted,
             agent_resumable: true,
             agent_resume_reason: ProviderResumeReason::ExplicitResumeAvailable,
@@ -276,6 +285,46 @@ mod tests {
                 "child".to_owned(),
             ],
         }
+    }
+
+    #[test]
+    fn creator_conversation_is_optional_display_metadata() {
+        let mut observation = runtime();
+        observation.creator_continuation = Some(crate::domain::id::AgentContinuationRef::new());
+        observation.director_continuation = Some(crate::domain::id::AgentContinuationRef::new());
+        let encoded = serde_json::to_value(&observation).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SessionRuntimeObservation>(encoded.clone()).unwrap(),
+            observation
+        );
+        assert!(encoded.get("creator_agent_id").is_none());
+        let mut legacy = encoded.clone();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("creator_continuation");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("director_continuation");
+        assert_eq!(
+            serde_json::from_value::<SessionRuntimeObservation>(legacy.clone())
+                .unwrap()
+                .director_continuation,
+            None
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionRuntimeObservation>(legacy)
+                .unwrap()
+                .creator_continuation,
+            None
+        );
+        let mut malformed = encoded.clone();
+        malformed["director_continuation"] = serde_json::json!("not-an-id");
+        assert!(serde_json::from_value::<SessionRuntimeObservation>(malformed).is_err());
+        let mut malformed = encoded;
+        malformed["creator_continuation"] = serde_json::json!("not-an-id");
+        assert!(serde_json::from_value::<SessionRuntimeObservation>(malformed).is_err());
     }
 
     #[test]
@@ -372,6 +421,14 @@ mod tests {
             runtime: Some(runtime()).into(),
         })
         .unwrap();
+        let mut malformed_runtime = missing_nullable.clone();
+        malformed_runtime["agent_phase"] = serde_json::json!(7);
+        assert!(
+            serde_json::from_value::<SessionListItem>(malformed_runtime)
+                .unwrap_err()
+                .to_string()
+                .contains("session runtime observation is malformed")
+        );
         missing_nullable
             .as_object_mut()
             .unwrap()

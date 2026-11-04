@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod agent_message;
+pub mod attention;
 pub mod clock;
 pub mod daemon;
 pub mod frontmatter;
@@ -18,15 +19,13 @@ pub mod pullrequest;
 pub mod recent;
 pub mod role;
 pub mod session;
+pub mod session_cache;
 pub mod session_lifecycle;
 pub mod settings;
-pub mod supervisor;
 pub mod terminal_launch;
 pub mod terminal_retention;
 pub mod terminal_visibility;
-pub mod trace;
 pub mod user_decision;
-pub mod workflow;
 pub mod workspace;
 pub mod workspace_layout;
 pub mod workspace_state;

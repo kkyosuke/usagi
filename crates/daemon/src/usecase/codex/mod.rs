@@ -94,7 +94,12 @@ pub fn mcp_arguments(usagi_command: &str) -> Vec<String> {
     arguments.extend(assignment("mcp_servers.usagi.args", &array(&["mcp"])));
     arguments.extend(assignment(
         "mcp_servers.usagi.env_vars",
-        &array(&["USAGI_HOME", "USAGI_RUNTIME_MODE", "USAGI_WORKSPACE_ROOT"]),
+        &array(&[
+            "USAGI_HOME",
+            "USAGI_RUNTIME_MODE",
+            "USAGI_WORKSPACE_ROOT",
+            "USAGI_TRUST_ROOT",
+        ]),
     ));
     arguments.extend(assignment("mcp_servers.usagi.required", "true"));
     arguments.extend(assignment(
@@ -195,13 +200,6 @@ impl<P: CodexProvisioner> AgentAdapter for CodexAdapter<P> {
         let profile = validate_request(self, request).map_err(AdapterError::Validation)?;
         if request.mode == LaunchMode::Headless && request.initial_prompt.is_none() {
             return Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt));
-        }
-        if request.mode == LaunchMode::Headless && request.resume {
-            return Err(AdapterError::Validation(
-                LaunchValidationError::UnsupportedCapability {
-                    capability: AgentCapability::Resume,
-                },
-            ));
         }
         let mut provision = self
             .provisioner
@@ -326,7 +324,7 @@ mod wiring_tests {
                 "-c",
                 "mcp_servers.usagi.args = [\"mcp\"]",
                 "-c",
-                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\"]",
+                "mcp_servers.usagi.env_vars = [\"USAGI_HOME\", \"USAGI_RUNTIME_MODE\", \"USAGI_WORKSPACE_ROOT\", \"USAGI_TRUST_ROOT\"]",
                 "-c",
                 "mcp_servers.usagi.required = true",
                 "-c",

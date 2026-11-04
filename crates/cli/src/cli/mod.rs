@@ -13,6 +13,7 @@
 
 pub mod commands;
 pub mod hooks;
+pub mod update_progress;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -29,6 +30,7 @@ pub struct InstallerRequest {
     script: &'static [u8],
     expected_sha256: [u8; 32],
     select_version: bool,
+    restart_agents: bool,
 }
 
 impl InstallerRequest {
@@ -43,6 +45,7 @@ impl InstallerRequest {
             script,
             expected_sha256,
             select_version,
+            restart_agents: false,
         }
     }
 
@@ -59,6 +62,18 @@ impl InstallerRequest {
     #[must_use]
     pub const fn select_version(&self) -> bool {
         self.select_version
+    }
+
+    /// Include the explicitly requested Agent interruption in this update.
+    #[must_use]
+    pub const fn with_agent_restart(mut self, restart_agents: bool) -> Self {
+        self.restart_agents = restart_agents;
+        self
+    }
+
+    #[must_use]
+    pub const fn restart_agents(&self) -> bool {
+        self.restart_agents
     }
 }
 
@@ -91,7 +106,7 @@ pub enum RunOutcome {
     /// daemon control plane の起動を依頼する。
     LaunchDaemon(DaemonCommand),
     /// installed binary から managed update の daemon 同期を依頼する。
-    SyncDaemonAfterUpdate,
+    SyncDaemonAfterUpdate { restart_agents: bool },
     /// Ask for a coalesced build-artifact replacement trigger and perform the
     /// replacement it keys. `force` gives up the live runtime the running
     /// daemon owns; without it a busy daemon is refused untouched.
@@ -115,6 +130,8 @@ pub enum RunOutcome {
         /// provider payload が event 名を含まない場合に、配線側が固定する event。
         hook_event: Option<String>,
     },
+    /// Emit daemon-issued Antigravity system context without starting a daemon.
+    EmitAgySystemPrompt,
     /// Claude `PreToolUse` hook の payload を stdin から読み、worktree を出る
     /// ツール呼び出しなら deny 判定を stdout へ書く。判定は純粋（daemon 不要）。
     GuardWorkspace,
@@ -216,7 +233,7 @@ pub enum Command {
         /// 検出した安全な候補を実際に削除する（省略時は dry-run）
         #[arg(long)]
         apply: bool,
-        /// dirty worktree と未マージ branch も削除する（--apply が必要）
+        /// dirty worktree・未マージ branch・保管できない成果物も破棄する（--apply が必要）
         #[arg(long, requires = "apply")]
         force: bool,
     },
@@ -225,6 +242,9 @@ pub enum Command {
         /// 更新先の release を一覧から選択する
         #[arg(short = 'v')]
         select_version: bool,
+        /// Agent を中断し、daemon 切替後に同じ会話で作業を続行する
+        #[arg(long)]
+        restart_agents: bool,
     },
     /// 指定シェルの補完スクリプトを標準出力に印字する（Tab 補完を有効化する）
     Completion {
@@ -256,6 +276,9 @@ pub enum Command {
         #[arg(long)]
         hook_event: Option<String>,
     },
+    /// （ヘルプ非表示・内部）AGY のモデル呼び出し前に system context を注入する。
+    #[command(hide = true)]
+    AgySystemPrompt,
     /// （ヘルプ非表示・内部）Codex `SessionStart` の session ID を daemon へ渡す。
     #[command(hide = true)]
     CodexSessionCapture,
@@ -356,16 +379,22 @@ pub enum DaemonCommand {
     },
     /// daemon を再起動する
     Restart {
-        /// daemon-owned Agent を停止し、切替後に現在の integration で exact resume する
+        /// 実行中の Agent も中断し、daemon 切替後に同じ会話で作業を続行する
         #[arg(long)]
         restart_agents: bool,
-        /// `--restart-agents` では実行中 tool の中断を、それ以外では live runtime の破棄を許可する
+        /// 未完了の再開処理を放棄する。`--restart-agents` なしでは live runtime の破棄も許可する
         #[arg(long)]
         force: bool,
     },
     /// installer が update lock 内で daemon を同期する内部 capability
     #[command(hide = true)]
-    SyncAfterUpdate,
+    SyncAfterUpdate {
+        #[arg(long)]
+        restart_agents: bool,
+    },
+    /// Retry a queued managed update independently of the invoking TUI.
+    #[command(hide = true)]
+    ContinueUpdate,
     /// 現在 daemon の artifact を明示的に入れ替える trigger を要求する
     Replace {
         /// live な Agent / generic terminal を巻き添えに入れ替えることを明示する
@@ -378,9 +407,11 @@ pub enum DaemonCommand {
     UninstallService,
 }
 
-/// The session mutations exposed by the human CLI.
+/// The session operations exposed by the human CLI.
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
+    /// Inspect Agent creation and launch origins in the current workspace.
+    Agents,
     Create {
         name: String,
         /// Stable session role selected from the effective role catalog.
@@ -392,7 +423,7 @@ pub enum SessionCommand {
     },
     Remove {
         name: String,
-        /// Force removal of a dirty worktree.
+        /// Force removal of a dirty worktree, discarding artifacts if archiving fails.
         #[arg(long)]
         force: bool,
         /// Discard a daemon-diagnosed integrity orphan, including unregistered
@@ -404,10 +435,20 @@ pub enum SessionCommand {
     Sleep {
         name: String,
     },
+    /// Queue a cache scan or cleanup; --status observes its progress and result.
+    Cache {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long, conflicts_with = "apply")]
+        status: bool,
+    },
     /// Resume one exact target returned by `resume-inventory`. The target is a
     /// secret-free JSON object; provider-native IDs are never accepted.
     ResumeExact {
         target: String,
+        /// Execute one new AGY turn non-interactively in the exact conversation.
+        #[arg(long)]
+        headless_prompt: Option<String>,
     },
     /// List root and managed-session Agent resume targets for one workspace ID.
     ResumeInventory {
@@ -441,7 +482,13 @@ impl Command {
                 apply,
                 force,
             } => Box::new(Clean { apply, force }),
-            Command::Update { select_version } => Box::new(h::Update { select_version }),
+            Command::Update {
+                select_version,
+                restart_agents,
+            } => Box::new(h::Update {
+                select_version,
+                restart_agents,
+            }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
@@ -455,6 +502,7 @@ impl Command {
             Command::AgentPhase { phase, hook_event } => {
                 Box::new(hooks::AgentPhase { phase, hook_event })
             }
+            Command::AgySystemPrompt => Box::new(hooks::AgySystemPrompt),
             Command::CodexSessionCapture => Box::new(hooks::CodexSessionCapture),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
             Command::ClaudeSandbox {
@@ -484,6 +532,31 @@ impl Command {
     }
 }
 
+#[cfg(test)]
+mod agent_inventory_tests {
+    use super::*;
+
+    #[test]
+    fn agents_command_requests_read_only_workspace_inventory() {
+        let parsed = Cli::try_parse_from(["usagi", "session", "agents"]).unwrap();
+        let command = parsed.command.unwrap();
+        assert!(matches!(
+            command,
+            Command::Session {
+                command: SessionCommand::Agents
+            }
+        ));
+        let (outcome, _) = execute(command);
+        assert!(matches!(
+            outcome,
+            RunOutcome::DaemonRequest(DaemonRequest::Session {
+                action: SessionAction::Agents,
+                ..
+            })
+        ));
+    }
+}
+
 struct Clean {
     apply: bool,
     force: bool,
@@ -506,7 +579,9 @@ impl Run for DaemonEntry {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         Ok(match self.command.clone() {
             DaemonCommand::Replace { force } => RunOutcome::RequestDaemonReplacement { force },
-            DaemonCommand::SyncAfterUpdate => RunOutcome::SyncDaemonAfterUpdate,
+            DaemonCommand::SyncAfterUpdate { restart_agents } => {
+                RunOutcome::SyncDaemonAfterUpdate { restart_agents }
+            }
             command => RunOutcome::LaunchDaemon(command),
         })
     }
@@ -527,6 +602,7 @@ struct Session {
 impl Run for Session {
     fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
         let (action, payload) = match &self.command {
+            SessionCommand::Agents => (SessionAction::Agents, serde_json::json!({})),
             SessionCommand::Create {
                 name,
                 role,
@@ -553,13 +629,30 @@ impl Run for Session {
             SessionCommand::Sleep { name } => {
                 (SessionAction::Sleep, serde_json::json!({"name": name}))
             }
-            SessionCommand::ResumeExact { target } => {
+            SessionCommand::Cache { apply, status } => (
+                SessionAction::Cache,
+                serde_json::json!({"apply": apply,"status":status}),
+            ),
+            SessionCommand::ResumeExact {
+                target,
+                headless_prompt,
+            } => {
                 let target = serde_json::from_str(target).map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "resume target must be a valid exact-target JSON object",
                     )
                 })?;
+                if let Some(prompt) = headless_prompt {
+                    return Ok(RunOutcome::DaemonRequest(
+                        DaemonRequest::ResumeAgentHeadless {
+                            operation_id: usagi_core::domain::id::OperationId::new().as_str(),
+                            target,
+                            prompt: prompt.clone(),
+                            caller_context: None,
+                        },
+                    ));
+                }
                 return Ok(RunOutcome::DaemonRequest(DaemonRequest::ResumeAgent {
                     operation_id: usagi_core::domain::id::OperationId::new().as_str(),
                     target,
@@ -693,7 +786,8 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "update"]).unwrap().command,
             Some(Command::Update {
-                select_version: false
+                select_version: false,
+                restart_agents: false,
             })
         ));
         assert!(matches!(
@@ -701,7 +795,8 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Update {
-                select_version: true
+                select_version: true,
+                restart_agents: false,
             })
         ));
         assert!(matches!(
@@ -712,6 +807,25 @@ mod tests {
 
     #[test]
     fn doctor_and_daemon_restart_keep_diagnosis_and_lifecycle_flags_separate() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "update", "-v", "--restart-agents"])
+                .unwrap()
+                .command,
+            Some(Command::Update {
+                select_version: true,
+                restart_agents: true
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "daemon", "sync-after-update", "--restart-agents"])
+                .unwrap()
+                .command,
+            Some(Command::Daemon {
+                command: Some(DaemonCommand::SyncAfterUpdate {
+                    restart_agents: true
+                })
+            })
+        ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "doctor", "--fix"])
                 .unwrap()
@@ -736,13 +850,24 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Daemon {
-                command: Some(DaemonCommand::SyncAfterUpdate)
+                command: Some(DaemonCommand::SyncAfterUpdate {
+                    restart_agents: false
+                })
             })
         ));
         let help = Cli::try_parse_from(["usagi", "daemon", "--help"])
             .unwrap_err()
             .to_string();
         assert!(!help.contains("sync-after-update"));
+        assert!(!help.contains("continue-update"));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "daemon", "continue-update"])
+                .unwrap()
+                .command,
+            Some(Command::Daemon {
+                command: Some(DaemonCommand::ContinueUpdate)
+            })
+        ));
     }
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
@@ -843,8 +968,8 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::LaunchDaemon(expected));
-            assert!(out.is_empty());
-            assert!(err.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
+            assert_eq!(err, [] as [u8; 0]);
         }
     }
 
@@ -885,8 +1010,8 @@ mod tests {
             outcome,
             RunOutcome::RequestDaemonReplacement { force: false }
         );
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -901,15 +1026,15 @@ mod tests {
             outcome,
             RunOutcome::RequestDaemonReplacement { force: true }
         );
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi", "mcp"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(outcome, RunOutcome::LaunchMcp);
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     /// `open` は任意のパス、`completion` は `value_enum` を受け取る。
@@ -992,7 +1117,7 @@ mod tests {
                 force: false
             }
         );
-        assert!(output.is_empty());
+        assert_eq!(output, "");
 
         let (apply, _) = super::execute(Command::Clean {
             dry_run: false,
@@ -1009,6 +1134,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One table verifies every session command and both exact-resume wire modes.
     fn session_commands_become_daemon_requests() {
         for (argv, action) in [
             (
@@ -1022,6 +1148,18 @@ mod tests {
             (
                 ["usagi", "session", "sleep", "a"].as_slice(),
                 usagi_core::infrastructure::ipc::SessionAction::Sleep,
+            ),
+            (
+                ["usagi", "session", "cache"].as_slice(),
+                usagi_core::infrastructure::ipc::SessionAction::Cache,
+            ),
+            (
+                ["usagi", "session", "cache", "--apply"].as_slice(),
+                usagi_core::infrastructure::ipc::SessionAction::Cache,
+            ),
+            (
+                ["usagi", "session", "cache", "--status"].as_slice(),
+                usagi_core::infrastructure::ipc::SessionAction::Cache,
             ),
             (
                 ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
@@ -1059,6 +1197,7 @@ mod tests {
         let (exact, _) = super::execute(Command::Session {
             command: SessionCommand::ResumeExact {
                 target: serde_json::to_string(&target).unwrap(),
+                headless_prompt: None,
             },
         });
         assert!(matches!(
@@ -1066,6 +1205,22 @@ mod tests {
             RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::ResumeAgent { target: actual, .. })
                 if actual == target
         ));
+        let target_json = serde_json::to_string(&target).unwrap();
+        let parsed = Cli::try_parse_from([
+            "usagi",
+            "session",
+            "resume-exact",
+            &target_json,
+            "--headless-prompt",
+            "next AGY turn",
+        ])
+        .unwrap()
+        .command
+        .unwrap();
+        let (headless, _) = super::execute(parsed);
+        assert!(
+            matches!(headless, RunOutcome::DaemonRequest(usagi_core::infrastructure::ipc::DaemonRequest::ResumeAgentHeadless {prompt,..}) if prompt=="next AGY turn")
+        );
         let (inventory, _) = super::execute(Command::Session {
             command: SessionCommand::ResumeInventory {
                 workspace_id: target.workspace_id.to_string(),
@@ -1080,6 +1235,7 @@ mod tests {
         for command in [
             SessionCommand::ResumeExact {
                 target: "not-json".into(),
+                headless_prompt: None,
             },
             SessionCommand::ResumeInventory {
                 workspace_id: "not-a-resource-id".into(),
@@ -1193,8 +1349,8 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::LaunchTui(expected));
-            assert!(out.is_empty());
-            assert!(err.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
+            assert_eq!(err, [] as [u8; 0]);
         }
     }
 
@@ -1205,8 +1361,8 @@ mod tests {
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(outcome, RunOutcome::LaunchTui(TuiRequest::Welcome));
-        assert!(out.is_empty());
-        assert!(err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     /// `--help` は `out` に出て終了コード 0。
@@ -1216,8 +1372,8 @@ mod tests {
         let mut err = Vec::new();
         let outcome = run(argv(&["usagi", "--help"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(outcome, RunOutcome::Exit(0));
-        assert!(err.is_empty());
-        assert!(!out.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
+        assert_ne!(out, [] as [u8; 0]);
     }
 
     /// daemon service の help は実装済みの macOS / Linux を両方示す。
@@ -1235,7 +1391,7 @@ mod tests {
         let help = String::from_utf8(out).unwrap();
 
         assert_eq!(outcome, RunOutcome::Exit(0));
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
         assert!(help.contains("macOS `LaunchAgent` / Linux systemd user service を install する"));
         assert!(
             help.contains("macOS `LaunchAgent` / Linux systemd user service を uninstall する")
@@ -1250,7 +1406,7 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(0));
-            assert!(err.is_empty());
+            assert_eq!(err, [] as [u8; 0]);
             assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
         }
     }
@@ -1268,7 +1424,7 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, RunOutcome::SelfUpdate { .. }));
         assert!(String::from_utf8(out).unwrap().contains("リリースを選んで"));
-        assert!(err.is_empty());
+        assert_eq!(err, [] as [u8; 0]);
     }
 
     /// 不正なコマンドは `err` に出て非 0 終了。
@@ -1284,8 +1440,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome, RunOutcome::Exit(2));
-        assert!(out.is_empty());
-        assert!(!err.is_empty());
+        assert_eq!(out, [] as [u8; 0]);
+        assert_ne!(err, [] as [u8; 0]);
     }
 
     /// 余分な引数と未知 daemon verb は clap の使い方エラーになり、起動要求へ到達しない。
@@ -1304,7 +1460,7 @@ mod tests {
             let mut err = Vec::new();
             let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(2));
-            assert!(out.is_empty());
+            assert_eq!(out, [] as [u8; 0]);
             assert!(String::from_utf8(err).unwrap().contains("Usage:"));
         }
     }

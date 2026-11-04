@@ -254,7 +254,6 @@ fn every_refusal_and_failure_renders_a_distinct_message() {
         ResourceError::WrongState,
         ResourceError::OwnershipUnknown,
         ResourceError::IdentityUnverifiable,
-        ResourceError::SealedElsewhere,
         ResourceError::NotCollectable,
     ];
     let mut rendered: Vec<String> = refusals

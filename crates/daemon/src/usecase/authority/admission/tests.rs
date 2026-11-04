@@ -159,7 +159,7 @@ fn a_background_producer_stops_before_the_barrier_waits_on_it() {
     let worker = {
         let gate = Arc::clone(&gate);
         thread::spawn(move || {
-            // A supervisor / decision / PR refresh producer: it holds a control
+            // A decision / PR refresh producer: it holds a control
             // lease for each tick and stops issuing when the class closes.
             let mut ticks = 0;
             while let Ok(lease) = gate.acquire(LeaseClass::ActiveControl) {
@@ -326,7 +326,7 @@ fn every_refusal_reads_as_a_safety_outcome() {
         AdmissionRefusal::StaleRevision,
         AdmissionRefusal::StillOpen,
     ] {
-        assert!(!refusal.to_string().is_empty());
+        assert_ne!(refusal.to_string(), "");
         assert!(refusal.source().is_none());
     }
 }

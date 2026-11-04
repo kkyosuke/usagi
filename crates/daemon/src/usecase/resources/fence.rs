@@ -3,14 +3,12 @@
 //! Splitting the runtime records into shards fixes the store that a rollover
 //! obviously races. It would be a false fix if the same lost update simply moved
 //! to the next whole-snapshot document a draining process still writes — the PR
-//! inventory it refreshes from PTY observation, or the supervisor state its tick
-//! recomputes. So the writers are enumerated here, with the mode each one is
+//! inventory it refreshes from PTY observation. So the writers are enumerated here, with the mode each one is
 //! written in, and one rule decides what a generation may do to them.
 //!
 //! | shared writer | write mode | draining owner |
 //! |---|---|---|
 //! | `pr-inventory.json` | whole snapshot | publishes an owner-local event; the active writer applies it |
-//! | supervisor state | whole snapshot | refused: the active generation's tick recomputes it |
 //! | `sessions.json` | whole snapshot | refused: lifecycle admission already closed for it |
 //! | `dispatch.json` | locked reducer with a handoff-stable schema | allowed |
 //! | `dispatch-workspaces.json` | whole snapshot | refused |
@@ -46,8 +44,6 @@ pub enum WriteMode {
 pub enum SharedWriter {
     /// `pr-inventory.json`, refreshed from PTY output observation.
     PrInventory,
-    /// The supervisor's durable state, recomputed by its tick.
-    SupervisorState,
     /// `sessions.json`, the managed session lifecycle reducer's store.
     SessionLifecycle,
     /// `dispatch.json`, the dispatch/run registry.
@@ -63,10 +59,9 @@ impl SharedWriter {
     #[must_use]
     pub fn mode(self) -> WriteMode {
         match self {
-            Self::PrInventory
-            | Self::SupervisorState
-            | Self::SessionLifecycle
-            | Self::WorkspaceDispatchRegistry => WriteMode::WholeSnapshot,
+            Self::PrInventory | Self::SessionLifecycle | Self::WorkspaceDispatchRegistry => {
+                WriteMode::WholeSnapshot
+            }
             Self::DispatchRegistry | Self::CompletionInbox => WriteMode::AppendOnly,
         }
     }
@@ -81,9 +76,8 @@ impl SharedWriter {
 
 /// Every shared writer this build knows about. A new whole-snapshot document must
 /// be added here, which is what keeps the inventory from silently going stale.
-pub const SHARED_WRITERS: [SharedWriter; 6] = [
+pub const SHARED_WRITERS: [SharedWriter; 5] = [
     SharedWriter::PrInventory,
-    SharedWriter::SupervisorState,
     SharedWriter::SessionLifecycle,
     SharedWriter::DispatchRegistry,
     SharedWriter::WorkspaceDispatchRegistry,
@@ -117,15 +111,6 @@ pub fn shared_write_verdict(writer: SharedWriter, role: GenerationRole) -> Write
         },
         GenerationRole::Standby | GenerationRole::Retired => WriteVerdict::Refused,
     }
-}
-
-/// The whole-snapshot documents that would lose an update without this fence.
-#[must_use]
-pub fn fenced_writers() -> Vec<SharedWriter> {
-    SHARED_WRITERS
-        .into_iter()
-        .filter(|writer| writer.mode() == WriteMode::WholeSnapshot)
-        .collect()
 }
 
 /// Why a fenced write was refused.

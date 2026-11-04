@@ -105,6 +105,23 @@ pub enum TerminalRuntimeState {
     SpawnFailed,
 }
 
+impl TerminalRuntimeState {
+    /// Whether a PTY may still belong to this runtime and requires termination
+    /// before its workspace can be retired or its record removed.
+    #[must_use]
+    pub const fn requires_termination(self) -> bool {
+        matches!(
+            self,
+            Self::Running
+                | Self::ReconcileRequired(
+                    TerminalReconcileState::SpawnAmbiguous
+                        | TerminalReconcileState::PersistAfterSpawn
+                        | TerminalReconcileState::OrphanRunning
+                )
+        )
+    }
+}
+
 /// A fail-closed condition that must be reconciled, never replaced by spawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -805,7 +822,7 @@ impl TerminalRegistry {
         reference: &TerminalRef,
         connection: ConnectionId,
     ) -> Result<Attached, RegistryError> {
-        self.attach_client(reference, connection, None, None, None)
+        self.attach_client(reference, connection, None, None)
     }
 
     /// Attaches on behalf of `client`, stating that client's viewport and
@@ -821,9 +838,8 @@ impl TerminalRegistry {
         &mut self,
         reference: &TerminalRef,
         connection: ConnectionId,
-        client: Option<ClientId>,
+        client: Option<(ClientId, &mut dyn PtyWriter)>,
         viewport: Option<Geometry>,
-        writer: Option<&mut dyn PtyWriter>,
     ) -> Result<Attached, RegistryError> {
         let checkpoint_bytes_limit = self.checkpoint_bytes_limit;
         let _screen_budget_guard = lock_screen_budget(self.screen_cells_process_shared);
@@ -835,7 +851,7 @@ impl TerminalRegistry {
             .find_map(|(subscription, attachment)| {
                 (attachment.connection == connection).then_some(*subscription)
             });
-        if let Some(client) = client {
+        let client = client.map(|(client, writer)| {
             let seen = entry.geometry;
             entry
                 .viewports
@@ -845,12 +861,9 @@ impl TerminalRegistry {
                     requested: viewport,
                     seen,
                 });
-            // A caller without a writer (the internal attach) states no
-            // viewport either, so there is nothing for it to reshape.
-            if let Some(writer) = writer {
-                reconcile_geometry(entry, Some(&client), writer, budgets);
-            }
-        }
+            reconcile_geometry(entry, Some(&client), writer, budgets);
+            client
+        });
         let snapshot = snapshot(entry, checkpoint_bytes_limit)?;
         // The client leaves with a screen at this geometry, so it is no longer
         // out of date with the shared PTY even if a peer moved it earlier.
@@ -894,7 +907,7 @@ impl TerminalRegistry {
         writer: &mut dyn PtyWriter,
     ) -> Result<Attached, RegistryError> {
         let mut attached =
-            self.attach_client(reference, connection, Some(client), viewport, Some(writer))?;
+            self.attach_client(reference, connection, Some((client, writer)), viewport)?;
         let entry = self.entry(reference)?;
         attached.next_input_seq = Some(
             entry
@@ -1440,9 +1453,9 @@ impl TerminalRegistry {
     ///
     /// A growing screen takes whatever the process ceiling leaves, and nothing
     /// hands it back until that screen is forgotten. Exited screens are kept
-    /// until retention evicts them, so a session that keeps launching Agents —
-    /// a workflow's planner and reviewer turns — filled the ceiling with
-    /// history nobody is reading, and every later launch was refused. Exited
+    /// until retention evicts them, so repeated Agent launches filled the
+    /// ceiling with history nobody is reading, and every later launch was
+    /// refused. Exited
     /// screens give up their history first, then the largest live ones; no
     /// visible grid is touched, so a screen stays drawable.
     fn reclaim_screen_cells(&mut self, needed: u64) {

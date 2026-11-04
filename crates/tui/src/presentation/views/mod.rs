@@ -4,6 +4,7 @@
 //! [`super::widgets`] に委ね、view は「どの状態をどこに出すか」だけを担う。
 //! 色は [`super::theme`] の意味的な役割で載せる。
 
+pub mod artifact_modal;
 pub mod cleanup_modal;
 pub mod closeup_modal;
 pub mod config;
@@ -24,6 +25,4 @@ pub mod scratchpad_modal;
 pub mod splash;
 pub mod text_overlay;
 pub mod welcome;
-pub mod work_run;
-pub mod workflow;
 pub mod workspace;

@@ -3,6 +3,613 @@
 #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
 
 use super::*;
+use crate::presentation::widgets;
+use usagi_core::domain::id::AgentId;
+
+fn decision_selection_runtime() -> WorkspaceRuntime {
+    decision_selection_runtime_with_title("Copy 日本語")
+}
+
+pub(super) fn decision_selection_runtime_with_title(title: &str) -> WorkspaceRuntime {
+    decision_selection_runtime_with_context(title, Vec::new())
+}
+
+fn decision_selection_runtime_with_context(
+    title: &str,
+    context: Vec<usagi_core::domain::user_decision::UserDecisionContext>,
+) -> WorkspaceRuntime {
+    use usagi_core::domain::agent::CallerRef;
+    use usagi_core::domain::user_decision::{
+        UserDecision, UserDecisionOption, UserDecisionOwner, UserDecisionSelectionMode,
+        UserDecisionStatus,
+    };
+    let workspace = WorkspaceId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, Vec::new());
+    let request = UserDecision {
+        decision_id: UserDecisionId::new(),
+        owner: UserDecisionOwner {
+            workspace_id: workspace,
+            session_id: None,
+            caller: CallerRef {
+                session_id: None,
+                agent_id: AgentId::new(),
+            },
+            run_id: OperationId::new(),
+        },
+        title: title.into(),
+        prompt: "Question text\nSecond line".into(),
+        options: vec![UserDecisionOption {
+            id: "safe".into(),
+            label: "Safe choice".into(),
+            description: None,
+            pros: Vec::new(),
+            cons: Vec::new(),
+        }],
+        allow_freeform: true,
+        allow_comment: true,
+        require_confirmation: true,
+        recommendation: None,
+        selection_limits: None,
+        selection_mode: UserDecisionSelectionMode::Single,
+        context,
+        expires_at: None,
+        idempotency_key: None,
+        status: UserDecisionStatus::Pending,
+        answer: None,
+        created_at: now(),
+        resolved_at: None,
+    };
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+        workspace,
+        decisions: vec![request],
+    }));
+    runtime
+}
+
+fn decision_selection_frame(
+    runtime: &WorkspaceRuntime,
+    height: usize,
+    width: usize,
+) -> Vec<String> {
+    crate::presentation::views::decision_modal::render_over(
+        height,
+        width,
+        &vec!["BACKGROUND TERMINAL".into(); height],
+        runtime.state().decision_overlay().unwrap(),
+        runtime.state().decisions(),
+        &crate::presentation::views::decision_modal::OwnerNames::default(),
+    )
+}
+
+fn decision_pointer(kind: PointerKind, column: usize, row: usize) -> Key {
+    Key::Pointer(PointerEvent {
+        kind,
+        column: u16::try_from(column).unwrap(),
+        row: u16::try_from(row).unwrap(),
+    })
+}
+
+/// Translate the scripted Attention action into a click on the button actually
+/// displayed. Async attention badges can move it between frames.
+struct DecisionProjectBarTerminal(FakeTerminal);
+
+impl Terminal for DecisionProjectBarTerminal {
+    fn size(&mut self) -> io::Result<(usize, usize)> {
+        self.0.size()
+    }
+    fn draw(&mut self, frame: &[String]) -> io::Result<()> {
+        self.0.draw(frame)
+    }
+    fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+        self.0.wait(duration)
+    }
+    fn copy_text(&mut self, text: &str) -> Result<(), String> {
+        self.0.copy_text(text)
+    }
+    fn read_key(&mut self) -> io::Result<Key> {
+        let key = self.0.read_key()?;
+        if key == Key::Live(LiveTerminalAction::OpenAttention) {
+            let bar = widgets::strip_ansi(&self.0.frames.last().unwrap()[0]);
+            let start = ["! Action needed", "Checking status", "No action needed"]
+                .iter()
+                .find_map(|label| bar.find(label))
+                .unwrap();
+            return Ok(Key::Click {
+                column: u16::try_from(widgets::display_width(&bar[..start])).unwrap(),
+                row: 0,
+            });
+        }
+        Ok(key)
+    }
+}
+
+#[test]
+fn decision_drag_copies_only_body_and_keeps_wide_glyphs_highlighted() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime();
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    // Begin on the second cell of 日 and finish on the second cell of 語.
+    for key in [
+        Key::Click {
+            column: u16::try_from(viewport.left + 8).unwrap(),
+            row: u16::try_from(viewport.top).unwrap(),
+        },
+        decision_pointer(PointerKind::Drag, viewport.left + 12, viewport.top),
+        decision_pointer(PointerKind::Up, viewport.left + 12, viewport.top),
+    ] {
+        assert!(selection.handle_input(&key, &mut term));
+    }
+    assert_eq!(term.copied, ["日本語"]);
+    let mut painted = frame.clone();
+    selection.paint(&mut painted, 80);
+    assert!(painted[viewport.top].contains("\u{1b}[7m日本語"));
+    assert_eq!(
+        widgets::strip_ansi(&painted[viewport.top]),
+        widgets::strip_ansi(&frame[viewport.top])
+    );
+    assert!(painted.join("\n").contains("copied 1 line(s)"));
+    assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    assert_eq!(term.copied, ["日本語", "日本語"]);
+    // Background updates do not replace the selected text.
+    let mut background_update = frame;
+    background_update[0] = "NEW BACKGROUND".into();
+    let revision = selection.revision();
+    selection.sync(
+        &background_update,
+        24,
+        80,
+        runtime.state().decision_overlay(),
+    );
+    assert_eq!(selection.revision(), revision);
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut term,
+    );
+    assert_eq!(term.copied.last().unwrap(), "日本語");
+}
+
+#[test]
+fn decision_drag_keeps_combining_marks_and_following_cell_coordinates() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime_with_title("Ae\u{301}界Z");
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    for (column, expected) in [(3, "e\u{301}"), (4, "界"), (5, "界"), (6, "Z")] {
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(selection.handle_input(
+                &decision_pointer(kind, viewport.left + column, viewport.top),
+                &mut term,
+            ));
+        }
+        assert_eq!(term.copied.last().unwrap(), expected);
+        let mut painted = frame.clone();
+        selection.paint(&mut painted, 80);
+        assert!(painted[viewport.top].contains(&format!("\u{1b}[7m{expected}\u{1b}[0m")));
+        assert_eq!(
+            widgets::strip_ansi(&painted[viewport.top]),
+            widgets::strip_ansi(&frame[viewport.top]),
+        );
+    }
+}
+
+#[test]
+fn decision_drag_copies_complete_emoji_graphemes() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    for emoji in ["👍🏽", "🇯🇵", "👩‍👩‍👧‍👦"] {
+        let runtime = decision_selection_runtime_with_title(&format!("{emoji}X"));
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        let mut selection = DecisionTextSelection::default();
+        let mut term = FakeTerminal::default();
+        selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+        let emoji_width = widgets::display_width(emoji);
+        for (column, expected) in [(2, emoji), (1 + emoji_width, emoji), (2 + emoji_width, "X")] {
+            for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+                assert!(selection.handle_input(
+                    &decision_pointer(kind, viewport.left + column, viewport.top),
+                    &mut term,
+                ));
+            }
+            assert_eq!(term.copied.last().unwrap(), expected);
+            let mut painted = frame.clone();
+            selection.paint(&mut painted, 80);
+            assert!(painted[viewport.top].contains(&format!("\u{1b}[7m{expected}\u{1b}[0m")));
+            assert_eq!(
+                widgets::strip_ansi(&painted[viewport.top]),
+                widgets::strip_ansi(&frame[viewport.top]),
+            );
+        }
+    }
+}
+
+#[test]
+fn decision_drag_copies_whole_emoji_after_a_title_wrap() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    for (padding, emoji) in [(66, "👍🏽"), (67, "🇯🇵"), (66, "👩‍👩‍👧‍👦")]
+    {
+        let prefix = "a".repeat(padding);
+        let runtime = decision_selection_runtime_with_title(&format!("{prefix}{emoji}X"));
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        let row = viewport.top + 1;
+        let mut selection = DecisionTextSelection::default();
+        let mut term = FakeTerminal::default();
+        selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(
+                selection.handle_input(&decision_pointer(kind, viewport.left + 2, row), &mut term,)
+            );
+        }
+        assert_eq!(term.copied.last().unwrap(), emoji);
+        assert_eq!(
+            widgets::strip_ansi(&widgets::modal::columns(
+                &frame[viewport.top],
+                viewport.left,
+                viewport.cols,
+            ))
+            .trim_end(),
+            format!("  {prefix}"),
+        );
+        let mut painted = frame.clone();
+        selection.paint(&mut painted, 80);
+        assert!(painted[row].contains(&format!("\u{1b}[7m{emoji}\u{1b}[0m")));
+        assert_eq!(
+            widgets::strip_ansi(&painted[row]),
+            widgets::strip_ansi(&frame[row])
+        );
+    }
+}
+
+#[test]
+fn decision_diagram_clipping_omits_incomplete_emoji_graphemes() {
+    use usagi_core::domain::user_decision::UserDecisionContext;
+    for (padding, emoji, suffix) in [(65, "👍🏽", ""), (66, "🇯🇵", "X"), (65, "👩‍👩‍👧‍👦", "")]
+    {
+        let prefix = "a".repeat(padding);
+        let mut runtime = decision_selection_runtime_with_context(
+            "Diagram clipping",
+            vec![UserDecisionContext::Diagram {
+                title: "Diagram".into(),
+                text: format!("{prefix}{emoji}{suffix}"),
+            }],
+        );
+        let _ = runtime.apply_event(AppEvent::DecisionScrolled {
+            decision_id: runtime.state().decisions()[0].decision_id,
+            offset: 0,
+        });
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        let line = frame
+            .iter()
+            .find(|line| widgets::strip_ansi(line).contains(&prefix))
+            .unwrap();
+        assert_eq!(
+            widgets::strip_ansi(&widgets::modal::columns(line, viewport.left, viewport.cols))
+                .trim_end(),
+            format!("  {prefix}…"),
+        );
+    }
+}
+
+#[test]
+fn decision_drag_copies_a_table_emoji_wider_than_its_grid_column() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    use usagi_core::domain::user_decision::UserDecisionContext;
+    let family = "👩‍👩‍👧‍👦";
+    let mut row = vec!["value".into(); 5];
+    row.push(family.into());
+    let mut runtime = decision_selection_runtime_with_context(
+        "Table selection",
+        vec![UserDecisionContext::Table {
+            title: "Families".into(),
+            columns: vec!["Column".into(); 6],
+            rows: vec![row],
+        }],
+    );
+    let _ = runtime.apply_event(AppEvent::DecisionScrolled {
+        decision_id: runtime.state().decisions()[0].decision_id,
+        offset: 0,
+    });
+    let frame = decision_selection_frame(&runtime, 40, 68);
+    let (row, line) = frame
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.contains(family))
+        .expect("the complete family emoji must remain visible");
+    let plain = widgets::strip_ansi(line);
+    let column = widgets::display_width(&plain[..plain.find(family).unwrap()]);
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 40, 68, runtime.state().decision_overlay());
+    for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+        assert!(selection.handle_input(&decision_pointer(kind, column, row), &mut term));
+    }
+    assert_eq!(term.copied, [family]);
+}
+
+#[test]
+fn decision_copy_retains_the_text_in_a_one_row_body() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let mut runtime = decision_selection_runtime();
+    let _ = runtime.apply_event(AppEvent::DecisionScrolled {
+        decision_id: runtime.state().decisions()[0].decision_id,
+        offset: 0,
+    });
+    let frame = decision_selection_frame(&runtime, 7, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(7, 80).unwrap();
+    assert_eq!(viewport.rows, 1);
+    let original = widgets::strip_ansi(&frame[viewport.top]);
+    assert!(original.contains("Copy 日本語"));
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    selection.sync(&frame, 7, 80, runtime.state().decision_overlay());
+    for (kind, column) in [
+        (PointerKind::Down, viewport.left),
+        (PointerKind::Drag, viewport.left + viewport.cols - 1),
+        (PointerKind::Up, viewport.left + viewport.cols - 1),
+    ] {
+        assert!(selection.handle_input(&decision_pointer(kind, column, viewport.top), &mut term));
+    }
+    assert_ne!(term.copied[0].trim(), "");
+    let mut painted = frame.clone();
+    selection.paint(&mut painted, 80);
+    assert_eq!(widgets::strip_ansi(&painted[viewport.top]), original);
+    assert!(painted[viewport.top].contains("\u{1b}[7m"));
+    assert!(painted[viewport.top + viewport.rows].contains("copied 1 line(s)"));
+    selection.sync(&frame, 7, 80, runtime.state().decision_overlay());
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut term,
+    );
+    assert_eq!(term.copied[0], term.copied[1]);
+}
+
+#[test]
+fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let mut runtime = decision_selection_runtime();
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    assert!(!selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    selection.sync(
+        &decision_selection_frame(&runtime, 24, 80),
+        24,
+        80,
+        runtime.state().decision_overlay(),
+    );
+    for key in [
+        decision_pointer(PointerKind::Move, 0, 0),
+        decision_pointer(PointerKind::Drag, 0, 0),
+        decision_pointer(PointerKind::Up, 0, 0),
+        decision_pointer(PointerKind::Down, viewport.left, viewport.top),
+        decision_pointer(PointerKind::Up, viewport.left, viewport.top),
+        Key::Click { column: 0, row: 0 },
+        decision_pointer(PointerKind::Drag, viewport.left, viewport.top),
+        decision_pointer(PointerKind::Up, viewport.left, viewport.top),
+        Key::TerminalCopy { fallback: vec![3] },
+    ] {
+        assert!(selection.handle_input(&key, &mut term));
+    }
+    assert_eq!(term.copied, [] as [String; 0]);
+    let mut painted = decision_selection_frame(&runtime, 24, 80);
+    selection.paint(&mut painted, 80);
+    assert!(painted.join("\n").contains("no decision text is selected"));
+    for key in [Key::Tab, Key::Paste("Pasted comment".into())] {
+        assert!(!selection.handle_input(&key, &mut term));
+        assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
+    }
+    assert_eq!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .comment(),
+        "Pasted comment"
+    );
+    for key in [Key::Tab, Key::Paste("Pasted answer".into())] {
+        assert!(!selection.handle_input(&key, &mut term));
+        assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
+    }
+    assert_eq!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .freeform(),
+        "Pasted answer"
+    );
+}
+
+#[test]
+fn decision_selection_tracks_list_review_scroll_resize_and_close() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let mut runtime = decision_selection_runtime();
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    for key in [Key::Other, Key::Enter, Key::Escape, Key::Escape] {
+        let _ = runtime.handle_key(key);
+        let frame = decision_selection_frame(&runtime, 24, 80);
+        let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+        selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+        for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+            assert!(selection.handle_input(
+                &decision_pointer(kind, viewport.left + 4, viewport.top),
+                &mut term
+            ));
+        }
+        assert!(!term.copied.last().unwrap().contains("BACKGROUND"));
+    }
+    let _ = runtime.handle_key(Key::Enter);
+    let _ = runtime.handle_key(Key::PageDown);
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    let copies = term.copied.len();
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut term,
+    );
+    assert_eq!(term.copied.len(), copies);
+    for (height, width) in [(40, 140), (12, 20), (0, 0), (2, 4), (12, 3)] {
+        let frame = decision_selection_frame(&runtime, height, width);
+        selection.sync(&frame, height, width, runtime.state().decision_overlay());
+        selection.paint(&mut frame.clone(), if width == 0 { 80 } else { width });
+        selection.handle_input(&decision_pointer(PointerKind::Move, 0, 0), &mut term);
+    }
+    selection.sync(&[], 24, 80, None);
+    selection.paint(&mut [], 80);
+    assert!(!selection.handle_input(&Key::Click { column: 0, row: 0 }, &mut term));
+}
+
+#[test]
+fn decision_multiline_drag_clamps_to_body_and_reports_clipboard_failure() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    let runtime = decision_selection_runtime();
+    let frame = decision_selection_frame(&runtime, 24, 80);
+    let viewport = crate::presentation::views::decision_modal::body_viewport(24, 80).unwrap();
+    let mut selection = DecisionTextSelection::default();
+    selection.sync(&frame, 24, 80, runtime.state().decision_overlay());
+    let mut term = FakeTerminal::default();
+    for (kind, column, row) in [
+        (PointerKind::Down, viewport.left + 12, viewport.top + 2),
+        (PointerKind::Drag, 0, 0),
+        (PointerKind::Up, 0, 0),
+    ] {
+        selection.handle_input(&decision_pointer(kind, column, row), &mut term);
+    }
+    assert_eq!(
+        term.copied,
+        ["  Copy 日本語\n  Question text\n  Second line"]
+    );
+    selection.handle_input(
+        &Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        &mut SleepingTerminal::default(),
+    );
+    let mut painted = frame.clone();
+    selection.paint(&mut painted, 80);
+    assert!(painted.join("\n").contains("clipboard is unavailable"));
+    // A blank selection never overwrites the clipboard.
+    for kind in [PointerKind::Down, PointerKind::Drag, PointerKind::Up] {
+        selection.handle_input(
+            &decision_pointer(kind, viewport.left + 40, viewport.top),
+            &mut term,
+        );
+    }
+    assert_eq!(term.copied.len(), 1);
+}
+
+#[test]
+fn decision_copy_and_paste_work_through_the_workspace_frame_loop() {
+    use usagi_core::domain::user_decision::UserDecision;
+    struct DecisionLane(UserDecision);
+    impl BackendDecisionPort for DecisionLane {
+        fn refresh(&mut self, workspace: WorkspaceId, completions: Completions) {
+            self.0.owner.workspace_id = workspace;
+            completions.emit(AppEvent::Backend(BackendEvent::Decisions {
+                workspace,
+                decisions: vec![self.0.clone()],
+            }));
+        }
+        fn resolve(
+            &mut self,
+            _: WorkspaceId,
+            _: UserDecisionId,
+            _: UserDecisionAnswer,
+            _: Completions,
+        ) {
+            panic!("copying text must not submit an answer");
+        }
+    }
+    let snapshot = snapshot("decision");
+    // The project bar takes one row above the Home frame.
+    let viewport = crate::presentation::views::decision_modal::body_viewport(23, 80).unwrap();
+    let row = viewport.top + 1;
+    let keys = [
+        decision_pointer(PointerKind::Down, viewport.left + 8, row),
+        decision_pointer(PointerKind::Drag, viewport.left + 12, row),
+        decision_pointer(PointerKind::Up, viewport.left + 12, row),
+        Key::TerminalCopy { fallback: vec![3] },
+        Key::Live(LiveTerminalAction::OpenAttention),
+        Key::TerminalCopy { fallback: vec![3] },
+        Key::Escape,
+        Key::TerminalCopy {
+            fallback: Vec::new(),
+        },
+        Key::Tab,
+        Key::Paste("Pasted note".into()),
+        Key::Escape,
+        Key::Escape,
+        Key::CtrlQ,
+        Key::Char('y'),
+    ];
+    let mut term = DecisionProjectBarTerminal(FakeTerminal {
+        size: Some((24, 80)),
+        ..FakeTerminal::with_keys(&keys)
+    });
+    let runtime = decision_selection_runtime();
+    let mut factory = FixedBackendFactory {
+        sessions: Some(Box::new(UnavailableSessionCommandPort)),
+        agent: Some(Box::new(UnavailableAgentCommandPort)),
+        launch: None,
+        restore: None,
+        metrics: Some(Box::new(NoMetrics)),
+        browser: Some(Box::new(UnavailableBrowserOpener)),
+        session_refresh: None,
+        decisions: Some(Box::new(DecisionLane(
+            runtime.state().decisions()[0].clone(),
+        ))),
+        session_worktrees: None,
+    };
+    assert_eq!(
+        run_workspace_controller_with_backend(&mut term, snapshot, &mut factory).unwrap(),
+        Exit::Quit
+    );
+    let term = term.0;
+    assert_eq!(term.copied, ["日本語", "日本語"]);
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("All projects"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("\u{1b}[7m日本語"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("copied 1 line(s)"))
+    );
+    assert!(
+        term.frames
+            .iter()
+            .flatten()
+            .any(|line| line.contains("Pasted note"))
+    );
+}
 
 #[test]
 fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
@@ -43,6 +650,10 @@ fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
         Some(AppEvent::Key(AppKey::OpenPreview))
     );
     assert_eq!(
+        app_event_from_key(Key::Live(LiveTerminalAction::OpenArtifacts)),
+        Some(AppEvent::Key(AppKey::OpenArtifacts))
+    );
+    assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::OpenDecisions)),
         Some(AppEvent::Key(AppKey::OpenDecisions))
     );
@@ -70,10 +681,7 @@ fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
         app_event_from_key(Key::Live(LiveTerminalAction::DirectorNew)),
         Some(AppEvent::Key(AppKey::OpenDirectorNew))
     );
-    assert_eq!(
-        app_event_from_key(Key::Live(LiveTerminalAction::WorkRuns)),
-        Some(AppEvent::Key(AppKey::OpenDirectorWorkRuns))
-    );
+
     assert_eq!(
         app_event_from_key(Key::Live(LiveTerminalAction::RootTerminal)),
         Some(AppEvent::Key(AppKey::ToggleRootTerminalDrawer))
@@ -351,6 +959,7 @@ fn right_pane_click_selection_reaches_the_runtime_tab_owner() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // The same durable fixture covers tab-strip and palette selection, including refused writes.
 fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
@@ -424,6 +1033,26 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
 
     select_right_pane_tab(&mut ui, &mut runtime, 1);
 
+    for tab in runtime.palette_tabs() {
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut ui,
+            &mut runtime,
+            workspace,
+            &tab.action,
+        )
+        .unwrap();
+    }
+    assert!(
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut ui,
+            &mut runtime,
+            WorkspaceId::new(),
+            &crate::presentation::workspace_deck::palette::Action::Workspace,
+        )
+        .is_err()
+    );
+    select_right_pane_tab(&mut ui, &mut runtime, 1);
+
     assert_eq!(runtime.focused_terminal(), Some(second.clone()));
     assert!(mutations.lock().unwrap().iter().any(|mutation| matches!(
         mutation,
@@ -453,7 +1082,66 @@ fn right_pane_agent_click_commits_intent_before_selection_and_surfaces_failure()
     select_right_pane_tab(&mut failing_ui, &mut runtime, 0);
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    let action = runtime.palette_tabs()[0].action.clone();
+    assert!(
+        crate::presentation::terminal_io::visit_palette_target(
+            &mut failing_ui,
+            &mut runtime,
+            workspace,
+            &action,
+        )
+        .is_err()
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(runtime.focused_terminal(), Some(second));
+}
+
+#[test]
+fn palette_root_shell_selection_preserves_the_directors_saved_conversation() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let root_agent = scoped_terminal_ref(workspace, None);
+    let shell = scoped_terminal_ref(workspace, None);
+    let continuation = AgentContinuationRef::new();
+    let mut intent = AgentTabIntent::empty(workspace);
+    intent.apply(AgentTabIntentMutation::Upsert {
+        session_id: None,
+        continuation,
+        terminal: root_agent,
+        select: true,
+    });
+    let durable = Arc::new(Mutex::new(intent));
+    let mutations = Arc::new(Mutex::new(Vec::new()));
+    let view = WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort)).with_agent_tab_intent(
+        workspace,
+        BTreeSet::from([session]),
+        Box::new(MemoryIntentPort {
+            state: Arc::clone(&durable),
+            mutations: Arc::clone(&mutations),
+        }),
+    );
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![]);
+    let target = Target::Root(workspace);
+    let operation = OperationId::new();
+    let _ = runtime.request_pane(target, operation, PaneKind::Terminal);
+    let _ = runtime.complete_pane(target, operation, shell.clone());
+    let action = runtime.palette_tabs()[0].action.clone();
+
+    crate::presentation::terminal_io::visit_palette_target(
+        &mut ui,
+        &mut runtime,
+        workspace,
+        &action,
+    )
+    .unwrap();
+
+    assert_eq!(runtime.focused_terminal(), Some(shell));
+    assert_eq!(
+        durable.lock().unwrap().targets[0].selected,
+        Some(continuation)
+    );
+    assert!(mutations.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -518,7 +1206,10 @@ fn a_blocked_pane_launch_keeps_every_live_pane_streaming() {
     // accepting input, resizing, and detaching.
     let resizes_before = stream.lock().unwrap().resizes;
     ui.resize_terminals(terminal_geometry(24, 100));
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(ui.send_terminal_bytes(&first, b"a"), Ok(()));
     assert_eq!(ui.send_terminal_bytes(&second, b"b"), Ok(()));
     ui.close_terminal(&second);
@@ -586,7 +1277,6 @@ fn every_pane_launch_request_carries_its_own_pending_operation() {
     let mut pending = std::collections::HashMap::new();
 
     let root_agent = OperationId::new();
-    let root_goal = OperationId::new();
     let session_agent = OperationId::new();
     let session_terminal = OperationId::new();
     let planned = [
@@ -599,20 +1289,6 @@ fn every_pane_launch_request_carries_its_own_pending_operation() {
                 workspace,
                 session: None,
                 profile: None,
-                goal: None,
-                resume: false,
-            },
-        ),
-        (
-            Target::Root(workspace),
-            root_goal,
-            "goal",
-            crate::presentation::PaneLaunch::Agent {
-                operation: root_goal,
-                workspace,
-                session: None,
-                profile: None,
-                goal: Some("prepare the PR".to_owned()),
                 resume: false,
             },
         ),
@@ -664,12 +1340,12 @@ fn every_pane_launch_request_carries_its_own_pending_operation() {
             "the pane promoted the terminal its own operation was answered with"
         );
     }
-    assert_eq!(requests.lock().unwrap().len(), 4);
+    assert_eq!(requests.lock().unwrap().len(), 3);
     assert!(pending.is_empty());
 }
 
 #[test]
-fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
+fn root_host_action_creates_one_root_pending_pane() {
     let workspace = WorkspaceId::new();
     let operation = OperationId::new();
     let view = WorkspaceView::with_runtime_ids(ws("demo"), empty_state("demo"), Vec::new());
@@ -684,7 +1360,6 @@ fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
             session: None,
             operation_id: operation,
             profile: None,
-            goal: Some("prepare a PR".to_owned()),
         }))
         .unwrap();
 
@@ -709,9 +1384,8 @@ fn goal_host_action_creates_one_root_pending_pane_and_preserves_the_goal() {
         [crate::presentation::PaneLaunch::Agent {
             operation: actual,
             session: None,
-            goal: Some(goal),
             ..
-        }] if *actual == operation && goal == "prepare a PR"
+        }] if *actual == operation
     ));
 }
 
@@ -762,7 +1436,6 @@ fn out_of_order_and_late_completions_never_cross_or_revive_a_pane() {
                     result: Ok(AgentPaneAdmission {
                         terminal,
                         continuation: None,
-                        supervisor_run_id: None,
                     }),
                 },
             })
@@ -837,7 +1510,10 @@ fn a_panicking_launch_worker_fails_only_its_pane() {
     assert!(!pending.contains_key(&dying));
 
     // The live pane never noticed, and the next launch reaches the daemon.
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(ui.send_terminal_bytes(&live, b"c"), Ok(()));
     crate::presentation::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
     let outcome = drain_next_completion(&mut ui, &mut runtime, &mut pending);
@@ -885,7 +1561,6 @@ fn a_stale_completion_neither_frees_admission_nor_completes_another_pane() {
                 result: Ok(AgentPaneAdmission {
                     terminal: stale_terminal,
                     continuation: None,
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -950,7 +1625,6 @@ fn successful_pane_completions_persist_focus_and_select_agent_tabs() {
                 result: Ok(AgentPaneAdmission {
                     terminal: agent_terminal.clone(),
                     continuation: Some(continuation),
-                    supervisor_run_id: None,
                 }),
             },
         })
@@ -1155,7 +1829,7 @@ fn an_exited_terminal_auto_closes_its_pane_and_detaches_through_the_runtime() {
     // the client subscription — the #1011 behavior lost in the migration.
     close_exited_panes(&mut ui, &mut runtime);
 
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(!runtime.state().has_live_pane());
     assert_eq!(*detaches.lock().unwrap(), vec![5]);
     assert!(
@@ -1202,7 +1876,10 @@ fn a_replaced_shared_connection_reattaches_every_pane_before_it_streams_again() 
     //    the same connection, so B keeps its attachment and its ledger
     //    position, and A continues from the sequence the daemon expects.
     script.lock().unwrap().poll_resync.push("A");
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert_eq!(ui.send_terminal_bytes(&generic, b"b2"), Ok(()));
     assert_eq!(ui.send_terminal_bytes(&agent, b"a2"), Ok(()));
 
@@ -1389,7 +2066,10 @@ fn reconnecting_and_stale_terminal_states_are_projected_into_the_pane_footer() {
         );
         let mut controls = LiveTerminalControls::default();
 
-        assert!(ui.poll_all_terminals().is_empty());
+        assert_eq!(
+            ui.poll_all_terminals(),
+            [] as [usagi_core::domain::id::TerminalRef; 0]
+        );
         let view = controller_terminal_view(&ui, &runtime, &mut controls, 10).unwrap();
 
         assert_eq!(view.feedback.as_deref(), Some(expected));
@@ -1415,10 +2095,16 @@ fn terminal_reconnect_fake_port_contract() {
         }),
     );
 
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert!(!ui.take_terminal_reconnected());
     std::thread::sleep(std::time::Duration::from_millis(110));
-    assert!(ui.poll_all_terminals().is_empty());
+    assert_eq!(
+        ui.poll_all_terminals(),
+        [] as [usagi_core::domain::id::TerminalRef; 0]
+    );
     assert!(ui.take_terminal_reconnected());
     assert!(!ui.take_terminal_reconnected());
 }
@@ -1531,7 +2217,7 @@ fn generic_terminal_ctrl_l_and_ctrl_c_clear_the_shell_and_close_requests_exit() 
             b"\x03exit\r".to_vec()
         ]
     );
-    assert!(runtime.active_pane().tabs().is_empty());
+    assert_eq!(runtime.active_pane().tabs(), []);
     assert!(ui.closed_generic_terminals.contains(&terminal));
 }
 
@@ -1833,8 +2519,8 @@ fn switch_consumes_right_pane_controls_without_mutating_the_dimmed_pane() {
     assert!(!controls.has_selection());
     assert_eq!(runtime.active_pane().tabs(), tabs_before.as_slice());
     assert!(detaches.lock().unwrap().is_empty());
-    assert!(term.copied.is_empty());
-    assert!(browser.opened.is_empty());
+    assert_eq!(term.copied, [] as [String; 0]);
+    assert_eq!(browser.opened, [] as [String; 0]);
 }
 
 #[test]
@@ -1936,7 +2622,6 @@ fn close_tab_live_action_cancels_the_focused_pending_launch() {
         workspace,
         session: Some(session),
         profile: None,
-        goal: None,
         resume: false,
     });
     let mut pending_targets = std::collections::HashMap::from([(operation, target)]);
@@ -1993,7 +2678,7 @@ fn close_tab_live_action_cancels_the_focused_pending_launch() {
         &mut pending_runtime,
         &mut pending_targets,
     );
-    assert!(pending_runtime.active_pane().tabs().is_empty());
+    assert_eq!(pending_runtime.active_pane().tabs(), []);
     assert!(pending_targets.is_empty());
 }
 
@@ -2041,13 +2726,13 @@ fn coherent_empty_projection_authoritatively_clears_every_scoped_live_target() {
     assert!(empty.iter().all(|target| target.panes.is_empty()));
     let fence = runtime.restore_fence();
     assert!(runtime.restore_snapshot(fence.0, fence.1, empty));
-    assert!(
+    assert_eq!(
         runtime
             .panes()
             .pane(Target::Session(session))
             .unwrap()
-            .tabs()
-            .is_empty()
+            .tabs(),
+        []
     );
 }
 
@@ -2398,6 +3083,9 @@ fn same_tui_reopen_waits_for_fresh_observation_and_preserves_new_generic_pane() 
             agents: Ok(AgentInventory {
                 workspace_id: workspace,
                 runtimes: vec![AgentRuntimeInventoryItem {
+                    operation_id: None,
+                    agent_id: None,
+                    launch_provenance: None,
                     runtime: AgentRuntimeRef::new(
                         AgentRuntimeId::new(),
                         agent_terminal.clone(),
@@ -2524,6 +3212,33 @@ fn root_terminal_drawer_retargets_plain_new_to_a_terminal_tab() {
 }
 
 #[test]
+fn visible_terminals_wait_for_a_stream_port_without_creating_local_sessions() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let terminal = live_terminal_ref(workspace, session);
+    let mut ui = io_runtime(
+        WorkspaceView::with_runtime_ids(ws("demo"), state("demo"), vec![session]),
+        Box::new(UnavailableSessionCommandPort),
+    );
+    ui.sync_visible_terminals(&[(terminal.clone(), terminal_geometry(20, 80))]);
+    assert_eq!(ui.terminals.len(), 0);
+    assert!(ui.retained_terminal_view(&terminal, 5).is_none());
+}
+
+#[test]
+fn root_terminal_tab_navigation_waits_for_the_first_pane() {
+    let mut runtime = WorkspaceRuntime::new(WorkspaceId::new(), Vec::new());
+    let _ = runtime.handle_key(Key::Live(LiveTerminalAction::RootTerminal));
+    assert!(runtime.state().root_terminal_drawer_open());
+    for key in [LiveTerminalAction::NextTab, LiveTerminalAction::PreviousTab] {
+        assert!(select_root_terminal_tab(&Key::Live(key), &mut runtime));
+    }
+    assert!(runtime.root_terminal_selection_at(0).is_none());
+    assert!(runtime.focused_terminal().is_none());
+    assert!(runtime.state().root_terminal_drawer_open());
+}
+
+#[test]
 fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
@@ -2605,50 +3320,6 @@ fn root_terminal_drawer_cycles_and_clicks_terminal_only_tabs() {
         0,
         0,
     ));
-}
-
-#[test]
-fn a_press_on_the_workflow_tab_beside_a_live_agent_is_not_a_terminal_press() {
-    // Starting a workflow launches an Agent tab in the same session, so the
-    // session holds a live tab while the person still reads the Workflow tab.
-    // A press there used to find live input wanted but no terminal selected,
-    // and the TUI panicked out of the raw-mode screen.
-    let workspace = WorkspaceId::new();
-    let session = SessionId::new();
-    let terminal = live_terminal_ref(workspace, session);
-    let (ui, mut runtime) = focused_live_pane(
-        workspace,
-        session,
-        terminal.clone(),
-        Box::new(ScriptedAgentPort {
-            terminal,
-            subscription: 9,
-            replay: b"hello".to_vec(),
-            poll_error: None,
-            detaches: Arc::new(Mutex::new(Vec::new())),
-        }),
-    );
-    runtime.on_effect(&Effect::OpenWorkflow { session });
-    assert!(runtime.wants_live_input());
-    assert!(runtime.focused_terminal().is_none());
-    let mut controls = LiveTerminalControls::default();
-    assert!(!handle_terminal_pointer(
-        &ui,
-        &runtime,
-        &mut controls,
-        &mut FakeTerminal::default(),
-        &mut RecordingBrowser::default(),
-        20,
-        80,
-        1,
-        0,
-        PointerEvent {
-            kind: PointerKind::Down,
-            column: 37,
-            row: 5,
-        },
-    ));
-    assert!(!controls.has_selection());
 }
 
 #[test]
@@ -2757,7 +3428,7 @@ fn a_live_terminal_drag_selects_and_release_copies_to_the_clipboard() {
         "selection highlight lost after release: {projected:?}"
     );
     // A drag that copied a selection never also opens a link.
-    assert!(browser.opened.is_empty());
+    assert_eq!(browser.opened, [] as [String; 0]);
 }
 
 #[test]
@@ -2848,7 +3519,7 @@ fn a_down_up_click_on_a_terminal_link_opens_it_without_touching_the_pty() {
     assert_eq!(browser.opened, vec!["https://example.com/x".to_owned()]);
     // A pointer release is not keyboard input, so nothing was forwarded to the
     // child PTY, and the clipboard was left alone.
-    assert!(term.copied.is_empty());
+    assert_eq!(term.copied, [] as [String; 0]);
 
     // A complete click on the leading prose (frame column 37 = content
     // column 0) opens nothing.
@@ -3029,8 +3700,8 @@ fn open_selection_loads_and_runs_workspace_on_the_same_terminal() {
     );
     assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
     assert_eq!(term.frames.len(), 4);
-    assert!(term.frames[0].join("\n").contains("Menu"));
-    assert!(term.frames[1].join("\n").contains("Open Workspace"));
+    assert!(term.frames[0].join("\n").contains("Clone repository"));
+    assert!(term.frames[1].join("\n").contains("Open / add projects"));
     assert!(term.frames[2].join("\n").contains("alpha-session"));
 }
 

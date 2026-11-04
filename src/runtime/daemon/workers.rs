@@ -2,7 +2,11 @@
 
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::AtomicBool;
 
+use usagi_daemon::usecase::lock_watch::{LockTarget, LockWatchTiming};
+
+use super::agent::AgentOwnerLock;
 use super::{
     AGENT_READINESS_TERMINATE_GRACE, AcceptedStream, AdmissionGate, AgentPtyObservation,
     AgentReadinessCommand, Arc, BTreeMap, BTreeSet, BackgroundWorker, ClientWorkers, Collection,
@@ -78,15 +82,26 @@ pub(super) struct SystemAgentReadiness {
     pub(super) state: Mutex<ReadinessState>,
     pub(super) completed: Condvar,
     pub(super) terminate_grace: Duration,
+    /// The daemon's shutdown flag. A probe runs on a client worker that
+    /// shutdown joins, so a probe still inside its budget must end as soon as
+    /// shutdown begins rather than when the budget does.
+    pub(super) abort: Arc<AtomicBool>,
 }
 
-impl Default for SystemAgentReadiness {
-    fn default() -> Self {
+impl SystemAgentReadiness {
+    pub(super) fn new(abort: Arc<AtomicBool>) -> Self {
         Self {
             state: Mutex::new(ReadinessState::default()),
             completed: Condvar::new(),
             terminate_grace: AGENT_READINESS_TERMINATE_GRACE,
+            abort,
         }
+    }
+}
+
+impl Default for SystemAgentReadiness {
+    fn default() -> Self {
+        Self::new(Arc::new(AtomicBool::new(false)))
     }
 }
 
@@ -152,7 +167,13 @@ impl SystemAgentReadiness {
         slot.result = None;
         drop(state);
 
-        let result = bounded_readiness_command(program, arguments, bounds, self.terminate_grace);
+        let result = bounded_readiness_command(
+            program,
+            arguments,
+            bounds,
+            self.terminate_grace,
+            &self.abort,
+        );
         let Ok(mut state) = self.state.lock() else {
             return AgentReadiness::Unavailable;
         };
@@ -550,11 +571,53 @@ pub(super) trait OrphanCleanupPass: Send {
 pub(super) struct AutomaticOrphanCleanup {
     pub(super) workspaces: Workspaces,
     pub(super) gate: AdmissionGate,
+    pub(super) agent: SharedAgentRuntime,
+    pub(super) terminal: SharedTerminalRuntime,
+    pub(super) cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
+    pub(super) clock: super::SystemClock,
+    pub(super) schedule: usagi_daemon::usecase::session_cache_jobs::MaintenanceSchedule,
+}
+
+impl usagi_daemon::usecase::session_cache_jobs::CacheJobExecutor for AutomaticOrphanCleanup {
+    #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_cache_cleanup_reports_usage_and_keeps_the_session
+    fn execute(
+        &mut self,
+        workspace: super::WorkspaceId,
+        apply: bool,
+    ) -> Result<serde_json::Value, String> {
+        let tenant = self
+            .workspaces
+            .workspace(workspace)
+            .ok_or("cache workspace is unavailable")?;
+        match super::session_cache::clean_session_caches(
+            &ConnectionWorkspace {
+                tenant,
+                workspaces: Arc::clone(&self.workspaces),
+            },
+            &self.agent,
+            &self.terminal,
+            apply,
+        ) {
+            Ok(result) => Ok(result),
+            Err(error) => Err(error.to_string()),
+        }
+    }
 }
 
 impl OrphanCleanupPass for AutomaticOrphanCleanup {
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=running_daemon_cleans_a_merged_orphan_branch_without_touching_active_sessions
     fn run(&mut self) {
+        let Some(_lease) = active_cleanup_lease(&self.gate) else {
+            return;
+        };
+        let jobs = self.cache_jobs.clone();
+        if let Err(error) = usagi_daemon::usecase::session_cache_jobs::drain(&jobs, self) {
+            ErrorLog::record(error);
+            return;
+        }
+        if !self.schedule.due(self.clock.now_ms()) {
+            return;
+        }
         for tenant in self.workspaces.all() {
             let Some(_lease) = active_cleanup_lease(&self.gate) else {
                 break;
@@ -570,6 +633,27 @@ impl OrphanCleanupPass for AutomaticOrphanCleanup {
                     root.display(),
                     error.safe_message()
                 ));
+            }
+            match super::session_cache::clean_session_caches(
+                &bound,
+                &self.agent,
+                &self.terminal,
+                true,
+            ) {
+                Ok(report)
+                    if report["removed"].as_u64().unwrap_or_default() != 0
+                        || report["deferred"].as_u64().unwrap_or_default() != 0 =>
+                {
+                    ErrorLog::record(&format!(
+                        "session cache cleanup for {}: {report}",
+                        root.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => ErrorLog::record(&format!(
+                    "session cache cleanup deferred for {}: {error}",
+                    root.display()
+                )),
             }
         }
     }
@@ -659,6 +743,12 @@ where
             let worker_health =
                 shutdown.monitor_background_worker(BackgroundWorker::TenantRetirement);
             while !shutdown.is_requested() {
+                for root in tenants.release_draining(&gate, &activity) {
+                    ErrorLog::record(&format!(
+                        "replaced daemon released workspace {}",
+                        root.display()
+                    ));
+                }
                 for root in tenants.retire_idle(&activity, chrono::Utc::now(), idle_for) {
                     ErrorLog::record(&format!(
                         "daemon released the idle workspace {}",
@@ -679,6 +769,34 @@ where
             }
             worker_health.finish_planned();
         })
+}
+
+/// Starts the watchdog that reports a daemon-wide runtime lock left
+/// unavailable, so a parked lock holder is named in the error log instead of
+/// surfacing only as refused connections once client capacity is exhausted.
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=the_watchdog_reports_a_held_lock_and_its_release_then_stops_on_shutdown
+pub(super) fn start_lock_watchdog(
+    agent: &SharedAgentRuntime,
+    terminal: &SharedTerminalRuntime,
+    workers: Arc<ClientWorkers>,
+    shutdown: &Arc<ShutdownRequest>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let threads = usagi_daemon::usecase::lock_watch::start_lock_watch(
+        vec![
+            LockTarget::new(
+                "agent runtime",
+                Box::new(AgentOwnerLock(Arc::downgrade(agent))),
+            ),
+            LockTarget::new("terminal runtime", Box::new(Arc::downgrade(terminal))),
+        ],
+        workers,
+        shutdown,
+        LockWatchTiming::SHIPPING,
+        Arc::new(ErrorLog::record),
+    )?;
+    // The watch thread joins the probes that end with it. One still parked on
+    // the very lock it reports is left, so it cannot hold up shutdown.
+    Ok(threads.watch)
 }
 
 /// Starts the only production retention collector. Launch and exit already
@@ -840,6 +958,7 @@ pub(super) fn start_pr_projection_worker(
                         let _ = projector.observe_committed(terminal, session, &bytes);
                     }
                     PrProjection::Gap { terminal } => projector.mark_gap(terminal),
+                    PrProjection::Reset => projector.reset_carries(),
                     PrProjection::Closed { terminal, session } => {
                         let _ = projector.release_terminal(terminal, session);
                     }

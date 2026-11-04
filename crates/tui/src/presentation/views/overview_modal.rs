@@ -2,10 +2,10 @@
 //!
 //! workspace 画面で `:` を押すと開く、workspace 全体に効くコマンドの入力パレット。入力欄に
 //! 打つと候補が前方一致で絞り込まれ、Tab で補完、↑↓ で履歴を遡れる。選択中 command の
-//! usage / long help と直前の結果も同じ固定位置に表示する。中央に浮かぶ枠付きダイアログとして
+//! usage / long help も同じ固定位置に表示する。中央に浮かぶ枠付きダイアログとして
 //! 描く（配置は共通の [`modal`] widget に委譲）。
 //!
-//! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
+//! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render_over`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。キー入力の解釈は入力層が整うときに載せ、ここでは
 //! 入力編集と候補選択の純粋操作だけを公開する。
 
@@ -16,9 +16,9 @@ use usagi_core::domain::settings::ModalSelectionMode;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 56;
-/// 一度に出す候補の最大数。
+/// 候補一覧に使う最大行数（スクロール表示・展開したサブコマンドを含む）。
 const MAX_MATCHES: usize = 8;
-/// input, heading, candidates, help, result, and footer.
+/// Input, heading, candidates, help, spacing, and footer.
 const BODY_HEIGHT: usize = 20;
 
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
@@ -31,16 +31,6 @@ pub struct OverviewModal {
     history_index: Option<usize>,
     expanded: bool,
     selected_subcommand: usize,
-    result: Option<PaletteResult>,
-}
-
-/// command 実行後に palette の結果帯へ残す安全な 1 行。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaletteResult {
-    /// 成功または通常の通知。
-    Notice(String),
-    /// 入力・実行時の安全なエラー。
-    Error(String),
 }
 
 impl OverviewModal {
@@ -93,12 +83,6 @@ impl OverviewModal {
     #[must_use]
     pub fn history(&self) -> &[String] {
         &self.history
-    }
-
-    /// 直前の command 実行結果。
-    #[must_use]
-    pub fn result(&self) -> Option<&PaletteResult> {
-        self.result.as_ref()
     }
 
     /// 入力の前方一致で絞り込んだコマンド候補。入力が空なら全件。
@@ -169,21 +153,6 @@ impl OverviewModal {
         self.history_index = None;
     }
 
-    /// command 実行の通常結果を結果帯へ表示する。
-    pub fn set_result(&mut self, result: impl Into<String>) {
-        self.result = Some(PaletteResult::Notice(result.into()));
-    }
-
-    /// command 実行の安全なエラーを結果帯へ表示する。
-    pub fn set_error(&mut self, error: impl Into<String>) {
-        self.result = Some(PaletteResult::Error(error.into()));
-    }
-
-    /// 結果帯を消す。
-    pub fn clear_result(&mut self) {
-        self.result = None;
-    }
-
     /// Enter で controller へ渡す入力。空欄では選択中候補を実行する。
     #[must_use]
     pub fn submission(&self) -> String {
@@ -191,16 +160,13 @@ impl OverviewModal {
             return self.input.value().to_owned();
         }
         if self.expanded {
-            return self
-                .selected_command()
-                .map(|command| {
-                    format!(
-                        "{} {}",
-                        command.name,
-                        self.subcommands()[self.selected_subcommand]
-                    )
-                })
-                .unwrap_or_default();
+            return self.selected_command().map_or_default(|command| {
+                format!(
+                    "{} {}",
+                    command.name,
+                    self.subcommands()[self.selected_subcommand]
+                )
+            });
         }
         if self.input.value().contains(char::is_whitespace) || self.matches().is_empty() {
             return self.input.value().to_owned();
@@ -297,31 +263,26 @@ impl OverviewModal {
 
     /// 選択を次の候補へ（末尾で先頭へ回り込む）。候補が無ければ何もしない。
     pub fn select_next(&mut self) {
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
-        if len > 0 {
-            self.selected = (self.selected + 1) % len;
-        }
+        self.move_selection(true);
     }
 
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
     pub fn select_prev(&mut self) {
-        if self.expanded {
-            let len = self.subcommands().len();
-            if len > 0 {
-                self.selected_subcommand = (self.selected_subcommand + len - 1) % len;
-            }
-            return;
-        }
-        let len = self.matches().len();
+        self.move_selection(false);
+    }
+
+    fn move_selection(&mut self, forward: bool) {
+        let (len, selected) = if self.expanded {
+            (self.subcommands().len(), &mut self.selected_subcommand)
+        } else {
+            (self.matches().len(), &mut self.selected)
+        };
         if len > 0 {
-            self.selected = (self.selected + len - 1) % len;
+            *selected = if forward {
+                (*selected + 1) % len
+            } else {
+                (*selected + len - 1) % len
+            };
         }
     }
 
@@ -366,20 +327,27 @@ fn body(state: &OverviewModal) -> Vec<String> {
             "matches"
         };
         lines.push(modal::caption(header));
-        for (i, hint) in matches.iter().take(MAX_MATCHES).enumerate() {
-            lines.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
+        let mut rows = Vec::new();
+        let mut cursor = 0;
+        for (i, hint) in matches.iter().enumerate() {
+            if i == state.selected {
+                cursor = rows.len();
+            }
+            rows.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
             if state.selection_mode == ModalSelectionMode::Action
                 && state.expanded
                 && i == state.selected
             {
+                cursor += 1 + state.selected_subcommand;
                 for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
-                    lines.push(modal::subcommand_row(
+                    rows.push(modal::subcommand_row(
                         subcommand,
                         sub_index == state.selected_subcommand,
                     ));
                 }
             }
         }
+        lines.extend(modal::bounded_list_rows(&rows, cursor, MAX_MATCHES));
     }
     let help = matches
         .get(state.selected)
@@ -389,17 +357,7 @@ fn body(state: &OverviewModal) -> Vec<String> {
         lines.push(modal::caption(help.usage));
         lines.push(modal::caption(help.long_description));
     }
-    lines.push(String::new());
-    match state.result() {
-        Some(PaletteResult::Notice(result)) => {
-            lines.push(Role::Success.style().paint(&format!("  {result}")));
-        }
-        Some(PaletteResult::Error(error)) => {
-            lines.push(Role::Danger.style().paint(&format!("  {error}")));
-        }
-        None => lines.push(String::new()),
-    }
-    lines.push(String::new());
+    lines.extend([String::new(), String::new(), String::new()]);
     lines.push(modal::footer(
         if state.selection_mode == ModalSelectionMode::Action {
             "Tab: complete ↑↓ select → expand Enter run Esc: close"
@@ -408,20 +366,6 @@ fn body(state: &OverviewModal) -> Vec<String> {
         },
     ));
     lines
-}
-
-/// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
-/// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
-#[must_use]
-pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
-    modal::render_body(
-        raw_height,
-        raw_width,
-        "Overview",
-        INNER_WIDTH,
-        BODY_HEIGHT,
-        body(state),
-    )
 }
 
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
@@ -447,9 +391,13 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     #![coverage(off)] // coverage: reason=composition owner=tui expires=2027-01-31 tests=module_unit_contract
-    use super::{OverviewModal, PaletteResult, render, render_over};
+    use super::{OverviewModal, render_over};
     use crate::presentation::widgets::{display_width, strip_ansi};
     use usagi_core::domain::settings::ModalSelectionMode;
+
+    fn render(height: usize, width: usize, state: &OverviewModal) -> Vec<String> {
+        render_over(height, width, &[], state)
+    }
 
     fn joined(state: &OverviewModal) -> String {
         render(24, 80, state)
@@ -471,7 +419,7 @@ mod tests {
         assert_eq!(modal.input(), "");
         assert_eq!(modal.cursor(), 0);
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.matches().len(), 8);
+        assert_eq!(modal.matches().len(), 9);
         // derive された Clone / Debug / Eq も触れる。
         assert!(format!("{modal:?}").contains("OverviewModal"));
         assert_eq!(modal.clone(), modal);
@@ -481,7 +429,7 @@ mod tests {
         // registry metadata の derive も。
         let hint = modal.matches()[0];
         assert_eq!(hint, hint);
-        assert!(format!("{hint:?}").contains("clean"));
+        assert!(format!("{hint:?}").contains("artifact"));
     }
 
     #[test]
@@ -526,14 +474,14 @@ mod tests {
             vec!["clean", "config"]
         );
         modal.backspace();
-        assert_eq!(modal.matches().len(), 8);
+        assert_eq!(modal.matches().len(), 9);
     }
 
     #[test]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
-        modal.select_prev(); // wrap to last (7)
-        assert_eq!(modal.selected(), 7);
+        modal.select_prev(); // wrap to last (8)
+        assert_eq!(modal.selected(), 8);
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
     }
@@ -541,12 +489,14 @@ mod tests {
     #[test]
     fn action_mode_expands_and_cycles_session_subcommands() {
         let mut modal = OverviewModal::new();
+        modal.select_next(); // clean
         modal.expand_selected();
         assert_eq!(modal.submission(), "clean --apply");
         modal.select_next();
         assert_eq!(modal.submission(), "clean --apply --force");
         assert!(modal.collapse());
 
+        modal.select_prev(); // artifact
         modal.select_prev(); // session
         modal.expand_selected();
         assert_eq!(modal.submission(), "session cleanup");
@@ -561,10 +511,11 @@ mod tests {
         modal.select_prev();
         assert_eq!(modal.submission(), "session remove");
         let expanded = joined(&modal);
-        assert!(expanded.contains("cleanup"));
-        assert!(expanded.contains("list"));
-        assert!(expanded.contains("overview"));
-        assert!(expanded.contains("remove"));
+        assert!(expanded.contains("        cleanup"));
+        assert!(expanded.contains("        list"));
+        assert!(expanded.contains("        overview"));
+        assert!(expanded.contains("› remove"));
+        assert!(expanded.contains("Esc: close"));
         assert!(modal.collapse());
         assert!(!modal.collapse());
 
@@ -573,6 +524,25 @@ mod tests {
         plain.expand_selected();
         assert!(!plain.collapse());
         assert_eq!(plain.submission(), "config");
+    }
+
+    #[test]
+    fn scrolling_keeps_every_selected_command_and_footer_visible() {
+        let mut modal = OverviewModal::new();
+        for command in modal.matches() {
+            let text = joined(&modal);
+            assert!(text.contains(&format!("› {}", command.name)), "{text}");
+            assert!(text.contains("Esc: close"), "{text}");
+            assert_eq!(modal.submission(), command.name);
+            modal.select_next();
+        }
+        assert_eq!(modal.selected(), 0);
+        modal.select_next(); // clean
+        modal.expand_selected();
+        modal.select_next();
+        let text = joined(&modal);
+        assert!(text.contains("› --apply --force"), "{text}");
+        assert!(text.contains("Esc: close"), "{text}");
     }
 
     #[test]
@@ -585,7 +555,7 @@ mod tests {
         assert_eq!(modal.submission(), expected);
 
         let empty = OverviewModal::new();
-        assert_eq!(empty.submission(), "clean");
+        assert_eq!(empty.submission(), "artifact");
     }
 
     #[test]
@@ -621,12 +591,12 @@ mod tests {
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
-        modal.set_error("safe error");
-        let error = render(40, 80, &modal)
+        type_str(&mut modal, "session");
+        let filtered = render(40, 80, &modal)
             .iter()
             .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
             .count();
-        assert_eq!(empty, error);
+        assert_eq!(empty, filtered);
     }
 
     #[test]
@@ -669,32 +639,22 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_long_help_and_a_result_strip() {
+    fn render_shows_long_help_and_controls() {
         let mut modal = OverviewModal::new();
-        modal.set_result("Settings saved");
+        modal.select_next(); // clean
         let text = joined(&modal);
         assert!(text.contains("Compare daemon lifecycle state"));
-        assert!(text.contains("Settings saved"));
         assert!(text.contains("Tab: complete"));
-        assert_eq!(
-            modal.result(),
-            Some(&PaletteResult::Notice("Settings saved".to_owned()))
-        );
-
-        modal.set_error("Settings are unavailable");
-        assert_eq!(
-            modal.result(),
-            Some(&PaletteResult::Error("Settings are unavailable".to_owned()))
-        );
-        modal.clear_result();
-        assert_eq!(modal.result(), None);
     }
 
     #[test]
     fn selection_is_a_noop_when_there_are_no_matches() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "zzz"); // 何にも一致しない
-        assert!(modal.matches().is_empty());
+        assert_eq!(
+            modal.matches(),
+            [] as [crate::usecase::overview::CommandInfo; 0]
+        );
         modal.select_next();
         modal.select_prev();
         assert_eq!(modal.selected(), 0);

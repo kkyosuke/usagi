@@ -27,8 +27,8 @@ const ORCHESTRATION_GUIDE: &str = include_str!("guides/orchestration.md");
 
 /// 公開する全 resource のレジストリ。
 #[must_use]
-pub fn registry() -> Vec<Resource> {
-    vec![Resource {
+pub fn registry() -> &'static [Resource] {
+    &[Resource {
         uri: "usagi://guides/orchestration",
         name: "usagi orchestration guide",
         description: "セッションの委譲・観測・完了報告の使い方（agent 向け）",
@@ -82,8 +82,8 @@ mod tests {
         let guide = &reg[0];
         assert_eq!(guide.uri, "usagi://guides/orchestration");
         assert_eq!(guide.mime_type, "text/markdown");
-        assert!(!guide.name.is_empty());
-        assert!(!guide.description.is_empty());
+        assert_ne!(guide.name, "");
+        assert_ne!(guide.description, "");
         assert!(guide.text.contains("orchestration"));
     }
 
@@ -91,7 +91,7 @@ mod tests {
     fn every_resource_has_a_unique_uri() {
         let reg = registry();
         let mut seen = std::collections::HashSet::new();
-        for resource in &reg {
+        for resource in reg {
             assert!(seen.insert(resource.uri));
         }
     }
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(guide["uri"], "usagi://guides/orchestration");
         assert_eq!(guide["name"], "usagi orchestration guide");
         assert_eq!(guide["mimeType"], "text/markdown");
-        assert!(!guide["description"].as_str().unwrap().is_empty());
+        assert_ne!(guide["description"].as_str().unwrap(), "");
     }
 
     #[test]

@@ -556,9 +556,12 @@ impl Drop for TerminalPollPump {
         // Cut a pending idle wait short so quitting never waits out the cadence.
         lock(&self.shared.state).woken = true;
         self.shared.signal.notify_all();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        // Construction installs the handle; only Drop takes ownership of it.
+        let handle = self
+            .handle
+            .take()
+            .expect("worker handle is present until drop");
+        let _ = handle.join();
     }
 }
 

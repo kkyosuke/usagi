@@ -19,6 +19,7 @@ fn client(capabilities: Vec<String>) -> ClientHello {
         client_id: usagi_core::infrastructure::ipc::ClientId(
             usagi_core::domain::id::ClientId::new().as_str(),
         ),
+        surface: None,
         connection_nonce: "nonce".into(),
         expected_daemon_generation: None,
         supported_protocols: vec![ProtocolRange {
@@ -173,7 +174,7 @@ fn every_refusal_names_itself() {
             reason: "agent selection changed".to_owned(),
         },
     ] {
-        assert!(!refusal.to_string().is_empty());
+        assert_ne!(refusal.to_string(), "");
     }
     // The one refusal an operator can act on says how: `--force` would destroy
     // the conversations this refusal just protected, so the remedy that keeps

@@ -10,6 +10,7 @@ use fs2::FileExt;
 use serde::Deserialize;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::domain::id::DaemonGeneration;
+use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::git::{
     GitOutput, GitRunner, confined_git_command, delete_branch, list_worktrees, remove_worktree,
 };
@@ -235,6 +236,11 @@ fn apply_candidate(candidate: &CleanCandidate, storage: &Storage, force: bool) -
                 .ok_or_else(|| io::Error::other("worktree has no canonical session name"))?;
             ensure_unlinked(root, name)?;
             ensure_managed_worktree(&SystemGit, root, path, name)?;
+            usagi_core::infrastructure::artifacts::archive_before_removal(
+                path,
+                force,
+                &ErrorLog::record,
+            )?;
             remove_worktree(&SystemGit, root, path, force).map_err(io::Error::other)
         }
         CleanCandidate::Branch { root, name, .. } => {
@@ -1060,6 +1066,22 @@ not a process line
             pid: 22,
             start_identity: "different-start".to_owned(),
         }));
+    }
+
+    #[test]
+    fn malformed_or_unidentified_records_do_not_claim_process_ownership() {
+        let mut accounted = BTreeSet::new();
+        for name in [
+            "daemon.json",
+            "generations.json",
+            "bootstrap-broker-fixture.json",
+        ] {
+            collect_accounted_processes(name, "{invalid", &mut accounted);
+        }
+        for identity in [None, Some("")] {
+            AccountedProcess::insert(42, identity, &mut accounted);
+        }
+        assert_eq!(accounted, BTreeSet::new());
     }
 
     #[test]

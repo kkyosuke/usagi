@@ -14,7 +14,6 @@ pub mod request;
 // protocol.
 pub use request::*;
 
-use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -33,6 +32,10 @@ pub const TERMINAL_WIRE_GENERATION: u16 = 1;
 /// A peer that negotiates a lower revision keeps the legacy `replay` tail, so
 /// the daemon serves both during the migration window.
 pub const TERMINAL_CHECKPOINT_REVISION: u16 = 2;
+/// Revision 4 adds recovery of unacknowledged answers and explicit human
+/// disposal. Older revisions remain usable for non-decision families.
+pub const USER_DECISION_DELIVERY_REVISION: u16 = 4;
+pub const CURRENT_PROTOCOL_REVISION: u16 = USER_DECISION_DELIVERY_REVISION;
 
 /// Closed vocabulary for capabilities exchanged during IPC negotiation.
 ///
@@ -52,6 +55,7 @@ pub enum Capability {
     WorkspaceFence,
     OwnerGenerationRouting,
     GenerationHandoff,
+    UserDecisionDelivery,
 }
 
 /// Stable metadata for one member of the capability vocabulary.
@@ -63,7 +67,7 @@ pub struct CapabilityDescriptor {
 
 impl Capability {
     /// Every capability understood by this build.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::RequestCorrelation,
         Self::PrSnapshot,
         Self::PrSubscription,
@@ -74,6 +78,7 @@ impl Capability {
         Self::WorkspaceFence,
         Self::OwnerGenerationRouting,
         Self::GenerationHandoff,
+        Self::UserDecisionDelivery,
     ];
 
     /// Stable wire spelling and protocol purpose.
@@ -119,6 +124,10 @@ impl Capability {
             Self::GenerationHandoff => CapabilityDescriptor {
                 wire_name: "daemon.generation-handoff.v1",
                 purpose: "re-decide authority during generation handoff",
+            },
+            Self::UserDecisionDelivery => CapabilityDescriptor {
+                wire_name: "user-decision.delivery.v1",
+                purpose: "observe decisions without acknowledging them and transfer bounded fragments",
             },
         }
     }
@@ -505,6 +514,9 @@ pub enum ClientWorkspace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientHello {
     pub client_id: ClientId,
+    /// Reported surface for launch diagnostics; it grants no caller authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<crate::domain::agent::AgentClientSurface>,
     pub connection_nonce: String,
     pub expected_daemon_generation: Option<DaemonGeneration>,
     pub supported_protocols: Vec<ProtocolRange>,
@@ -557,7 +569,7 @@ const BASE_CLIENT_REQUIRED_CAPABILITIES: [Capability; 3] = [
     Capability::BuildArtifact,
 ];
 
-const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 9] = [
+const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 10] = [
     Capability::RequestCorrelation,
     Capability::PrSnapshot,
     Capability::PrSubscription,
@@ -567,6 +579,7 @@ const BASE_SERVER_ADVERTISED_CAPABILITIES: [Capability; 9] = [
     Capability::TerminalInputOperation,
     Capability::WorkspaceFence,
     Capability::OwnerGenerationRouting,
+    Capability::UserDecisionDelivery,
 ];
 
 const STANDBY_READINESS_REQUIRED_CAPABILITIES: [Capability; 2] =
@@ -610,6 +623,27 @@ pub fn server_advertised_capabilities(role: GenerationRole) -> Vec<String> {
         capabilities.push(Capability::GenerationHandoff.wire_name().to_owned());
     }
     capabilities
+}
+
+/// A decision request must never fall back to implicit read acknowledgements or
+/// publish a partial inventory to a client that does not understand fragments.
+pub fn require_user_decision_delivery(
+    protocol: ProtocolVersion,
+    capabilities: &[String],
+) -> Result<(), ProtocolError> {
+    if protocol.generation == TERMINAL_WIRE_GENERATION
+        && protocol.revision >= USER_DECISION_DELIVERY_REVISION
+        && Capability::UserDecisionDelivery.is_advertised_by(capabilities)
+    {
+        return Ok(());
+    }
+    Err(ProtocolError::new(
+        ErrorCode::CapabilityMissing,
+        format!(
+            "user decisions require IPC revision {USER_DECISION_DELIVERY_REVISION} and {}; update the daemon and reconnect clients",
+            Capability::UserDecisionDelivery.wire_name()
+        ),
+    ))
 }
 
 /// Descriptors a standby hello must advertise before it can receive authority.
@@ -1181,94 +1215,6 @@ pub fn agent_operation_digest(semantic_key: &str) -> String {
         })
 }
 
-/// A cache entry ties a response to the exact request body digest.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CachedResponse {
-    pub body_digest: String,
-    pub response: Envelope,
-    pub received_at_ms: u64,
-}
-#[derive(Debug, Default)]
-pub struct ResponseCache {
-    capacity: usize,
-    entries: HashMap<(ClientId, RequestId), CachedResponse>,
-    order: VecDeque<(ClientId, RequestId)>,
-}
-impl ResponseCache {
-    #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            capacity,
-            ..Self::default()
-        }
-    }
-    pub fn get(
-        &self,
-        client: &ClientId,
-        request: &RequestId,
-        body_digest: &str,
-    ) -> Result<Option<&Envelope>, ProtocolError> {
-        match self.entries.get(&(client.clone(), request.clone())) {
-            Some(entry) if entry.body_digest == body_digest => Ok(Some(&entry.response)),
-            Some(_) => Err(ProtocolError::new(
-                ErrorCode::IdempotencyConflict,
-                "request id was reused with a different body",
-            )),
-            None => Ok(None),
-        }
-    }
-    pub fn insert(&mut self, client: ClientId, request: RequestId, entry: CachedResponse) {
-        if self.capacity == 0 {
-            return;
-        }
-        let key = (client, request);
-        if !self.entries.contains_key(&key) {
-            self.order.push_back(key.clone());
-        }
-        self.entries.insert(key, entry);
-        while self.entries.len() > self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.entries.remove(&old);
-            }
-        }
-    }
-}
-
-/// Durable operation identity is independent of request/connection correlation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OperationKey {
-    pub operation_id: OperationId,
-    pub target_scope: String,
-    pub semantic_digest: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdempotencyDecision {
-    New,
-    Existing,
-    Conflict,
-}
-#[derive(Debug, Default)]
-pub struct IdempotencyJournal {
-    keys: HashMap<OperationId, (String, String)>,
-}
-impl IdempotencyJournal {
-    pub fn decide(&mut self, key: OperationKey) -> IdempotencyDecision {
-        match self.keys.get(&key.operation_id) {
-            Some((scope, digest))
-                if scope == &key.target_scope && digest == &key.semantic_digest =>
-            {
-                IdempotencyDecision::Existing
-            }
-            Some(_) => IdempotencyDecision::Conflict,
-            None => {
-                self.keys
-                    .insert(key.operation_id, (key.target_scope, key.semantic_digest));
-                IdempotencyDecision::New
-            }
-        }
-    }
-}
-
 /// Write one bounded u32-big-endian JSON payload frame.
 pub fn write_frame(writer: &mut dyn Write, payload: &[u8]) -> io::Result<()> {
     write_frame_with_limit(writer, payload, DEFAULT_MAX_FRAME_BYTES)
@@ -1350,153 +1296,6 @@ pub fn write_json_frame<T: Serialize>(
 /// Unix sockets remain an outer transport adapter.
 pub trait Connection: Read + Write + Send {}
 impl<T: Read + Write + Send> Connection for T {}
-
-/// Per-connection bounds. Control has reserved capacity so terminal output
-/// cannot starve acknowledgements or operation responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueueLimits {
-    pub control_frames: usize,
-    pub control_bytes: usize,
-    pub output_frames: usize,
-    pub output_bytes: usize,
-    pub control_reserve_bytes: usize,
-}
-
-impl Default for QueueLimits {
-    fn default() -> Self {
-        Self {
-            control_frames: 256,
-            control_bytes: 2 * 1024 * 1024,
-            output_frames: 256,
-            output_bytes: 2 * 1024 * 1024,
-            control_reserve_bytes: 64 * 1024,
-        }
-    }
-}
-
-/// A framed payload whose unsent suffix survives a nonblocking write.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingFrame {
-    bytes: Vec<u8>,
-    offset: usize,
-}
-
-impl PendingFrame {
-    /// Frames one payload for nonblocking output.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the payload cannot be represented by the `u32` wire length.
-    #[must_use]
-    pub fn new(payload: Vec<u8>) -> Self {
-        let mut bytes = Vec::with_capacity(payload.len() + 4);
-        let length = u32::try_from(payload.len()).expect("IPC frame fits in u32");
-        bytes.extend_from_slice(&length.to_be_bytes());
-        bytes.extend(payload);
-        Self { bytes, offset: 0 }
-    }
-
-    #[must_use]
-    pub fn remaining(&self) -> usize {
-        self.bytes.len() - self.offset
-    }
-
-    pub fn write_to(&mut self, writer: &mut dyn Write) -> io::Result<bool> {
-        match writer.write(&self.bytes[self.offset..]) {
-            Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "IPC peer closed")),
-            Ok(written) => {
-                self.offset += written;
-                Ok(self.offset == self.bytes.len())
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-}
-
-/// The result of attempting to admit a frame before any side effect occurs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueError {
-    ResourceExhausted,
-    Backpressure,
-}
-
-/// Priority-separated bounded outbound queues.
-#[derive(Debug)]
-pub struct OutboundQueues {
-    limits: QueueLimits,
-    control: VecDeque<PendingFrame>,
-    output: VecDeque<PendingFrame>,
-    control_bytes: usize,
-    output_bytes: usize,
-}
-
-impl OutboundQueues {
-    #[must_use]
-    pub fn new(limits: QueueLimits) -> Self {
-        Self {
-            limits,
-            control: VecDeque::new(),
-            output: VecDeque::new(),
-            control_bytes: 0,
-            output_bytes: 0,
-        }
-    }
-
-    pub fn push_control(&mut self, payload: Vec<u8>) -> Result<(), QueueError> {
-        let frame = PendingFrame::new(payload);
-        if self.control.len() >= self.limits.control_frames
-            || self.control_bytes.saturating_add(frame.remaining())
-                > self
-                    .limits
-                    .control_bytes
-                    .saturating_add(self.limits.control_reserve_bytes)
-        {
-            return Err(QueueError::ResourceExhausted);
-        }
-        self.control_bytes += frame.remaining();
-        self.control.push_back(frame);
-        Ok(())
-    }
-
-    /// Output admission fails explicitly; the caller must issue a
-    /// `resync_required` protocol error rather than silently dropping output.
-    pub fn push_output(&mut self, payload: Vec<u8>) -> Result<(), QueueError> {
-        let frame = PendingFrame::new(payload);
-        if self.output.len() >= self.limits.output_frames
-            || self.output_bytes.saturating_add(frame.remaining()) > self.limits.output_bytes
-        {
-            return Err(QueueError::Backpressure);
-        }
-        self.output_bytes += frame.remaining();
-        self.output.push_back(frame);
-        Ok(())
-    }
-
-    /// Writes control first and never interleaves a partially written frame.
-    pub fn flush_one(&mut self, writer: &mut dyn Write) -> io::Result<bool> {
-        let (queue, bytes) = if self.control.is_empty() {
-            (&mut self.output, &mut self.output_bytes)
-        } else {
-            (&mut self.control, &mut self.control_bytes)
-        };
-        let Some(frame) = queue.front_mut() else {
-            return Ok(false);
-        };
-        let before = frame.remaining();
-        let done = frame.write_to(writer)?;
-        *bytes -= before - frame.remaining();
-        if done {
-            queue.pop_front();
-        }
-        Ok(true)
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.control.is_empty() && self.output.is_empty()
-    }
-}
 
 #[cfg(test)]
 mod tests;
