@@ -1208,7 +1208,7 @@ launcher は、**起動する provider 自身の state directory** を `$HOME` �
 |---|---|
 | `claude`（`claude`） | `~/.claude` |
 | `codex`（`codex`） | `~/.codex` |
-| `agy`（`agy`。Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`・`brain`（加えて同じ state 直下の conversation summary DB 3 ファイルと `bin/agentapi` ファイルだけ） |
+| `agy`（`agy`。Antigravity CLI） | `~/.gemini/antigravity-cli/conversations`（追加 anchor は下記） |
 
 - 判定の正本は `usagi-core` の `domain::settings::DefaultModel::state_directory` である（provider と state の
   置き場所を 1 つの事実として持つ）。**根拠は exec する program ではなく provider** で、daemon は launcher へ
@@ -1219,10 +1219,12 @@ launcher は、**起動する provider 自身の state directory** を `$HOME` �
   writable にする directory の中にある workspace を通してしまう。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
-- `agy` は auth token を OS keyring から読み、永続書き込みを conversation subtree と summary DB に限定する。
+- `agy` は auth token を OS keyring から読み、永続書き込みを conversation subtree、`brain/`（`invoke_subagent` と会話 artifact）、
+  summary DB 3 ファイル、`run_command` が使う `bin/agentapi` ファイルに限定する。これらの追加 anchor は daemon の AGY provisioning が
+  作成・検証して launch に渡し、`bin/` ディレクトリ自体は read-only のまま保つ。
   default の動的 log directory は `--log-file /dev/null` で使わない。`~/.gemini` の親を writable にして危険 path を
   blacklist する方式ではないため、global rule、skill、plugin、settings が未作成でも Agent は新規作成できず、
-  既存内容は保持して読み取れる。Linux は read-only root filesystem の内側へ conversation path だけを再 bind し、
+  既存内容は保持して読み取れる。Linux は read-only root filesystem の内側へこれらの path だけを再 bind し、
   macOS は同じ path だけを SBPL allow rule に入れる。
 
 #### agent global config の writable prefix
