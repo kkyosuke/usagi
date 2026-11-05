@@ -2729,8 +2729,8 @@ resume request を作らない。要求は選択中の exact tab の `AgentResum
 
 同じ tab に対する重複操作（double click）は in-flight な operation へ収束し、2 つ目の request も spawn も作らない。
 拒否・失敗は interrupted tab をそのまま残し、provider ID を含まない safe reason と retry 可否だけを表示する。
-daemon が返した拒否理由を表示し、成功・失敗のどちらでも inventory を再取得する。古い resume source や
-応答を失った起動結果を最新の観測へ反映し、再試行は更新後の exact target に対する利用者の明示操作で行う。
+daemon が返した拒否理由を表示し、成功・失敗のどちらでも inventory を非同期に再取得する。古い resume source や
+応答を失った起動結果を最新の観測へ反映し、更新後の明示再試行では最新の exact target を使う。自動再試行はしない。
 他の tab、他の history、selection、provider conversation、runtime record は変更しない。
 
 ### surface ごとの表示と操作

@@ -1217,8 +1217,8 @@ pub(super) fn drain_pane_completions_into_runtime(
                 result,
             } => {
                 // A refusal can mean the source changed, and a lost response
-                // can hide a successful spawn. Observe either outcome before
-                // the user's next explicit retry; never retry automatically.
+                // can hide a successful spawn. Observe either outcome so later
+                // explicit retries use refreshed state; never retry automatically.
                 ui.request_agent_inventory_change_observation();
                 let Some(target) = pending_targets.remove(&operation) else {
                     continue;
