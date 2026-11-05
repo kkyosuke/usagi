@@ -3238,7 +3238,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
         "Claude (interrupted)",
     );
     // ── 5. A resume that the daemon refuses (the provider CLI is unavailable)
-    // leaves the tab interrupted with safe feedback and spawns nothing; the
+    // leaves the tab interrupted with the daemon's actionable reason and spawns nothing; the
     // explicit retry then succeeds against the same lineage.
     let hidden = fixtures.bin.join("claude.unavailable");
     fs::rename(fixtures.bin.join("claude"), &hidden).unwrap();
@@ -3246,7 +3246,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     wait_for_screen_since(
         &captured,
         cold_baseline,
-        "provider resume failed; refresh Agent inventory",
+        "agent CLI is unavailable or not authenticated",
     );
     assert_eq!(
         fixtures.claude_spawns(),
