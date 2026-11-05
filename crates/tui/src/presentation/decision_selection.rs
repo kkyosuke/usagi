@@ -2,12 +2,13 @@
 
 use usagi_core::domain::id::UserDecisionId;
 use usagi_core::domain::presentation_text::sanitize_presentation_line;
+use usagi_core::domain::user_decision::{UserDecision, UserDecisionContext};
 
 use super::theme::Style;
 use super::widgets::live_terminal::ViewportGeometry;
 use super::widgets::{self, modal};
 use super::{Key, PointerKind, Terminal};
-use crate::usecase::application::controller::DecisionOverlayState;
+use crate::usecase::application::controller::{DecisionEditor, DecisionOverlayState};
 use crate::usecase::application::terminal_selection::{
     TerminalPoint, TerminalSelection, whole_grapheme_columns,
 };
@@ -18,6 +19,7 @@ const RESET: &str = "\u{1b}[0m";
 pub(super) struct DecisionTextSelection {
     surface: Option<(Option<UserDecisionId>, bool, ViewportGeometry)>,
     rows: Vec<String>,
+    decision: Option<UserDecision>,
     press: Option<TerminalSelection>,
     selection: Option<TerminalSelection>,
     dragging: bool,
@@ -35,6 +37,12 @@ impl DecisionTextSelection {
         width: usize,
         overlay: Option<&DecisionOverlayState>,
     ) {
+        let decision = overlay
+            .and_then(|overlay| overlay.editor())
+            .map(DecisionEditor::decision);
+        if self.decision.as_ref() != decision {
+            self.decision = decision.cloned();
+        }
         let surface = overlay.and_then(|overlay| {
             super::views::decision_modal::body_viewport(height, width).map(|viewport| {
                 (
@@ -137,10 +145,14 @@ impl DecisionTextSelection {
     }
 
     fn copy(&mut self, term: &mut dyn Terminal) {
-        let text = self
-            .selection
-            .as_ref()
-            .map_or_else(String::new, TerminalSelection::text);
+        let text = self.selection.as_ref().map_or_else(
+            || {
+                self.decision
+                    .as_ref()
+                    .map_or_else(String::new, request_text)
+            },
+            TerminalSelection::text,
+        );
         self.feedback = Some(if text.trim().is_empty() {
             "no decision text is selected".to_owned()
         } else {
@@ -176,12 +188,76 @@ impl DecisionTextSelection {
         }
         // The box already has a breathing row below its body. Keep feedback
         // there so it cannot replace selected text, even in a one-row viewport.
-        if let Some(feedback) = &self.feedback
+        let feedback = self.feedback.as_deref().or_else(|| {
+            self.decision
+                .as_ref()
+                .map(|_| "Drag: select text  Copy shortcut: selection or whole question")
+        });
+        if let Some(feedback) = feedback
             && let Some(line) = frame.get_mut(viewport.top + viewport.rows)
         {
             replace_body(line, &modal::footer(feedback), viewport, width);
         }
     }
+}
+
+/// Export the complete question without viewport wrapping, clipping or chrome.
+fn request_text(decision: &UserDecision) -> String {
+    let mut sections = vec![decision.title.clone(), decision.prompt.clone()];
+    if let Some(deadline) = decision.expires_at {
+        sections.push(format!(
+            "expires: {}",
+            deadline.format("%Y-%m-%d %H:%M UTC")
+        ));
+    }
+    if let Some(recommendation) = &decision.recommendation {
+        let labels = decision
+            .options
+            .iter()
+            .filter(|option| recommendation.option_ids.contains(&option.id))
+            .map(|option| option.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        sections.push(format!(
+            "Agent recommendation: {labels}\n{}",
+            recommendation.reason
+        ));
+    }
+    for context in &decision.context {
+        sections.push(match context {
+            UserDecisionContext::Table {
+                title,
+                columns,
+                rows,
+            } => {
+                let mut lines = vec![title.clone(), columns.join(" | ")];
+                lines.extend(rows.iter().map(|row| row.join(" | ")));
+                lines.join("\n")
+            }
+            UserDecisionContext::Diagram { title, text } => format!("{title}\n{text}"),
+        });
+    }
+    if decision.selection_mode
+        == usagi_core::domain::user_decision::UserDecisionSelectionMode::Multiple
+    {
+        let (min, max) = decision.selection_bounds();
+        sections.push(format!("Choose {min}-{max} options"));
+    }
+    for (index, option) in decision.options.iter().enumerate() {
+        let mut lines = vec![format!("{}. {}", index + 1, option.label)];
+        if let Some(description) = &option.description {
+            lines.push(description.clone());
+        }
+        lines.extend(option.pros.iter().map(|text| format!("+ {text}")));
+        lines.extend(option.cons.iter().map(|text| format!("- {text}")));
+        sections.push(lines.join("\n"));
+    }
+    sections
+        .join("\n\n")
+        .lines()
+        .map(sanitize_presentation_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn replace_body(line: &mut String, body: &str, viewport: ViewportGeometry, width: usize) {

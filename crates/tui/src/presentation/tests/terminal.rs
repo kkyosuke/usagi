@@ -81,6 +81,67 @@ fn decision_selection_frame(
     )
 }
 
+#[test]
+fn decision_copy_without_selection_exports_hidden_question_content() {
+    use crate::presentation::decision_selection::DecisionTextSelection;
+    use usagi_core::domain::user_decision::{
+        UserDecisionContext, UserDecisionRecommendation, UserDecisionSelectionMode,
+    };
+    let runtime = decision_selection_runtime();
+    let mut request = runtime.state().decisions()[0].clone();
+    request.prompt = format!("{}\n最後の行 👩‍👩‍👧‍👦", "long question ".repeat(100));
+    request.expires_at = Some(now() + chrono::Duration::hours(1));
+    request.selection_mode = UserDecisionSelectionMode::Multiple;
+    request.options[0].description = Some("Complete description".into());
+    request.options[0].pros = vec!["Benefit".into()];
+    request.options[0].cons = vec!["Caution".into()];
+    request.recommendation = Some(UserDecisionRecommendation {
+        option_ids: vec!["safe".into()],
+        reason: "Recommended reason".into(),
+    });
+    request.context = vec![
+        UserDecisionContext::Table {
+            title: "Comparison".into(),
+            columns: vec!["Name".into(), "Details".into()],
+            rows: vec![vec!["A".into(), "unclipped cell ".repeat(40)]],
+        },
+        UserDecisionContext::Diagram {
+            title: "Flow".into(),
+            text: "  start\n    └── end".into(),
+        },
+    ];
+    let mut runtime = WorkspaceRuntime::new(request.owner.workspace_id, Vec::new());
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Decisions {
+        workspace: runtime.state().workspace(),
+        decisions: vec![request.clone()],
+    }));
+    let mut selection = DecisionTextSelection::default();
+    let mut term = FakeTerminal::default();
+    for (height, width) in [(24, 80), (7, 20)] {
+        let frame = decision_selection_frame(&runtime, height, width);
+        selection.sync(&frame, height, width, runtime.state().decision_overlay());
+        assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    }
+    assert_eq!(term.copied[0], term.copied[1]);
+    let text = &term.copied[0];
+    for expected in [
+        request.prompt.as_str(),
+        "expires:",
+        "Agent recommendation: Safe choice",
+        "Recommended reason",
+        "Name | Details",
+        &"unclipped cell ".repeat(40),
+        "Flow\n  start\n    └── end",
+        "Choose 1-1 options",
+        "1. Safe choice\nComplete description\n+ Benefit\n- Caution",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}");
+    }
+    assert!(!text.contains("BACKGROUND"));
+    assert!(!text.contains('\u{1b}'));
+    assert_eq!(runtime.state().decisions()[0].answer, None);
+}
+
 fn decision_pointer(kind: PointerKind, column: usize, row: usize) -> Key {
     Key::Pointer(PointerEvent {
         kind,
@@ -398,14 +459,13 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
         Key::Click { column: 0, row: 0 },
         decision_pointer(PointerKind::Drag, viewport.left, viewport.top),
         decision_pointer(PointerKind::Up, viewport.left, viewport.top),
-        Key::TerminalCopy { fallback: vec![3] },
     ] {
         assert!(selection.handle_input(&key, &mut term));
     }
     assert_eq!(term.copied, [] as [String; 0]);
     let mut painted = decision_selection_frame(&runtime, 24, 80);
     selection.paint(&mut painted, 80);
-    assert!(painted.join("\n").contains("no decision text is selected"));
+    assert!(painted.join("\n").contains("Copy shortcut"));
     for key in [Key::Tab, Key::Paste("Pasted comment".into())] {
         assert!(!selection.handle_input(&key, &mut term));
         assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
@@ -466,7 +526,13 @@ fn decision_selection_tracks_list_review_scroll_resize_and_close() {
         },
         &mut term,
     );
-    assert_eq!(term.copied.len(), copies);
+    assert_eq!(term.copied.len(), copies + 1);
+    assert!(
+        term.copied
+            .last()
+            .unwrap()
+            .starts_with("Copy 日本語\n\nQuestion text")
+    );
     for (height, width) in [(40, 140), (12, 20), (0, 0), (2, 4), (12, 3)] {
         let frame = decision_selection_frame(&runtime, height, width);
         selection.sync(&frame, height, width, runtime.state().decision_overlay());
@@ -584,7 +650,9 @@ fn decision_copy_and_paste_work_through_the_workspace_frame_loop() {
         Exit::Quit
     );
     let term = term.0;
-    assert_eq!(term.copied, ["日本語", "日本語"]);
+    assert_eq!(term.copied.len(), 3);
+    assert_eq!(&term.copied[..2], ["日本語", "日本語"]);
+    assert!(term.copied[2].contains("Question text\nSecond line"));
     assert!(
         term.frames
             .iter()
