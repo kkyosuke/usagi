@@ -370,10 +370,10 @@ impl PtyTerminal {
             .kill()
             .map_err(io_error)?;
         poll_exit_within(
-            || self.try_wait().map(|status| status.is_some()),
+            &mut || self.try_wait().map(|status| status.is_some()),
             PTY_EXIT_POLL,
             PTY_TERMINATE_REAP_TIMEOUT,
-            std::thread::sleep,
+            &mut std::thread::sleep,
         )
     }
 }
@@ -419,14 +419,17 @@ pub enum ReapOutcome {
 /// Polls `exited` every `poll` until it reports `true` or `limit` has been
 /// slept away.
 ///
+/// The callbacks are trait objects so the function has one instantiation:
+/// coverage would otherwise count a per-caller copy whose sleep never runs.
+///
 /// # Errors
 ///
 /// Returns the first error `exited` reports.
 pub fn poll_exit_within(
-    mut exited: impl FnMut() -> std::io::Result<bool>,
+    exited: &mut dyn FnMut() -> std::io::Result<bool>,
     poll: Duration,
     limit: Duration,
-    mut sleep: impl FnMut(Duration),
+    sleep: &mut dyn FnMut(Duration),
 ) -> std::io::Result<ReapOutcome> {
     let mut slept = Duration::ZERO;
     loop {
@@ -1202,13 +1205,13 @@ mod tests {
         let mut checks = 0;
         let mut slept = Vec::new();
         let outcome = poll_exit_within(
-            || {
+            &mut || {
                 checks += 1;
                 Ok(checks == 3)
             },
             Duration::from_millis(50),
             Duration::from_secs(2),
-            |poll| slept.push(poll),
+            &mut |poll| slept.push(poll),
         );
         assert_eq!(outcome.unwrap(), ReapOutcome::Reaped);
         assert_eq!(slept, vec![Duration::from_millis(50); 2]);
@@ -1219,13 +1222,13 @@ mod tests {
         let mut checks = 0;
         let mut slept = Duration::ZERO;
         let outcome = poll_exit_within(
-            || {
+            &mut || {
                 checks += 1;
                 Ok(false)
             },
             Duration::from_millis(50),
             Duration::from_millis(200),
-            |poll| slept += poll,
+            &mut |poll| slept += poll,
         );
         assert_eq!(outcome.unwrap(), ReapOutcome::Pending);
         assert_eq!(slept, Duration::from_millis(200));
@@ -1237,10 +1240,10 @@ mod tests {
         // A failed query returns before any wait, so the sleep is never
         // called; a std function keeps the test free of an unrun closure.
         let outcome = poll_exit_within(
-            || Err(Error::other("status query failed")),
+            &mut || Err(Error::other("status query failed")),
             Duration::from_millis(50),
             Duration::from_secs(2),
-            drop::<Duration>,
+            &mut drop::<Duration>,
         );
         assert_eq!(outcome.unwrap_err().to_string(), "status query failed");
     }
