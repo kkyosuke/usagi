@@ -1584,8 +1584,8 @@ Agent と generic terminal の terminate/reap（session close・teardown、compe
 kernel が child の終了処理を終えない場合（macOS では exit 途中の process が `E` 状態のまま残ることがある）でも、
 他の全接続を lock 待ちで止めないためである。
 
-期限内に reap できなかった child は SIGKILL 済みであり、以後 provider として動作しないため、terminate 成功として扱う。
-runtime record は process を `Gone` として回収し、capacity claim も解放する。error log には
+期限内に reap できなかった child は SIGKILL 済みで以後何も実行しないため、terminate 成功として扱う。
+runtime record は process を終了済みとして解決し、capacity claim も解放する。error log には
 `action=terminate-reap` を記録し、その child は lock を保持せずに poll する background reaper が、終了した時点で reap する。
 kill の送信または status の取得に失敗した場合だけが terminate/reap の失敗である。
 

@@ -1258,8 +1258,11 @@ mod tests {
         // As in the daemon, output is drained: on macOS the child's last
         // terminal close waits for unread output.
         let mut reader = terminal.lock().unwrap().reader().unwrap();
-        std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+        let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
         assert_eq!(reap_in_background(terminal).join().unwrap().unwrap(), 4);
+        // The reader reaches EOF once the child has exited; joining it keeps
+        // no product reader running past the test.
+        drain.join().unwrap().unwrap();
     }
 
     #[test]
