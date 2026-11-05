@@ -7,7 +7,7 @@
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
@@ -350,21 +350,31 @@ impl PtyTerminal {
             .transpose()
     }
 
-    /// Terminates and reaps this daemon-owned child. Used only to compensate a
-    /// failed admission commit after the process has already been spawned.
+    /// Terminates this daemon-owned child and reaps it within
+    /// [`PTY_TERMINATE_REAP_TIMEOUT`].
+    ///
+    /// Callers close sessions under daemon-wide runtime locks, so the reap is
+    /// bounded: a killed child the kernel has not finished tearing down (macOS
+    /// can leave one exiting indefinitely) is reported as
+    /// [`ReapOutcome::Pending`] instead of parking every connection behind a
+    /// blocking `waitpid`; the caller hands it to [`reap_in_background`].
     ///
     /// # Errors
     ///
-    /// Returns an error when the child lock, termination, or wait fails.
+    /// Returns an error when the child lock, termination, or status query fails.
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=agent_real_pty
-    pub fn terminate_reap(&self) -> std::io::Result<()> {
-        let mut child = self
-            .child
+    pub fn terminate_reap(&self) -> std::io::Result<ReapOutcome> {
+        self.child
             .lock()
-            .map_err(|_| std::io::Error::other("PTY child lock poisoned"))?;
-        child.kill().map_err(io_error)?;
-        child.wait().map_err(io_error)?;
-        Ok(())
+            .map_err(|_| std::io::Error::other("PTY child lock poisoned"))?
+            .kill()
+            .map_err(io_error)?;
+        poll_exit_within(
+            &mut || self.try_wait().map(|status| status.is_some()),
+            PTY_EXIT_POLL,
+            PTY_TERMINATE_REAP_TIMEOUT,
+            &mut std::thread::sleep,
+        )
     }
 }
 
@@ -380,6 +390,59 @@ impl PtyWriter for PtyTerminal {
 
 /// How often [`wait_for_exit`] re-checks a child whose output already ended.
 pub const PTY_EXIT_POLL: Duration = Duration::from_millis(50);
+
+/// Reaps the child of a shared terminal on a thread of its own once it exits.
+///
+/// [`PtyTerminal::terminate_reap`] gives up on a child after
+/// [`PTY_TERMINATE_REAP_TIMEOUT`]; the terminal's output observer reaps only
+/// after its reader reaches EOF, which a child still exiting (or a grandchild
+/// holding the PTY) can postpone indefinitely. This thread waits as
+/// [`wait_for_exit`] does, never holding the terminal lock across the wait.
+pub fn reap_in_background(
+    terminal: Arc<Mutex<PtyTerminal>>,
+) -> std::thread::JoinHandle<std::io::Result<i32>> {
+    std::thread::spawn(move || wait_for_exit(&terminal, PTY_EXIT_POLL))
+}
+
+/// Longest time [`PtyTerminal::terminate_reap`] waits for a killed child.
+pub const PTY_TERMINATE_REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether a terminated child was reaped before the deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReapOutcome {
+    /// The child exited and was reaped.
+    Reaped,
+    /// The child was killed but has not finished exiting yet.
+    Pending,
+}
+
+/// Polls `exited` every `poll` until it reports `true` or `limit` has been
+/// slept away.
+///
+/// The callbacks are trait objects so the function has one instantiation:
+/// coverage would otherwise count a per-caller copy whose sleep never runs.
+///
+/// # Errors
+///
+/// Returns the first error `exited` reports.
+pub fn poll_exit_within(
+    exited: &mut dyn FnMut() -> std::io::Result<bool>,
+    poll: Duration,
+    limit: Duration,
+    sleep: &mut dyn FnMut(Duration),
+) -> std::io::Result<ReapOutcome> {
+    let mut slept = Duration::ZERO;
+    loop {
+        if exited()? {
+            return Ok(ReapOutcome::Reaped);
+        }
+        if slept >= limit {
+            return Ok(ReapOutcome::Pending);
+        }
+        sleep(poll);
+        slept += poll;
+    }
+}
 
 /// Waits for the child of a shared terminal to exit without holding the
 /// terminal's lock while it waits.
@@ -420,8 +483,9 @@ fn io_error_with_context(context: &str, error: impl std::fmt::Display) -> std::i
 #[cfg(test)]
 mod tests {
     use super::{
-        PollReadiness, PtyTerminal, Readiness, ReadinessReader, StallBoundedWriter, fcntl_outcome,
-        poll_outcome, set_nonblocking, wait_for_exit,
+        PollReadiness, PtyTerminal, Readiness, ReadinessReader, ReapOutcome, StallBoundedWriter,
+        fcntl_outcome, poll_exit_within, poll_outcome, reap_in_background, set_nonblocking,
+        wait_for_exit,
     };
     use crate::usecase::terminal::{Geometry, InputAck, InputRequest, PtyWriter, TerminalRegistry};
     use std::collections::VecDeque;
@@ -1134,6 +1198,76 @@ mod tests {
             terminal.lock().unwrap().write_all(b"done\n").unwrap();
             assert_eq!(waiter.join().unwrap().unwrap(), 3);
         });
+    }
+
+    #[test]
+    fn polling_for_exit_reaps_a_child_that_exits_within_the_limit() {
+        let mut checks = 0;
+        let mut slept = Vec::new();
+        let outcome = poll_exit_within(
+            &mut || {
+                checks += 1;
+                Ok(checks == 3)
+            },
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            &mut |poll| slept.push(poll),
+        );
+        assert_eq!(outcome.unwrap(), ReapOutcome::Reaped);
+        assert_eq!(slept, vec![Duration::from_millis(50); 2]);
+    }
+
+    #[test]
+    fn polling_for_exit_leaves_a_child_that_never_exits_pending_at_the_limit() {
+        let mut checks = 0;
+        let mut slept = Duration::ZERO;
+        let outcome = poll_exit_within(
+            &mut || {
+                checks += 1;
+                Ok(false)
+            },
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+            &mut |poll| slept += poll,
+        );
+        assert_eq!(outcome.unwrap(), ReapOutcome::Pending);
+        assert_eq!(slept, Duration::from_millis(200));
+        assert_eq!(checks, 5);
+    }
+
+    #[test]
+    fn polling_for_exit_reports_a_failed_status_query() {
+        // A failed query returns before any wait, so the sleep is never
+        // called; a std function keeps the test free of an unrun closure.
+        let outcome = poll_exit_within(
+            &mut || Err(Error::other("status query failed")),
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            &mut drop::<Duration>,
+        );
+        assert_eq!(outcome.unwrap_err().to_string(), "status query failed");
+    }
+
+    #[test]
+    fn a_background_reaper_reaps_the_child_once_it_exits() {
+        let terminal = std::sync::Arc::new(Mutex::new(
+            PtyTerminal::spawn_with(
+                "/bin/sh",
+                &["-c".to_owned(), "exit 4".to_owned()],
+                &[],
+                std::path::Path::new("/"),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap(),
+        ));
+        // As in the daemon, output is drained: on macOS the child's last
+        // terminal close waits for unread output.
+        let mut reader = terminal.lock().unwrap().reader().unwrap();
+        let drain = std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+        assert_eq!(reap_in_background(terminal).join().unwrap().unwrap(), 4);
+        // The reader reaches EOF once the child has exited; joining it keeps
+        // no product reader running past the test.
+        drain.join().unwrap().unwrap();
     }
 
     #[test]

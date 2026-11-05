@@ -3417,3 +3417,10 @@ fn switch_reorder_projects_rows_and_does_not_resync_on_every_frame() {
         assert_eq!(rows[0].label, "second");
     }
 }
+
+#[test]
+fn deck_opening_labels_count_only_a_multi_workspace_deck() {
+    assert_eq!(deck_opening_label(1, 1), "Opening workspace…");
+    assert_eq!(deck_opening_label(1, 3), "Opening workspace 1 / 3…");
+    assert_eq!(deck_opening_label(3, 3), "Opening workspace 3 / 3…");
+}
