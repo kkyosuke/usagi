@@ -273,11 +273,14 @@ fn only_a_pending_reap_leaves_an_error_log_entry() {
         session_id: Some(SessionId::new()),
         worktree_id: WorktreeId::new(),
     };
-    assert_eq!(pending_reap_entry("Agent", ReapOutcome::Reaped, &terminal), None);
+    assert_eq!(
+        pending_reap_entry("Agent", ReapOutcome::Reaped, &terminal),
+        None
+    );
     let entry = pending_reap_entry("Agent", ReapOutcome::Pending, &terminal).unwrap();
     assert!(entry.contains("daemon Agent PTY failed: action=terminate-reap"));
     assert!(entry.contains(&format!("terminal={}", terminal.terminal_id.as_str())));
-    assert!(entry.contains("its exit observer reaps it"));
+    assert!(entry.contains("a background reaper waits for it"));
 }
 
 #[test]

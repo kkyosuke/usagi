@@ -7,7 +7,7 @@
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
@@ -357,7 +357,7 @@ impl PtyTerminal {
     /// bounded: a killed child the kernel has not finished tearing down (macOS
     /// can leave one exiting indefinitely) is reported as
     /// [`ReapOutcome::Pending`] instead of parking every connection behind a
-    /// blocking `waitpid`. The terminal's exit observer reaps it later.
+    /// blocking `waitpid`; the caller hands it to [`reap_in_background`].
     ///
     /// # Errors
     ///
@@ -391,6 +391,19 @@ impl PtyWriter for PtyTerminal {
 /// How often [`wait_for_exit`] re-checks a child whose output already ended.
 pub const PTY_EXIT_POLL: Duration = Duration::from_millis(50);
 
+/// Reaps the child of a shared terminal on a thread of its own once it exits.
+///
+/// [`PtyTerminal::terminate_reap`] gives up on a child after
+/// [`PTY_TERMINATE_REAP_TIMEOUT`]; the terminal's output observer reaps only
+/// after its reader reaches EOF, which a child still exiting (or a grandchild
+/// holding the PTY) can postpone indefinitely. This thread waits as
+/// [`wait_for_exit`] does, never holding the terminal lock across the wait.
+pub fn reap_in_background(
+    terminal: Arc<Mutex<PtyTerminal>>,
+) -> std::thread::JoinHandle<std::io::Result<i32>> {
+    std::thread::spawn(move || wait_for_exit(&terminal, PTY_EXIT_POLL))
+}
+
 /// Longest time [`PtyTerminal::terminate_reap`] waits for a killed child.
 pub const PTY_TERMINATE_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -399,8 +412,7 @@ pub const PTY_TERMINATE_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum ReapOutcome {
     /// The child exited and was reaped.
     Reaped,
-    /// The child was signalled but has not finished exiting yet; whoever
-    /// observes its exit reaps it.
+    /// The child was killed but has not finished exiting yet.
     Pending,
 }
 
@@ -468,8 +480,9 @@ fn io_error_with_context(context: &str, error: impl std::fmt::Display) -> std::i
 #[cfg(test)]
 mod tests {
     use super::{
-        PollReadiness, PtyTerminal, ReapOutcome, Readiness, ReadinessReader, StallBoundedWriter,
-        fcntl_outcome, poll_exit_within, poll_outcome, set_nonblocking, wait_for_exit,
+        PollReadiness, PtyTerminal, Readiness, ReadinessReader, ReapOutcome, StallBoundedWriter,
+        fcntl_outcome, poll_exit_within, poll_outcome, reap_in_background, set_nonblocking,
+        wait_for_exit,
     };
     use crate::usecase::terminal::{Geometry, InputAck, InputRequest, PtyWriter, TerminalRegistry};
     use std::collections::VecDeque;
@@ -1120,7 +1133,7 @@ mod tests {
         });
         // Reap before asserting either outcome, including a failed setup, so
         // a failing regression never leaves its sleep child running.
-        assert_eq!(terminal.terminate_reap().unwrap(), ReapOutcome::Reaped);
+        terminal.terminate_reap().unwrap();
 
         let (first, first_elapsed) = observations.unwrap();
         let error = first.unwrap_err();
@@ -1228,6 +1241,25 @@ mod tests {
             |_| panic!("a failed query must not wait"),
         );
         assert_eq!(outcome.unwrap_err().to_string(), "status query failed");
+    }
+
+    #[test]
+    fn a_background_reaper_reaps_the_child_once_it_exits() {
+        let terminal = std::sync::Arc::new(Mutex::new(
+            PtyTerminal::spawn_with(
+                "/bin/sh",
+                &["-c".to_owned(), "exit 4".to_owned()],
+                &[],
+                std::path::Path::new("/"),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap(),
+        ));
+        // As in the daemon, output is drained: on macOS the child's last
+        // terminal close waits for unread output.
+        let mut reader = terminal.lock().unwrap().reader().unwrap();
+        std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+        assert_eq!(reap_in_background(terminal).join().unwrap().unwrap(), 4);
     }
 
     #[test]

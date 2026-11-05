@@ -2,7 +2,7 @@
 
 use std::sync::mpsc;
 
-use usagi_daemon::infrastructure::pty::ReapOutcome;
+use usagi_daemon::infrastructure::pty::{ReapOutcome, reap_in_background};
 
 use super::{
     Arc, AtomicU64, BTreeMap, ChildRelease, DurableLaunchSnapshot, ErrorLog,
@@ -215,10 +215,11 @@ pub(super) fn daemon_pty_failure_entry(
     )
 }
 
-/// The error-log entry for a terminated child that has not finished exiting.
+/// The error-log entry for a killed child that has not finished exiting.
 ///
-/// The close that terminated it already went on without blocking on it; the
-/// entry keeps a child the kernel never tears down visible to the operator.
+/// The terminate already went on without blocking on it and a background
+/// reaper owns it; the entry keeps a child the kernel never tears down visible
+/// to the operator.
 pub(super) fn pending_reap_entry(
     owner: &str,
     outcome: ReapOutcome,
@@ -229,7 +230,7 @@ pub(super) fn pending_reap_entry(
             owner,
             "terminate-reap",
             terminal,
-            "the killed child has not exited within the reap deadline; its exit observer reaps it",
+            "the killed child has not exited within the reap deadline; a background reaper waits for it",
         )
     })
 }
@@ -406,6 +407,7 @@ impl PtySpawner for AgentPty {
             .map_err(|_| TerminateReapError)?;
         if let Some(entry) = pending_reap_entry("Agent", outcome, terminal) {
             ErrorLog::record(&entry);
+            drop(reap_in_background(pty));
         }
         release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
         Ok(())
@@ -620,6 +622,7 @@ impl GenericPtySpawner for DaemonPty {
             .map_err(|_| GenericTerminateReapError)?;
         if let Some(entry) = pending_reap_entry("terminal", outcome, terminal) {
             ErrorLog::record(&entry);
+            drop(reap_in_background(pty));
         }
         release_owned_pty(&mut self.terminals, &mut self.selected, terminal);
         Ok(())
