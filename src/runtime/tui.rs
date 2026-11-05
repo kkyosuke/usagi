@@ -2359,7 +2359,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             Ok(reply) => reply,
             Err(error) => {
                 ErrorLog::record(&tui_error_entry("Agent resume request", &error.to_string()));
-                return Err("provider resume failed; refresh Agent inventory".to_owned());
+                return Err(daemon_error_reason(error));
             }
         };
         let result = match reply {

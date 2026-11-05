@@ -3041,7 +3041,7 @@ fn a_refused_or_failed_resume_keeps_the_history_tab_with_safe_feedback() {
         vec![history],
         launch_port(Box::new(ScriptedExactResumePort {
             answers: vec![
-                Err("provider resume failed; refresh Agent inventory".to_owned()),
+                Err("agent resume target is stale".to_owned()),
                 Ok(relationless),
             ],
             requests: Arc::clone(&requests),
@@ -3052,13 +3052,7 @@ fn a_refused_or_failed_resume_keeps_the_history_tab_with_safe_feedback() {
     for _ in 0..2 {
         crate::presentation::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
         crate::presentation::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        crate::presentation::drain_pane_completions_into_runtime(
-            &mut ui,
-            &mut runtime,
-            &mut pending,
-            terminal_geometry(20, 80),
-        );
+        drain_completions(&mut ui, &mut runtime, &mut pending, 1);
         // The tab survives every refusal, and no live pane is invented.
         assert_eq!(runtime.active_pane().tabs().len(), 1);
         assert!(matches!(
@@ -3067,10 +3061,77 @@ fn a_refused_or_failed_resume_keeps_the_history_tab_with_safe_feedback() {
         ));
         assert!(runtime.focused_terminal().is_none());
         assert!(runtime.active_pane().error().is_some());
+        assert!(
+            ui.take_agent_inventory_change_observation_request(),
+            "a failed or unconfirmed resume must refresh its exact target"
+        );
     }
     // A transport failure and a relation-less answer are both retryable, so
     // both requests reached the daemon.
     assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn failed_resume_refreshes_the_source_before_an_explicit_retry() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let history = interrupted_history(workspace, Some(session), true);
+    let mut refreshed = history.clone();
+    let target = refreshed.target.as_mut().unwrap();
+    target.source = usagi_core::domain::id::AgentResumeSourceId::new();
+    target.runtime_id = usagi_core::domain::id::AgentRuntimeId::new();
+    refreshed.last_terminal.terminal_id = TerminalId::new();
+    let resumed = exact_resume_answer(&refreshed);
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let (mut ui, mut runtime) = closeup_with_history(
+        workspace,
+        session,
+        vec![history.clone()],
+        launch_port(Box::new(ScriptedExactResumePort {
+            answers: vec![
+                Err("agent resume target is stale".to_owned()),
+                Ok(resumed.clone()),
+            ],
+            requests: Arc::clone(&requests),
+        })),
+    );
+    let mut pending = std::collections::HashMap::new();
+    crate::presentation::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+    crate::presentation::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+    drain_completions(&mut ui, &mut runtime, &mut pending, 1);
+    assert_eq!(
+        runtime.active_pane().error(),
+        Some("agent resume target is stale")
+    );
+    assert!(ui.take_agent_inventory_change_observation_request());
+
+    // The requested observation replaces only this lineage's exact source.
+    let (interaction, revision) = runtime.restore_fence();
+    assert!(runtime.restore_snapshot(
+        interaction,
+        revision,
+        vec![super::PaneRestoreTarget {
+            target: Target::Session(session),
+            panes: Vec::new(),
+            selected: None,
+            selected_interrupted: Some(history.continuation),
+            interrupted: vec![refreshed.clone()],
+        }],
+    ));
+    assert!(
+        ui.pane_launches.is_empty(),
+        "observation must not resume automatically"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    crate::presentation::resume_focused_interrupted_tab(&mut ui, &mut runtime, &mut pending);
+    crate::presentation::drain_pane_launches(&mut ui, terminal_geometry(20, 80));
+    drain_completions(&mut ui, &mut runtime, &mut pending, 1);
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded[0].0, history.target.unwrap());
+    assert_eq!(recorded[1].0, refreshed.target.unwrap());
+    assert_ne!(recorded[0].1, recorded[1].1);
+    assert_eq!(runtime.focused_terminal(), Some(resumed.terminal));
+    assert_eq!(runtime.active_pane().tabs().len(), 1);
 }
 
 #[test]
