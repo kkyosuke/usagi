@@ -2963,6 +2963,17 @@ fn remember_project_deck(loader: &mut dyn WorkspaceLoader, deck: &mut WorkspaceD
     }
 }
 
+/// The loading label for the `position`-th of `total` deck workspaces. Every
+/// workspace of a multi-workspace deck shows its count, and a lone one shows
+/// none, so no position appears without the total it counts towards.
+fn deck_opening_label(position: usize, total: usize) -> String {
+    if total > 1 {
+        format!("Opening workspace {position} / {total}…")
+    } else {
+        "Opening workspace…".to_owned()
+    }
+}
+
 fn prepare_workspace_deck(
     term: &mut dyn Terminal,
     loader: &mut dyn WorkspaceLoader,
@@ -2974,10 +2985,15 @@ fn prepare_workspace_deck(
             "a project deck needs at least one workspace",
         ));
     };
-    let primary = open_workspace_responsive(term, loader, first_path, "Opening workspace 1…")?;
+    let primary = open_workspace_responsive(
+        term,
+        loader,
+        first_path,
+        &deck_opening_label(1, paths.len()),
+    )?;
     let mut snapshots = vec![primary.clone()];
     for (index, path) in remaining_paths.iter().enumerate() {
-        let label = format!("Opening workspace {} / {}…", index + 2, paths.len());
+        let label = deck_opening_label(index + 2, paths.len());
         snapshots.push(open_workspace_responsive(term, loader, path, &label)?);
     }
     activate_workspace_responsive(

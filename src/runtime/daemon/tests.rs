@@ -262,6 +262,25 @@ fn daemon_pty_failure_entry_contains_identity_and_reason_without_launch_data() {
 }
 
 #[test]
+fn only_a_pending_reap_leaves_an_error_log_entry() {
+    use super::pty::pending_reap_entry;
+    use usagi_daemon::infrastructure::pty::ReapOutcome;
+
+    let terminal = TerminalRef {
+        daemon_generation: DaemonGeneration::new(),
+        terminal_id: TerminalId::new(),
+        workspace_id: WorkspaceId::new(),
+        session_id: Some(SessionId::new()),
+        worktree_id: WorktreeId::new(),
+    };
+    assert_eq!(pending_reap_entry("Agent", ReapOutcome::Reaped, &terminal), None);
+    let entry = pending_reap_entry("Agent", ReapOutcome::Pending, &terminal).unwrap();
+    assert!(entry.contains("daemon Agent PTY failed: action=terminate-reap"));
+    assert!(entry.contains(&format!("terminal={}", terminal.terminal_id.as_str())));
+    assert!(entry.contains("its exit observer reaps it"));
+}
+
+#[test]
 fn terminal_capacity_uses_the_global_setting_and_falls_back_safely() {
     let temporary = tempfile::tempdir().unwrap();
     assert_eq!(

@@ -1544,8 +1544,9 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は physical tree と owner repository の登録を除去する直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら以後の effect を実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `Ctrl-X`、Closeup の `close -f`、Overview の `session remove <name> --force` と `session remove -s --force`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。plain `x` / `X` は remove 自体を送らない。`session cleanup`、`--force` を付けない Overview の `session remove`、`--purge-orphan` を伴わない CLI・MCP の force remove は対を送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
-| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
+| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する（[terminate 後の reap は 2 秒で打ち切る](#terminate-後の-reap-の上限)）。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
 | generic terminal | Agent と同じ順序で、対象 `SessionId` の generic terminal も worktree 撤去より前に terminate/reap して record を除去する。session の shell terminal も worktree 内に cwd を持つ child と capacity claim を握るため、残すと `git worktree remove` が使用中で失敗し、claim は daemon の生存中ずっと pool を占有する。reap に失敗した場合は record を残して retry する。`SessionId` を持たない workspace-root terminal は対象外である |
+
 
 daemon 起動時は canonical な `.usagi/sessions/` 直下も走査し、lifecycle state に所有者がいない物理 entry を
 `Failed` / `Integrity` の recovery row として採用する。採用は attach authority を与えず、actual local branch、dirty、
@@ -1576,6 +1577,14 @@ client 側の表示は既存の投影で足りる。受理直後から `deleting
 
 設計判断（却下した代替案・fence の単位・crash 時の再開契約）は
 [13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を参照する。
+
+### terminate 後の reap の上限
+
+session の close は Agent・generic terminal の terminate/reap を daemon 全体の runtime lock を保持したまま行う。
+そのため kill した child の終了待ちは 2 秒で打ち切る。kernel が child の終了処理を終えない場合（macOS では
+exit 途中の process が `E` 状態のまま残ることがある）でも、他の全接続を lock 待ちで止めないためである。
+期限内に reap できなかった child は signal 済みとして close を進め、error log に `action=terminate-reap` を記録する。
+その child は terminal の exit observer が lock を保持せずに poll し続け、終了した時点で reap する。
 
 ### teardown が終端状態とみなす形
 
