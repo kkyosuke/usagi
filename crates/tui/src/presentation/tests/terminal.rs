@@ -494,6 +494,46 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
             .freeform(),
         "Pasted answer"
     );
+    // Neither the answer editor nor its confirmation screen exports drafts.
+    for key in [Key::Other, Key::Enter] {
+        assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
+        selection.sync(
+            &decision_selection_frame(&runtime, 24, 80),
+            24,
+            80,
+            runtime.state().decision_overlay(),
+        );
+        assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+        let copied = term.copied.last().unwrap();
+        assert!(copied.contains("Question text\nSecond line"));
+        assert!(!copied.contains("Pasted comment"));
+        assert!(!copied.contains("Pasted answer"));
+    }
+    assert!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .confirmation()
+            .is_some()
+    );
+    assert_eq!(term.copied[0], term.copied[1]);
+
+    // Returning to the list clears the complete question cached by the editor.
+    for _ in 0..2 {
+        let _ = runtime.handle_key(Key::Escape);
+    }
+    assert!(runtime.state().decision_overlay().unwrap().editor().is_none());
+    selection.sync(
+        &decision_selection_frame(&runtime, 24, 80),
+        24,
+        80,
+        runtime.state().decision_overlay(),
+    );
+    assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    assert_eq!(term.copied.len(), 2);
 }
 
 #[test]
