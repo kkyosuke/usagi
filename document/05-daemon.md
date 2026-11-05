@@ -1544,7 +1544,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は physical tree と owner repository の登録を除去する直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら以後の effect を実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `Ctrl-X`、Closeup の `close -f`、Overview の `session remove <name> --force` と `session remove -s --force`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。plain `x` / `X` は remove 自体を送らない。`session cleanup`、`--force` を付けない Overview の `session remove`、`--purge-orphan` を伴わない CLI・MCP の force remove は対を送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
-| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
+| Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する（[reap の上限](#terminate-後の-reap-の上限)）。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
 | generic terminal | Agent と同じ順序で、対象 `SessionId` の generic terminal も worktree 撤去より前に terminate/reap して record を除去する。session の shell terminal も worktree 内に cwd を持つ child と capacity claim を握るため、残すと `git worktree remove` が使用中で失敗し、claim は daemon の生存中ずっと pool を占有する。reap に失敗した場合は record を残して retry する。`SessionId` を持たない workspace-root terminal は対象外である |
 
 daemon 起動時は canonical な `.usagi/sessions/` 直下も走査し、lifecycle state に所有者がいない物理 entry を
@@ -1576,6 +1576,18 @@ client 側の表示は既存の投影で足りる。受理直後から `deleting
 
 設計判断（却下した代替案・fence の単位・crash 時の再開契約）は
 [13. daemon singleton と session teardown](proposals/13-daemon-singleton-and-teardown.md) を参照する。
+
+### terminate 後の reap の上限
+
+Agent と generic terminal の terminate/reap（session close・teardown、compensate、sleep、interrupt、
+`retire --force`）は daemon 全体の runtime lock を保持したまま行うため、kill した child の終了待ちを 2 秒で打ち切る。
+kernel が child の終了処理を終えない場合（macOS では exit 途中の process が `E` 状態のまま残ることがある）でも、
+他の全接続を lock 待ちで止めないためである。
+
+期限内に reap できなかった child は SIGKILL 済みで以後何も実行しないため、terminate 成功として扱う。
+runtime record は process を終了済みとして解決し、capacity claim も解放する。error log には
+`action=terminate-reap` を記録し、その child は lock を保持せずに poll する background reaper が、終了した時点で reap する。
+kill の送信または status の取得に失敗した場合だけが terminate/reap の失敗である。
 
 ### teardown が終端状態とみなす形
 
@@ -1811,7 +1823,7 @@ validate
 | prepare | operation、`Preparing` run、binding、`Starting` agent、terminal/runtime fence、semantic key、credential provenance を保存する | process は存在しない。daemon-minted secret を in-memory caller registry に登録する |
 | spawn | prepare 済み operation だけが一度だけ PTY child を起動する | adapter secret は spawn provision にだけ存在し、MCP caller credential は Agent spawn 後の child claim まで daemon memory に留まる |
 | commit | runtime process identity と `Running` run/agent を保存する | commit 完了後だけ admission success を返す |
-| compensate | post-spawn の runtime/dispatch 保存失敗を safe failure または reconcile-required として保存する | exact terminal owner が process を terminate して reap する。terminate/reap を証明できなければ orphan-running として fail closed する |
+| compensate | post-spawn の runtime/dispatch 保存失敗を safe failure または reconcile-required として保存する | exact terminal owner が process を terminate して reap する。kill した child が期限内に終了しない場合も terminate 済みとして扱い（[terminate 後の reap の上限](#terminate-後の-reap-の上限)）、kill または status 取得に失敗した場合は orphan-running として fail closed する |
 
 pre-spawn の terminal 登録までに失敗した launch は、dispatch admission を failed にする前に runtime reservation も `spawn_failed` へ終端化する。旧バージョンが残した不整合は通常の inventory では live / ready とみなさず、`clean --apply --force` だけが matching dispatch run の failed、runtime の `reserved` または daemon restart 後の `reconcile_required(identity_unknown)`、process identity 未設定を再検証して `spawn_failed` へ収束させる。`identity_unknown` の回収は明示された `--force` を process 不在の acknowledgement として扱う。いずれかが一致しない runtime は clean の候補にせず、process の不存在を暗黙に推測しない。
 

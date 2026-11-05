@@ -1877,8 +1877,7 @@ pub(super) fn drive_workspace_controller(
                             let mut prepared = Vec::with_capacity(paths.len());
                             let mut failed = false;
                             for (index, path) in paths.iter().enumerate() {
-                                let label =
-                                    format!("Opening workspace {} / {}…", index + 1, paths.len());
+                                let label = super::deck_opening_label(index + 1, paths.len());
                                 let Some(snapshot) =
                                     prepare_deck_workspace(term, &mut loader, deck, path, &label)
                                 else {

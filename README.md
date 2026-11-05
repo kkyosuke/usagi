@@ -110,6 +110,7 @@ Agent の停止・本体更新・daemon 切替・同じ会話での再開をま�
 導入済み binary へ切り替える場合は `usagi daemon restart --restart-agents` を使います。
 同じ会話への再開では、人への確認依頼と回答、委譲元への完了通知も引き継ぎます。
 同じ会話での作業再開と再開できない場合の扱いは [daemon の Agent 更新](document/05-daemon.md#daemon-restart-による-agent-integration-更新) を参照してください。
+中断タブの再開エラーと再試行の扱いは [TUI の明示 resume](document/03-tui.md#明示-resume-の検証) を参照してください。
 
 対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。
