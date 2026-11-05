@@ -525,7 +525,14 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
     for _ in 0..2 {
         let _ = runtime.handle_key(Key::Escape);
     }
-    assert!(runtime.state().decision_overlay().unwrap().editor().is_none());
+    assert!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .is_none()
+    );
     selection.sync(
         &decision_selection_frame(&runtime, 24, 80),
         24,
