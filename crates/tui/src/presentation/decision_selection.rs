@@ -176,9 +176,11 @@ impl DecisionTextSelection {
         }
         // The box already has a breathing row below its body. Keep feedback
         // there so it cannot replace selected text, even in a one-row viewport.
-        if let Some(feedback) = &self.feedback
-            && let Some(line) = frame.get_mut(viewport.top + viewport.rows)
-        {
+        let feedback = self
+            .feedback
+            .as_deref()
+            .unwrap_or("Drag: select and copy  Copy shortcut: copy selection");
+        if let Some(line) = frame.get_mut(viewport.top + viewport.rows) {
             replace_body(line, &modal::footer(feedback), viewport, width);
         }
     }
