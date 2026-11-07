@@ -166,19 +166,15 @@ mod tests {
         }
         press(&mut state, AppKey::Paste(" 新しい名前 👩‍💻 ".into()));
         let effects = press(&mut state, AppKey::Enter);
-        let [
-            Effect::RenameSession {
-                session,
-                request_id,
-                name,
-            },
-        ] = effects.as_slice()
-        else {
-            panic!("rename effect");
-        };
-        assert_eq!(*session, selected);
-        assert_eq!(name, "新しい名前 👩‍💻");
-        let old_request = *request_id;
+        let old_request = state.rename_session_form().unwrap().request_id;
+        assert_eq!(
+            effects,
+            vec![Effect::RenameSession {
+                session: selected,
+                request_id: old_request,
+                name: "新しい名前 👩‍💻".into(),
+            }]
+        );
         assert!(state.rename_session_form().unwrap().saving);
         for key in [
             AppKey::Enter,
@@ -203,19 +199,38 @@ mod tests {
         assert_eq!(state.rename_session_form().unwrap().name, " 新しい名前 👩‍💻 ");
         assert!(state.rename_session_form().unwrap().error.is_some());
         let effects = press(&mut state, AppKey::Enter);
-        let [Effect::RenameSession { request_id, .. }] = effects.as_slice() else {
-            panic!("retry effect");
-        };
-        assert_ne!(*request_id, old_request);
+        let request_id = state.rename_session_form().unwrap().request_id;
+        assert_eq!(
+            effects,
+            vec![Effect::RenameSession {
+                session: selected,
+                request_id,
+                name: "新しい名前 👩‍💻".into(),
+            }]
+        );
+        assert_ne!(request_id, old_request);
         complete(&mut state, selected, old_request, Ok(()));
         assert!(state.rename_session_form().unwrap().saving);
-        complete(&mut state, selected, *request_id, Ok(()));
+        complete(&mut state, selected, request_id, Ok(()));
         assert!(state.rename_session_form().is_none());
         assert_eq!(state.overlay(), None);
         assert_eq!(state.active, Some(active));
         assert_eq!(state.selected, Selection::Target(Target::Session(selected)));
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
-        complete(&mut state, selected, *request_id, Err("late".into()));
+        complete(&mut state, selected, request_id, Err("late".into()));
+        assert_eq!(state.notice().unwrap().message, "Session renamed.");
+    }
+
+    #[test]
+    fn rename_completion_preserves_an_overlay_opened_while_saving() {
+        let (mut state, _, selected) = home();
+        press(&mut state, AppKey::Char('r'));
+        press(&mut state, AppKey::Enter);
+        let request_id = state.rename_session_form().unwrap().request_id;
+        state.overlay = Some(Overlay::QuitConfirmation);
+        complete(&mut state, selected, request_id, Ok(()));
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        assert!(state.rename_session_form().is_none());
         assert_eq!(state.notice().unwrap().message, "Session renamed.");
     }
 

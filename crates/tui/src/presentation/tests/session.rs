@@ -2384,6 +2384,20 @@ fn older_annotation_snapshot_keeps_renamed_label_but_adopts_new_lifecycle_member
     assert_eq!(ui.workspace.session_ids(), &[id, new_id]);
     assert_eq!(ui.notes_updated_at, Some(before));
     assert_eq!(ui.session_labels_updated_at, Some(after));
+    adopt_session_snapshot(
+        &mut ui,
+        SessionCommandResult {
+            revision: Some(2),
+            notes_updated_at: Some(before),
+            ..SessionCommandResult::message("partial observation")
+        },
+    );
+    assert_eq!(ui.workspace.session_ids(), &[id, new_id]);
+    assert_eq!(
+        ui.workspace.sessions()[0].display_name.as_deref(),
+        Some("Saved name")
+    );
+    assert_eq!(ui.session_labels_updated_at, Some(after));
     record.display_name = Some("External edit".into());
     adopt_session_snapshot(
         &mut ui,
