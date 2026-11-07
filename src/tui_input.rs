@@ -217,6 +217,7 @@ where
                 timeout,
             );
         }
+        let poll_deadline = self.source.now() + timeout;
         let event = if let Some(escape) = self.pending_escape.take() {
             escape
         } else {
@@ -232,12 +233,13 @@ where
                 buffered: VecDeque::new(),
                 report: String::new(),
             });
+            let remaining = poll_deadline.saturating_duration_since(self.source.now());
             return recover_mouse_report(
                 &mut self.source,
                 &mut self.pending_terminal,
                 &mut self.pending_escape,
                 &mut self.pending_mouse,
-                timeout,
+                remaining,
             );
         }
         Ok(Some(event))
@@ -347,7 +349,12 @@ fn recover_mouse_report(
         // for the remainder of this call's budget so `next` cannot emit early
         // ticks and move its schedule arbitrarily far into the future.
         let wait = poll_deadline.saturating_duration_since(now);
-        let event = match poll_source(source, if grace.is_zero() { wait } else { grace }) {
+        let timeout = if candidate.report.is_empty() && !grace.is_zero() {
+            grace
+        } else {
+            wait.max(grace)
+        };
+        let event = match poll_source(source, timeout) {
             Ok(Some(event)) => event,
             Ok(None) => {
                 // Keep a bounded prefix while letting backend events and ticks
@@ -1012,14 +1019,14 @@ mod tests {
     fn a_partial_tail_during_a_blocking_poll_waits_out_the_frame_budget() {
         struct TimedSource {
             now: Instant,
-            event: Option<(Instant, Event)>,
+            events: VecDeque<(Instant, Event)>,
         }
         impl CrosstermEventSource for TimedSource {
             fn now(&mut self) -> Instant {
                 self.now
             }
             fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
-                if let Some((at, _)) = &self.event
+                if let Some((at, _)) = self.events.front()
                     && *at <= self.now + timeout
                 {
                     self.now = self.now.max(*at);
@@ -1029,7 +1036,7 @@ mod tests {
                 Ok(false)
             }
             fn read(&mut self) -> io::Result<Event> {
-                Ok(self.event.take().unwrap().1)
+                Ok(self.events.pop_front().unwrap().1)
             }
         }
         let start = Instant::now();
@@ -1037,7 +1044,7 @@ mod tests {
         let mut pump = EventPump::new(
             TimedSource {
                 now: start,
-                event: Some((start, escape.clone())),
+                events: VecDeque::from([(start, escape.clone())]),
             },
             FakeEventBackend::default(),
             TICK,
@@ -1045,7 +1052,7 @@ mod tests {
         );
         assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(escape));
         assert_eq!(pump.source.now - start, MOUSE_REPORT_GRACE);
-        pump.source.event = Some((
+        pump.source.events.push_back((
             pump.source.now + Duration::from_millis(5),
             Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE)),
         ));
@@ -1053,6 +1060,31 @@ mod tests {
             pump.next(T0 + MOUSE_REPORT_GRACE).unwrap(),
             RuntimeEvent::Tick
         );
+        assert_eq!(pump.source.now - start, TICK);
+        assert_eq!(pump.pending_mouse.as_ref().unwrap().report, "[");
+
+        // A new Escape and prefix can also arrive during the blocking phase.
+        // Its grace deadline must not produce a tick before the frame deadline,
+        // and the initial wait for Escape counts toward the same frame budget.
+        let mut pump = EventPump::new(
+            TimedSource {
+                now: start,
+                events: VecDeque::from([
+                    (
+                        start + Duration::from_millis(5),
+                        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                    ),
+                    (
+                        start + Duration::from_millis(6),
+                        Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE)),
+                    ),
+                ]),
+            },
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
         assert_eq!(pump.source.now - start, TICK);
         assert_eq!(pump.pending_mouse.as_ref().unwrap().report, "[");
     }
