@@ -107,6 +107,19 @@ pub trait RestoreConnectionPort: Send {
 
 /// Overview session commands owned by the daemon lifecycle runner.
 pub trait SessionCommandPort: Send + Sync {
+    /// Save a user-facing name after validating the daemon-owned incarnation.
+    ///
+    /// # Errors
+    /// Returns a safe message when validation or persistence fails.
+    fn rename(
+        &self,
+        _workspace: &Workspace,
+        _session: SessionId,
+        _name: &str,
+    ) -> Result<SessionCommandResult, String> {
+        Err("Session rename is unavailable.".to_owned())
+    }
+
     /// Executes one parsed command against the selected workspace/session.
     ///
     /// # Errors

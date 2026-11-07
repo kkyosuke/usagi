@@ -86,6 +86,14 @@ pub struct RemoveSessionRequest {
     pub purge_orphan: bool,
 }
 
+/// Display metadata mutation for an exact session incarnation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameSessionRequest {
+    pub session: SessionId,
+    pub request_id: RequestId,
+    pub name: String,
+}
+
 /// A non-destructive Agent sleep request for one retained session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SleepSessionRequest {
@@ -141,6 +149,16 @@ pub struct OpenTerminalRequest {
 /// as [`super::controller::BackendEvent::Sessions`].  The reducer stays the
 /// authority on how a completion updates the sidebar and pending band.
 pub trait SessionLifecyclePort {
+    /// Save display metadata asynchronously without changing lifecycle identity.
+    fn rename(&mut self, request: RenameSessionRequest, completions: Completions) {
+        completions.emit(AppEvent::Backend(
+            super::controller::BackendEvent::SessionRenamed {
+                session: request.session,
+                request_id: request.request_id,
+                result: Err("Session rename is unavailable.".to_owned()),
+            },
+        ));
+    }
     /// Create a session and report the completion for its token.
     fn create(&mut self, request: CreateSessionRequest, completions: Completions);
     /// Request a fresh session snapshot for the workspace.
@@ -569,6 +587,18 @@ impl DaemonBackend {
                     force,
                     force_delete_branch,
                     purge_orphan,
+                },
+                self.completions(),
+            ),
+            Effect::RenameSession {
+                session,
+                request_id,
+                name,
+            } => self.sessions.rename(
+                RenameSessionRequest {
+                    session,
+                    request_id,
+                    name,
                 },
                 self.completions(),
             ),
@@ -1351,6 +1381,26 @@ mod tests {
             [AppEvent::Backend(BackendEvent::RolesError { scope, .. })]
                 if *scope == RoleEditorScope::Global
         ));
+    }
+
+    #[test]
+    fn rename_dispatch_reports_an_unavailable_port_to_the_exact_request() {
+        let mut backend = backend();
+        let session = SessionId::new();
+        let request_id = RequestId::new();
+        backend.dispatch(Effect::RenameSession {
+            session,
+            request_id,
+            name: "new".into(),
+        });
+        assert_eq!(
+            backend.drain_events(),
+            vec![AppEvent::Backend(BackendEvent::SessionRenamed {
+                session,
+                request_id,
+                result: Err("Session rename is unavailable.".into()),
+            })]
+        );
     }
 
     #[test]

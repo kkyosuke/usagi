@@ -208,12 +208,48 @@ pub(super) fn begin_session_command(
     command: SessionCommand,
     completion: SessionBackendCompletion,
 ) -> bool {
+    begin_session_operation(ui, lane, SessionOperation::Command(command), completion)
+}
+
+pub(super) fn begin_session_rename(
+    ui: &mut WorkspaceIoRuntime,
+    lane: &mut SessionCommandLane,
+    request: crate::usecase::application::daemon_backend::RenameSessionRequest,
+    completions: Completions,
+) -> bool {
+    begin_session_operation(
+        ui,
+        lane,
+        SessionOperation::Rename {
+            session: request.session,
+            name: request.name,
+        },
+        SessionBackendCompletion::Rename {
+            session: request.session,
+            request_id: request.request_id,
+            completions,
+        },
+    )
+}
+
+enum SessionOperation {
+    Command(SessionCommand),
+    Rename { session: SessionId, name: String },
+}
+
+fn begin_session_operation(
+    ui: &mut WorkspaceIoRuntime,
+    lane: &mut SessionCommandLane,
+    command: SessionOperation,
+    completion: SessionBackendCompletion,
+) -> bool {
     let workspace = ui.workspace.record().clone();
-    let create_name = if let SessionCommand::Create { name, .. } = &command {
-        Some(name.clone())
-    } else {
-        None
-    };
+    let create_name =
+        if let SessionOperation::Command(SessionCommand::Create { name, .. }) = &command {
+            Some(name.clone())
+        } else {
+            None
+        };
     let removing = if let SessionBackendCompletion::Remove { session, .. } = &completion {
         Some(*session)
     } else {
@@ -238,8 +274,9 @@ pub(super) fn begin_session_command(
     let sender = ui.session_completion_sender.clone();
     let lane_workspace = workspace.path.clone();
     std::thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            port.execute(&workspace, None, command)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match command {
+            SessionOperation::Command(command) => port.execute(&workspace, None, command),
+            SessionOperation::Rename { session, name } => port.rename(&workspace, session, &name),
         }))
         .unwrap_or_else(|_| Err("session command worker failed".to_owned()));
         // Complete the reducer request before returning the projection/port to
@@ -356,7 +393,9 @@ pub(super) fn drain_session_completions(
             {
                 ui.removing_session = None;
             }
-            SessionBackendCompletion::Remove { .. } | SessionBackendCompletion::Sleep { .. } => {}
+            SessionBackendCompletion::Remove { .. }
+            | SessionBackendCompletion::Sleep { .. }
+            | SessionBackendCompletion::Rename { .. } => {}
         }
         // This composition owns the command's skeleton but not its reducer sink:
         // the command was started before a project switch, so the pending row and
@@ -465,7 +504,10 @@ pub(super) fn deliver_carried_outcome(
 /// observation that started before a user's create/remove but landed after it
 /// carries the older revision and is discarded, so the newest daemon state wins
 /// regardless of which lane observed it (#551).
-pub(super) fn adopt_session_snapshot(ui: &mut WorkspaceIoRuntime, result: SessionCommandResult) {
+pub(super) fn adopt_session_snapshot(
+    ui: &mut WorkspaceIoRuntime,
+    mut result: SessionCommandResult,
+) {
     let is_current = result
         .revision
         .is_none_or(|revision| revision >= ui.last_session_revision);
@@ -473,6 +515,31 @@ pub(super) fn adopt_session_snapshot(ui: &mut WorkspaceIoRuntime, result: Sessio
         ui.last_session_revision = revision;
     }
     if is_current {
+        // A resident observation may have read annotations before a rename,
+        // while carrying the same (or a newer) lifecycle revision. Preserve the
+        // saved labels by incarnation while still adopting lifecycle changes.
+        if result
+            .notes_updated_at
+            .zip(ui.session_labels_updated_at)
+            .is_some_and(|(observed, saved)| observed < saved)
+        {
+            if let Some((records, ids)) = result.sessions.as_mut().zip(result.session_ids.as_ref())
+            {
+                for (record, id) in records.iter_mut().zip(ids) {
+                    if let Some(previous) = ui
+                        .workspace
+                        .session_ids()
+                        .iter()
+                        .zip(ui.workspace.sessions())
+                        .find_map(|(old_id, record)| (old_id == id).then_some(record))
+                    {
+                        record.display_name.clone_from(&previous.display_name);
+                    }
+                }
+            }
+        } else if let Some(updated_at) = result.notes_updated_at {
+            ui.session_labels_updated_at = Some(updated_at);
+        }
         if let Some(updated_at) = result.notes_updated_at {
             ui.notes_updated_at = Some(updated_at);
         }
@@ -554,6 +621,23 @@ pub(super) fn emit_session_command_result(
     completion: &SessionBackendCompletion,
 ) {
     match (result, completion) {
+        (
+            result,
+            SessionBackendCompletion::Rename {
+                session,
+                request_id,
+                completions,
+            },
+        ) => {
+            completions.emit(AppEvent::Backend(BackendEvent::SessionRenamed {
+                session: *session,
+                request_id: *request_id,
+                result: result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|message| safe_session_error(message)),
+            }));
+        }
         (
             Ok(result),
             SessionBackendCompletion::Create {
@@ -712,6 +796,16 @@ pub(super) fn sync_runtime_sessions(
         // all. The caller dispatches them; dropping them here is what froze the
         // lane at the sessions the workspace opened with.
         effects.extend(runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids))));
+    }
+    let labels = ui
+        .workspace
+        .sessions()
+        .iter()
+        .zip(ui.workspace.session_ids())
+        .map(|(record, id)| (*id, record.display_label().to_owned()))
+        .collect();
+    if runtime.state().session_labels() != &labels {
+        effects.extend(runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLabels(labels))));
     }
     // Keep the reducer's advisory name copy in step so the create form can reject
     // a known worktree collision locally before it ever reaches the daemon. The

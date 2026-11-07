@@ -70,9 +70,9 @@ use flow_steps::{
 
 use session_commands::{
     ActiveSessionCommand, SessionCommandCompletion, SessionCommandLane, adopt_session_command_lane,
-    begin_session_command, deliver_carried_outcome, drain_session_completions,
-    drain_session_refresh, project_controller_sessions, session_name_for,
-    sync_overlay_session_roots, sync_runtime_sessions,
+    begin_session_command, begin_session_rename, deliver_carried_outcome,
+    drain_session_completions, drain_session_refresh, project_controller_sessions,
+    session_name_for, sync_overlay_session_roots, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{
@@ -1036,6 +1036,11 @@ struct AgentContext {
 }
 
 enum SessionBackendCompletion {
+    Rename {
+        session: SessionId,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    },
     Create {
         token: PendingToken,
         /// Name the user asked for. A create that outlives its composition is
@@ -1550,6 +1555,7 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    rename_session: Option<crate::usecase::application::controller::RenameSessionForm>,
     /// The terminal-launch failure dialog's safe message.
     terminal_launch_error: Option<String>,
     /// The Agent-launch failure dialog's safe message.
@@ -2346,6 +2352,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::Environment => KeyHelpContext::WorkspaceEnvironmentEditor,
             Overlay::Roles => KeyHelpContext::RolesEditor,
             Overlay::CreateSession => KeyHelpContext::CreateSession,
+            Overlay::RenameSession => KeyHelpContext::RenameSession,
             Overlay::Decisions if state.decision_answer_open => KeyHelpContext::DecisionAnswer,
             Overlay::Decisions => KeyHelpContext::DecisionList,
             Overlay::CleanupQueue => KeyHelpContext::CleanupQueue,

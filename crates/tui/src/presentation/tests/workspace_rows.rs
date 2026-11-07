@@ -1144,6 +1144,7 @@ fn workspace_help_resolver_covers_every_frontmost_surface() {
         ),
         (Overlay::Roles, HelpContext::RolesEditor),
         (Overlay::CreateSession, HelpContext::CreateSession),
+        (Overlay::RenameSession, HelpContext::RenameSession),
         (Overlay::Decisions, HelpContext::DecisionList),
         (Overlay::CleanupQueue, HelpContext::CleanupQueue),
         (Overlay::RemoveSessions, HelpContext::RemoveSessions),

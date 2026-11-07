@@ -577,6 +577,7 @@ fn controller_loop_opens_the_create_form_from_the_new_session_row() {
         WorkspaceState {
             sessions: Vec::new(),
             session_notes: std::collections::BTreeMap::new(),
+            session_display_names: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         },
@@ -665,6 +666,7 @@ fn controller_loop_dispatches_each_ctrl_a_representation_once_to_the_session_por
             WorkspaceState {
                 sessions: Vec::new(),
                 session_notes: std::collections::BTreeMap::new(),
+                session_display_names: std::collections::BTreeMap::new(),
                 root_notes: Scratchpad::default(),
                 updated_at: now(),
             },
@@ -2188,4 +2190,213 @@ fn switch_session_reorder_invalidates_row_cache_and_redraws_immediately() {
     assert!(term.builds_at_draw.contains(&(2, 1)));
     let frame = strip_ansi(&term.frames[1].join("\n"));
     assert!(frame.find("second-row").unwrap() < frame.find("first-row").unwrap());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One end-to-end host/worker scenario also verifies the lane is reaped before the test ends.
+fn switch_rename_runs_on_session_lane_and_refreshes_display_without_changing_identity() {
+    use crate::presentation::{
+        SessionBackendCompletion, emit_session_command_result, sync_runtime_sessions,
+    };
+    use crate::usecase::application::daemon_backend::{RenameSessionRequest, SessionLifecyclePort};
+    use std::collections::HashMap;
+    use usagi_core::domain::id::RequestId;
+
+    struct RenamePort {
+        id: SessionId,
+        record: SessionRecord,
+    }
+    impl SessionCommandPort for RenamePort {
+        fn rename(
+            &self,
+            _workspace: &Workspace,
+            session: SessionId,
+            name: &str,
+        ) -> Result<SessionCommandResult, String> {
+            assert_eq!(session, self.id);
+            let mut record = self.record.clone();
+            record.display_name = Some(name.to_owned());
+            Ok(SessionCommandResult {
+                sessions: Some(vec![record]),
+                session_ids: Some(vec![self.id]),
+                ..SessionCommandResult::message("saved")
+            })
+        }
+    }
+    let initial = snapshot("demo");
+    let workspace = initial.workspace_id;
+    let session = initial.session_ids[0];
+    assert!(
+        SessionCommandPort::rename(
+            &UnavailableSessionCommandPort,
+            &initial.workspace,
+            session,
+            "new"
+        )
+        .is_err()
+    );
+    let record = initial.state.sessions[0].clone();
+    let canonical = record.name.clone();
+    let mut lane = SessionCommandLane::new();
+    let view =
+        WorkspaceView::with_runtime_ids(initial.workspace, initial.state, initial.session_ids);
+    let mut ui = io_runtime_on(
+        &lane,
+        view,
+        Box::new(RenamePort {
+            id: session,
+            record,
+        }),
+    );
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = sync_runtime_sessions(&mut runtime, &ui, &[]);
+    let _ = runtime.handle_key(Key::Char('r'));
+    assert_eq!(
+        runtime.state().rename_session_form().unwrap().name,
+        canonical
+    );
+    let frame = home_frame_material(
+        24,
+        80,
+        &runtime,
+        "demo",
+        &[],
+        None,
+        DaemonHealthTracker::default(),
+        &BTreeMap::new(),
+        None,
+        None,
+        Utc::now(),
+    );
+    assert!(
+        render_home_material(&frame)
+            .join("\n")
+            .contains("Rename session")
+    );
+    let (mut host, actions) = ControllerHost::channel();
+    let (completions, receiver) = Completions::channel();
+    let request_id = RequestId::new();
+    host.rename(
+        RenameSessionRequest {
+            session,
+            request_id,
+            name: "New display".into(),
+        },
+        completions,
+    );
+    drain_host_actions(
+        &actions,
+        &mut ui,
+        &mut lane,
+        &mut runtime,
+        &mut HashMap::new(),
+    );
+    assert_eq!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap(),
+        AppEvent::Backend(BackendEvent::SessionRenamed {
+            session,
+            request_id,
+            result: Ok(())
+        })
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while ui.active_session_command.is_some() {
+        drain_session_completions(&mut ui, &mut lane);
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let _ = sync_runtime_sessions(&mut runtime, &ui, &[]);
+    assert_eq!(runtime.state().session_labels()[&session], "New display");
+    assert_eq!(ui.workspace.sessions()[0].name, canonical);
+    assert_eq!(ui.workspace.session_ids(), &[session]);
+
+    let (mut unavailable, actions) = ControllerHost::channel();
+    drop(actions);
+    let (completions, receiver) = Completions::channel();
+    unavailable.rename(
+        RenameSessionRequest {
+            session,
+            request_id,
+            name: "new".into(),
+        },
+        completions,
+    );
+    assert!(matches!(
+        receiver.recv().unwrap(),
+        AppEvent::Backend(BackendEvent::SessionRenamed { result: Err(_), .. })
+    ));
+
+    let (completions, receiver) = Completions::channel();
+    emit_session_command_result(
+        &Err("save failed\nprivate details".into()),
+        &SessionBackendCompletion::Rename {
+            session,
+            request_id,
+            completions,
+        },
+    );
+    assert_eq!(
+        receiver.recv().unwrap(),
+        AppEvent::Backend(BackendEvent::SessionRenamed {
+            session,
+            request_id,
+            result: Err("save failed".into())
+        })
+    );
+}
+
+#[test]
+fn older_annotation_snapshot_keeps_renamed_label_but_adopts_new_lifecycle_membership() {
+    let initial = snapshot("demo");
+    let id = initial.session_ids[0];
+    let mut record = initial.state.sessions[0].clone();
+    let view =
+        WorkspaceView::with_runtime_ids(initial.workspace, initial.state, initial.session_ids);
+    let mut ui = io_runtime(view, Box::new(UnavailableSessionCommandPort));
+    let before = Utc::now();
+    let after = before + chrono::Duration::seconds(1);
+    record.display_name = Some("Saved name".into());
+    let saved = SessionCommandResult {
+        sessions: Some(vec![record.clone()]),
+        session_ids: Some(vec![id]),
+        revision: Some(1),
+        notes_updated_at: Some(after),
+        ..SessionCommandResult::message("saved")
+    };
+    adopt_session_snapshot(&mut ui, saved);
+    record.display_name = None;
+    let new_id = SessionId::new();
+    let stale = SessionCommandResult {
+        sessions: Some(vec![record.clone(), record.clone()]),
+        session_ids: Some(vec![id, new_id]),
+        revision: Some(2),
+        notes_updated_at: Some(before),
+        ..SessionCommandResult::message("stale annotations, newer lifecycle")
+    };
+    adopt_session_snapshot(&mut ui, stale);
+    assert_eq!(
+        ui.workspace.sessions()[0].display_name.as_deref(),
+        Some("Saved name")
+    );
+    assert_eq!(ui.workspace.sessions()[1].display_name, None);
+    assert_eq!(ui.workspace.session_ids(), &[id, new_id]);
+    assert_eq!(ui.notes_updated_at, Some(before));
+    assert_eq!(ui.session_labels_updated_at, Some(after));
+    record.display_name = Some("External edit".into());
+    adopt_session_snapshot(
+        &mut ui,
+        SessionCommandResult {
+            sessions: Some(vec![record]),
+            session_ids: Some(vec![id]),
+            revision: Some(2),
+            notes_updated_at: Some(after + chrono::Duration::seconds(1)),
+            ..SessionCommandResult::message("external rename")
+        },
+    );
+    assert_eq!(
+        ui.workspace.sessions()[0].display_name.as_deref(),
+        Some("External edit")
+    );
 }

@@ -4187,6 +4187,7 @@ mod tests {
                 session("daemon", None, SessionOrigin::Mcp),
             ],
             session_notes: std::collections::BTreeMap::new(),
+            session_display_names: std::collections::BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: now(),
         };

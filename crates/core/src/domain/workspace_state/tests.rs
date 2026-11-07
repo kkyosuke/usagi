@@ -44,6 +44,7 @@ fn populated_state_round_trips_through_json() {
     let state = WorkspaceState {
         sessions: vec![session("alpha"), session("beta")],
         session_notes: std::collections::BTreeMap::new(),
+        session_display_names: std::collections::BTreeMap::new(),
         root_notes: Scratchpad {
             note: Some("root memo".to_string()),
             todos: vec![SessionTodo::new("triage")],
