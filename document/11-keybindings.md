@@ -174,6 +174,9 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Switch | `Enter` / `t` | session Closeup、または選択したnew session |
 | Switch | `Ctrl-A` / `Home` | new session form |
 | Switch | `n` | 選択中 session の memo 編集 |
+| Switch | `r` | 選択中 session の表示名を編集 |
+| Rename session | 文字 / paste / `Backspace` | 表示名を編集 |
+| Rename session | `Enter` / `Esc` | 保存 / 取消 |
 | Switch | `:` | Overview palette |
 | Switch / live pane以外のCloseup | `?` | 現在のsurfaceで使えるキーボードショートカットを表示 |
 | Switch | `Ctrl-X` | 選択sessionのforce remove（未コミットworktreeと未マージbranchを破棄）。選択中の `failed/integrity` orphan sessionはpurgeも付ける |

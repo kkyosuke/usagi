@@ -25,7 +25,7 @@ use super::{
     WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceStep, WorkspaceView,
     activate_focused_interrupted_tab, activate_workspace_responsive, adjust_project_bar_pointer,
     adopt_session_command_lane, apply_drawer_header_while_director_open, apply_restore_completion,
-    begin_session_command, close_exited_panes, closes_workspace_help,
+    begin_session_command, begin_session_rename, close_exited_panes, closes_workspace_help,
     compose_workspace_shell_frame, controller_terminal_view, deliver_carried_outcome,
     director_drawer_projection, dismiss_pr_modal_on_project_bar_click,
     drain_pane_completions_into_runtime, drain_pane_launches, drain_session_completions,
@@ -246,6 +246,11 @@ pub(super) fn home_frame_material_shared(
         ),
         quit_confirmation: (runtime.state().overlay() == Some(Overlay::QuitConfirmation))
             .then(|| runtime.state().exit_choice()),
+        rename_session: runtime
+            .state()
+            .rename_session_form()
+            .filter(|_| runtime.state().overlay() == Some(Overlay::RenameSession))
+            .cloned(),
         create_error: runtime
             .state()
             .create_session_error()
@@ -310,6 +315,14 @@ pub(super) fn render_home_material(material: &HomeFrameMaterial) -> Vec<String> 
             material.width,
             &frame,
             choice,
+        );
+    }
+    if let Some(form) = &material.rename_session {
+        return super::views::rename_session_modal::render_over(
+            material.height,
+            material.width,
+            &frame,
+            form,
         );
     }
     if let Some(message) = &material.create_error {
@@ -501,6 +514,9 @@ pub(super) fn drain_controller_host_actions(
                         "selected session is no longer available",
                     ))));
                 }
+            }
+            ControllerHostAction::Rename(request, completions) => {
+                begin_session_rename(ui, lane, request, completions);
             }
             ControllerHostAction::Sleep(request, completions) => {
                 if let Some(name) = session_name_for(ui, request.session) {

@@ -11,6 +11,8 @@ mod new;
 mod notes;
 mod preview;
 mod pull_requests;
+mod rename;
+pub use rename::RenameSessionForm;
 
 use chrono::{DateTime, Utc};
 
@@ -91,6 +93,8 @@ pub enum Overlay {
     Roles,
     /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
     CreateSession,
+    /// Edit the selected session display name.
+    RenameSession,
     /// Daemon-wide pending user decisions and their answer editor.
     Decisions,
     /// Merge-confirmed sessions awaiting explicit, sequential cleanup.
@@ -1198,6 +1202,8 @@ pub struct AppState {
     /// them before anything is typed, so they outlive one overlay.
     preview_recent: Vec<(Target, Vec<String>)>,
     create_session: Option<CreateSessionForm>,
+    rename_session: Option<RenameSessionForm>,
+    session_labels: BTreeMap<SessionId, String>,
     create_session_error: Option<Notice>,
     terminal_launch_error: Option<Notice>,
     agent_launch_error: Option<Notice>,
@@ -1396,6 +1402,8 @@ impl AppState {
             preview_overlay: None,
             preview_recent: Vec::new(),
             create_session: None,
+            rename_session: None,
+            session_labels: BTreeMap::new(),
             create_session_error: None,
             terminal_launch_error: None,
             agent_launch_error: None,
@@ -1527,6 +1535,17 @@ impl AppState {
     pub fn note_editor(&self) -> Option<&NoteEditor> {
         self.note_editor.as_ref()
     }
+    /// Open display-name editor, retaining its draft across save failures.
+    #[must_use]
+    pub fn rename_session_form(&self) -> Option<&RenameSessionForm> {
+        self.rename_session.as_ref()
+    }
+
+    #[must_use]
+    pub fn session_labels(&self) -> &BTreeMap<SessionId, String> {
+        &self.session_labels
+    }
+
     /// Open new-session form, including values retained after validation failure.
     #[must_use]
     pub fn create_session_form(&self) -> Option<&CreateSessionForm> {
@@ -2373,6 +2392,12 @@ pub enum BackendEvent {
     /// 表示中 session の name。新規作成の同名 validation にだけ使う advisory copy で、
     /// [`Sessions`](Self::Sessions) の identity 同期とは独立に還流してよい。
     SessionNames(Vec<String>),
+    SessionLabels(BTreeMap<SessionId, String>),
+    SessionRenamed {
+        session: SessionId,
+        request_id: RequestId,
+        result: Result<(), String>,
+    },
     /// Per-session lifecycle keyed by stable identity, so the reducer can gate
     /// actions by capability (a `Failed` row is not attachable but is removable).
     /// A session absent here is treated as `Available`, so it refluxes
@@ -2547,6 +2572,11 @@ pub enum TabDirection {
 /// reducer が要求する外部操作。daemon wire 型への変換は adapter 側の責務。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    RenameSession {
+        session: SessionId,
+        request_id: RequestId,
+        name: String,
+    },
     /// Read workspace-local favorite preferences.
     LoadSessionFavorites,
     /// Toggle one exact session under the preference store lock.
@@ -3127,13 +3157,16 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             preview::sync_preview_pane(state)
         }
         BackendEvent::Sessions(sessions) => update_session_snapshot(state, sessions),
-        BackendEvent::SessionNames(names) => {
-            state.session_names = names;
-            if let Some(form) = state.create_session.as_mut() {
-                form.replace_existing(&state.session_names);
-            }
+        BackendEvent::SessionLabels(labels) => {
+            state.session_labels = labels;
             Vec::new()
         }
+        BackendEvent::SessionRenamed {
+            session,
+            request_id,
+            result,
+        } => rename::complete(state, session, request_id, result),
+        BackendEvent::SessionNames(names) => update_session_names(state, names),
         BackendEvent::SessionLifecycles(lifecycles) => update_session_lifecycles(state, lifecycles),
         BackendEvent::SessionRoles(roles) => {
             state.session_roles = roles;
@@ -3169,6 +3202,14 @@ fn update_backend_event(state: &mut AppState, event: BackendEvent) -> Vec<Effect
             }
         }
     }
+}
+
+fn update_session_names(state: &mut AppState, names: Vec<String>) -> Vec<Effect> {
+    state.session_names = names;
+    if let Some(form) = state.create_session.as_mut() {
+        form.replace_existing(&state.session_names);
+    }
+    Vec::new()
 }
 
 fn update_session_favorites(state: &mut AppState, favorites: BTreeSet<SessionId>) -> Vec<Effect> {
@@ -4207,6 +4248,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
         }
         Overlay::Roles => update_role_editor(state, &key),
         Overlay::CreateSession => update_create_session_form(state, &key),
+        Overlay::RenameSession => rename::key(state, &key),
         // Dismissal is handled by the early Enter/Escape/Ctrl-C branch above; any
         // other key is inert while the create-failure dialog owns input.
         Overlay::Prs => pull_requests::update_key(state, &key),
@@ -4572,6 +4614,11 @@ fn open_decisions(state: &mut AppState, requested: Option<UserDecisionId>) -> Ve
 #[allow(clippy::too_many_lines)] // Exhaustive Home command ownership remains visible in one reducer table.
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
+        AppKey::Char('r')
+            if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
+        {
+            rename::open(state)
+        }
         AppKey::Char('f')
             if state.overlay.is_none() && matches!(state.route, Route::Home(HomeMode::Switch)) =>
         {

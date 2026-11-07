@@ -14,5 +14,6 @@ pub(crate) mod fuzzy;
 pub mod overview;
 /// Shared syntax for destructive session removal commands.
 pub mod session_remove;
+pub mod session_rename;
 /// Live terminal input vocabulary, encoder, and default prefix classifier.
 pub mod terminal_input;

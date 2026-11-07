@@ -613,6 +613,14 @@ Switch の session 行で `f` を押すと、お気に入り登録・解除を�
 FIFO の writer を待たずに拒否するため、workspace を離れるときの worker 終了も妨げない。
 `+ new session` 行、Closeup、前面 modal ではこの shortcut を実行しない。
 
+Switch の利用可能な session 行では、表示名を変更できる（[キーバインド](11-keybindings.md#workspace-画面)）。
+編集フォームは現在の表示名を初期値にし、前後の空白を除いた1〜64文字の名前を保存する。日本語・絵文字・空白を
+使え、制御文字は入力から除く。保存中は編集・二重送信を止め、失敗時は入力を保持して再試行できる。
+保存は背景の session command worker が行い、daemon の最新一覧で対象の固有 ID が利用可能か確認する。
+表示名は repository-local な `state.json` の `session_display_names` に固有 ID ごとに保持するため、再起動後も
+反映され、同名で作り直した別 session には引き継がない。worktree path、Git branch、CLI・MCP の対象名は
+変わらない。新規作成行、Closeup、他の前面 modal からはリネームを開始しない。
+
 ### Switch の右ペインは cursor の preview
 
 Switch は左 sidebar が navigation を持つため、右ペインは cursor（hover）が指す session の preview である。

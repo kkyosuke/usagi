@@ -684,6 +684,7 @@ fn every_existing_modal_blocks_director_drawer_entry() {
             | Overlay::CreateSessionError
             | Overlay::TerminalLaunchError
             | Overlay::AgentLaunchError
+            | Overlay::RenameSession
             | Overlay::Garden => {}
         }
         for key in [AppKey::ToggleDirectorDrawer, AppKey::OpenDirectorNew] {

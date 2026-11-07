@@ -139,6 +139,7 @@ mod tests {
         WorkspaceState {
             sessions: vec![session("alpha")],
             session_notes: std::collections::BTreeMap::new(),
+            session_display_names: std::collections::BTreeMap::new(),
             root_notes: Scratchpad {
                 note: Some("root memo".to_string()),
                 ..Default::default()

@@ -16,8 +16,8 @@ use crate::usecase::application::controller::{
 };
 use crate::usecase::application::daemon_backend::{
     AgentPort as BackendAgentPort, Completions, CreateSessionRequest, LaunchAgentRequest,
-    OpenTerminalRequest, RemoveSessionRequest, ReopenAgentRequest, ResumeAgentRequest,
-    SessionLifecyclePort as BackendSessionLifecyclePort, SleepSessionRequest,
+    OpenTerminalRequest, RemoveSessionRequest, RenameSessionRequest, ReopenAgentRequest,
+    ResumeAgentRequest, SessionLifecyclePort as BackendSessionLifecyclePort, SleepSessionRequest,
 };
 
 /// Actions whose stateful host remains in the terminal loop while
@@ -27,6 +27,7 @@ pub enum ControllerHostAction {
     Refresh(WorkspaceId, Completions),
     Remove(RemoveSessionRequest, Completions),
     Sleep(SleepSessionRequest, Completions),
+    Rename(RenameSessionRequest, Completions),
     LaunchAgent(LaunchAgentRequest),
     ResumeAgent(ResumeAgentRequest),
     ReopenAgent(ReopenAgentRequest),
@@ -50,6 +51,19 @@ impl ControllerHost {
 }
 
 impl BackendSessionLifecyclePort for ControllerHost {
+    fn rename(&mut self, request: RenameSessionRequest, completions: Completions) {
+        if let Err(mpsc::SendError(ControllerHostAction::Rename(request, completions))) = self
+            .0
+            .send(ControllerHostAction::Rename(request, completions))
+        {
+            completions.emit(AppEvent::Backend(BackendEvent::SessionRenamed {
+                session: request.session,
+                request_id: request.request_id,
+                result: Err("Session command host is unavailable.".to_owned()),
+            }));
+        }
+    }
+
     fn create(&mut self, request: CreateSessionRequest, completions: Completions) {
         if let Err(mpsc::SendError(ControllerHostAction::Create(request, completions))) = self
             .0
