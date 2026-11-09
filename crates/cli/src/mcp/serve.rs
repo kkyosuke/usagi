@@ -899,10 +899,12 @@ fn apply_caller_policy(
     arguments: &mut Value,
     caller_credential: Option<&str>,
 ) {
-    if policy == CallerPolicy::SessionCredential
-        && let Some(credential) = caller_credential
-    {
-        arguments["_caller_credential"] = Value::String(credential.to_owned());
+    if policy == CallerPolicy::SessionCredential {
+        if let Some(credential) = caller_credential {
+            arguments["_caller_credential"] = Value::String(credential.to_owned());
+        } else if let Some(object) = arguments.as_object_mut() {
+            object.remove("_caller_credential");
+        }
     }
 }
 
@@ -2490,5 +2492,12 @@ mod tests {
         serve(input.as_bytes(), &mut out, "9.9.9").unwrap();
         let output = String::from_utf8(out).unwrap();
         assert!(output.contains("managed daemon client is not configured"));
+
+        let mut spoofed = serde_json::json!({
+            "name": "a",
+            "_caller_credential": "forged-credential"
+        });
+        apply_caller_policy(CallerPolicy::SessionCredential, &mut spoofed, None);
+        assert!(spoofed.get("_caller_credential").is_none());
     }
 }
