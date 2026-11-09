@@ -242,64 +242,7 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or(program);
     if program == "git" {
-        let git_tokens = &tokens[1..];
-        let Some(subcommand) = git_subcommand_from_tokens(git_tokens) else {
-            return false;
-        };
-        let unsafe_option = git_tokens.iter().any(|token| {
-            token == "-c"
-                || token.starts_with("-c=")
-                || token == "--config-env"
-                || token.starts_with("--config-env=")
-                || (token == "-C"
-                    && git_tokens
-                        .windows(2)
-                        .any(|pair| pair[0] == "-C" && pair[1] != "."))
-                || (token.starts_with("-C=") && token != "-C=.")
-                || token == "--git-dir"
-                || token.starts_with("--git-dir=")
-                || token == "--work-tree"
-                || token.starts_with("--work-tree=")
-                || token == "--exec-path"
-                || token.starts_with("--exec-path=")
-                || token == "-o"
-                || token == "--output"
-                || token.starts_with("--output=")
-                || token == "--upload-pack"
-                || token.starts_with("--upload-pack=")
-                || token == "--open-files-in-pager"
-                || token.starts_with("--open-files-in-pager=")
-                || token == "-O"
-                || (token.starts_with("-O") && token.len() > 2)
-                || token == "-p"
-                || token == "--paginate"
-                || token.starts_with("--paginate=")
-                || token == "--ext-diff"
-                || token.starts_with("--ext-diff=")
-                || token == "--textconv"
-                || token.starts_with("--textconv=")
-                || token == "--show-signature"
-        });
-        let log_requests_diff = subcommand == "log"
-            && git_tokens.iter().any(|token| {
-                matches!(
-                    token.as_str(),
-                    "-p" | "--patch"
-                        | "--stat"
-                        | "--numstat"
-                        | "--shortstat"
-                        | "--raw"
-                        | "--name-only"
-                        | "--name-status"
-                )
-            });
-        let diff_helpers_disabled = !DIFF_CAPABLE_GIT_SUBCOMMANDS.contains(&subcommand)
-            || (subcommand == "log" && !log_requests_diff)
-            || (git_tokens.iter().any(|token| token == "--no-ext-diff")
-                && git_tokens.iter().any(|token| token == "--no-textconv"));
-        return READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
-            && !unsafe_option
-            && diff_helpers_disabled;
+        return git_command_is_read_only(&tokens[1..]);
     }
     if program != basename {
         return false;
@@ -331,6 +274,80 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
         basename,
         "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "test" | "true" | "false"
     )
+}
+
+fn git_command_is_read_only(git_tokens: &[String]) -> bool {
+    let Some((subcommand_index, subcommand)) = git_subcommand_from_tokens(git_tokens) else {
+        return false;
+    };
+    let unsafe_option = git_tokens.iter().any(|token| {
+        token.starts_with("-c")
+            || token == "--config-env"
+            || token.starts_with("--config-env=")
+            || (token == "-C"
+                && git_tokens
+                    .windows(2)
+                    .any(|pair| pair[0] == "-C" && pair[1] != "."))
+            || (token.starts_with("-C") && token != "-C" && token != "-C." && token != "-C=.")
+            || token == "--git-dir"
+            || token.starts_with("--git-dir=")
+            || token == "--work-tree"
+            || token.starts_with("--work-tree=")
+            || token == "--exec-path"
+            || token.starts_with("--exec-path=")
+            || token.starts_with("-o")
+            || token == "--output"
+            || token.starts_with("--output=")
+            || token == "--upload-pack"
+            || token.starts_with("--upload-pack=")
+            || token == "--open-files-in-pager"
+            || token.starts_with("--open-files-in-pager=")
+            || token == "-O"
+            || (token.starts_with("-O") && token.len() > 2)
+            || token == "-p"
+            || token == "--paginate"
+            || token.starts_with("--paginate=")
+            || token == "--ext-diff"
+            || token.starts_with("--ext-diff=")
+            || token == "--textconv"
+            || token.starts_with("--textconv=")
+            || token == "--show-signature"
+    });
+    let reflog_mutates = subcommand == "reflog"
+        && git_tokens[subcommand_index + 1..]
+            .iter()
+            .find(|token| !token.starts_with('-'))
+            .is_some_and(|action| {
+                matches!(action.as_str(), "delete" | "expire" | "exists" | "drop")
+            });
+    let log_requests_diff = subcommand == "log"
+        && git_tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "-p" | "-u"
+                    | "--patch"
+                    | "--patch-with-stat"
+                    | "--patch-with-raw"
+                    | "--stat"
+                    | "--numstat"
+                    | "--shortstat"
+                    | "--raw"
+                    | "--name-only"
+                    | "--name-status"
+                    | "--cc"
+                    | "-m"
+            ) || token.starts_with("-S")
+                || token.starts_with("-G")
+                || token.starts_with("-L")
+        });
+    let diff_helpers_disabled = !DIFF_CAPABLE_GIT_SUBCOMMANDS.contains(&subcommand)
+        || (subcommand == "log" && !log_requests_diff)
+        || (git_tokens.iter().any(|token| token == "--no-ext-diff")
+            && git_tokens.iter().any(|token| token == "--no-textconv"));
+    READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
+        && !unsafe_option
+        && !reflog_mutates
+        && diff_helpers_disabled
 }
 
 /// Match the browser flag as gh parses it, including grouped short flags.
