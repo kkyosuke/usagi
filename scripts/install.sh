@@ -383,7 +383,9 @@ acquire_lock() {
         [ ! -L "$node" ] || fail "update owner node must not be a symlink"
         [ "$node" != "$LOCK_NODE" ] || continue
         if ! lock_owner_alive "$node"; then
-            rm -rf -- "$node"
+            if mv -- "$node" "$LOCK_DIR/.retired.$$.${node##*/}" 2>/dev/null; then
+                rm -rf -- "$LOCK_DIR/.retired.$$.${node##*/}"
+            fi
             continue
         fi
         if ! ticket="$(read_lock_ticket "$node")"; then
@@ -410,7 +412,9 @@ acquire_lock() {
             [ ! -L "$node" ] || fail "update owner node must not be a symlink"
             [ "$node" != "$LOCK_NODE" ] || continue
             if ! lock_owner_alive "$node"; then
-                rm -rf -- "$node"
+                if mv -- "$node" "$LOCK_DIR/.retired.$$.${node##*/}" 2>/dev/null; then
+                    rm -rf -- "$LOCK_DIR/.retired.$$.${node##*/}"
+                fi
                 continue
             fi
             if [ -f "$node/choosing" ]; then
