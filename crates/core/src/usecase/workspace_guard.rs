@@ -382,7 +382,7 @@ fn gh_opens_browser(tokens: &[String]) -> bool {
     false
 }
 
-fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
+fn git_subcommand_from_tokens(tokens: &[String]) -> Option<(usize, &str)> {
     let mut index = 0;
     while index < tokens.len() {
         let token = tokens[index].as_str();
@@ -392,7 +392,7 @@ fn git_subcommand_from_tokens(tokens: &[String]) -> Option<&str> {
                 index += 1;
             }
         } else {
-            return Some(token);
+            return Some((index, token));
         }
     }
     None
@@ -673,13 +673,29 @@ mod tests {
             "/tmp/git --no-pager --no-optional-locks status",
             "rg --pre=touch needle",
             "git log --output=/tmp/out",
+            "git log -o/tmp/out",
             "git -c diff.external=touch diff --ext-diff",
+            "git -ccore.pager=touch status",
+            "git -C.. status",
+            "git -C=.. status",
             "git --config-env=diff.external=PWN git diff --ext-diff",
             "git --no-pager --no-optional-locks diff HEAD",
             "git --no-pager --no-optional-locks ls-remote --upload-pack=touch origin",
             "git --no-pager --no-optional-locks -p status",
             "git --no-pager --no-optional-locks show --no-ext-diff --no-textconv --show-signature",
             "git --no-pager --no-optional-locks grep -Otouch needle",
+            "git reflog --no-ext-diff --no-textconv delete HEAD@{0}",
+            "git reflog --no-ext-diff --no-textconv expire --expire=now --all",
+            "git reflog --no-ext-diff --no-textconv exists refs/heads/main",
+            "git reflog --no-ext-diff --no-textconv drop refs/heads/main",
+            "git log -u main",
+            "git log --patch-with-stat main",
+            "git log --patch-with-raw main",
+            "git log --cc main",
+            "git log -m main",
+            "git log -Sneedle main",
+            "git log -Gneedle main",
+            "git log -L1,5:src/main.rs",
             "echo $(git status)",
         ] {
             assert!(!root_command_is_read_only(command), "allowed {command}");
@@ -690,7 +706,12 @@ mod tests {
             "git --no-pager --no-optional-locks diff --no-ext-diff --no-textconv",
             "git log --oneline main",
             "git log --stat --no-ext-diff --no-textconv main",
+            "git log -Sneedle --no-ext-diff --no-textconv main",
+            "git reflog --no-ext-diff --no-textconv",
+            "git reflog --no-ext-diff --no-textconv show HEAD",
             "git -C . status --short --branch",
+            "git -C. status --short --branch",
+            "git -C=. status --short --branch",
             "git log main | head -20",
             "gh pr view --comments",
             "gh pr list --limit 10",
