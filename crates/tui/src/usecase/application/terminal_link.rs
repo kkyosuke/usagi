@@ -467,6 +467,20 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_wrap_chains_across_several_indented_rows() {
+        // A link long enough to span three rows: the middle row is both a
+        // continuation (starting after its indent) and wrapped again at the edge.
+        let view = grid(12, &["x https://a.", "  b.io/c/d/e", "  f/g 続き"]);
+        let want = Some("https://a.b.io/c/d/ef/g");
+        for point in [at(0, 2), at(1, 6), at(2, 3)] {
+            assert_eq!(url_at(&view, point).as_deref(), want);
+        }
+        let cells = pairs(link_cells(&view));
+        assert!(cells.contains(&(0, 11)) && cells.contains(&(1, 2)) && cells.contains(&(2, 4)));
+        assert!(!cells.contains(&(1, 1)) && !cells.contains(&(2, 1)) && !cells.contains(&(2, 5)));
+    }
+
+    #[test]
     fn an_agent_wrap_may_leave_the_last_column_blank() {
         // Row 0 stops one column short of the edge (within the slack) and the
         // continuation is indented.
