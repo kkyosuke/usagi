@@ -391,6 +391,7 @@ impl PrivateLockWait {
     };
 }
 
+#[derive(Debug)]
 pub(super) struct LockedPrivateFile(pub(super) std::fs::File);
 
 impl std::ops::Deref for LockedPrivateFile {

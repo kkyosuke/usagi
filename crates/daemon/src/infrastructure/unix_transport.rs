@@ -425,7 +425,7 @@ pub struct EndpointCleanup {
     daemon: PathBuf,
     socket_identity: SocketIdentity,
     generation_dir: PathBuf,
-    generation_directory: Arc<fs::File>,
+    generation_directory: Arc<LockedPrivateFile>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -547,7 +547,7 @@ impl SecureUnixListener {
             verify_owned_socket_identity_at(&generation_directory, "sock", identity, true)?;
             // Publication takes current.lock. Release the generation setup
             // fence first so stale cleanup never observes the reverse order.
-            FileExt::unlock(generation_directory.as_ref())?;
+            FileExt::unlock(&**generation_directory)?;
             let cleanup = EndpointCleanup {
                 locator,
                 daemon: daemon.clone(),
@@ -1448,6 +1448,7 @@ fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
     current.generation == owner.generation && current.endpoint == owner.endpoint
 }
 
+#[derive(Debug)]
 pub(crate) struct LockedPrivateFile(fs::File);
 
 impl std::ops::Deref for LockedPrivateFile {
