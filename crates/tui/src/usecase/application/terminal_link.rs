@@ -25,10 +25,15 @@
 //!
 //! Because [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) drops the
 //! per-row wrap flag, a logical line is reconstructed from the grid width: a row
-//! whose last display column is non-blank is taken to wrap into the next. A line
-//! whose real content happens to fill the last column with no trailing space is
-//! therefore joined with the row below, the one ambiguity of working from the
-//! rendered grid rather than the decoder's wrap bit.
+//! whose last display column is non-blank is taken to wrap into the next. Agent
+//! TUIs (Claude Code, for one) also wrap their own output before it reaches the
+//! terminal, breaking a long link at their width and indenting the
+//! continuation; a row that reaches the right edge on a URL character followed
+//! by a row whose first non-blank character is a URL character is therefore
+//! joined with the indentation skipped. A line whose real content happens to
+//! reach the right edge is consequently joined with the row below, the one
+//! ambiguity of working from the rendered grid rather than the decoder's wrap
+//! bit.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -41,6 +46,11 @@ use super::terminal_selection::TerminalPoint;
 /// word (or a bare `host:port`) is never mistaken for a link to open.
 const SCHEMES: [&str; 2] = ["https://", "http://"];
 
+/// How many blank columns an app-wrapped row may leave at its right edge and
+/// still count as having reached it. Agent TUIs that wrap their own output
+/// (rather than relying on terminal auto-wrap) may keep the final column free.
+const EDGE_SLACK: usize = 1;
+
 /// The terminal grid expanded to one `char` per display column.
 ///
 /// [`cells`](usagi_core::usecase::vt_screen::VtScreen::cells) already dropped
@@ -52,41 +62,87 @@ struct Columns {
     width: usize,
 }
 
+/// How row `r` connects to row `r + 1` when logical lines are rebuilt.
+enum Boundary {
+    /// The rows belong to different logical lines.
+    Break,
+    /// Terminal auto-wrap: the rows are joined column-for-column.
+    Wrap,
+    /// An app-side wrap: an agent TUI broke a long token at its own width and
+    /// indented the continuation. Row `r` is kept up to column `end` and row
+    /// `r + 1` resumes at column `indent`, so the token is joined without the
+    /// trailing blanks and continuation indent in between.
+    Continue { end: usize, indent: usize },
+}
+
 impl Columns {
-    /// Whether `row` wraps into the next one. Without the decoder's wrap bit this
-    /// is inferred from the grid: a wrapped row fills its last column, so a
-    /// non-blank final column marks the wrap.
-    fn wrapped(&self, row: usize) -> bool {
-        self.width > 0 && self.rows[row].last().is_some_and(|&ch| ch != ' ')
-    }
-
-    /// The last row of the logical line that `row` belongs to (each row but the
-    /// last wraps onto the next).
-    fn logical_end(&self, row: usize) -> usize {
-        let mut end = row;
-        while end + 1 < self.rows.len() && self.wrapped(end) {
-            end += 1;
+    /// How `row` connects to the next one. Without the decoder's wrap bit this is
+    /// inferred from the grid:
+    ///
+    /// - When `row` reaches the right edge (within [`EDGE_SLACK`]) on a URL
+    ///   character and the next row's first non-blank character, after any
+    ///   indentation, is also a URL character, the token continues there
+    ///   ([`Boundary::Continue`]). This is how agent TUIs such as Claude Code
+    ///   hard-wrap a long link under a hanging indent.
+    /// - Otherwise a non-blank final column marks terminal auto-wrap
+    ///   ([`Boundary::Wrap`]).
+    fn boundary(&self, row: usize) -> Boundary {
+        let cur = &self.rows[row];
+        let next = &self.rows[row + 1];
+        let last = cur.iter().rposition(|&ch| ch != ' ');
+        let first = next.iter().position(|&ch| ch != ' ');
+        if let (Some(last), Some(first)) = (last, first)
+            && last + 1 + EDGE_SLACK >= self.width
+            && is_url_char(cur[last])
+            && is_url_char(next[first])
+        {
+            return Boundary::Continue {
+                end: last + 1,
+                indent: first,
+            };
         }
-        end
-    }
-
-    /// The flattened chars of rows `start..=end`, joined column-for-column.
-    fn flatten(&self, start: usize, end: usize) -> Vec<char> {
-        let mut chars = Vec::with_capacity((end - start + 1) * self.width);
-        for row in &self.rows[start..=end] {
-            chars.extend_from_slice(row);
-        }
-        chars
-    }
-
-    /// Map a flattened-line index back to its grid cell, given the line's first
-    /// row.
-    fn cell(&self, start: usize, index: usize) -> TerminalPoint {
-        TerminalPoint {
-            row: start + index / self.width,
-            column: index % self.width,
+        if cur.last().is_some_and(|&ch| ch != ' ') {
+            Boundary::Wrap
+        } else {
+            Boundary::Break
         }
     }
+
+    /// Rebuild the logical lines of the grid, each as its chars plus the grid
+    /// cell every char came from.
+    fn lines(&self) -> Vec<Line> {
+        let mut lines = Vec::new();
+        let mut line = Line::default();
+        let mut begin = 0;
+        for row in 0..self.rows.len() {
+            let boundary = if row + 1 < self.rows.len() {
+                self.boundary(row)
+            } else {
+                Boundary::Break
+            };
+            let (end, next_begin, ends_line) = match boundary {
+                Boundary::Break => (self.width, 0, true),
+                Boundary::Wrap => (self.width, 0, false),
+                Boundary::Continue { end, indent } => (end, indent, false),
+            };
+            line.chars.extend_from_slice(&self.rows[row][begin..end]);
+            line.cells
+                .extend((begin..end).map(|column| TerminalPoint { row, column }));
+            if ends_line {
+                lines.push(std::mem::take(&mut line));
+            }
+            begin = next_begin;
+        }
+        lines
+    }
+}
+
+/// One logical line: its chars and, index for index, the grid cell each came
+/// from. Cells skipped while joining an app-side wrap have no entry.
+#[derive(Default)]
+struct Line {
+    chars: Vec<char>,
+    cells: Vec<TerminalPoint>,
 }
 
 /// The display width of `ch`, at least one column (a zero-width char still
@@ -123,15 +179,6 @@ fn columns_of(row: &str, width: usize) -> Vec<char> {
     cols
 }
 
-/// Walk out from `row` to the first row of the logical line it belongs to.
-fn logical_start(grid: &Columns, row: usize) -> usize {
-    let mut start = row;
-    while start > 0 && grid.wrapped(start - 1) {
-        start -= 1;
-    }
-    start
-}
-
 /// Detect the `http(s)` URL the cell at `point` sits on, returning it as text, or
 /// `None` when the cell is blank or not part of a URL. A URL that wrapped onto
 /// the next row(s) is stitched back together, so a click anywhere along it yields
@@ -142,10 +189,10 @@ pub fn url_at(viewport: &[String], point: TerminalPoint) -> Option<String> {
     if grid.width == 0 || point.row >= grid.rows.len() || point.column >= grid.width {
         return None;
     }
-    let start = logical_start(&grid, point.row);
-    let chars = grid.flatten(start, grid.logical_end(point.row));
-    let idx = (point.row - start) * grid.width + point.column;
-    url_in_chars(&chars, idx)
+    grid.lines().into_iter().find_map(|line| {
+        let idx = line.cells.iter().position(|&cell| cell == point)?;
+        url_in_chars(&line.chars, idx)
+    })
 }
 
 /// Every grid cell that sits on an `http(s)` URL, so the renderer can underline
@@ -157,16 +204,10 @@ pub fn link_cells(viewport: &[String]) -> HashSet<TerminalPoint> {
     if grid.width == 0 {
         return cells;
     }
-    let mut start = 0;
-    while start < grid.rows.len() {
-        let end = grid.logical_end(start);
-        let chars = grid.flatten(start, end);
-        for span in url_spans(&chars) {
-            for index in span {
-                cells.insert(grid.cell(start, index));
-            }
+    for line in grid.lines() {
+        for span in url_spans(&line.chars) {
+            cells.extend(span.map(|index| line.cells[index]));
         }
-        start = end + 1;
     }
     cells
 }
@@ -406,6 +447,53 @@ mod tests {
             url_at(&view, at(2, 0)).as_deref(),
             Some("https://example.com/page"),
         );
+    }
+
+    #[test]
+    fn url_at_stitches_a_url_an_agent_wrapped_under_a_hanging_indent() {
+        // Claude Code hard-wraps a long link at its own width and indents the
+        // continuation to the text column; the indent must not split the link.
+        let view = grid(24, &["● see（https://ex.com/a/", "  runs/42)を確認"]);
+        let want = Some("https://ex.com/a/runs/42");
+        assert_eq!(url_at(&view, at(0, 8)).as_deref(), want);
+        assert_eq!(url_at(&view, at(1, 3)).as_deref(), want);
+        // The indentation itself and the trimmed `)` are not part of the link.
+        assert_eq!(url_at(&view, at(1, 0)), None);
+        assert_eq!(url_at(&view, at(1, 9)), None);
+        let cells = pairs(link_cells(&view));
+        assert!(cells.contains(&(0, 23)));
+        assert!(cells.contains(&(1, 2)));
+        assert!(!cells.contains(&(1, 1)));
+    }
+
+    #[test]
+    fn an_agent_wrap_may_leave_the_last_column_blank() {
+        // Row 0 stops one column short of the edge (within the slack) and the
+        // continuation is indented.
+        let view = grid(16, &["https://example", "  .com/page"]);
+        assert_eq!(
+            url_at(&view, at(1, 4)).as_deref(),
+            Some("https://example.com/page"),
+        );
+    }
+
+    #[test]
+    fn a_url_ending_short_of_the_edge_is_not_joined_with_the_next_row() {
+        let view = grid(20, &["https://a.io", "  next"]);
+        assert_eq!(url_at(&view, at(0, 2)).as_deref(), Some("https://a.io"));
+        assert_eq!(url_at(&view, at(1, 3)), None);
+    }
+
+    #[test]
+    fn an_edge_row_followed_by_non_url_text_keeps_the_url_whole() {
+        // The next row opens with a CJK glyph after its indent, so it does not
+        // continue the link; terminal auto-wrap still joins the rows, but the
+        // indent separates them.
+        let view = grid(12, &["https://a.io", "  続き"]);
+        assert_eq!(url_at(&view, at(0, 0)).as_deref(), Some("https://a.io"));
+        // A blank next row ends the logical line.
+        let view = grid(12, &["https://a.io", ""]);
+        assert_eq!(url_at(&view, at(0, 0)).as_deref(), Some("https://a.io"));
     }
 
     #[test]
