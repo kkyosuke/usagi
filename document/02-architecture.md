@@ -765,7 +765,7 @@ secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ
 #### Antigravity CLI の互換範囲
 
 この表が AGY と他 provider の起動・観測に関する差異の正本である。
-AGY 1.2.0 の `agy --help` と、公式の [headless mode](https://www.antigravity.google/docs/cli/headless)・
+AGY 1.2.0 の `agy --help`（workspace の並び順は AGY 1.5.5 で確認）と、公式の [headless mode](https://www.antigravity.google/docs/cli/headless)・
 [hooks](https://www.antigravity.google/docs/hooks) の契約に合わせて連携する。
 
 | 機能 | AGY での扱い |
@@ -780,7 +780,7 @@ AGY 1.2.0 の `agy --help` と、公式の [headless mode](https://www.antigravi
 | 認証状態 | 専用 auth status command がないため `agy models` を preflight とする。budget は [readiness preflight](05-daemon.md#agent-cli-の-readiness-preflight) を参照する |
 
 AGY の MCP 委譲 selector の設定は [MCP の runtime/model 選択](07-mcp.md#runtimemodel-選択) を参照する。
-AGY integration revision は 4。旧 integration の live Agent の更新は
+AGY integration revision は 5。旧 integration の live Agent の更新は
 [daemon restart による Agent integration 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) に従う。
 
 実 CLI の検証には [scripts/smoke-agy.py](../scripts/smoke-agy.py) を使う。ビルド後、
@@ -1176,9 +1176,17 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   `agent-integrations/<workspace-id>/agy/workspace/.agents/` を作成・更新し、synthetic workspace を private
   `--add-dir` で managed launch にだけ追加する。`mcp_config.json`、`hooks.json` を atomic write し、
   integration root は実効 writable root / prefix（worktree、provider state、`TMPDIR`、`/tmp`、`/var/tmp` を含む）との
-  双方向 overlap を作成前に拒否し、sandbox でも明示 read-only に戻す。managed AGY は
-  `~/.gemini` 全体を writable にせず、`antigravity-cli/conversations/`・`brain/`、
-  `conversation_summaries.db{,-shm,-wal}`、`bin/agentapi` ファイルだけを writable allowlist にする（`bin/` ディレクトリ自体は read-only）。したがって
+  双方向 overlap を作成前に拒否し、sandbox でも明示 read-only に戻す。
+  AGY は workspace directory を path の辞書順に並べ、先頭を model に示す `Command Working Directory` と
+  `run_command` の既定 cwd にする（process の cwd や `--add-dir` の順序には従わない）。data directory は通常
+  worktree より前に並ぶため、integration root をそのまま渡すと read-only の integration で command が実行される。
+  そこで `--add-dir` には integration root ではなく、workspace の `.usagi/workspace-agy-<digest>` に置いた
+  integration root への symlink を渡す。`workspace-` は `sessions/` より後ろに並ぶので、workspace root と
+  `.usagi/sessions/<name>` の worktree が常に先頭になり、そうならない構成は起動を拒否する。digest は
+  integration root の path から作り、MCP 構成と prompt-only 構成、runtime mode ごとの data directory を分ける。
+  `.usagi/` は Git に無視され、どの mode でも Agent の writable root の外にあるため、Agent は alias を読めても
+  置換できない。daemon は既存 entry が symlink でなければ置換せず、古い symlink は atomic rename で張り替える。
+  managed AGY が書ける provider state は [agent state の writable root](#agent-state-の-writable-root) に限られ、
   `~/.gemini/GEMINI.md`、`config/`、state 内の `plugins/`・`skills/`・`settings.json`・
   `import_manifest.json`・`statusline.sh`・`title.sh` を含む既存/将来の customization は、列挙漏れに
   依存せず read-only のままである。Agent 自身による hook / MCP / command / prompt の永続注入と、管理外の
@@ -1219,9 +1227,23 @@ launcher は、**起動する provider 自身の state directory** を `$HOME` �
   writable にする directory の中にある workspace を通してしまう。
 - grant は両 mode に効く。session の agent CLI も利用者本人の state directory をそのまま使うため、
   onboarding・theme・permission mode・MCP 承認・認証は session をまたいで持続する。
-- `agy` は auth token を OS keyring から読み、永続書き込みを conversation subtree、`brain/`（`invoke_subagent` と会話 artifact）、
-  summary DB 3 ファイル、`run_command` が使う `bin/agentapi` ファイルに限定する。これらの追加 anchor は daemon の AGY provisioning が
-  作成・検証して launch に渡し、`bin/` ディレクトリ自体は read-only のまま保つ。
+- `agy` は auth token を OS keyring から読み、永続書き込みを次の runtime state に限定する。この一覧が managed AGY の
+  writable allowlist の正本である。
+
+  | path（`~/.gemini/antigravity-cli/` 配下） | 用途 |
+  |---|---|
+  | `conversations/` | 会話 DB |
+  | `brain/` | `invoke_subagent` と会話 artifact |
+  | `presence/` | 会話ごとの lock |
+  | `crashes/` | crash report |
+  | `conversation_summaries.db{,-shm,-wal}` | 会話一覧の summary DB（WAL mode） |
+  | `bin/agentapi` | `run_command` が `PATH` から実行する helper script |
+
+  `conversations/` 以外の追加 anchor は daemon の AGY provisioning が no-follow・所有者検証付きで作成して launch に渡し、
+  `bin/` ディレクトリ自体は read-only のまま保つ。AGY は `bin/agentapi` を既存 file への上書きで再生成し、その際に
+  mode を変えないため、daemon は anchor を `0700` で作り、owner の実行 bit が欠けた既存 anchor も修復する。
+  SQLite file は `0600` で作る。state 直下へ temp file を作って rename する cache（`cache/`、`implicit/`、
+  `jetbox_summaries_proto.pb`）と MCP tool cache（`mcp/`）は書けないが、AGY は失敗を log に残して続行する。
   default の動的 log directory は `--log-file /dev/null` で使わない。`~/.gemini` の親を writable にして危険 path を
   blacklist する方式ではないため、global rule、skill、plugin、settings が未作成でも Agent は新規作成できず、
   既存内容は保持して読み取れる。Linux は read-only root filesystem の内側へこれらの path だけを再 bind し、

@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "total": 551,
+  "total": 553,
   "owners": {
     "core": 16,
-    "daemon": 371,
+    "daemon": 373,
     "root-cli": 40,
     "tui": 124
   },
@@ -74,8 +74,8 @@
     "src/runtime/daemon.rs": 84,
     "src/runtime/daemon/agent.rs": 18,
     "src/runtime/daemon/agent_provisioning.rs": 25,
-    "src/runtime/daemon/agent_provisioning/agy.rs": 2,
-    "src/runtime/daemon/agent_provisioning/agy/security.rs": 1,
+    "src/runtime/daemon/agent_provisioning/agy.rs": 3,
+    "src/runtime/daemon/agent_provisioning/agy/security.rs": 2,
     "src/runtime/daemon/broker.rs": 12,
     "src/runtime/daemon/dispatch.rs": 24,
     "src/runtime/daemon/dispatch/session.rs": 8,
