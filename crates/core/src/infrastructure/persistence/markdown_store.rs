@@ -206,11 +206,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
                 entry.context(format!("failed to read an entry in {}", self.dir.display()))?;
             let path = entry.path();
             if E::is_entry_file(&path) {
-                anyhow::ensure!(
-                    entry.file_type().is_ok_and(|kind| !kind.is_symlink()),
-                    "failed to read {}: refusing to follow symlink",
-                    path.display()
-                );
+                ensure_not_symlink(&path)?;
                 files.push(path);
             }
         }
@@ -269,11 +265,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     // even though it only needs `path` and `E`.
     #[allow(clippy::unused_self)] // trait 実装と署名を揃えるため、`self` を取る。
     pub(crate) fn read_existing_path(&self, path: &Path) -> Result<E::Entry> {
-        anyhow::ensure!(
-            !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
-            "failed to read {}: refusing to follow symlink",
-            path.display()
-        );
+        ensure_not_symlink(path)?;
         let text =
             fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
         E::Entry::from_markdown(&text)
@@ -476,6 +468,15 @@ fn path_is_genuinely_missing(path: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn ensure_not_symlink(path: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
+        "failed to read {}: refusing to follow symlink",
+        path.display()
+    );
+    Ok(())
 }
 
 fn valid_fingerprint(fingerprint: &str) -> bool {
