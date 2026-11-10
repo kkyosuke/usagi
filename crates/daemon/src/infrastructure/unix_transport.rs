@@ -1448,8 +1448,26 @@ fn owns_endpoint(current: &EndpointLocator, owner: &EndpointLocator) -> bool {
     current.generation == owner.generation && current.endpoint == owner.endpoint
 }
 
+pub(crate) struct LockedPrivateFile(fs::File);
+
+impl std::ops::Deref for LockedPrivateFile {
+    type Target = fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for LockedPrivateFile {
+    fn drop(&mut self) {
+        // close alone leaves flock held if a concurrent fork inherited this
+        // open file description; unlock explicitly before closing.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 #[coverage(off)]
-fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
+fn lock_locator(daemon: &Path) -> io::Result<LockedPrivateFile> {
     lock_private_node(daemon, LOCATOR_LOCK)
 }
 
@@ -1460,12 +1478,16 @@ fn lock_locator(daemon: &Path) -> io::Result<fs::File> {
 /// # Errors
 ///
 /// Returns an error when the node cannot be created, verified, or locked.
-pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<fs::File> {
+pub(crate) fn lock_private_node(daemon: &Path, name: &str) -> io::Result<LockedPrivateFile> {
     lock_private_node_within(daemon, name, SETUP_LOCK_WAIT)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=generation_registry_store,contended_private_node_lock_is_bounded_and_preserves_the_owner
-fn lock_private_node_within(daemon: &Path, name: &str, wait: Duration) -> io::Result<fs::File> {
+fn lock_private_node_within(
+    daemon: &Path,
+    name: &str,
+    wait: Duration,
+) -> io::Result<LockedPrivateFile> {
     let deadline = Instant::now() + wait;
     let path = daemon.join(name);
     // The directory fd is a bootstrap lock for creating or repairing the lock
@@ -1497,7 +1519,7 @@ fn lock_private_node_within(daemon: &Path, name: &str, wait: Duration) -> io::Re
     let _inherited_directory = inherit_locator_setup_directory(&directory);
     // close alone leaves flock held if a concurrent fork inherited this open
     // file description. CLOEXEC closes that copy only when the child execs.
-    FileExt::unlock(&directory)?;
+    FileExt::unlock(&*directory)?;
     drop(directory);
     #[cfg(test)]
     pause_locator_lock_after_setup();
@@ -1517,10 +1539,11 @@ fn lock_private_node_within(daemon: &Path, name: &str, wait: Duration) -> io::Re
             Err(error) => return Err(error),
         }
     }
+    let locked = LockedPrivateFile(file);
     #[cfg(test)]
     pause_locator_lock_before_verify();
-    verify_locked_private_file(&path, &file, SOCKET_MODE)?;
-    Ok(file)
+    verify_locked_private_file(&path, &locked, SOCKET_MODE)?;
+    Ok(locked)
 }
 
 fn open_recoverable_locator_lock(path: &Path) -> io::Result<fs::File> {
@@ -2370,7 +2393,7 @@ fn repair_crashed_private_parent(path: &Path) -> io::Result<()> {
 const SETUP_LOCK_WAIT: Duration = Duration::from_secs(2);
 const SETUP_LOCK_POLL: Duration = Duration::from_millis(20);
 
-fn lock_setup_directory(path: &Path, exact_private_mode: bool) -> io::Result<fs::File> {
+fn lock_setup_directory(path: &Path, exact_private_mode: bool) -> io::Result<LockedPrivateFile> {
     lock_setup_directory_within(path, exact_private_mode, SETUP_LOCK_WAIT)
 }
 
@@ -2378,7 +2401,7 @@ fn lock_setup_directory_within(
     path: &Path,
     exact_private_mode: bool,
     wait: Duration,
-) -> io::Result<fs::File> {
+) -> io::Result<LockedPrivateFile> {
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | PRIVATE_FILE_FLAGS)
@@ -2397,6 +2420,7 @@ fn lock_setup_directory_within(
             }
         }
     }
+    let directory = LockedPrivateFile(directory);
     verify_open_directory(path, &directory, exact_private_mode)?;
     Ok(directory)
 }
