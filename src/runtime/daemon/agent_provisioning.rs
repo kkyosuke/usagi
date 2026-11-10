@@ -4,7 +4,6 @@
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
-pub(super) use super::secure_path::read_git_indirection;
 use super::secure_path::{
     InvalidOwnedDirectory, ensure_owned_subdirectories, tighten_owned_directories,
     validate_owned_directory, validate_owned_path,
@@ -666,19 +665,8 @@ pub(super) fn session_git_policy(
     {
         return Err(());
     }
-    ensure_owned_subdirectories(
-        &common,
-        &[
-            "refs",
-            "refs/heads",
-            "refs/heads/usagi",
-            "logs",
-            "logs/refs",
-            "logs/refs/heads",
-            "logs/refs/heads/usagi",
-        ],
-    )
-    .map_err(|_| ())?;
+    ensure_owned_subdirectories(&common, &["refs/heads/usagi", "logs/refs/heads/usagi"])
+        .map_err(|_| ())?;
     let writable_roots = vec![
         git_dir,
         common.join("objects"),
@@ -787,6 +775,25 @@ pub(super) fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
         return Ok(git_dir);
     }
     read_git_indirection(&common_marker, None, &git_dir)
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
+pub(super) fn read_git_indirection(
+    path: &Path,
+    prefix: Option<&str>,
+    relative_to: &Path,
+) -> Result<PathBuf, ()> {
+    if std::fs::metadata(path).map_err(|_| ())?.len() > 16 * 1024 {
+        return Err(());
+    }
+    let value = std::fs::read_to_string(path).map_err(|_| ())?;
+    let value = prefix
+        .map_or(Some(value.trim()), |p| {
+            value.trim().strip_prefix(p).map(str::trim)
+        })
+        .filter(|v| !v.is_empty())
+        .ok_or(())?;
+    relative_to.join(value).canonicalize().map_err(|_| ())
 }
 
 /// Policy paths are daemon-owned inputs.  Validate their identity before user

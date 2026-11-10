@@ -16,51 +16,20 @@ pub(super) fn validate_owned_directory(path: &Path) -> Result<(), InvalidOwnedDi
 /// Creates missing child directories one component at a time and verifies that
 /// the base directory and every child remain caller-owned, non-symlink
 /// directories.
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_git_policy_anchors_authority_to_the_registered_worktree
 pub(super) fn ensure_owned_subdirectories(
     base: &Path,
     relatives: &[&str],
 ) -> Result<(), InvalidOwnedDirectory> {
     validate_owned_directory(base)?;
     for relative in relatives {
-        let directory = base.join(relative);
-        if std::fs::symlink_metadata(&directory)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        {
-            std::fs::create_dir(&directory).map_err(|_| InvalidOwnedDirectory)?;
+        let mut directory = base.to_path_buf();
+        for component in Path::new(relative).components() {
+            directory.push(component);
+            let _ = std::fs::create_dir(&directory);
+            validate_owned_directory(&directory)?;
         }
-        validate_owned_directory(&directory)?;
     }
     Ok(())
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
-pub(super) fn read_git_indirection(
-    path: &Path,
-    prefix: Option<&str>,
-    relative_to: &Path,
-) -> Result<PathBuf, ()> {
-    let metadata = std::fs::metadata(path).map_err(|_| ())?;
-    if metadata.len() > 16 * 1024 {
-        return Err(());
-    }
-    let value = std::fs::read_to_string(path).map_err(|_| ())?;
-    let value = value.trim();
-    let value = match prefix {
-        Some(prefix) => value
-            .strip_prefix(prefix)
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-        None => (!value.is_empty()).then_some(value),
-    }
-    .ok_or(())?;
-    let path = PathBuf::from(value);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        relative_to.join(path)
-    };
-    path.canonicalize().map_err(|_| ())
 }
 
 /// Drops group and other permission bits from existing directories owned by this
