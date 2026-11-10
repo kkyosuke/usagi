@@ -19,6 +19,8 @@ pub(in crate::runtime::daemon) fn agy_arguments_for_integration(
         return Err(());
     }
     let alias = alias.to_str().ok_or(())?;
+    // The sandbox carves the integration out by this path, which must be UTF-8.
+    integration.to_str().ok_or(())?;
     Ok((
         vec!["--add-dir".to_owned(), alias.to_owned()],
         Some(integration.to_path_buf()),
